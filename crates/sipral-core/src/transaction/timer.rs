@@ -224,26 +224,12 @@ impl<T> Timers<T> {
     ///
     /// Call until it returns `None`: firing one timer can schedule another,
     /// and a caller that comes back late has several to work through.
-    pub(crate) fn fire(&mut self, now: Instant) -> Option<(TimerName, T)>
-    where
-        T: Timed,
-    {
+    pub(crate) fn fire(&mut self, now: Instant) -> Option<T> {
         let handle = *self.due.keys().next()?;
         if handle.at > now {
             return None;
         }
-        let value = self.due.remove(&handle)?;
-        Some((value.name(), value))
-    }
-
-    /// How many are scheduled.
-    pub(crate) fn len(&self) -> usize {
-        self.due.len()
-    }
-
-    /// Whether nothing is scheduled.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.due.is_empty()
+        self.due.remove(&handle)
     }
 }
 
@@ -253,25 +239,13 @@ impl<T> Default for Timers<T> {
     }
 }
 
-/// Something hung on a deadline that knows which RFC timer it is.
-pub(crate) trait Timed {
-    /// The letter, for logs and events.
-    fn name(&self) -> TimerName;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Timed, TimerConfig, TimerName, Timers};
+    use super::{TimerConfig, TimerName, Timers};
     use std::time::{Duration, Instant};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Fired(TimerName);
-
-    impl Timed for Fired {
-        fn name(&self) -> TimerName {
-            self.0
-        }
-    }
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
@@ -334,12 +308,8 @@ mod tests {
         timers.schedule(at(base, 500), Fired(TimerName::A));
         assert_eq!(timers.next_deadline(), Some(at(base, 500)));
         assert_eq!(timers.fire(at(base, 499)), None);
-        assert_eq!(
-            timers.fire(at(base, 500)),
-            Some((TimerName::A, Fired(TimerName::A)))
-        );
+        assert_eq!(timers.fire(at(base, 500)), Some(Fired(TimerName::A)));
         assert_eq!(timers.next_deadline(), None);
-        assert!(timers.is_empty());
     }
 
     #[test]
@@ -352,7 +322,7 @@ mod tests {
         assert_eq!(timers.next_deadline(), Some(at(base, 500)));
 
         let mut fired = Vec::new();
-        while let Some((name, _)) = timers.fire(at(base, 10_000)) {
+        while let Some(Fired(name)) = timers.fire(at(base, 10_000)) {
             fired.push(name);
         }
         assert_eq!(fired, vec![TimerName::A, TimerName::E, TimerName::B]);
@@ -365,7 +335,7 @@ mod tests {
         timers.schedule(at(base, 100), Fired(TimerName::G));
         timers.schedule(at(base, 100), Fired(TimerName::H));
         let mut fired = Vec::new();
-        while let Some((name, _)) = timers.fire(at(base, 100)) {
+        while let Some(Fired(name)) = timers.fire(at(base, 100)) {
             fired.push(name);
         }
         assert_eq!(fired, vec![TimerName::G, TimerName::H]);
@@ -381,11 +351,7 @@ mod tests {
         assert_eq!(timers.cancel(early), Some(Fired(TimerName::A)));
         assert_eq!(timers.cancel(early), None);
         assert_eq!(timers.next_deadline(), Some(at(base, 200)));
-        assert_eq!(timers.len(), 1);
-        assert_eq!(
-            timers.fire(at(base, 1000)),
-            Some((TimerName::B, Fired(TimerName::B)))
-        );
+        assert_eq!(timers.fire(at(base, 1000)), Some(Fired(TimerName::B)));
     }
 
     #[test]

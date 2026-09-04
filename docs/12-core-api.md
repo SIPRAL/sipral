@@ -67,6 +67,7 @@ pub struct DialogId { raw: Raw }
 
 /// One reliable provisional response (RFC 3262) awaiting PRACK. It carries the
 /// dialog it belongs to, so a PRACK cannot be aimed at the wrong dialog.
+/// Arrives with PRACK; nothing produces one before that.
 pub struct ProvisionalResponseId { dialog: DialogId, raw: Raw }
 impl ProvisionalResponseId {
     pub fn dialog(&self) -> DialogId;
@@ -616,6 +617,12 @@ pub enum TransportErrorKind { ConnectionRefused, ConnectionReset, Unreachable, T
 pub struct Transmit {
     pub transport: TransportId,
     pub destination: SocketAddr,
+    /// Which of the transport's local addresses to send from, when it has more
+    /// than one. RFC 3581 §4: "The response MUST be sent from the same address
+    /// and port that the corresponding request was received on", which a
+    /// caller listening on a wildcard address cannot work out for itself.
+    /// `None` for everything this endpoint originates.
+    pub source: Option<SocketAddr>,
     /// Refcounted. A retransmission is an `Arc` clone.
     pub payload: Arc<[u8]>,
     /// May differ from the request's nominal transport after the RFC 3261
@@ -658,11 +665,48 @@ pub struct EndpointConfig {
     pub keepalive_interval: Option<Duration>,
 }
 
+/// What the caller describes. The endpoint fills in the branch, the sent-by,
+/// the sequence number, the `Call-ID` and the tags, because a caller that
+/// writes those writes a branch that repeats — and a repeated branch is a
+/// response delivered to the wrong transaction. `to` and `from` are required;
+/// a `From` without a tag gets one.
+///
+/// The transport and the address are the caller's: RFC 3263 resolution is
+/// I/O, and the endpoint asks (`Event::ResolveNeeded`) only about targets it
+/// found inside a message, never about one the caller handed it.
+pub struct OutgoingRequest { /* owned */ }
+impl OutgoingRequest {
+    pub fn new(method: Method<'_>, request_uri: Uri, transport: TransportId, remote: SocketAddr) -> Self;
+    pub fn to(self, value: &[u8]) -> Self;            // required
+    pub fn from(self, value: &[u8]) -> Self;          // required
+    pub fn call_id(self, call_id: CallId) -> Self;    // §10.2: registrations reuse one
+    pub fn cseq(self, seq: u32) -> Self;
+    pub fn route(self, value: &[u8]) -> Self;
+    pub fn contact(self, value: &[u8]) -> Self;
+    pub fn header(self, name: HeaderName<'_>, value: &[u8]) -> Self;
+    pub fn body(self, content_type: &[u8], body: Arc<[u8]>) -> Self;
+    pub fn max_forwards(self, hops: u32) -> Self;
+}
+
+/// Shorter, because §12.2.1.1 already decides the Request-URI, the route, both
+/// addresses with their tags, the `Call-ID` and the number.
+pub struct OutgoingInDialogRequest { /* method, contact, headers, body */ }
+
+/// Everything a response echoes from its request (§8.2.6.2) comes from the
+/// request. The tag does too: one per server transaction, on every response
+/// but the 100.
+pub struct OutgoingResponse { /* status, reason, to_tag, contact, headers, body */ }
+
 impl Endpoint {
-    pub fn new(config: EndpointConfig) -> Self;
+    /// `seed` is thirty-two bytes of entropy, and every branch, tag,
+    /// `Call-ID` and `cnonce` this endpoint writes is `SHA-256(seed ||
+    /// counter)`. The caller supplies it for the same reason it supplies the
+    /// clock and the sockets — and a test that supplies a fixed one can
+    /// assert on bytes.
+    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self;
 
     // -- UAC ------------------------------------------------------------------
-    pub fn invite(&mut self, request: OutgoingInvite, now: Instant)
+    pub fn invite(&mut self, request: &OutgoingRequest, now: Instant)
         -> Result<TransactionId<InviteClient>, SendError>;
 
     /// RFC 3261 §9.1. Always accepted while the transaction is live. If no
@@ -677,22 +721,25 @@ impl Endpoint {
     /// the caller decides when media is ready. After that the endpoint keeps
     /// the ACK and resends it itself on every retransmitted 2xx for as long as
     /// the dialog lives.
-    pub fn ack_2xx(&mut self, dialog: DialogId, answer: Option<Arc<[u8]>>, now: Instant)
+    pub fn ack_2xx(&mut self, dialog: DialogId, answer: Option<&[u8]>, now: Instant)
         -> Result<(), AckError>;
 
     /// RFC 3262. The dialog is read out of the handle.
     pub fn prack(&mut self, provisional: ProvisionalResponseId, body: Option<Arc<[u8]>>, now: Instant)
         -> Result<TransactionId<NonInviteClient>, PrackError>;
 
-    pub fn request_in_dialog(&mut self, dialog: DialogId, request: OutgoingInDialogRequest, now: Instant)
+    pub fn request_in_dialog(&mut self, dialog: DialogId, request: &OutgoingInDialogRequest, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
     pub fn reinvite(&mut self, dialog: DialogId, offer: Option<Arc<[u8]>>, now: Instant)
         -> Result<TransactionId<InviteClient>, SendError>;
+    /// §15.1.1: the dialog is over as soon as the BYE is passed to the
+    /// transaction, whatever the far end answers, so this also emits
+    /// `Event::DialogTerminated`.
     pub fn bye(&mut self, dialog: DialogId, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
 
     /// REGISTER, OPTIONS, SUBSCRIBE, and any out-of-dialog non-INVITE request.
-    pub fn request(&mut self, request: OutgoingRequest, now: Instant)
+    pub fn request(&mut self, request: &OutgoingRequest, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
 
     /// Resend a challenged request with credentials computed against the
@@ -707,18 +754,23 @@ impl Endpoint {
     // -- UAS ------------------------------------------------------------------
     /// 100, or any final response. Rejected with `MustBeReliable` if the
     /// INVITE carried `Require: 100rel` and the status is a non-100 1xx.
-    pub fn respond_invite(&mut self, transaction: TransactionId<InviteServer>, response: OutgoingResponse, now: Instant)
-        -> Result<(), RespondError>;
+    /// A 101-199 or a 2xx opens the dialog and hands it back; anything else
+    /// does not (§12.1.1).
+    pub fn respond_invite(&mut self, transaction: TransactionId<InviteServer>, response: &OutgoingResponse, now: Instant)
+        -> Result<Option<DialogId>, RespondError>;
     /// Reliable 101–199 (RFC 3262). The endpoint retransmits it until PRACK
     /// arrives or the transaction is abandoned.
-    pub fn respond_reliable(&mut self, transaction: TransactionId<InviteServer>, response: OutgoingResponse, now: Instant)
+    pub fn respond_reliable(&mut self, transaction: TransactionId<InviteServer>, response: &OutgoingResponse, now: Instant)
         -> Result<ProvisionalResponseId, RespondError>;
-    pub fn respond(&mut self, transaction: TransactionId<NonInviteServer>, response: OutgoingResponse, now: Instant)
+    pub fn respond(&mut self, transaction: TransactionId<NonInviteServer>, response: &OutgoingResponse, now: Instant)
         -> Result<(), RespondError>;
 
     // -- introspection ----------------------------------------------------------
     pub fn transaction_state<K: TransactionKind>(&self, id: TransactionId<K>) -> Option<K::State>;
     pub fn dialog(&self, id: DialogId) -> Option<DialogSnapshot>;
+    /// Live transactions and live dialogs, for a caller deciding whether it
+    /// can shut down.
+    pub fn in_flight(&self) -> (usize, usize);
 }
 
 pub struct DialogSnapshot {
@@ -749,25 +801,32 @@ would put policy in the layer that is supposed to have none.
 #[non_exhaustive]
 pub enum Event {
     // UAC, fork-aware: one early dialog per distinct To-tag
-    Provisional { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, body: Option<Arc<[u8]>> },
-    ReliableProvisional { invite: TransactionId<InviteClient>, dialog: DialogId, provisional: ProvisionalResponseId, status: StatusCode, body: Option<Arc<[u8]>> },
+    /// `dialog: None` for a 100, and for a provisional with no tag to name a
+    /// dialog by; neither of those opens one.
+    Provisional { invite: TransactionId<InviteClient>, dialog: Option<DialogId>, status: StatusCode, response: OwnedMessage },
+    ReliableProvisional { invite: TransactionId<InviteClient>, dialog: DialogId, provisional: ProvisionalResponseId, status: StatusCode, response: OwnedMessage },
     /// A 2xx for this dialog. Caller must `ack_2xx`. Several of these may
-    /// follow one INVITE; the endpoint does not pick a winner.
-    Established { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, body: Option<Arc<[u8]>> },
-    /// `dialog: Some` when one fork failed while others continue; `None` when
-    /// the transaction failed before any dialog existed.
-    Failed { invite: TransactionId<InviteClient>, dialog: Option<DialogId>, status: Option<StatusCode>, reason: FailureReason },
+    /// follow one INVITE; the endpoint does not pick a winner. A retransmitted
+    /// 2xx is answered from the stored ACK and reported to nobody.
+    Established { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },
+    /// The call will not connect: refused, timed out, or the transport died.
+    /// Every dialog it had opened is reported terminated separately.
+    Failed { invite: TransactionId<InviteClient>, status: Option<StatusCode>, reason: FailureReason },
     CancelSent { invite: TransactionId<InviteClient>, cancel: TransactionId<NonInviteClient> },
-    /// The CANCEL was honoured: 487 arrived on this dialog.
-    Cancelled { invite: TransactionId<InviteClient>, dialog: DialogId },
+    /// The CANCEL was honoured: 487 arrived.
+    Cancelled { invite: TransactionId<InviteClient> },
     /// The CANCEL lost the race: the dialog confirmed anyway. It is a live
     /// dialog; the caller ACKs and, if it still wants out, sends BYE.
     CancelLostRace { invite: TransactionId<InviteClient>, dialog: DialogId },
 
     // UAS
-    /// Early dialog and INVITE server transaction are minted together.
-    IncomingInvite { transaction: TransactionId<InviteServer>, dialog: DialogId, request: OwnedMessage },
-    IncomingCancel { cancel: TransactionId<NonInviteServer>, invite: TransactionId<InviteServer>, dialog: DialogId },
+    /// A call coming in. The dialog is minted by the first response that opens
+    /// one, and handed back by `respond_invite`.
+    IncomingInvite { transaction: TransactionId<InviteServer>, request: OwnedMessage },
+    /// The caller gave up. The 200 for the CANCEL and the 487 for the INVITE
+    /// have already gone out — §9.2 makes both unconditional — so what is left
+    /// is to stop ringing.
+    IncomingCancel { invite: TransactionId<InviteServer> },
     IncomingPrack { transaction: TransactionId<NonInviteServer>, provisional: ProvisionalResponseId, request: OwnedMessage },
     IncomingAck { dialog: DialogId, request: OwnedMessage },
     IncomingBye { transaction: TransactionId<NonInviteServer>, dialog: DialogId },
@@ -782,11 +841,22 @@ pub enum Event {
 
     // plumbing
     ResolveNeeded { request: ResolveId, host: Host, port: Option<u16>, protocol: Option<TransportProtocol> },
+    /// A request is too large for a datagram (§18.1.1) and no stream transport
+    /// is open to move it to. Opening one is the caller's; the request is not
+    /// held, and goes when it is sent again.
     TransportWanted { protocol: TransportProtocol, destination: SocketAddr },
     TransactionTerminated { transaction: AnyTransactionId, reason: TerminationReason },
     DialogTerminated { dialog: DialogId, reason: DialogEndReason },
 }
+
+pub enum FailureReason { Timeout, TransportFailed, Refused }
+pub enum TerminationReason { Completed, TimedOut, TransportFailed }
+pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed }
 ```
+
+`ReliableProvisional`, `IncomingPrack`, `Challenged` and `ResolveNeeded` are
+the four that arrive with the features they belong to — RFC 3262, the
+credential retry and RFC 3263 resolution — rather than with the endpoint.
 
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the
@@ -853,7 +923,7 @@ or already-final transaction.
 
 ## Walkthrough: register
 
-1. `request(OutgoingRequest { method: Register, .. })` → `TransactionId<NonInviteClient>`; `poll_transmit` yields the REGISTER.
+1. `request(&OutgoingRequest::new(Register, ..).to(..).from(..))` → `TransactionId<NonInviteClient>`; `poll_transmit` yields the REGISTER, with a fresh branch, a `From` tag and `;rport`.
 2. 401 arrives → `Event::Challenged { transaction, realm, proxy: false, .. }`. The transaction terminates normally.
 3. `retry_with_credentials(transaction, &creds, now)` → a new transaction; `poll_transmit` yields the REGISTER with `Authorization`.
 4. 200 arrives → `Event::Response { status: 200, response }`. `sipral-ua` reads `Contact`/`Expires` from `response` and schedules the refresh; the core has no opinion about expiry.
@@ -889,10 +959,10 @@ first and BYE the second, or keep both.
 ## Fake clock
 
 ```rust
-let mut ep = Endpoint::new(EndpointConfig::default());
+let mut ep = Endpoint::new(EndpointConfig::default(), [7; 32]);   // a fixed seed
 let t0 = Instant::now();               // any fixed instant; never read again
-ep.receive(Input::TransportBound { transport: T, protocol: Udp, local }, t0).unwrap();
-let inv = ep.invite(invite_to("sip:bob@example.com"), t0).unwrap();
+ep.receive(Input::TransportBound { transport: T, protocol: Udp, local, remote: None }, t0).unwrap();
+let inv = ep.invite(&invite_to("sip:bob@example.com"), t0).unwrap();
 assert_eq!(ep.poll_transmit().unwrap().payload.len(), bytes_of_invite);
 assert_eq!(ep.poll_timeout(), Some(t0 + T1));            // timer A
 

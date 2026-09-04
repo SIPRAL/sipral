@@ -383,6 +383,17 @@ impl Dialog {
         self.state = DialogState::Terminated;
     }
 
+    /// The 2xx has gone out, so an early dialog is now confirmed (§12.1.1).
+    ///
+    /// The other direction has [`Dialog::on_response`], which reads the 2xx
+    /// off the wire. This end has no response to read: it wrote it.
+    /// A dialog that has already ended stays ended.
+    pub const fn confirm(&mut self) {
+        if matches!(self.state, DialogState::Early) {
+            self.state = DialogState::Confirmed;
+        }
+    }
+
     /// The Request-URI and the `Route` values for a request in this dialog
     /// (§12.2.1.1).
     ///

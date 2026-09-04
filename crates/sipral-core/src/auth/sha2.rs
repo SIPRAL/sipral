@@ -15,7 +15,7 @@
 //! known-answer tests are what prove it was transcribed correctly.
 
 /// The SHA-256 digest of `data`.
-pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     let mut state: [u32; 8] = [
         0x6a09_e667,
         0xbb67_ae85,

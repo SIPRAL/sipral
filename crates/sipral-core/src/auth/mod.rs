@@ -19,10 +19,10 @@
 //! used for anything.
 
 mod cache;
-mod digest;
+pub(crate) mod digest;
 mod md5;
 mod secret;
-mod sha2;
+pub(crate) mod sha2;
 
 pub use cache::{AuthCache, Learned};
 pub use digest::{Challenge, DigestAlgorithm};

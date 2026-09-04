@@ -20,6 +20,8 @@
 use core::fmt;
 use core::marker::PhantomData;
 
+use crate::endpoint::Endpoint;
+
 /// Slot plus generation. A handle into a slot that has since been reused never
 /// compares equal to the new occupant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -52,6 +54,16 @@ pub trait TransactionKind: sealed::Sealed + 'static {
     type State: Copy + Eq + fmt::Debug;
     /// For error messages and for the C projection.
     const NAME: &'static str;
+
+    /// How [`Endpoint::transaction_state`] reaches the right arena.
+    ///
+    /// The dispatch has to live on the kind, because that is the only thing
+    /// the caller's handle carries about which of the four machines it names.
+    /// The trait is sealed, so nobody outside implements this.
+    #[doc(hidden)]
+    fn state_of(endpoint: &Endpoint, id: TransactionId<Self>) -> Option<Self::State>
+    where
+        Self: Sized;
 }
 
 /// RFC 3261 §17.1.1, with RFC 6026's `Accepted`: timers A, B, D and M.
@@ -136,23 +148,27 @@ pub enum NonInviteServerState {
 }
 
 macro_rules! kinds {
-    ($($kind:ident => $state:ident, $role:ident, $name:literal;)*) => {
+    ($($kind:ident => $state:ident, $role:ident, $name:literal, $arena:ident;)*) => {
         $(
             impl sealed::Sealed for $kind {}
             impl TransactionKind for $kind {
                 const ROLE: Role = Role::$role;
                 type State = $state;
                 const NAME: &'static str = $name;
+
+                fn state_of(endpoint: &Endpoint, id: TransactionId<Self>) -> Option<Self::State> {
+                    endpoint.store().$arena(id).map(|entry| entry.machine.state())
+                }
             }
         )*
     };
 }
 
 kinds! {
-    InviteClient    => InviteClientState,    Client, "INVITE client";
-    NonInviteClient => NonInviteClientState, Client, "non-INVITE client";
-    InviteServer    => InviteServerState,    Server, "INVITE server";
-    NonInviteServer => NonInviteServerState, Server, "non-INVITE server";
+    InviteClient    => InviteClientState,    Client, "INVITE client",    invite_client;
+    NonInviteClient => NonInviteClientState, Client, "non-INVITE client", non_invite_client;
+    InviteServer    => InviteServerState,    Server, "INVITE server",    invite_server;
+    NonInviteServer => NonInviteServerState, Server, "non-INVITE server", non_invite_server;
 }
 
 /// A transaction, named by the machine it runs.
@@ -287,47 +303,11 @@ impl fmt::Debug for DialogId {
     }
 }
 
-/// One reliable provisional response awaiting its PRACK (RFC 3262).
-///
-/// It carries the dialog, so a PRACK cannot be aimed at the wrong one: a fork
-/// produces several early dialogs on the same INVITE, each with its own RSeq
-/// sequence, and the numbers alone do not say which is which.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProvisionalResponseId {
-    dialog: DialogId,
-    rseq: u32,
-    pub(crate) raw: Raw,
-}
-
-impl ProvisionalResponseId {
-    pub(crate) const fn new(dialog: DialogId, rseq: u32, raw: Raw) -> Self {
-        Self { dialog, rseq, raw }
-    }
-
-    /// The dialog this response belongs to.
-    #[must_use]
-    pub const fn dialog(&self) -> DialogId {
-        self.dialog
-    }
-
-    /// The `RSeq` it carried (RFC 3262 §7.1).
-    #[must_use]
-    pub const fn rseq(&self) -> u32 {
-        self.rseq
-    }
-}
-
-impl fmt::Debug for ProvisionalResponseId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?} rseq {}", self.dialog, self.rseq)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient,
-        ProvisionalResponseId, Raw, Role, TransactionId, TransactionKind,
+        AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, Raw, Role,
+        TransactionId, TransactionKind,
     };
     use std::collections::HashSet;
 
@@ -382,18 +362,5 @@ mod tests {
         let id: TransactionId<InviteClient> = TransactionId::new(raw(7, 3));
         assert_eq!(format!("{id:?}"), "INVITE client#7.3");
         assert_eq!(format!("{:?}", DialogId::new(raw(1, 0))), "dialog#1.0");
-    }
-
-    #[test]
-    fn a_provisional_response_remembers_which_dialog_it_belongs_to() {
-        // a fork gives several early dialogs on one INVITE, each numbering its
-        // own provisionals, so the RSeq alone does not identify one
-        let left = DialogId::new(raw(0, 0));
-        let right = DialogId::new(raw(1, 0));
-        let from_left = ProvisionalResponseId::new(left, 1, raw(0, 0));
-        let from_right = ProvisionalResponseId::new(right, 1, raw(1, 0));
-        assert_eq!(from_left.rseq(), from_right.rseq());
-        assert_ne!(from_left.dialog(), from_right.dialog());
-        assert_ne!(from_left, from_right);
     }
 }

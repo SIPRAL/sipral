@@ -101,6 +101,11 @@ impl InviteClientMachine {
         self.state
     }
 
+    /// The request as it went out, which is what a CANCEL is built from.
+    pub(crate) const fn request(&self) -> &OwnedMessage {
+        &self.request
+    }
+
     /// When the machine next needs the clock, if it does.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         [self.timer_a, self.timer_b, self.timer_d, self.timer_m]

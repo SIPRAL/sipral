@@ -274,6 +274,15 @@ pub struct Transmit {
     /// Where to send it. Ignored by a connected transport, which has only one
     /// far end, and carried anyway so that a log line says where it went.
     pub destination: SocketAddr,
+    /// Which of the transport's local addresses to send from, when it has
+    /// more than one.
+    ///
+    /// RFC 3581 §4: "The response MUST be sent from the same address and port
+    /// that the corresponding request was received on", which a caller
+    /// listening on a wildcard address cannot work out for itself. `None`
+    /// means the transport's own address, which is the answer for every
+    /// request this endpoint originates.
+    pub source: Option<SocketAddr>,
     /// The bytes.
     pub payload: Arc<[u8]>,
     /// What the transport speaks. May differ from the transport the request

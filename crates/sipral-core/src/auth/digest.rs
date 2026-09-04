@@ -273,7 +273,7 @@ fn join(parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-pub(super) fn hex(digest: &[u8]) -> String {
+pub(crate) fn hex(digest: &[u8]) -> String {
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         out.push(char::from(nibble(byte >> 4)));

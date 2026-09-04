@@ -17,7 +17,24 @@
 //! rather than a wait.
 
 mod config;
+mod dialogs;
+mod driver;
+mod error;
+mod event;
+mod inbound;
+mod outgoing;
+mod table;
+#[cfg(test)]
+mod tests;
+mod tokens;
 mod transport;
+mod via;
+
+pub(crate) use table::Flow;
 
 pub use config::{DatagramLimit, EndpointConfig};
+pub use driver::{DialogSnapshot, Endpoint};
+pub use error::{AckError, CancelError, ReceiveError, RespondError, SendError};
+pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
+pub use outgoing::{OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
 pub use transport::{Host, Input, Transmit, TransportErrorKind, TransportId, TransportProtocol};

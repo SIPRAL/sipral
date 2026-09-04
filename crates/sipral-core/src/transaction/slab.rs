@@ -138,19 +138,6 @@ impl<T> Slab<T> {
             generation: u32::MAX,
         }
     }
-
-    /// Every live value, mutably.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (Raw, &mut T)> {
-        self.entries
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(slot, entry)| {
-                let generation = entry.generation;
-                let value = entry.value.as_mut()?;
-                let slot = u32::try_from(slot).ok()?;
-                Some((Raw { slot, generation }, value))
-            })
-    }
 }
 
 impl<T> Default for Slab<T> {
@@ -234,10 +221,7 @@ mod tests {
         let mut seen: Vec<i32> = slab.iter().map(|(_, v)| *v).collect();
         seen.sort_unstable();
         assert_eq!(seen, vec![1, 3]);
-        for (_, value) in slab.iter_mut() {
-            *value *= 10;
-        }
-        assert_eq!(slab.get(a), Some(&10));
-        assert_eq!(slab.get(c), Some(&30));
+        assert_eq!(slab.get(a), Some(&1));
+        assert_eq!(slab.get(c), Some(&3));
     }
 }

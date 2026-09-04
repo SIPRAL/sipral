@@ -139,6 +139,8 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
+    /// 500, which §12.2.2 answers a request whose `CSeq` runs backwards with.
+    pub const SERVER_ERROR: Self = Self(500);
     /// 504 Server Time-out.
     pub const SERVER_TIMEOUT: Self = Self(504);
 

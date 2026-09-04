@@ -269,6 +269,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `DatagramLimit` is §18.1.1's size rule as two numbers, both settable because
   the RFC's 1300 assumes a 1500-byte Ethernet MTU that plenty of access
   networks do not have.
+- `sipral-core::endpoint::Endpoint`: the five calls the whole stack is driven
+  through, and the first place the layers are bound together. Bytes and time
+  in, bytes and events out; nothing opens a socket, reads a clock or draws a
+  random number. The branch, the sent-by, the tags, the `Call-ID` and the
+  sequence numbers are the endpoint's, derived from thirty-two bytes of
+  caller-supplied entropy, because a caller that writes its own branch writes
+  one that repeats. Registrations, calls, forking, CANCEL racing a 200, the
+  ACK for a 2xx and its retransmissions, incoming calls and the dialogs they
+  open, BYE in both directions, the §18.1.1 switch to a stream transport, the
+  §18.2.2 and RFC 3581 rules for where a response goes, the §18.1.2 check that
+  discards a response addressed to somebody else, and RFC 5626 keep-alives on
+  a jittered interval. Two things happen without asking, because the RFC
+  leaves no choice: a CANCEL that matches gets its 200 and its INVITE gets a
+  487 (§9.2), and an in-dialog request whose `CSeq` runs backwards gets a 500
+  (§12.2.2). Everything else is reported and left to the layer above.
+  36 tests, each a scripted exchange on a fake clock.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4

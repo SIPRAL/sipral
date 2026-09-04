@@ -97,13 +97,27 @@ impl ServerKey {
     /// [`HeaderError`] when a field the key is built from is missing or
     /// unreadable.
     pub(crate) fn for_request(request: &RawMessage<'_>) -> Result<Self, HeaderError> {
-        let via = request.top_via()?;
         // an ACK belongs to the INVITE server transaction that answered
-        let method: Box<[u8]> = request
-            .transaction_lookup_method()?
-            .as_str()
-            .as_bytes()
-            .into();
+        let method = request.transaction_lookup_method()?;
+        Self::with_method(request, method)
+    }
+
+    /// The key of the INVITE server transaction a CANCEL is aimed at.
+    ///
+    /// §9.2: a CANCEL "is matched to the INVITE" it cancels, and it carries
+    /// the same branch and sent-by for exactly that. Its own transaction is a
+    /// different one, keyed on CANCEL by [`ServerKey::for_request`], and both
+    /// exist at once.
+    ///
+    /// # Errors
+    /// [`HeaderError`] when a field the key is built from is missing.
+    pub(crate) fn for_cancelled(request: &RawMessage<'_>) -> Result<Self, HeaderError> {
+        Self::with_method(request, Method::Invite)
+    }
+
+    fn with_method(request: &RawMessage<'_>, method: Method<'_>) -> Result<Self, HeaderError> {
+        let via = request.top_via()?;
+        let method: Box<[u8]> = method.as_str().as_bytes().into();
 
         if via.has_magic_cookie() {
             return Ok(Self::Rfc3261 {
@@ -136,17 +150,6 @@ impl ServerKey {
                 .into(),
         })
     }
-
-    /// Whether the peer that sent this is an RFC 3261 one.
-    pub(crate) const fn is_rfc3261(&self) -> bool {
-        matches!(*self, Self::Rfc3261 { .. })
-    }
-}
-
-/// Whether a request is an ACK, which the server side has to know because an
-/// ACK reaches a transaction it did not create.
-pub(crate) fn is_ack(request: &RawMessage<'_>) -> bool {
-    request.method() == Some(Method::Ack)
 }
 
 fn branch_of(via: &ViaRef<'_>) -> Result<Box<[u8]>, HeaderError> {
@@ -179,7 +182,7 @@ fn sent_by_of(via: &ViaRef<'_>) -> Box<[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientKey, ServerKey, is_ack};
+    use super::{ClientKey, ServerKey};
     use crate::msg::{ParseMode, ParseScratch, RawMessage, parse};
 
     fn with<T>(buf: &[u8], f: impl FnOnce(&RawMessage<'_>) -> T) -> T {
@@ -263,8 +266,29 @@ Content-Length: 0\r\n\
             with(ack, ServerKey::for_request).expect("a key"),
             with(INVITE, ServerKey::for_request).expect("a key")
         );
-        assert!(with(ack, is_ack));
-        assert!(!with(INVITE, is_ack));
+    }
+
+    #[test]
+    fn a_cancel_is_its_own_transaction_and_still_finds_the_invite() {
+        // 9.2: the CANCEL "is matched to the INVITE" by branch and sent-by,
+        // while being a server transaction of its own keyed on CANCEL
+        let cancel = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKnashds8\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let own = with(cancel, ServerKey::for_request).expect("a key");
+        let target = with(cancel, ServerKey::for_cancelled).expect("a key");
+        assert_ne!(own, target, "a CANCEL is not the INVITE it cancels");
+        assert_eq!(
+            target,
+            with(INVITE, ServerKey::for_request).expect("a key"),
+            "the CANCEL has to reach the INVITE's transaction"
+        );
     }
 
     #[test]
@@ -335,16 +359,15 @@ CSeq: 314159 ACK\r\n\
 Content-Length: 0\r\n\
 \r\n";
         let key = with(old, ServerKey::for_request).expect("a key");
-        assert!(!key.is_rfc3261());
         assert_eq!(
             with(old_ack, ServerKey::for_request).expect("a key"),
             key,
             "the ACK matches on the CSeq number, not its method"
         );
-        assert!(
-            with(INVITE, ServerKey::for_request)
-                .expect("a key")
-                .is_rfc3261()
+        assert_ne!(
+            with(INVITE, ServerKey::for_request).expect("a key"),
+            key,
+            "a peer with the cookie is not keyed the old way"
         );
     }
 
