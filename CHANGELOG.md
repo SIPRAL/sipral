@@ -70,6 +70,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   unescaped. Parameters and headers are walked on demand, and `unescape`
   handles `%` escapes including `%00`, leaving a stray `%` alone because the
   corpus has one in a message that is valid.
+- `sipral-core::msg::lex`: the lexical rules every header value obeys, in one
+  place instead of once per field. Unfolding, comma-separated values, and
+  `;name=value` parameters, all of which stop at a quoted string or a `<...>`
+  URI. `Contact: "Smith, John" <sip:j@x>` is one value; `qop="auth=1,auth-int"`
+  is one parameter.
+- `sipral-core::msg::OwnedMessage`: the same bytes and header index behind two
+  `Arc`s, so a message the stack keeps costs one copy and a clone costs none.
+  Bytes past the body are left behind, so a second request sharing a datagram
+  is not carried along.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! A parsed message as a view over the buffer it arrived in.
+//! A parsed message as a view over the buffer it arrived in, and the owned
+//! form the stack keeps.
+
+use std::sync::Arc;
 
 use super::header::HeaderName;
 use super::method::{Method, StatusCode};
@@ -149,6 +152,74 @@ impl<'a> RawMessage<'a> {
     #[must_use]
     pub fn as_bytes(&self) -> &'a [u8] {
         self.buf
+    }
+
+    /// The one seam where a borrowed view becomes something the stack can keep.
+    ///
+    /// The bytes are copied once into a refcounted buffer and the header index
+    /// is moved alongside them; every span stays valid because it was already
+    /// an offset from the start of the message. Anything past the body — a
+    /// second request sharing the datagram, say — is left behind.
+    #[must_use]
+    pub fn to_owned(&self) -> OwnedMessage {
+        let end = (self.body.end as usize).min(self.buf.len());
+        OwnedMessage {
+            bytes: Arc::from(self.buf.get(..end).unwrap_or(self.buf)),
+            start: self.start,
+            headers: Arc::from(self.headers),
+            body: self.body,
+        }
+    }
+}
+
+/// A message the stack owns.
+///
+/// The same bytes and the same header index as the [`RawMessage`] it came
+/// from, so every accessor works unchanged through [`OwnedMessage::as_raw`].
+/// Cloning is two refcount bumps; a retransmission never re-copies and never
+/// re-parses.
+#[derive(Clone)]
+pub struct OwnedMessage {
+    bytes: Arc<[u8]>,
+    start: StartLine,
+    headers: Arc<[HeaderSlot]>,
+    body: Span,
+}
+
+impl OwnedMessage {
+    /// A borrowed view, with the whole accessor surface on it.
+    #[must_use]
+    pub fn as_raw(&self) -> RawMessage<'_> {
+        RawMessage {
+            buf: &self.bytes,
+            start: self.start,
+            headers: &self.headers,
+            body: self.body,
+        }
+    }
+
+    /// The wire bytes, ready to hand to a transport. Cheap to clone.
+    #[must_use]
+    pub fn bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
+    /// How many bytes go on the wire.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether there is nothing to send, which a parsed message never is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl core::fmt::Debug for OwnedMessage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.as_raw().fmt(f)
     }
 }
 

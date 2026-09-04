@@ -601,6 +601,42 @@ v=0\n";
     }
 
     #[test]
+    fn an_owned_message_outlives_the_buffer_it_was_parsed_from() {
+        use crate::msg::HeaderName;
+        let owned = {
+            let buf = INVITE.to_vec();
+            let mut scratch = ParseScratch::new();
+            let m = ok(&buf, &mut scratch);
+            m.to_owned()
+        };
+        let m = owned.as_raw();
+        assert_eq!(m.kind(), MessageKind::Request(Method::Invite));
+        assert_eq!(m.header(HeaderName::CallId), Some(&b"a84b4c76e66710"[..]));
+        assert_eq!(m.header_slots().len(), 6);
+        assert_eq!(m.body(), b"v=0\n");
+    }
+
+    #[test]
+    fn owning_a_message_leaves_the_trailing_octets_behind() {
+        // RFC 4475 3.1.1.8: a second request sharing the datagram
+        let mut scratch = ParseScratch::new();
+        let buf = b"SIP/2.0 200 OK\r\nContent-Length: 3\r\n\r\nabcJUNKJUNKJUNK";
+        let owned = ok(buf, &mut scratch).to_owned();
+        assert_eq!(owned.as_raw().body(), b"abc");
+        assert_eq!(owned.len(), buf.len() - "JUNKJUNKJUNK".len());
+        assert!(!owned.is_empty());
+    }
+
+    #[test]
+    fn cloning_an_owned_message_shares_its_bytes() {
+        let mut scratch = ParseScratch::new();
+        let a = ok(INVITE, &mut scratch).to_owned();
+        let b = a.clone();
+        assert!(std::sync::Arc::ptr_eq(&a.bytes(), &b.bytes()));
+        assert_eq!(a.as_raw().body(), b.as_raw().body());
+    }
+
+    #[test]
     fn the_scratch_is_reusable_across_messages() {
         let mut scratch = ParseScratch::new();
         {
