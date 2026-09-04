@@ -142,7 +142,8 @@ impl<'a> RawMessage<'a> {
     pub fn kind(&self) -> MessageKind<'a>;
     pub fn method(&self) -> Option<Method<'a>>;
     pub fn status(&self) -> Option<StatusCode>;
-    pub fn request_uri(&self) -> Option<UriRef<'a>>;
+    pub fn request_uri(&self) -> Option<Result<UriRef<'a>, UriError>>;
+    pub fn request_uri_bytes(&self) -> Option<&'a [u8]>;
     pub fn body(&self) -> &'a [u8];
     pub fn header(&self, name: HeaderName<'_>) -> Option<&'a [u8]>;
     pub fn header_values<'n>(&self, name: HeaderName<'n>) -> impl Iterator<Item = &'a [u8]>;
@@ -188,7 +189,40 @@ impl OwnedMessage {
 }
 ```
 
-The borrowed/owned pairs follow one pattern throughout: `UriRef<'a>` / `Uri`,
+A URI is an enum, not a struct, because only `sip:` and `sips:` have the
+`userinfo hostport parameters headers` shape:
+
+```rust
+pub enum UriRef<'a> {
+    Sip(SipUriRef<'a>),
+    /// tel:, or a scheme we have never heard of. Kept whole.
+    Other { scheme: UriScheme<'a>, opaque: &'a str },
+}
+
+pub struct SipUriRef<'a> {
+    pub scheme: UriScheme<'a>,   // Sip or Sips
+    pub user: Option<&'a str>,   // still escaped
+    pub password: Option<&'a str>,
+    pub host: HostRef<'a>,       // Name, Ipv4 or Ipv6
+    pub port: Option<u16>,
+    // params and headers kept raw, walked on demand
+}
+
+pub fn unescape(bytes: &[u8]) -> Cow<'_, [u8]>;
+```
+
+`tel:+1-201-555-0123` has no host, and RFC 4475 §3.3.2 and §3.3.4 are
+well-formed messages carrying schemes a parser has no business refusing.
+Forcing either into a hostport is how a stack ends up rejecting traffic it
+should have passed upward.
+
+The userinfo boundary is found before anything else, because `user` may
+contain `;` and `?` unescaped (RFC 3261 §25.1 `user-unreserved`). In
+`sip:user;par=u%40example.net@example.com` the user is
+`user;par=u%40example.net` and the host is `example.com`; splitting on the
+first `;` gets both wrong. That URI is in the corpus for exactly this reason.
+
+The borrowed/owned pairs follow one pattern throughout: `SipUriRef<'a>` / `Uri`,
 `NameAddrRef<'a>` / `NameAddr`, `ViaRef<'a>` / `ViaBuf`, `TagRef<'a>` / `Tag`,
 `CallIdRef<'a>` / `CallId`, `BranchRef<'a>` / `Branch`, `Method<'a>` /
 `OwnedMethod`. Each `*Ref` has `to_owned()`. Owned strings are `Arc<str>` so a

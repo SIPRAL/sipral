@@ -6,6 +6,7 @@
 use super::header::HeaderName;
 use super::method::{Method, StatusCode};
 use super::span::{HeaderSlot, Span};
+use super::uri::{UriError, UriRef};
 
 /// Whether a message is a request or a response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,14 +76,21 @@ impl<'a> RawMessage<'a> {
         }
     }
 
-    /// The Request-URI as it appeared, for a request. Parsing it is the URI
-    /// layer's job.
+    /// The Request-URI exactly as it appeared, for a request.
     #[must_use]
-    pub fn request_uri(&self) -> Option<&'a [u8]> {
+    pub fn request_uri_bytes(&self) -> Option<&'a [u8]> {
         match self.start {
             StartLine::Request { uri, .. } => Some(uri.slice(self.buf)),
             StartLine::Response { .. } => None,
         }
+    }
+
+    /// The Request-URI, parsed. `None` for a response; `Some(Err(_))` when the
+    /// message is a request whose URI does not parse, which is a rejection the
+    /// layer above has to make, not a reason to have refused the message.
+    #[must_use]
+    pub fn request_uri(&self) -> Option<Result<UriRef<'a>, UriError>> {
+        self.request_uri_bytes().map(UriRef::parse)
     }
 
     /// The message body, delimited by `Content-Length` when one was present.

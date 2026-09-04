@@ -62,6 +62,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   of the RFC that defines it rather than from memory. `RawMessage` gains
   `header`, `header_values`, `header_count` and `header_names`, so asking for
   `Via` finds a `v:` line and asking for an extension is case-insensitive too.
+- `sipral-core::msg::UriRef`: SIP URIs in parts, borrowed from the buffer.
+  An enum rather than a struct, because only `sip:` and `sips:` have a
+  hostport: a `tel:` URI and an unknown scheme are kept whole instead of being
+  forced into a shape they do not have. The userinfo boundary is settled before
+  parameters or headers are looked for, since `user` may contain `;` and `?`
+  unescaped. Parameters and headers are walked on demand, and `unescape`
+  handles `%` escapes including `%00`, leaving a stray `%` alone because the
+  corpus has one in a message that is valid.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

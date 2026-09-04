@@ -17,6 +17,7 @@ mod message;
 mod method;
 mod parse;
 mod span;
+mod uri;
 
 pub use error::ParseError;
 pub use header::HeaderName;
@@ -24,3 +25,6 @@ pub use message::{MessageKind, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
 pub use span::{HeaderSlot, ParseScratch, Span};
+pub use uri::{
+    HostRef, SipUriRef, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,
+};
