@@ -18,11 +18,21 @@ dialogs: all of these are ordinary tests, not integration scenarios.
 **Corpus.** The 49 RFC 4475 torture messages under `fixtures/rfc4475/`, byte for
 byte from the archive in the RFC's Appendix A, one directory per section and a
 manifest with the expected outcome of each. The 13 valid parser cases must parse
-and round trip; the 19 invalid ones must be rejected without a panic and without
-unbounded work; the 17 semantic cases are well formed and test what the
-transaction and UA layers do with them, not the parser. `scripts/check.sh`
-verifies every file's hash, so the corpus cannot drift. This is the first thing
-that runs in CI.
+and round trip byte for byte; the 22 invalid ones must be rejected without a
+panic and without unbounded work; the 14 semantic cases are well formed and test
+what the transaction and UA layers do with them, not the parser.
+
+A rejection is either the parser refusing the message or `RawMessage::validate`
+refusing a field in it, and the corpus does not distinguish: both are the stack
+answering 400, and which one happens depends on whether the fault is in the
+framing or in a field. Three messages carry a per-message outcome that differs
+from their group's — `insuf`, `multi01` and `mcl01` sit in the application
+section but their RFC text asks for a 400 outright — with the reason written
+beside them in the manifest.
+
+`scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
+`crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating
+it. This is the first thing that runs in CI.
 
 **Capture replay.** Recorded exchanges from the lab PBX and from carriers,
 replayed against the stack byte for byte. Every interoperability bug found in

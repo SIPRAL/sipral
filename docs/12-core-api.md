@@ -172,6 +172,7 @@ impl<'a> RawMessage<'a> {
     pub fn expires(&self) -> Result<Digits, HeaderError>;
     pub fn rseq(&self) -> Result<u32, HeaderError>;
     pub fn rack(&self) -> Result<RAck<'a>, HeaderError>;
+    pub fn date(&self) -> Result<SipDate, HeaderError>;
     pub fn require(&self) -> TokenIter<'a>;
     pub fn proxy_require(&self) -> TokenIter<'a>;
     pub fn supported(&self) -> TokenIter<'a>;
@@ -193,6 +194,12 @@ impl<'a> RawMessage<'a> {
     /// that repeats `Call-ID`, and picking one value silently is how a stack
     /// ends up disagreeing with the proxy in front of it.
     pub fn single(&self, name: HeaderName<'_>) -> Result<&'a [u8], HeaderError>;
+
+    /// Whether this is a message the stack can act on, or one that draws a
+    /// 400. A message can be framed correctly and still be unusable, and the
+    /// parser has no business deciding: it does not know which fields the
+    /// caller will read.
+    pub fn validate(&self) -> Result<(), Invalid>;
 
     /// The method the transaction table is keyed on for this inbound message.
     /// Equal to the start line's method except for an ACK to a non-2xx, which

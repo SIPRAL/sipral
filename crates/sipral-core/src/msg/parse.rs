@@ -694,6 +694,74 @@ m: <sip:watson@example.net>;q=0.1, <sip:watson@example.org>\r\n\
     }
 
     #[test]
+    fn validation_is_the_question_a_uas_asks_before_answering() {
+        let mut scratch = ParseScratch::new();
+        assert_eq!(ok(INVITE, &mut scratch).validate(), Ok(()));
+
+        let cases: [(&[u8], &str); 5] = [
+            // RFC 4475 3.1.2.17: CSeq names a different method
+            (
+                b"INVITE sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\n\
+Call-ID: c\r\nCSeq: 8 OPTIONS\r\n\r\n",
+                "CSeq",
+            ),
+            // RFC 4475 3.1.2.11: escaped headers in the Request-URI
+            (
+                b"INVITE sip:b@example.com?Route=%3Csip:p.example.com%3E SIP/2.0\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\n\
+Call-ID: c\r\nCSeq: 8 INVITE\r\n\r\n",
+                "Request-URI",
+            ),
+            // RFC 4475 3.1.2.1: the fault is in the second Via value
+            (
+                b"INVITE sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.15;;,;,,\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\n\
+Call-ID: c\r\nCSeq: 8 INVITE\r\n\r\n",
+                "Via",
+            ),
+            // RFC 4475 3.1.2.9: a Date in a zone nobody can read
+            (
+                b"INVITE sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\n\
+Call-ID: c\r\nCSeq: 8 INVITE\r\nDate: Fri, 01 Jan 2010 16:00:00 EST\r\n\r\n",
+                "Date",
+            ),
+            // RFC 4475 3.3.8: a field that may appear once, twice
+            (
+                b"INVITE sip:b@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\n\
+Call-ID: c\r\nCall-ID: d\r\nCSeq: 8 INVITE\r\n\r\n",
+                "Call-ID",
+            ),
+        ];
+        for (buf, field) in cases {
+            let mut scratch = ParseScratch::new();
+            let m = ok(buf, &mut scratch);
+            let invalid = m.validate().expect_err("expected a rejection");
+            assert_eq!(invalid.field, field, "{}", String::from_utf8_lossy(buf));
+        }
+    }
+
+    #[test]
+    fn a_response_is_validated_without_a_method_to_compare_against() {
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK1\r\n\
+From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>;tag=2\r\n\
+Call-ID: c\r\nCSeq: 8 INVITE\r\n\r\n",
+            &mut scratch,
+        );
+        assert_eq!(m.validate(), Ok(()));
+    }
+
+    #[test]
     fn the_transaction_key_follows_the_ack_to_the_invite_that_owns_it() {
         let mut scratch = ParseScratch::new();
         assert_eq!(

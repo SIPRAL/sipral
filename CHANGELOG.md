@@ -148,6 +148,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   messages and counted, so the connection's owner can send the single CRLF a
   double CRLF is owed. Work is bounded per byte received rather than per call:
   a peer feeding one byte at a time cannot make reassembly quadratic.
+- `RawMessage::validate`: the question a UAS asks before answering — is this a
+  message the stack can act on, or one that draws a 400? A message can be
+  framed correctly and still carry a `From` whose display name is not one, a
+  `CSeq` naming a different method than the start line, or a `Date` in a zone
+  nobody can read. The parser has no business refusing those, since it does not
+  know which fields the caller will read, so the question is asked once, here,
+  by whoever is about to answer.
+- `SipDate` and `RawMessage::date`: RFC 3261 §20.17, which narrows RFC 1123 to
+  GMT and says outright that the names are case-sensitive. `EST` is not a zone
+  this reads, and neither is `UT`, `UTC` or `gmt`.
+- The RFC 4475 corpus is now a test, and it passes: all 49 messages behave as
+  `fixtures/rfc4475/manifest.toml` says, and every valid one round trips byte
+  for byte. Three messages moved from `semantic` to `reject` — `insuf`,
+  `multi01` and `mcl01` sit in the application group but their RFC sections ask
+  for a 400 outright — so the split is 13 parse, 22 reject, 14 semantic.
 - `StatusCode::reason`: the reason phrases RFC 3261 §21 registers, plus 422
   from RFC 4028, so nobody has to invent one.
 - `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK

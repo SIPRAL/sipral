@@ -152,9 +152,131 @@ pub fn rseq(value: &[u8]) -> Result<u32, HeaderError> {
     }
 }
 
+/// `Date: Fri, 01 Jan 2010 16:00:00 GMT` (RFC 3261 §20.17).
+///
+/// ```text
+/// rfc1123-date  =  wkday "," SP date1 SP time SP "GMT"
+/// date1         =  2DIGIT SP month SP 4DIGIT
+/// time          =  2DIGIT ":" 2DIGIT ":" 2DIGIT
+/// ```
+///
+/// Only GMT, and only this one format — §20.17 narrows RFC 1123, which allows
+/// any zone, down to the one that needs no table to interpret. The names are
+/// case-sensitive, which the same section says outright: `EST` is not a zone
+/// this can read, and neither is `UT`, `UTC` or `GMt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SipDate {
+    /// Monday is 0. Not checked against the date, which is the sender's
+    /// business.
+    pub weekday: u8,
+    /// 1 to 31.
+    pub day: u8,
+    /// January is 1.
+    pub month: u8,
+    /// Four digits, as written.
+    pub year: u16,
+    /// 0 to 23.
+    pub hour: u8,
+    /// 0 to 59.
+    pub minute: u8,
+    /// 0 to 60, the last for a leap second.
+    pub second: u8,
+}
+
+const WEEKDAYS: [&[u8]; 7] = [b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
+const MONTHS: [&[u8]; 12] = [
+    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
+];
+
+impl SipDate {
+    /// Read a `Date` value.
+    ///
+    /// # Errors
+    /// [`HeaderError::Malformed`] for anything that is not exactly an RFC 1123
+    /// date in GMT. RFC 4475 §3.1.2.9 is an INVITE whose only fault is the
+    /// zone.
+    pub fn parse(value: &[u8]) -> Result<Self, HeaderError> {
+        let mut parts = fields(value);
+        let mut next = || {
+            parts
+                .next()
+                .ok_or(HeaderError::Malformed("Date is too short"))
+        };
+        let wkday = next()?;
+        let day = next()?;
+        let month = next()?;
+        let year = next()?;
+        let time = next()?;
+        let zone = next()?;
+        if parts.next().is_some() {
+            return Err(HeaderError::Malformed("Date has trailing text"));
+        }
+        if zone != b"GMT" {
+            return Err(HeaderError::Malformed("Date is GMT or nothing"));
+        }
+
+        let wkday = wkday
+            .strip_suffix(b",")
+            .ok_or(HeaderError::Malformed("Date has no comma after the day"))?;
+        let weekday = index_of(&WEEKDAYS, wkday)
+            .ok_or(HeaderError::Malformed("Date has an unknown weekday"))?;
+        let month =
+            index_of(&MONTHS, month).ok_or(HeaderError::Malformed("Date has an unknown month"))?;
+
+        let (hour, rest) = split_at_colon(time)?;
+        let (minute, second) = split_at_colon(rest)?;
+
+        Ok(Self {
+            weekday,
+            day: small(day, 1, 31)?,
+            month: month + 1,
+            year: fixed(year, 4)?,
+            hour: small(hour, 0, 23)?,
+            minute: small(minute, 0, 59)?,
+            // 60 is a leap second, which is a real value on a real wire
+            second: small(second, 0, 60)?,
+        })
+    }
+}
+
+fn index_of(table: &[&[u8]], name: &[u8]) -> Option<u8> {
+    // case-sensitive: 20.17 says an RFC 1123 date is
+    let at = table.iter().position(|n| *n == name)?;
+    u8::try_from(at).ok()
+}
+
+fn split_at_colon(v: &[u8]) -> Result<(&[u8], &[u8]), HeaderError> {
+    let at = v
+        .iter()
+        .position(|&b| b == b':')
+        .ok_or(HeaderError::Malformed("Date has no time"))?;
+    Ok((
+        v.get(..at).unwrap_or_default(),
+        v.get(at + 1..).unwrap_or_default(),
+    ))
+}
+
+/// A run of exactly `width` digits. The grammar counts them, so `1 Jan` and
+/// `001 Jan` are both wrong.
+fn fixed(v: &[u8], width: usize) -> Result<u16, HeaderError> {
+    if v.len() != width || !v.iter().all(u8::is_ascii_digit) {
+        return Err(HeaderError::Malformed("Date has a malformed number"));
+    }
+    Ok(v.iter().fold(0_u16, |a, &d| a * 10 + u16::from(d - b'0')))
+}
+
+/// Two digits, in range.
+fn small(v: &[u8], low: u16, high: u16) -> Result<u8, HeaderError> {
+    let n = fixed(v, 2)?;
+    if n < low || n > high {
+        return Err(HeaderError::Malformed("Date is out of range"));
+    }
+    u8::try_from(n).map_err(|_| HeaderError::Malformed("Date is out of range"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CSeq, Digits, RAck, digits, rseq};
+    use super::{CSeq, Digits, RAck, SipDate, digits, rseq};
     use crate::msg::{HeaderError, Method};
 
     #[test]
@@ -306,5 +428,94 @@ mod tests {
             written: 1,
         };
         assert_eq!(a, digits(b"1").expect("digits"));
+    }
+
+    #[test]
+    fn a_date_in_gmt() {
+        // RFC 3261 20.17's own example
+        let d = SipDate::parse(b"Sat, 13 Nov 2010 23:29:00 GMT").expect("a date");
+        assert_eq!(d.weekday, 5);
+        assert_eq!((d.day, d.month, d.year), (13, 11, 2010));
+        assert_eq!((d.hour, d.minute, d.second), (23, 29, 0));
+    }
+
+    #[test]
+    fn a_date_folded_between_its_pieces_still_reads() {
+        let d = SipDate::parse(b"Fri,\r\n 01 Jan 2010\r\n\t16:00:00 GMT").expect("a date");
+        assert_eq!((d.day, d.month, d.year), (1, 1, 2010));
+    }
+
+    #[test]
+    fn only_gmt_and_only_this_spelling() {
+        // RFC 4475 3.1.2.9 baddate: the zone is the whole fault
+        for bad in [
+            &b"Fri, 01 Jan 2010 16:00:00 EST"[..],
+            b"Fri, 01 Jan 2010 16:00:00 UT",
+            b"Fri, 01 Jan 2010 16:00:00 UTC",
+            b"Fri, 01 Jan 2010 16:00:00 gmt",
+            b"Fri, 01 Jan 2010 16:00:00",
+        ] {
+            assert!(matches!(
+                SipDate::parse(bad),
+                Err(HeaderError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn the_names_and_the_digit_counts_are_exact() {
+        // 20.17: an RFC 1123 date is case-sensitive
+        for bad in [
+            &b"fri, 01 Jan 2010 16:00:00 GMT"[..],
+            b"Fri, 01 JAN 2010 16:00:00 GMT",
+            b"Fri 01 Jan 2010 16:00:00 GMT",
+            b"Xyz, 01 Jan 2010 16:00:00 GMT",
+            b"Fri, 1 Jan 2010 16:00:00 GMT",
+            b"Fri, 01 Jan 10 16:00:00 GMT",
+            b"Fri, 01 Jan 2010 16:00 GMT",
+            b"Fri, 32 Jan 2010 16:00:00 GMT",
+            b"Fri, 01 Jan 2010 24:00:00 GMT",
+            b"Fri, 01 Jan 2010 16:60:00 GMT",
+            b"Fri, 01 Jan 2010 16:00:00 GMT extra",
+            b"",
+        ] {
+            assert!(
+                matches!(SipDate::parse(bad), Err(HeaderError::Malformed(_))),
+                "{} was accepted",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn a_leap_second_is_a_real_value() {
+        assert_eq!(
+            SipDate::parse(b"Sat, 31 Dec 2016 23:59:60 GMT")
+                .expect("a date")
+                .second,
+            60
+        );
+    }
+
+    #[test]
+    fn nothing_makes_the_date_parser_panic() {
+        for len in 0..12_usize {
+            for seed in 0..80_u8 {
+                let v: Vec<u8> = (0..len)
+                    .map(|i| {
+                        let b = seed
+                            .wrapping_mul(19)
+                            .wrapping_add(u8::try_from(i).unwrap_or(0));
+                        match b % 5 {
+                            0 => b',',
+                            1 => b':',
+                            2 => b' ',
+                            _ => b,
+                        }
+                    })
+                    .collect();
+                let _ = SipDate::parse(&v);
+            }
+        }
     }
 }

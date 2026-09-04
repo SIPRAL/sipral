@@ -299,7 +299,9 @@ name = "insuf"
 section = "3.3.1"
 title = "Missing Required Header Fields"
 file = "3.3-application/insuf.dat"
-outcome = "semantic"
+# The RFC section calls for a 400 even though the message sits in the
+# application group: without Call-ID, To and From there is nothing to answer.
+outcome = "reject"
 sha256 = "1e3efd9f3b238c6351ba12bc7eb46d843f2761b5d4a6b82b63bffdf07f2c5aee"
 
 [[message]]
@@ -355,7 +357,9 @@ name = "multi01"
 section = "3.3.8"
 title = "Multiple Values in Single Value Required Fields"
 file = "3.3-application/multi01.dat"
-outcome = "semantic"
+# The RFC section calls for a 400: several Call-ID, To, From, Max-Forwards
+# and CSeq values, none of which may repeat.
+outcome = "reject"
 sha256 = "d156ab12105b4bfd8a6498de6f7195087058162b8cda1606169855b722411791"
 
 [[message]]
@@ -363,7 +367,9 @@ name = "mcl01"
 section = "3.3.9"
 title = "Multiple Content-Length Values"
 file = "3.3-application/mcl01.dat"
-outcome = "semantic"
+# The RFC section calls for an error and, on a stream, a closed connection:
+# two Content-Length values that disagree leave the framing undefined.
+outcome = "reject"
 sha256 = "887191619bf003b7e87399200b5cf4c3b5397344dbf70288ad5e23bd157b7fe4"
 
 [[message]]

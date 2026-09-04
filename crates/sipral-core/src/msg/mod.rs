@@ -35,11 +35,11 @@ pub use error::{HeaderError, ParseError};
 pub use framer::StreamFramer;
 pub use header::HeaderName;
 pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};
-pub use message::{FieldValues, MessageKind, OwnedMessage, RawMessage};
+pub use message::{FieldValues, Invalid, MessageKind, OwnedMessage, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
 pub use route::{RouteIter, RouteRef};
-pub use scalar::{CSeq, Digits, RAck, digits, rseq};
+pub use scalar::{CSeq, Digits, RAck, SipDate, digits, rseq};
 pub use span::{HeaderSlot, ParseScratch, Span};
 pub use tokens::{MediaTypeRef, TokenIter};
 pub use uri::{

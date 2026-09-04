@@ -13,7 +13,7 @@ use super::header::HeaderName;
 use super::lex::{CommaList, trim};
 use super::method::{Method, StatusCode};
 use super::route::RouteIter;
-use super::scalar::{CSeq, Digits, RAck, digits, rseq};
+use super::scalar::{CSeq, Digits, RAck, SipDate, digits, rseq};
 use super::span::{HeaderSlot, Span};
 use super::tokens::{MediaTypeRef, TokenIter};
 use super::uri::{UriError, UriRef};
@@ -424,6 +424,14 @@ impl<'a> RawMessage<'a> {
         digits(self.single(HeaderName::ContentLength)?)
     }
 
+    /// `Date` (RFC 3261 §20.17), GMT only.
+    ///
+    /// # Errors
+    /// See [`SipDate::parse`] and [`RawMessage::single`].
+    pub fn date(&self) -> Result<SipDate, HeaderError> {
+        SipDate::parse(self.single(HeaderName::Date)?)
+    }
+
     /// `RSeq` (RFC 3262 §7.1).
     ///
     /// # Errors
@@ -460,6 +468,125 @@ impl<'a> RawMessage<'a> {
             MessageKind::Request(m) => Ok(m),
             MessageKind::Response(_) => Ok(self.cseq()?.method),
         }
+    }
+
+    /// Whether this is a message the stack can act on, or one that draws a
+    /// 400.
+    ///
+    /// A message can be framed correctly and still be unusable: a `From` whose
+    /// display name is not a display name, a `CSeq` that names a different
+    /// method than the start line, a `Date` in a time zone nobody can read.
+    /// The parser has no business refusing those — it does not know which
+    /// fields the caller will read — so the question is asked here, once, by
+    /// whoever is about to answer.
+    ///
+    /// Only the fields that carry the message are checked, and only when they
+    /// are present. An extension header nobody understands is not a fault.
+    ///
+    /// # Errors
+    /// [`Invalid`], naming the field and what was wrong with it.
+    pub fn validate(&self) -> Result<(), Invalid> {
+        if let Some(uri) = self.request_uri() {
+            let uri =
+                uri.map_err(|_| Invalid::field("Request-URI", HeaderError::Malformed("URI")))?;
+            // 8.1.3.4 has a UAC copy a target URI into the Request-URI
+            // "except for the method-param and header URI parameters", so
+            // headers have no business arriving in one (RFC 4475 §3.1.2.11)
+            if uri.sip().is_some_and(|u| !u.headers_raw().is_empty()) {
+                return Err(Invalid::field(
+                    "Request-URI",
+                    HeaderError::Malformed("a Request-URI carries no headers"),
+                ));
+            }
+        }
+
+        // every one, not just the top: a response walks the whole list back,
+        // and RFC 4475 §3.1.2.1 hides its fault in the second value
+        let mut seen_via = false;
+        for via in self.via() {
+            via.map_err(|e| Invalid::field("Via", e))?;
+            seen_via = true;
+        }
+        if !seen_via {
+            return Err(Invalid::field("Via", HeaderError::Missing));
+        }
+        self.call_id().map_err(|e| Invalid::field("Call-ID", e))?;
+        let cseq = self.cseq().map_err(|e| Invalid::field("CSeq", e))?;
+        if let Some(method) = self.method()
+            && cseq.method != method
+        {
+            // 8.1.1.5: the method part of CSeq is case-sensitive and matches
+            // the request's own (RFC 4475 §3.1.2.17 and §3.1.2.18)
+            return Err(Invalid::field(
+                "CSeq",
+                HeaderError::Malformed("CSeq names a different method than the start line"),
+            ));
+        }
+        self.from().map_err(|e| Invalid::field("From", e))?;
+        self.to().map_err(|e| Invalid::field("To", e))?;
+
+        match self.contact() {
+            Err(e) => return Err(Invalid::field("Contact", e)),
+            Ok(Contacts::Star) => {}
+            Ok(Contacts::Addrs(addrs)) => {
+                for contact in addrs {
+                    contact.map_err(|e| Invalid::field("Contact", e))?;
+                }
+            }
+        }
+        for (name, hops) in [
+            ("Route", self.route()),
+            ("Record-Route", self.record_route()),
+        ] {
+            for hop in hops {
+                hop.map_err(|e| Invalid::field(name, e))?;
+            }
+        }
+        for challenge in self.www_authenticate() {
+            challenge.map_err(|e| Invalid::field("WWW-Authenticate", e))?;
+        }
+        for challenge in self.proxy_authenticate() {
+            challenge.map_err(|e| Invalid::field("Proxy-Authenticate", e))?;
+        }
+        for credentials in self.authorization() {
+            credentials.map_err(|e| Invalid::field("Authorization", e))?;
+        }
+        for credentials in self.proxy_authorization() {
+            credentials.map_err(|e| Invalid::field("Proxy-Authorization", e))?;
+        }
+
+        for (name, present, parsed) in [
+            (
+                "Max-Forwards",
+                self.header_count(HeaderName::MaxForwards),
+                self.max_forwards().map(|_| ()),
+            ),
+            (
+                "Expires",
+                self.header_count(HeaderName::Expires),
+                self.expires().map(|_| ()),
+            ),
+            (
+                "Content-Length",
+                self.header_count(HeaderName::ContentLength),
+                self.content_length().map(|_| ()),
+            ),
+            (
+                "Content-Type",
+                self.header_count(HeaderName::ContentType),
+                self.content_type().map(|_| ()),
+            ),
+            (
+                "Date",
+                self.header_count(HeaderName::Date),
+                self.date().map(|_| ()),
+            ),
+        ] {
+            if present > 0 {
+                parsed.map_err(|e| Invalid::field(name, e))?;
+            }
+        }
+        Ok(())
     }
 
     /// The whole message as it was received, body included.
@@ -500,6 +627,29 @@ impl<'a> RawMessage<'a> {
         }
     }
 }
+
+/// What is wrong with a message that arrived intact but cannot be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Invalid {
+    /// The field at fault, in its canonical spelling.
+    pub field: &'static str,
+    /// What was wrong with it.
+    pub error: HeaderError,
+}
+
+impl Invalid {
+    const fn field(field: &'static str, error: HeaderError) -> Self {
+        Self { field, error }
+    }
+}
+
+impl core::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.field, self.error)
+    }
+}
+
+impl core::error::Error for Invalid {}
 
 /// Every value of one field, across the lines it appears on and across the
 /// commas within them, in wire order.
