@@ -153,6 +153,8 @@ mod tests {
             Some(HostRef::Name("server10.example.com"))
         );
         assert!(hops.iter().all(RouteRef::is_loose_route));
+        // the fold before the second '<' is whitespace, not a display name
+        assert!(hops.iter().all(|h| h.addr().display_name().is_none()));
     }
 
     #[test]

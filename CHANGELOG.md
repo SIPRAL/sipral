@@ -112,6 +112,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   that happens to be spelled the same, and getting that backwards sends the
   request to a strict router with a Request-URI it cannot use. Entries come
   back in wire order, never sorted or deduplicated.
+- `sipral-core::msg::ChallengeRef` and `CredentialsRef`: digest challenges and
+  credentials, as two types rather than one, because `qop` is a quoted comma
+  list in a challenge and a bare token in credentials and the RFC's own worked
+  example writes both. `realm`, `nonce`, `cnonce`, `username` and `opaque` come
+  back unescaped; `uri` and `response` come back exactly as written, since
+  neither is a `quoted-string` and a Request-URI is no place to resolve
+  backslashes. `response` has no fixed length, per RFC 8760. Each header line
+  is one value: RFC 3261 §20.7 and §20.28 exempt these fields from
+  comma-joining, and several challenges are several lines in preference order.
+- `sipral-core::msg::TokenIter` and `MediaTypeRef`: `Require`, `Proxy-Require`,
+  `Supported`, `Unsupported`, `Content-Encoding`, `Accept`, `Allow` and
+  `Content-Type`. Option tags are matched without case; methods are not,
+  because the six RFC 3261 verbs are fixed-case literals in the grammar and
+  `Allow: invite` is an extension method that happens to be spelled like one
+  of them.
+- `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK
+  answers INVITE, since the INVITE server transaction absorbs the ACK to a
+  non-2xx and an ACK to a 2xx finds nothing under that key and belongs to the
+  dialog; a response answers with its `CSeq` method, having none of its own.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

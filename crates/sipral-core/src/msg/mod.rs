@@ -12,6 +12,7 @@
 //! `fixtures/rfc4475/`.
 
 mod addr;
+mod auth;
 mod error;
 mod header;
 mod lex;
@@ -21,10 +22,12 @@ mod parse;
 mod route;
 mod scalar;
 mod span;
+mod tokens;
 mod uri;
 mod via;
 
 pub use addr::{ContactIter, Contacts, NameAddrRef};
+pub use auth::{AuthParams, ChallengeRef, CredentialsRef};
 pub use error::{HeaderError, ParseError};
 pub use header::HeaderName;
 pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};
@@ -34,6 +37,7 @@ pub use parse::{Limits, ParseMode, parse, parse_with_limits};
 pub use route::{RouteIter, RouteRef};
 pub use scalar::{CSeq, Digits, RAck, digits, rseq};
 pub use span::{HeaderSlot, ParseScratch, Span};
+pub use tokens::{MediaTypeRef, TokenIter};
 pub use uri::{
     HostRef, SipUriRef, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,
 };

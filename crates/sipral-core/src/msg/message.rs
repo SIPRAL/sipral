@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use super::addr::{ContactIter, Contacts, NameAddrRef};
+use super::auth::{ChallengeRef, CredentialsRef};
 use super::error::HeaderError;
 use super::header::HeaderName;
 use super::lex::{CommaList, trim};
@@ -14,6 +15,7 @@ use super::method::{Method, StatusCode};
 use super::route::RouteIter;
 use super::scalar::{CSeq, Digits, RAck, digits, rseq};
 use super::span::{HeaderSlot, Span};
+use super::tokens::{MediaTypeRef, TokenIter};
 use super::uri::{UriError, UriRef};
 use super::via::ViaRef;
 
@@ -259,6 +261,118 @@ impl<'a> RawMessage<'a> {
         Ok(Contacts::Addrs(ContactIter::new(values)))
     }
 
+    /// `WWW-Authenticate` (RFC 3261 §20.44): the challenges a UAS, registrar
+    /// or redirect server sent with a 401, most preferred first.
+    ///
+    /// One line is one challenge. RFC 8760 §2.3 offers several algorithms as
+    /// several lines in preference order, and joining them would produce a
+    /// value with two scheme keywords that the grammar cannot read back.
+    pub fn www_authenticate(
+        &self,
+    ) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>> + use<'a> {
+        self.header_values(HeaderName::WwwAuthenticate)
+            .map(ChallengeRef::parse)
+    }
+
+    /// `Proxy-Authenticate` (RFC 3261 §20.27): the challenges a proxy sent
+    /// with a 407.
+    ///
+    /// A separate credential space from `WWW-Authenticate` — different status
+    /// code, different role (§22.1) — so answering one with the other is
+    /// wrong however alike they read.
+    pub fn proxy_authenticate(
+        &self,
+    ) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>> + use<'a> {
+        self.header_values(HeaderName::ProxyAuthenticate)
+            .map(ChallengeRef::parse)
+    }
+
+    /// `Authorization` (RFC 3261 §20.7).
+    ///
+    /// One line each: §20.7 exempts this field from the comma-joining rule of
+    /// §7.3.1 explicitly.
+    pub fn authorization(
+        &self,
+    ) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>> + use<'a> {
+        self.header_values(HeaderName::Authorization)
+            .map(CredentialsRef::parse)
+    }
+
+    /// `Proxy-Authorization` (RFC 3261 §20.28).
+    ///
+    /// A proxy must not consume a value whose `realm` is not its own (§22.3),
+    /// so these are read as a list rather than searched by scheme.
+    pub fn proxy_authorization(
+        &self,
+    ) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>> + use<'a> {
+        self.header_values(HeaderName::ProxyAuthorization)
+            .map(CredentialsRef::parse)
+    }
+
+    /// `Require` (RFC 3261 §20.32): the extensions the peer insists on.
+    ///
+    /// Must not be ignored when present — a UAS that cannot honour one of
+    /// these answers 420 and lists it in `Unsupported`.
+    #[must_use]
+    pub fn require(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::Require))
+    }
+
+    /// `Proxy-Require` (RFC 3261 §20.29): the same, addressed to proxies.
+    #[must_use]
+    pub fn proxy_require(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::ProxyRequire))
+    }
+
+    /// `Supported` (RFC 3261 §20.37): the extensions the peer can do.
+    ///
+    /// Present and empty means none, which is not the same as absent.
+    #[must_use]
+    pub fn supported(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::Supported))
+    }
+
+    /// `Unsupported` (RFC 3261 §20.40): what a 420 could not honour.
+    #[must_use]
+    pub fn unsupported(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::Unsupported))
+    }
+
+    /// `Content-Encoding` (RFC 3261 §20.12), outermost first.
+    #[must_use]
+    pub fn content_encoding(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::ContentEncoding))
+    }
+
+    /// `Accept` (RFC 3261 §20.1): the body types the peer will take, as
+    /// written.
+    ///
+    /// Absent means `application/sdp` is assumed; present and empty means
+    /// nothing is acceptable, so the two cannot be collapsed.
+    #[must_use]
+    pub fn accept(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::Accept))
+    }
+
+    /// `Allow` (RFC 3261 §20.5): the methods the peer implements.
+    ///
+    /// The six RFC 3261 verbs are fixed-case literals in the grammar, so
+    /// `Allow: invite` yields [`Method::Extension`], not [`Method::Invite`].
+    /// Absent says nothing about what is supported (§20.5); it is not a claim
+    /// that nothing is.
+    pub fn allow(&self) -> impl Iterator<Item = Method<'a>> + use<'a> {
+        TokenIter::new(self.field_values(HeaderName::Allow)).filter_map(Method::from_bytes)
+    }
+
+    /// `Content-Type` (RFC 3261 §20.15).
+    ///
+    /// # Errors
+    /// See [`MediaTypeRef::parse`] and [`RawMessage::single`]. One media type,
+    /// never a list, so a second one is a repeat rather than another value.
+    pub fn content_type(&self) -> Result<MediaTypeRef<'a>, HeaderError> {
+        MediaTypeRef::parse(self.single(HeaderName::ContentType)?)
+    }
+
     /// `Route` (RFC 3261 §20.34), in the order the request has to follow.
     #[must_use]
     pub fn route(&self) -> RouteIter<'a> {
@@ -324,6 +438,28 @@ impl<'a> RawMessage<'a> {
     /// See [`RAck::parse`] and [`RawMessage::single`].
     pub fn rack(&self) -> Result<RAck<'a>, HeaderError> {
         RAck::parse(self.single(HeaderName::RAck)?)
+    }
+
+    /// The method the transaction table is keyed on for this message.
+    ///
+    /// A request answers with its own method, except an ACK, which answers
+    /// INVITE: the INVITE server transaction absorbs the ACK to a non-2xx
+    /// (RFC 3261 §17.2.1), and an ACK to a 2xx simply finds no transaction
+    /// under that key and belongs to the dialog instead. A response answers
+    /// with its `CSeq` method, because that is what §17.1.3 matches on
+    /// alongside the branch — a response carries no method of its own.
+    ///
+    /// CANCEL stays CANCEL: it shares the branch of the request it cancels
+    /// but forms a transaction of its own (§9.1).
+    ///
+    /// # Errors
+    /// See [`RawMessage::cseq`], for a response.
+    pub fn transaction_lookup_method(&self) -> Result<Method<'a>, HeaderError> {
+        match self.kind() {
+            MessageKind::Request(Method::Ack) => Ok(Method::Invite),
+            MessageKind::Request(m) => Ok(m),
+            MessageKind::Response(_) => Ok(self.cseq()?.method),
+        }
     }
 
     /// The whole message as it was received, body included.

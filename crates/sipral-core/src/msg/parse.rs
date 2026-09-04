@@ -694,6 +694,150 @@ m: <sip:watson@example.net>;q=0.1, <sip:watson@example.org>\r\n\
     }
 
     #[test]
+    fn the_transaction_key_follows_the_ack_to_the_invite_that_owns_it() {
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(INVITE, &mut scratch).transaction_lookup_method(),
+            Ok(Method::Invite)
+        );
+
+        // 17.2.1: the INVITE server transaction absorbs the ACK to a non-2xx
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(
+                b"ACK sip:bob@example.com SIP/2.0\r\nCSeq: 1 ACK\r\n\r\n",
+                &mut scratch
+            )
+            .transaction_lookup_method(),
+            Ok(Method::Invite)
+        );
+
+        // a CANCEL is its own transaction even though it borrows the branch
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(
+                b"CANCEL sip:bob@example.com SIP/2.0\r\nCSeq: 1 CANCEL\r\n\r\n",
+                &mut scratch
+            )
+            .transaction_lookup_method(),
+            Ok(Method::Cancel)
+        );
+
+        // 17.1.3: a response is matched on the branch and the CSeq method
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(
+                b"SIP/2.0 200 OK\r\nCSeq: 314159 INVITE\r\n\r\n",
+                &mut scratch
+            )
+            .transaction_lookup_method(),
+            Ok(Method::Invite)
+        );
+
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(b"SIP/2.0 200 OK\r\n\r\n", &mut scratch).transaction_lookup_method(),
+            Err(crate::msg::HeaderError::Missing)
+        );
+    }
+
+    #[test]
+    fn every_challenge_line_is_its_own_challenge() {
+        // RFC 8760 2.3: several algorithms, most preferred first, one line
+        // each — joining them would make a value the grammar cannot read back
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 401 Unauthorized\r\n\
+WWW-Authenticate: Digest realm=\"example.com\", nonce=\"a1\", algorithm=SHA-256, qop=\"auth\"\r\n\
+WWW-Authenticate: Digest realm=\"example.com\", nonce=\"a2\", algorithm=MD5, qop=\"auth\"\r\n\
+Proxy-Authenticate: Digest realm=\"proxy.example.com\", nonce=\"p1\"\r\n\
+\r\n",
+            &mut scratch,
+        );
+        let offered: Vec<_> = m
+            .www_authenticate()
+            .map(|c| c.expect("a challenge"))
+            .map(|c| c.algorithm().unwrap_or_default().into_owned())
+            .collect();
+        assert_eq!(offered, vec![b"SHA-256".to_vec(), b"MD5".to_vec()]);
+
+        // a separate credential space, not another entry in the same one
+        let proxy: Vec<_> = m
+            .proxy_authenticate()
+            .map(|c| c.expect("a challenge"))
+            .map(|c| c.realm().unwrap_or_default().into_owned())
+            .collect();
+        assert_eq!(proxy, vec![b"proxy.example.com".to_vec()]);
+    }
+
+    #[test]
+    fn an_unknown_auth_scheme_is_well_formed() {
+        // RFC 4475 3.3.7 regaut01
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"REGISTER sip:example.com SIP/2.0\r\n\
+Authorization: NoOneKnowsThisScheme opaque-data=here\r\n\
+\r\n",
+            &mut scratch,
+        );
+        let c = m
+            .authorization()
+            .next()
+            .expect("one value")
+            .expect("credentials");
+        assert!(!c.is_digest());
+        assert_eq!(c.scheme(), b"NoOneKnowsThisScheme");
+        assert_eq!(m.proxy_authorization().count(), 0);
+    }
+
+    #[test]
+    fn the_list_fields_read_across_lines_and_commas() {
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"INVITE sip:x@example.com SIP/2.0\r\n\
+Supported: 100rel, timer\r\n\
+k: replaces\r\n\
+Require: 100rel\r\n\
+Allow: INVITE, ACK, BYE, invite\r\n\
+Accept: application/sdp\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: 0\r\n\
+\r\n",
+            &mut scratch,
+        );
+        assert_eq!(
+            m.supported().collect::<Vec<_>>(),
+            vec![&b"100rel"[..], b"timer", b"replaces"]
+        );
+        assert!(m.supported().has("TIMER"));
+        assert!(!m.supported().has("norefersub"));
+        assert!(m.require().has("100rel"));
+        assert!(m.content_type().expect("a type").is("application", "sdp"));
+        assert_eq!(m.accept().count(), 1);
+
+        // the standard verbs are fixed-case literals in the grammar
+        assert_eq!(
+            m.allow().collect::<Vec<_>>(),
+            vec![
+                Method::Invite,
+                Method::Ack,
+                Method::Bye,
+                Method::Extension("invite"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_absent_list_field_is_empty_rather_than_an_error() {
+        let mut scratch = ParseScratch::new();
+        let m = ok(INVITE, &mut scratch);
+        assert_eq!(m.supported().count(), 0);
+        assert_eq!(m.require().count(), 0);
+        assert_eq!(m.allow().count(), 0);
+        assert_eq!(m.www_authenticate().count(), 0);
+    }
+
+    #[test]
     fn route_rows_combine_in_the_order_they_arrived() {
         // RFC 3261 7.3.1: the same three entries in another order are "valid
         // but not equivalent", so nothing here sorts or dedupes

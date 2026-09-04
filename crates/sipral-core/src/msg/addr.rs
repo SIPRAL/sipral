@@ -38,7 +38,7 @@ use core::fmt;
 use std::borrow::Cow;
 
 use super::error::HeaderError;
-use super::lex::{Params, fields, trim, unfold, unquote};
+use super::lex::{Params, fields, is_lws, trim, unfold, unquote};
 use super::message::FieldValues;
 use super::method::is_token_byte;
 use super::scalar::{Digits, digits};
@@ -114,7 +114,7 @@ impl<'a> NameAddrRef<'a> {
         }
         // RFC 4475 3.1.2.14: LAQUOT and RAQUOT absorb the whitespace, so none
         // of it may be left inside
-        if uri_bytes.iter().any(|&b| is_lws_byte(b)) {
+        if uri_bytes.iter().copied().any(is_lws) {
             return Err(HeaderError::Malformed("whitespace inside the addr-spec"));
         }
         let uri = UriRef::parse(uri_bytes).map_err(|_| HeaderError::Malformed("addr-spec"))?;
@@ -258,10 +258,6 @@ impl<'a> Iterator for ContactIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         self.values.next().map(NameAddrRef::parse)
     }
-}
-
-const fn is_lws_byte(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 /// Where the quoted string starting at byte 0 ends, one past its closing

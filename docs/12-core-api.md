@@ -168,12 +168,25 @@ impl<'a> RawMessage<'a> {
     pub fn record_route(&self) -> RouteIter<'a>;
     pub fn max_forwards(&self) -> Result<Digits, HeaderError>;
     pub fn content_length(&self) -> Result<Digits, HeaderError>;
-    pub fn content_type(&self) -> Result<&'a str, HeaderError>;
+    pub fn content_type(&self) -> Result<MediaTypeRef<'a>, HeaderError>;
     pub fn expires(&self) -> Result<Digits, HeaderError>;
     pub fn rseq(&self) -> Result<u32, HeaderError>;
     pub fn rack(&self) -> Result<RAck<'a>, HeaderError>;
     pub fn require(&self) -> TokenIter<'a>;
+    pub fn proxy_require(&self) -> TokenIter<'a>;
     pub fn supported(&self) -> TokenIter<'a>;
+    pub fn unsupported(&self) -> TokenIter<'a>;
+    pub fn content_encoding(&self) -> TokenIter<'a>;
+    pub fn accept(&self) -> TokenIter<'a>;
+    pub fn allow(&self) -> impl Iterator<Item = Method<'a>>;
+
+    /// One line each: RFC 3261 §20.7 and §20.28 exempt these from
+    /// comma-joining, and RFC 8760 §2.3 sends several algorithms as several
+    /// lines in preference order. WWW/Proxy are separate credential spaces.
+    pub fn www_authenticate(&self) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>>;
+    pub fn proxy_authenticate(&self) -> impl Iterator<Item = Result<ChallengeRef<'a>, HeaderError>>;
+    pub fn authorization(&self) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>>;
+    pub fn proxy_authorization(&self) -> impl Iterator<Item = Result<CredentialsRef<'a>, HeaderError>>;
 
     /// One value of a field that may appear only once. `Missing` when it is
     /// absent, `UnexpectedRepeat` when it is not; RFC 4475 §3.3.8 is a message
@@ -294,6 +307,29 @@ router carrying a header parameter that happens to be spelled `lr`, which is
 the branch §12.2.1.1 and §16.6 take. Entries come back in wire order, never
 sorted or deduplicated — §7.3.1 gives three `Route` rows and calls the same
 three in another order "valid but not equivalent".
+
+Digest challenges and credentials are two types, not one:
+
+```rust
+pub struct ChallengeRef<'a> { /* WWW-Authenticate, Proxy-Authenticate */ }
+pub struct CredentialsRef<'a> { /* Authorization, Proxy-Authorization */ }
+```
+
+They share a scheme and a comma-separated parameter list, and differ where it
+matters. `qop` is a quoted comma list in a challenge and one bare token in
+credentials, so `ChallengeRef::qop` iterates and `CredentialsRef::qop` does
+not. `realm`, `nonce`, `cnonce`, `username` and `opaque` are `quoted-string`
+and come back unescaped; `uri` and `response` are quoted without being
+`quoted-string` (§22.4) and come back exactly as written, because a
+Request-URI is not a place to resolve backslashes. `response` has no fixed
+length — RFC 8760 §2.7 replaced `32LHEX` with `*LHEX` so SHA-256 fits, and
+allows an empty value before the first challenge.
+
+A parameter that the grammar names twice — once typed, once through the
+`auth-param` catch-all — parses either way, and the typed accessor is what
+objects: `nc=0000001` is not `8LHEX` but is a good token, so the field parses
+and `CredentialsRef::nc` returns `Malformed`. Rejecting the message there is
+a policy RFC 3261 does not ask for.
 
 Numbers are `Digits { value: Option<u32>, written: usize }` rather than a bare
 `u32`, because a field of legal digits too large for 32 bits is not the same

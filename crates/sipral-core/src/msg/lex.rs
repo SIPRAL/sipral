@@ -47,17 +47,27 @@ pub fn unfold(value: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// Drop leading and trailing space and horizontal tab.
+/// Drop leading and trailing linear whitespace.
+///
+/// A fold counts: `LWS = [*WSP CRLF] 1*WSP` (RFC 3261 §25.1), so a value that
+/// begins after a continuation line begins with CRLF, and leaving those two
+/// bytes in place turns whitespace into content. `Route:\r\n <sip:a@b>` would
+/// otherwise arrive with a display name of CRLF.
 #[must_use]
 pub fn trim(value: &[u8]) -> &[u8] {
     let mut s = value;
-    while let [b' ' | b'\t', rest @ ..] = s {
+    while let [b' ' | b'\t' | b'\r' | b'\n', rest @ ..] = s {
         s = rest;
     }
-    while let [rest @ .., b' ' | b'\t'] = s {
+    while let [rest @ .., b' ' | b'\t' | b'\r' | b'\n'] = s {
         s = rest;
     }
     s
+}
+
+/// Whether a byte is one a fold or a space can be made of.
+pub(super) const fn is_lws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 /// Undo one level of quoting: strip the surrounding `"` and resolve every
@@ -90,26 +100,35 @@ pub fn unquote(value: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// Whether the value is a syntactically complete quoted string.
+/// Whether the value is one syntactically complete quoted string and nothing
+/// else.
+///
+/// The closing quote has to be the *first* unescaped one, not merely the last
+/// byte: `"a" b="c"` starts and ends with a quote and is two values with a
+/// missing separator between them.
 #[must_use]
 pub fn is_quoted(value: &[u8]) -> bool {
     let v = trim(value);
-    v.len() >= 2 && v.first() == Some(&b'"') && ends_with_unescaped_quote(v)
+    quoted_len(v) == Some(v.len())
 }
 
-fn ends_with_unescaped_quote(v: &[u8]) -> bool {
-    let Some(inner) = v.get(1..v.len().saturating_sub(1)) else {
-        return false;
-    };
-    if v.last() != Some(&b'"') {
-        return false;
+/// How long the quoted string starting at byte 0 is, closing quote included.
+fn quoted_len(v: &[u8]) -> Option<usize> {
+    if v.first() != Some(&b'"') {
+        return None;
     }
-    // the closing quote is real only if it is not itself escaped
-    let mut escaped = false;
-    for &b in inner {
-        escaped = b == b'\\' && !escaped;
+    let mut i = 1;
+    while let Some(&b) = v.get(i) {
+        match b {
+            b'"' => return Some(i + 1),
+            b'\\' => {
+                v.get(i + 1)?;
+                i += 2;
+            }
+            _ => i += 1,
+        }
     }
-    !escaped
+    None
 }
 
 /// The whitespace-separated pieces of a value, folds included.
@@ -320,10 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn trimming_takes_space_and_tab_from_both_ends() {
+    fn trimming_takes_linear_whitespace_from_both_ends() {
         assert_eq!(trim(b"  \tx y \t "), b"x y");
         assert_eq!(trim(b""), b"");
         assert_eq!(trim(b"   "), b"");
+        // a fold is whitespace too, and a value that follows one starts with
+        // its CRLF
+        assert_eq!(trim(b"\r\n   x y"), b"x y");
+        assert_eq!(trim(b"\r\n\t"), b"");
+        assert_eq!(trim(b"x\r\n "), b"x");
     }
 
     #[test]
@@ -343,6 +367,12 @@ mod tests {
         assert!(is_quoted(br#""fine""#));
         assert!(is_quoted(br#""has \" inside""#));
         assert!(!is_quoted(b"bare"));
+        // starts and ends with a quote, and is still two values with the
+        // separator missing
+        assert!(!is_quoted(br#""a" b="c""#));
+        assert!(!is_quoted(br#""a"junk"#));
+        assert!(is_quoted(br#""""#));
+        assert!(!is_quoted(br#"""#));
     }
 
     #[test]
