@@ -27,6 +27,7 @@ That is why the history is never squashed and never rewritten.
 | [09-rfc-index.md](09-rfc-index.md) | every specification implemented, and by which crate |
 | [10-roadmap.md](10-roadmap.md) | phases and their exit criteria |
 | [11-testing.md](11-testing.md) | test corpus, fixtures, the interoperability matrix |
+| [12-core-api.md](12-core-api.md) | the public surface of `sipral-core`, signatures only, with walkthroughs and what was rejected |
 
 ## Conventions
 

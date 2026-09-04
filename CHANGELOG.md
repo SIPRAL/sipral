@@ -40,6 +40,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   internal files and captures, build, lints, tests, dependency licences,
   secrets.
 - CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
+- `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
+  merged from four independent proposals scored by three reviewers, with
+  register, call, CANCEL-race and fork walkthroughs, a fake-clock test, the C
+  projection, and a record of what was rejected and why. Adds the RFC 6026
+  `Accepted` state to both INVITE machines, which every proposal had missed on
+  the client side.
 - RFC 4475 torture corpus under `fixtures/rfc4475/`: the 49 messages decoded
   byte for byte from the archive in Appendix A, laid out by RFC section, with
   a manifest carrying section, title, expected outcome and SHA-256 per file.

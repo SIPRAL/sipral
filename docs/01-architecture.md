@@ -12,14 +12,18 @@ Copyright (c) 2026 Tiberiu Balasea
 It exposes, in essence:
 
 ```rust
-fn handle_input(&mut self, input: Input, now: Instant) -> Result<(), Error>;
-fn poll_output(&mut self) -> Option<Output>;
+fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError>;
+fn handle_timeout(&mut self, now: Instant);
+fn poll_transmit(&mut self) -> Option<Transmit>;
+fn poll_event(&mut self) -> Option<Event>;
 fn poll_timeout(&self) -> Option<Instant>;
 ```
 
-`Input` is a datagram that arrived, or an application command. `Output` is a
-datagram to send, or an event the application should see. `poll_timeout` says
-when the caller must come back even if nothing arrives.
+`Input` is bytes that arrived on a transport the caller owns. `Transmit` is
+bytes to send. `Event` is what the application should know. `poll_timeout`
+says when the caller must call `handle_timeout` even if nothing arrives; a
+timer firing is not an arrival, so it gets its own call. The full surface is
+in [12-core-api.md](12-core-api.md).
 
 Consequences, in the order they matter:
 

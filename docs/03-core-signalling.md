@@ -121,8 +121,11 @@ A dialog is Call-ID plus both tags. The layer maintains:
 - the remote target from `Contact`, set when the early dialog is established
   (RFC 3261 §12.1) and afterwards changed only by the two target-refresh
   requests, re-INVITE (§12.2) and UPDATE (RFC 3311 §5.2);
-- the ACK for a 2xx, which is a separate transaction and is the caller's
-  responsibility to retransmit until a response stops arriving.
+- the ACK for a 2xx, which is outside the INVITE transaction (RFC 3261
+  §13.2.2.4). The caller sends it once, because it may carry the answer and
+  because the caller decides when media is ready; after that the dialog layer
+  keeps it and answers every retransmitted 2xx itself. The ACK for a non-2xx
+  is the transaction's own business (§17.1.1.3) and never reaches the caller.
 
 ## SDP
 
