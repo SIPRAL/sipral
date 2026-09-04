@@ -74,6 +74,14 @@ else
     fail "fixtures/rfc4475/manifest.toml missing"
 fi
 
+step "one version everywhere"
+ws=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' Cargo.toml)
+cs=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' bindings/dotnet/Sipral/Sipral.csproj 2>/dev/null)
+ci=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' bindings/dotnet/Sipral/SipralInfo.cs 2>/dev/null)
+if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ]; then pass "workspace, csproj and SipralInfo.cs all say $ws"; else
+    fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci"
+fi
+
 step "no addresses to harvest"
 mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \

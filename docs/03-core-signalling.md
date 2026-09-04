@@ -56,8 +56,12 @@ the transport layer may switch.
 `sipral-core` decides *what* to send over *which* transport; it does not open
 the socket.
 
-- **UDP, TCP, TLS, WS, WSS.** The transport is picked from the URI, the `Via`,
-  the NAPTR/SRV result the caller supplied, or configuration.
+- **UDP, TCP and TLS in phase 1; WS and WSS in phase 2** (RFC 7118). The
+  transport is picked from the URI, the `Via`, the NAPTR/SRV result the caller
+  supplied, or configuration. WebSocket is not a byte stream to the SIP layer:
+  RFC 7118 §4.2 puts exactly one SIP message in each WebSocket message, so a
+  frame is handed to the core whole, like a datagram, and never goes through
+  the `Content-Length` framer that TCP and TLS need.
 - **Automatic switch to TCP** when a request is within 200 bytes of a known
   path MTU, or, when the path MTU is unknown, larger than 1300 bytes, per RFC
   3261 §18.1.1. Both figures are configurable, because some carriers perform
@@ -70,7 +74,9 @@ the socket.
   §4.4.1), or `OPTIONS` where a registrar wants a request. The interval is a
   design choice, not a spec value: 25 s by default, because typical NAT UDP
   bindings expire at 30 s and the RFC 5626 default of 120 s for TCP would drop
-  most of them; tunable per account.
+  most of them; tunable per endpoint. The core owns the CRLF timer and emits
+  the keepalive as a `Transmit`; the `OPTIONS` variant, and any per-account
+  policy, live in `sipral-ua`, which has accounts and the core does not.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 

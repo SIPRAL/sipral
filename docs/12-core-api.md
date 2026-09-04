@@ -229,9 +229,13 @@ impl ResponseBuilder {
     pub fn build(self) -> Result<OwnedMessage, BuildError>;
 }
 
-/// Reassembles TCP/TLS/WS bytes into messages. The one place inbound bytes
+/// Reassembles TCP and TLS bytes into messages. The one place inbound bytes
 /// must be copied into an accumulation buffer, because a message can arrive
 /// split across reads. Frames on Content-Length (RFC 3261 §18.3).
+///
+/// WebSocket (phase 2, RFC 7118) does not use this: each WebSocket message
+/// carries exactly one SIP message, so the caller feeds a frame as
+/// `Input::Datagram` on a transport bound with `TransportProtocol::Ws`/`Wss`.
 pub struct StreamFramer { /* buffer, cursor, max */ }
 impl StreamFramer {
     pub fn new(max_message_bytes: u32) -> Self;
@@ -286,6 +290,9 @@ pub struct EndpointConfig {
     pub mtu_known: Option<u32>,                // None: use the 1300-byte rule
     pub udp_to_tcp_switch_bytes: u32,          // 1 300, RFC 3261 §18.1.1
     pub always_request_rport: bool,            // true, RFC 3581 (a MAY, chosen)
+    /// Double-CRLF keepalive on stream transports (RFC 5626 §4.4.1), emitted
+    /// as a `Transmit` when due. `None` disables it. Default 25 s, see `03`.
+    pub keepalive_interval: Option<Duration>,
 }
 
 impl Endpoint {
@@ -527,13 +534,19 @@ Each binding ships the idiomatic version for its runtime.
 ## Layering above
 
 `sipral-ua` wraps one `Endpoint` and exposes the same five-call shape with a
-call vocabulary: `AccountId`, `CallId`, `SubscriptionId`, a `Command` enum
+call vocabulary: `AccountId`, `CallHandle`, `SubscriptionId`, a `Command` enum
 (`Register`, `Call`, `Answer`, `Hangup`, `Hold`, `Transfer`, `Subscribe`, ...)
 and a `UaEvent` enum (`Registration`, `IncomingCall`, `CallProgress`,
 `CallConfirmed`, `CallEnded`, ...). It owns the policy the core refuses to
 have: registration refresh, automatic credential retry, `MultipleAnswerPolicy`
 for forks, hold via re-INVITE or UPDATE, transfer sequencing. Every type it
 exposes is fully owned; no lifetime parameter leaves `sipral-core`.
+
+`CallHandle` is deliberately not called `CallId`: the core's `CallId` is the
+RFC 3261 `Call-ID` header value, and one of those spawns several `DialogId`s in
+a fork. A `CallHandle` names one dialog the application is talking to, minted
+per early dialog, so a forked INVITE yields several handles under one dial
+attempt and the application is told which one survived.
 
 ## Projection onto C
 

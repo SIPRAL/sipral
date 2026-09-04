@@ -12,6 +12,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- Phase 1 readiness review, nine gaps closed: WebSocket scoped to phase 2 and
+  its framing corrected (one SIP message per WebSocket message, never the
+  `Content-Length` framer); keepalive given a home in `EndpointConfig`; the
+  `sipral-ua` call handle renamed away from the core's `CallId`; a fuzzing
+  plan and a per-flow interoperability pass bar in `docs/11-testing.md`; the
+  `sipral` facade crate inheriting version, licence and lints from the
+  workspace; `scripts/check.sh` failing on version drift between the
+  workspace and the .NET package.
 - Design and licensing documents checked claim by claim against the RFC text
   and the primary sources; 20 corrections applied. The ones that change
   behaviour: the release profile no longer sets `panic = "abort"`, because the
