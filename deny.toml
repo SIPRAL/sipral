@@ -25,6 +25,16 @@ allow = [
 name = "sipral"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+# the fuzz harness, which is never distributed
+name = "sipral-fuzz"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
+# libFuzzer's bindings carry LLVM's old NCSA licence alongside MIT/Apache.
+# NCSA is permissive, and this reaches only the fuzz harness under fuzz/,
+# which is outside the workspace and never shipped.
+name = "libfuzzer-sys"
+allow = ["NCSA"]
+[[licenses.exceptions]]
 name = "sipral-core"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]

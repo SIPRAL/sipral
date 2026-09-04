@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+# Not on push: three targets at five minutes each would add half an hour to
+# every commit and buy very little. Nightly, and on demand.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        required: false
+        default: "300"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, framer, builder]
+    steps:
+      - uses: actions/checkout@v7
+      # fuzz/rust-toolchain.toml is the single source of truth for the nightly
+      - run: rustup toolchain install
+        working-directory: fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: seed the corpus
+        run: |
+          mkdir -p "corpus/${{ matrix.target }}"
+          for f in ../fixtures/rfc4475/*/*.dat; do
+              case "${{ matrix.target }}" in
+                  # the framer reads the first byte as its read size
+                  framer) printf '\100' | cat - "$f" > "corpus/framer/$(basename "$f")" ;;
+                  *) cp "$f" "corpus/${{ matrix.target }}/" ;;
+              esac
+          done
+        working-directory: fuzz
+      - name: run
+        run: |
+          cargo fuzz run "${{ matrix.target }}" -- \
+              -max_total_time="${SECONDS_PER_TARGET}" \
+              -max_len=65535 \
+              -rss_limit_mb=2048
+        working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '300' }}
+      - name: keep whatever crashed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

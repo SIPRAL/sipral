@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Outside the workspace on purpose: libFuzzer needs a nightly compiler, and the
+# rest of the tree keeps its stable pin. See rust-toolchain.toml beside this.
+
+[package]
+name = "sipral-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sipral-core]
+path = "../crates/sipral-core"
+
+[workspace]
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framer"
+path = "fuzz_targets/framer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "builder"
+path = "fuzz_targets/builder.rs"
+test = false
+doc = false
+bench = false

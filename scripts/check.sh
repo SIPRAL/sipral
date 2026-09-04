@@ -140,6 +140,9 @@ step "dependency licences"
 if command -v cargo-deny >/dev/null 2>&1; then
     cargo deny check >/dev/null 2>&1 \
         && pass "cargo deny" || fail "cargo deny check"
+    # fuzz/ is its own workspace, so the run above never sees it
+    (cd "$ROOT/fuzz" && cargo deny check licenses >/dev/null 2>&1) \
+        && pass "cargo deny (fuzz)" || fail "cargo deny check in fuzz/"
 else
     fail "cargo-deny not installed: cargo install cargo-deny --locked"
 fi

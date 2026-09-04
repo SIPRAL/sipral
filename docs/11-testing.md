@@ -39,15 +39,35 @@ replayed against the stack byte for byte. Every interoperability bug found in
 the field becomes a fixture here on the day it is found, and it never regresses
 again.
 
-**Fuzzing.** `cargo fuzz` (libFuzzer) with three targets: the message parser,
-the SDP parser and the stream framer. The fuzz crate lives under `fuzz/`,
+**Fuzzing.** `cargo fuzz` (libFuzzer). The fuzz crate lives under `fuzz/`,
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
-date, so the rest of the tree keeps its stable pin. Seeds: the RFC 4475 corpus
-plus every anonymised capture. Bounds: 10 s per input and a memory limit, so a
-hang is reported as a failure rather than waited out. The phase 1 exit gate is
-24 hours on each target with no crash and no timeout; CI runs each target for
-ten minutes on every push as a smoke test. Every crashing input is minimised
-and committed under `fixtures/regressions/` with the fix, and the test suite
+date and its own lockfile, so the rest of the tree keeps its stable pin.
+
+Three targets today — `parse`, `framer`, `builder` — and a fourth, the SDP
+parser, when there is one to fuzz. `parse` walks every typed accessor after a
+successful parse, because a message that parses can still hold a field nobody
+can read and reading it is what the stack does next. `framer` takes the first
+byte of the input as its read size, so one input covers both "the whole message
+at once" and "one byte at a time". `builder` feeds arbitrary bytes in as header
+values and asserts the result parses back with exactly the fields that went in:
+what it is really testing is that a caller's data cannot become structure.
+
+```sh
+cd fuzz
+cp ../fixtures/rfc4475/*/*.dat corpus/parse/     # seeds
+cargo fuzz run parse -- -max_total_time=600 -max_len=65535 -rss_limit_mb=2048
+```
+
+Seeds are the RFC 4475 corpus plus every anonymised capture; `fuzz/corpus/` is
+not committed, since it is generated and grows without bound. Bounds: a memory
+limit and a time limit per run, so a hang is a failure rather than something to
+wait out.
+
+The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
+Until then, `.github/workflows/fuzz.yml` runs each target for five minutes,
+nightly and on demand — not on every push, which would add half an hour to
+every commit to buy very little. Every crashing input is minimised and
+committed under `fixtures/regressions/` with the fix, and the test suite
 replays that directory forever.
 
 **Media measurement.** Impairment profiles built with `tc netem` and committed

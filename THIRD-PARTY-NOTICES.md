@@ -50,5 +50,14 @@ SIPp, Wireshark, Kamailio, FreeSWITCH and Asterisk are used to test Sipral.
 None of them is linked into it, none ships with it, and their licences do not
 reach the product.
 
+The fuzz harness under `fuzz/` links `libfuzzer-sys` and, through it,
+`arbitrary`, `libc`, `cc`, `jobserver` and `shlex`. That crate is a separate
+workspace with its own lockfile and its own nightly pin, it is never published
+and never linked into anything shipped, and `scripts/check.sh` runs
+`cargo deny` over it too. All of them are MIT or Apache-2.0, except
+`libfuzzer-sys` itself, which is `(MIT OR Apache-2.0) AND NCSA` — NCSA is
+LLVM's old permissive licence, and `deny.toml` allows it by name for that one
+crate rather than opening the allow-list.
+
 The RFC 4475 torture test corpus under `fixtures/rfc4475/` is IETF Trust
 material, reproduced under the IETF Trust Legal Provisions.

@@ -1,0 +1,7 @@
+# libFuzzer needs a nightly compiler. Pinned to a date rather than to
+# "nightly", so a fuzz run is reproducible and a broken nightly cannot break
+# the build on a Tuesday. The rest of the tree stays on the stable pin in the
+# repository root.
+[toolchain]
+channel = "nightly-2026-09-03"
+components = ["rust-src", "rustfmt", "clippy"]
