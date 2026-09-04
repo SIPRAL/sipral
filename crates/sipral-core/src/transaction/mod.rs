@@ -25,6 +25,7 @@
 mod ack;
 mod handle;
 mod invite_client;
+mod non_invite_client;
 mod slab;
 mod timer;
 

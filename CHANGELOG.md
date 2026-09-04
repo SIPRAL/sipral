@@ -174,6 +174,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   A retransmitted final response re-sends the ACK and is not reported twice.
   On UDP the request goes out seven times in 64·T1, which is what the RFC says
   that number is for.
+- The non-INVITE client transaction (RFC 3261 §17.1.2), which is what REGISTER,
+  OPTIONS, BYE and MESSAGE run on. Retransmissions cap at T2 rather than
+  doubling forever, and a provisional response does not stop them — it moves
+  the machine to `Proceeding`, where the interval is T2 flat and timer F still
+  ends the transaction. Only an INVITE gets to ring indefinitely.
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —
