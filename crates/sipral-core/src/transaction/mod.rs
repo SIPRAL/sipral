@@ -13,7 +13,18 @@
 //! end an INVITE transaction outright, and the `Accepted` state on both INVITE
 //! machines is where that correction lives.
 
+// The machines are written before the store that owns them, so most of this
+// module has no caller outside its own tests yet. The allow goes when the
+// store lands with message matching, and it is deliberately module-wide
+// rather than sprinkled per item so that removing it is one edit.
+#![allow(
+    dead_code,
+    reason = "the transaction store that drives these machines lands with message matching"
+)]
+
+mod ack;
 mod handle;
+mod invite_client;
 mod slab;
 mod timer;
 

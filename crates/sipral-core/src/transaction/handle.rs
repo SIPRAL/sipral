@@ -167,10 +167,6 @@ pub struct TransactionId<K: TransactionKind> {
 }
 
 impl<K: TransactionKind> TransactionId<K> {
-    #[allow(
-        dead_code,
-        reason = "the store that issues handles lands with the state machines"
-    )]
     pub(crate) const fn new(raw: Raw) -> Self {
         Self {
             raw,
@@ -280,10 +276,6 @@ pub struct DialogId {
 }
 
 impl DialogId {
-    #[allow(
-        dead_code,
-        reason = "the store that issues handles lands with the dialog layer"
-    )]
     pub(crate) const fn new(raw: Raw) -> Self {
         Self { raw }
     }
@@ -308,7 +300,6 @@ pub struct ProvisionalResponseId {
 }
 
 impl ProvisionalResponseId {
-    #[allow(dead_code, reason = "the store that issues handles lands with PRACK")]
     pub(crate) const fn new(dialog: DialogId, rseq: u32, raw: Raw) -> Self {
         Self { dialog, rseq, raw }
     }

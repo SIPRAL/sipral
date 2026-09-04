@@ -12,13 +12,6 @@
 //! handle carries the generation it was issued under. A stale handle finds
 //! nothing.
 
-// the store that fills these slots is the next task; the arena and its
-// guarantee are finished and tested here, and nothing outside uses them yet
-#![allow(
-    dead_code,
-    reason = "the transaction store that fills the arena lands with the state machines"
-)]
-
 use super::handle::Raw;
 
 /// A generational arena.

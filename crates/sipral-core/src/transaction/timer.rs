@@ -32,13 +32,6 @@
 //! The `/ 0` ones are zero on a reliable transport: nothing retransmits there,
 //! so there is nothing to absorb and the machine can terminate at once.
 
-// the state machines that hang timers on this land next; the schedule and its
-// ordering guarantees are finished and tested here
-#![allow(
-    dead_code,
-    reason = "the state machines that schedule these land with the transaction store"
-)]
-
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

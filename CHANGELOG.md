@@ -165,6 +165,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   before a transaction died never answers to whoever took its slot — which is
   what a late retransmission is holding. The four state enums carry RFC 6026's
   `Accepted` on both INVITE machines.
+- The INVITE client transaction (RFC 3261 §17.1.1, RFC 6026 §7.2), and the ACK
+  a client transaction builds for a final response that is not a 2xx. A 2xx
+  does not end the transaction: the machine moves to `Accepted` and stays there
+  for timer M, so a retransmitted 2xx or one from another fork is passed up
+  rather than dropped as a stray. A provisional response stops both timer A and
+  timer B, because how long to wait for a ringing phone is the user's decision.
+  A retransmitted final response re-sends the ACK and is not reported twice.
+  On UDP the request goes out seven times in 64·T1, which is what the RFC says
+  that number is for.
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —
