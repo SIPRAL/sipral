@@ -158,6 +158,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - `SipDate` and `RawMessage::date`: RFC 3261 §20.17, which narrows RFC 1123 to
   GMT and says outright that the names are case-sensitive. `EST` is not a zone
   this reads, and neither is `UT`, `UTC` or `gmt`.
+- `sipral-core::transaction`: the handles the transaction layer is addressed
+  by. Typed by machine, so answering a PRACK with an INVITE server transaction
+  handle is a compile error rather than a runtime one, and the guarantee
+  survives into C as one struct per kind. Generational, so a handle issued
+  before a transaction died never answers to whoever took its slot — which is
+  what a late retransmission is holding. The four state enums carry RFC 6026's
+  `Accepted` on both INVITE machines.
 - Fuzzing under `fuzz/`: three libFuzzer targets over the parser and every
   typed accessor, the stream framer fed at arbitrary read sizes, and the
   builder fed arbitrary bytes as header values to prove a caller's data cannot
