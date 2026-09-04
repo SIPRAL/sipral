@@ -15,9 +15,11 @@
 
 mod handle;
 mod slab;
+mod timer;
 
 pub use handle::{
     AnyTransactionId, DialogId, InviteClient, InviteClientState, InviteServer, InviteServerState,
     NonInviteClient, NonInviteClientState, NonInviteServer, NonInviteServerState,
     ProvisionalResponseId, Role, TransactionId, TransactionKind, TransportId,
 };
+pub use timer::{TimerConfig, TimerName};

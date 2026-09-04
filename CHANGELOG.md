@@ -165,6 +165,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   before a transaction died never answers to whoever took its slot — which is
   what a late retransmission is holding. The four state enums carry RFC 6026's
   `Accepted` on both INVITE machines.
+- `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
+  with every other timer derived from them, and a schedule that answers "when
+  do I have to come back" through a shared reference. Nothing reads a clock —
+  the caller says what time it is — so a timer diagram from §17 is an ordinary
+  test that runs in microseconds. The absorbing timers are zero on a reliable
+  transport, because nothing retransmits there.
 - Fuzzing under `fuzz/`: three libFuzzer targets over the parser and every
   typed accessor, the stream framer fed at arbitrary read sizes, and the
   builder fed arbitrary bytes as header values to prove a caller's data cannot
