@@ -18,9 +18,11 @@ step() { printf '\n%s\n' "$1"; }
 
 SELF="scripts/check.sh"
 
+# --others too: a file that is new and not yet staged is exactly the one a
+# pre-commit check must look at, and ls-files alone cannot see it
 tracked() {
     if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-        git -C "$ROOT" ls-files "$@"
+        git -C "$ROOT" ls-files --cached --others --exclude-standard "$@"
     else
         local pats=()
         for p in "$@"; do pats+=(-name "$p" -o); done

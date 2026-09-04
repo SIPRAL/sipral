@@ -679,7 +679,7 @@ mod tests {
             Err(UriError::UnclosedIpv6)
         );
         assert_eq!(
-            SipUriRef::parse_str("sip:a@-bad-.com"),
+            SipUriRef::parse_str("sip:a@-bad-.invalid"),
             Err(UriError::BadHost)
         );
     }
