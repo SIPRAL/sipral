@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+name: Commercial licence enquiry
+description: Ask about licensing Sipral for a closed source product
+labels: [licensing]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue will be public.** If you would rather not say in the open
+        that your product is closed source, use the contact form on the Sipral
+        site instead. It reaches the same place and nobody else sees it.
+
+        Read [LICENSING.md](../blob/main/LICENSING.md) first: if your own
+        application is AGPL-3.0, you need no licence and no enquiry.
+
+  - type: input
+    id: company
+    attributes:
+      label: Company
+    validations:
+      required: true
+
+  - type: textarea
+    id: product
+    attributes:
+      label: What you are building
+      description: Enough to tell which arm applies. No detail you would not put on your own website.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: why
+    attributes:
+      label: Why the free arm does not fit
+      options:
+        - label: The application is closed source
+        - label: It ships through an app store
+        - label: It runs as a hosted service and the source is not published
+        - label: Sipral would be inside something we resell
+
+  - type: input
+    id: reach
+    attributes:
+      label: How to reach you
+      description: We will contact you privately. Do not put an address here that you mind being scraped.
+    validations:
+      required: true

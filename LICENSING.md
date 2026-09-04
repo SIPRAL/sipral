@@ -1,0 +1,77 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+-->
+
+# Licensing in plain words
+
+Sipral is dual-licensed. You pick the arm that fits what you are building.
+
+## The free arm — AGPL-3.0-only
+
+Use Sipral at no cost, for anything, as long as **your own application is also
+released under the AGPL-3.0**, source included. That covers students, research,
+hobby projects, and any open source product that is itself copyleft.
+
+The AGPL adds one obligation over the plain GPL: if you run a modified Sipral as
+a **network service**, the people using that service must be able to get your
+source. Running a SIP endpoint on your server for someone else to call counts.
+See section 13 of `LICENSE`.
+
+## The paid arm — commercial licence
+
+You need a commercial licence if any of the following is true:
+
+- your application is closed source, or under a licence that is not AGPL-compatible;
+- you ship it through the App Store, Google Play, or any store whose terms
+  conflict with the AGPL;
+- you run Sipral, modified, as part of a service and do not want to publish
+  your source;
+- you embed Sipral into a product you resell.
+
+Terms are in [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md): one price per
+company, perpetual for the versions delivered during the maintenance term, no
+royalties, no per-seat and no per-channel counting, no NDA required, no
+obligation to disclose your source, and an explicit right to distribute through
+app stores.
+
+There is **no licence check inside the library**. The commercial arm is a
+contract, not a runtime lock.
+
+## Quick table
+
+| What you are building | Arm |
+|---|---|
+| Open source app under AGPL-3.0 | Free |
+| Research, teaching, evaluation, a prototype you do not ship | Free |
+| Closed source desktop, mobile or server product | Commercial |
+| App Store / Google Play distribution | Commercial |
+| Hosted service using a modified Sipral, source not published | Commercial |
+| SDK or library you resell with Sipral inside | Commercial |
+
+## Third-party code
+
+Sipral links only permissively licensed dependencies (MIT, BSD, Apache-2.0,
+ISC, Zlib). None of them restricts either arm. Their attributions are in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and must ship with your
+binaries. The dependency allow-list is enforced in CI by `cargo deny`.
+
+## The name
+
+The licence covers the code, not the name. Read [`TRADEMARK.md`](TRADEMARK.md)
+before calling something "Sipral".
+
+## Getting a commercial licence
+
+Through the contact form on the Sipral site. It is private, and it is the route
+we prefer: you should not have to announce in public that your product is closed
+source in order to ask a question about licensing it.
+
+If you would rather ask in the open, there is a
+[commercial licence enquiry](../../issues/new?template=commercial-licence.yml)
+issue template. That thread is public, so use it only if you do not mind.
+
+There is deliberately no email address anywhere in this repository. Published
+addresses get harvested, and the resulting spam buries the enquiries that
+matter. Security reports have their own private route, in
+[`SECURITY.md`](SECURITY.md).

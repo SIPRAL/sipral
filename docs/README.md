@@ -1,0 +1,39 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+-->
+
+# Sipral design documents
+
+These are written before the code, and updated in the same commit as the code
+that contradicts them. A design document that disagrees with the tree is a bug
+report against one of the two.
+
+They also serve a second purpose. Sipral is written clean-room, and dated design
+documents in the repository history are the evidence that its state machines
+were derived from the specifications rather than from another implementation.
+That is why the history is never squashed and never rewritten.
+
+| Document | Covers |
+|---|---|
+| [01-architecture.md](01-architecture.md) | layering, the sans-I/O boundary, what lives in which crate |
+| [02-clean-room.md](02-clean-room.md) | provenance rules, what may not be read, what to do when unsure |
+| [03-core-signalling.md](03-core-signalling.md) | parser, transactions, dialogs, SDP, authentication |
+| [04-ua.md](04-ua.md) | registration, calls, hold, transfer, subscriptions |
+| [05-media.md](05-media.md) | RTP, jitter buffer, loss concealment, DTMF, SRTP, codecs |
+| [06-nat.md](06-nat.md) | STUN, TURN, ICE-lite, and what carriers actually need |
+| [07-headless.md](07-headless.md) | the PCM socket endpoint for AI voice agents |
+| [08-ffi.md](08-ffi.md) | C ABI rules, and the Swift, .NET and Kotlin bindings |
+| [09-rfc-index.md](09-rfc-index.md) | every specification implemented, and by which crate |
+| [10-roadmap.md](10-roadmap.md) | phases and their exit criteria |
+| [11-testing.md](11-testing.md) | test corpus, fixtures, the interoperability matrix |
+
+## Conventions
+
+Present tense describes what the code does. Future tense describes what is not
+written yet, and every such statement names the phase from `10-roadmap.md` that
+delivers it.
+
+Anything that is a judgement call is written down with its reason. Six months
+later the reason is the only thing that stops someone undoing the decision by
+accident.

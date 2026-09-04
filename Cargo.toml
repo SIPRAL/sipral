@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+authors = ["Tiberiu Balasea"]
+repository = "https://github.com/samybalasa/sipral"
+homepage = "https://sipral.io"
+keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
+categories = ["network-programming", "multimedia::audio"]
+publish = false
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

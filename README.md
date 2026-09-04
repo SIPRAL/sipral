@@ -1,0 +1,85 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+-->
+
+# Sipral
+
+**S**ession **I**nitiation **P**rotocol **R**ust **A**udio **L**ayer.
+
+A SIP user agent stack written in Rust: memory-safe, sans-I/O at the core, no
+audio device inside it, one C ABI, and thin bindings for Swift, .NET and Kotlin.
+Small enough to embed in an AI voice agent, complete enough to run a softphone.
+
+> **Status: pre-alpha.** Design and skeleton. Nothing interoperates yet. The
+> roadmap and the exit criteria for each phase are in
+> [`docs/10-roadmap.md`](docs/10-roadmap.md).
+
+## Why this exists
+
+Every mature SIP client stack is either GPL with a private commercial arm, or
+LGPL, which is its own problem the moment you statically link into an iOS app.
+The permissive ones are C, and none of them is in Rust with real language
+bindings. Meanwhile every AI voice agent that needs to answer a phone call is
+made to run a whole media server or a whole PBX to get at the audio.
+
+Sipral is the narrow answer to both: a stack you can link into a closed product
+under a clear commercial licence, and a headless mode that hands you raw PCM on
+a socket with no audio device and no room abstraction anywhere near it.
+
+## Design in one paragraph
+
+The core opens no sockets and starts no threads. It takes bytes and a clock, and
+returns bytes and events. That makes every state machine deterministically
+testable, and it lets the same core sit inside a Swift async context, a .NET
+`Task` or a Kotlin coroutine without fighting anyone's runtime. Platform audio
+and transport live in separate crates that you pick, or replace.
+
+## Crates
+
+| Crate | Contents |
+|---|---|
+| `sipral-core` | message parser and serializer, transactions, dialogs, SDP, authentication. Sans-I/O, no allocation surprises, no clock of its own |
+| `sipral-ua` | registration, calls, hold, transfer, subscriptions. Built on the core |
+| `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
+| `sipral-nat` | STUN client, TURN client, ICE-lite |
+| `sipral-media` | audio pipeline: mixing, resampling, codecs, echo cancellation as an external module |
+| `sipral-io-coreaudio` | macOS and iOS device I/O. Siblings for WASAPI and AAudio follow |
+| `sipral-headless` | PCM in and out over a local socket or WebSocket. No audio device, for AI agents |
+| `sipral-ffi` | stable C ABI, and the Swift Package, NuGet and AAR built on it |
+
+## Standards
+
+Implemented from the RFCs, not from anyone's source tree. The full list, and
+which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
+Core set: RFC 3261, 3262, 3264, 3515, 3581, 4028, 4733, 6665, 8760 for
+signalling; 3550, 3711, 8445, 8489, 8656 for media and NAT.
+
+## Build
+
+```bash
+cargo build --workspace
+cargo test --workspace
+./scripts/check.sh
+```
+
+Rust 1.95 or newer, edition 2024. The toolchain is pinned in
+`rust-toolchain.toml`.
+
+## Licence
+
+Dual: **AGPL-3.0-only**, or a **commercial licence** for closed source products
+and app store distribution. [`LICENSING.md`](LICENSING.md) tells you in one page
+which one you need. Full terms in [`LICENSE`](LICENSE) and
+[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+
+Dependencies are permissive only, and CI fails the build on anything else.
+
+The name is a trademark and is not covered by either licence, see
+[`TRADEMARK.md`](TRADEMARK.md).
+
+## Contributing
+
+Issues, interoperability reports and anonymised captures are welcome now. Code
+contributions are not accepted before 1.0, for the reason explained in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).

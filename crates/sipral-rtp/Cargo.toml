@@ -1,0 +1,18 @@
+[package]
+name = "sipral-rtp"
+description = "RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF and SRTP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+# internal, never published
+/intern/
+CLAUDE.md
+.claude/
+.vscode/
+.cursor*
+.aider*
+AGENTS.md
+
+# live captures hold real numbers and IPs; they stay in the private fixture repo
+/fixtures/private/
+*.pcap
+*.pcapng
+!/fixtures/rfc4475/**
+
+/target/
+**/*.rs.bk
+*.pdb
+
+**/.env
+**/.env.*
+!**/.env.example
+
+.DS_Store
