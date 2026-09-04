@@ -6,8 +6,11 @@
 
 use std::sync::Arc;
 
+use super::error::HeaderError;
 use super::header::HeaderName;
+use super::lex::trim;
 use super::method::{Method, StatusCode};
+use super::scalar::{CSeq, Digits, RAck, digits, rseq};
 use super::span::{HeaderSlot, Span};
 use super::uri::{UriError, UriRef};
 
@@ -146,6 +149,81 @@ impl<'a> RawMessage<'a> {
     #[must_use]
     pub fn header_count(&self, name: HeaderName<'_>) -> usize {
         self.header_values(name).count()
+    }
+
+    /// The one value of a field that may appear only once.
+    ///
+    /// # Errors
+    /// [`HeaderError::Missing`] when it is absent, [`HeaderError::UnexpectedRepeat`]
+    /// when it appears more than once — RFC 4475 §3.3.8 is a message that does
+    /// exactly that, and picking one of the values silently is how a stack ends
+    /// up disagreeing with the proxy in front of it.
+    pub fn single(&self, name: HeaderName<'_>) -> Result<&'a [u8], HeaderError> {
+        let mut it = self.header_values(name);
+        let first = it.next().ok_or(HeaderError::Missing)?;
+        if it.next().is_some() {
+            return Err(HeaderError::UnexpectedRepeat);
+        }
+        Ok(first)
+    }
+
+    /// `Call-ID`, opaque (RFC 3261 §20.8).
+    ///
+    /// # Errors
+    /// See [`RawMessage::single`].
+    pub fn call_id(&self) -> Result<&'a [u8], HeaderError> {
+        self.single(HeaderName::CallId).map(trim)
+    }
+
+    /// `CSeq` (RFC 3261 §20.16).
+    ///
+    /// # Errors
+    /// See [`CSeq::parse`] and [`RawMessage::single`].
+    pub fn cseq(&self) -> Result<CSeq<'a>, HeaderError> {
+        CSeq::parse(self.single(HeaderName::CSeq)?)
+    }
+
+    /// `Max-Forwards` (RFC 3261 §20.22).
+    ///
+    /// # Errors
+    /// See [`digits`] and [`RawMessage::single`].
+    pub fn max_forwards(&self) -> Result<Digits, HeaderError> {
+        digits(self.single(HeaderName::MaxForwards)?)
+    }
+
+    /// `Expires` (RFC 3261 §20.19).
+    ///
+    /// # Errors
+    /// See [`digits`] and [`RawMessage::single`].
+    pub fn expires(&self) -> Result<Digits, HeaderError> {
+        digits(self.single(HeaderName::Expires)?)
+    }
+
+    /// `Content-Length` (RFC 3261 §20.14).
+    ///
+    /// The parser already used this to frame the body; this is the field as
+    /// written, for a layer that wants to reason about it.
+    ///
+    /// # Errors
+    /// See [`digits`] and [`RawMessage::single`].
+    pub fn content_length(&self) -> Result<Digits, HeaderError> {
+        digits(self.single(HeaderName::ContentLength)?)
+    }
+
+    /// `RSeq` (RFC 3262 §7.1).
+    ///
+    /// # Errors
+    /// See [`rseq`] and [`RawMessage::single`].
+    pub fn rseq(&self) -> Result<u32, HeaderError> {
+        rseq(self.single(HeaderName::RSeq)?)
+    }
+
+    /// `RAck` (RFC 3262 §7.2).
+    ///
+    /// # Errors
+    /// See [`RAck::parse`] and [`RawMessage::single`].
+    pub fn rack(&self) -> Result<RAck<'a>, HeaderError> {
+        RAck::parse(self.single(HeaderName::RAck)?)
     }
 
     /// The whole message as it was received, body included.

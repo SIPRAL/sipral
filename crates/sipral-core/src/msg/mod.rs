@@ -17,15 +17,17 @@ mod lex;
 mod message;
 mod method;
 mod parse;
+mod scalar;
 mod span;
 mod uri;
 
-pub use error::ParseError;
+pub use error::{HeaderError, ParseError};
 pub use header::HeaderName;
-pub use lex::{CommaList, Params, is_quoted, trim, unfold, unquote};
+pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};
 pub use message::{MessageKind, OwnedMessage, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
+pub use scalar::{CSeq, Digits, RAck, digits, rseq};
 pub use span::{HeaderSlot, ParseScratch, Span};
 pub use uri::{
     HostRef, SipUriRef, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,

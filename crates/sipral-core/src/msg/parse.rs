@@ -601,6 +601,46 @@ v=0\n";
     }
 
     #[test]
+    fn the_scalar_accessors_read_the_message() {
+        use crate::msg::{HeaderError, HeaderName};
+        let mut scratch = ParseScratch::new();
+        let m = ok(INVITE, &mut scratch);
+        assert_eq!(m.call_id(), Ok(&b"a84b4c76e66710"[..]));
+        let c = m.cseq().expect("a CSeq");
+        assert_eq!((c.seq, c.method), (314_159, Method::Invite));
+        assert_eq!(
+            m.content_length().and_then(crate::msg::Digits::require),
+            Ok(4)
+        );
+        assert_eq!(m.max_forwards(), Err(HeaderError::Missing));
+        assert_eq!(m.header_count(HeaderName::CSeq), 1);
+    }
+
+    #[test]
+    fn a_field_that_may_appear_once_and_appears_twice_is_refused() {
+        // RFC 4475 3.3.8
+        use crate::msg::HeaderError;
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\nCall-ID: one\r\nCall-ID: two\r\n\r\n",
+            &mut scratch,
+        );
+        assert_eq!(m.call_id(), Err(HeaderError::UnexpectedRepeat));
+    }
+
+    #[test]
+    fn a_cseq_folded_between_its_number_and_its_method_still_reads() {
+        // RFC 4475 3.1.1.1 wsinv
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\ncseq: 0009\r\n  INVITE\r\n\r\n",
+            &mut scratch,
+        );
+        let c = m.cseq().expect("a CSeq");
+        assert_eq!((c.seq, c.method), (9, Method::Invite));
+    }
+
+    #[test]
     fn an_owned_message_outlives_the_buffer_it_was_parsed_from() {
         use crate::msg::HeaderName;
         let owned = {

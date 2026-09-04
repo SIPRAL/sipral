@@ -82,3 +82,36 @@ impl fmt::Display for ParseError {
 }
 
 impl core::error::Error for ParseError {}
+
+/// Why one header field's value could not be interpreted.
+///
+/// A message whose framing is sound can still carry a header nobody can read.
+/// That is not a reason to have refused the message: it is a decision for the
+/// layer that wanted the field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderError {
+    /// The field is not in the message.
+    Missing,
+    /// The value does not match the field's grammar.
+    Malformed(&'static str),
+    /// The field appears more times than it may.
+    UnexpectedRepeat,
+    /// A value that must be a number is legal digits but does not fit.
+    OutOfRange,
+    /// Bytes that are not UTF-8 where the grammar requires text.
+    NotUtf8,
+}
+
+impl fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Missing => f.write_str("header field is absent"),
+            Self::Malformed(what) => write!(f, "malformed header field: {what}"),
+            Self::UnexpectedRepeat => f.write_str("header field appears more than once"),
+            Self::OutOfRange => f.write_str("numeric value out of range"),
+            Self::NotUtf8 => f.write_str("not UTF-8"),
+        }
+    }
+}
+
+impl core::error::Error for HeaderError {}

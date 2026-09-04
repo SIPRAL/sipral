@@ -112,6 +112,36 @@ fn ends_with_unescaped_quote(v: &[u8]) -> bool {
     !escaped
 }
 
+/// The whitespace-separated pieces of a value, folds included.
+///
+/// RFC 3261 §25.1 makes the separator `LWS = [*WSP CRLF] 1*WSP`, so the space
+/// between the two halves of `CSeq: 1 INVITE` may be several spaces, a tab, or
+/// a fold. RFC 4475's `wsinv` really does send `cseq: 0009\r\n  INVITE`, and a
+/// splitter that looks for one 0x20 byte misses it.
+#[derive(Clone, Debug)]
+pub struct LwsFields<'a> {
+    rest: &'a [u8],
+}
+
+/// Walk the whitespace-separated pieces of a value.
+#[must_use]
+pub const fn fields(value: &[u8]) -> LwsFields<'_> {
+    LwsFields { rest: value }
+}
+
+impl<'a> Iterator for LwsFields<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+        let start = self.rest.iter().position(|&b| !is_ws(b))?;
+        let rest = self.rest.get(start..)?;
+        let end = rest.iter().position(|&b| is_ws(b)).unwrap_or(rest.len());
+        self.rest = rest.get(end..).unwrap_or_default();
+        rest.get(..end)
+    }
+}
+
 /// Tracks whether the cursor is inside a quoted string or inside `<...>`.
 #[derive(Clone, Copy, Debug, Default)]
 struct Depth {
