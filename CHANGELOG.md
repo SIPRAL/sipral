@@ -25,6 +25,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   internal files and captures, build, lints, tests, dependency licences,
   secrets.
 - CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
+- RFC 4475 torture corpus under `fixtures/rfc4475/`: the 49 messages decoded
+  byte for byte from the archive in Appendix A, laid out by RFC section, with
+  a manifest carrying section, title, expected outcome and SHA-256 per file.
+  `scripts/check.sh` verifies the hashes so line-ending normalisation cannot
+  silently alter a test.
 - `SECURITY.md`, pointing at GitHub private vulnerability reporting, and an
   issue template for commercial licence enquiries. No email address appears
   anywhere in the repository, by design: `scripts/check.sh` fails on one, in a

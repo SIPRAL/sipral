@@ -11,7 +11,8 @@ the criterion is demonstrated, in the test suite or against real equipment.
 ## Phase 0 — design
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the
-licensing set, the workspace skeleton, CI, and the capture fixtures from the lab
+licensing set, the workspace skeleton, CI, the RFC 4475 corpus, the public API
+surface of `sipral-core` agreed on paper, and the capture fixtures from the lab
 PBX.
 
 **Exit:** every state machine in `03-core-signalling.md` can be explained from

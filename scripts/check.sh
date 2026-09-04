@@ -60,6 +60,20 @@ captures=$(tracked | grep -E '\.pcapng?$' | grep -v '^fixtures/rfc4475/' || true
     fail "captures tracked:"; printf '        %s\n' $captures
 }
 
+step "rfc 4475 corpus is byte exact"
+if [ -f fixtures/rfc4475/manifest.toml ]; then
+    bad=$(awk -F'"' '/^file = /{f=$2} /^sha256 = /{print f, $2}' fixtures/rfc4475/manifest.toml \
+        | while read -r f sha; do
+            [ "$(shasum -a 256 "fixtures/rfc4475/$f" 2>/dev/null | cut -d' ' -f1)" = "$sha" ] || echo "$f"
+          done)
+    n=$(grep -c '^\[\[message\]\]' fixtures/rfc4475/manifest.toml)
+    [ -z "$bad" ] && pass "$n messages match the manifest" || {
+        fail "corpus files altered or missing:"; printf '        %s\n' $bad
+    }
+else
+    fail "fixtures/rfc4475/manifest.toml missing"
+fi
+
 step "no addresses to harvest"
 mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \

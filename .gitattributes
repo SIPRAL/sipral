@@ -1,0 +1,3 @@
+# The RFC 4475 corpus is byte exact and carries CRLF on purpose. Never convert it.
+fixtures/rfc4475/** -text
+*.dat -text

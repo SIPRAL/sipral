@@ -1,0 +1,423 @@
+# RFC 4475 torture test corpus, extracted byte for byte from the archive in
+# Appendix A of the RFC. One entry per message, in RFC order.
+#
+# outcome: parse    = must parse and round trip
+#          reject   = must be rejected cleanly
+#          semantic = well formed; expected behaviour is in the RFC section
+
+[archive]
+source = "https://www.rfc-editor.org/rfc/rfc4475.txt"
+sha256_tar_gz = "4ce03214334379f350f0d1f7998ac03dbe1ce046676551adca2a5e8fb0f819dd"
+messages = 49
+
+[groups."3.1.1-valid"]
+outcome = "parse"
+description = "Parser tests: valid messages. Must parse and round trip."
+
+[groups."3.1.2-invalid"]
+outcome = "reject"
+description = "Parser tests: invalid messages. Must be rejected without panic or unbounded work."
+
+[groups."3.2-transaction"]
+outcome = "semantic"
+description = "Transaction layer semantics. Well formed; the expected behaviour is in the RFC section."
+
+[groups."3.3-application"]
+outcome = "semantic"
+description = "Application layer semantics. Well formed; the expected behaviour is in the RFC section."
+
+[groups."3.4-backward-compat"]
+outcome = "semantic"
+description = "Backward compatibility with RFC 2543 syntax."
+
+[[message]]
+name = "wsinv"
+section = "3.1.1.1"
+title = "A Short Tortuous INVITE"
+file = "3.1.1-valid/wsinv.dat"
+outcome = "parse"
+sha256 = "d6f6cdee99cd0a1f8e3d9a0fdd67c877700e19ab86d8186dada06f61260e3e61"
+
+[[message]]
+name = "intmeth"
+section = "3.1.1.2"
+title = "Wide Range of Valid Characters"
+file = "3.1.1-valid/intmeth.dat"
+outcome = "parse"
+sha256 = "b957a8292c1c0a9851fe94705b90f94320738f43aacde64998e401f742ef688d"
+
+[[message]]
+name = "esc01"
+section = "3.1.1.3"
+title = "Valid Use of the % Escaping Mechanism"
+file = "3.1.1-valid/esc01.dat"
+outcome = "parse"
+sha256 = "be3a316d4ce5f69cad474646191e390dd4b50fc8371e44b5197fe1237781973e"
+
+[[message]]
+name = "escnull"
+section = "3.1.1.4"
+title = "Escaped Nulls in URIs"
+file = "3.1.1-valid/escnull.dat"
+outcome = "parse"
+sha256 = "263fe2ecd12a5ccbb6c67b3174e9211d11da9b600e7d69666a86d2ee42873e90"
+
+[[message]]
+name = "esc02"
+section = "3.1.1.5"
+title = "Use of % When It Is Not an Escape"
+file = "3.1.1-valid/esc02.dat"
+outcome = "parse"
+sha256 = "9a9c59449f00327b02071feafc8e5c2a261c98c818044167894cc17809a12199"
+
+[[message]]
+name = "lwsdisp"
+section = "3.1.1.6"
+title = "Message with No LWS between Display Name and <"
+file = "3.1.1-valid/lwsdisp.dat"
+outcome = "parse"
+sha256 = "d1b36b6316c12824f6f04bf6b1fd1f021cade9b74871693b9c3474cd9fa7f4e6"
+
+[[message]]
+name = "longreq"
+section = "3.1.1.7"
+title = "Long Values in Header Fields"
+file = "3.1.1-valid/longreq.dat"
+outcome = "parse"
+sha256 = "185739292bc676760e5b1cca77c87705aa570240171c506ad76f8c35af0ecdaa"
+
+[[message]]
+name = "dblreq"
+section = "3.1.1.8"
+title = "Extra Trailing Octets in a UDP Datagram"
+file = "3.1.1-valid/dblreq.dat"
+outcome = "parse"
+sha256 = "a6be48426565c2a705389c4ce2ea17e57b891cb13f80490a2cb9392c797b46ef"
+
+[[message]]
+name = "semiuri"
+section = "3.1.1.9"
+title = "Semicolon-Separated Parameters in URI User Part"
+file = "3.1.1-valid/semiuri.dat"
+outcome = "parse"
+sha256 = "87bbaed6b4b354dbd3c5c7a20e66686303c63e43a0aa19b89de1ac75231611a2"
+
+[[message]]
+name = "transports"
+section = "3.1.1.10"
+title = "Varied and Unknown Transport Types"
+file = "3.1.1-valid/transports.dat"
+outcome = "parse"
+sha256 = "33b4553a3b9418121b099ff07882535151edd6a1e81898c63a916aad2cbf90bc"
+
+[[message]]
+name = "mpart01"
+section = "3.1.1.11"
+title = "Multipart MIME Message"
+file = "3.1.1-valid/mpart01.dat"
+outcome = "parse"
+sha256 = "92147c8e24997bac59629e1b163767697d0d6d499af87f89e325d69968bec3ba"
+
+[[message]]
+name = "unreason"
+section = "3.1.1.12"
+title = "Unusual Reason Phrase"
+file = "3.1.1-valid/unreason.dat"
+outcome = "parse"
+sha256 = "4f939d6ebf4817eea70f011d3209e83732872ffc20ffd304b244084dc392f4d7"
+
+[[message]]
+name = "noreason"
+section = "3.1.1.13"
+title = "Empty Reason Phrase"
+file = "3.1.1-valid/noreason.dat"
+outcome = "parse"
+sha256 = "07e11e470a69fffa3674de805e5165d1351a9439a91045ee70c9570ea24ab4fe"
+
+[[message]]
+name = "badinv01"
+section = "3.1.2.1"
+title = "Extraneous Header Field Separators"
+file = "3.1.2-invalid/badinv01.dat"
+outcome = "reject"
+sha256 = "9ee2b88f2e0b5a9eeb9bf729b6177f0a0c7d0b5e6c84be593e0480d7962f3ab8"
+
+[[message]]
+name = "clerr"
+section = "3.1.2.2"
+title = "Content Length Larger Than Message"
+file = "3.1.2-invalid/clerr.dat"
+outcome = "reject"
+sha256 = "d9da629086a38df433438fb0fb19a8730f34516f049a5520dd0cac3285485290"
+
+[[message]]
+name = "ncl"
+section = "3.1.2.3"
+title = "Negative Content-Length"
+file = "3.1.2-invalid/ncl.dat"
+outcome = "reject"
+sha256 = "7ea6538edc1f054fdb6cd1c821040460cffca3cb682fa2e8e2a502d92170b4c2"
+
+[[message]]
+name = "scalar02"
+section = "3.1.2.4"
+title = "Request Scalar Fields with Overlarge Values"
+file = "3.1.2-invalid/scalar02.dat"
+outcome = "reject"
+sha256 = "53158177326568e9964bce5dcfac27a2bf8a90953bbc03f6c5e2775864a97e4b"
+
+[[message]]
+name = "scalarlg"
+section = "3.1.2.5"
+title = "Response Scalar Fields with Overlarge Values"
+file = "3.1.2-invalid/scalarlg.dat"
+outcome = "reject"
+sha256 = "0957eca31737e3592eb1418bb41e9f5219278a78ff420111620d7fb60175b551"
+
+[[message]]
+name = "quotbal"
+section = "3.1.2.6"
+title = "Unterminated Quoted String in Display Name"
+file = "3.1.2-invalid/quotbal.dat"
+outcome = "reject"
+sha256 = "e61978a2ea359fc666f0336fe4dbc623447532280e3273ea98119b3d3f788c84"
+
+[[message]]
+name = "ltgtruri"
+section = "3.1.2.7"
+title = "<> Enclosing Request-URI"
+file = "3.1.2-invalid/ltgtruri.dat"
+outcome = "reject"
+sha256 = "bcacb2dc17610e8cc8f9b8b0e3d6ee65ab473f93787a03bbd33579e1cea473df"
+
+[[message]]
+name = "lwsruri"
+section = "3.1.2.8"
+title = "Malformed SIP Request-URI (embedded LWS)"
+file = "3.1.2-invalid/lwsruri.dat"
+outcome = "reject"
+sha256 = "3e22ceeca585ad23cc180208e2dad94e0a5aa4bb877a61cac443aa927f758b9e"
+
+[[message]]
+name = "lwsstart"
+section = "3.1.2.9"
+title = "Multiple SP Separating Request-Line Elements"
+file = "3.1.2-invalid/lwsstart.dat"
+outcome = "reject"
+sha256 = "f884e5626c6c5b1210cfc4a3540b8a28bd52939cff092f3f0c5c971e032adb0e"
+
+[[message]]
+name = "trws"
+section = "3.1.2.10"
+title = "SP Characters at End of Request-Line"
+file = "3.1.2-invalid/trws.dat"
+outcome = "reject"
+sha256 = "64ae20694026e28c10746b57386b7fd1276de02b6f8d42d418070e87d6f4499f"
+
+[[message]]
+name = "escruri"
+section = "3.1.2.11"
+title = "Escaped Headers in SIP Request-URI"
+file = "3.1.2-invalid/escruri.dat"
+outcome = "reject"
+sha256 = "c3cf30af13a9d107829cc105effd79355f1139c6ecc683a048b4c27951f8f416"
+
+[[message]]
+name = "baddate"
+section = "3.1.2.12"
+title = "Invalid Time Zone in Date Header Field"
+file = "3.1.2-invalid/baddate.dat"
+outcome = "reject"
+sha256 = "1208a6e3e0c8a8c33a06a1f3733d158413cb72e58c379d094c4ecea11e9d4c28"
+
+[[message]]
+name = "regbadct"
+section = "3.1.2.13"
+title = "Failure to Enclose name-addr URI in <>"
+file = "3.1.2-invalid/regbadct.dat"
+outcome = "reject"
+sha256 = "575d27530275814c1c98be164808fac89a0e2b4fc899dadcd97e6ba499437bda"
+
+[[message]]
+name = "badaspec"
+section = "3.1.2.14"
+title = "Spaces within addr-spec"
+file = "3.1.2-invalid/badaspec.dat"
+outcome = "reject"
+sha256 = "f8f6e2f4247287b0be6adb5ac222a6db4759395e44d27d2ddb9b39393e94867e"
+
+[[message]]
+name = "baddn"
+section = "3.1.2.15"
+title = "Non-token Characters in Display Name"
+file = "3.1.2-invalid/baddn.dat"
+outcome = "reject"
+sha256 = "9d9428e8017092f194ec11077ba6865c251308cdfd7fd9db6a993b28e5748951"
+
+[[message]]
+name = "badvers"
+section = "3.1.2.16"
+title = "Unknown Protocol Version"
+file = "3.1.2-invalid/badvers.dat"
+outcome = "reject"
+sha256 = "037d702d19e934bfeebbd2609050d7d54928d590cf90c78f3914522771dd8e03"
+
+[[message]]
+name = "mismatch01"
+section = "3.1.2.17"
+title = "Start Line and CSeq Method Mismatch"
+file = "3.1.2-invalid/mismatch01.dat"
+outcome = "reject"
+sha256 = "a2c285636e451e75420da0cc62ee55ca3e398827008418befbfb078726bf0793"
+
+[[message]]
+name = "mismatch02"
+section = "3.1.2.18"
+title = "Unknown Method with CSeq Method Mismatch"
+file = "3.1.2-invalid/mismatch02.dat"
+outcome = "reject"
+sha256 = "01b287f9a9c492f7f57405c36c8a2af0e2393896ed2d25fb92b502f2a6722bc4"
+
+[[message]]
+name = "bigcode"
+section = "3.1.2.19"
+title = "Overlarge Response Code"
+file = "3.1.2-invalid/bigcode.dat"
+outcome = "reject"
+sha256 = "f79450070975da54c3525c9a5cbe75bae3c9d8cb92eba609772c26f66f225c2e"
+
+[[message]]
+name = "badbranch"
+section = "3.2.1"
+title = "Missing Transaction Identifier"
+file = "3.2-transaction/badbranch.dat"
+outcome = "semantic"
+sha256 = "cb049c727f16b5ec49e822f9e8b7d0ee20ca2d20ffb50baecd0b411a5e64fa7d"
+
+[[message]]
+name = "insuf"
+section = "3.3.1"
+title = "Missing Required Header Fields"
+file = "3.3-application/insuf.dat"
+outcome = "semantic"
+sha256 = "1e3efd9f3b238c6351ba12bc7eb46d843f2761b5d4a6b82b63bffdf07f2c5aee"
+
+[[message]]
+name = "unkscm"
+section = "3.3.2"
+title = "Request-URI with Unknown Scheme"
+file = "3.3-application/unkscm.dat"
+outcome = "semantic"
+sha256 = "81be1a6a566c7ab52fe1c58c4a75440dfd697ad04c5e09fa71340de7da7b8bbb"
+
+[[message]]
+name = "novelsc"
+section = "3.3.3"
+title = "Request-URI with Known but Atypical Scheme"
+file = "3.3-application/novelsc.dat"
+outcome = "semantic"
+sha256 = "9a50a7343fcf685e77c4d0f477138a28f32a41c75aa566d200f3df210b01e648"
+
+[[message]]
+name = "unksm2"
+section = "3.3.4"
+title = "Unknown URI Schemes in Header Fields"
+file = "3.3-application/unksm2.dat"
+outcome = "semantic"
+sha256 = "f6914409ced613ef5eb56e264d2f096dac26ab9e397d6a638934d2027f1f6acb"
+
+[[message]]
+name = "bext01"
+section = "3.3.5"
+title = "Proxy-Require and Require"
+file = "3.3-application/bext01.dat"
+outcome = "semantic"
+sha256 = "57181987c02c4f5752b7aa8c2847311f6184216ce7621e40303015949e70761c"
+
+[[message]]
+name = "invut"
+section = "3.3.6"
+title = "Unknown Content-Type"
+file = "3.3-application/invut.dat"
+outcome = "semantic"
+sha256 = "9b39e824947df46f90f824cd308fb3c118f548d94637f581101e355b381a0d92"
+
+[[message]]
+name = "regaut01"
+section = "3.3.7"
+title = "Unknown Authorization Scheme"
+file = "3.3-application/regaut01.dat"
+outcome = "semantic"
+sha256 = "885ba0488872cfc04a3c7622854b8381955a5ee890745d6010834e3731a73faa"
+
+[[message]]
+name = "multi01"
+section = "3.3.8"
+title = "Multiple Values in Single Value Required Fields"
+file = "3.3-application/multi01.dat"
+outcome = "semantic"
+sha256 = "d156ab12105b4bfd8a6498de6f7195087058162b8cda1606169855b722411791"
+
+[[message]]
+name = "mcl01"
+section = "3.3.9"
+title = "Multiple Content-Length Values"
+file = "3.3-application/mcl01.dat"
+outcome = "semantic"
+sha256 = "887191619bf003b7e87399200b5cf4c3b5397344dbf70288ad5e23bd157b7fe4"
+
+[[message]]
+name = "bcast"
+section = "3.3.10"
+title = "200 OK Response with Broadcast Via Header Field Value"
+file = "3.3-application/bcast.dat"
+outcome = "semantic"
+sha256 = "073637c63597199179cf5fc91b980b2d530c066a0048ea3b908772def57b4c36"
+
+[[message]]
+name = "zeromf"
+section = "3.3.11"
+title = "Max-Forwards of Zero"
+file = "3.3-application/zeromf.dat"
+outcome = "semantic"
+sha256 = "50954ef47acca4f9f5263ded06246d06dee4e2ee508a8d284191795d7fddf365"
+
+[[message]]
+name = "cparam01"
+section = "3.3.12"
+title = "REGISTER with a Contact Header Parameter"
+file = "3.3-application/cparam01.dat"
+outcome = "semantic"
+sha256 = "dfa6b5cdb289adc694b9b7e103ebfa7a2167335c46e5dc9de67055021910ae1c"
+
+[[message]]
+name = "cparam02"
+section = "3.3.13"
+title = "REGISTER with a url-parameter"
+file = "3.3-application/cparam02.dat"
+outcome = "semantic"
+sha256 = "e93574215bd1d804bb46cc15ca6176b567def7ea1b15f72ab2c2dcf598af465a"
+
+[[message]]
+name = "regescrt"
+section = "3.3.14"
+title = "REGISTER with a URL Escaped Header"
+file = "3.3-application/regescrt.dat"
+outcome = "semantic"
+sha256 = "dab4087c133348b06fd7b3c4c7ef15094f8754e265e4e8c2137bb3ecda2ef477"
+
+[[message]]
+name = "sdp01"
+section = "3.3.15"
+title = "Unacceptable Accept Offering"
+file = "3.3-application/sdp01.dat"
+outcome = "semantic"
+sha256 = "497c5f1ced6c7b579b48075e2dca919ce9b819a735964128a6e744a3a0b9e57f"
+
+[[message]]
+name = "inv2543"
+section = "3.4.1"
+title = "INVITE with RFC 2543 Syntax"
+file = "3.4-backward-compat/inv2543.dat"
+outcome = "semantic"
+sha256 = "76fac8afe22dee49ea696b511621946694897ac7030fc5d07f57c8b487ce0521"

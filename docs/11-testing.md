@@ -15,9 +15,14 @@ driven by feeding bytes and advancing time explicitly. Timer A retransmission,
 timer B timeout, the `CANCEL` versus `200 OK` race, a fork producing three early
 dialogs: all of these are ordinary tests, not integration scenarios.
 
-**Corpus.** RFC 4475 torture messages under `fixtures/rfc4475/`. Valid messages
-must parse and round trip; invalid messages must be rejected without a panic and
-without unbounded work. This is the first thing that runs in CI.
+**Corpus.** The 49 RFC 4475 torture messages under `fixtures/rfc4475/`, byte for
+byte from the archive in the RFC's Appendix A, one directory per section and a
+manifest with the expected outcome of each. The 13 valid parser cases must parse
+and round trip; the 19 invalid ones must be rejected without a panic and without
+unbounded work; the 17 semantic cases are well formed and test what the
+transaction and UA layers do with them, not the parser. `scripts/check.sh`
+verifies every file's hash, so the corpus cannot drift. This is the first thing
+that runs in CI.
 
 **Capture replay.** Recorded exchanges from the lab PBX and from carriers,
 replayed against the stack byte for byte. Every interoperability bug found in
