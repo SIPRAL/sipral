@@ -203,6 +203,27 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   provisional response has arrived — the server could otherwise receive it
   before the INVITE and have nothing to cancel — so one asked for too early is
   held and released at the first provisional rather than refused.
+- Dialogs (RFC 3261 §12): route set, remote target, the two sequence spaces,
+  the `secure` flag and both ways of opening one — from the response to a
+  request we sent, and from a request we are answering. The route set is
+  reversed for the caller and kept in order for the callee, because the two
+  ends face opposite ways down the same path, and it is built from the bytes as
+  they arrived so that every URI parameter survives. Requests come out through
+  §12.2.1.1, including the strict-router rewrite for proxies that predate loose
+  routing: the request is addressed to the first hop and the real target is
+  pushed to the end of the `Route`, where a loose router lifts it back. ACK and
+  CANCEL are refused there — their number belongs to the request they answer.
+  The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
+  never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
+  changes nothing.
+- `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
+  `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
+  back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4
+  comparison as `equivalent()` rather than `PartialEq`, because §19.1.4
+  equivalence is not transitive and the RFC says so itself. `Tag` and `CallId`
+  compare the way the RFC compares them, which is not the same way: byte for
+  byte for a `Call-ID` (§20.8), without case for a tag, which is a token
+  (§7.3.1).
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —

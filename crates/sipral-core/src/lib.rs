@@ -25,5 +25,6 @@
     )
 )]
 
+pub mod dialog;
 pub mod msg;
 pub mod transaction;

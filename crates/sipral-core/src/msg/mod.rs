@@ -43,6 +43,6 @@ pub use scalar::{CSeq, Digits, RAck, SipDate, digits, rseq};
 pub use span::{HeaderSlot, ParseScratch, Span};
 pub use tokens::{MediaTypeRef, TokenIter};
 pub use uri::{
-    HostRef, SipUriRef, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,
+    HostRef, SipUriRef, Uri, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,
 };
 pub use via::{MAGIC_COOKIE, Rport, ViaRef};

@@ -345,12 +345,27 @@ RFC 4475 §3.1.2.4 wants a 400); `Expires` parses and reports that it did not
 fit, since §20 lets an element fall back to its default. Truncating would turn
 RFC 4475 `scalar02`'s hundred-digit `Expires` into a plausible small number.
 
-The borrowed/owned pairs follow one pattern throughout: `SipUriRef<'a>` / `Uri`,
-`NameAddrRef<'a>` / `NameAddr`, `ViaRef<'a>` / `ViaBuf`, `TagRef<'a>` / `Tag`,
-`CallIdRef<'a>` / `CallId`, `BranchRef<'a>` / `Branch`, `Method<'a>` /
-`OwnedMethod`. Each `*Ref` has `to_owned()`. Owned strings are `Arc<str>` so a
-dialog's route set and remote target can be shared with events without
-copying.
+The borrowed/owned pairs follow one pattern: `UriRef<'a>` / `Uri`, and the
+tags and `Call-ID` a dialog is named by as `Tag` and `CallId`. An owned form
+appears when something has to keep the value past the buffer it arrived in,
+not before — that is why the list is shorter than the one this document
+carried while it was still on paper.
+
+`Uri` holds the text once, in an `Arc<str>`, and records the parts as offsets
+into it: borrowing the parsed form back out is free and cannot fail, and a
+clone shares the text, so a route set costs one allocation per hop for the
+life of the call. It has no `PartialEq`. "Same bytes" and "same resource" are
+different questions, `==` can only answer one, and the second is not even
+transitive — RFC 3261 §19.1.4 says so itself, with a URI equivalent to both
+itself plus `;security=on` and itself plus `;security=off` while those two are
+not equivalent to each other. So `as_str()` compares bytes and `equivalent()`
+applies §19.1.4.
+
+`Tag` and `CallId` are compared the way the RFC compares them, which is not
+the same way: a `Call-ID` is "case-sensitive and ... simply compared
+byte-by-byte" (§20.8), while a tag is a token and "Tokens are always
+case-insensitive" (§7.3.1). `Tag` therefore hashes on one case, so a peer that
+echoes our tag back in different case still lands in the same dialog.
 
 ```rust
 pub enum Method<'a> {
@@ -485,6 +500,49 @@ of the headers resumes where it stopped, and once the body's length is known
 nothing is parsed again until that many bytes have arrived. A peer feeding one
 byte at a time therefore cannot turn reassembly into quadratic work.
 
+## Dialogs
+
+```rust
+pub struct DialogKey { /* CallId, Tag, Option<Tag> */ }
+impl DialogKey {
+    pub fn as_uac(message: &RawMessage<'_>) -> Result<Self, DialogError>;
+    pub fn as_uas(message: &RawMessage<'_>) -> Result<Self, DialogError>;
+}
+
+pub enum DialogState { Early, Confirmed, Terminated }
+pub enum Incoming { Accepted, OutOfOrder }
+
+impl Dialog {
+    pub fn from_response(request: &RawMessage<'_>, response: &RawMessage<'_>, over_tls: bool) -> Result<Self, DialogError>;
+    pub fn from_request(request: &RawMessage<'_>, local_tag: &[u8], status: StatusCode, over_tls: bool) -> Result<Self, DialogError>;
+
+    pub fn next_request(&mut self, method: Method<'_>) -> Result<InDialogRequest, DialogError>;
+    pub fn on_response(&mut self, response: &RawMessage<'_>) -> Result<DialogState, DialogError>;
+    pub fn on_request(&mut self, request: &RawMessage<'_>) -> Result<Incoming, DialogError>;
+    pub fn terminate(&mut self);
+}
+```
+
+`DialogKey` is the name a message carries; `DialogId` above is the handle the
+endpoint hands out. Two types because they answer different questions: the key
+is what a lookup is done by, and the handle is what survives being passed to
+another language and back.
+
+A dialog does not remember which side of it we were, and does not need to.
+Which tag is ours follows from who started the transaction the message belongs
+to: our requests and the responses to them carry our tag in `From`, everything
+the peer sends carries it in `To`. That is `as_uac` and `as_uas`, and it means
+an incoming request is always looked up one way and an incoming response
+always the other.
+
+`next_request` consumes a sequence number and hands back an `InDialogRequest`
+holding the Request-URI, the `Route` values, both addresses with their tags,
+the `Call-ID` and the number — and a `builder()` carrying all of it. What is
+missing is deliberate: the `Via` belongs to the transport that will carry the
+message, the `Contact` to whoever knows this host's address, and the body to
+the layer that has one. ACK and CANCEL are refused there, because §12.2.1.1
+gives them the number of the request they answer rather than one of their own.
+
 ## Input and output
 
 ```rust
@@ -596,14 +654,18 @@ pub struct DialogSnapshot {
     pub state: DialogState,          // Early, Confirmed, Terminated
     pub call_id: CallId,
     pub local_tag: Tag,
-    pub remote_tag: Tag,
-    pub local_cseq: u32,
+    pub remote_tag: Option<Tag>,     // null for a peer that predates RFC 3261
+    pub local_cseq: Option<u32>,     // empty until this end sends a request
     pub remote_cseq: Option<u32>,
     pub route_set: Arc<[Uri]>,
     pub remote_target: Uri,
     pub secure: bool,
 }
 ```
+
+Both sequence numbers are optional and for the same reason: §12.1.1 and
+§12.1.2 each leave one of them empty at creation, because a dialog only has a
+number in a direction once something has been sent in it.
 
 The endpoint never resolves a fork. It reports every 2xx per dialog and lets
 the layer above decide which to keep. Baking "ACK and BYE the loser" into the

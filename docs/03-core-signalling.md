@@ -126,7 +126,7 @@ A dialog is Call-ID plus both tags. The layer maintains:
   the strict-router rewrite for the ones that still exist;
 - the remote target from `Contact`, set when the early dialog is established
   (RFC 3261 §12.1) and afterwards changed only by the two target-refresh
-  requests, re-INVITE (§12.2) and UPDATE (RFC 3311 §5.2);
+  requests, re-INVITE (§12.2) and UPDATE (RFC 3311 §5.1);
 - the ACK for a 2xx, which is outside the INVITE transaction (RFC 3261
   §13.2.2.4). The caller sends it once, because it may carry the answer and
   because the caller decides when media is ready; after that the dialog layer

@@ -18,6 +18,7 @@
 use core::fmt;
 use std::borrow::Cow;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
 /// The scheme of a URI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +87,8 @@ pub enum UriError {
     NotUtf8,
     /// A SIP URI was expected and the scheme is something else.
     NotSip,
+    /// More than 4 GiB of URI, which [`Uri`] records offsets into.
+    TooLong,
 }
 
 impl fmt::Display for UriError {
@@ -98,6 +101,7 @@ impl fmt::Display for UriError {
             Self::UnclosedIpv6 => "unclosed IPv6 reference",
             Self::NotUtf8 => "not UTF-8",
             Self::NotSip => "not a sip: or sips: URI",
+            Self::TooLong => "URI too long to keep",
         })
     }
 }
@@ -168,6 +172,19 @@ impl<'a> UriRef<'a> {
             Self::Other { .. } => None,
         }
     }
+
+    /// Keep this URI past the buffer it points into.
+    ///
+    /// The URI is written out again from its parts, so a scheme spelled in
+    /// another case and an IPv6 literal written the long way come back
+    /// canonical. Those are equivalent spellings of the same URI (§19.1.4),
+    /// but when the bytes themselves matter — a route set entry that has to go
+    /// back on the wire exactly as it arrived — build the owned form from the
+    /// original slice with [`Uri::parse`] instead.
+    #[must_use]
+    pub fn to_owned(&self) -> Uri {
+        Uri::from_rendered(self.to_string())
+    }
 }
 
 impl fmt::Display for UriRef<'_> {
@@ -186,16 +203,19 @@ fn split_scheme(s: &str) -> Result<(UriScheme<'_>, &str), UriError> {
     if scheme_str.is_empty() || !scheme_str.bytes().all(is_scheme_byte) {
         return Err(UriError::BadScheme);
     }
-    let scheme = if scheme_str.eq_ignore_ascii_case("sip") {
+    Ok((classify_scheme(scheme_str), rest))
+}
+
+fn classify_scheme(s: &str) -> UriScheme<'_> {
+    if s.eq_ignore_ascii_case("sip") {
         UriScheme::Sip
-    } else if scheme_str.eq_ignore_ascii_case("sips") {
+    } else if s.eq_ignore_ascii_case("sips") {
         UriScheme::Sips
-    } else if scheme_str.eq_ignore_ascii_case("tel") {
+    } else if s.eq_ignore_ascii_case("tel") {
         UriScheme::Tel
     } else {
-        UriScheme::Other(scheme_str)
-    };
-    Ok((scheme, rest))
+        UriScheme::Other(s)
+    }
 }
 
 /// A `sip:` or `sips:` URI, in parts.
@@ -414,6 +434,474 @@ impl<'a> Iterator for UriHeaderIter<'a> {
     }
 }
 
+/// A URI kept past the buffer it arrived in.
+///
+/// The text is held once, in an `Arc<str>`, and the parts are recorded as
+/// offsets into it. Borrowing the parsed form back out is therefore free and
+/// cannot fail, and a clone shares the text instead of copying it — a dialog's
+/// route set and every request built from it end up pointing at the same bytes.
+///
+/// There is deliberately no `PartialEq`. "Same bytes" and "same resource" are
+/// different questions and `==` can only answer one of them. Worse, the second
+/// one is not transitive, as RFC 3261 §19.1.4 points out itself: a URI is
+/// equivalent to itself with `;security=on` and to itself with
+/// `;security=off`, while those two are not equivalent to each other. So the
+/// question has to be asked by name — [`Uri::as_str`] for the bytes,
+/// [`Uri::equivalent`] for the resource.
+#[derive(Clone)]
+pub struct Uri {
+    text: Arc<str>,
+    parts: Parts,
+}
+
+/// The parts, as offsets into the text.
+#[derive(Clone, Copy, Debug)]
+enum Parts {
+    Sip {
+        secure: bool,
+        user: Option<Slice>,
+        password: Option<Slice>,
+        host: OwnedHost,
+        port: Option<u16>,
+        params: Slice,
+        headers: Slice,
+    },
+    Other {
+        scheme: Slice,
+        opaque: Slice,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnedHost {
+    Name(Slice),
+    Ipv4(Ipv4Addr),
+    Ipv6(Ipv6Addr),
+}
+
+/// Where one part sits in the text.
+#[derive(Clone, Copy, Debug)]
+struct Slice {
+    start: u32,
+    end: u32,
+}
+
+impl Slice {
+    const EMPTY: Self = Self { start: 0, end: 0 };
+
+    /// `part` is always a subslice of `base` here: both come out of one parse
+    /// of one string. A part that is not lands on the empty slice, which is
+    /// wrong but bounded, rather than on some other part's bytes.
+    fn of(base: &str, part: &str) -> Self {
+        let offset = (part.as_ptr() as usize).wrapping_sub(base.as_ptr() as usize);
+        let end = offset.saturating_add(part.len());
+        if end > base.len() {
+            return Self::EMPTY;
+        }
+        match (u32::try_from(offset), u32::try_from(end)) {
+            (Ok(start), Ok(end)) => Self { start, end },
+            _ => Self::EMPTY,
+        }
+    }
+
+    fn whole(base: &str) -> Self {
+        Self::of(base, base)
+    }
+
+    fn get(self, base: &str) -> &str {
+        let range =
+            usize::try_from(self.start).unwrap_or(0)..usize::try_from(self.end).unwrap_or(0);
+        base.get(range).unwrap_or_default()
+    }
+}
+
+impl Uri {
+    /// Parse and keep a URI.
+    ///
+    /// # Errors
+    /// See [`UriError`].
+    pub fn parse(bytes: &[u8]) -> Result<Self, UriError> {
+        Self::parse_str(core::str::from_utf8(bytes).map_err(|_| UriError::NotUtf8)?)
+    }
+
+    /// Parse and keep a URI that is already known to be UTF-8.
+    ///
+    /// # Errors
+    /// See [`UriError`].
+    pub fn parse_str(s: &str) -> Result<Self, UriError> {
+        if u32::try_from(s.len()).is_err() {
+            return Err(UriError::TooLong);
+        }
+        let text: Arc<str> = Arc::from(s);
+        let parts = Parts::of(&text, UriRef::parse_str(&text)?);
+        Ok(Self { text, parts })
+    }
+
+    /// Take text that was written out from an already parsed URI.
+    fn from_rendered(text: String) -> Self {
+        let text: Arc<str> = Arc::from(text);
+        let parts = match UriRef::parse_str(&text) {
+            Ok(parsed) => Parts::of(&text, parsed),
+            // Unreachable: the text was written from a URI that parsed. If it
+            // ever is reached, keeping the whole thing opaque hands back every
+            // byte it was given and claims nothing about them.
+            Err(_) => Parts::Other {
+                scheme: Slice::EMPTY,
+                opaque: Slice::whole(&text),
+            },
+        };
+        Self { text, parts }
+    }
+
+    /// The URI as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The URI as written, in bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.text.as_bytes()
+    }
+
+    /// The parts, borrowed.
+    #[must_use]
+    pub fn as_uri_ref(&self) -> UriRef<'_> {
+        match self.parts {
+            Parts::Sip {
+                secure,
+                user,
+                password,
+                host,
+                port,
+                params,
+                headers,
+            } => UriRef::Sip(SipUriRef {
+                scheme: if secure {
+                    UriScheme::Sips
+                } else {
+                    UriScheme::Sip
+                },
+                user: user.map(|s| s.get(&self.text)),
+                password: password.map(|s| s.get(&self.text)),
+                host: match host {
+                    OwnedHost::Name(s) => HostRef::Name(s.get(&self.text)),
+                    OwnedHost::Ipv4(a) => HostRef::Ipv4(a),
+                    OwnedHost::Ipv6(a) => HostRef::Ipv6(a),
+                },
+                port,
+                params: params.get(&self.text),
+                headers: headers.get(&self.text),
+            }),
+            Parts::Other { scheme, opaque } => UriRef::Other {
+                scheme: classify_scheme(scheme.get(&self.text)),
+                opaque: opaque.get(&self.text),
+            },
+        }
+    }
+
+    /// The scheme.
+    #[must_use]
+    pub fn scheme(&self) -> UriScheme<'_> {
+        self.as_uri_ref().scheme()
+    }
+
+    /// The parts, when this is a SIP or SIPS URI.
+    #[must_use]
+    pub fn sip(&self) -> Option<SipUriRef<'_>> {
+        self.as_uri_ref().sip()
+    }
+
+    /// Whether the scheme is `sips`.
+    #[must_use]
+    pub const fn is_secure(&self) -> bool {
+        matches!(self.parts, Parts::Sip { secure: true, .. })
+    }
+
+    /// The value of one URI parameter, matched case-insensitively on the name.
+    #[must_use]
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.sip().and_then(|u| u.param(name))
+    }
+
+    /// Whether a parameter is present at all, with or without a value.
+    #[must_use]
+    pub fn has_param(&self, name: &str) -> bool {
+        self.sip().is_some_and(|u| u.has_param(name))
+    }
+
+    /// `;lr`: the peer is a loose router (RFC 3261 §19.1.1).
+    #[must_use]
+    pub fn is_loose_route(&self) -> bool {
+        self.has_param("lr")
+    }
+
+    /// The same URI, in the form it may take as a Request-URI (§19.1.5).
+    ///
+    /// The `method` parameter is dropped — "The method parameter MUST NOT be
+    /// placed in the Request-URI" — and so are the URI headers, which name
+    /// header fields for the message rather than parts of the address.
+    /// Everything else stays, known or not: §19.1.5 requires the transport,
+    /// maddr, ttl and user parameters to be carried over, and unknown
+    /// parameters with them.
+    #[must_use]
+    pub fn as_request_uri(&self) -> Self {
+        let Some(sip) = self.sip() else {
+            return self.clone();
+        };
+        if sip.headers_raw().is_empty() && !sip.has_param("method") {
+            return self.clone();
+        }
+
+        let mut out = String::with_capacity(self.text.len());
+        out.push_str(sip.scheme.as_str());
+        out.push(':');
+        if let Some(user) = sip.user {
+            out.push_str(user);
+            if let Some(password) = sip.password {
+                out.push(':');
+                out.push_str(password);
+            }
+            out.push('@');
+        }
+        match sip.host {
+            HostRef::Name(name) => out.push_str(name),
+            HostRef::Ipv4(addr) => out.push_str(&addr.to_string()),
+            HostRef::Ipv6(addr) => {
+                out.push('[');
+                out.push_str(&addr.to_string());
+                out.push(']');
+            }
+        }
+        if let Some(port) = sip.port {
+            out.push(':');
+            out.push_str(&port.to_string());
+        }
+        for (name, value) in sip.params() {
+            if name.eq_ignore_ascii_case("method") {
+                continue;
+            }
+            out.push(';');
+            out.push_str(name);
+            if let Some(value) = value {
+                out.push('=');
+                out.push_str(value);
+            }
+        }
+        Self::from_rendered(out)
+    }
+
+    /// Whether two URIs address the same resource (RFC 3261 §19.1.4).
+    ///
+    /// Escapes are compared decoded, which is what "characters other than
+    /// those in the reserved set are equivalent to their `%HEX HEX` encoding"
+    /// asks for — with the one restriction that an escape standing for a
+    /// character that is not unreserved stays escaped. Decoding `%3B` would
+    /// turn a piece of a user name into a parameter separator, and decoding
+    /// `%25` would produce a bare `%`, which is not legal in a URI at all.
+    ///
+    /// One simplification, said out loud because it is a deviation: URI header
+    /// values are compared as text, not by the per-field rules §20 defines for
+    /// each header.
+    #[must_use]
+    pub fn equivalent(&self, other: &Self) -> bool {
+        match (self.as_uri_ref(), other.as_uri_ref()) {
+            (UriRef::Sip(a), UriRef::Sip(b)) => sip_equivalent(a, b),
+            // §19.1.4 is written for SIP and SIPS. Other schemes have their own
+            // rules — RFC 3966 §4 for tel: — and until those are implemented the
+            // only honest answer is the one that never claims a match that has
+            // not been proven.
+            (
+                UriRef::Other {
+                    scheme: a,
+                    opaque: a_rest,
+                },
+                UriRef::Other {
+                    scheme: b,
+                    opaque: b_rest,
+                },
+            ) => a.as_str().eq_ignore_ascii_case(b.as_str()) && a_rest == b_rest,
+            _ => false,
+        }
+    }
+}
+
+impl Parts {
+    fn of(base: &str, uri: UriRef<'_>) -> Self {
+        match uri {
+            UriRef::Sip(u) => Self::Sip {
+                secure: u.scheme.is_secure(),
+                user: u.user.map(|s| Slice::of(base, s)),
+                password: u.password.map(|s| Slice::of(base, s)),
+                host: match u.host {
+                    HostRef::Name(name) => OwnedHost::Name(Slice::of(base, name)),
+                    HostRef::Ipv4(addr) => OwnedHost::Ipv4(addr),
+                    HostRef::Ipv6(addr) => OwnedHost::Ipv6(addr),
+                },
+                port: u.port,
+                params: Slice::of(base, u.params_raw()),
+                headers: Slice::of(base, u.headers_raw()),
+            },
+            // The scheme is whatever precedes the colon the opaque part starts
+            // after; taking it from the text rather than from `UriScheme` keeps
+            // `tel:`, whose name is a constant, pointing at the right bytes.
+            UriRef::Other { opaque, .. } => {
+                let opaque = Slice::of(base, opaque);
+                Self::Other {
+                    scheme: Slice {
+                        start: 0,
+                        end: opaque.start.saturating_sub(1),
+                    },
+                    opaque,
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Uri {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl fmt::Debug for Uri {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Uri({:?})", &*self.text)
+    }
+}
+
+/// Present in only one URI, and then the two never match (§19.1.4). The list
+/// is the RFC's `user`, `ttl` and `method`, plus `maddr`, which gets its own
+/// sentence, plus `transport`, which the RFC leaves out of the list and then
+/// uses in its own example of two URIs that are *not* equivalent.
+const DECISIVE_PARAMS: [&str; 5] = ["user", "ttl", "method", "maddr", "transport"];
+
+fn sip_equivalent(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
+    // "A SIP and SIPS URI are never equivalent."
+    if a.scheme.is_secure() != b.scheme.is_secure() {
+        return false;
+    }
+    // "Comparison of the userinfo of SIP and SIPS URIs is case-sensitive."
+    if !optional_matches(a.user, b.user, Case::Sensitive)
+        || !optional_matches(a.password, b.password, Case::Sensitive)
+        || !hosts_match(a.host, b.host)
+    {
+        return false;
+    }
+    // "A URI omitting the optional port component will not match a URI
+    // explicitly declaring port 5060."
+    if a.port != b.port {
+        return false;
+    }
+    params_match(a, b) && params_match(b, a) && headers_match(a, b) && headers_match(b, a)
+}
+
+fn params_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
+    a.params().all(|(name, value)| {
+        match b.params().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            // "Any uri-parameter appearing in both URIs must match."
+            Some((_, other)) => text_matches(
+                value.unwrap_or_default(),
+                other.unwrap_or_default(),
+                Case::Insensitive,
+            ),
+            // "All other uri-parameters appearing in only one URI are ignored."
+            None => !DECISIVE_PARAMS.iter().any(|k| name.eq_ignore_ascii_case(k)),
+        }
+    })
+}
+
+fn headers_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
+    // "URI header components are never ignored. Any present header component
+    // MUST be present in both URIs and match for the URIs to match."
+    a.headers().all(|(name, value)| {
+        b.headers()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .is_some_and(|(_, other)| text_matches(value, other, Case::Insensitive))
+    })
+}
+
+fn hosts_match(a: HostRef<'_>, b: HostRef<'_>) -> bool {
+    match (a, b) {
+        (HostRef::Name(a), HostRef::Name(b)) => a.eq_ignore_ascii_case(b),
+        (HostRef::Ipv4(a), HostRef::Ipv4(b)) => a == b,
+        (HostRef::Ipv6(a), HostRef::Ipv6(b)) => a == b,
+        // "An IP address that is the result of a DNS lookup of a host name
+        // does not match that host name."
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Case {
+    Sensitive,
+    Insensitive,
+}
+
+fn optional_matches(a: Option<&str>, b: Option<&str>, case: Case) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        // "A URI omitting the user component will not match a URI that
+        // includes one."
+        (Some(a), Some(b)) => text_matches(a, b, case),
+        _ => false,
+    }
+}
+
+fn text_matches(a: &str, b: &str, case: Case) -> bool {
+    let (a, b) = (decode_unreserved(a), decode_unreserved(b));
+    match case {
+        Case::Sensitive => a == b,
+        Case::Insensitive => a.eq_ignore_ascii_case(&b),
+    }
+}
+
+/// Undo the escapes that stand for unreserved characters, and write the rest
+/// in one case so that `%2f` and `%2F` compare equal.
+fn decode_unreserved(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%'
+            && let (Some(high), Some(low)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(high), Some(low)) = (hex(*high), hex(*low))
+        {
+            let decoded = high * 16 + low;
+            if is_unreserved(decoded) {
+                out.push(decoded);
+            } else {
+                out.push(b'%');
+                out.push(hex_digit(high));
+                out.push(hex_digit(low));
+            }
+            i += 3;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    out
+}
+
+const fn hex_digit(value: u8) -> u8 {
+    match value {
+        0..=9 => b'0' + value,
+        _ => b'A' + value - 10,
+    }
+}
+
+/// RFC 2396 `unreserved = alphanum | mark`.
+const fn is_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+        )
+}
+
 /// Undo `%` escaping (RFC 3261 §25.1 `escaped`).
 ///
 /// Borrows when there is nothing to undo. Works on bytes because an escape
@@ -526,8 +1014,9 @@ fn is_hostname(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostRef, SipUriRef, UriError, UriRef, UriScheme, unescape};
+    use super::{HostRef, SipUriRef, Uri, UriError, UriRef, UriScheme, unescape};
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
 
     fn uri(s: &str) -> SipUriRef<'_> {
         SipUriRef::parse_str(s).expect("a SIP URI")
@@ -722,7 +1211,194 @@ mod tests {
                 let _ = UriRef::parse_str(&s);
                 let _ = SipUriRef::parse_str(&s);
                 let _ = SipUriRef::parse_str(&format!("sip:{s}"));
+                let _ = Uri::parse_str(&s);
             }
         }
+    }
+
+    // The vectors below are the ones RFC 3261 §19.1.4 gives, with the domains
+    // moved to the names RFC 2606 reserves: the RFC's own examples read as
+    // harvestable addresses to the tree check, and the comparison rules do not
+    // care which name is written.
+    fn owned(s: &str) -> Uri {
+        Uri::parse_str(s).expect("a URI")
+    }
+
+    #[test]
+    fn an_owned_uri_keeps_the_text_and_hands_back_the_parts() {
+        // the userinfo boundary case from the module doc, kept whole
+        let u = owned("sip:user;par=u%40example.net@example.com:5060;transport=tcp?to=x");
+        assert_eq!(
+            u.as_str(),
+            "sip:user;par=u%40example.net@example.com:5060;transport=tcp?to=x"
+        );
+        assert_eq!(u.as_uri_ref(), UriRef::parse_str(u.as_str()).expect("same"));
+
+        let sip = u.sip().expect("a SIP URI");
+        assert_eq!(sip.user, Some("user;par=u%40example.net"));
+        assert_eq!(sip.host, HostRef::Name("example.com"));
+        assert_eq!(sip.port, Some(5060));
+        assert_eq!(u.param("transport"), Some("tcp"));
+        assert_eq!(sip.headers().collect::<Vec<_>>(), vec![("to", "x")]);
+        assert!(!u.is_secure());
+    }
+
+    #[test]
+    fn the_spelling_survives_the_round_trip() {
+        for s in [
+            "SIP:Alice@example.com;Transport=TCP",
+            "sips:bob@example.net:5061",
+            "sip:[2001:db8::1]:5060;lr",
+            "tel:+1-201-555-0123",
+            "sip:%61lice@example.com",
+            "urn:service:sos",
+        ] {
+            let u = owned(s);
+            assert_eq!(u.as_str(), s);
+            assert_eq!(u.to_string(), s);
+            assert_eq!(u.scheme(), UriRef::parse_str(s).expect("same").scheme());
+        }
+    }
+
+    #[test]
+    fn an_owned_uri_is_cheap_to_clone_and_share() {
+        let u = owned("sip:proxy.example.com;lr");
+        let clone = u.clone();
+        assert!(clone.is_loose_route());
+        assert_eq!(clone.as_str(), u.as_str());
+        assert!(Arc::ptr_eq(&u.text, &clone.text), "the text is shared");
+    }
+
+    #[test]
+    fn to_owned_writes_the_uri_out_from_its_parts() {
+        let borrowed = UriRef::parse_str("SIP:bob@[0:0:0:0:0:0:0:1]:5060;lr").expect("a URI");
+        let kept = borrowed.to_owned();
+        // canonical rather than byte for byte, which is why a route set is
+        // built with Uri::parse from the bytes as they arrived
+        assert_eq!(kept.as_str(), "sip:bob@[::1]:5060;lr");
+        assert!(kept.equivalent(&owned("SIP:bob@[0:0:0:0:0:0:0:1]:5060")));
+        assert!(kept.is_loose_route());
+    }
+
+    #[test]
+    fn the_rfc_lists_these_as_equivalent() {
+        for (a, b) in [
+            (
+                "sip:%61lice@example.com;transport=TCP",
+                "sip:alice@example.com;Transport=tcp",
+            ),
+            // the host is the case-insensitive half; the user is not, so the
+            // two halves are shown apart rather than in one vector
+            ("sip:ExAmPle.CoM;lr", "sip:example.com;LR"),
+            ("sip:carol@example.org", "sip:carol@example.org;newparam=5"),
+            ("sip:carol@example.org", "sip:carol@example.org;security=on"),
+            (
+                "sip:example.net;transport=tcp;method=REGISTER?to=sip:bob%40example.net",
+                "sip:example.net;method=REGISTER;transport=tcp?to=sip:bob%40example.net",
+            ),
+            (
+                "sip:alice@example.com?subject=project%20x&priority=urgent",
+                "sip:alice@example.com?priority=urgent&subject=project%20x",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(a.equivalent(&b), "{a} vs {b}");
+            assert!(b.equivalent(&a), "not symmetric: {b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn the_rfc_lists_these_as_different() {
+        for (a, b, why) in [
+            (
+                "SIP:ALICE@example.com;Transport=udp",
+                "sip:alice@example.com;Transport=UDP",
+                "different usernames",
+            ),
+            (
+                "sip:bob@example.net",
+                "sip:bob@example.net:5060",
+                "can resolve to different ports",
+            ),
+            (
+                "sip:bob@example.net",
+                "sip:bob@example.net;transport=udp",
+                "can resolve to different transports",
+            ),
+            (
+                "sip:bob@example.net",
+                "sip:bob@example.net:6000;transport=tcp",
+                "different port and transport",
+            ),
+            (
+                "sip:carol@example.org",
+                "sip:carol@example.org?Subject=next%20meeting",
+                "different header component",
+            ),
+            (
+                "sip:bob@phone21.example.org",
+                "sip:bob@192.0.2.4",
+                "a lookup result is not the name",
+            ),
+            (
+                "sip:bob@example.net",
+                "sips:bob@example.net",
+                "a SIP and a SIPS URI are never equivalent",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(!a.equivalent(&b), "{why}: {a} vs {b}");
+            assert!(!b.equivalent(&a), "{why}, reversed: {b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn equivalence_is_not_transitive_which_is_why_it_is_not_partial_eq() {
+        let plain = owned("sip:carol@example.org");
+        let on = owned("sip:carol@example.org;security=on");
+        let off = owned("sip:carol@example.org;security=off");
+        assert!(plain.equivalent(&on));
+        assert!(plain.equivalent(&off));
+        assert!(!on.equivalent(&off));
+    }
+
+    #[test]
+    fn an_escape_for_a_reserved_character_is_not_the_character() {
+        // decoding %3B would turn a piece of the user name into a separator
+        assert!(!owned("sip:a%3Bb@example.com").equivalent(&owned("sip:a;b@example.com")));
+        // and case in an escape is not case in the value
+        assert!(owned("sip:a%2Fb@example.com").equivalent(&owned("sip:a%2fb@example.com")));
+    }
+
+    #[test]
+    fn a_request_uri_drops_the_method_and_the_headers() {
+        // §19.1.5: "The method parameter MUST NOT be placed in the Request-URI"
+        let u =
+            owned("sip:bob@example.com;method=REGISTER;transport=tcp?to=sip:carol%40example.org");
+        assert_eq!(
+            u.as_request_uri().as_str(),
+            "sip:bob@example.com;transport=tcp"
+        );
+        // and carries every other parameter over, known or not
+        let u = owned("sip:bob@example.com:5060;maddr=192.0.2.1;ttl=1;unknown=7");
+        assert_eq!(u.as_request_uri().as_str(), u.as_str());
+    }
+
+    #[test]
+    fn a_scheme_we_do_not_know_is_compared_only_against_itself() {
+        let tel = owned("tel:+1-201-555-0123");
+        assert_eq!(tel.scheme(), UriScheme::Tel);
+        assert!(tel.sip().is_none());
+        assert!(tel.equivalent(&owned("TEL:+1-201-555-0123")), "scheme case");
+        assert!(!tel.equivalent(&owned("tel:+1-201-555-0124")));
+        assert!(!tel.equivalent(&owned("sip:+1-201-555-0123@example.com;user=phone")));
+        assert_eq!(tel.as_request_uri().as_str(), tel.as_str());
+    }
+
+    #[test]
+    fn what_an_owned_uri_refuses() {
+        assert_eq!(Uri::parse(&[0xff]).unwrap_err(), UriError::NotUtf8);
+        assert_eq!(Uri::parse_str("nocolon").unwrap_err(), UriError::BadScheme);
+        assert_eq!(Uri::parse_str("sip:").unwrap_err(), UriError::NoHost);
     }
 }
