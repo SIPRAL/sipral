@@ -758,21 +758,48 @@ core growing a field for each.
 ```rust
 pub enum DigestAlgorithm { Md5, Md5Sess, Sha256, Sha256Sess, Sha512_256, Sha512_256Sess }
 
-/// Password zeroised on drop. No `Debug`, no `Display`, never logged.
-pub struct Credentials { pub username: Arc<str>, /* private */ }
+/// The password. No `Debug`, no `Display`, no way out of the module, and the
+/// bytes are overwritten on drop.
+pub struct Secret(/* private */);
+pub struct Credentials { pub username: Arc<str>, /* Secret */ }
 
 pub struct Challenge { pub realm: Arc<str>, pub nonce: Arc<str>, pub opaque: Option<Arc<str>>, pub algorithm: DigestAlgorithm, pub qop_auth: bool, pub stale: bool, pub proxy: bool }
+impl Challenge {
+    pub fn read(challenge: &ChallengeRef<'_>, proxy: bool) -> Option<Self>;
+    pub fn respond(&self, credentials: &Credentials, method: Method<'_>, uri: &[u8], count: u32, cnonce: &str) -> String;
+    pub fn header(&self) -> HeaderName<'static>;   // Authorization or Proxy-Authorization
+}
+
+pub enum Learned { Retry, Refused, Unusable }
 
 /// Cached per (realm, credential space) so a later request can carry
 /// `Authorization` without a 401 round trip (RFC 3261 §22.1).
 pub struct AuthCache { /* per-realm Challenge + nc */ }
+impl AuthCache {
+    pub fn learn(&mut self, response: &RawMessage<'_>, cnonce: &str) -> Learned;
+    pub fn authorize(&mut self, credentials: &Credentials, method: Method<'_>, uri: &[u8]) -> Vec<(HeaderName<'static>, String)>;
+}
 ```
 
+`Credentials` does have a `Debug`, which prints the user name and `<redacted>`
+where the password would be. `Secret` has none at all: a value that cannot be
+printed cannot be printed by accident, which is the only kind of leak that
+actually happens. Overwriting on drop is best effort and says so — only a
+volatile write is guaranteed to survive an optimiser, and that needs `unsafe`,
+which this crate denies.
+
+The cache draws no client nonce and reads no clock; both arrive from the
+caller. It answers the topmost challenge it understands per realm (RFC 8760
+§2.4), keeps the 401 and the 407 spaces apart, counts `nc` per challenge, and
+refuses to answer the same nonce twice after a refusal — §22.1 forbids
+re-attempting credentials that were just rejected, and `Learned::Refused` is
+how the endpoint hears that the password is wrong rather than missing.
+
 SDP is a value type in `sipral_core::sdp`: `SessionDescription`,
-`MediaDescription`, `parse`, `to_bytes` (deterministic), and the RFC 3264
-`answer(offer, preference)` computation. The core carries SDP bodies as opaque
-bytes; interpreting them is `sipral-ua`'s job, which is why the endpoint's
-signatures say `Arc<[u8]>` and not `SessionDescription`.
+`MediaDescription`, `parse`, `to_bytes` (deterministic), and
+`offer.answer(origin, connection, streams)` for RFC 3264. The endpoint carries
+SDP bodies as opaque bytes, which is why its signatures say `Arc<[u8]>` and not
+`SessionDescription`; whoever wants the parsed form asks for it.
 
 ## Errors
 

@@ -216,6 +216,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
   never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
   changes nothing.
+- Digest authentication (RFC 3261 §22, RFC 8760): MD5, MD5-sess, SHA-256,
+  SHA-256-sess, SHA-512-256 and SHA-512-256-sess, with `qop=auth` and the
+  counter that makes a captured response useless a second time. The three hash
+  functions are written out here, because the crate has no dependencies, and
+  each is checked against published digests — including the SHA-256 of the
+  empty string that RFC 8760 §2.6 prints — before anything is built on it.
+  `AuthCache` keeps a challenge per protection domain so a later request can
+  carry credentials without a round trip, answers the topmost challenge it
+  understands per realm, keeps the 401 and 407 spaces apart, and refuses to
+  answer the same nonce twice after a refusal: §22.1 forbids re-attempting
+  credentials that were just rejected, and repeating them only locks the
+  account. A `-sess` algorithm without `qop` is treated as unanswerable rather
+  than guessed at, which is what §22.4 rule 8 leaves. The password lives in a
+  `Secret` with no `Debug` and no way out of its module, overwritten on drop as
+  far as safe Rust can promise.
 - SDP (RFC 4566) and offer/answer (RFC 3264). A description that is read and
   written back comes out as it went in, down to the lines the stack has no use
   for — an SDP body travels through a call inside messages that get forwarded,

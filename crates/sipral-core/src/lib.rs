@@ -25,6 +25,7 @@
     )
 )]
 
+pub mod auth;
 pub mod dialog;
 pub mod msg;
 pub mod sdp;
