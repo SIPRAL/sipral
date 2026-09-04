@@ -77,7 +77,9 @@ fi
 step "no addresses to harvest"
 mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
-    | grep -v 'users\.noreply\.github\.com' || true)
+    | grep -v 'users\.noreply\.github\.com' \
+    | grep -vE '@([A-Za-z0-9.-]+\.)?(example\.(com|net|org)|[A-Za-z0-9-]+\.(example|invalid|test|localhost))\b' || true)
+# RFC 2606 reserved domains are SIP URIs in walkthroughs, not addresses anyone can harvest
 [ -z "$mails" ] && pass "no email address in the tree" || {
     fail "email address in published files:"; printf '        %s\n' "$mails"
 }

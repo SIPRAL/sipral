@@ -40,6 +40,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   internal files and captures, build, lints, tests, dependency licences,
   secrets.
 - CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
+- `crates/sipral`: the facade crate, for now a name reservation on crates.io
+  that exports a version constant. The only crate with `publish = true`.
 - `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
   merged from four independent proposals scored by three reviewers, with
   register, call, CANCEL-race and fork walkthroughs, a fake-clock test, the C

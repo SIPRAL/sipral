@@ -47,6 +47,7 @@ and transport live in separate crates that you pick, or replace.
 | `sipral-io-coreaudio` | macOS and iOS device I/O. Siblings for WASAPI and AAudio follow |
 | `sipral-headless` | PCM in and out over a local socket or WebSocket. No audio device, for AI agents |
 | `sipral-ffi` | stable C ABI, and the Swift Package, NuGet and AAR built on it |
+| `sipral` | the facade crate. Today a name reservation on crates.io that exports nothing; later the one crate an application depends on, re-exporting the stack |
 
 ## Standards
 

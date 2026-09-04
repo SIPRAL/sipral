@@ -97,4 +97,6 @@ later.
   over the whole history, and the licence set, SPDX headers and `cargo deny`
   in place, which they are from commit zero.
 - No crate is published to a registry before the ABI in `08-ffi.md` is frozen.
-  A published crate name is a promise about compatibility.
+  A published crate name is a promise about compatibility. The one exception
+  is the `sipral` name reservation, a placeholder that exports a version
+  constant and promises nothing.

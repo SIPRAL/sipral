@@ -22,6 +22,9 @@ allow = [
 
 [[licenses.exceptions]]
 # our own crates, dual-licensed; the AGPL arm is ours to grant
+name = "sipral"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 name = "sipral-core"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]

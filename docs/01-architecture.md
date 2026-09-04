@@ -101,6 +101,15 @@ layer was kept out of the core in the first place.
 One narrow C ABI. Handles are opaque, ownership is explicit, and events arrive
 on a callback. The expressive API is written once per language, on top.
 
+### sipral
+
+The facade. An application that just wants a softphone stack depends on this
+one crate and gets `sipral-ua` plus a media pipeline re-exported under one
+name. At this commit it is a name reservation on crates.io that exports a
+version constant and nothing else; it is the only crate with `publish = true`,
+and the only one that ships before the ABI freezes, precisely because it
+promises nothing yet.
+
 ## What is not in the tree
 
 - **No SIP server, proxy, registrar or B2BUA.** Sipral is an endpoint. The
