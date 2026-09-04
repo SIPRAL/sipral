@@ -1,0 +1,13 @@
+[package]
+name = "sipral"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+description = "Sipral - Session Initiation Protocol Rust Audio Layer. SIP + RTP client stack in Rust with Swift, .NET and Kotlin bindings. Pre-release name reservation; the first usable release follows."
+license = "AGPL-3.0-only"
+repository = "https://github.com/SIPRAL/sipral"
+homepage = "https://sipral.net"
+keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
+categories = ["network-programming", "multimedia::audio"]
+readme = "README.md"
+publish = true

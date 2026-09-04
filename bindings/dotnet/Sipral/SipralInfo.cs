@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+namespace Sipral;
+
+/// <summary>Name reservation for the Sipral .NET bindings.</summary>
+public static class SipralInfo
+{
+    /// <summary>Package version.</summary>
+    public const string Version = "0.0.1";
+}

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>Sipral</PackageId>
+    <Version>0.0.1</Version>
+    <Authors>SIPRAL</Authors>
+    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. .NET bindings. Pre-release name reservation; the first usable release follows.</Description>
+    <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <PackageProjectUrl>https://sipral.net</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SIPRAL/sipral</RepositoryUrl>
+    <PackageTags>sip;voip;rtp;telephony;softphone</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>
