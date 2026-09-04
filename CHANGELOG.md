@@ -196,6 +196,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and the method, with an ACK keyed as the INVITE it answers. A peer without
   the magic cookie is matched the pre-3261 way instead, on the Request-URI,
   From tag, `Call-ID`, `CSeq` number and top `Via`.
+- CANCEL (RFC 3261 §9.1): built to look exactly like the INVITE it cancels so
+  the two can be paired, with `Route` copied for stateless proxies and
+  `Require`/`Proxy-Require` deliberately dropped. Asking to cancel is always
+  accepted while the transaction is open: a CANCEL may not be sent before a
+  provisional response has arrived — the server could otherwise receive it
+  before the INVITE and have nothing to cancel — so one asked for too early is
+  held and released at the first provisional rather than refused.
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —

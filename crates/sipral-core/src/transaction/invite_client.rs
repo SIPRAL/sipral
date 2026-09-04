@@ -40,6 +40,7 @@ use std::time::Instant;
 
 use super::super::msg::{OwnedMessage, RawMessage, StatusCode};
 use super::ack::ack_for_response;
+use super::cancel::CancelDisposition;
 use super::effect::{Effects, Notify};
 use super::handle::InviteClientState;
 use super::timer::{TimerConfig, TimerName};
@@ -61,6 +62,9 @@ pub(crate) struct InviteClientMachine {
     timer_b: Option<Instant>,
     timer_d: Option<Instant>,
     timer_m: Option<Instant>,
+    /// The user asked to cancel before anything came back, so the CANCEL is
+    /// waiting for the first provisional response (RFC 3261 §9.1).
+    cancel_pending: bool,
 }
 
 impl InviteClientMachine {
@@ -79,6 +83,7 @@ impl InviteClientMachine {
             timer_b: Some(now + config.sixty_four_t1()),
             timer_d: None,
             timer_m: None,
+            cancel_pending: false,
             attempt: 0,
             config,
             reliable,
@@ -175,6 +180,40 @@ impl InviteClientMachine {
         }
     }
 
+    /// The user wants the call given up on.
+    ///
+    /// Always accepted while the transaction is open. RFC 3261 §9.1 will not
+    /// let a CANCEL go before a provisional response has arrived — the server
+    /// could receive it before the INVITE and have nothing to cancel — so one
+    /// asked for too early is held rather than refused, and
+    /// [`InviteClientMachine::take_deferred_cancel`] says when it may go.
+    pub(crate) fn request_cancel(&mut self) -> CancelDisposition {
+        match self.state {
+            InviteClientState::Calling => {
+                self.cancel_pending = true;
+                CancelDisposition::Deferred
+            }
+            InviteClientState::Proceeding => CancelDisposition::Now,
+            // "a CANCEL has no effect on requests that have already generated
+            // a final response"
+            InviteClientState::Accepted
+            | InviteClientState::Completed
+            | InviteClientState::Terminated => CancelDisposition::TooLate,
+        }
+    }
+
+    /// Whether a CANCEL that was held may now go out.
+    ///
+    /// Ask after feeding in a response. True at most once: the CANCEL is a
+    /// transaction of its own from then on.
+    pub(crate) fn take_deferred_cancel(&mut self) -> bool {
+        let due = self.cancel_pending && self.state == InviteClientState::Proceeding;
+        if due {
+            self.cancel_pending = false;
+        }
+        due
+    }
+
     /// The transport could not deliver the request.
     pub(crate) fn on_transport_error(&mut self) -> Effects {
         if self.state == InviteClientState::Terminated {
@@ -230,6 +269,7 @@ impl InviteClientMachine {
 
     fn terminate(&mut self) {
         self.state = InviteClientState::Terminated;
+        self.cancel_pending = false;
         self.timer_a = None;
         self.timer_b = None;
         self.timer_d = None;
@@ -244,6 +284,7 @@ mod tests {
         HeaderName, Method, OwnedMessage, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder,
         StatusCode, parse,
     };
+    use crate::transaction::cancel::CancelDisposition;
     use crate::transaction::effect::{Effects, Notify};
     use crate::transaction::{InviteClientState, TimerConfig, TimerName};
     use std::time::{Duration, Instant};
@@ -474,6 +515,54 @@ mod tests {
         assert_eq!(machine.state(), InviteClientState::Terminated);
         // and once is enough
         assert_eq!(machine.on_transport_error().notify, None);
+    }
+
+    #[test]
+    fn a_cancel_asked_for_too_early_is_held_rather_than_refused() {
+        // 9.1: "If no provisional response has been received, the CANCEL
+        // request MUST NOT be sent; rather, the client MUST wait"
+        let (mut machine, _, now, _) = start(false);
+        assert_eq!(machine.request_cancel(), CancelDisposition::Deferred);
+        assert!(!machine.take_deferred_cancel(), "nothing has come back yet");
+
+        feed(&mut machine, &response(180, Some(b"a6c85cf")), now);
+        assert!(machine.take_deferred_cancel(), "now it may go");
+        assert!(
+            !machine.take_deferred_cancel(),
+            "and it is its own transaction from here"
+        );
+    }
+
+    #[test]
+    fn a_cancel_asked_for_after_a_provisional_goes_at_once() {
+        let (mut machine, _, now, _) = start(false);
+        feed(&mut machine, &response(180, Some(b"a6c85cf")), now);
+        assert_eq!(machine.request_cancel(), CancelDisposition::Now);
+        assert!(
+            !machine.take_deferred_cancel(),
+            "it was not held, so there is nothing to release"
+        );
+    }
+
+    #[test]
+    fn a_cancel_asked_for_after_the_answer_is_too_late() {
+        // "CANCEL has no effect on requests that have already generated a
+        // final response"
+        for status in [200_u16, 486] {
+            let (mut machine, _, now, _) = start(false);
+            feed(&mut machine, &response(status, Some(b"a6c85cf")), now);
+            assert_eq!(machine.request_cancel(), CancelDisposition::TooLate);
+        }
+    }
+
+    #[test]
+    fn a_held_cancel_is_dropped_when_the_transaction_ends_without_one() {
+        let (mut machine, _, now, config) = start(true);
+        assert_eq!(machine.request_cancel(), CancelDisposition::Deferred);
+        machine
+            .handle_timeout(now + config.sixty_four_t1())
+            .expect("timer B");
+        assert!(!machine.take_deferred_cancel());
     }
 
     #[test]
