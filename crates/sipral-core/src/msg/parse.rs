@@ -397,8 +397,22 @@ v=0\n";
             b"SIP/2.0 200 OK\r\nVia: first\r\nVia: second\r\n\r\n",
             &mut scratch,
         );
-        let vias: Vec<_> = m.raw_header_values(b"Via").collect();
+        let vias: Vec<_> = m.header_values(crate::msg::HeaderName::Via).collect();
         assert_eq!(vias, vec![&b"first"[..], &b"second"[..]]);
+    }
+
+    #[test]
+    fn a_field_is_found_whichever_form_it_was_written_in() {
+        use crate::msg::HeaderName;
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\nv: SIP/2.0/UDP a\r\nVia: SIP/2.0/TCP b\r\ni: abc\r\n\r\n",
+            &mut scratch,
+        );
+        assert_eq!(m.header_count(HeaderName::Via), 2);
+        assert_eq!(m.header(HeaderName::Via), Some(&b"SIP/2.0/UDP a"[..]));
+        assert_eq!(m.header(HeaderName::CallId), Some(&b"abc"[..]));
+        assert_eq!(m.header(HeaderName::CSeq), None);
     }
 
     #[test]

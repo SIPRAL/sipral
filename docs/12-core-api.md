@@ -145,7 +145,11 @@ impl<'a> RawMessage<'a> {
     pub fn request_uri(&self) -> Option<UriRef<'a>>;
     pub fn body(&self) -> &'a [u8];
     pub fn header(&self, name: HeaderName<'_>) -> Option<&'a [u8]>;
-    pub fn raw_headers(&self) -> RawHeaderIter<'a, '_>;
+    pub fn header_values<'n>(&self, name: HeaderName<'n>) -> impl Iterator<Item = &'a [u8]>;
+    pub fn header_count(&self, name: HeaderName<'_>) -> usize;
+    pub fn header_names(&self) -> impl Iterator<Item = HeaderName<'a>>;
+    pub fn raw_headers(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])>;
+    pub fn header_slots(&self) -> &'a [HeaderSlot];
 
     pub fn via(&self) -> ViaIter<'a, '_>;
     pub fn call_id(&self) -> Result<CallIdRef<'a>, HeaderError>;
@@ -198,15 +202,23 @@ pub enum Method<'a> {
 }
 
 pub enum HeaderName<'a> {
-    Via, From, To, CallId, CSeq, Contact, MaxForwards, ContentLength,
-    ContentType, Route, RecordRoute, Expires, Allow, Supported, Require,
-    Unsupported, Authorization, WwwAuthenticate, ProxyAuthenticate,
-    ProxyAuthorization, Event, SubscriptionState, ReferTo, ReferredBy,
-    Replaces, SessionExpires, MinSe, RSeq, RAck, UserAgent, Warning,
+    Accept, Allow, AllowEvents, Authorization, CallId, Contact,
+    ContentEncoding, ContentLength, ContentType, CSeq, Date, Event, Expires,
+    From, MaxForwards, MinExpires, MinSe, ProxyAuthenticate,
+    ProxyAuthorization, ProxyRequire, RAck, RecordRoute, ReferTo, ReferredBy,
+    Replaces, Require, Route, RSeq, SessionExpires, Subject,
+    SubscriptionState, Supported, To, Unsupported, UserAgent, Via, Warning,
+    WwwAuthenticate,
     Extension(&'a str),
 }
-// Equality is ASCII case-insensitive and treats compact forms as the same
-// name (RFC 3261 §7.3.3): i, m, e, l, c, f, t, v, k, s.
+// Equality is ASCII case-insensitive and treats a compact form as the field
+// it abbreviates, so `Via`, `via` and `v` are one value. Fifteen fields have
+// one: i m e l c f t v k s (RFC 3261 §7.3.3), u and o (RFC 6665 §8.2),
+// r (RFC 3515), b (RFC 3892), x (RFC 4028). `Extension` compares
+// case-insensitively too, and keeps the spelling it arrived with.
+//
+// `HeaderName::KNOWN` lists every recognised field, so a test can assert that
+// the long form, the compact form and the table cannot drift apart.
 
 pub struct ViaRef<'a> {
     pub transport: TransportProtocol,

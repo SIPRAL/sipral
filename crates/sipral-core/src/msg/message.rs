@@ -3,6 +3,7 @@
 
 //! A parsed message as a view over the buffer it arrived in.
 
+use super::header::HeaderName;
 use super::method::{Method, StatusCode};
 use super::span::{HeaderSlot, Span};
 
@@ -106,12 +107,34 @@ impl<'a> RawMessage<'a> {
             .map(move |slot| (slot.name.slice(buf), slot.value.slice(buf)))
     }
 
-    /// Every value of one header field, matched case-insensitively on the
-    /// exact name given. Compact forms are the typed accessors' business.
-    pub fn raw_header_values(&self, name: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + use<'a> {
+    /// The names of every header field, in wire order.
+    pub fn header_names(&self) -> impl Iterator<Item = HeaderName<'a>> + use<'a> {
         self.raw_headers()
-            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .filter_map(|(n, _)| HeaderName::from_bytes(n))
+    }
+
+    /// Every value of one field, in wire order. Compact and long forms are the
+    /// same field, so asking for `Via` finds a `v:` line too.
+    pub fn header_values<'n>(
+        &self,
+        name: HeaderName<'n>,
+    ) -> impl Iterator<Item = &'a [u8]> + use<'a, 'n> {
+        self.raw_headers()
+            .filter(move |(n, _)| HeaderName::from_bytes(n).is_some_and(|got| got == name))
             .map(|(_, v)| v)
+    }
+
+    /// The first value of one field, if it is present.
+    #[must_use]
+    pub fn header(&self, name: HeaderName<'_>) -> Option<&'a [u8]> {
+        self.header_values(name).next()
+    }
+
+    /// How many times a field appears. Several `Via` lines are normal; several
+    /// `Call-ID` lines are a malformed message the layers above must refuse.
+    #[must_use]
+    pub fn header_count(&self, name: HeaderName<'_>) -> usize {
+        self.header_values(name).count()
     }
 
     /// The whole message as it was received, body included.

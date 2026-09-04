@@ -12,12 +12,14 @@
 //! `fixtures/rfc4475/`.
 
 mod error;
+mod header;
 mod message;
 mod method;
 mod parse;
 mod span;
 
 pub use error::ParseError;
+pub use header::HeaderName;
 pub use message::{MessageKind, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};

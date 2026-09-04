@@ -57,6 +57,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   datagram are ignored. Bounded by a `Limits` struct so a hostile peer cannot
   make it do unbounded work, and written so that no input reaches a panic.
   37 tests, several of them RFC 4475 cases the corpus will assert in full later.
+- `sipral-core::msg::HeaderName`: the 38 header fields the stack knows, matched
+  whatever their case and in either form. Fifteen compact forms, each read out
+  of the RFC that defines it rather than from memory. `RawMessage` gains
+  `header`, `header_values`, `header_count` and `header_names`, so asking for
+  `Via` finds a `v:` line and asking for an extension is case-insensitive too.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
