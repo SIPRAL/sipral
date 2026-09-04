@@ -158,6 +158,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - `SipDate` and `RawMessage::date`: RFC 3261 §20.17, which narrows RFC 1123 to
   GMT and says outright that the names are case-sensitive. `EST` is not a zone
   this reads, and neither is `UT`, `UTC` or `gmt`.
+- Fuzzing under `fuzz/`: three libFuzzer targets over the parser and every
+  typed accessor, the stream framer fed at arbitrary read sizes, and the
+  builder fed arbitrary bytes as header values to prove a caller's data cannot
+  become structure. Outside the workspace with its own lockfile and nightly
+  pin, and covered by `cargo deny` too.
 - The RFC 4475 corpus is now a test, and it passes: all 49 messages behave as
   `fixtures/rfc4475/manifest.toml` says, and every valid one round trips byte
   for byte. Three messages moved from `semantic` to `reject` — `insuf`,
