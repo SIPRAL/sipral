@@ -13,6 +13,10 @@ maintainer, and it does not require an email address from either side.
 
 Do not open a public issue for a vulnerability.
 
+GitHub only offers private vulnerability reporting on public repositories. While
+this repository is private, the only people who can see it were invited by the
+maintainer; report through the channel you were invited by.
+
 Expect an acknowledgement within a few days, an assessment within two weeks, and
 credit in the advisory unless you prefer otherwise.
 

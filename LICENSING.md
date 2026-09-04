@@ -27,7 +27,9 @@ You need a commercial licence if any of the following is true:
   conflict with the AGPL;
 - you run Sipral, modified, as part of a service and do not want to publish
   your source;
-- you embed Sipral into a product you resell.
+- you embed Sipral into a product you resell without releasing that product's
+  own source, including your modifications, under the AGPL-3.0. Charging for a
+  copy is not the trigger; the AGPL allows that. Withholding the source is.
 
 Terms are in [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md): one price per
 company, perpetual for the versions delivered during the maintenance term, no
@@ -47,7 +49,7 @@ contract, not a runtime lock.
 | Closed source desktop, mobile or server product | Commercial |
 | App Store / Google Play distribution | Commercial |
 | Hosted service using a modified Sipral, source not published | Commercial |
-| SDK or library you resell with Sipral inside | Commercial |
+| SDK or library you resell with Sipral inside, its own source not under AGPL-3.0 | Commercial |
 
 ## Third-party code
 

@@ -17,8 +17,9 @@ the same commit that adds it to a `Cargo.toml`.
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, enforced in CI. It permits
-MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, Zlib, MIT-0, Unicode-3.0 and
-CC0-1.0.
+MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0 (including the
+`WITH LLVM-exception` variant), ISC, Zlib, Unicode-3.0, CC0-1.0 and BSL-1.0
+(Boost, not Business Source).
 
 Anything under GPL, LGPL, MPL, SSPL, BUSL, CDDL or a non-commercial clause is
 refused. A single LGPL dependency would make the commercial arm undeliverable,
@@ -34,7 +35,7 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 | Opus | wideband codec | BSD-3-Clause, with patent grants from Xiph, Broadcom and Microsoft |
 | libsrtp2 | SRTP | BSD-3-Clause (Cisco) |
 | webrtc-audio-processing | AEC3, AGC, noise suppression | BSD-3-Clause |
-| sippy/libg722 | G.722 | unrestricted (CMU) |
+| sippy/libg722 | G.722 | CMU 1993 portion unrestricted; Sippy Software portion BSD-2-Clause with attribution |
 | miniaudio or PortAudio | baseline audio device I/O | MIT-0 / MIT |
 | rustls or OpenSSL | TLS transport | Apache-2.0 + MIT + ISC / Apache-2.0 |
 

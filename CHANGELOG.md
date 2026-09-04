@@ -10,6 +10,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Changed
+
+- Design and licensing documents checked claim by claim against the RFC text
+  and the primary sources; 20 corrections applied. The ones that change
+  behaviour: the release profile no longer sets `panic = "abort"`, because the
+  FFI layer has to catch unwinding at the C boundary; `sipral-ffi` and
+  `sipral-io-coreaudio` now carry the `unwrap`/`expect`/`panic`/indexing lints
+  they were silently missing; phase 1 explicitly includes the minimal RTP and
+  G.711 slice a bidirectional call needs; `LICENSING.md` no longer implies that
+  charging for a product is by itself what triggers the commercial arm. CI
+  installs the toolchain from `rust-toolchain.toml` instead of pinning a second
+  time in the workflow.
+
 ### Added
 
 - Workspace skeleton: the eight crates from `docs/01-architecture.md`, each with

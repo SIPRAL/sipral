@@ -31,5 +31,5 @@ indexing_slicing = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# unwind, not abort: sipral-ffi catches panics at the C boundary
 strip = true

@@ -58,16 +58,19 @@ the socket.
 
 - **UDP, TCP, TLS, WS, WSS.** The transport is picked from the URI, the `Via`,
   the NAPTR/SRV result the caller supplied, or configuration.
-- **Automatic switch to TCP** when a request would exceed the path MTU, per RFC
-  3261 §18.1.1. The threshold is 1300 bytes by default and configurable, because
-  some carriers are worse than the MTU suggests.
+- **Automatic switch to TCP** when a request is within 200 bytes of a known
+  path MTU, or, when the path MTU is unknown, larger than 1300 bytes, per RFC
+  3261 §18.1.1. Both figures are configurable, because some carriers perform
+  worse than the RFC's assumed 1500-byte Ethernet MTU.
 - **`Via` handling.** `branch` with the `z9hG4bK` magic cookie, `rport` per RFC
   3581 always requested, `received` and `rport` honoured on responses. Symmetric
   behaviour: responses go back where the request came from, not where the `Via`
   claims.
-- **Keepalive.** Double-CRLF on connection-oriented transports, `OPTIONS` where
-  the registrar wants it, on an interval that keeps a NAT binding alive
-  (default 25 s, tunable).
+- **Keepalive.** Double-CRLF on connection-oriented transports (RFC 5626
+  §4.4.1), or `OPTIONS` where a registrar wants a request. The interval is a
+  design choice, not a spec value: 25 s by default, because typical NAT UDP
+  bindings expire at 30 s and the RFC 5626 default of 120 s for TCP would drop
+  most of them; tunable per account.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 
@@ -115,8 +118,9 @@ A dialog is Call-ID plus both tags. The layer maintains:
   increment it;
 - the route set from `Record-Route`, in the right order, with `lr` handling and
   the strict-router rewrite for the ones that still exist;
-- the remote target from `Contact`, updated by re-INVITE, UPDATE, and by a
-  reliable provisional response;
+- the remote target from `Contact`, set when the early dialog is established
+  (RFC 3261 §12.1) and afterwards changed only by the two target-refresh
+  requests, re-INVITE (§12.2) and UPDATE (RFC 3311 §5.2);
 - the ACK for a 2xx, which is a separate transaction and is the caller's
   responsibility to retransmit until a response stops arriving.
 

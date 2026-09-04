@@ -19,8 +19,12 @@ Rules for the ABI:
   matching free function. Strings are UTF-8, length-delimited, never assumed
   null-terminated on input.
 - **No panics across the boundary.** Every entry point catches unwinding and
-  turns it into an error code. A panic reaching C is undefined behaviour, and a
-  SIP stack sees malformed input for a living.
+  turns it into an error code. A panic that reaches an `extern "C"` boundary
+  uncaught aborts the whole host process (defined behaviour since Rust 1.24, but
+  not something the caller can recover from), and a SIP stack sees malformed
+  input for a living. This is why the release profile keeps `panic = "unwind"`:
+  with `panic = "abort"` there is nothing to catch, and Cargo does not allow a
+  per-crate override of that setting.
 - **Errors are integer codes** plus a thread-local last-error string. No
   errno-style globals shared between handles.
 - **Events arrive on one callback**, registered per stack handle, carrying a

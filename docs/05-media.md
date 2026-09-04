@@ -15,8 +15,8 @@ that is written in-house rather than assembled.
 ### RTP and RTCP
 
 RFC 3550. Sequence numbers with wraparound, timestamps per clock rate, SSRC
-collision handling, marker bit on talk spurt start, contributing sources parsed
-and ignored.
+collision handling, contributing sources parsed and ignored. Marker bit on talk
+spurt start, which is the audio profile's rule (RFC 3551 §4.1), not RFC 3550's.
 
 RTCP sender and receiver reports on the standard interval, because carriers use
 them for quality reporting and their absence is noticed. RTCP-mux when
@@ -72,7 +72,8 @@ Loss on a real mobile network is not exceptional. Concealment is per codec:
 ### DTMF
 
 RFC 4733 telephone-event: correct event codes, volume, duration, the end bit and
-its three retransmissions. On receive, the redundant packets for one event
+its two retransmissions (the final packet goes out three times in total, RFC
+4733 §2.5.1.4). On receive, the redundant packets for one event
 collapse into a single reported digit, which is the bug everyone ships at least
 once.
 

@@ -23,13 +23,13 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 | 3262 | Reliability of provisional responses (PRACK) | sipral-core | phase 1 |
 | 3311 | The UPDATE method | sipral-ua | phase 1 |
 | 4028 | Session timers | sipral-ua | phase 1 |
-| 8760 | Digest with SHA-256 | sipral-core | phase 1 |
+| 8760 | Digest with SHA-256 and SHA-512/256 | sipral-core | phase 1 |
 | 3515 | The REFER method | sipral-ua | phase 1 |
 | 3891 | The Replaces header | sipral-ua | phase 1 |
 | 3892 | The Referred-By mechanism | sipral-ua | phase 1 |
 | 6665 | Event notification framework | sipral-ua | phase 2 |
 | 3842 | Message waiting indication | sipral-ua | phase 2 |
-| 4235 | Dialog event package (BLF) | sipral-ua | phase 2 |
+| 4235 | Dialog event package (what busy lamp field is built on) | sipral-ua | phase 2 |
 | 3856 | Presence event package | sipral-ua | phase 2 |
 | 6026 | Correct transaction handling for 2xx | sipral-core | phase 1 |
 | 5626 | Outbound: managing client connections | sipral-ua | phase 2 |
@@ -42,8 +42,8 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 
 | RFC | Title | Crate | Status |
 |---|---|---|---|
-| 3550 | RTP and RTCP | sipral-rtp | phase 2 |
-| 3551 | RTP profile for audio and video | sipral-rtp | phase 2 |
+| 3550 | RTP and RTCP | sipral-rtp | phase 1 (send/receive), phase 2 (adaptive buffer) |
+| 3551 | RTP profile for audio and video | sipral-rtp | phase 1 |
 | 4733 | RTP payload for DTMF | sipral-rtp | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |
@@ -64,6 +64,8 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 | 8656 | TURN | sipral-nat | phase 2 |
 | 8445 | ICE, lite role only | sipral-nat | phase 2 |
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2 |
+| 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`) | sipral-core | phase 2 |
+| 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
 
 ## Deliberately not implemented
 

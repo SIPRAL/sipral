@@ -5,7 +5,6 @@
 all-features = true
 
 [licenses]
-version = 2
 confidence-threshold = 0.93
 allow = [
     "MIT",
@@ -52,7 +51,6 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [advisories]
-version = 2
 yanked = "deny"
 
 [sources]

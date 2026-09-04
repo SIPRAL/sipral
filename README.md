@@ -52,8 +52,8 @@ and transport live in separate crates that you pick, or replace.
 
 Implemented from the RFCs, not from anyone's source tree. The full list, and
 which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
-Core set: RFC 3261, 3262, 3264, 3515, 3581, 4028, 4733, 6665, 8760 for
-signalling; 3550, 3711, 8445, 8489, 8656 for media and NAT.
+Core set: RFC 3261, 3262, 3264, 3515, 3581, 4028, 6665, 8760 for signalling;
+3550, 3711, 4733, 8445, 8489, 8656 for media and NAT.
 
 ## Build
 

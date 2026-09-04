@@ -22,9 +22,12 @@ the RFC alone, with no other implementation's source ever having been opened.
 
 ## Phase 1 — signalling
 
-`sipral-core` and `sipral-ua`. UDP, TCP and TLS. Digest with MD5 and SHA-256.
-REGISTER with refresh, INVITE and BYE, SDP offer/answer, G.711, session timers,
-PRACK, REFER for blind and attended transfer.
+`sipral-core` and `sipral-ua`, plus the smallest media slice that lets a call
+be heard: RTP send and receive in `sipral-rtp` with a fixed-depth buffer, and
+G.711 in `sipral-media`. The adaptive buffer, loss concealment, Opus, SRTP and
+everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
+with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
+session timers, PRACK, REFER for blind and attended transfer.
 
 **Exit, all of them:**
 
