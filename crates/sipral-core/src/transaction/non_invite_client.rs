@@ -23,8 +23,8 @@
 use std::time::Instant;
 
 use super::super::msg::{OwnedMessage, RawMessage};
+use super::effect::{Effects, Notify};
 use super::handle::NonInviteClientState;
-use super::invite_client::{Effects, Notify};
 use super::timer::{TimerConfig, TimerName};
 
 /// The machine.

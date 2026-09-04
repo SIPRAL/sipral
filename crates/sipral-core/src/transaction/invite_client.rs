@@ -40,33 +40,9 @@ use std::time::Instant;
 
 use super::super::msg::{OwnedMessage, RawMessage, StatusCode};
 use super::ack::ack_for_response;
+use super::effect::{Effects, Notify};
 use super::handle::InviteClientState;
 use super::timer::{TimerConfig, TimerName};
-
-/// What the layer above has to do after feeding something in.
-///
-/// At most one message goes out per input, so this is one `Option` rather
-/// than a queue: the request, or the ACK, or nothing.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Effects {
-    /// Hand these bytes to the transport.
-    pub send: Option<OwnedMessage>,
-    /// Tell the transaction user.
-    pub notify: Option<Notify>,
-    /// The machine is finished and can be dropped.
-    pub terminated: bool,
-}
-
-/// What the transaction user is told.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Notify {
-    /// The response just fed in is for the user to see.
-    Response,
-    /// Timer B: nothing came back at all.
-    TimedOut,
-    /// The transport gave up on the request.
-    TransportFailed,
-}
 
 /// The machine.
 #[derive(Debug)]
@@ -261,29 +237,14 @@ impl InviteClientMachine {
     }
 }
 
-impl Effects {
-    fn notify(notify: Notify) -> Self {
-        Self {
-            notify: Some(notify),
-            ..Self::default()
-        }
-    }
-
-    fn terminated() -> Self {
-        Self {
-            terminated: true,
-            ..Self::default()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Effects, InviteClientMachine, Notify};
+    use super::InviteClientMachine;
     use crate::msg::{
         HeaderName, Method, OwnedMessage, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder,
         StatusCode, parse,
     };
+    use crate::transaction::effect::{Effects, Notify};
     use crate::transaction::{InviteClientState, TimerConfig, TimerName};
     use std::time::{Duration, Instant};
 

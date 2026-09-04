@@ -179,6 +179,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   doubling forever, and a provisional response does not stop them — it moves
   the machine to `Proceeding`, where the interval is T2 flat and timer F still
   ends the transaction. Only an INVITE gets to ring indefinitely.
+- The two server transactions (RFC 3261 §17.2, RFC 6026 §8.1). The INVITE one
+  sends a 100 Trying at once — the transaction layer never knows whether the
+  user will answer within 200 ms, and a redundant 100 costs one datagram while
+  a missing one costs six retransmitted INVITEs. A 2xx puts it in `Accepted`,
+  where retransmitted INVITEs are absorbed rather than answered again and an
+  arriving ACK is passed up rather than swallowed, because after a 2xx the ACK
+  belongs to the dialog. A non-2xx final response is retransmitted by timer G,
+  but only on an unreliable transport. The non-INVITE one sends nothing until
+  the user says so: in `Trying` a retransmitted request is discarded, since
+  inventing a response the user never wrote is worse than silence.
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —
