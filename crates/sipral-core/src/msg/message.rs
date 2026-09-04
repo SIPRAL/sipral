@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use super::error::HeaderError;
 use super::header::HeaderName;
-use super::lex::trim;
+use super::lex::{CommaList, trim};
 use super::method::{Method, StatusCode};
 use super::scalar::{CSeq, Digits, RAck, digits, rseq};
 use super::span::{HeaderSlot, Span};
 use super::uri::{UriError, UriRef};
+use super::via::ViaRef;
 
 /// Whether a message is a request or a response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +166,26 @@ impl<'a> RawMessage<'a> {
             return Err(HeaderError::UnexpectedRepeat);
         }
         Ok(first)
+    }
+
+    /// Every `Via` value, in the order that decides where a response goes.
+    ///
+    /// Header lines in wire order, and within each line the comma-separated
+    /// values in wire order, because RFC 3261 §7.3.1 says the two spellings
+    /// have to mean the same thing. The top one is the first item.
+    pub fn via(&self) -> impl Iterator<Item = Result<ViaRef<'a>, HeaderError>> + use<'a> {
+        self.header_values(HeaderName::Via)
+            .flat_map(CommaList::new)
+            .map(ViaRef::parse)
+    }
+
+    /// The topmost `Via`, which is the one the transport layer answers to.
+    ///
+    /// # Errors
+    /// [`HeaderError::Missing`] when there is none, or whatever
+    /// [`ViaRef::parse`] refused.
+    pub fn top_via(&self) -> Result<ViaRef<'a>, HeaderError> {
+        self.via().next().unwrap_or(Err(HeaderError::Missing))
     }
 
     /// `Call-ID`, opaque (RFC 3261 §20.8).

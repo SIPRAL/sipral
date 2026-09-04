@@ -20,6 +20,7 @@ mod parse;
 mod scalar;
 mod span;
 mod uri;
+mod via;
 
 pub use error::{HeaderError, ParseError};
 pub use header::HeaderName;
@@ -32,3 +33,4 @@ pub use span::{HeaderSlot, ParseScratch, Span};
 pub use uri::{
     HostRef, SipUriRef, UriError, UriHeaderIter, UriParamIter, UriRef, UriScheme, unescape,
 };
+pub use via::{MAGIC_COOKIE, Rport, ViaRef};

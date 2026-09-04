@@ -456,7 +456,10 @@ const fn is_scheme_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
 }
 
-fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriError> {
+/// Shared with Via's sent-by, where RFC 3261 §25.1 makes the colon `SWS ":" SWS`,
+/// so both halves are trimmed.
+pub(super) fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriError> {
+    let s = s.trim_matches([' ', '\t', '\r', '\n']);
     if s.is_empty() {
         return Err(UriError::NoHost);
     }
@@ -472,8 +475,9 @@ fn parse_hostport(s: &str) -> Result<(HostRef<'_>, Option<u16>), UriError> {
     }
 
     let (host, tail) = match s.rfind(':') {
+        // COLON is SWS ":" SWS where this is shared with Via's sent-by
         Some(i) => (
-            s.get(..i).unwrap_or_default(),
+            s.get(..i).unwrap_or_default().trim_ascii_end(),
             s.get(i..).unwrap_or_default(),
         ),
         None => (s, ""),
@@ -496,6 +500,7 @@ fn parse_port(tail: &str) -> Result<Option<u16>, UriError> {
         None if tail.is_empty() => Ok(None),
         None => Err(UriError::BadPort),
         Some(digits) => {
+            let digits = digits.trim_ascii_start();
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(UriError::BadPort);
             }

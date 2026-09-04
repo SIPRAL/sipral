@@ -617,6 +617,38 @@ v=0\n";
     }
 
     #[test]
+    fn via_values_come_back_in_the_order_a_response_must_follow() {
+        use crate::msg::HostRef;
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP first;branch=z9hG4bK1, SIP/2.0/TCP second;branch=z9hG4bK2\r\n\
+v: SIP/2.0/TLS third;branch=z9hG4bK3\r\n\
+\r\n",
+            &mut scratch,
+        );
+        let hosts: Vec<_> = m.via().filter_map(Result::ok).map(|v| v.host).collect();
+        assert_eq!(
+            hosts,
+            vec![
+                HostRef::Name("first"),
+                HostRef::Name("second"),
+                HostRef::Name("third"),
+            ]
+        );
+        assert_eq!(m.top_via().expect("top").host, HostRef::Name("first"));
+    }
+
+    #[test]
+    fn a_message_with_no_via_says_so_rather_than_guessing() {
+        use crate::msg::HeaderError;
+        let mut scratch = ParseScratch::new();
+        let m = ok(b"SIP/2.0 200 OK\r\n\r\n", &mut scratch);
+        assert_eq!(m.top_via(), Err(HeaderError::Missing));
+        assert_eq!(m.via().count(), 0);
+    }
+
+    #[test]
     fn a_field_that_may_appear_once_and_appears_twice_is_refused() {
         // RFC 4475 3.3.8
         use crate::msg::HeaderError;
