@@ -530,6 +530,21 @@ pub struct OwnedMessage {
 }
 
 impl OwnedMessage {
+    /// Take ownership of a buffer that was just parsed, without copying it a
+    /// second time.
+    ///
+    /// `bytes` has to be the buffer `raw` was parsed from, which is why this
+    /// is not public: every span is an offset into it. The builders use it so
+    /// that writing a message costs one allocation rather than two.
+    pub(super) fn adopt(bytes: Arc<[u8]>, raw: &RawMessage<'_>) -> Self {
+        Self {
+            bytes,
+            start: raw.start,
+            headers: Arc::from(raw.headers),
+            body: raw.body,
+        }
+    }
+
     /// A borrowed view, with the whole accessor surface on it.
     #[must_use]
     pub fn as_raw(&self) -> RawMessage<'_> {

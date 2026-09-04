@@ -127,6 +127,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   because the six RFC 3261 verbs are fixed-case literals in the grammar and
   `Allow: invite` is an extension method that happens to be spelled like one
   of them.
+- `sipral-core::msg::RequestBuilder` and `ResponseBuilder`: writing a message
+  out. Deterministic — same inputs, same bytes, whatever order the setters were
+  called in — because a retransmission has to be the identical datagram and a
+  byte-comparing test is worth nothing otherwise. `Via` goes first, then the
+  routing and dialog fields, then whatever else the caller added, then the
+  body's two fields; `Content-Length` is always written, since a stream
+  transport has no other way to find the end of a message. A response copies
+  what RFC 3261 §8.2.6.2 says must be equal, adds a `To` tag only when the
+  request carried none, and copies `Record-Route` only when asked, because
+  §12.1.1 requires that of a response establishing a dialog and only the
+  caller knows whether this is one. No value may hold CR or LF: a header value
+  goes out on one line, and a caller's data with a line break in it would
+  otherwise write headers of its own.
+- `StatusCode::reason`: the reason phrases RFC 3261 §21 registers, plus 422
+  from RFC 4028, so nobody has to invent one.
 - `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK
   answers INVITE, since the INVITE server transaction absorbs the ACK to a
   non-2xx and an ACK to a 2xx finds nothing under that key and belongs to the

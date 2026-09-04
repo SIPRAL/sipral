@@ -13,6 +13,7 @@
 
 mod addr;
 mod auth;
+mod builder;
 mod error;
 mod header;
 mod lex;
@@ -28,6 +29,7 @@ mod via;
 
 pub use addr::{ContactIter, Contacts, NameAddrRef};
 pub use auth::{AuthParams, ChallengeRef, CredentialsRef};
+pub use builder::{BuildError, RequestBuilder, ResponseBuilder};
 pub use error::{HeaderError, ParseError};
 pub use header::HeaderName;
 pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};

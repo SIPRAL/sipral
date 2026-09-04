@@ -177,6 +177,74 @@ impl StatusCode {
     pub const fn is_final(self) -> bool {
         !self.is_provisional()
     }
+
+    /// The reason phrase RFC 3261 §21 registers for this code, if it
+    /// registers one.
+    ///
+    /// The phrase is for a person to read (§7.2), so a caller is free to send
+    /// something else; this is the default so that nobody has to invent one.
+    /// 422 comes from RFC 4028 §6.
+    #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the table stays in the RFC's order so it can be read against §21; 406 and 606 do share a phrase"
+    )]
+    pub const fn reason(self) -> Option<&'static str> {
+        Some(match self.0 {
+            100 => "Trying",
+            180 => "Ringing",
+            181 => "Call Is Being Forwarded",
+            182 => "Queued",
+            183 => "Session Progress",
+            200 => "OK",
+            300 => "Multiple Choices",
+            301 => "Moved Permanently",
+            302 => "Moved Temporarily",
+            305 => "Use Proxy",
+            380 => "Alternative Service",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            402 => "Payment Required",
+            403 => "Forbidden",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            406 => "Not Acceptable",
+            407 => "Proxy Authentication Required",
+            408 => "Request Timeout",
+            410 => "Gone",
+            413 => "Request Entity Too Large",
+            414 => "Request-URI Too Long",
+            415 => "Unsupported Media Type",
+            416 => "Unsupported URI Scheme",
+            420 => "Bad Extension",
+            421 => "Extension Required",
+            422 => "Session Interval Too Small",
+            423 => "Interval Too Brief",
+            480 => "Temporarily Unavailable",
+            481 => "Call/Transaction Does Not Exist",
+            482 => "Loop Detected",
+            483 => "Too Many Hops",
+            484 => "Address Incomplete",
+            485 => "Ambiguous",
+            486 => "Busy Here",
+            487 => "Request Terminated",
+            488 => "Not Acceptable Here",
+            491 => "Request Pending",
+            493 => "Undecipherable",
+            500 => "Server Internal Error",
+            501 => "Not Implemented",
+            502 => "Bad Gateway",
+            503 => "Service Unavailable",
+            504 => "Server Time-out",
+            505 => "Version Not Supported",
+            513 => "Message Too Large",
+            600 => "Busy Everywhere",
+            603 => "Decline",
+            604 => "Does Not Exist Anywhere",
+            606 => "Not Acceptable",
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for StatusCode {
@@ -253,5 +321,28 @@ mod tests {
         assert!(StatusCode::OK.is_success());
         assert!(StatusCode::BUSY_HERE.is_final());
         assert!(!StatusCode::BUSY_HERE.is_success());
+    }
+
+    #[test]
+    fn the_registered_reason_phrases_come_from_the_rfc() {
+        assert_eq!(StatusCode::TRYING.reason(), Some("Trying"));
+        assert_eq!(StatusCode::OK.reason(), Some("OK"));
+        assert_eq!(StatusCode::SERVER_TIMEOUT.reason(), Some("Server Time-out"));
+        // RFC 4028 6
+        assert_eq!(
+            StatusCode::new(422).expect("a status").reason(),
+            Some("Session Interval Too Small")
+        );
+        // 406 and 606 share a phrase, and both are registered
+        assert_eq!(
+            StatusCode::new(406).expect("a status").reason(),
+            Some("Not Acceptable")
+        );
+        assert_eq!(
+            StatusCode::new(606).expect("a status").reason(),
+            Some("Not Acceptable")
+        );
+        // a code nobody registered has no phrase to offer
+        assert_eq!(StatusCode::new(499).expect("a status").reason(), None);
     }
 }

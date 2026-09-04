@@ -370,40 +370,59 @@ pub enum HeaderName<'a> {
 // `HeaderName::KNOWN` lists every recognised field, so a test can assert that
 // the long form, the compact form and the table cannot drift apart.
 
+// The sent-protocol is three open tokens, not an enum: protocol-name and
+// protocol-version are `token` in the grammar and other-transport is an
+// extension point RFC 4475 `transports` exercises.
 pub struct ViaRef<'a> {
-    pub transport: TransportProtocol,
-    pub sent_by_host: HostRef<'a>,
-    pub sent_by_port: Option<u16>,
-    pub branch: Option<BranchRef<'a>>,
-    pub received: Option<HostRef<'a>>,
-    /// RFC 3581. `Some(None)`: rport requested. `Some(Some(p))`: echoed back.
-    pub rport: Option<Option<u16>>,
+    pub protocol_name: &'a str,
+    pub protocol_version: &'a str,
+    pub transport: &'a str,
+    pub host: HostRef<'a>,
+    pub port: Option<u16>,
 }
 
-pub struct RequestBuilder { /* owned inputs only */ }
-impl RequestBuilder {
-    pub fn new(method: OwnedMethod, request_uri: Uri) -> Self;
-    pub fn via(self, via: ViaBuf) -> Self;
-    pub fn from(self, from: NameAddr) -> Self;
-    pub fn to(self, to: NameAddr) -> Self;
-    pub fn call_id(self, call_id: CallId) -> Self;
-    pub fn cseq(self, seq: u32) -> Self;
-    pub fn max_forwards(self, n: u8) -> Self;
-    pub fn contact(self, contact: NameAddr) -> Self;
-    pub fn route(self, route_set: impl IntoIterator<Item = Uri>) -> Self;
-    pub fn header(self, name: HeaderName<'_>, value: impl Into<HeaderValue>) -> Self;
-    pub fn body(self, content_type: &str, body: Arc<[u8]>) -> Self;
+impl<'a> ViaRef<'a> {
+    pub fn branch(&self) -> Option<Cow<'a, [u8]>>;
+    pub fn has_magic_cookie(&self) -> bool;
+    pub fn received(&self) -> Option<IpAddr>;          // bare IPv6 here, unlike sent-by
+    pub fn rport(&self) -> Result<Rport, HeaderError>;
+    pub fn ttl(&self) -> Result<Option<u8>, HeaderError>;
+    pub fn maddr(&self) -> Option<Cow<'a, [u8]>>;
+    pub fn params(&self) -> Params<'a>;
+}
+
+/// RFC 3581. `;rport` asks, `;rport=n` answers, and `;rport=` is neither.
+pub enum Rport { Absent, Requested, Given(u16) }
+
+pub struct RequestBuilder<'a> { /* borrowed inputs, copied once at build */ }
+impl<'a> RequestBuilder<'a> {
+    pub fn new(method: Method<'a>, request_uri: &'a [u8]) -> Self;
+    pub fn via(self, value: &'a [u8]) -> Self;        // again for another, topmost first
+    pub fn from(self, value: &'a [u8]) -> Self;
+    pub fn to(self, value: &'a [u8]) -> Self;
+    pub fn call_id(self, value: &'a [u8]) -> Self;
+    pub fn cseq(self, seq: u32) -> Self;              // method taken from the request
+    pub fn max_forwards(self, n: u32) -> Self;
+    pub fn contact(self, value: &'a [u8]) -> Self;
+    pub fn route(self, value: &'a [u8]) -> Self;      // again for the next hop, in order
+    pub fn header(self, name: HeaderName<'a>, value: &'a [u8]) -> Self;
+    pub fn body(self, content_type: &'a [u8], body: &'a [u8]) -> Self;
     pub fn build(self) -> Result<OwnedMessage, BuildError>;
 }
 
-pub struct ResponseBuilder { /* seeded from the request: Via in order, From, Call-ID, CSeq, RFC 3261 §8.2.6.2 */ }
-impl ResponseBuilder {
-    pub fn for_request(request: &RawMessage<'_>, status: StatusCode, local_tag: Option<Tag>) -> Self;
-    pub fn contact(self, contact: NameAddr) -> Self;
-    pub fn header(self, name: HeaderName<'_>, value: impl Into<HeaderValue>) -> Self;
-    pub fn body(self, content_type: &str, body: Arc<[u8]>) -> Self;
+pub struct ResponseBuilder<'a> { /* seeded from the request per RFC 3261 §8.2.6.2 */ }
+impl<'a> ResponseBuilder<'a> {
+    pub fn for_request(request: &RawMessage<'a>, status: StatusCode) -> Self;
+    pub fn to_tag(self, tag: &'a [u8]) -> Self;       // only if the request had none
+    pub fn copy_record_route(self, request: &RawMessage<'a>) -> Self;
+    pub fn reason(self, reason: &'a [u8]) -> Self;
+    pub fn contact(self, value: &'a [u8]) -> Self;
+    pub fn header(self, name: HeaderName<'a>, value: &'a [u8]) -> Self;
+    pub fn body(self, content_type: &'a [u8], body: &'a [u8]) -> Self;
     pub fn build(self) -> Result<OwnedMessage, BuildError>;
 }
+
+pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), NotWellFormed(ParseError) }
 
 /// Reassembles TCP and TLS bytes into messages. The one place inbound bytes
 /// must be copied into an accumulation buffer, because a message can arrive
@@ -424,6 +443,22 @@ impl StreamFramer {
 Bounds are configuration, and every one has a default that stops a hostile
 peer from making the parser do unbounded work: message size, header count,
 header value length.
+
+The builders take borrowed input and copy once at `build()`. The owned forms
+are for state a dialog keeps between calls; a builder lives inside one step of
+a state machine, and making it own its inputs would only mean allocating them
+twice. What comes out is deterministic — same inputs, same bytes, whatever
+order the setters were called in — because a retransmission has to be the
+identical datagram (§17.1.1.2) and a byte-comparing test is worth nothing
+otherwise. Field order is fixed: `Via` first, then routing and dialog fields,
+then whatever else the caller added in the order it was added, then
+`Content-Type` and `Content-Length` around the body. `Content-Length` is
+always written, since a stream transport has no other way to find the end.
+
+No value may contain CR or LF: a header value goes out on one line, so a
+caller's data with a line break in it would be writing headers of its own.
+`build()` parses what it wrote and hands back the failure rather than
+shipping a message the far end will reject.
 
 ## Input and output
 
