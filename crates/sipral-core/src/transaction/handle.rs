@@ -323,24 +323,11 @@ impl fmt::Debug for ProvisionalResponseId {
     }
 }
 
-/// A transport the caller opened, named by the caller.
-///
-/// The endpoint never opens a socket and never owns one; it is told which
-/// transports exist and asked to write bytes to them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TransportId(pub u32);
-
-impl fmt::Display for TransportId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "transport {}", self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient,
-        ProvisionalResponseId, Raw, Role, TransactionId, TransactionKind, TransportId,
+        ProvisionalResponseId, Raw, Role, TransactionId, TransactionKind,
     };
     use std::collections::HashSet;
 
@@ -408,11 +395,5 @@ mod tests {
         assert_eq!(from_left.rseq(), from_right.rseq());
         assert_ne!(from_left.dialog(), from_right.dialog());
         assert_ne!(from_left, from_right);
-    }
-
-    #[test]
-    fn a_transport_is_named_by_whoever_opened_it() {
-        assert_eq!(TransportId(4).to_string(), "transport 4");
-        assert!(TransportId(1) < TransportId(2));
     }
 }

@@ -52,15 +52,18 @@ pub struct TimerConfig {
 
 impl Default for TimerConfig {
     fn default() -> Self {
-        Self {
-            t1: Duration::from_millis(500),
-            t2: Duration::from_secs(4),
-            t4: Duration::from_secs(5),
-        }
+        Self::DEFAULT
     }
 }
 
 impl TimerConfig {
+    /// Table 4's own values: T1 500 ms, T2 4 s, T4 5 s.
+    pub const DEFAULT: Self = Self {
+        t1: Duration::from_millis(500),
+        t2: Duration::from_secs(4),
+        t4: Duration::from_secs(5),
+    };
+
     /// 64·T1, which is B, F, H, L and M, and J on an unreliable transport.
     #[must_use]
     pub const fn sixty_four_t1(&self) -> Duration {

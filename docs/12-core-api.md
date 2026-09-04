@@ -74,6 +74,8 @@ impl ProvisionalResponseId {
 }
 
 /// Caller-assigned. The endpoint never opens a socket and never owns one.
+/// Lives in the endpoint module rather than with the transaction handles: a
+/// transport outlives every transaction that ever used it.
 pub struct TransportId(pub u32);
 ```
 
@@ -578,13 +580,38 @@ bytes without asking again. The ACK for a non-2xx is the transaction's
 ## Input and output
 
 ```rust
+/// UDP, TCP and TLS in phase 1. WS and WSS are named because RFC 7118
+/// registers them as `sent-protocol` transports and a `Via` carrying one is
+/// not malformed; the rest of RFC 7118 is phase 2.
+pub enum TransportProtocol { Udp, Tcp, Tls, Ws, Wss }
+impl TransportProtocol {
+    pub fn as_str(self) -> &'static str;              // the Via token: UDP, TCP, TLS, WS, WSS
+    pub fn from_token(token: &[u8]) -> Option<Self>;  // case-insensitive, §7.3.1
+    pub fn is_reliable(self) -> bool;                 // what §17 keys timers D, I, J, K on
+    pub fn is_stream(self) -> bool;                   // needs Content-Length framing: TCP, TLS
+    pub fn is_secure(self) -> bool;                   // what a sips: URI asks for
+    pub fn default_port(self) -> Option<u16>;         // 5060/5061 (§18.1.1); none for WS
+}
+
+/// A host that outlived the message it was read out of, because resolution
+/// happens outside and the answer comes back later.
+pub enum Host { Name(Arc<str>), Ip(IpAddr) }
+
 pub enum Input<'a> {
     Datagram { transport: TransportId, remote: SocketAddr, local: SocketAddr, data: &'a [u8] },
     StreamData { transport: TransportId, data: &'a [u8] },
     StreamClosed { transport: TransportId },
-    TransportBound { transport: TransportId, protocol: TransportProtocol, local: SocketAddr },
+    /// `local` is what goes into the `Via` of everything sent on this
+    /// transport, so a caller bound to a wildcard address says here which
+    /// address the far end can reach it at. `remote` is the far end of a
+    /// connection and `None` for a datagram socket, which has many.
+    TransportBound { transport: TransportId, protocol: TransportProtocol, local: SocketAddr, remote: Option<SocketAddr> },
     TransportFailed { transport: TransportId, error: TransportErrorKind },
 }
+
+/// Coarse on purpose: §17 has one reaction to all of them — tell the user,
+/// terminate — and the real message is still in the caller's log.
+pub enum TransportErrorKind { ConnectionRefused, ConnectionReset, Unreachable, TimedOut, Closed, Other }
 
 pub struct Transmit {
     pub transport: TransportId,
@@ -607,15 +634,27 @@ library would. The endpoint asks for a host and receives addresses.
 ## Endpoint operations
 
 ```rust
+/// RFC 3261 §18.1.1 as two numbers: "within 200 bytes of the path MTU, or
+/// larger than 1300 bytes and the path MTU is unknown".
+pub struct DatagramLimit {
+    pub path_mtu: Option<u32>,                 // None: use the 1300-byte rule
+    pub headroom_bytes: u32,                   // 200: room for a larger response
+    pub max_datagram_bytes: u32,               // 1 300
+}
+impl DatagramLimit {
+    pub fn too_big_for_a_datagram(&self, request_bytes: usize) -> bool;
+}
+
 pub struct EndpointConfig {
     pub timers: TimerConfig,
     pub parse_mode: ParseMode,                 // Lenient
     pub limits: Limits,                        // the parser's bounds, above
-    pub mtu_known: Option<u32>,                // None: use the 1300-byte rule
-    pub udp_to_tcp_switch_bytes: u32,          // 1 300, RFC 3261 §18.1.1
+    pub datagram_limit: DatagramLimit,
     pub always_request_rport: bool,            // true, RFC 3581 (a MAY, chosen)
     /// Double-CRLF keepalive on stream transports (RFC 5626 §4.4.1), emitted
-    /// as a `Transmit` when due. `None` disables it. Default 25 s, see `03`.
+    /// as a `Transmit` when due. `None` disables it. An upper bound rather
+    /// than a period: §4.4.1 requires the interval to be drawn at random
+    /// between it and 20% below it. Default 25 s, see `03`.
     pub keepalive_interval: Option<Duration>,
 }
 

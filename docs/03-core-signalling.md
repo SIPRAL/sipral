@@ -71,12 +71,17 @@ the socket.
   behaviour: responses go back where the request came from, not where the `Via`
   claims.
 - **Keepalive.** Double-CRLF on connection-oriented transports (RFC 5626
-  §4.4.1), or `OPTIONS` where a registrar wants a request. The interval is a
-  design choice, not a spec value: 25 s by default, because typical NAT UDP
-  bindings expire at 30 s and the RFC 5626 default of 120 s for TCP would drop
-  most of them; tunable per endpoint. The core owns the CRLF timer and emits
-  the keepalive as a `Transmit`; the `OPTIONS` variant, and any per-account
-  policy, live in `sipral-ua`, which has accounts and the core does not.
+  §4.4.1), or `OPTIONS` where a registrar wants a request. The interval is an
+  upper bound, not a period: §4.4.1 requires it to be drawn at random between
+  the bound and 20% below it, so that a server does not receive every client's
+  ping at the same instant. The bound is 25 s by default rather than the 120 s
+  the RFC suggests, because that figure assumes a network which leaves an idle
+  TCP connection alone for over two minutes and carrier-grade NATs routinely do
+  not; a softphone that notices a dead flow two minutes late has missed the call
+  it exists for. The cost is four bytes per connection per interval. Tunable per
+  endpoint. The core owns the CRLF timer and emits the keepalive as a
+  `Transmit`; the `OPTIONS` variant, and any per-account policy, live in
+  `sipral-ua`, which has accounts and the core does not.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 

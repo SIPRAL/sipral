@@ -27,6 +27,7 @@
 
 pub mod auth;
 pub mod dialog;
+pub mod endpoint;
 pub mod msg;
 pub mod sdp;
 pub mod transaction;

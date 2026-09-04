@@ -258,6 +258,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the transaction: the caller builds it once, since only the caller knows
   whether there is an answer to put in it, and every retransmitted 2xx after
   that is answered from the stored bytes.
+- `sipral-core::endpoint`: what a transport is to a stack that never opens one.
+  `TransportProtocol` derives from the protocol alone everything the RFCs make
+  conditional on the transport — reliability, which is what RFC 3261 §17 sets
+  timers D, I, J and K to zero on; framing, which is why TCP and TLS need
+  `Content-Length` and WebSocket does not, since RFC 7118 §4.2 puts one SIP
+  message in each WebSocket message; and the default ports of §18.1.1.
+  `Input` and `Transmit` are the two directions of the whole surface, with the
+  payload refcounted because a retransmission has to be the identical datagram.
+  `DatagramLimit` is §18.1.1's size rule as two numbers, both settable because
+  the RFC's 1300 assumes a 1500-byte Ethernet MTU that plenty of access
+  networks do not have.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4
