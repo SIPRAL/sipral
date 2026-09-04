@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use super::addr::{ContactIter, Contacts, NameAddrRef};
 use super::error::HeaderError;
 use super::header::HeaderName;
 use super::lex::{CommaList, trim};
@@ -152,6 +153,21 @@ impl<'a> RawMessage<'a> {
         self.header_values(name).count()
     }
 
+    /// Every value of one comma-separated field, in wire order.
+    ///
+    /// RFC 3261 §7.3.1 makes several lines of such a field and one line with
+    /// commas the same message, so this walks both: line by line, and within
+    /// each line comma by comma, with quotes and `<...>` respected.
+    #[must_use]
+    pub fn field_values(&self, name: HeaderName<'a>) -> FieldValues<'a> {
+        FieldValues {
+            buf: self.buf,
+            slots: self.headers.iter(),
+            name,
+            current: None,
+        }
+    }
+
     /// The one value of a field that may appear only once.
     ///
     /// # Errors
@@ -174,9 +190,7 @@ impl<'a> RawMessage<'a> {
     /// values in wire order, because RFC 3261 §7.3.1 says the two spellings
     /// have to mean the same thing. The top one is the first item.
     pub fn via(&self) -> impl Iterator<Item = Result<ViaRef<'a>, HeaderError>> + use<'a> {
-        self.header_values(HeaderName::Via)
-            .flat_map(CommaList::new)
-            .map(ViaRef::parse)
+        self.field_values(HeaderName::Via).map(ViaRef::parse)
     }
 
     /// The topmost `Via`, which is the one the transport layer answers to.
@@ -194,6 +208,54 @@ impl<'a> RawMessage<'a> {
     /// See [`RawMessage::single`].
     pub fn call_id(&self) -> Result<&'a [u8], HeaderError> {
         self.single(HeaderName::CallId).map(trim)
+    }
+
+    /// `From` (RFC 3261 §20.20).
+    ///
+    /// One value, never a list: `from-spec` has no `COMMA` alternative, so a
+    /// second address on the line is a malformed field rather than a second
+    /// caller.
+    ///
+    /// # Errors
+    /// See [`NameAddrRef::parse`] and [`RawMessage::single`].
+    pub fn from(&self) -> Result<NameAddrRef<'a>, HeaderError> {
+        NameAddrRef::parse(self.single(HeaderName::From)?)
+    }
+
+    /// `To` (RFC 3261 §20.39). One value, for the same reason as `From`.
+    ///
+    /// # Errors
+    /// See [`NameAddrRef::parse`] and [`RawMessage::single`].
+    pub fn to(&self) -> Result<NameAddrRef<'a>, HeaderError> {
+        NameAddrRef::parse(self.single(HeaderName::To)?)
+    }
+
+    /// `Contact` (RFC 3261 §20.10): the addresses, or the `*` wildcard.
+    ///
+    /// A message with no `Contact` gives an empty iterator, not an error —
+    /// most requests carry none.
+    ///
+    /// # Errors
+    /// [`HeaderError::Malformed`] when `*` arrives alongside an address. The
+    /// grammar offers `STAR` *or* the list, so the two together are outside
+    /// it, however sensible each half looks on its own.
+    pub fn contact(&self) -> Result<Contacts<'a>, HeaderError> {
+        let values = self.field_values(HeaderName::Contact);
+        let mut count = 0_usize;
+        let mut star = false;
+        for value in values.clone() {
+            count += 1;
+            star |= matches!(trim(value), b"*");
+        }
+        if star {
+            if count > 1 {
+                return Err(HeaderError::Malformed(
+                    "Contact: * is the whole field or nothing",
+                ));
+            }
+            return Ok(Contacts::Star);
+        }
+        Ok(Contacts::Addrs(ContactIter::new(values)))
     }
 
     /// `CSeq` (RFC 3261 §20.16).
@@ -267,6 +329,35 @@ impl<'a> RawMessage<'a> {
             start: self.start,
             headers: Arc::from(self.headers),
             body: self.body,
+        }
+    }
+}
+
+/// Every value of one field, across the lines it appears on and across the
+/// commas within them, in wire order.
+#[derive(Clone, Debug)]
+pub struct FieldValues<'a> {
+    buf: &'a [u8],
+    slots: core::slice::Iter<'a, HeaderSlot>,
+    name: HeaderName<'a>,
+    current: Option<CommaList<'a>>,
+}
+
+impl<'a> Iterator for FieldValues<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(list) = self.current.as_mut()
+                && let Some(value) = list.next()
+            {
+                return Some(value);
+            }
+            self.current = None;
+            let slot = self.slots.next()?;
+            if HeaderName::from_bytes(slot.name.slice(self.buf)).is_some_and(|n| n == self.name) {
+                self.current = Some(CommaList::new(slot.value.slice(self.buf)));
+            }
         }
     }
 }

@@ -79,6 +79,31 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `Arc`s, so a message the stack keeps costs one copy and a clone costs none.
   Bytes past the body are left behind, so a second request sharing a datagram
   is not carried along.
+- `sipral-core::msg::scalar`: the fields that carry a number, and `CSeq`, which
+  carries one and a method. The separator inside `CSeq` and `RAck` is `LWS`, so
+  a fold between the digits and the method still reads. Overflow is two rules,
+  not one: a `CSeq` that does not fit in 32 bits is refused, while an `Expires`
+  parses and reports that it did not fit, because the RFC lets an element fall
+  back to its default there. Nothing is truncated, so a hundred-digit `Expires`
+  cannot become a plausible small number.
+- `sipral-core::msg::ViaRef`: the field that decides where a response goes.
+  `SLASH` and `COLON` absorb surrounding whitespace, so the two slashes are
+  located before anything else; `received` carries an IPv6 address without
+  brackets, unlike everywhere else, and accepts them anyway because they are
+  sent; `ttl` is `1*3DIGIT`, so `;ttl=1234` is not a ttl at all; `rport` has
+  three states and `;rport=` is none of them. A `Via` with no branch is an RFC
+  2543 peer to be matched per §17.2.3, not a malformed header.
+- `sipral-core::msg::NameAddrRef`: `From`, `To` and `Contact`. The angle
+  brackets decide who owns the parameters — inside them `;transport=tcp` is on
+  the URI, outside them it is on the header field — and RFC 4475 `cparam01` and
+  `cparam02` are one address written both ways to catch a stack that cannot
+  tell. Whitespace lives outside the brackets, so `< sip:a@b >` is refused; a
+  display name is a token run or a quoted string and nothing else, so
+  `Bell, Alexander <sip:...>` is refused while `caller<sip:...>` is accepted as
+  the documented grammar defect it is; an unterminated quoted string is refused
+  rather than guessed at. `Contact: *` is the whole field or nothing.
+  `RawMessage` gains `from`, `to`, `contact` and `field_values`, the last
+  walking a comma-separated field across its lines and its commas alike.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

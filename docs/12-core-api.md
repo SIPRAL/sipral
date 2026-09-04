@@ -152,20 +152,34 @@ impl<'a> RawMessage<'a> {
     pub fn raw_headers(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])>;
     pub fn header_slots(&self) -> &'a [HeaderSlot];
 
-    pub fn via(&self) -> ViaIter<'a, '_>;
-    pub fn call_id(&self) -> Result<CallIdRef<'a>, HeaderError>;
+    /// Values of a comma-separated field: line by line, and within each line
+    /// comma by comma, with quotes and `<...>` respected. RFC 3261 §7.3.1
+    /// makes the two spellings the same message.
+    pub fn field_values(&self, name: HeaderName<'a>) -> FieldValues<'a>;
+
+    pub fn via(&self) -> impl Iterator<Item = Result<ViaRef<'a>, HeaderError>>;
+    pub fn top_via(&self) -> Result<ViaRef<'a>, HeaderError>;
+    pub fn call_id(&self) -> Result<&'a [u8], HeaderError>;
     pub fn from(&self) -> Result<NameAddrRef<'a>, HeaderError>;
     pub fn to(&self) -> Result<NameAddrRef<'a>, HeaderError>;
-    pub fn cseq(&self) -> Result<CSeqRef<'a>, HeaderError>;
-    pub fn contact(&self) -> ContactIter<'a, '_>;
-    pub fn route(&self) -> RouteIter<'a, '_>;
-    pub fn record_route(&self) -> RouteIter<'a, '_>;
-    pub fn max_forwards(&self) -> Option<Result<u8, HeaderError>>;
-    pub fn content_length(&self) -> Option<Result<u32, HeaderError>>;
-    pub fn content_type(&self) -> Option<Result<&'a str, HeaderError>>;
-    pub fn expires(&self) -> Option<Result<u32, HeaderError>>;
-    pub fn require(&self) -> TokenIter<'a, '_>;
-    pub fn supported(&self) -> TokenIter<'a, '_>;
+    pub fn cseq(&self) -> Result<CSeq<'a>, HeaderError>;
+    pub fn contact(&self) -> Result<Contacts<'a>, HeaderError>;
+    pub fn route(&self) -> RouteIter<'a>;
+    pub fn record_route(&self) -> RouteIter<'a>;
+    pub fn max_forwards(&self) -> Result<Digits, HeaderError>;
+    pub fn content_length(&self) -> Result<Digits, HeaderError>;
+    pub fn content_type(&self) -> Result<&'a str, HeaderError>;
+    pub fn expires(&self) -> Result<Digits, HeaderError>;
+    pub fn rseq(&self) -> Result<u32, HeaderError>;
+    pub fn rack(&self) -> Result<RAck<'a>, HeaderError>;
+    pub fn require(&self) -> TokenIter<'a>;
+    pub fn supported(&self) -> TokenIter<'a>;
+
+    /// One value of a field that may appear only once. `Missing` when it is
+    /// absent, `UnexpectedRepeat` when it is not; RFC 4475 §3.3.8 is a message
+    /// that repeats `Call-ID`, and picking one value silently is how a stack
+    /// ends up disagreeing with the proxy in front of it.
+    pub fn single(&self, name: HeaderName<'_>) -> Result<&'a [u8], HeaderError>;
 
     /// The method the transaction table is keyed on for this inbound message.
     /// Equal to the start line's method except for an ACK to a non-2xx, which
@@ -221,6 +235,50 @@ contain `;` and `?` unescaped (RFC 3261 §25.1 `user-unreserved`). In
 `sip:user;par=u%40example.net@example.com` the user is
 `user;par=u%40example.net` and the host is `example.com`; splitting on the
 first `;` gets both wrong. That URI is in the corpus for exactly this reason.
+
+An address is the URI plus what surrounds it, and the angle brackets are the
+part that carries meaning:
+
+```rust
+pub struct NameAddrRef<'a> {
+    // display name, URI and header parameters, all borrowed
+}
+
+impl<'a> NameAddrRef<'a> {
+    pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError>;
+    pub fn display_name(&self) -> Option<Cow<'a, [u8]>>;   // unfolded, unquoted
+    pub fn display_name_raw(&self) -> Option<&'a [u8]>;
+    pub fn uri(&self) -> UriRef<'a>;
+    pub fn uri_bytes(&self) -> &'a [u8];
+    pub fn is_name_addr(&self) -> bool;                    // came in <...>
+    pub fn params(&self) -> Params<'a>;                    // header's, never the URI's
+    pub fn tag(&self) -> Option<Cow<'a, [u8]>>;
+    pub fn expires(&self) -> Result<Option<Digits>, HeaderError>;
+    pub fn q(&self) -> Result<Option<u16>, HeaderError>;   // thousandths: 0.7 is 700
+}
+
+pub enum Contacts<'a> {
+    Star,                       // Contact: *
+    Addrs(ContactIter<'a>),
+}
+```
+
+With brackets, `;transport=tcp` before the `>` belongs to the URI; without
+them the same text is a parameter of the header field (RFC 3261 §20.10). RFC
+4475 `cparam01` and `cparam02` are one address written both ways, and
+`is_name_addr()` is how a caller tells which object to ask. The whitespace
+lives outside the brackets — `LAQUOT` is `SWS "<"` — so `< sip:a@b >` is
+refused, which is all of RFC 4475 §3.1.2.14.
+
+`q` is thousandths rather than a float because `qvalue` is at most three
+decimals and at most 1.0: every legal value is exact, and nothing rounds.
+
+Numbers are `Digits { value: Option<u32>, written: usize }` rather than a bare
+`u32`, because a field of legal digits too large for 32 bits is not the same
+as a malformed one. `CSeq` refuses it (RFC 3261 §8.1.1.5 requires 32 bits, and
+RFC 4475 §3.1.2.4 wants a 400); `Expires` parses and reports that it did not
+fit, since §20 lets an element fall back to its default. Truncating would turn
+RFC 4475 `scalar02`'s hundred-digit `Expires` into a plausible small number.
 
 The borrowed/owned pairs follow one pattern throughout: `SipUriRef<'a>` / `Uri`,
 `NameAddrRef<'a>` / `NameAddr`, `ViaRef<'a>` / `ViaBuf`, `TagRef<'a>` / `Tag`,

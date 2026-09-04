@@ -11,6 +11,7 @@
 //! Written from RFC 3261 §7 and §25, and tested against the RFC 4475 corpus in
 //! `fixtures/rfc4475/`.
 
+mod addr;
 mod error;
 mod header;
 mod lex;
@@ -22,10 +23,11 @@ mod span;
 mod uri;
 mod via;
 
+pub use addr::{ContactIter, Contacts, NameAddrRef};
 pub use error::{HeaderError, ParseError};
 pub use header::HeaderName;
 pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unquote};
-pub use message::{MessageKind, OwnedMessage, RawMessage};
+pub use message::{FieldValues, MessageKind, OwnedMessage, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
 pub use scalar::{CSeq, Digits, RAck, digits, rseq};

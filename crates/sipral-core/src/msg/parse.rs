@@ -617,6 +617,83 @@ v=0\n";
     }
 
     #[test]
+    fn the_address_accessors_read_the_message() {
+        let mut scratch = ParseScratch::new();
+        let m = ok(INVITE, &mut scratch);
+        let from = m.from().expect("a From");
+        assert_eq!(from.display_name().as_deref(), Some(&b"Alice"[..]));
+        assert_eq!(from.tag().as_deref(), Some(&b"1928301774"[..]));
+        assert_eq!(from.uri_bytes(), b"sip:alice@example.com");
+        let to = m.to().expect("a To");
+        assert_eq!(to.display_name().as_deref(), Some(&b"Bob"[..]));
+        assert_eq!(to.tag(), None);
+    }
+
+    #[test]
+    fn contact_values_come_from_every_line_and_every_comma() {
+        use crate::msg::Contacts;
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"REGISTER sip:example.com SIP/2.0\r\n\
+Contact: \"Mr. Watson\" <sip:watson@worcester.example.com>;q=0.7;expires=3600\r\n\
+m: <sip:watson@example.net>;q=0.1, <sip:watson@example.org>\r\n\
+\r\n",
+            &mut scratch,
+        );
+        let Ok(Contacts::Addrs(addrs)) = m.contact() else {
+            panic!("expected a list of contacts");
+        };
+        let hosts: Vec<_> = addrs
+            .filter_map(Result::ok)
+            .map(|a| a.uri_bytes().to_vec())
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![
+                b"sip:watson@worcester.example.com".to_vec(),
+                b"sip:watson@example.net".to_vec(),
+                b"sip:watson@example.org".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_contact_wildcard_is_the_whole_field_or_nothing() {
+        use crate::msg::{Contacts, HeaderError};
+        let mut scratch = ParseScratch::new();
+        assert!(matches!(
+            ok(
+                b"REGISTER sip:example.com SIP/2.0\r\nContact: *\r\nExpires: 0\r\n\r\n",
+                &mut scratch,
+            )
+            .contact(),
+            Ok(Contacts::Star)
+        ));
+
+        let mut scratch = ParseScratch::new();
+        // RFC 3261 25.1: the grammar offers STAR or the list, never both
+        assert!(matches!(
+            ok(
+                b"REGISTER sip:example.com SIP/2.0\r\nContact: *\r\nContact: <sip:a@b.example>\r\n\r\n",
+                &mut scratch,
+            )
+            .contact(),
+            Err(HeaderError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_message_with_no_contact_has_no_contacts_rather_than_an_error() {
+        use crate::msg::Contacts;
+        let mut scratch = ParseScratch::new();
+        let m = ok(INVITE, &mut scratch);
+        let Ok(Contacts::Addrs(addrs)) = m.contact() else {
+            panic!("expected a list of contacts");
+        };
+        assert_eq!(addrs.count(), 0);
+    }
+
+    #[test]
     fn via_values_come_back_in_the_order_a_response_must_follow() {
         use crate::msg::HostRef;
         let mut scratch = ParseScratch::new();
