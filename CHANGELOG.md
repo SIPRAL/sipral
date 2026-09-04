@@ -104,6 +104,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   rather than guessed at. `Contact: *` is the whole field or nothing.
   `RawMessage` gains `from`, `to`, `contact` and `field_values`, the last
   walking a comma-separated field across its lines and its commas alike.
+- `sipral-core::msg::RouteRef`: `Route` and `Record-Route`. A route entry is a
+  `name-addr` with no bracket-less alternative, so `Route: sip:p1;lr` is
+  refused rather than guessed at — without the `>` there is nothing to say
+  where the URI ends. `is_loose_route()` reads `;lr` on the URI and not on the
+  header field, because `<sip:p1>;lr` is a strict router carrying a parameter
+  that happens to be spelled the same, and getting that backwards sends the
+  request to a strict router with a Request-URI it cannot use. Entries come
+  back in wire order, never sorted or deduplicated.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

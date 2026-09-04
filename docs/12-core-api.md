@@ -273,6 +273,28 @@ refused, which is all of RFC 4475 §3.1.2.14.
 `q` is thousandths rather than a float because `qvalue` is at most three
 decimals and at most 1.0: every legal value is exact, and nothing rounds.
 
+`Route` and `Record-Route` reuse that address, with two rules of their own:
+
+```rust
+pub struct RouteRef<'a> { /* a NameAddrRef that had to be bracketed */ }
+
+impl<'a> RouteRef<'a> {
+    pub fn parse(value: &'a [u8]) -> Result<Self, HeaderError>;
+    pub fn addr(&self) -> NameAddrRef<'a>;
+    pub fn uri(&self) -> UriRef<'a>;
+    pub fn is_loose_route(&self) -> bool;   // ;lr on the URI, not on the field
+    pub fn params(&self) -> Params<'a>;     // rr-param
+}
+```
+
+`route-param` is `name-addr`, with no bracket-less alternative, so
+`Route: sip:p1.example.com;lr` is refused rather than guessed at. And `;lr`
+counts only inside the brackets: `<sip:p1.example.com>;lr` is a *strict*
+router carrying a header parameter that happens to be spelled `lr`, which is
+the branch §12.2.1.1 and §16.6 take. Entries come back in wire order, never
+sorted or deduplicated — §7.3.1 gives three `Route` rows and calls the same
+three in another order "valid but not equivalent".
+
 Numbers are `Digits { value: Option<u32>, written: usize }` rather than a bare
 `u32`, because a field of legal digits too large for 32 bits is not the same
 as a malformed one. `CSeq` refuses it (RFC 3261 §8.1.1.5 requires 32 bits, and

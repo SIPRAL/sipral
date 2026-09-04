@@ -18,6 +18,7 @@ mod lex;
 mod message;
 mod method;
 mod parse;
+mod route;
 mod scalar;
 mod span;
 mod uri;
@@ -30,6 +31,7 @@ pub use lex::{CommaList, LwsFields, Params, fields, is_quoted, trim, unfold, unq
 pub use message::{FieldValues, MessageKind, OwnedMessage, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
+pub use route::{RouteIter, RouteRef};
 pub use scalar::{CSeq, Digits, RAck, digits, rseq};
 pub use span::{HeaderSlot, ParseScratch, Span};
 pub use uri::{

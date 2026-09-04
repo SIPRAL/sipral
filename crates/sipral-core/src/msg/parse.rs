@@ -694,6 +694,72 @@ m: <sip:watson@example.net>;q=0.1, <sip:watson@example.org>\r\n\
     }
 
     #[test]
+    fn route_rows_combine_in_the_order_they_arrived() {
+        // RFC 3261 7.3.1: the same three entries in another order are "valid
+        // but not equivalent", so nothing here sorts or dedupes
+        let hops = |buf: &'static [u8]| {
+            let mut scratch = ParseScratch::new();
+            ok(buf, &mut scratch)
+                .route()
+                .filter_map(Result::ok)
+                .map(|r| r.uri().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hops(
+                b"INVITE sip:x@example.com SIP/2.0\r\n\
+Route: <sip:alice@atlanta.example.com>\r\n\
+Route: <sip:bob@biloxi.example.com>, <sip:carol@chicago.example.com>\r\n\
+\r\n"
+            ),
+            vec![
+                "sip:alice@atlanta.example.com",
+                "sip:bob@biloxi.example.com",
+                "sip:carol@chicago.example.com",
+            ]
+        );
+        assert_eq!(
+            hops(
+                b"INVITE sip:x@example.com SIP/2.0\r\n\
+Route: <sip:bob@biloxi.example.com>\r\n\
+Route: <sip:alice@atlanta.example.com>\r\n\
+Route: <sip:carol@chicago.example.com>\r\n\
+\r\n"
+            ),
+            vec![
+                "sip:bob@biloxi.example.com",
+                "sip:alice@atlanta.example.com",
+                "sip:carol@chicago.example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn record_route_comes_back_in_wire_order_for_both_sides_to_use() {
+        // 12.1.1 takes these in order and 12.1.2 in reverse; reversing here
+        // would make one of the two wrong
+        let mut scratch = ParseScratch::new();
+        let m = ok(
+            b"SIP/2.0 200 OK\r\n\
+Record-Route: <sip:server10.example.com;lr>,\r\n              <sip:bigbox3.example.com;lr>\r\n\
+\r\n",
+            &mut scratch,
+        );
+        let hops: Vec<_> = m
+            .record_route()
+            .map(|r| r.expect("an entry"))
+            .map(|r| (r.uri().to_string(), r.is_loose_route()))
+            .collect();
+        assert_eq!(
+            hops,
+            vec![
+                ("sip:server10.example.com;lr".to_owned(), true),
+                ("sip:bigbox3.example.com;lr".to_owned(), true),
+            ]
+        );
+    }
+
+    #[test]
     fn via_values_come_back_in_the_order_a_response_must_follow() {
         use crate::msg::HostRef;
         let mut scratch = ParseScratch::new();

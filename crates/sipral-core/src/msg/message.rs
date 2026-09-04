@@ -11,6 +11,7 @@ use super::error::HeaderError;
 use super::header::HeaderName;
 use super::lex::{CommaList, trim};
 use super::method::{Method, StatusCode};
+use super::route::RouteIter;
 use super::scalar::{CSeq, Digits, RAck, digits, rseq};
 use super::span::{HeaderSlot, Span};
 use super::uri::{UriError, UriRef};
@@ -256,6 +257,22 @@ impl<'a> RawMessage<'a> {
             return Ok(Contacts::Star);
         }
         Ok(Contacts::Addrs(ContactIter::new(values)))
+    }
+
+    /// `Route` (RFC 3261 §20.34), in the order the request has to follow.
+    #[must_use]
+    pub fn route(&self) -> RouteIter<'a> {
+        RouteIter::new(self.field_values(HeaderName::Route))
+    }
+
+    /// `Record-Route` (RFC 3261 §20.30), in wire order.
+    ///
+    /// Wire order, not dialog order: §12.1.1 has the UAS take these as they
+    /// come and §12.1.2 has the UAC reverse them, so reversing here would make
+    /// one of the two wrong.
+    #[must_use]
+    pub fn record_route(&self) -> RouteIter<'a> {
+        RouteIter::new(self.field_values(HeaderName::RecordRoute))
     }
 
     /// `CSeq` (RFC 3261 §20.16).
