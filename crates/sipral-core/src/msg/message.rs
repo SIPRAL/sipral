@@ -468,6 +468,21 @@ impl<'a> RawMessage<'a> {
         self.buf
     }
 
+    /// How many bytes of the buffer this message takes up.
+    ///
+    /// Less than the buffer when something followed it — a second request
+    /// sharing a datagram, or the next message on a stream.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.body.end as usize
+    }
+
+    /// Whether the message is zero bytes long, which a parsed one never is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The one seam where a borrowed view becomes something the stack can keep.
     ///
     /// The bytes are copied once into a refcounted buffer and the header index

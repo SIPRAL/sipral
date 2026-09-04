@@ -140,6 +140,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   caller knows whether this is one. No value may hold CR or LF: a header value
   goes out on one line, and a caller's data with a line break in it would
   otherwise write headers of its own.
+- `sipral-core::msg::StreamFramer`: reassembling TCP and TLS into messages, and
+  the one place in the receive path that copies. A message without
+  `Content-Length` is refused rather than read to the end of the buffer, since
+  RFC 3261 §18.3 makes the field mandatory on a stream and guessing would
+  swallow whatever followed. Keep-alives (RFC 5626 §4.4.1) are skipped between
+  messages and counted, so the connection's owner can send the single CRLF a
+  double CRLF is owed. Work is bounded per byte received rather than per call:
+  a peer feeding one byte at a time cannot make reassembly quadratic.
 - `StatusCode::reason`: the reason phrases RFC 3261 §21 registers, plus 422
   from RFC 4028, so nobody has to invent one.
 - `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK

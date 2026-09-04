@@ -56,6 +56,12 @@ pub enum ParseError {
         /// The bound that was exceeded.
         limit: u32,
     },
+    /// A message arrived on a stream transport without a `Content-Length`.
+    ///
+    /// RFC 3261 §18.3 makes the field mandatory there, because it is the only
+    /// thing that says where one message ends and the next begins. A datagram
+    /// may leave it out; a stream may not.
+    MissingContentLength,
 }
 
 impl fmt::Display for ParseError {
@@ -77,6 +83,7 @@ impl fmt::Display for ParseError {
             }
             Self::TooManyHeaders { limit } => write!(f, "more than {limit} headers"),
             Self::MessageTooLarge { limit } => write!(f, "message exceeds {limit} bytes"),
+            Self::MissingContentLength => f.write_str("no Content-Length on a stream transport"),
         }
     }
 }

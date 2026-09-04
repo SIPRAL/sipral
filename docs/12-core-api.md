@@ -431,12 +431,16 @@ pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), No
 /// WebSocket (phase 2, RFC 7118) does not use this: each WebSocket message
 /// carries exactly one SIP message, so the caller feeds a frame as
 /// `Input::Datagram` on a transport bound with `TransportProtocol::Ws`/`Wss`.
-pub struct StreamFramer { /* buffer, cursor, max */ }
+pub struct StreamFramer { /* buffer, its own scratch, cursor, limits */ }
 impl StreamFramer {
     pub fn new(max_message_bytes: u32) -> Self;
+    pub fn with_limits(limits: Limits) -> Self;
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), ParseError>;
-    pub fn next_message<'s>(&'s mut self, scratch: &'s mut ParseScratch, mode: ParseMode)
-        -> Result<Option<RawMessage<'s>>, ParseError>;
+    pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<RawMessage<'_>>, ParseError>;
+    /// RFC 5626 §4.4.1: a double CRLF arrived and a single CRLF owes it an answer.
+    pub fn take_ping(&mut self) -> bool;
+    pub fn pending(&self) -> usize;
+    pub fn reset(&mut self);
 }
 ```
 
@@ -459,6 +463,20 @@ No value may contain CR or LF: a header value goes out on one line, so a
 caller's data with a line break in it would be writing headers of its own.
 `build()` parses what it wrote and hands back the failure rather than
 shipping a message the far end will reject.
+
+The framer owns its scratch rather than borrowing one, because it has to hold
+the cursor and the parse index together anyway, and a caller passing a second
+scratch would only be able to get the lifetimes wrong. A message without
+`Content-Length` is `MissingContentLength`, not a body read to the end of the
+buffer: §18.3 makes the field mandatory on a stream, and guessing would
+swallow whatever came after it. Keep-alives (RFC 5626 §4.4.1) are skipped
+between messages and counted, so the layer that owns the connection can send
+the single CRLF a ping is owed.
+
+Work is bounded per byte received rather than per call: the search for the end
+of the headers resumes where it stopped, and once the body's length is known
+nothing is parsed again until that many bytes have arrived. A peer feeding one
+byte at a time therefore cannot turn reassembly into quadratic work.
 
 ## Input and output
 
