@@ -13,6 +13,7 @@
 
 mod error;
 mod header;
+mod lex;
 mod message;
 mod method;
 mod parse;
@@ -21,6 +22,7 @@ mod uri;
 
 pub use error::ParseError;
 pub use header::HeaderName;
+pub use lex::{CommaList, Params, is_quoted, trim, unfold, unquote};
 pub use message::{MessageKind, RawMessage};
 pub use method::{InvalidStatusCode, Method, StatusCode};
 pub use parse::{Limits, ParseMode, parse, parse_with_limits};
