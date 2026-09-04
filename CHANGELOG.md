@@ -21,7 +21,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   G.711 slice a bidirectional call needs; `LICENSING.md` no longer implies that
   charging for a product is by itself what triggers the commercial arm. CI
   installs the toolchain from `rust-toolchain.toml` instead of pinning a second
-  time in the workflow.
+  time in the workflow, and runs the gitleaks binary (pinned, checksum
+  verified) instead of the marketplace action, which requires a paid licence
+  on organisation repositories.
 
 ### Added
 
