@@ -17,6 +17,10 @@ AGENTS.md
 **/*.rs.bk
 *.pdb
 
+# .NET build output
+bin/
+obj/
+
 **/.env
 **/.env.*
 !**/.env.example

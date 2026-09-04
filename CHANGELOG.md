@@ -42,6 +42,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
+- `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
+  published to NuGet as `Sipral` 0.0.1.
 - `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
   merged from four independent proposals scored by three reviewers, with
   register, call, CANCEL-race and fork walkthroughs, a fake-clock test, the C
