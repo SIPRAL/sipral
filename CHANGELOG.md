@@ -48,6 +48,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   internal files and captures, build, lints, tests, dependency licences,
   secrets.
 - CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
+- `sipral-core::msg`: the message layer's foundation. `Span`, `HeaderSlot` and
+  a reusable `ParseScratch`; `Method` and `StatusCode`; `RawMessage` as a view
+  over the caller's buffer; and a parser that locates the start line, the
+  header fields and the body without copying any of them. Folded values are one
+  slot with their interior CRLF intact, repeated headers are one slot each in
+  wire order, and `Content-Length` frames the body so trailing octets in a
+  datagram are ignored. Bounded by a `Limits` struct so a hostile peer cannot
+  make it do unbounded work, and written so that no input reaches a panic.
+  37 tests, several of them RFC 4475 cases the corpus will assert in full later.
 - `crates/sipral`: the facade crate, for now a name reservation on crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation

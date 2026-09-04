@@ -110,6 +110,11 @@ impl Default for TimerConfig {}   // 500 ms, 4 s, 5 s, RFC 3261 §17.1.1.1
 
 ```rust
 pub struct Span { pub start: u32, pub end: u32 }
+
+/// A value folded across lines (RFC 3261 §7.3.1) is one slot whose value span
+/// covers the continuation lines, interior CRLF included; unfolding is the
+/// typed accessors' job. A header repeated on several lines is one slot per
+/// line, in wire order.
 pub struct HeaderSlot { pub name: Span, pub value: Span }
 
 /// Reused across parses. Cleared, not freed.
@@ -117,7 +122,16 @@ pub struct ParseScratch { /* Vec<HeaderSlot> */ }
 
 pub enum ParseMode { Lenient, Strict }
 
+/// Bounds that stop a hostile peer from making the parser do unbounded work.
+pub struct Limits {
+    pub max_message_bytes: u32,       // 65 535
+    pub max_headers: u16,             // 128
+    pub max_header_value_bytes: u32,  // 4 096
+}
+
 pub fn parse<'a>(buf: &'a [u8], scratch: &'a mut ParseScratch, mode: ParseMode)
+    -> Result<RawMessage<'a>, ParseError>;
+pub fn parse_with_limits<'a>(buf: &'a [u8], scratch: &'a mut ParseScratch, mode: ParseMode, limits: Limits)
     -> Result<RawMessage<'a>, ParseError>;
 
 /// A view over the caller's buffer. Every accessor locates and validates a
@@ -284,9 +298,7 @@ library would. The endpoint asks for a host and receives addresses.
 pub struct EndpointConfig {
     pub timers: TimerConfig,
     pub parse_mode: ParseMode,                 // Lenient
-    pub max_message_bytes: u32,                // 65 535
-    pub max_headers: u16,                      // 128
-    pub max_header_value_bytes: u16,           // 4 096
+    pub limits: Limits,                        // the parser's bounds, above
     pub mtu_known: Option<u32>,                // None: use the 1300-byte rule
     pub udp_to_tcp_switch_bytes: u32,          // 1 300, RFC 3261 §18.1.1
     pub always_request_rport: bool,            // true, RFC 3581 (a MAY, chosen)

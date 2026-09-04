@@ -13,3 +13,16 @@
 //!
 //! Written from the RFCs listed in `docs/09-rfc-index.md`. See
 //! `docs/02-clean-room.md` for why that matters here.
+
+// tests say what they mean; the no-panic discipline is for the library
+#![cfg_attr(
+    test,
+    allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )
+)]
+
+pub mod msg;
