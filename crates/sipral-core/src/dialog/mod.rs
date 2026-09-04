@@ -21,11 +21,13 @@
 //! hang up belong further up.
 
 mod error;
+mod fork;
 mod key;
 mod request;
 mod state;
 
 pub use error::DialogError;
+pub use fork::{DialogSet, Fork};
 pub use key::{CallId, DialogKey, Tag};
 pub use request::InDialogRequest;
 pub use state::{Dialog, DialogState, Incoming};

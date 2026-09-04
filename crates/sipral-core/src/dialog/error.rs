@@ -30,6 +30,8 @@ pub enum DialogError {
     NotItsOwnRequest,
     /// The local sequence number has reached the 2**31 ceiling of §8.1.1.5.
     SequenceExhausted,
+    /// No dialog of that name in this set.
+    NoSuchDialog,
 }
 
 impl fmt::Display for DialogError {
@@ -45,6 +47,7 @@ impl fmt::Display for DialogError {
                 f.write_str("ACK and CANCEL are built from the request they answer")
             }
             Self::SequenceExhausted => f.write_str("local sequence number exhausted"),
+            Self::NoSuchDialog => f.write_str("no dialog of that name here"),
         }
     }
 }

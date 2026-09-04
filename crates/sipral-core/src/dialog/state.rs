@@ -237,6 +237,39 @@ impl Dialog {
         ))
     }
 
+    /// The ACK for a 2xx to `invite` (§13.2.2.4).
+    ///
+    /// A dialog's ACK, not a transaction's. The ACK for a non-2xx belongs to
+    /// the INVITE client transaction, goes where the INVITE went, and never
+    /// reaches the caller (§17.1.1.3). This one is a request in the dialog:
+    /// it follows the route set, it may carry the answer to an offer in the
+    /// 2xx, and nothing retransmits it for us — it goes out again by hand
+    /// every time the 2xx it answers arrives again.
+    ///
+    /// Its sequence number is the INVITE's, not a new one, and the
+    /// credentials are copied so a proxy that challenged the INVITE does not
+    /// challenge the ACK it can no longer ask about.
+    ///
+    /// # Errors
+    /// [`DialogError::Field`] when the INVITE has no readable `CSeq`.
+    pub fn ack_2xx(&self, invite: &RawMessage<'_>) -> Result<InDialogRequest, DialogError> {
+        // "The sequence number of the CSeq header field MUST be the same as
+        // the INVITE being acknowledged, but the CSeq method MUST be ACK."
+        let cseq = invite.cseq()?.seq;
+        let (request_uri, route) = self.target_and_route();
+        let mut ack = InDialogRequest::new(
+            Method::Ack,
+            request_uri,
+            &route,
+            addr_with_tag(&self.remote_uri, self.key.remote_tag()),
+            addr_with_tag(&self.local_uri, Some(self.key.local_tag())),
+            self.key.call_id().clone(),
+            cseq,
+        );
+        ack.copy_credentials(invite);
+        Ok(ack)
+    }
+
     /// A response arrived to a request we sent inside this dialog (§12.2.1.2).
     ///
     /// # Errors
@@ -260,6 +293,16 @@ impl Dialog {
                 self.remote_target = target;
             }
             if self.state == DialogState::Early && method == Method::Invite {
+                // §13.2.2.4: "the route set for the dialog MUST be recomputed
+                // based on the 2xx response". Only the route set — mid-dialog
+                // requests may already have moved the sequence numbers — and
+                // only here, because RFC 2543 mirrored `Record-Route` in the
+                // 2xx but not in the provisional the early dialog was built
+                // from. This is the caller's side by construction: the end
+                // that answers an INVITE sends the 2xx rather than reading it.
+                let mut recomputed = record_route(response)?;
+                recomputed.reverse();
+                self.route_set = recomputed.into();
                 self.state = DialogState::Confirmed;
             }
             // §15.1.1: the session, and with it the dialog, is over

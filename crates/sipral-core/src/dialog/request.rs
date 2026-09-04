@@ -11,7 +11,7 @@
 //! hands back.
 
 use super::key::CallId;
-use crate::msg::{Method, RequestBuilder, Uri};
+use crate::msg::{HeaderName, Method, RawMessage, RequestBuilder, Uri};
 
 /// Everything the dialog puts into the next request it sends.
 #[derive(Clone, Debug)]
@@ -23,6 +23,7 @@ pub struct InDialogRequest {
     from: Box<[u8]>,
     call_id: CallId,
     cseq: u32,
+    credentials: Vec<(HeaderName<'static>, Box<[u8]>)>,
 }
 
 impl InDialogRequest {
@@ -43,6 +44,20 @@ impl InDialogRequest {
             from,
             call_id,
             cseq,
+            credentials: Vec::new(),
+        }
+    }
+
+    /// Carry the credentials of another request into this one.
+    ///
+    /// §13.2.2.4 for the ACK to a 2xx: "The ACK MUST contain the same
+    /// credentials as the INVITE." Read line by line rather than through the
+    /// comma rule of §7.3.1, which §20.7 exempts these fields from.
+    pub(super) fn copy_credentials(&mut self, from: &RawMessage<'_>) {
+        for name in [HeaderName::Authorization, HeaderName::ProxyAuthorization] {
+            for value in from.header_values(name) {
+                self.credentials.push((name, Box::from(value)));
+            }
         }
     }
 
@@ -90,6 +105,13 @@ impl InDialogRequest {
         self.cseq
     }
 
+    /// The credentials carried over from another request, if any.
+    pub fn credentials(&self) -> impl Iterator<Item = (HeaderName<'static>, &[u8])> {
+        self.credentials
+            .iter()
+            .map(|(name, value)| (*name, value.as_ref()))
+    }
+
     /// A builder carrying everything above.
     ///
     /// What is left to add is what the dialog cannot know: the `Via` of the
@@ -104,6 +126,9 @@ impl InDialogRequest {
             .cseq(self.cseq);
         for hop in self.route() {
             builder = builder.route(hop);
+        }
+        for (name, value) in self.credentials() {
+            builder = builder.header(name, value);
         }
         builder
     }

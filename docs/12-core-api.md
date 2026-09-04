@@ -543,6 +543,38 @@ message, the `Contact` to whoever knows this host's address, and the body to
 the layer that has one. ACK and CANCEL are refused there, because §12.2.1.1
 gives them the number of the request they answer rather than one of their own.
 
+```rust
+pub enum Fork { Opened(DialogKey), Advanced(DialogKey), Refused, Ignored }
+
+impl DialogSet {
+    pub fn new(invite: OwnedMessage, over_tls: bool) -> Self;
+    pub fn on_response(&mut self, response: &RawMessage<'_>) -> Result<Fork, DialogError>;
+    pub fn no_more_answers(&mut self);                       // 64*T1 after the first 2xx
+
+    pub fn ack_2xx(&self, key: &DialogKey) -> Result<InDialogRequest, DialogError>;
+    pub fn keep_ack(&mut self, key: &DialogKey, ack: OwnedMessage) -> Result<(), DialogError>;
+    pub fn ack_for(&self, key: &DialogKey) -> Option<&OwnedMessage>;
+}
+```
+
+`DialogSet` is one INVITE and every dialog it produced. A forking proxy rings
+the desk phone, the mobile and the voicemail; each branch that answers is a
+distinct dialog told apart by its `To` tag, and the core picks none of them.
+A non-2xx final ends every dialog still early and leaves a confirmed one
+alone. A 2xx that arrives after that is still taken: §13.2.2.3 says to ignore
+subsequent finals "which would only arrive under error conditions", and a 2xx
+is not one — dropping it would leave a call standing at the other end with
+nobody to hang it up.
+
+The ACK for a 2xx lives here rather than in the transaction, because
+§13.2.2.4 puts it outside one: it follows the dialog's route set, it may carry
+the answer to an offer, and "the UAC core handles retransmissions of the ACK,
+not the transaction layer". So the caller builds it once — it is the caller
+who knows whether there is an answer to put in it — hands it back with
+`keep_ack`, and every retransmitted 2xx after that is answered from the stored
+bytes without asking again. The ACK for a non-2xx is the transaction's
+(§17.1.1.3) and never reaches the caller.
+
 ## Input and output
 
 ```rust

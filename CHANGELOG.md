@@ -216,6 +216,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
   never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
   changes nothing.
+- Forking and the ACK for a 2xx (RFC 3261 §13.2.2). One INVITE can produce
+  several dialogs — a proxy rings the desk phone, the mobile and the voicemail,
+  and each branch that answers is told apart by its `To` tag. `DialogSet` keeps
+  them all and chooses between none of them: which fork to keep is policy, and
+  policy does not live in the core. A non-2xx final ends every dialog still
+  early and leaves an already confirmed one alone; a 2xx arriving after that is
+  still taken, because dropping it would leave a call standing at the far end
+  with nobody able to hang it up. The 2xx confirming an early dialog recomputes
+  its route set, which RFC 2543 compatibility requires and which nothing else
+  in a dialog's life does. The ACK for a 2xx belongs to the dialog rather than
+  the transaction: the caller builds it once, since only the caller knows
+  whether there is an answer to put in it, and every retransmitted 2xx after
+  that is answered from the stored bytes.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4
