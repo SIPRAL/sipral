@@ -216,6 +216,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
   never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
   changes nothing.
+- SDP (RFC 4566) and offer/answer (RFC 3264). A description that is read and
+  written back comes out as it went in, down to the lines the stack has no use
+  for — an SDP body travels through a call inside messages that get forwarded,
+  so quietly dropping what is not understood breaks the next extension somebody
+  adds. Ordering is enforced the way §5 fixes it, and a type letter that is not
+  one of the fourteen refuses the whole description rather than the line, which
+  is what §5 asks for. `answer()` builds the answer from the offer: the same
+  number of streams in the same order, the same `t=` line, the payload mappings
+  the offer defined, and a direction narrowed to what the offer allows — an
+  offer of `sendonly` can only be answered `recvonly` or `inactive`. Which
+  codecs to keep and which streams to take arrive as arguments; there is no
+  policy here. The RFC 3264 §10.1 exchange is a test, byte for byte, and a
+  fourth fuzz target asserts that writing a description out and reading it back
+  yields the same description.
 - Forking and the ACK for a 2xx (RFC 3261 §13.2.2). One INVITE can produce
   several dialogs — a proxy rings the desk phone, the mobile and the voicemail,
   and each branch that answers is told apart by its `To` tag. `DialogSet` keeps

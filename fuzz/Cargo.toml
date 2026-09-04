@@ -45,3 +45,10 @@ path = "fuzz_targets/builder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sdp"
+path = "fuzz_targets/sdp.rs"
+test = false
+doc = false
+bench = false

@@ -139,6 +139,12 @@ Offer/answer per RFC 3264, as a value type: parse, inspect, build. No policy.
 `sipral-ua` decides which codecs to offer; `sipral-core` only encodes the
 result.
 
+Every line is kept, including the ones this stack has no use for: a body
+travels through a call inside messages that get forwarded, and a stack that
+drops what it does not understand breaks the next extension somebody adds.
+Attributes are held generically — name and value — with typed access for the
+ones the stack acts on.
+
 Supported: `m=audio` with RTP/AVP and RTP/SAVP, `a=rtpmap`, `a=fmtp`,
 `a=ptime`/`a=maxptime`, `a=sendrecv|sendonly|recvonly|inactive`, `a=rtcp`,
 `a=rtcp-mux`, `c=` with IPv4 and IPv6, `a=crypto` for SDES, `a=fingerprint`

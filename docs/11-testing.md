@@ -43,14 +43,19 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Three targets today — `parse`, `framer`, `builder` — and a fourth, the SDP
-parser, when there is one to fuzz. `parse` walks every typed accessor after a
-successful parse, because a message that parses can still hold a field nobody
-can read and reading it is what the stack does next. `framer` takes the first
-byte of the input as its read size, so one input covers both "the whole message
-at once" and "one byte at a time". `builder` feeds arbitrary bytes in as header
-values and asserts the result parses back with exactly the fields that went in:
-what it is really testing is that a caller's data cannot become structure.
+Four targets: `parse`, `framer`, `builder`, `sdp`. `parse` walks every typed
+accessor after a successful parse, because a message that parses can still hold
+a field nobody can read and reading it is what the stack does next. `framer`
+takes the first byte of the input as its read size, so one input covers both
+"the whole message at once" and "one byte at a time". `builder` feeds arbitrary
+bytes in as header values and asserts the result parses back with exactly the
+fields that went in: what it is really testing is that a caller's data cannot
+become structure. `sdp` asserts that a description which parses, written back
+out, parses again into exactly the same description — a body travels through a
+call inside messages that get forwarded, so one that changes meaning by passing
+through here is a bug even when nothing crashes — and then answers the offer,
+since an answer is derived from the offer and a strange offer is the shortest
+way to a strange answer.
 
 ```sh
 cd fuzz

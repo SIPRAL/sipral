@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Tiberiu Balasea
 
-# Not on push: three targets at five minutes each would add half an hour to
+# Not on push: four targets at five minutes each would add half an hour to
 # every commit and buy very little. Nightly, and on demand.
 name: fuzz
 
@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse, framer, builder]
+        target: [parse, framer, builder, sdp]
     steps:
       - uses: actions/checkout@v7
       # fuzz/rust-toolchain.toml is the single source of truth for the nightly
