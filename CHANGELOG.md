@@ -189,6 +189,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   but only on an unreliable transport. The non-INVITE one sends nothing until
   the user says so: in `Trying` a retransmitted request is discarded, since
   inventing a response the user never wrote is worse than silence.
+- Message matching (RFC 3261 §17.1.3 and §17.2.3). A response finds its client
+  transaction by branch and `CSeq` method — the method matters because a CANCEL
+  borrows the branch of the request it cancels while being a transaction of its
+  own. A request finds its server transaction by branch, the `Via`'s sent-by
+  and the method, with an ACK keyed as the INVITE it answers. A peer without
+  the magic cookie is matched the pre-3261 way instead, on the Request-URI,
+  From tag, `Call-ID`, `CSeq` number and top `Via`.
 - `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
   with every other timer derived from them, and a schedule that answers "when
   do I have to come back" through a shared reference. Nothing reads a clock —

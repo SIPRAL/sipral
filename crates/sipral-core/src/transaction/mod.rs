@@ -27,6 +27,7 @@ mod effect;
 mod handle;
 mod invite_client;
 mod invite_server;
+mod matching;
 mod non_invite_client;
 mod non_invite_server;
 mod slab;
