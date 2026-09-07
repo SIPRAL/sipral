@@ -260,18 +260,22 @@ impl Endpoint {
         let effects = entry.machine.on_response(response, now);
         let notify = effects.notify;
         let cancel_due = entry.machine.take_deferred_cancel();
+        let renegotiated = self.reinvites.dialog_of(id);
         self.apply(effects, flow, AnyTransactionId::InviteClient(id));
 
         if notify == Some(Notify::Response) {
-            self.on_fork(id, response, flow);
+            // §14.1: a re-INVITE never forks, so its answer is not one of
+            // several a dialog set has to tell apart — it belongs to the one
+            // dialog it was sent in
+            if let Some(dialog) = renegotiated {
+                self.on_reinvite_response(id, dialog, response, flow);
+            } else {
+                self.on_fork(id, response, flow);
+            }
             self.on_challenge(AnyTransactionId::InviteClient(id), response, sent, flow);
         }
         if notify == Some(Notify::TimedOut) {
-            self.push(Event::Failed {
-                invite: id,
-                status: None,
-                reason: FailureReason::Timeout,
-            });
+            self.invite_gave_up(id, renegotiated, FailureReason::Timeout);
         }
         // 9.1: the CANCEL was asked for before anything had come back, and
         // the first provisional response is what releases it
@@ -347,6 +351,7 @@ impl Endpoint {
                         invite: id,
                         status: Some(status),
                         reason: FailureReason::Refused,
+                        response: Some(response.to_owned()),
                     });
                 }
             }
@@ -457,10 +462,16 @@ impl Endpoint {
         // 14.2: a re-INVITE inside a dialog renegotiates it; the ordering
         // check and the target refresh are the dialog's
         if let Some(dialog) = existing {
+            self.remember_tag(AnyTransactionId::InviteServer(id), key_tag(request));
             if self.reject_out_of_order(dialog, request, id.into(), flow, now) {
                 return;
             }
-            self.remember_tag(AnyTransactionId::InviteServer(id), key_tag(request));
+            // 14.2 answers a crossing INVITE itself, and both answers are
+            // MUSTs; neither reaches the caller
+            if self.refuse_crossing_invite(dialog, id, flow, now) {
+                return;
+            }
+            self.reinvites.receive_invite(dialog, id);
             self.push(Event::IncomingReinvite {
                 transaction: id,
                 dialog,
@@ -556,6 +567,17 @@ impl Endpoint {
             return;
         }
 
+        // RFC 3311 §5.2: a second UPDATE arriving before the first is answered
+        // is refused here, because that rule turns on transaction state. Its
+        // siblings turn on whether an offer is outstanding, which is not
+        // something this crate has an opinion about
+        if request.method() == Some(Method::Update) {
+            if self.refuse_crossing_update(dialog, id, flow, now) {
+                return;
+            }
+            self.reinvites.receive_update(dialog, id);
+        }
+
         if request.method() == Some(Method::Bye) {
             // 15.1.2: the dialog is over the moment the BYE is accepted, and
             // whether to answer it 200 is still the caller's
@@ -616,13 +638,12 @@ impl Endpoint {
                 {
                     let flow = self.flow_of(id);
                     let notify = effects.notify;
+                    // read before applying: timer B terminates the
+                    // transaction, and retiring it forgets what it was
+                    let renegotiated = self.reinvites.dialog_of(inner);
                     self.apply(effects, flow, id);
                     if name == TimerName::B && notify == Some(Notify::TimedOut) {
-                        self.push(Event::Failed {
-                            invite: inner,
-                            status: None,
-                            reason: FailureReason::Timeout,
-                        });
+                        self.invite_gave_up(inner, renegotiated, FailureReason::Timeout);
                     }
                 }
             }
@@ -737,14 +758,18 @@ impl Endpoint {
             return;
         };
         let notify = effects.notify;
+        let renegotiated = match id {
+            AnyTransactionId::InviteClient(inner) => self.reinvites.dialog_of(inner),
+            AnyTransactionId::NonInviteClient(_)
+            | AnyTransactionId::InviteServer(_)
+            | AnyTransactionId::NonInviteServer(_) => None,
+        };
         self.apply(effects, flow, id);
         if notify == Some(Notify::TransportFailed) {
             match id {
-                AnyTransactionId::InviteClient(inner) => self.push(Event::Failed {
-                    invite: inner,
-                    status: None,
-                    reason: FailureReason::TransportFailed,
-                }),
+                AnyTransactionId::InviteClient(inner) => {
+                    self.invite_gave_up(inner, renegotiated, FailureReason::TransportFailed);
+                }
                 AnyTransactionId::NonInviteClient(inner) => self.push(Event::RequestFailed {
                     transaction: inner,
                     reason: FailureReason::TransportFailed,
@@ -794,6 +819,9 @@ impl Endpoint {
                     self.dialogs.invite_done(set);
                 }
                 self.forget_cancelled(inner);
+                // §14: the ACK for a re-INVITE is kept for as long as a 2xx
+                // can still arrive again, which is exactly timer M
+                self.reinvites.finish(inner);
                 self.transactions.drop_invite_client(inner);
             }
             AnyTransactionId::NonInviteClient(inner) => {
@@ -801,9 +829,11 @@ impl Endpoint {
             }
             AnyTransactionId::InviteServer(inner) => {
                 self.forget_reliable_on(inner);
+                self.reinvites.answered_theirs(id);
                 self.transactions.drop_invite_server(inner);
             }
             AnyTransactionId::NonInviteServer(inner) => {
+                self.reinvites.answered_theirs(id);
                 self.transactions.drop_non_invite_server(inner);
             }
         }
@@ -831,7 +861,30 @@ impl Endpoint {
     pub(super) fn forget_dialog(&mut self, dialog: DialogId, reason: DialogEndReason) {
         if self.dialogs.forget(dialog).is_some() {
             self.forget_reliable_in(dialog);
+            self.reinvites.forget_dialog(dialog);
             self.push(Event::DialogTerminated { dialog, reason });
+        }
+    }
+
+    /// An INVITE this end sent will not be answered.
+    ///
+    /// `renegotiated` is the dialog it was sent inside, when it was a
+    /// re-INVITE, and has to be read before the transaction is retired —
+    /// retiring it is what forgets that.
+    fn invite_gave_up(
+        &mut self,
+        id: TransactionId<InviteClient>,
+        renegotiated: Option<DialogId>,
+        reason: FailureReason,
+    ) {
+        match renegotiated {
+            Some(dialog) => self.reinvite_gave_up(id, dialog, reason),
+            None => self.push(Event::Failed {
+                invite: id,
+                status: None,
+                reason,
+                response: None,
+            }),
         }
     }
 
@@ -923,7 +976,7 @@ impl Endpoint {
         fresh
     }
 
-    fn respond_raw(
+    pub(super) fn respond_raw(
         &mut self,
         transaction: AnyTransactionId,
         message: OwnedMessage,

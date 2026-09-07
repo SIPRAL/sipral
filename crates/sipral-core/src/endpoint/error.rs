@@ -80,6 +80,16 @@ pub enum SendError {
     /// The dialog refused to produce the request: a method it does not send,
     /// or a sequence space that has run out.
     Dialog(DialogError),
+    /// The method does not go out through the call it was given to. An INVITE
+    /// inside a dialog is a re-INVITE: it runs on an INVITE client transaction
+    /// and owns an ACK, so it goes out through [`super::Endpoint::reinvite`].
+    WrongMethod,
+    /// An INVITE is already running in this dialog, in one direction or the
+    /// other. §14.1: "a UAC MUST NOT initiate a new INVITE transaction within
+    /// a dialog while another INVITE transaction is in progress in either
+    /// direction." Two that cross are answered 491 by whichever end receives
+    /// the second one, so sending it buys nothing but a round trip.
+    InviteInProgress,
 }
 
 impl fmt::Display for SendError {
@@ -94,6 +104,10 @@ impl fmt::Display for SendError {
             }
             Self::NoSuchDialog => f.write_str("no such dialog"),
             Self::Dialog(ref error) => write!(f, "the dialog refused it: {error}"),
+            Self::WrongMethod => f.write_str("that method does not go out on this call"),
+            Self::InviteInProgress => {
+                f.write_str("an INVITE is already in progress in this dialog")
+            }
         }
     }
 }

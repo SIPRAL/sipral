@@ -173,12 +173,20 @@ impl Endpoint {
         let timers = self.config.timers;
         let retried = if method == Method::Invite {
             let secure = flow.protocol.is_secure();
-            let set = crate::dialog::DialogSet::new(message.clone(), secure);
             let (id, effects) = self
                 .transactions
-                .start_invite_client(message, flow, timers, now)
+                .start_invite_client(message.clone(), flow, timers, now)
                 .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
-            self.dialogs.watch(set, id);
+            match dialog {
+                // §14.1: an INVITE inside a dialog is a re-INVITE and never
+                // forks, so it gets no dialog set. Watching one here would
+                // open a second, parallel view of a call that already exists
+                Some(dialog) => self.watch_reinvite(id, dialog, message),
+                None => {
+                    self.dialogs
+                        .watch(crate::dialog::DialogSet::new(message, secure), id);
+                }
+            }
             self.apply_client(effects, flow);
             AnyTransactionId::InviteClient(id)
         } else {

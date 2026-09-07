@@ -29,6 +29,7 @@ use super::dialogs::Dialogs;
 use super::error::{AckError, CancelError, ReceiveError, RespondError, SendError};
 use super::event::Event;
 use super::outgoing::{Extra, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
+use super::reinvite::Reinvites;
 use super::reliable::Reliables;
 use super::table::{Flow, Transports};
 use super::tokens::Tokens;
@@ -80,6 +81,9 @@ pub struct Endpoint {
     pub(super) cancelled: HashSet<TransactionId<InviteClient>>,
     /// Reliable provisional responses in both directions (RFC 3262).
     pub(super) reliable: Reliables,
+    /// The INVITEs and UPDATEs running inside dialogs (RFC 3261 §14), which
+    /// are the ones that cross.
+    pub(super) reinvites: Reinvites,
     /// Requests that were refused with a challenge, waiting for a password.
     pub(super) challenges: Challenges,
     /// Which dialog a client transaction is inside, when it is inside one.
@@ -116,6 +120,7 @@ impl Endpoint {
             local_tags: HashMap::new(),
             cancelled: HashSet::new(),
             reliable: Reliables::new(),
+            reinvites: Reinvites::new(),
             challenges: Challenges::new(),
             dialogs_of: HashMap::new(),
             carried_auth: HashMap::new(),
@@ -520,6 +525,12 @@ impl Endpoint {
         request: &OutgoingInDialogRequest,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        // an INVITE runs on a different machine and owns an ACK of its own;
+        // sending one from here would give it a non-INVITE transaction and no
+        // way to acknowledge the 2xx
+        if request.method() == Method::Invite {
+            return Err(SendError::WrongMethod);
+        }
         let flow = self.dialogs.flow(dialog).ok_or(SendError::NoSuchDialog)?;
         let plan = self
             .dialogs
@@ -536,20 +547,39 @@ impl Endpoint {
         Ok(id)
     }
 
-    /// Renegotiate inside a confirmed dialog: hold, resume, a codec change.
+    /// Renegotiate inside a dialog: hold, resume, a codec change (§14.1).
+    ///
+    /// The `Contact` is required and not defaulted. §8.1.1.8 makes it a MUST
+    /// on any request that can establish a dialog, a re-INVITE refreshes the
+    /// target the far end will address the rest of the call to, and the
+    /// endpoint does not know what this end is reachable as — it was told a
+    /// transport and a peer address, not a public URI.
+    ///
+    /// The response comes back as [`Event::ReinviteAnswered`] and is
+    /// acknowledged with [`Endpoint::ack_reinvite`], not with
+    /// [`Endpoint::ack_2xx`]: a re-INVITE never forks, so there is no set of
+    /// dialogs to say which one is being acknowledged.
     ///
     /// # Errors
-    /// As [`Endpoint::request_in_dialog`].
+    /// [`SendError::InviteInProgress`] when another INVITE is already running
+    /// in the dialog — §14.1 makes a second one a MUST NOT, and glare is
+    /// exactly what that rule prevents. Otherwise as
+    /// [`Endpoint::request_in_dialog`].
     pub fn reinvite(
         &mut self,
         dialog: DialogId,
-        offer: Option<Arc<[u8]>>,
+        request: &OutgoingInDialogRequest,
         now: Instant,
     ) -> Result<TransactionId<InviteClient>, SendError> {
+        if request.contact.is_none() {
+            return Err(SendError::MissingField("Contact"));
+        }
         let flow = self.dialogs.flow(dialog).ok_or(SendError::NoSuchDialog)?;
-        let mut request = OutgoingInDialogRequest::new(Method::Invite);
-        if let Some(offer) = offer {
-            request = request.body(b"application/sdp", offer);
+        // §14.1: "a UAC MUST NOT initiate a new INVITE transaction within a
+        // dialog while another INVITE transaction is in progress in either
+        // direction"
+        if self.invite_outstanding(dialog) || self.reinvites.their_invite_in(dialog).is_some() {
+            return Err(SendError::InviteInProgress);
         }
         let plan = self
             .dialogs
@@ -557,10 +587,14 @@ impl Endpoint {
             .ok_or(SendError::NoSuchDialog)?
             .next_request(Method::Invite)
             .map_err(SendError::Dialog)?;
-        let message = self.build_in_dialog(&plan, flow, Some(&request), request.body.as_deref())?;
-        let (id, effects) =
-            self.transactions
-                .start_invite_client(message, flow, self.config.timers, now)?;
+        let message = self.build_in_dialog(&plan, flow, Some(request), request.body.as_deref())?;
+        let (id, effects) = self.transactions.start_invite_client(
+            message.clone(),
+            flow,
+            self.config.timers,
+            now,
+        )?;
+        self.watch_reinvite(id, dialog, message);
         self.apply_client(effects, flow);
         self.remember_dialog(AnyTransactionId::InviteClient(id), dialog);
         Ok(id)
@@ -598,6 +632,11 @@ impl Endpoint {
             flow,
             AnyTransactionId::NonInviteServer(transaction),
         );
+        // RFC 3311 §5.2 counts an UPDATE as pending only until it is answered
+        if response.status.is_final() {
+            self.reinvites
+                .answered_theirs(AnyTransactionId::NonInviteServer(transaction));
+        }
         Ok(())
     }
 
@@ -668,6 +707,12 @@ impl Endpoint {
             return Err(RespondError::TooLate);
         }
         self.apply(effects, flow, AnyTransactionId::InviteServer(transaction));
+        // §14.2's rule is about "a second INVITE before it sends the final
+        // response to a first", so the dialog is free for another one here
+        if status.is_final() {
+            self.reinvites
+                .answered_theirs(AnyTransactionId::InviteServer(transaction));
+        }
         Ok(dialog)
     }
 }
@@ -800,7 +845,7 @@ impl Endpoint {
     }
 
     /// Finish a request the dialog has already decided everything about.
-    fn build_in_dialog(
+    pub(super) fn build_in_dialog(
         &mut self,
         plan: &InDialogRequest,
         flow: Flow,

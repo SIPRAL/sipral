@@ -71,6 +71,8 @@ pub enum HeaderName<'a> {
     Replaces,
     /// RFC 3261 §20.32.
     Require,
+    /// RFC 3261 §20.33.
+    RetryAfter,
     /// RFC 3261 §20.34.
     Route,
     /// RFC 3262 §7.1.
@@ -128,6 +130,7 @@ impl HeaderName<'static> {
         Self::ReferredBy,
         Self::Replaces,
         Self::Require,
+        Self::RetryAfter,
         Self::Route,
         Self::RSeq,
         Self::SessionExpires,
@@ -195,6 +198,7 @@ impl<'a> HeaderName<'a> {
             Self::ReferredBy => "Referred-By",
             Self::Replaces => "Replaces",
             Self::Require => "Require",
+            Self::RetryAfter => "Retry-After",
             Self::Route => "Route",
             Self::RSeq => "RSeq",
             Self::SessionExpires => "Session-Expires",

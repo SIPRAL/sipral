@@ -10,6 +10,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- A re-INVITE could not finish. Its responses were offered to the dialog set
+  that follows a forked INVITE, which a re-INVITE has none of, so every answer
+  to one — 200, 488, 491 — was dropped in silence and the call could never be
+  put on hold. RFC 3261 §14.1 is explicit that a re-INVITE never forks, so it
+  now has a path of its own: the response feeds the dialog it was sent in, the
+  remote target is refreshed from the 2xx (§12.2.1.2), and the ACK is built
+  from the re-INVITE so that it carries the right `CSeq`. `Endpoint::reinvite`
+  takes an `OutgoingInDialogRequest` and requires the `Contact` §8.1.1.8 makes
+  mandatory; the 2xx is acknowledged with the new `Endpoint::ack_reinvite`,
+  which keeps the ACK and answers retransmissions with it.
+- `Event::Failed` carries the response. A status code alone cannot say what a
+  3xx names or what a `Retry-After` asked for, and the bytes were being thrown
+  away for every non-2xx final.
+- `Event::ResolveNeeded` named the wrong host for a URI with a `maddr`.
+  RFC 3263 §4 makes the target the `maddr` when there is one — the response
+  path already did this, so the two halves of one rule disagreed.
+
+### Added
+
+- Glare, both ways (§14.2, RFC 3311 §5.2). An INVITE that crosses one of ours
+  inside a dialog is answered 491, a second one that arrives before we answered
+  the first is answered 500 with a drawn `Retry-After`, and so is a second
+  UPDATE; none of them reaches the caller, because none is a decision. The end
+  that receives a 491 gets `Event::ReinviteGlare` with how long to wait, drawn
+  from the range §14.1 gives it — which differs by who generated the `Call-ID`,
+  so that two ends backing off do not collide again.
+- `SendError::InviteInProgress` and `SendError::WrongMethod`: §14.1 forbids a
+  second INVITE transaction in a dialog while one is running in either
+  direction, and an INVITE handed to `request_in_dialog` would have run on a
+  transaction machine that cannot acknowledge it.
+
 ### Changed
 
 - The project's home is `sipral.org`. `Cargo.toml`, both package READMEs and the

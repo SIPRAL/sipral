@@ -139,6 +139,9 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
+    /// 491, which §14.2 answers an INVITE that crossed one of our own inside
+    /// the same dialog with.
+    pub const REQUEST_PENDING: Self = Self(491);
     /// 481, which answers a request naming a dialog or a transaction that is
     /// not there (§12.2.2, RFC 3262 §3).
     pub const CALL_DOES_NOT_EXIST: Self = Self(481);

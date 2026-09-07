@@ -29,6 +29,9 @@ mod outgoing;
 mod prack;
 #[cfg(test)]
 mod prack_tests;
+mod reinvite;
+#[cfg(test)]
+mod reinvite_tests;
 mod reliable;
 mod resolve;
 mod table;

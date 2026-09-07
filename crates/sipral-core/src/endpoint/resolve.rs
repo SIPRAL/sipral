@@ -24,12 +24,13 @@
 //! or a server-side deployment wants.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use super::driver::Endpoint;
 use super::event::Event;
 use super::table::Flow;
 use super::transport::{Host, TransportProtocol};
-use crate::msg::{HostRef, Uri};
+use crate::msg::Uri;
 use crate::transaction::DialogId;
 
 impl Endpoint {
@@ -77,11 +78,29 @@ impl Endpoint {
         };
         self.push(Event::ResolveNeeded {
             dialog,
-            host: Host::from_ref(sip.host),
+            host: target_host(&sip),
             port: sip.port,
             protocol: protocol_of(&target),
         });
     }
+}
+
+/// RFC 3263 §4: "the TARGET is the maddr parameter of the URI, if present, and
+/// the host portion of the URI if not."
+///
+/// A `Route` value with a `maddr` names the proxy the request has to travel
+/// through; resolving its host instead sends the request to a different
+/// machine that happens to be named in the same URI. The response path applies
+/// the same rule to a `Via` in `via.rs`, and the two must not disagree.
+fn target_host(sip: &crate::msg::SipUriRef<'_>) -> Host {
+    let Some(maddr) = sip.maddr() else {
+        return Host::from_ref(sip.host);
+    };
+    // §19.1.1 brackets an IPv6 literal wherever it appears in a URI
+    maddr
+        .trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .map_or_else(|_| Host::Name(Arc::from(maddr)), Host::Ip)
 }
 
 /// The URI whose address a request in this dialog would be sent to
@@ -103,10 +122,8 @@ fn points_at(target: &Uri, flow: Flow) -> bool {
     let Some(sip) = target.sip() else {
         return false;
     };
-    let address = match sip.host {
-        HostRef::Ipv4(addr) => IpAddr::V4(addr),
-        HostRef::Ipv6(addr) => IpAddr::V6(addr),
-        HostRef::Name(_) => return false,
+    let Some(address) = target_host(&sip).ip() else {
+        return false;
     };
     let port = sip
         .port
@@ -130,11 +147,11 @@ fn protocol_of(target: &Uri) -> Option<TransportProtocol> {
 
 #[cfg(test)]
 mod tests {
-    use super::{points_at, protocol_of};
+    use super::{points_at, protocol_of, target_host};
     use crate::endpoint::table::Flow;
     use crate::endpoint::{TransportId, TransportProtocol};
     use crate::msg::Uri;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr};
 
     fn flow(destination: &str, protocol: TransportProtocol) -> Flow {
         Flow {
@@ -184,6 +201,39 @@ mod tests {
             &uri("sip:bob@example.com"),
             flow("192.0.2.9:5060", TransportProtocol::Udp)
         ));
+    }
+
+    #[test]
+    fn a_maddr_is_the_target_and_the_host_is_not() {
+        // RFC 3263 4: "the TARGET is the maddr parameter of the URI, if
+        // present, and the host portion of the URI if not". A Route value with
+        // a maddr names the proxy to travel through, and resolving its host
+        // sends the request somewhere else entirely
+        assert_eq!(
+            target_host(&uri("sip:p1.example.com;maddr=192.0.2.9").sip().unwrap()).ip(),
+            Some("192.0.2.9".parse::<IpAddr>().unwrap())
+        );
+        assert!(points_at(
+            &uri("sip:p1.example.com;maddr=192.0.2.9"),
+            flow("192.0.2.9:5060", TransportProtocol::Udp)
+        ));
+        assert!(
+            !points_at(
+                &uri("sip:192.0.2.9;maddr=198.51.100.7"),
+                flow("192.0.2.9:5060", TransportProtocol::Udp)
+            ),
+            "the host is not where this one goes"
+        );
+        // 19.1.1 brackets an IPv6 literal wherever it appears in a URI
+        assert_eq!(
+            target_host(&uri("sip:p1.example.com;maddr=[2001:db8::1]").sip().unwrap()).ip(),
+            Some("2001:db8::1".parse::<IpAddr>().unwrap())
+        );
+        // a maddr that is a name needs the resolver the caller owns
+        assert_eq!(
+            target_host(&uri("sip:192.0.2.9;maddr=sip.example.net").sip().unwrap()).ip(),
+            None
+        );
     }
 
     #[test]

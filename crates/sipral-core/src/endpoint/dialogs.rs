@@ -186,6 +186,15 @@ impl Dialogs {
         }
     }
 
+    /// The INVITE that opened this dialog, while it is still running.
+    ///
+    /// §14.1 forbids a second INVITE transaction in a dialog while one is in
+    /// progress, and the INVITE that opened an early dialog counts.
+    pub(crate) fn opening_invite(&self, id: DialogId) -> Option<TransactionId<InviteClient>> {
+        let set = self.branch_set(id)?;
+        self.sets.get(set)?.invite
+    }
+
     /// The INVITE transaction is over. The set stays for as long as it still
     /// has dialogs; without them it goes now.
     pub(crate) fn invite_done(&mut self, set: Raw) {

@@ -147,6 +147,24 @@ A dialog is Call-ID plus both tags. The layer maintains:
   keeps it and answers every retransmitted 2xx itself. The ACK for a non-2xx
   is the transaction's own business (§17.1.1.3) and never reaches the caller.
 
+A re-INVITE (§14) is an INVITE inside a dialog and is handled apart from one
+that opens a call, because "unlike an INVITE, which can fork, a re-INVITE will
+never fork" (§14.1). Its answer is not offered to a set of dialogs looking for
+branches; it feeds the one dialog it was sent in, refreshes the remote target,
+and is acknowledged by an ACK carrying *its* sequence number rather than the
+original INVITE's.
+
+Two INVITEs crossing in one dialog — both ends putting the call on hold at the
+same instant — is answered here and never handed up, because §14.2 leaves no
+decision in it: 491 when the crossing one arrived while ours was outstanding,
+500 with a randomly drawn `Retry-After` when the far end sent a second before
+we answered its first, and the same 500 for a second UPDATE (RFC 3311 §5.2).
+The end that receives the 491 is told how long to wait — 2.1 to 4 seconds if it
+generated the `Call-ID`, 0 to 2 if it did not, so that the two do not collide
+again — and decides for itself whether the change is still wanted. RFC 3311's
+other glare rules turn on whether an offer is outstanding, which is offer/answer
+state and belongs to `sipral-ua`.
+
 ## SDP
 
 Offer/answer per RFC 3264, as a value type: parse, inspect, build. No policy.
@@ -159,10 +177,15 @@ drops what it does not understand breaks the next extension somebody adds.
 Attributes are held generically — name and value — with typed access for the
 ones the stack acts on.
 
-Supported: `m=audio` with RTP/AVP and RTP/SAVP, `a=rtpmap`, `a=fmtp`,
+Typed today: `m=audio` with RTP/AVP and RTP/SAVP, `a=rtpmap`, `a=fmtp`,
 `a=ptime`/`a=maxptime`, `a=sendrecv|sendonly|recvonly|inactive`, `a=rtcp`,
-`a=rtcp-mux`, `c=` with IPv4 and IPv6, `a=crypto` for SDES, `a=fingerprint`
-for DTLS-SRTP, and the `a=candidate` lines ICE needs.
+`a=rtcp-mux`, and `c=` with IPv4 and IPv6.
+
+Carried but not yet typed: `a=crypto` for SDES, `a=fingerprint` for DTLS-SRTP,
+and the `a=candidate` lines ICE needs. They survive a parse and a round trip
+like every other attribute, and reading one still means reading a name and a
+value. Typed access arrives with the crate that acts on them, in phase 2 —
+writing it earlier would be an accessor with no caller.
 
 Hold is `a=sendonly` with `a=recvonly` in the answer. The `c=0.0.0.0` form is
 accepted on receive because old equipment sends it, and never sent.

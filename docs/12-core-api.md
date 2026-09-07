@@ -748,10 +748,33 @@ impl Endpoint {
     pub fn prack(&mut self, provisional: ProvisionalResponseId, body: Option<Arc<[u8]>>, now: Instant)
         -> Result<TransactionId<NonInviteClient>, PrackError>;
 
+    /// Anything but an INVITE: BYE, INFO, NOTIFY, UPDATE, REFER. An INVITE is
+    /// refused with `SendError::WrongMethod`, because it needs an INVITE
+    /// client transaction and an ACK of its own.
     pub fn request_in_dialog(&mut self, dialog: DialogId, request: &OutgoingInDialogRequest, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
-    pub fn reinvite(&mut self, dialog: DialogId, offer: Option<Arc<[u8]>>, now: Instant)
+
+    /// Hold, resume, a codec change (§14.1). The `Contact` is required and not
+    /// defaulted: §8.1.1.8 makes it a MUST on anything that can establish a
+    /// dialog, and the endpoint was told a transport and a peer address, not a
+    /// public URI to advertise.
+    ///
+    /// Refused with `SendError::InviteInProgress` when another INVITE is
+    /// already running in the dialog in either direction — §14.1 makes a
+    /// second one a MUST NOT, and that rule is what glare comes from.
+    ///
+    /// A re-INVITE never forks, so its answer is not a fork: it arrives as
+    /// `Event::ReinviteAnswered` and is acknowledged with `ack_reinvite`.
+    pub fn reinvite(&mut self, dialog: DialogId, request: &OutgoingInDialogRequest, now: Instant)
         -> Result<TransactionId<InviteClient>, SendError>;
+
+    /// ACK for the 2xx to a re-INVITE. Separate from `ack_2xx` because the two
+    /// acknowledge different things: that one names which of several forked
+    /// dialogs answered, this one is a request inside a dialog that already
+    /// exists, and its `CSeq` is the re-INVITE's rather than the original
+    /// INVITE's. Kept and resent on every retransmission of the 2xx, as above.
+    pub fn ack_reinvite(&mut self, invite: TransactionId<InviteClient>, answer: Option<&[u8]>, now: Instant)
+        -> Result<(), AckError>;
     /// §15.1.1: the dialog is over as soon as the BYE is passed to the
     /// transaction, whatever the far end answers, so this also emits
     /// `Event::DialogTerminated`.
@@ -840,8 +863,27 @@ pub enum Event {
     /// 2xx is answered from the stored ACK and reported to nobody.
     Established { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },
     /// The call will not connect: refused, timed out, or the transport died.
-    /// Every dialog it had opened is reported terminated separately.
-    Failed { invite: TransactionId<InviteClient>, status: Option<StatusCode>, reason: FailureReason },
+    /// Every dialog it had opened is reported terminated separately. The
+    /// refusal rides whole, because a 3xx names where to try instead and a
+    /// status code alone cannot say it.
+    Failed { invite: TransactionId<InviteClient>, status: Option<StatusCode>, reason: FailureReason, response: Option<OwnedMessage> },
+
+    // UAC, inside a dialog: a re-INVITE never forks (§14.1), so none of these
+    // carries a set of dialogs to choose between
+    ReinviteProgress { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },
+    /// Caller must `ack_reinvite`. The remote target has already been
+    /// refreshed from the `Contact` of this response (§12.2.1.2).
+    ReinviteAnswered { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },
+    /// §14.1: "the session parameters MUST remain unchanged, as if no
+    /// re-INVITE had been issued". The dialog stands unless a
+    /// `DialogTerminated` follows, which it does for the three cases §12.2.1.2
+    /// names: a 481, a 408, and nothing at all.
+    ReinviteFailed { invite: TransactionId<InviteClient>, dialog: DialogId, status: Option<StatusCode>, reason: FailureReason, response: Option<OwnedMessage> },
+    /// Two re-INVITEs crossed and the far end answered 491 (§14.2). `retry_in`
+    /// is this end's draw from the range §14.1 gives it — 2.1 to 4 seconds for
+    /// the end that generated the `Call-ID`, 0 to 2 for the other, so that the
+    /// two do not collide again. Retrying is the caller's decision.
+    ReinviteGlare { invite: TransactionId<InviteClient>, dialog: DialogId, retry_in: Duration, response: OwnedMessage },
     CancelSent { invite: TransactionId<InviteClient>, cancel: TransactionId<NonInviteClient> },
     /// The CANCEL was honoured: 487 arrived.
     Cancelled { invite: TransactionId<InviteClient> },
@@ -885,8 +927,20 @@ pub enum Event {
 
 pub enum FailureReason { Timeout, TransportFailed, Refused }
 pub enum TerminationReason { Completed, TimedOut, TransportFailed }
-pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed }
+pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed, Gone }
 ```
+
+`Gone` is §12.2.1.2's case: a 481 or a 408 to a request inside the dialog, or
+no answer at all. No BYE goes out for it — the far end has just said there is
+no such dialog, and a BYE would earn the same 481.
+
+An INVITE that arrives inside a dialog while another is in flight is answered
+by the endpoint and never reaches the caller, because §14.2 makes both answers
+MUSTs and neither is a decision: 491 when the crossing one is ours, and 500
+with a drawn `Retry-After` when the far end sent a second before we answered
+its first. RFC 3311 §5.2 says the same about a second UPDATE and that one is
+answered here too; its sibling rules turn on whether an offer is outstanding,
+which is offer/answer state and lives in `sipral-ua`.
 
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the

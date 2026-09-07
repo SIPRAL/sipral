@@ -87,6 +87,10 @@ pub enum DialogEndReason {
     Abandoned,
     /// Nothing came back, or the transport died.
     Failed,
+    /// The far end no longer has it: a 481 or a 408 to a request sent inside
+    /// it, or no answer at all (§12.2.1.2). No BYE goes out — the peer has
+    /// just said there is no such dialog, and a BYE would earn the same 481.
+    Gone,
 }
 
 impl core::fmt::Display for DialogEndReason {
@@ -97,6 +101,7 @@ impl core::fmt::Display for DialogEndReason {
             Self::Refused => "refused",
             Self::Abandoned => "abandoned",
             Self::Failed => "failed",
+            Self::Gone => "gone at the far end",
         })
     }
 }
@@ -161,6 +166,78 @@ pub enum Event {
         status: Option<StatusCode>,
         /// Why.
         reason: FailureReason,
+        /// The refusal, whole, when there was one. A 3xx names where to try
+        /// instead and a 4xx may carry a `Warning` or a `Retry-After`; none of
+        /// that survives being reduced to a number, and this is a core that
+        /// does not follow redirects on the caller's behalf.
+        response: Option<OwnedMessage>,
+    },
+    /// A re-INVITE this end sent got a provisional response (§14.1).
+    ///
+    /// Rare — §14.2 says a UAS "MAY choose not to generate 180 (Ringing)
+    /// responses for a re-INVITE" — and reported rather than swallowed,
+    /// because a 183 to a re-INVITE can carry an early answer.
+    ReinviteProgress {
+        /// The transaction that sent it.
+        invite: TransactionId<InviteClient>,
+        /// The dialog it is in.
+        dialog: DialogId,
+        /// The status.
+        status: StatusCode,
+        /// The response, whole.
+        response: OwnedMessage,
+    },
+    /// A re-INVITE this end sent was accepted. The caller must call
+    /// [`super::Endpoint::ack_reinvite`].
+    ///
+    /// The dialog is the one it was sent in — a re-INVITE never forks
+    /// (§14.1) — and its remote target has already been refreshed from the
+    /// `Contact` of this response.
+    ReinviteAnswered {
+        /// The transaction that sent it.
+        invite: TransactionId<InviteClient>,
+        /// The dialog it renegotiated.
+        dialog: DialogId,
+        /// The status.
+        status: StatusCode,
+        /// The response, whole; the offer may be in it.
+        response: OwnedMessage,
+    },
+    /// A re-INVITE this end sent was refused, or will not be answered.
+    ///
+    /// §14.1: "the session parameters MUST remain unchanged, as if no
+    /// re-INVITE had been issued". The dialog stands unless a
+    /// [`Event::DialogTerminated`] follows, which it does for the three cases
+    /// §12.2.1.2 names: a 481, a 408, and nothing at all.
+    ReinviteFailed {
+        /// The transaction that sent it.
+        invite: TransactionId<InviteClient>,
+        /// The dialog it was sent in.
+        dialog: DialogId,
+        /// The status, when one arrived.
+        status: Option<StatusCode>,
+        /// Why.
+        reason: FailureReason,
+        /// The refusal, whole, when there was one.
+        response: Option<OwnedMessage>,
+    },
+    /// Two re-INVITEs crossed: the far end answered 491 Request Pending
+    /// (§14.2), because it had one of its own outstanding when ours arrived.
+    ///
+    /// Both ends are about to back off, from ranges that do not overlap, so
+    /// that they do not collide a second time. `retry_in` is this end's draw.
+    /// Sending it again is the caller's decision — the session may no longer
+    /// need changing, and §14.1 says as much: "if it still desires for that
+    /// session modification to take place".
+    ReinviteGlare {
+        /// The transaction that was refused.
+        invite: TransactionId<InviteClient>,
+        /// The dialog both INVITEs are in.
+        dialog: DialogId,
+        /// How long to wait before offering the same change again.
+        retry_in: core::time::Duration,
+        /// The 491, whole.
+        response: OwnedMessage,
     },
     /// A CANCEL that was asked for has gone out.
     ///
@@ -363,7 +440,22 @@ impl Event {
                 let body = response.as_raw().body();
                 (!body.is_empty()).then(|| Arc::from(body))
             }
-            Self::Provisional { ref response, .. } | Self::Established { ref response, .. } => {
+            Self::Provisional { ref response, .. }
+            | Self::Established { ref response, .. }
+            | Self::ReliableProvisional { ref response, .. }
+            | Self::ReinviteProgress { ref response, .. }
+            | Self::ReinviteAnswered { ref response, .. } => {
+                let body = response.as_raw().body();
+                (!body.is_empty()).then(|| Arc::from(body))
+            }
+            Self::Failed {
+                response: Some(ref response),
+                ..
+            }
+            | Self::ReinviteFailed {
+                response: Some(ref response),
+                ..
+            } => {
                 let body = response.as_raw().body();
                 (!body.is_empty()).then(|| Arc::from(body))
             }

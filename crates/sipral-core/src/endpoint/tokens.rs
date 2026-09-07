@@ -73,6 +73,22 @@ impl Tokens {
         value % upper + 1
     }
 
+    /// An interval drawn evenly from `low..=high`, in steps of ten
+    /// milliseconds.
+    ///
+    /// RFC 3261 §14.1 asks for the 491 back-off "in units of 10 ms", and
+    /// §14.2 for a `Retry-After` "randomly chosen ... between 0 and 10
+    /// seconds". Two implementations that back off by the same amount collide
+    /// again, which is the whole reason the interval is drawn rather than
+    /// fixed.
+    pub(crate) fn interval(&mut self, low: Duration, high: Duration) -> Duration {
+        const STEP: Duration = Duration::from_millis(10);
+        let steps = |span: Duration| u32::try_from(span.as_millis() / 10).unwrap_or(u32::MAX);
+        let (low, high) = (steps(low), steps(high));
+        let span = high.saturating_sub(low);
+        STEP * (low + self.number(span.saturating_add(1)).saturating_sub(1))
+    }
+
     /// An interval at or just under `upper`.
     ///
     /// RFC 5626 §4.4.1: "The UA MUST select a random number between a fixed
@@ -194,5 +210,31 @@ mod tests {
     #[test]
     fn a_zero_bound_stays_zero() {
         assert_eq!(tokens(6).jitter(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn an_interval_lands_inside_its_range_on_a_ten_millisecond_step() {
+        // §14.1's first case: 2.1 to 4 seconds, in units of 10 ms
+        let mut source = tokens(9);
+        let (low, high) = (Duration::from_millis(2_100), Duration::from_secs(4));
+        let mut distinct = HashSet::new();
+        for _ in 0..500 {
+            let interval = source.interval(low, high);
+            assert!(interval >= low, "{interval:?} is below the range");
+            assert!(interval <= high, "{interval:?} is above the range");
+            assert_eq!(interval.as_millis() % 10, 0, "not a ten millisecond step");
+            distinct.insert(interval);
+        }
+        assert!(distinct.len() > 100, "the draw is barely moving");
+    }
+
+    #[test]
+    fn an_interval_with_no_room_is_the_bound_itself() {
+        let mut source = tokens(10);
+        let fixed = Duration::from_millis(2_100);
+        assert_eq!(source.interval(fixed, fixed), fixed);
+        // §14.2's range starts at zero, and zero is a legitimate draw
+        let low = source.interval(Duration::ZERO, Duration::ZERO);
+        assert_eq!(low, Duration::ZERO);
     }
 }
