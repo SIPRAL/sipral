@@ -123,6 +123,20 @@ pub enum RespondError {
     /// The transaction is past the point where this response could go out:
     /// §17.2.2 discards a second final response rather than sending it.
     TooLate,
+    /// The INVITE carried `Require: 100rel`, so a non-100 provisional response
+    /// to it has to be sent reliably (RFC 3262 §3). Use
+    /// [`super::Endpoint::respond_reliable`].
+    MustBeReliable,
+    /// Only 101 to 199 may be sent reliably. A 100 is hop by hop, and the
+    /// mechanism is end to end.
+    NotProvisional,
+    /// The INVITE listed `100rel` in neither `Supported` nor `Require`, so the
+    /// far end has not agreed to acknowledge one.
+    NotOffered,
+    /// A reliable provisional response is still unacknowledged. §3: "The UAS
+    /// MUST NOT send a second reliable provisional response until the first is
+    /// acknowledged."
+    StillUnacknowledged,
 }
 
 impl fmt::Display for RespondError {
@@ -131,6 +145,12 @@ impl fmt::Display for RespondError {
             Self::NoSuchTransaction => f.write_str("no such transaction"),
             Self::Build(ref error) => write!(f, "cannot build the response: {error}"),
             Self::TooLate => f.write_str("the transaction has already answered"),
+            Self::MustBeReliable => f.write_str("this INVITE requires 100rel"),
+            Self::NotProvisional => f.write_str("only 101 to 199 may be sent reliably"),
+            Self::NotOffered => f.write_str("the far end did not offer 100rel"),
+            Self::StillUnacknowledged => {
+                f.write_str("the previous reliable response is unacknowledged")
+            }
         }
     }
 }
@@ -213,6 +233,37 @@ impl core::error::Error for AckError {}
 impl From<SendError> for AckError {
     fn from(error: SendError) -> Self {
         Self::Build(error)
+    }
+}
+
+/// Why a reliable provisional response could not be acknowledged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PrackError {
+    /// The handle names a response that is no longer outstanding — a final
+    /// response arrived, or it was acknowledged already.
+    NoSuchResponse,
+    /// The dialog it belonged to has ended.
+    NoSuchDialog,
+    /// The PRACK could not be assembled or sent.
+    Send(SendError),
+}
+
+impl fmt::Display for PrackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::NoSuchResponse => f.write_str("no such provisional response"),
+            Self::NoSuchDialog => f.write_str("no such dialog"),
+            Self::Send(ref error) => write!(f, "cannot send the PRACK: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for PrackError {}
+
+impl From<SendError> for PrackError {
+    fn from(error: SendError) -> Self {
+        Self::Send(error)
     }
 }
 

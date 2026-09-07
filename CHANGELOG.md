@@ -285,6 +285,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   487 (§9.2), and an in-dialog request whose `CSeq` runs backwards gets a 500
   (§12.2.2). Everything else is reported and left to the layer above.
   36 tests, each a scripted exchange on a fake clock.
+- Reliable provisional responses (RFC 3262), both ways round. A 180 is a
+  datagram like any other and can be lost, which matters because an offer or an
+  answer can travel in a 1xx and offer/answer has no recovery from a lost
+  message — and because a carrier that puts `100rel` in `Require` will not
+  complete a call without one. The end that sends one numbers it, retransmits
+  it doubling from T1 with no cap, and refuses to send a second until the first
+  is acknowledged; 64·T1 without a PRACK refuses the call with a 500, which is
+  what §3 asks for. The end that receives one keeps the highest number it has
+  seen in order and silently drops a retransmission or a gap, so a PRACK is
+  never sent twice for one response. A PRACK that matches nothing is answered
+  481 without being handed up, and one that matches stops the retransmissions
+  before the caller sees it. `Supported: 100rel` goes on every outgoing INVITE,
+  merged with whatever the caller listed rather than written as a second line
+  of the same field. The received numbering is kept per dialog rather than per
+  request, because a forked INVITE is answered by several user agents that each
+  number from their own transaction; the reasoning is in `docs/03`.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4

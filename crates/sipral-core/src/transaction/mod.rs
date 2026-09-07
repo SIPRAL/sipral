@@ -31,8 +31,8 @@ pub(crate) use effect::{Effects, Notify};
 pub(crate) use handle::Raw;
 pub use handle::{
     AnyTransactionId, DialogId, InviteClient, InviteClientState, InviteServer, InviteServerState,
-    NonInviteClient, NonInviteClientState, NonInviteServer, NonInviteServerState, Role,
-    TransactionId, TransactionKind,
+    NonInviteClient, NonInviteClientState, NonInviteServer, NonInviteServerState,
+    ProvisionalResponseId, Role, TransactionId, TransactionKind,
 };
 pub(crate) use matching::ServerKey;
 pub(crate) use store::{Client, Server, Transactions};

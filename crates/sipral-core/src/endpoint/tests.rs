@@ -28,16 +28,16 @@ const UDP: TransportId = TransportId(1);
 const TCP: TransportId = TransportId(2);
 const T1: Duration = Duration::from_millis(500);
 
-fn local() -> SocketAddr {
+pub(super) fn local() -> SocketAddr {
     "192.0.2.1:5060".parse().expect("a local address")
 }
 
-fn peer() -> SocketAddr {
+pub(super) fn peer() -> SocketAddr {
     "192.0.2.9:5060".parse().expect("a peer address")
 }
 
 /// An endpoint with one UDP transport bound, at `t0`.
-fn endpoint(now: Instant) -> Endpoint {
+pub(super) fn endpoint(now: Instant) -> Endpoint {
     let mut endpoint = Endpoint::new(EndpointConfig::default(), [7; 32]);
     endpoint
         .receive(
@@ -57,6 +57,16 @@ fn uri(text: &str) -> Uri {
     Uri::parse_str(text).expect("a URI")
 }
 
+/// An INVITE to the peer, with the two fields the endpoint insists on.
+pub(super) fn invite_request() -> OutgoingRequest {
+    request(Method::Invite)
+}
+
+/// An OPTIONS to the peer.
+pub(super) fn options_request() -> OutgoingRequest {
+    request(Method::Options)
+}
+
 fn request(method: Method<'_>) -> OutgoingRequest {
     OutgoingRequest::new(method, uri("sip:bob@example.com"), UDP, peer())
         .to(b"<sip:bob@example.com>")
@@ -64,7 +74,7 @@ fn request(method: Method<'_>) -> OutgoingRequest {
 }
 
 /// Everything the endpoint wants written, drained.
-fn transmits(endpoint: &mut Endpoint) -> Vec<Transmit> {
+pub(super) fn transmits(endpoint: &mut Endpoint) -> Vec<Transmit> {
     let mut out = Vec::new();
     while let Some(transmit) = endpoint.poll_transmit() {
         out.push(transmit);
@@ -73,7 +83,7 @@ fn transmits(endpoint: &mut Endpoint) -> Vec<Transmit> {
 }
 
 /// Everything the endpoint wants said, drained.
-fn events(endpoint: &mut Endpoint) -> Vec<Event> {
+pub(super) fn events(endpoint: &mut Endpoint) -> Vec<Event> {
     let mut out = Vec::new();
     while let Some(event) = endpoint.poll_event() {
         out.push(event);
@@ -82,19 +92,19 @@ fn events(endpoint: &mut Endpoint) -> Vec<Event> {
 }
 
 /// The one message the endpoint wanted written.
-fn sent(endpoint: &mut Endpoint) -> Vec<u8> {
+pub(super) fn sent(endpoint: &mut Endpoint) -> Vec<u8> {
     let mut all = transmits(endpoint);
     assert_eq!(all.len(), 1, "expected exactly one message out");
     all.pop().map(|t| t.payload.to_vec()).unwrap_or_default()
 }
 
-fn with<T>(bytes: &[u8], f: impl FnOnce(&RawMessage<'_>) -> T) -> T {
+pub(super) fn with<T>(bytes: &[u8], f: impl FnOnce(&RawMessage<'_>) -> T) -> T {
     let mut scratch = ParseScratch::new();
     let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
     f(&message)
 }
 
-fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
+pub(super) fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
     with(bytes, |message| {
         message.header(name).unwrap_or_default().to_vec()
     })
@@ -131,7 +141,7 @@ fn respond_to(request: &[u8], status: u16, reason: &str, tag: Option<&str>) -> V
 }
 
 /// Feed a datagram in from the peer.
-fn deliver(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
+pub(super) fn deliver(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
     endpoint
         .receive(
             Input::Datagram {
@@ -146,7 +156,7 @@ fn deliver(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
 }
 
 /// A request arriving from the peer, with a branch of its own.
-fn incoming(method: &str, branch: &str, extra: &str) -> Vec<u8> {
+pub(super) fn incoming(method: &str, branch: &str, extra: &str) -> Vec<u8> {
     format!(
         "{method} sip:alice@192.0.2.1 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\

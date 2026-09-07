@@ -56,6 +56,23 @@ impl Tokens {
         out.into_boxed_slice()
     }
 
+    /// A number in `1..=upper`, drawn evenly.
+    ///
+    /// RFC 3262 §3 asks for the first `RSeq` of a transaction to be "chosen
+    /// uniformly" in a range, so that a number on the wire says nothing about
+    /// how many calls this endpoint has taken.
+    pub(crate) fn number(&mut self, upper: u32) -> u32 {
+        if upper == 0 {
+            return 0;
+        }
+        let digest = self.draw();
+        let mut value = 0_u32;
+        for byte in digest.iter().take(4) {
+            value = (value << 8) | u32::from(*byte);
+        }
+        value % upper + 1
+    }
+
     /// An interval at or just under `upper`.
     ///
     /// RFC 5626 §4.4.1: "The UA MUST select a random number between a fixed
@@ -142,6 +159,21 @@ mod tests {
         let branch = tokens(4).branch();
         assert!(branch.starts_with(MAGIC_COOKIE));
         assert_eq!(branch.len(), MAGIC_COOKIE.len() + 32);
+    }
+
+    #[test]
+    fn a_number_lands_inside_its_range_and_moves_about_in_it() {
+        let mut source = tokens(8);
+        let mut distinct = HashSet::new();
+        for _ in 0..500 {
+            let value = source.number(2_147_483_647);
+            assert!(value >= 1, "zero is not in 1..=upper");
+            assert!(value <= 2_147_483_647);
+            distinct.insert(value);
+        }
+        assert!(distinct.len() > 400, "the draw is barely moving");
+        assert_eq!(source.number(1), 1);
+        assert_eq!(source.number(0), 0, "an empty range has no answer");
     }
 
     #[test]

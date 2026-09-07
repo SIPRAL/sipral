@@ -117,7 +117,16 @@ RFC 3262 reliable provisional responses. Not needed for FreeSWITCH, where 100rel
 is off by default. Needed for carriers that mandate it, which is why it is in
 phase 1 rather than deferred. `100rel` in `Supported` or `Require`, `RSeq` and
 `RAck` accounting, and the retransmission of the reliable provisional response
-until PRACK arrives.
+until PRACK arrives, doubling from T1 with no cap — unlike a 2xx, because a
+PRACK is not triggered by receiving one.
+
+One reading is written down rather than left implicit. §4 keeps the received
+sequence number "for the initial request", which predates a clean answer for
+forking: one INVITE that a proxy forks is answered by several user agents, each
+numbering its own series from its own transaction (§3: "The RSeq numbering space
+is within a single transaction"). Kept per request, two branches would look to
+each other like a series full of gaps and every response after the first would
+be discarded, so it is kept per dialog instead.
 
 ## 4. Dialogs
 

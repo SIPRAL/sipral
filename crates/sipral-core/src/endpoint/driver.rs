@@ -28,17 +28,20 @@ use super::dialogs::Dialogs;
 use super::error::{AckError, CancelError, ReceiveError, RespondError, SendError};
 use super::event::Event;
 use super::outgoing::{Extra, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
+use super::reliable::Reliables;
 use super::table::{Flow, Transports};
 use super::tokens::Tokens;
 use super::transport::{Input, Transmit, TransportId, TransportProtocol};
 use super::via;
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
-use crate::msg::{Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode};
+use crate::msg::{
+    HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
+};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
     TransactionId, TransactionKind, Transactions,
 };
-use crate::transaction::{TimerHandle, Timers};
+use crate::transaction::{Raw, TimerHandle, Timers};
 
 /// Something that is neither a transaction nor a dialog, and still has to
 /// happen at a particular time.
@@ -46,6 +49,8 @@ use crate::transaction::{TimerHandle, Timers};
 pub(super) enum Deadline {
     /// A double CRLF is due on a byte stream (RFC 5626 §4.4.1).
     Keepalive(TransportId),
+    /// A reliable provisional response has to go out again (RFC 3262 §3).
+    Reliable(Raw),
 }
 
 /// One SIP endpoint: everything in flight, and nothing that does I/O.
@@ -71,6 +76,8 @@ pub struct Endpoint {
     /// The INVITEs a CANCEL has gone out for, so that a 487 can be told from
     /// an ordinary refusal and a 2xx from a race that was lost.
     pub(super) cancelled: HashSet<TransactionId<InviteClient>>,
+    /// Reliable provisional responses in both directions (RFC 3262).
+    pub(super) reliable: Reliables,
 }
 
 impl Endpoint {
@@ -97,6 +104,7 @@ impl Endpoint {
             hit: Vec::new(),
             local_tags: HashMap::new(),
             cancelled: HashSet::new(),
+            reliable: Reliables::new(),
         }
     }
 
@@ -140,6 +148,7 @@ impl Endpoint {
         while let Some(deadline) = self.deadlines.fire(now) {
             match deadline {
                 Deadline::Keepalive(transport) => self.send_keepalive(transport, now),
+                Deadline::Reliable(raw) => self.retransmit_reliable(raw, now),
             }
         }
 
@@ -601,6 +610,22 @@ impl Endpoint {
         };
         let message = build_response(&request, response, Some(&tag))?;
 
+        // RFC 3262 §3: "The UAS MUST send any non-100 provisional response
+        // reliably if the initial request contained a Require header field
+        // with the option tag 100rel"
+        if status.is_provisional()
+            && status.get() >= 101
+            && super::reliable::demands_100rel(&request.as_raw())
+        {
+            return Err(RespondError::MustBeReliable);
+        }
+        // §3: a final response stops the retransmissions of anything still
+        // unacknowledged, without forgetting it — a PRACK for one may still
+        // arrive and still has to be answered
+        if status.is_final() {
+            self.quiet_reliable(transaction);
+        }
+
         // §12.1.1: only a 101-199 or a 2xx opens a dialog. A 100 names
         // nothing, and a failure ends whatever was already open
         let opens = status.get() >= 101 && (status.is_provisional() || status.is_success());
@@ -661,10 +686,21 @@ impl Endpoint {
             None => self.tokens.token(),
         };
         let branch = self.tokens.branch();
-        let cseq = request.cseq.unwrap_or(1);
+        // RFC 3262 §4: "The UAC SHOULD include this in all INVITE requests."
+        // Without it the far end may not answer reliably, and an offer in a
+        // 1xx has no recovery from a lost datagram
+        let supported = (request.method.as_ref() == Method::Invite.as_str().as_bytes())
+            .then(|| offering_100rel(&request.extra));
+        let minted = Minted {
+            branch: &branch,
+            from,
+            to,
+            call_id: &call_id,
+            cseq: request.cseq.unwrap_or(1),
+            supported: supported.as_deref(),
+        };
 
-        let mut message =
-            self.assemble(request, &flow, local, &branch, from, to, &call_id, cseq)?;
+        let mut message = self.assemble(request, &flow, local, &minted)?;
 
         // 18.1.1: too large for a datagram means it leaves over something
         // congestion controlled, and the Via has to say so
@@ -692,49 +728,44 @@ impl Endpoint {
                 protocol: bound.protocol,
             };
             local = bound.local;
-            message = self.assemble(request, &flow, local, &branch, from, to, &call_id, cseq)?;
+            message = self.assemble(request, &flow, local, &minted)?;
         }
 
         Ok((message, flow))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "assembling a request needs every field of one, and grouping them into a struct would only move the list"
-    )]
     fn assemble(
         &self,
         request: &OutgoingRequest,
         flow: &Flow,
         local: SocketAddr,
-        branch: &[u8],
-        from: &[u8],
-        to: &[u8],
-        call_id: &[u8],
-        cseq: u32,
+        minted: &Minted<'_>,
     ) -> Result<OwnedMessage, SendError> {
         let via = via::local_via(
             flow.protocol,
             local,
-            branch,
+            minted.branch,
             self.config.always_request_rport,
         );
         let method =
             Method::from_bytes(&request.method).ok_or(SendError::MissingField("method"))?;
         let mut builder = RequestBuilder::new(method, request.request_uri.as_bytes())
             .via(&via)
-            .from(from)
-            .to(to)
-            .call_id(call_id)
-            .cseq(cseq)
+            .from(minted.from)
+            .to(minted.to)
+            .call_id(minted.call_id)
+            .cseq(minted.cseq)
             .max_forwards(request.max_forwards);
+        if let Some(supported) = minted.supported {
+            builder = builder.header(HeaderName::Supported, supported);
+        }
         for hop in &request.route {
             builder = builder.route(hop);
         }
         if let Some(ref contact) = request.contact {
             builder = builder.contact(contact);
         }
-        builder = add_extra(builder, &request.extra);
+        builder = add_extra(builder, &request.extra, minted.supported.is_some());
         if let (Some(kind), Some(body)) = (request.content_type.as_deref(), request.body.as_deref())
         {
             builder = builder.body(kind, body);
@@ -771,7 +802,7 @@ impl Endpoint {
             if let Some(ref contact) = extra.contact {
                 builder = builder.contact(contact);
             }
-            builder = add_extra(builder, &extra.extra);
+            builder = add_extra(builder, &extra.extra, false);
             if let (Some(kind), Some(body)) = (extra.content_type.as_deref(), body) {
                 builder = builder.body(kind, body);
             }
@@ -784,7 +815,7 @@ impl Endpoint {
     }
 }
 
-fn build_response(
+pub(super) fn build_response(
     request: &OwnedMessage,
     response: &OutgoingResponse,
     tag: Option<&[u8]>,
@@ -817,13 +848,64 @@ fn build_response(
     Ok(builder.build()?)
 }
 
-fn add_extra<'a>(mut builder: RequestBuilder<'a>, extra: &'a [Extra]) -> RequestBuilder<'a> {
+/// Everything the caller added by name.
+///
+/// `Supported` is skipped when the endpoint has written its own: the two would
+/// otherwise arrive as two lines of one field, which is legal but reads as a
+/// stack that does not know what it supports.
+fn add_extra<'a>(
+    mut builder: RequestBuilder<'a>,
+    extra: &'a [Extra],
+    supported_written: bool,
+) -> RequestBuilder<'a> {
     for one in extra {
         if let Some((name, value)) = one.parts() {
+            if supported_written && name == HeaderName::Supported {
+                continue;
+            }
             builder = builder.header(name, value);
         }
     }
     builder
+}
+
+/// What the caller put in `Supported`, with `100rel` in it.
+fn offering_100rel(extra: &[Extra]) -> Box<[u8]> {
+    let mut out: Vec<u8> = Vec::new();
+    for one in extra {
+        let Some((name, value)) = one.parts() else {
+            continue;
+        };
+        if name != HeaderName::Supported {
+            continue;
+        }
+        if !out.is_empty() {
+            out.extend_from_slice(b", ");
+        }
+        out.extend_from_slice(value);
+    }
+    let has_it = out
+        .split(|byte| *byte == b',')
+        .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"100rel"));
+    if has_it {
+        return out.into_boxed_slice();
+    }
+    if !out.is_empty() {
+        out.extend_from_slice(b", ");
+    }
+    out.extend_from_slice(b"100rel");
+    out.into_boxed_slice()
+}
+
+/// The values the endpoint chose for one request.
+struct Minted<'a> {
+    branch: &'a [u8],
+    from: &'a [u8],
+    to: &'a [u8],
+    call_id: &'a [u8],
+    cseq: u32,
+    /// `Supported`, when the endpoint has something of its own to add to it.
+    supported: Option<&'a [u8]>,
 }
 
 /// Whether a `From` or `To` value already carries a tag.

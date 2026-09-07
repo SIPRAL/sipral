@@ -171,6 +171,42 @@ kinds! {
     NonInviteServer => NonInviteServerState, Server, "non-INVITE server", non_invite_server;
 }
 
+/// One reliable provisional response awaiting its PRACK (RFC 3262).
+///
+/// It carries the dialog, so a PRACK cannot be aimed at the wrong one: a fork
+/// produces several early dialogs on the same INVITE, each numbering its own
+/// provisionals, and the numbers alone do not say which is which.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProvisionalResponseId {
+    dialog: DialogId,
+    rseq: u32,
+    pub(crate) raw: Raw,
+}
+
+impl ProvisionalResponseId {
+    pub(crate) const fn new(dialog: DialogId, rseq: u32, raw: Raw) -> Self {
+        Self { dialog, rseq, raw }
+    }
+
+    /// The dialog this response belongs to.
+    #[must_use]
+    pub const fn dialog(&self) -> DialogId {
+        self.dialog
+    }
+
+    /// The `RSeq` it carried (RFC 3262 §7.1).
+    #[must_use]
+    pub const fn rseq(&self) -> u32 {
+        self.rseq
+    }
+}
+
+impl fmt::Debug for ProvisionalResponseId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?} rseq {}", self.dialog, self.rseq)
+    }
+}
+
 /// A transaction, named by the machine it runs.
 ///
 /// The kind is a phantom, so this is four bytes of slot and four of

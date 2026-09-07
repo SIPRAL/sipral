@@ -24,6 +24,7 @@ use std::time::Instant;
 use super::driver::{Deadline, Endpoint, assemble_response};
 use super::error::ReceiveError;
 use super::event::{DialogEndReason, Event, FailureReason, TerminationReason};
+use super::reliable;
 use super::table::Flow;
 use super::via;
 use crate::dialog::{Dialog, DialogKey, DialogState, Fork, Incoming};
@@ -318,6 +319,8 @@ impl Endpoint {
                         status,
                         response: response.to_owned(),
                     });
+                } else if reliable::is_reliable(response) {
+                    self.on_reliable_provisional(id, dialog, response, flow);
                 } else {
                     self.push(Event::Provisional {
                         invite: id,
@@ -519,6 +522,12 @@ impl Endpoint {
         let Some(dialog) = dialog else {
             let tag = self.mint_tag();
             self.remember_tag(AnyTransactionId::NonInviteServer(id), tag);
+            // a PRACK naming no dialog at all matches no outstanding response
+            // either, and §3 answers that 481 rather than handing it up
+            if request.method() == Some(Method::Prack) {
+                self.on_prack(id, None, request, now);
+                return;
+            }
             self.push(Event::IncomingOutOfDialog {
                 transaction: id,
                 request: request.to_owned(),
@@ -528,6 +537,14 @@ impl Endpoint {
 
         self.remember_tag(AnyTransactionId::NonInviteServer(id), key_tag(request));
         if self.reject_out_of_order(dialog, request, id.into(), flow, now) {
+            return;
+        }
+
+        // RFC 3262 §3: a PRACK is answered here whether or not it matches
+        // something, and the matching is on three numbers rather than on the
+        // dialog alone
+        if request.method() == Some(Method::Prack) {
+            self.on_prack(id, Some(dialog), request, now);
             return;
         }
 
@@ -774,7 +791,10 @@ impl Endpoint {
             AnyTransactionId::NonInviteClient(inner) => {
                 self.transactions.drop_non_invite_client(inner);
             }
-            AnyTransactionId::InviteServer(inner) => self.transactions.drop_invite_server(inner),
+            AnyTransactionId::InviteServer(inner) => {
+                self.forget_reliable_on(inner);
+                self.transactions.drop_invite_server(inner);
+            }
             AnyTransactionId::NonInviteServer(inner) => {
                 self.transactions.drop_non_invite_server(inner);
             }
@@ -800,6 +820,7 @@ impl Endpoint {
 
     pub(super) fn forget_dialog(&mut self, dialog: DialogId, reason: DialogEndReason) {
         if self.dialogs.forget(dialog).is_some() {
+            self.forget_reliable_in(dialog);
             self.push(Event::DialogTerminated { dialog, reason });
         }
     }

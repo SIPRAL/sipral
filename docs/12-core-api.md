@@ -67,7 +67,6 @@ pub struct DialogId { raw: Raw }
 
 /// One reliable provisional response (RFC 3262) awaiting PRACK. It carries the
 /// dialog it belongs to, so a PRACK cannot be aimed at the wrong dialog.
-/// Arrives with PRACK; nothing produces one before that.
 pub struct ProvisionalResponseId { dialog: DialogId, raw: Raw }
 impl ProvisionalResponseId {
     pub fn dialog(&self) -> DialogId;
@@ -724,7 +723,13 @@ impl Endpoint {
     pub fn ack_2xx(&mut self, dialog: DialogId, answer: Option<&[u8]>, now: Instant)
         -> Result<(), AckError>;
 
-    /// RFC 3262. The dialog is read out of the handle.
+    /// RFC 3262. The dialog is read out of the handle. The body is the answer
+    /// when the response carried an offer, which §5 makes a MUST for a UAC
+    /// that sent an INVITE without one.
+    ///
+    /// `Supported: 100rel` goes on every outgoing INVITE (§4), merged with
+    /// whatever the caller listed, so the far end is always allowed to answer
+    /// reliably.
     pub fn prack(&mut self, provisional: ProvisionalResponseId, body: Option<Arc<[u8]>>, now: Instant)
         -> Result<TransactionId<NonInviteClient>, PrackError>;
 
@@ -854,9 +859,9 @@ pub enum TerminationReason { Completed, TimedOut, TransportFailed }
 pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed }
 ```
 
-`ReliableProvisional`, `IncomingPrack`, `Challenged` and `ResolveNeeded` are
-the four that arrive with the features they belong to — RFC 3262, the
-credential retry and RFC 3263 resolution — rather than with the endpoint.
+`Challenged` and `ResolveNeeded` are the two that arrive with the features
+they belong to — the credential retry and RFC 3263 resolution — rather than
+with the endpoint.
 
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the
@@ -917,6 +922,12 @@ booleans:
 
 `ParseError`, `HeaderError`, `BuildError`, `ReceiveError`, `SendError`,
 `CancelError`, `AckError`, `PrackError`, `RespondError`, `AuthRetryError`.
+
+`RespondError` carries the four refusals RFC 3262 §3 asks for:
+`MustBeReliable` when the INVITE required `100rel` and the response is a
+non-100 provisional, `NotProvisional` for anything outside 101-199,
+`NotOffered` when the far end never listed the option tag, and
+`StillUnacknowledged` while a previous reliable response is outstanding.
 
 `CancelError` has no "too early" variant. The only ways to fail are an unknown
 or already-final transaction.

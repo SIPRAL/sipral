@@ -18,7 +18,7 @@ use super::transport::TransportProtocol;
 use crate::msg::{OwnedMessage, StatusCode};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
-    TransactionId,
+    ProvisionalResponseId, TransactionId,
 };
 
 /// Why something the caller asked for did not happen.
@@ -118,6 +118,24 @@ pub enum Event {
         /// The response, whole.
         response: OwnedMessage,
     },
+    /// A provisional response that was sent reliably (RFC 3262).
+    ///
+    /// It has to be acknowledged with [`super::Endpoint::prack`], and it may
+    /// carry an offer that the PRACK has to answer. Retransmissions of it are
+    /// discarded here rather than reported twice, and one that arrives out of
+    /// order is not reported at all.
+    ReliableProvisional {
+        /// The transaction that sent the INVITE.
+        invite: TransactionId<InviteClient>,
+        /// The dialog it opened or advanced.
+        dialog: DialogId,
+        /// The handle to acknowledge it by.
+        provisional: ProvisionalResponseId,
+        /// The status.
+        status: StatusCode,
+        /// The response, whole.
+        response: OwnedMessage,
+    },
     /// A 2xx for this dialog. The caller must call
     /// [`super::Endpoint::ack_2xx`].
     ///
@@ -202,6 +220,19 @@ pub enum Event {
         /// The dialog it confirms.
         dialog: DialogId,
         /// The request, whole; the answer to an offer may be in it.
+        request: OwnedMessage,
+    },
+    /// A PRACK acknowledging a reliable provisional response we sent.
+    ///
+    /// Retransmissions of that response have already stopped. §3 makes
+    /// answering it 2xx a MUST, and the answer is the caller's because a PRACK
+    /// may carry an offer that the 2xx has to answer.
+    IncomingPrack {
+        /// The transaction to answer on.
+        transaction: TransactionId<NonInviteServer>,
+        /// The response it acknowledges.
+        provisional: ProvisionalResponseId,
+        /// The request, whole.
         request: OwnedMessage,
     },
     /// The far end hung up.
@@ -298,6 +329,7 @@ impl Event {
             | Self::IncomingInvite { ref request, .. }
             | Self::IncomingReinvite { ref request, .. }
             | Self::IncomingAck { ref request, .. }
+            | Self::IncomingPrack { ref request, .. }
             | Self::IncomingInDialog { ref request, .. } => {
                 let body = request.as_raw().body();
                 (!body.is_empty()).then(|| Arc::from(body))

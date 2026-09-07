@@ -23,6 +23,10 @@ mod error;
 mod event;
 mod inbound;
 mod outgoing;
+mod prack;
+#[cfg(test)]
+mod prack_tests;
+mod reliable;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -34,7 +38,7 @@ pub(crate) use table::Flow;
 
 pub use config::{DatagramLimit, EndpointConfig};
 pub use driver::{DialogSnapshot, Endpoint};
-pub use error::{AckError, CancelError, ReceiveError, RespondError, SendError};
+pub use error::{AckError, CancelError, PrackError, ReceiveError, RespondError, SendError};
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
 pub use outgoing::{OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
 pub use transport::{Host, Input, Transmit, TransportErrorKind, TransportId, TransportProtocol};
