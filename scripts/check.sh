@@ -126,7 +126,12 @@ traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' \
 # Artwork arrives with a signed C2PA manifest naming the tool that made it, in
 # a PNG chunk or an SVG <metadata> element. Base64 inside a binary, so the text
 # scan above never sees it -- and this repository is public.
-stamped=$(others | while read -r f; do
+#
+# Only asset files are scanned. Prose that documents this check -- BRAND.md,
+# the changelog -- names the very strings it looks for, the same way the
+# script itself does; the list grows when a new kind of asset arrives.
+stamped=$(others '*.png' '*.jpg' '*.jpeg' '*.gif' '*.webp' '*.ico' '*.svg' \
+    '*.pdf' '*.woff' '*.woff2' '*.ttf' '*.otf' '*.mp4' '*.mov' | while read -r f; do
     LC_ALL=C grep -laq 'c2pa\|caBX\|Anthropic\|Content Credentials' "$f" 2>/dev/null && echo "$f"
 done)
 [ -z "$stamped" ] && pass "no provenance metadata in assets" || {
