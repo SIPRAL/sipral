@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::auth::Challenges;
 use super::config::EndpointConfig;
 use super::dialogs::Dialogs;
 use super::error::{AckError, CancelError, ReceiveError, RespondError, SendError};
@@ -33,6 +34,7 @@ use super::table::{Flow, Transports};
 use super::tokens::Tokens;
 use super::transport::{Input, Transmit, TransportId, TransportProtocol};
 use super::via;
+use crate::auth::AuthCache;
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
     HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
@@ -78,6 +80,15 @@ pub struct Endpoint {
     pub(super) cancelled: HashSet<TransactionId<InviteClient>>,
     /// Reliable provisional responses in both directions (RFC 3262).
     pub(super) reliable: Reliables,
+    /// Requests that were refused with a challenge, waiting for a password.
+    pub(super) challenges: Challenges,
+    /// Which dialog a client transaction is inside, when it is inside one.
+    /// A retry after a challenge has to take its `CSeq` from there.
+    pub(super) dialogs_of: HashMap<AnyTransactionId, DialogId>,
+    /// What a retry already answered, carried onto it so that a second
+    /// refusal with the same nonce can be told from a fresh challenge.
+    /// §22.1 does not answer the first twice.
+    pub(super) carried_auth: HashMap<AnyTransactionId, AuthCache>,
 }
 
 impl Endpoint {
@@ -105,6 +116,9 @@ impl Endpoint {
             local_tags: HashMap::new(),
             cancelled: HashSet::new(),
             reliable: Reliables::new(),
+            challenges: Challenges::new(),
+            dialogs_of: HashMap::new(),
+            carried_auth: HashMap::new(),
         }
     }
 
@@ -290,6 +304,16 @@ impl Endpoint {
 
     pub(super) fn forget_cancelled(&mut self, id: TransactionId<InviteClient>) {
         self.cancelled.remove(&id);
+    }
+
+    /// Record that a client transaction is inside a dialog.
+    pub(super) fn remember_dialog(&mut self, id: AnyTransactionId, dialog: DialogId) {
+        self.dialogs_of.insert(id, dialog);
+    }
+
+    /// The dialog a client transaction is inside.
+    pub(super) fn dialog_of(&self, id: AnyTransactionId) -> Option<DialogId> {
+        self.dialogs_of.get(&id).copied()
     }
 }
 
@@ -508,6 +532,7 @@ impl Endpoint {
             self.transactions
                 .start_non_invite_client(message, flow, self.config.timers, now)?;
         self.apply_client(effects, flow);
+        self.remember_dialog(AnyTransactionId::NonInviteClient(id), dialog);
         Ok(id)
     }
 
@@ -537,6 +562,7 @@ impl Endpoint {
             self.transactions
                 .start_invite_client(message, flow, self.config.timers, now)?;
         self.apply_client(effects, flow);
+        self.remember_dialog(AnyTransactionId::InviteClient(id), dialog);
         Ok(id)
     }
 

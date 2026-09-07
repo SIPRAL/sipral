@@ -170,9 +170,24 @@ accepted on receive because old equipment sends it, and never sent.
 ## Authentication
 
 Digest per RFC 3261 §22 and RFC 8760: MD5, MD5-sess, SHA-256, SHA-256-sess,
-`qop=auth`, correct `nc` and `cnonce` accounting, and re-use of a valid
-challenge without a round trip once one is known.
+SHA-512-256, SHA-512-256-sess, `qop=auth`, correct `nc` and `cnonce`
+accounting, and re-use of a valid challenge without a round trip once one is
+known.
 
 `WWW-Authenticate` and `Proxy-Authenticate` are separate credential spaces and
 are tracked separately. Credentials are held zeroised on drop and never
 logged, not even at trace level.
+
+The endpoint reads a challenge and says so; it never answers one on its own.
+The password is the one thing this layer must not hold, and answering with the
+wrong one is how an account gets locked, so *whether* to answer is the caller's
+decision. What the endpoint does own is the bookkeeping the RFC is exact about:
+`nc` moves by one per request and never skips, because a skipped number looks
+to a server like a replay; the `CSeq` moves too (§22.2); and the same nonce
+coming back without `stale` is read as a refusal rather than a fresh challenge,
+because §22.1 does not re-try credentials that were just rejected.
+
+A challenge outlives the transaction that earned it — the refusal is a final
+response, so the transaction ends on its timer while the password is still
+being typed. The set of remembered challenges is capped, so that a peer which
+refuses everything and a caller which never retries cannot grow it.

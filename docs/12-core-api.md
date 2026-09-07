@@ -749,8 +749,15 @@ impl Endpoint {
 
     /// Resend a challenged request with credentials computed against the
     /// challenge the endpoint captured for it (RFC 3261 §22, RFC 8760).
-    /// Consumes the stored challenge. The nonce count and cnonce are the
-    /// endpoint's business.
+    /// Consumes the stored challenge, so a second call with the same handle is
+    /// refused rather than replaying a nonce count. The nonce count, the
+    /// cnonce and the `CSeq` (§22.2) are the endpoint's business; the retry is
+    /// the original request again, header for header and body included, with
+    /// a new branch.
+    ///
+    /// The challenge outlives the transaction that earned it — a refusal is
+    /// final, and the password comes from a person. The set of them is capped,
+    /// so a peer that refuses everything cannot grow it.
     pub fn retry_with_credentials(&mut self, failed: AnyTransactionId, credentials: &Credentials, now: Instant)
         -> Result<AnyTransactionId, AuthRetryError>;
 
@@ -859,9 +866,8 @@ pub enum TerminationReason { Completed, TimedOut, TransportFailed }
 pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed }
 ```
 
-`Challenged` and `ResolveNeeded` are the two that arrive with the features
-they belong to — the credential retry and RFC 3263 resolution — rather than
-with the endpoint.
+`ResolveNeeded` is the one that arrives with the feature it belongs to — RFC
+3263 resolution — rather than with the endpoint.
 
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the

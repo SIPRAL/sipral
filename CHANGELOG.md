@@ -301,6 +301,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   of the same field. The received numbering is kept per dialog rather than per
   request, because a forked INVITE is answered by several user agents that each
   number from their own transaction; the reasoning is in `docs/03`.
+- Answering a challenge (RFC 3261 §22, RFC 8760). A registrar refuses the first
+  REGISTER it ever sees and a proxy refuses the first INVITE; that is the
+  handshake, not a failure. The endpoint reads the challenge, reports it, and
+  waits — the password is the one thing this layer must not hold, and answering
+  with the wrong one is how an account gets locked. `retry_with_credentials`
+  sends the original request again header for header, body included, with a new
+  branch, the next `CSeq` (§22.2, taken from the dialog when it had one so the
+  numbering does not collide), and the credentials. The nonce count moves by one
+  and never skips, since a skipped number reads to a server as a replay; the
+  same nonce coming back without `stale` is a refusal rather than a fresh
+  challenge, because §22.1 does not re-try credentials that were just rejected;
+  and a challenge nothing here understands is ignored rather than reported, per
+  RFC 8760 §2.4. A challenge outlives the transaction that earned it, and the
+  set of them is capped so a peer that refuses everything cannot grow it.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4

@@ -267,6 +267,36 @@ impl From<SendError> for PrackError {
     }
 }
 
+/// Why a challenged request could not be sent again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthRetryError {
+    /// No challenge is being held under this handle. It was answered already,
+    /// the refusal carried nothing this stack can answer, or the same nonce
+    /// came back a second time — §22.1 does not re-try credentials that were
+    /// just refused, because repeating them only locks the account.
+    NoChallenge,
+    /// The credentials produced nothing to send.
+    NothingToAnswer,
+    /// The request was inside a dialog that has since ended.
+    NoSuchDialog,
+    /// The retry could not be assembled or sent.
+    Unsendable(SendError),
+}
+
+impl fmt::Display for AuthRetryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::NoChallenge => f.write_str("no challenge to answer"),
+            Self::NothingToAnswer => f.write_str("nothing in the challenge can be answered"),
+            Self::NoSuchDialog => f.write_str("no such dialog"),
+            Self::Unsendable(ref error) => write!(f, "cannot send the retry: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for AuthRetryError {}
+
 #[cfg(test)]
 mod tests {
     use super::{ReceiveError, RespondError, SendError};

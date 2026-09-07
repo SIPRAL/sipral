@@ -16,6 +16,9 @@
 //! which is what makes a full RFC 3261 §17 timer diagram an ordinary unit test
 //! rather than a wait.
 
+mod auth;
+#[cfg(test)]
+mod auth_tests;
 mod config;
 mod dialogs;
 mod driver;
@@ -38,7 +41,9 @@ pub(crate) use table::Flow;
 
 pub use config::{DatagramLimit, EndpointConfig};
 pub use driver::{DialogSnapshot, Endpoint};
-pub use error::{AckError, CancelError, PrackError, ReceiveError, RespondError, SendError};
+pub use error::{
+    AckError, AuthRetryError, CancelError, PrackError, ReceiveError, RespondError, SendError,
+};
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
 pub use outgoing::{OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
 pub use transport::{Host, Input, Transmit, TransportErrorKind, TransportId, TransportProtocol};

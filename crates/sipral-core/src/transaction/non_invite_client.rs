@@ -73,6 +73,12 @@ impl NonInviteClientMachine {
         self.state
     }
 
+    /// The request as it went out, which a retry with credentials is built
+    /// from.
+    pub(crate) const fn request(&self) -> &OwnedMessage {
+        &self.request
+    }
+
     /// When the machine next needs the clock, if it does.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         [self.timer_e, self.timer_f, self.timer_k]

@@ -67,6 +67,14 @@ pub(super) fn options_request() -> OutgoingRequest {
     request(Method::Options)
 }
 
+/// A REGISTER to the registrar at `example.com`.
+pub(super) fn register_request() -> OutgoingRequest {
+    OutgoingRequest::new(Method::Register, uri("sip:example.com"), UDP, peer())
+        .to(b"<sip:alice@example.com>")
+        .from(b"Alice <sip:alice@example.com>")
+        .contact(b"<sip:alice@192.0.2.1>")
+}
+
 fn request(method: Method<'_>) -> OutgoingRequest {
     OutgoingRequest::new(method, uri("sip:bob@example.com"), UDP, peer())
         .to(b"<sip:bob@example.com>")

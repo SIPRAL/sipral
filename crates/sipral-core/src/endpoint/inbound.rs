@@ -218,6 +218,7 @@ impl Endpoint {
             return;
         };
         let flow = entry.flow;
+        let sent = entry.machine.request().clone();
         let effects = entry.machine.on_response(response, now);
         let notify = effects.notify;
         self.apply(effects, flow, AnyTransactionId::NonInviteClient(id));
@@ -231,6 +232,7 @@ impl Endpoint {
                         response: response.to_owned(),
                     });
                 }
+                self.on_challenge(AnyTransactionId::NonInviteClient(id), response, sent, flow);
             }
             Some(Notify::TimedOut) => self.push(Event::RequestFailed {
                 transaction: id,
@@ -254,6 +256,7 @@ impl Endpoint {
             return;
         };
         let flow = entry.flow;
+        let sent = entry.machine.request().clone();
         let effects = entry.machine.on_response(response, now);
         let notify = effects.notify;
         let cancel_due = entry.machine.take_deferred_cancel();
@@ -261,6 +264,7 @@ impl Endpoint {
 
         if notify == Some(Notify::Response) {
             self.on_fork(id, response, flow);
+            self.on_challenge(AnyTransactionId::InviteClient(id), response, sent, flow);
         }
         if notify == Some(Notify::TimedOut) {
             self.push(Event::Failed {
@@ -800,6 +804,8 @@ impl Endpoint {
             }
         }
         self.forget_tag(id);
+        self.dialogs_of.remove(&id);
+        self.carried_auth.remove(&id);
         self.push(Event::TransactionTerminated {
             transaction: id,
             reason,

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use super::transport::TransportProtocol;
+use crate::auth::DigestAlgorithm;
 use crate::msg::{OwnedMessage, StatusCode};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
@@ -253,6 +254,27 @@ pub enum Event {
         dialog: DialogId,
         /// The request, whole.
         request: OwnedMessage,
+    },
+    /// A request was refused with a challenge this stack can answer
+    /// (RFC 3261 §22, RFC 8760).
+    ///
+    /// One per challenge: a 401 and a 407 are separate protection domains and
+    /// a request may have to answer both. Whether to answer at all is the
+    /// caller's, because it needs a password and because answering with the
+    /// wrong one is how an account gets locked.
+    Challenged {
+        /// The transaction that was refused, and the handle
+        /// [`super::Endpoint::retry_with_credentials`] takes.
+        transaction: AnyTransactionId,
+        /// The protection domain the credentials belong to.
+        realm: Arc<str>,
+        /// Whether a proxy asked (407) rather than the far end (401).
+        proxy: bool,
+        /// Which hash it asked for.
+        algorithm: DigestAlgorithm,
+        /// Whether the server said only that the nonce was old, which means
+        /// the same credentials are worth sending again.
+        stale: bool,
     },
     /// A dialog is over and its handle is about to go stale.
     DialogTerminated {
