@@ -15,6 +15,7 @@ use sipral_core::endpoint::Event;
 use sipral_core::msg::{OwnedMessage, StatusCode};
 
 use crate::account::AccountId;
+use crate::call::{CallEndReason, CallHandle, CallState};
 
 /// Where a registration is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -157,6 +158,75 @@ pub enum UaEvent {
     Unregistered {
         /// Which account.
         account: AccountId,
+    },
+    /// Somebody is calling.
+    ///
+    /// Answer it with [`UserAgent::answer`](crate::UserAgent::answer), say it
+    /// is ringing with [`UserAgent::ring`](crate::UserAgent::ring), or refuse
+    /// it with [`UserAgent::reject`](crate::UserAgent::reject). A 100 Trying
+    /// has already gone out; nothing else has.
+    IncomingCall {
+        /// The call.
+        call: CallHandle,
+        /// The account it came in on, when it could be told which. An INVITE
+        /// addressed to somewhere this agent does not register still arrives,
+        /// because refusing it silently would hide a misrouted call.
+        account: Option<AccountId>,
+        /// The INVITE, whole; the offer may be in it.
+        request: OwnedMessage,
+    },
+    /// A response short of an answer: the far end is ringing, or is playing
+    /// something before it answers.
+    CallProgress {
+        /// The call.
+        call: CallHandle,
+        /// Where it is now.
+        state: CallState,
+        /// The status.
+        status: StatusCode,
+        /// The response, whole; early media is in it when there is any.
+        response: OwnedMessage,
+    },
+    /// One INVITE opened a second dialog: a proxy forked it, and more than one
+    /// phone is ringing.
+    ///
+    /// `sibling` is a call of its own from here on. What happens to it when
+    /// another branch answers is [`ForkPolicy`](crate::ForkPolicy).
+    CallForked {
+        /// The branch that was already known.
+        call: CallHandle,
+        /// The one that has just appeared.
+        sibling: CallHandle,
+    },
+    /// The call is up.
+    ///
+    /// `answer_wanted` is true only for a call placed without an offer: the
+    /// offer then arrives in this 2xx, the answer to it has to travel in the
+    /// ACK, and nothing has been acknowledged yet. Call
+    /// [`UserAgent::acknowledge`](crate::UserAgent::acknowledge) with it.
+    /// Otherwise the ACK has already gone — a 2xx left unacknowledged is
+    /// retransmitted for 32 seconds and then hung up by the far end, which is
+    /// not a decision worth leaving to an application.
+    CallConfirmed {
+        /// The call.
+        call: CallHandle,
+        /// The 2xx, for a call this end placed. Absent for one it answered:
+        /// this end wrote that response and the ACK is what arrived.
+        response: Option<OwnedMessage>,
+        /// Whether the ACK is waiting for a session description.
+        answer_wanted: bool,
+    },
+    /// The call is over and its handle is about to go stale.
+    CallEnded {
+        /// The call.
+        call: CallHandle,
+        /// Why.
+        reason: CallEndReason,
+        /// The status, when a response said so.
+        status: Option<StatusCode>,
+        /// The refusal, whole, when there was one. A 302 names where to try
+        /// instead, and a 380 carries an alternative service.
+        response: Option<OwnedMessage>,
     },
     /// A protocol event this layer has no policy for.
     ///

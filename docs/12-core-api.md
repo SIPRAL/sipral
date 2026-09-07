@@ -1103,9 +1103,11 @@ exposes is fully owned; no lifetime parameter leaves `sipral-core`.
 
 `CallHandle` is deliberately not called `CallId`: the core's `CallId` is the
 RFC 3261 `Call-ID` header value, and one of those spawns several `DialogId`s in
-a fork. A `CallHandle` names one dialog the application is talking to, minted
-per early dialog, so a forked INVITE yields several handles under one dial
-attempt and the application is told which one survived.
+a fork. A `CallHandle` names one dialog the application is talking to, so a
+forked INVITE yields several handles under one dial attempt and the application
+is told which one survived. Placing a call mints the first before any dialog
+exists — there has to be something to cancel with — and the first early dialog
+adopts it; each one after that is a sibling.
 
 ## Projection onto C
 

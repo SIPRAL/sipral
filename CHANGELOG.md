@@ -12,6 +12,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- Calls in `sipral-ua`: place, answer, refuse, hang up, and forks handled
+  rather than hidden. A `CallHandle` names one dialog, so an INVITE a proxy
+  forked to three phones becomes three calls under one attempt, each reported
+  as it appears; `ForkPolicy` says what happens to the ones that are not kept,
+  and every 2xx among them is acknowledged either way, because §13.2.2.4 does
+  not make that conditional. The ACK is sent by the stack rather than offered
+  to the application — the exception being a call placed without an offer,
+  where the answer travels in the ACK and only the application has one.
+  Hanging up is one call that means a CANCEL, a BYE or a refusal depending on
+  where the call is. An incoming INVITE is matched to the account it was
+  addressed to, and one that matches none is still reported.
 - `sipral-ua`, the first crate above the core, and registration in it. An
   account is a registrar, an identity and a password; `UserAgent` keeps its
   binding alive without being asked again. It has the endpoint's five calls,

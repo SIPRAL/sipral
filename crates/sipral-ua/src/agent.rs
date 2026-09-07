@@ -27,9 +27,12 @@ use sipral_core::endpoint::{
     Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest, ReceiveError, Transmit,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode};
-use sipral_core::transaction::{AnyTransactionId, NonInviteClient, TransactionId};
+use sipral_core::transaction::{
+    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
+};
 
 use crate::account::{Account, AccountId};
+use crate::call::{Call, CallHandle};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::registration::{
@@ -39,14 +42,24 @@ use crate::registration::{
 /// One user agent: several accounts over one endpoint.
 #[derive(Debug)]
 pub struct UserAgent {
-    endpoint: Endpoint,
-    accounts: HashMap<AccountId, Account>,
+    pub(crate) endpoint: Endpoint,
+    pub(crate) accounts: HashMap<AccountId, Account>,
     registrations: HashMap<AccountId, Registration>,
     /// Which account a transaction belongs to. A challenge answered gives a
     /// new transaction, so this moves rather than being written once.
     owners: HashMap<AnyTransactionId, AccountId>,
-    events: VecDeque<UaEvent>,
+    pub(crate) calls: HashMap<CallHandle, Call>,
+    /// The three ways a call is reached from an event: by the INVITE this end
+    /// sent, by the one the far end sent, and by the dialog either opened.
+    pub(crate) by_invite: HashMap<TransactionId<InviteClient>, CallHandle>,
+    pub(crate) by_server: HashMap<TransactionId<InviteServer>, CallHandle>,
+    pub(crate) by_dialog: HashMap<DialogId, CallHandle>,
+    /// The BYEs, CANCELs and PRACKs a call has in flight, so that their
+    /// answers are this layer's news rather than the application's.
+    pub(crate) by_request: HashMap<AnyTransactionId, CallHandle>,
+    pub(crate) events: VecDeque<UaEvent>,
     next_account: u32,
+    pub(crate) next_call: u32,
 }
 
 impl UserAgent {
@@ -62,8 +75,14 @@ impl UserAgent {
             accounts: HashMap::new(),
             registrations: HashMap::new(),
             owners: HashMap::new(),
+            calls: HashMap::new(),
+            by_invite: HashMap::new(),
+            by_server: HashMap::new(),
+            by_dialog: HashMap::new(),
+            by_request: HashMap::new(),
             events: VecDeque::new(),
             next_account: 0,
+            next_call: 0,
         }
     }
 
@@ -296,7 +315,7 @@ fn build_register(account: &Account, reg: &Registration, expires: Duration) -> O
 
 impl UserAgent {
     /// Turn everything the endpoint has to say into what the application does.
-    fn drain(&mut self, now: Instant) {
+    pub(crate) fn drain(&mut self, now: Instant) {
         while let Some(event) = self.endpoint.poll_event() {
             if let Some(event) = self.on_core_event(event, now) {
                 self.events.push_back(UaEvent::Unclaimed(event));
@@ -305,9 +324,17 @@ impl UserAgent {
         self.settle_challenges();
     }
 
+    /// `None` when this layer claimed the event; the event back when nothing
+    /// here has a policy for it, in which case it reaches the application
+    /// unchanged.
+    fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let event = self.on_registration_event(event, now)?;
+        self.on_call_event(event, now)
+    }
+
     /// `None` when the event belonged to a registration and has been dealt
     /// with; the event back when it did not.
-    fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+    fn on_registration_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::Response {
                 transaction,
@@ -327,7 +354,9 @@ impl UserAgent {
                 None
             }
             Event::Challenged { transaction, .. } => {
-                let account = *self.owners.get(&transaction)?;
+                let Some(account) = self.owners.get(&transaction).copied() else {
+                    return Some(event);
+                };
                 self.on_challenged(account, transaction, now);
                 None
             }

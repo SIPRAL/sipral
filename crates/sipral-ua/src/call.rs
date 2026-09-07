@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+//! A call, which is not the same thing as a `Call-ID` and not the same thing
+//! as a dialog.
+//!
+//! One INVITE can be forked by a proxy to a desk phone, a mobile and a
+//! voicemail box. Three phones ring, three early dialogs open, and every one
+//! that answers has to be acknowledged — §13.2.2.4 makes that a MUST, and a
+//! stack that acknowledges only the first leaves a call standing at the other
+//! end for as long as the far side keeps retransmitting.
+//!
+//! So a [`CallHandle`] names one dialog rather than one attempt. Placing a
+//! call mints one, the first early dialog adopts it, and each further one
+//! arrives as a sibling under [`crate::UaEvent::CallForked`]. What happens to
+//! the siblings is [`ForkPolicy`], and the default is what a telephone does:
+//! keep the first that answers, acknowledge the rest and hang them up.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use sipral_core::endpoint::TransportId;
+use sipral_core::msg::{HeaderName, Uri};
+use sipral_core::transaction::{DialogId, InviteClient, InviteServer, TransactionId};
+
+use crate::account::{AccountId, Extra};
+
+/// One call the application is talking to.
+///
+/// Minted when a call is placed or arrives, and again for every branch of a
+/// fork. Never reused, so a handle to a call that has ended names nothing
+/// rather than naming somebody else's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CallHandle(pub(crate) u32);
+
+/// Which end placed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// This end dialled.
+    Outgoing,
+    /// The far end dialled.
+    Incoming,
+}
+
+/// Where a call is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CallState {
+    /// The INVITE has gone and nothing has come back.
+    Calling,
+    /// Somebody is calling and this end has not answered.
+    Incoming,
+    /// The far end is ringing, or this end said it is.
+    Ringing,
+    /// A provisional response carried a session description: there is audio
+    /// before anybody answers, which is how a network announcement reaches a
+    /// caller.
+    EarlyMedia,
+    /// Up.
+    Confirmed,
+    /// A CANCEL or a BYE has gone and the call is not over until it is
+    /// answered.
+    Terminating,
+    /// Over. The handle is about to go stale.
+    Terminated,
+}
+
+impl CallState {
+    /// Whether the call is up.
+    #[must_use]
+    pub const fn is_confirmed(self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+
+    /// Whether it is still being set up, in either direction.
+    #[must_use]
+    pub const fn is_early(self) -> bool {
+        matches!(
+            self,
+            Self::Calling | Self::Incoming | Self::Ringing | Self::EarlyMedia
+        )
+    }
+}
+
+impl core::fmt::Display for CallState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match *self {
+            Self::Calling => "calling",
+            Self::Incoming => "incoming",
+            Self::Ringing => "ringing",
+            Self::EarlyMedia => "early media",
+            Self::Confirmed => "confirmed",
+            Self::Terminating => "terminating",
+            Self::Terminated => "terminated",
+        })
+    }
+}
+
+/// What to do with the branches of a fork that this end is not keeping.
+///
+/// Both of them acknowledge every 2xx, because §13.2.2.4 does not make that
+/// optional. The choice is only about what happens next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ForkPolicy {
+    /// Keep the first branch that answers and hang up every later one with a
+    /// BYE. What a telephone does, and the default.
+    #[default]
+    KeepFirst,
+    /// Keep all of them. A conference bridge, a recorder, or anything that
+    /// wants both legs of a fork has to say so, because hanging one up is not
+    /// something that can be undone.
+    KeepAll,
+}
+
+/// Why a call is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CallEndReason {
+    /// This end hung up.
+    LocalHangup,
+    /// The far end hung up.
+    RemoteHangup,
+    /// The far end refused it: busy, declined, not found.
+    Refused,
+    /// Given up before it was answered, from either end.
+    Cancelled,
+    /// Nothing came back, or the transport died.
+    Unreachable,
+    /// Another branch of the same fork was kept and this one was not
+    /// ([`ForkPolicy::KeepFirst`]).
+    ForkLost,
+    /// The branch was still ringing when the answer window closed
+    /// (§13.2.2.4), or the proxy told it another branch had won.
+    Abandoned,
+}
+
+impl core::fmt::Display for CallEndReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match *self {
+            Self::LocalHangup => "hung up here",
+            Self::RemoteHangup => "hung up there",
+            Self::Refused => "refused",
+            Self::Cancelled => "cancelled",
+            Self::Unreachable => "unreachable",
+            Self::ForkLost => "another branch was kept",
+            Self::Abandoned => "abandoned",
+        })
+    }
+}
+
+/// A call the application wants placed.
+#[derive(Clone, Debug)]
+pub struct OutgoingCall {
+    pub(crate) target: Uri,
+    pub(crate) offer: Option<Arc<[u8]>>,
+    pub(crate) destination: Option<(TransportId, SocketAddr)>,
+    pub(crate) forks: ForkPolicy,
+    pub(crate) extra: Vec<Extra>,
+}
+
+impl OutgoingCall {
+    /// A call to `target`.
+    ///
+    /// It leaves on the account's transport, for the address the account
+    /// registers with — which is the outbound proxy for a registered line, and
+    /// the reason a softphone behind a NAT works at all. Somewhere else needs
+    /// [`OutgoingCall::to_address`].
+    #[must_use]
+    pub const fn new(target: Uri) -> Self {
+        Self {
+            target,
+            offer: None,
+            destination: None,
+            forks: ForkPolicy::KeepFirst,
+            extra: Vec::new(),
+        }
+    }
+
+    /// The session description to offer.
+    ///
+    /// Left out, the INVITE carries none and the offer arrives in the 2xx
+    /// instead (§14.1). The answer to it then has to travel in the ACK, which
+    /// is why a call placed that way is not acknowledged until
+    /// [`crate::UserAgent::acknowledge`] is called.
+    #[must_use]
+    pub fn offer(mut self, sdp: Arc<[u8]>) -> Self {
+        self.offer = Some(sdp);
+        self
+    }
+
+    /// Send it somewhere other than where the account registers.
+    ///
+    /// Resolving a name is the caller's, here as everywhere: this takes the
+    /// answer, not the question.
+    #[must_use]
+    pub const fn to_address(mut self, transport: TransportId, remote: SocketAddr) -> Self {
+        self.destination = Some((transport, remote));
+        self
+    }
+
+    /// What to do with the branches of a fork that are not kept.
+    #[must_use]
+    pub const fn forks(mut self, policy: ForkPolicy) -> Self {
+        self.forks = policy;
+        self
+    }
+
+    /// A header field on the INVITE.
+    #[must_use]
+    pub fn header(mut self, name: HeaderName<'_>, value: &[u8]) -> Self {
+        self.extra.push(Extra {
+            name: Box::from(name.canonical().as_bytes()),
+            value: Box::from(value),
+        });
+        self
+    }
+}
+
+/// Everything one call is doing.
+#[derive(Debug)]
+pub(crate) struct Call {
+    pub(crate) account: Option<AccountId>,
+    pub(crate) direction: Direction,
+    pub(crate) state: CallState,
+    /// The INVITE this end sent, while its transaction is running.
+    pub(crate) invite: Option<TransactionId<InviteClient>>,
+    /// The INVITE the far end sent, while this end has not finally answered.
+    pub(crate) server: Option<TransactionId<InviteServer>>,
+    /// The dialog, once there is one.
+    pub(crate) dialog: Option<DialogId>,
+    /// What to do with the siblings this branch may acquire.
+    pub(crate) forks: ForkPolicy,
+    /// Whether the INVITE carried an offer, which decides whether the ACK has
+    /// to carry an answer.
+    pub(crate) offered: bool,
+    /// Whether the 2xx has been acknowledged.
+    pub(crate) acknowledged: bool,
+    /// A hangup was asked for and could not go yet: a CANCEL may not leave
+    /// before the first provisional response (§9.1), and the endpoint holds it
+    /// for us, but a call that has not even opened a dialog has nothing to
+    /// cancel.
+    pub(crate) hangup_wanted: bool,
+    /// `Contact`, kept because every request inside the dialog needs it and a
+    /// re-INVITE will need it again in 5.3.
+    pub(crate) contact: Box<[u8]>,
+    /// The branch this one was forked from, for the events that say so.
+    pub(crate) forked_from: Option<CallHandle>,
+}
+
+impl Call {
+    pub(crate) fn outgoing(
+        account: AccountId,
+        forks: ForkPolicy,
+        offered: bool,
+        contact: Box<[u8]>,
+    ) -> Self {
+        Self {
+            account: Some(account),
+            direction: Direction::Outgoing,
+            state: CallState::Calling,
+            invite: None,
+            server: None,
+            dialog: None,
+            forks,
+            offered,
+            acknowledged: false,
+            hangup_wanted: false,
+            contact,
+            forked_from: None,
+        }
+    }
+
+    pub(crate) fn incoming(
+        account: Option<AccountId>,
+        server: TransactionId<InviteServer>,
+        contact: Box<[u8]>,
+    ) -> Self {
+        Self {
+            account,
+            direction: Direction::Incoming,
+            state: CallState::Incoming,
+            invite: None,
+            server: Some(server),
+            dialog: None,
+            forks: ForkPolicy::KeepFirst,
+            // the offer, if there is one, is theirs; ours goes in the 200
+            offered: false,
+            acknowledged: false,
+            hangup_wanted: false,
+            contact,
+            forked_from: None,
+        }
+    }
+
+    /// A branch of the same fork, sharing everything but its dialog.
+    pub(crate) fn sibling_of(other: &Self, forked_from: CallHandle) -> Self {
+        Self {
+            account: other.account,
+            direction: other.direction,
+            state: CallState::Calling,
+            invite: other.invite,
+            server: None,
+            dialog: None,
+            forks: other.forks,
+            offered: other.offered,
+            acknowledged: false,
+            hangup_wanted: false,
+            contact: other.contact.clone(),
+            forked_from: Some(forked_from),
+        }
+    }
+}

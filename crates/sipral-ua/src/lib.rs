@@ -37,6 +37,8 @@
 
 mod account;
 mod agent;
+mod call;
+mod calls;
 mod error;
 mod event;
 mod registration;
@@ -45,6 +47,7 @@ mod tests;
 
 pub use account::{Account, AccountId};
 pub use agent::UserAgent;
+pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 
@@ -54,4 +57,4 @@ pub use sipral_core::auth::Credentials;
 pub use sipral_core::endpoint::{
     EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
 };
-pub use sipral_core::msg::Uri;
+pub use sipral_core::msg::{StatusCode, Uri};
