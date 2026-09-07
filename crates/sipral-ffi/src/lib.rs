@@ -8,3 +8,8 @@
 //! event callback. Everything expressive lives on the language side.
 //!
 //! ABI stability rules are in `docs/08-ffi.md`.
+
+#![doc(
+    html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
+    html_favicon_url = "https://sipral.org/brand/favicon.svg"
+)]

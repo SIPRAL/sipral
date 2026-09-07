@@ -123,6 +123,18 @@ traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' \
     fail "assistant traces in:"; printf '        %s\n' $traces
 }
 
+# Artwork arrives with a signed C2PA manifest naming the tool that made it, in
+# a PNG chunk or an SVG <metadata> element. Base64 inside a binary, so the text
+# scan above never sees it -- and this repository is public.
+stamped=$(others | while read -r f; do
+    LC_ALL=C grep -laq 'c2pa\|caBX\|Anthropic\|Content Credentials' "$f" 2>/dev/null && echo "$f"
+done)
+[ -z "$stamped" ] && pass "no provenance metadata in assets" || {
+    fail "provenance metadata in:"; printf '        %s\n' $stamped
+    printf '        strip it: PNG keeps IHDR/PLTE/tRNS/IDAT/IEND/sRGB only,\n'
+    printf '        SVG drops <metadata> and its namespace. See assets/BRAND.md.\n'
+}
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }

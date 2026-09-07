@@ -12,6 +12,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- The project's home is `sipral.org`. `Cargo.toml`, both package READMEs and the
+  NuGet `PackageProjectUrl` say so; the published NuGet 0.0.1 still carries the
+  previous domain and is corrected at the next version.
+
+### Added
+
+- The mark, and the rules for drawing it. `assets/` carries the mark and the
+  horizontal lockup as SVG and PNG, light and dark, with `assets/BRAND.md` for
+  the geometry, the three colours and the one red cell. The README shows the
+  lockup, every crate carries `html_logo_url` and `html_favicon_url` for
+  docs.rs, and the NuGet package carries an icon. The lockup SVG keeps the
+  wordmark as live text, so anywhere Archivo is not installed the PNG is the
+  one to use — which `BRAND.md` says.
+- `scripts/check.sh` fails on embedded provenance metadata. Artwork arrives with
+  a signed C2PA manifest naming the tool that made it, in a PNG `caBX` chunk or
+  an SVG `<metadata>` element; it is base64 inside a binary, so the existing
+  text scan never saw it, and this repository is public. The files in `assets/`
+  were stripped before being committed — PNG down to `IHDR`, `PLTE`, `tRNS`,
+  `IDAT`, `IEND` and `sRGB`, SVG without `<metadata>` — which changes no pixel.
+
+### Changed
+
 - Phase 1 readiness review, nine gaps closed: WebSocket scoped to phase 2 and
   its framing corrected (one SIP message per WebSocket message, never the
   `Content-Length` framer); keepalive given a home in `EndpointConfig`; the

@@ -14,6 +14,10 @@
 //! Written from the RFCs listed in `docs/09-rfc-index.md`. See
 //! `docs/02-clean-room.md` for why that matters here.
 
+#![doc(
+    html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
+    html_favicon_url = "https://sipral.org/brand/favicon.svg"
+)]
 // tests say what they mean; the no-panic discipline is for the library
 #![cfg_attr(
     test,

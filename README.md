@@ -3,7 +3,10 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 Copyright (c) 2026 Tiberiu Balasea
 -->
 
-# Sipral
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/sipral-lockup-dark.png">
+  <img src="assets/sipral-lockup.png" alt="Sipral" width="314">
+</picture>
 
 **S**ession **I**nitiation **P**rotocol **R**ust **A**udio **L**ayer.
 

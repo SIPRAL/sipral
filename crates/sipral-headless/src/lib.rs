@@ -9,3 +9,8 @@
 //! that does not wait on a room abstraction.
 //!
 //! Protocol in `docs/07-headless.md`.
+
+#![doc(
+    html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
+    html_favicon_url = "https://sipral.org/brand/favicon.svg"
+)]

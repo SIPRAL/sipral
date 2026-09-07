@@ -8,3 +8,8 @@
 //!
 //! Kept apart from [`sipral_media`] so that the core stack stays free of any
 //! platform dependency, and so `sipral-headless` can exist at all.
+
+#![doc(
+    html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
+    html_favicon_url = "https://sipral.org/brand/favicon.svg"
+)]

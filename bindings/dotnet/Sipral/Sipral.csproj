@@ -6,13 +6,15 @@
     <Authors>SIPRAL</Authors>
     <Description>Sipral - Session Initiation Protocol Rust Audio Layer. .NET bindings. Pre-release name reservation; the first usable release follows.</Description>
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
-    <PackageProjectUrl>https://sipral.net</PackageProjectUrl>
+    <PackageProjectUrl>https://sipral.org</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SIPRAL/sipral</RepositoryUrl>
     <PackageTags>sip;voip;rtp;telephony;softphone</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="icon.png" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>
