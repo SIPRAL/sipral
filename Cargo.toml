@@ -5,6 +5,9 @@ members = ["crates/*"]
 # own lockfile rather than dragging one into the workspace
 exclude = ["fuzz"]
 
+[workspace.dependencies]
+sipral-core = { path = "crates/sipral-core", version = "0.0.1" }
+
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
@@ -26,6 +29,10 @@ unreachable_pub = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 doc_markdown = "allow"
+# every interval in SIP is delta-seconds on the wire — `Expires: 3600`,
+# `Retry-After: 600`, T1 in milliseconds — and rewriting 3060 as "51 minutes"
+# hides the arithmetic the line exists to show
+duration_suboptimal_units = "allow"
 panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"

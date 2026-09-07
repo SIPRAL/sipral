@@ -37,3 +37,6 @@ version = "0.0.1"
 [[package]]
 name = "sipral-ua"
 version = "0.0.1"
+dependencies = [
+ "sipral-core",
+]

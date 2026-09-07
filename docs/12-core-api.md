@@ -819,6 +819,11 @@ impl Endpoint {
         -> Result<(), RespondError>;
 
     // -- introspection ----------------------------------------------------------
+    /// An unguessable token from the stream the branches, tags and `Call-ID`s
+    /// come from. The layer above needs them too — §10.2.4 wants one `Call-ID`
+    /// for every registration of a boot cycle — and a second generator would
+    /// be a second thing for a caller to supply entropy for.
+    pub fn token(&mut self) -> Box<[u8]>;
     pub fn transaction_state<K: TransactionKind>(&self, id: TransactionId<K>) -> Option<K::State>;
     pub fn dialog(&self, id: DialogId) -> Option<DialogSnapshot>;
     /// Live transactions and live dialogs, for a caller deciding whether it

@@ -233,6 +233,19 @@ impl Endpoint {
         })
     }
 
+    /// An unguessable token from the stream this endpoint's own branches, tags
+    /// and `Call-ID`s come from.
+    ///
+    /// The layer above needs them too — §10.2.4 wants one `Call-ID` for every
+    /// registration of a boot cycle, and something has to mint it — and a
+    /// second generator would be a second thing for a caller to supply entropy
+    /// for. Drawing from this one also guarantees the values never collide
+    /// with a branch.
+    #[must_use]
+    pub fn token(&mut self) -> Box<[u8]> {
+        self.tokens.token()
+    }
+
     /// How many transactions and dialogs are live, for a caller that wants to
     /// know whether it can shut down.
     #[must_use]

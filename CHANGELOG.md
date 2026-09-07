@@ -10,6 +10,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- `sipral-ua`, the first crate above the core, and registration in it. An
+  account is a registrar, an identity and a password; `UserAgent` keeps its
+  binding alive without being asked again. It has the endpoint's five calls,
+  so the same event loop drives either and a year of refreshes is a test that
+  finishes in a millisecond.
+  The policy the core refuses to have lives here: the refresh at 0.85 of what
+  the registrar granted and never later than thirty seconds before it lapses;
+  the granted expiry winning over the requested one, read off the `Contact`
+  the registrar echoed back by §19.1.4 equivalence; one `Call-ID` per boot
+  cycle (§10.2.4); a challenge answered from the account, and the same
+  challenge coming back a second time stopping rather than locking the
+  account; a 423 obeyed once (§10.2.8); and RFC 5626 §4.5's back-off, with the
+  wait drawn between half the bound and the bound so that a thousand phones
+  that lost one server do not come back in the same second. What cannot be
+  fixed by trying again — a 403, a refused password, a redirect — stops and
+  says so, with the response whole.
+- `Endpoint::token`, so the layer above draws its `Call-ID`s and its intervals
+  from the stream the branches come from rather than asking the caller for a
+  second seed.
+
 ### Fixed
 
 - A re-INVITE could not finish. Its responses were offered to the dialog set
