@@ -1210,6 +1210,80 @@ fn nothing_is_left_in_flight_when_a_call_is_over() {
 }
 
 #[test]
+fn a_dialog_whose_next_hop_is_a_name_says_so() {
+    // §12.2.1.1 computes the address from the route set or the target by the
+    // RFC 3263 procedures; §8.1.2 allows an alternate address instead, which
+    // is the flow the call is already on
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .invite(&invite_request(), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    let named = String::from_utf8_lossy(&respond_to(&bytes, 200, "OK", Some("desk")))
+        .replace("<sip:bob@192.0.2.9>", "<sip:bob@bob.example.com>")
+        .into_bytes();
+    deliver(&mut endpoint, &named, t0);
+
+    let reported = events(&mut endpoint);
+    let asked = reported
+        .iter()
+        .find_map(|event| match event {
+            Event::ResolveNeeded {
+                dialog,
+                host,
+                port,
+                protocol,
+            } => Some((*dialog, host.to_string(), *port, *protocol)),
+            _ => None,
+        })
+        .expect("a host to resolve");
+    assert_eq!(asked.1, "bob.example.com");
+    assert_eq!(asked.2, None, "no port, so RFC 3263 4.2 picks one");
+    assert_eq!(asked.3, None);
+
+    // ignoring it leaves the call on the flow that worked
+    endpoint.ack_2xx(asked.0, None, t0).expect("the ACK goes");
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.first().map(|t| t.destination), Some(peer()));
+
+    // answering it moves the dialog's requests
+    let elsewhere: SocketAddr = "198.51.100.7:5080".parse().expect("an address");
+    endpoint.resolved(asked.0, &[elsewhere]);
+    endpoint.bye(asked.0, t0).expect("the BYE goes");
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.first().map(|t| t.destination), Some(elsewhere));
+}
+
+#[test]
+fn a_target_the_call_is_already_pointed_at_is_not_worth_reporting() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, _) = call(&mut endpoint, t0);
+    assert!(
+        !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::ResolveNeeded { .. })),
+        "the Contact is the address the 2xx came from"
+    );
+}
+
+#[test]
+fn an_answer_for_a_dialog_that_has_ended_is_dropped() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    transmits(&mut endpoint);
+
+    let elsewhere: SocketAddr = "198.51.100.7:5080".parse().expect("an address");
+    endpoint.resolved(dialog, &[elsewhere]);
+    assert!(endpoint.dialog(dialog).is_none());
+}
+
+#[test]
 fn a_stale_handle_answers_to_nothing() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);

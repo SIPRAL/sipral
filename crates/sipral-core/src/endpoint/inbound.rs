@@ -297,7 +297,11 @@ impl Endpoint {
 
         match fork {
             Fork::Opened(key) | Fork::Advanced(key) => {
+                let fresh = self.dialogs.find(&key).is_none();
                 let dialog = self.dialogs.name_branch(set, key.clone(), flow);
+                if fresh {
+                    self.ask_to_resolve(dialog);
+                }
                 if status.is_success() {
                     // 13.2.2.4: "The ACK MUST be passed to the client
                     // transport every time a retransmission of the 2xx final
@@ -878,7 +882,9 @@ impl Endpoint {
         }
         let secure = flow.protocol.is_secure();
         let dialog = Dialog::from_request(&raw, tag, status, secure).ok()?;
-        Some(self.dialogs.answer(dialog, flow))
+        let named = self.dialogs.answer(dialog, flow);
+        self.ask_to_resolve(named);
+        Some(named)
     }
 
     /// Answer a request on a server transaction with nothing but a status.

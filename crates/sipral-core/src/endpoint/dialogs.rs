@@ -165,6 +165,14 @@ impl Dialogs {
         self.entries.get(id.raw).map(|entry| entry.flow)
     }
 
+    /// Point this dialog's requests somewhere else, after the caller has
+    /// resolved the next hop its route set names.
+    pub(crate) fn set_flow(&mut self, id: DialogId, flow: Flow) {
+        if let Some(entry) = self.entries.get_mut(id.raw) {
+            entry.flow = flow;
+        }
+    }
+
     /// The dialog this message belongs to, by its identifier (§12.2).
     pub(crate) fn find(&self, key: &DialogKey) -> Option<DialogId> {
         self.by_key.get(key).copied()

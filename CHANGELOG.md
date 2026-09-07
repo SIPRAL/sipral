@@ -315,6 +315,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and a challenge nothing here understands is ignored rather than reported, per
   RFC 8760 §2.4. A challenge outlives the transaction that earned it, and the
   set of them is capped so a peer that refuses everything cannot grow it.
+- Where a dialog's requests go (RFC 3261 §8.1.2, §12.2.1.1, RFC 3263). A dialog
+  keeps the flow its first message travelled on — the address the INVITE went
+  to and the answer came back from — which §8.1.2 explicitly allows as "an
+  alternate address" and which is the only thing that survives the NAT nearly
+  every softphone sits behind. When the next hop the route set or the target
+  names is not that address, the endpoint says so rather than resolving it:
+  `Event::ResolveNeeded` carries the host, the port if the URI gave one, and
+  the transport if the URI or the scheme named one, and `resolved` retargets
+  the dialog. Ignoring it is a legitimate choice and the common one. There is
+  no `ResolveId`: the only thing the core ever needs resolved is a dialog's next
+  hop, so the dialog is both the question and the handle.
 - `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
   `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
   back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4

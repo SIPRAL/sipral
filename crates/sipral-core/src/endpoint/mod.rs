@@ -30,6 +30,7 @@ mod prack;
 #[cfg(test)]
 mod prack_tests;
 mod reliable;
+mod resolve;
 mod table;
 #[cfg(test)]
 mod tests;

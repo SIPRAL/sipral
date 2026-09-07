@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::transport::TransportProtocol;
+use super::transport::{Host, TransportProtocol};
 use crate::auth::DigestAlgorithm;
 use crate::msg::{OwnedMessage, StatusCode};
 use crate::transaction::{
@@ -318,6 +318,26 @@ pub enum Event {
         transaction: AnyTransactionId,
         /// How it ended.
         reason: TerminationReason,
+    },
+    /// The next hop a dialog names is not the address its requests are going
+    /// to (RFC 3261 §12.2.1.1, RFC 3263).
+    ///
+    /// A dialog keeps the flow its first message travelled on, which §8.1.2
+    /// explicitly allows as "an alternate address" and which is the only thing
+    /// that survives a NAT. This says what the route set and the target
+    /// actually name, for a caller with a resolver; answering it with
+    /// [`super::Endpoint::resolved`] retargets the dialog, and ignoring it is
+    /// a legitimate choice and the common one.
+    ResolveNeeded {
+        /// The dialog whose next hop this is, and the handle the answer takes.
+        dialog: DialogId,
+        /// The host to resolve.
+        host: Host,
+        /// The port, when the URI gave one. `None` leaves the choice to
+        /// RFC 3263 §4.2, which is the caller's to make.
+        port: Option<u16>,
+        /// The transport, when the URI or the scheme named one.
+        protocol: Option<TransportProtocol>,
     },
     /// A message is too large for any datagram transport that is open, and
     /// there is no stream transport to move it to.

@@ -597,6 +597,9 @@ impl TransportProtocol {
 /// happens outside and the answer comes back later.
 pub enum Host { Name(Arc<str>), Ip(IpAddr) }
 
+// There is no `ResolveId`. The only thing the core ever needs resolved is a
+// dialog's next hop, so the dialog is the question and the handle both.
+
 pub enum Input<'a> {
     Datagram { transport: TransportId, remote: SocketAddr, local: SocketAddr, data: &'a [u8] },
     StreamData { transport: TransportId, data: &'a [u8] },
@@ -635,7 +638,19 @@ pub struct Transmit {
 
 Name resolution, including NAPTR and SRV per RFC 3263, stays outside: it is
 I/O, and the platform (or the binding) usually has a better resolver than a
-library would. The endpoint asks for a host and receives addresses.
+library would.
+
+The endpoint therefore never needs an address it was not given. Every
+destination it uses is either one the caller supplied on an `OutgoingRequest`,
+or the source of a message that arrived — a response goes back where the
+request came from (§18.2.2), and a dialog keeps the flow its first message
+travelled on. What it does do is *say* when the next hop a dialog names is not
+where its requests are going (`Event::ResolveNeeded`), so a caller with a
+resolver can correct it with `resolved`. §12.2.1.1 computes that address by the
+RFC 3263 procedures, and §8.1.2 in the same breath allows "an alternate
+address (such as a default outbound proxy not represented in the route set)",
+which is exactly what keeping the flow is — and the only thing that survives
+the NAT nearly every softphone sits behind.
 
 ## Endpoint operations
 
@@ -761,7 +776,10 @@ impl Endpoint {
     pub fn retry_with_credentials(&mut self, failed: AnyTransactionId, credentials: &Credentials, now: Instant)
         -> Result<AnyTransactionId, AuthRetryError>;
 
-    pub fn resolved(&mut self, request: ResolveId, addresses: &[SocketAddr], now: Instant);
+    /// Point a dialog's requests at an address resolved outside. No `now`:
+    /// every other mutating call takes the time because something it does is
+    /// timed, and this one only writes down an address.
+    pub fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]);
 
     // -- UAS ------------------------------------------------------------------
     /// 100, or any final response. Rejected with `MustBeReliable` if the
@@ -852,7 +870,11 @@ pub enum Event {
     RequestFailed { transaction: TransactionId<NonInviteClient>, reason: FailureReason },
 
     // plumbing
-    ResolveNeeded { request: ResolveId, host: Host, port: Option<u16>, protocol: Option<TransportProtocol> },
+    /// The next hop a dialog names is not where its requests are going.
+    /// Answering retargets it; ignoring it keeps the flow the call is on,
+    /// which §8.1.2 allows as "an alternate address" and which is the only
+    /// thing that survives a NAT.
+    ResolveNeeded { dialog: DialogId, host: Host, port: Option<u16>, protocol: Option<TransportProtocol> },
     /// A request is too large for a datagram (§18.1.1) and no stream transport
     /// is open to move it to. Opening one is the caller's; the request is not
     /// held, and goes when it is sent again.
@@ -865,9 +887,6 @@ pub enum FailureReason { Timeout, TransportFailed, Refused }
 pub enum TerminationReason { Completed, TimedOut, TransportFailed }
 pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed }
 ```
-
-`ResolveNeeded` is the one that arrives with the feature it belongs to — RFC
-3263 resolution — rather than with the endpoint.
 
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the
