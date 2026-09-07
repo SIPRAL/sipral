@@ -45,6 +45,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- Documents corrected against the tree after an outside reading of the README.
+  RFC 3263 is split in the index between what the core owns and what the caller
+  does, with RFC 2782 named next to it; RFC 3327 and RFC 8599 added; iLBC and
+  AMR given their exclusion rows. `a=ice-lite` is now conditioned on a public
+  address, which RFC 8445 Appendix A requires and which separates the headless
+  build from the softphone. SDES is stated to need a secured signalling channel
+  (RFC 4568 §7). The layer diagram says outright that signalling and media do
+  not depend on each other, and `MediaPlan` and `MediaCapabilities` name what
+  crosses between them. The README names the codecs, the fuzzing and the parser
+  bounds, and no longer refers to a transport crate that does not exist.
 - The project's home is `sipral.org`. `Cargo.toml`, both package READMEs and the
   NuGet `PackageProjectUrl` say so; the published NuGet 0.0.1 still carries the
   previous domain and is corrected at the next version.

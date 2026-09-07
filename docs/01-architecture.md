@@ -64,6 +64,40 @@ idiomatic one for their language.
 Dependencies point down only. `sipral-core` depends on nothing outside the
 standard library. Nothing depends on `sipral-io-*` except the application.
 
+One edge the picture allows and the design forbids: **`sipral-ua` does not
+depend on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
+depends on `sipral-ua`.** Signalling and media never call each other. What
+passes between them is a description — `MediaPlan` out of the negotiation and
+`MediaCapabilities` back into it, both in `sipral-core::sdp` and both written
+out in [05-media.md](05-media.md) — and the application carries it across. The
+media crates depend on `sipral-core` for those two types and for nothing else;
+that edge is shared vocabulary, and it is the only one between the two halves.
+
+The reason is the build in the third column: an agent that puts PCM on a socket
+links no media pipeline at all, and a `sipral-ua` that reached into one could
+not be built without it.
+
+### Who owns the sockets, the resolver and TLS
+
+Nothing in this tree opens one. The core says where a message should go and
+what has to be resolved (`Event::ResolveNeeded`, `Event::TransportWanted`); the
+caller answers.
+
+`sipral-ua` ships a reference loop for callers who do not want to write one. It
+is deliberately the plainest thing that works — `std::net`, blocking sockets,
+UDP and TCP — and it is **off by default**, behind a feature flag, because two
+things it cannot do are things a real deployment needs:
+
+- **NAPTR and SRV.** `std::net` resolves a name to addresses and nothing else,
+  so the reference loop answers `ResolveNeeded` with an A lookup and takes what
+  it gets. A deployment that has to reach a carrier through SRV supplies its own
+  resolver — the platform has one, and on mobile it is the only one allowed to
+  answer while the radio is asleep. The task is 5.7 in the roadmap.
+- **TLS.** No TLS implementation is linked here, and none will be: a stack that
+  picks one imposes it on every embedder. `TransportProtocol::Tls` describes a
+  transport the caller has already secured, and the caller supplies the
+  connection.
+
 ### sipral-core
 
 Message representation, parser and serializer, the transaction layer, the dialog

@@ -10,6 +10,44 @@ that says why. Media is different: it degrades, and the user calls it "the app
 sounds bad". This is where a SIP stack is actually judged, and it is the part
 that is written in-house rather than assembled.
 
+## What crosses the seam
+
+`sipral-ua` and `sipral-media` do not call each other and do not depend on each
+other ([01-architecture.md](01-architecture.md)). Two values pass between them,
+and the application carries both:
+
+```rust
+/// What the negotiation settled on. Produced by `sipral-ua` from the answer,
+/// consumed by whatever owns the media: `sipral-media` for a device build,
+/// `sipral-headless` for an agent. Emitted again, unchanged but for the fields
+/// that moved, after every re-INVITE or UPDATE that changes the session.
+pub struct MediaPlan {
+    pub local: SocketAddr,          // where to receive; the caller chose it
+    pub remote: SocketAddr,         // where to send, from the answer's c= and m=
+    pub codec: NegotiatedCodec,     // payload type, clock rate, channels, fmtp
+    pub direction: Direction,       // sendrecv, sendonly, recvonly, inactive
+    pub dtmf: Option<u8>,           // telephone-event payload type, when agreed
+    pub rtcp: RtcpPlan,             // muxed, a second port, or off
+    pub keying: Option<Keying>,     // SDES material, or a DTLS fingerprint
+}
+
+/// And back the other way, before an offer is written: what this build can
+/// actually do. An agent build has no device and no device rate, so it answers
+/// a shorter list than a softphone does.
+pub struct MediaCapabilities {
+    pub codecs: Vec<NegotiatedCodec>,
+    pub dtmf: bool,
+    pub rtcp_mux: bool,
+    pub srtp: SrtpSupport,
+}
+```
+
+Neither mentions a socket, a device, a thread or a codec implementation, which
+is what lets one `sipral-ua` drive a softphone and an agent that puts PCM on a
+socket. Both live in `sipral-core::sdp`, next to the offer/answer machinery that
+produces them; the media crates depend on `sipral-core` for these two types and
+nothing else, which keeps the seam a shared vocabulary rather than a call.
+
 ## sipral-rtp
 
 ### RTP and RTCP
@@ -84,6 +122,13 @@ DTLS-SRTP where the peer requires it. `AES_CM_128_HMAC_SHA1_80` as the baseline
 suite, with the AES-GCM suites where offered. Key material is zeroised on drop.
 Unencrypted RTP arriving on a secured session is dropped, never accepted as a
 fallback.
+
+SDES only over a secured signalling channel. `a=crypto` carries the master key
+in the SDP body, so over plain UDP or TCP it travels in the clear and anyone on
+the path can decrypt the media — RFC 4568 §7 is explicit that the mechanism
+depends on the signalling being protected. The offer is therefore made only on
+a TLS transport; on anything else the choice is DTLS-SRTP or no SRTP, and
+saying so is better than an `a=crypto` that looks like encryption and is not.
 
 ## sipral-media
 

@@ -32,11 +32,19 @@ a socket with no audio device and no room abstraction anywhere near it.
 
 ## Design in one paragraph
 
-The core opens no sockets and starts no threads. It takes bytes and a clock, and
-returns bytes and events. That makes every state machine deterministically
-testable, and it lets the same core sit inside a Swift async context, a .NET
-`Task` or a Kotlin coroutine without fighting anyone's runtime. Platform audio
-and transport live in separate crates that you pick, or replace.
+The core opens no sockets, starts no threads, reads no clock and draws no random
+numbers. It takes bytes, a time and a seed, and returns bytes and events. That
+makes every state machine deterministically testable — a full RFC 3261 §17 timer
+diagram is an ordinary unit test — and it lets the same core sit inside a Swift
+async context, a .NET `Task` or a Kotlin coroutine without fighting anyone's
+runtime.
+
+There is no transport crate, and that is the point: **you** own the sockets. The
+core says what to send and where, names what needs resolving, and asks for a
+stream connection when a message outgrows a datagram (§18.1.1). A reference
+event loop over `std::net` will ship in `sipral-ua` for callers who would rather
+not write one, off by default. Platform audio is the same shape: separate crates
+you pick, or replace, or leave out entirely.
 
 ## Crates
 
@@ -46,7 +54,7 @@ and transport live in separate crates that you pick, or replace.
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
 | `sipral-nat` | STUN client, TURN client, ICE-lite |
-| `sipral-media` | audio pipeline: mixing, resampling, codecs, echo cancellation as an external module |
+| `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law in-tree, Opus and G.722 linked, G.729 only if a carrier forces it |
 | `sipral-io-coreaudio` | macOS and iOS device I/O. Siblings for WASAPI and AAudio follow |
 | `sipral-headless` | PCM in and out over a local socket or WebSocket. No audio device, for AI agents |
 | `sipral-ffi` | stable C ABI, and the Swift Package, NuGet and AAR built on it |
@@ -56,8 +64,25 @@ and transport live in separate crates that you pick, or replace.
 
 Implemented from the RFCs, not from anyone's source tree. The full list, and
 which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
-Core set: RFC 3261, 3262, 3264, 3515, 3581, 4028, 6665, 8760 for signalling;
-3550, 3711, 4733, 8445, 8489, 8656 for media and NAT.
+Core set: RFC 3261, 3262, 3263, 3264, 3311, 3515, 3581, 4028, 6026, 6665, 8760
+for signalling; 3550, 3551, 4733, 6716 and 7587 for media; 3711 with 4568 and
+5764 for SRTP and its keying; 8445, 8489 and 8656 for NAT.
+
+## Not trusting the input
+
+A public SIP port receives malformed packets as a matter of course, so nothing
+here treats them as exceptional.
+
+- **No panics on input.** `unwrap`, `expect`, `panic` and unchecked indexing are
+  lints across the workspace, and CI runs with `-D warnings`.
+- **`Limits`** bounds every message parse before it starts: 64 KiB per message,
+  128 header fields, 4 KiB per header value, all three lower on request.
+- **Fuzzing** since the twenty-sixth commit — four `cargo-fuzz` targets over the
+  parser, the builder, the stream framer and SDP, seeded with the RFC 4475
+  corpus.
+- **The RFC 4475 torture corpus** is in the tree bit-exact, 49 messages with a
+  SHA-256 per file, and a test asserts on the outcome the RFC specifies for each
+  one rather than on "it did not crash".
 
 ## Build
 
