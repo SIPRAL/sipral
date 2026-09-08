@@ -85,30 +85,14 @@ jobs:
           wait_for freeswitch "Started Profile lab" \
             || echo "lab profile not seen in the log; continuing to the flows anyway"
           wait_for asterisk "Asterisk Ready"
-      # The lab's bridge, so every leg is visible: joining the proxy's network
-      # namespace saw only the proxy's own traffic, and the first flow to talk
-      # straight to Asterisk failed with nothing to look at.
+      # The capture runs inside the harness's own container, on its own
+      # interface. Two other places were tried: the proxy's network namespace,
+      # which cannot see a flow that talks straight to Asterisk, and the lab's
+      # bridge on the host, which produced a twenty-four byte file — a pcap
+      # header and nothing else — on the runs worth looking at. The harness is
+      # one end of every exchange, so its own view is enough, and it cannot be
+      # started too late because the flows are in the same command.
       #
-      # setsid, because a process merely backgrounded in a workflow step is
-      # killed with the step's process group, and the capture has to outlive
-      # the step that starts it.
-      - name: start the capture
-        working-directory: interop
-        run: |
-          bridge="br-$(docker network inspect sipral-interop_lab -f '{{.Id}}' | cut -c1-12)"
-          ip link show "$bridge"
-          sudo setsid nohup tcpdump -i "$bridge" -s 0 -U -w "$PWD/pcap/lab.pcap" \
-            </dev/null >/dev/null 2>&1 &
-          # wait for the file to exist rather than sleeping a guessed amount:
-          # the capture used to run in a container that installed tcpdump at
-          # start, and when the install was slow it began after the flows had
-          # already run. An empty capture reads as "nothing happened"
-          for _ in $(seq 1 30); do
-            [ -s pcap/lab.pcap ] && break
-            sleep 1
-          done
-          sudo test -s pcap/lab.pcap || { echo "the capture never started"; exit 1; }
-          pgrep -af "tcpdump -i $bridge"
       # a glibc image, because the runner builds against glibc and the proxy's
       # own image is musl — the binary is not portable between them, and the
       # error when it is not is "no such file or directory" for a file that is
@@ -117,8 +101,18 @@ jobs:
         working-directory: interop
         run: |
           docker run --rm --network sipral-interop_lab \
+            --cap-add NET_RAW --cap-add NET_ADMIN \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
-            debian:trixie-slim /harness kamailio 5060 9000
+            -v "$PWD/pcap:/pcap" \
+            debian:trixie-slim sh -c '
+              apt-get -qq update >/dev/null && apt-get -qq install -y tcpdump >/dev/null
+              tcpdump -i any -s 0 -U -w /pcap/proxy.pcap 2>/dev/null &
+              sleep 2
+              /harness kamailio 5060 9000
+              status=$?
+              sleep 1
+              kill %1 2>/dev/null
+              exit $status'
       # No proxy in front of this one, and a different stack behind it. The
       # point of the second server is that a rule we read one way and Kamailio
       # reads the same way may still be read differently by res_pjsip.
@@ -126,8 +120,18 @@ jobs:
         working-directory: interop
         run: |
           docker run --rm --network sipral-interop_lab \
+            --cap-add NET_RAW --cap-add NET_ADMIN \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
-            debian:trixie-slim /harness asterisk 5060 9000
+            -v "$PWD/pcap:/pcap" \
+            debian:trixie-slim sh -c '
+              apt-get -qq update >/dev/null && apt-get -qq install -y tcpdump >/dev/null
+              tcpdump -i any -s 0 -U -w /pcap/asterisk.pcap 2>/dev/null &
+              sleep 2
+              /harness asterisk 5060 9000
+              status=$?
+              sleep 1
+              kill %1 2>/dev/null
+              exit $status'
       - name: what the servers said
         if: always()
         working-directory: interop
@@ -136,9 +140,8 @@ jobs:
         if: always()
         working-directory: interop
         run: |
-          sudo pkill -INT -f "tcpdump -i br-" >/dev/null 2>&1 || true
-          sleep 1
-          sudo chmod a+r pcap/lab.pcap 2>/dev/null || true
+          sudo chmod -R a+r pcap 2>/dev/null || true
+          ls -l pcap
           docker compose down
       - uses: actions/upload-artifact@v4
         if: always()
