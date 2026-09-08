@@ -173,7 +173,17 @@ impl UserAgent {
         if let Some(sdp) = early {
             response = response.body(b"application/sdp", sdp);
         }
-        let dialog = self.endpoint.respond_invite(transaction, &response, now)?;
+        // RFC 3262 §3: reliably when the INVITE said so, and never otherwise
+        let carries_sdp = described.is_some();
+        let dialog = if self.reliably(call) {
+            let provisional = self
+                .endpoint
+                .respond_reliable(transaction, &response, now)?;
+            self.watch_provisional(call, provisional, carries_sdp);
+            Some(provisional.dialog())
+        } else {
+            self.endpoint.respond_invite(transaction, &response, now)?
+        };
         if let Some(held) = self.calls.get_mut(&call) {
             held.state = if status == StatusCode::RINGING {
                 CallState::Ringing
@@ -206,6 +216,13 @@ impl UserAgent {
         sdp: Option<Arc<[u8]>>,
         now: Instant,
     ) -> Result<(), UaError> {
+        // RFC 3262 §5: a reliable provisional that carried a description holds
+        // the 2xx until it is acknowledged, or two unanswered offers are on the
+        // wire at once and nothing says which the answer belongs to
+        if self.answer_is_held(call) {
+            self.hold_answer(call, sdp);
+            return Ok(());
+        }
         let transaction = self.answerable(call)?;
         let contact = self.contact_of(call)?;
         // RFC 3311 §4: "a 2xx response SHOULD contain an Allow header field
@@ -265,6 +282,46 @@ impl UserAgent {
         self.endpoint
             .respond_invite(transaction, &OutgoingResponse::new(status), now)?;
         self.finish(call, CallEndReason::LocalHangup, Some(status), None, now);
+        self.drain(now);
+        Ok(())
+    }
+
+    /// Answer an offer that arrived in a reliable provisional response.
+    ///
+    /// RFC 3262 §5: "If the UAC receives an offer in a reliable provisional
+    /// response, it MUST generate an answer in the PRACK." Only for a call
+    /// placed without an offer, which is the one case a provisional carries
+    /// one, and reported by `answer_wanted` on
+    /// [`UaEvent::CallProgress`](crate::UaEvent::CallProgress).
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing is
+    /// waiting for one, or [`UaError::Sdp`].
+    pub fn answer_early(
+        &mut self,
+        call: CallHandle,
+        sdp: &[u8],
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let described = sdp::parse(sdp).map_err(UaError::Sdp)?;
+        let (provisional, state) = {
+            let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+            let state = held.state;
+            (
+                held.owed_prack.take().ok_or(UaError::WrongState(state))?,
+                state,
+            )
+        };
+        let _ = state;
+        let prack = self
+            .endpoint
+            .prack(provisional, Some(Arc::from(sdp.to_vec())), now)
+            .map_err(|_| UaError::WrongState(state))?;
+        self.by_request
+            .insert(AnyTransactionId::NonInviteClient(prack), call);
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.session.set_local(described);
+        }
         self.drain(now);
         Ok(())
     }
@@ -498,7 +555,7 @@ impl UserAgent {
                 ref response,
             } => {
                 let call = self.branch(invite, dialog)?;
-                self.on_progress(call, status, response);
+                self.on_progress(call, status, response, false);
                 None
             }
             Event::ReliableProvisional {
@@ -509,16 +566,8 @@ impl UserAgent {
                 ref response,
             } => {
                 let call = self.branch(invite, Some(dialog))?;
-                self.on_progress(call, status, response);
-                // RFC 3262 §4 makes acknowledging it a MUST, and a response
-                // that is not acknowledged is retransmitted until the INVITE
-                // is abandoned. The body it may need — the answer to an offer
-                // that arrived in a 1xx, for a call placed without one — is
-                // 5.5's, and so is the offer this PRACK could carry
-                if let Ok(prack) = self.endpoint.prack(provisional, None, now) {
-                    self.by_request
-                        .insert(AnyTransactionId::NonInviteClient(prack), call);
-                }
+                let response = response.clone();
+                self.on_reliable_progress(call, provisional, status, &response, now);
                 None
             }
             Event::Established {
@@ -627,6 +676,36 @@ impl UserAgent {
         None
     }
 
+    /// A provisional response the far end will retransmit until it is
+    /// acknowledged (RFC 3262 §4).
+    fn on_reliable_progress(
+        &mut self,
+        call: CallHandle,
+        provisional: sipral_core::transaction::ProvisionalResponseId,
+        status: StatusCode,
+        response: &OwnedMessage,
+        now: Instant,
+    ) {
+        // §5: an offer here is answered in the PRACK, and only the application
+        // has an answer. Everything else is acknowledged at once, because §4
+        // makes that a MUST and a response nobody acknowledges is retransmitted
+        // until the INVITE is abandoned
+        let offered = !response.as_raw().body().is_empty()
+            && self
+                .calls
+                .get(&call)
+                .is_some_and(|held| !held.session.has_local());
+        self.on_progress(call, status, response, offered);
+        if offered {
+            if let Some(held) = self.calls.get_mut(&call) {
+                held.owed_prack = Some(provisional);
+            }
+        } else if let Ok(prack) = self.endpoint.prack(provisional, None, now) {
+            self.by_request
+                .insert(AnyTransactionId::NonInviteClient(prack), call);
+        }
+    }
+
     /// The CANCEL lost its race and the call connected anyway.
     ///
     /// §13.2.2.4 still wants the ACK — a 2xx is acknowledged whether or not it
@@ -658,6 +737,13 @@ impl UserAgent {
                 // RFC 4028 §9: an interval below the floor is refused with the
                 // floor, and the far end asks again. There is no policy in it,
                 // so the application is not troubled with it
+                // §8.2.2.3: a Require this agent cannot honour is refused
+                // before anything else looks at the request
+                let missing = crate::reliable::unsupported(&request.as_raw());
+                if !missing.is_empty() {
+                    self.refuse_extension(transaction, &missing, now);
+                    return None;
+                }
                 if Self::too_brief(&request.as_raw()) {
                     let refusal = OutgoingResponse::new(StatusCode::SESSION_INTERVAL_TOO_SMALL)
                         .header(HeaderName::MinSe, &crate::timers::seconds(FLOOR));
@@ -824,7 +910,13 @@ impl UserAgent {
         None
     }
 
-    fn on_progress(&mut self, call: CallHandle, status: StatusCode, response: &OwnedMessage) {
+    fn on_progress(
+        &mut self,
+        call: CallHandle,
+        status: StatusCode,
+        response: &OwnedMessage,
+        answer_wanted: bool,
+    ) {
         self.note_session(call, response);
         let early = !response.as_raw().body().is_empty();
         let state = if early {
@@ -846,6 +938,7 @@ impl UserAgent {
             state,
             status,
             response: response.clone(),
+            answer_wanted,
         });
     }
 

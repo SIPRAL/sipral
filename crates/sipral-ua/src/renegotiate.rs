@@ -53,9 +53,8 @@ use crate::session::Hold;
 /// What this agent will answer, advertised so that the far end knows an UPDATE
 /// is worth sending (RFC 3311 §4).
 ///
-/// It lists what is answered here and nothing more. PRACK is received by the
-/// layer below and answered by nobody yet, so it is not on the list.
-pub(crate) const ALLOW: &[u8] = b"INVITE, ACK, CANCEL, BYE, UPDATE";
+/// It lists what is answered here and nothing more.
+pub(crate) const ALLOW: &[u8] = b"INVITE, ACK, CANCEL, BYE, UPDATE, PRACK";
 
 /// §14.1 and RFC 3311 §5.3: the wait for the end that generated the `Call-ID`,
 /// in milliseconds.

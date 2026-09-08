@@ -25,10 +25,11 @@ use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{HeaderName, OwnedMessage, Uri};
 use sipral_core::sdp::SessionDescription;
 use sipral_core::transaction::{
-    AnyTransactionId, DialogId, InviteClient, InviteServer, TransactionId,
+    AnyTransactionId, DialogId, InviteClient, InviteServer, ProvisionalResponseId, TransactionId,
 };
 
 use crate::account::{AccountId, Extra};
+use crate::reliable::Unacknowledged;
 use crate::session::Session;
 use crate::timers::SessionTimer;
 
@@ -270,6 +271,12 @@ pub(crate) struct Call {
     pub(crate) retry_at: Option<Instant>,
     /// The session timer, once one has been negotiated (RFC 4028).
     pub(crate) timer: Option<SessionTimer>,
+    /// A reliable provisional response this end sent and is still owed a
+    /// PRACK for (RFC 3262 §3).
+    pub(crate) unacknowledged: Option<Unacknowledged>,
+    /// One that arrived carrying an offer, whose answer §5 puts in the PRACK
+    /// and which only the application has.
+    pub(crate) owed_prack: Option<ProvisionalResponseId>,
     /// What was dialled, kept so that a 422 can be answered by asking again
     /// with the interval the far end demanded (RFC 4028 §7.3).
     pub(crate) placed: Option<OutgoingCall>,
@@ -333,6 +340,8 @@ impl Call {
             awaiting_ack: None,
             retry_at: None,
             timer: None,
+            unacknowledged: None,
+            owed_prack: None,
             placed: None,
             invited: None,
             id: None,
@@ -365,6 +374,8 @@ impl Call {
             awaiting_ack: None,
             retry_at: None,
             timer: None,
+            unacknowledged: None,
+            owed_prack: None,
             placed: None,
             invited: None,
             id: None,
@@ -395,6 +406,8 @@ impl Call {
             awaiting_ack: None,
             retry_at: None,
             timer: None,
+            unacknowledged: None,
+            owed_prack: None,
             placed: None,
             invited: None,
             id: None,

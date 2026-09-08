@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+//! Provisional responses that are not allowed to be lost (RFC 3262).
+//!
+//! A 180 that vanishes costs a moment of silence. A 183 that vanishes costs
+//! the offer or the answer it was carrying, and then the call is set up wrong
+//! or not at all — which is why RFC 3262 exists and why carriers turn it on.
+//! The layer below already retransmits a reliable provisional and matches the
+//! PRACK that acknowledges it. What is decided here is when to use it, and
+//! what to put in the answer.
+//!
+//! **When.** §3 leaves no room: `Require: 100rel` in the INVITE makes every
+//! non-100 provisional reliable, `Supported: 100rel` makes it allowed, and
+//! neither makes it forbidden. The 100 is never reliable under any of them.
+//!
+//! **What the 2xx has to wait for.** §5: a reliable provisional that carried a
+//! session description holds up the 2xx until it is acknowledged. Sending the
+//! 2xx first would put two unanswered offers on the wire at once, and the far
+//! end has no way to tell which one the answer belongs to. So an application
+//! that answers a call whose early media is still unacknowledged has its 200
+//! held here and sent the moment the PRACK arrives — which is a wait measured
+//! in one round trip, and better than a session negotiated twice.
+//!
+//! **The option tags this agent understands**, which is also what decides
+//! whether a `Require` gets a 420 (§8.2.2.3). The list is short on purpose: an
+//! extension nobody implements is one nobody should claim.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use sipral_core::endpoint::{Event, OutgoingResponse};
+use sipral_core::msg::{HeaderName, RawMessage, StatusCode};
+use sipral_core::transaction::{InviteServer, ProvisionalResponseId, TransactionId};
+
+use crate::agent::UserAgent;
+use crate::call::CallHandle;
+use crate::renegotiate::ALLOW;
+
+/// Everything this agent will answer `Require` for.
+///
+/// `100rel` because this module implements it, `timer` because
+/// [`crate::timers`] does, and nothing else. RFC 3261 §8.2.2.3 answers a
+/// `Require` outside this list with a 420 and says which token it was.
+const UNDERSTOOD: [&[u8]; 2] = [b"100rel", b"timer"];
+
+/// What a reliable provisional this end sent is still waiting for.
+#[derive(Clone, Debug)]
+pub(crate) struct Unacknowledged {
+    /// The response, so that the wait can be told from an idle call.
+    pub(crate) provisional: ProvisionalResponseId,
+    /// Whether it carried a session description, which is what §5 makes the
+    /// 2xx wait for.
+    pub(crate) described: bool,
+    /// A 200 the application asked for while this was outstanding, held until
+    /// the PRACK arrives.
+    pub(crate) held: Option<Arc<[u8]>>,
+}
+
+/// The option tags a request demands that this agent does not implement.
+pub(crate) fn unsupported(request: &RawMessage<'_>) -> Vec<Vec<u8>> {
+    request
+        .require()
+        .filter(|token| {
+            !UNDERSTOOD
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(token))
+        })
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// Whether §3 says a provisional response to this request must, may, or must
+/// not go reliably.
+pub(crate) fn wants_reliable(request: &RawMessage<'_>) -> bool {
+    lists(request, HeaderName::Require) || lists(request, HeaderName::Supported)
+}
+
+fn lists(request: &RawMessage<'_>, name: HeaderName<'_>) -> bool {
+    request
+        .field_values(name)
+        .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"100rel"))
+}
+
+impl UserAgent {
+    /// Whether a provisional response to this call has to go reliably (§3).
+    pub(crate) fn reliably(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .and_then(|held| held.invited.as_ref())
+            .is_some_and(|invite| wants_reliable(&invite.as_raw()))
+    }
+
+    /// Whether a 2xx for this call has to wait (§5).
+    pub(crate) fn answer_is_held(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .and_then(|held| held.unacknowledged.as_ref())
+            .is_some_and(|waiting| waiting.described)
+    }
+
+    /// Remember a reliable provisional that has just gone out.
+    pub(crate) fn watch_provisional(
+        &mut self,
+        call: CallHandle,
+        provisional: ProvisionalResponseId,
+        described: bool,
+    ) {
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.unacknowledged = Some(Unacknowledged {
+                provisional,
+                described,
+                held: None,
+            });
+        }
+    }
+
+    /// Keep a 200 the application asked for until §5 allows it out.
+    pub(crate) fn hold_answer(&mut self, call: CallHandle, sdp: Option<Arc<[u8]>>) {
+        if let Some(waiting) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|held| held.unacknowledged.as_mut())
+        {
+            waiting.held = sdp.or_else(|| Some(Arc::from(&b""[..])));
+        }
+    }
+
+    /// `None` when the event was not about a reliable provisional.
+    pub(crate) fn on_reliable_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let Event::IncomingPrack {
+            transaction,
+            provisional,
+            ref request,
+        } = event
+        else {
+            return Some(event);
+        };
+        let Some(call) = self.call_of_provisional(provisional) else {
+            return Some(event);
+        };
+        let request = request.clone();
+
+        // §5: "If the UAS receives a PRACK with an offer, it MUST place the
+        // answer in the 2xx to the PRACK." Nothing here has an answer to
+        // write, so a PRACK that carries one is handed to the application the
+        // same way any other offer it cannot answer is
+        let body = request.as_raw().body().to_vec();
+        let answer = if body.is_empty() {
+            None
+        } else {
+            self.answer_for(call, &body)
+        };
+
+        // §3: "it MUST be responded to with a 2xx response"
+        let mut response = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
+        if let Some(ref answer) = answer {
+            response = response.body(b"application/sdp", Arc::clone(answer));
+        }
+        self.endpoint.respond(transaction, &response, now).ok();
+
+        let waiting = self
+            .calls
+            .get_mut(&call)
+            .and_then(|held| held.unacknowledged.take());
+        // §5 held the 2xx to the INVITE; it can go now
+        if let Some(sdp) = waiting.and_then(|waiting| waiting.held) {
+            let sdp = (!sdp.is_empty()).then_some(sdp);
+            self.answer(call, sdp, now).ok();
+        }
+        None
+    }
+
+    /// The call a reliable provisional belongs to.
+    fn call_of_provisional(&self, provisional: ProvisionalResponseId) -> Option<CallHandle> {
+        self.calls
+            .iter()
+            .find(|(_, held)| {
+                held.unacknowledged
+                    .as_ref()
+                    .is_some_and(|waiting| waiting.provisional == provisional)
+            })
+            .map(|(handle, _)| *handle)
+    }
+
+    /// The answer to an offer that arrived in a PRACK, when this layer can
+    /// write one at all.
+    fn answer_for(&mut self, call: CallHandle, body: &[u8]) -> Option<Arc<[u8]>> {
+        let offer = sipral_core::sdp::parse(body).ok()?;
+        let held = self.calls.get_mut(&call)?;
+        if !held.session.is_same_media(&offer) {
+            return None;
+        }
+        let wanted = held.session.hold.local;
+        let answer = held.session.answer(&offer, wanted)?;
+        held.session.set_remote(offer);
+        held.session.set_local(answer.clone());
+        Some(Arc::from(answer.to_bytes()))
+    }
+
+    /// §8.2.2.3: a `Require` this agent cannot honour is a 420, and the
+    /// response says which token it was so the far end can try without it.
+    pub(crate) fn refuse_extension(
+        &mut self,
+        transaction: TransactionId<InviteServer>,
+        missing: &[Vec<u8>],
+        now: Instant,
+    ) {
+        let mut listed: Vec<u8> = Vec::new();
+        for token in missing {
+            if !listed.is_empty() {
+                listed.extend_from_slice(b", ");
+            }
+            listed.extend_from_slice(token);
+        }
+        let Ok(status) = StatusCode::new(420) else {
+            return;
+        };
+        let refusal = OutgoingResponse::new(status).header(HeaderName::Unsupported, &listed);
+        self.endpoint
+            .respond_invite(transaction, &refusal, now)
+            .ok();
+    }
+}

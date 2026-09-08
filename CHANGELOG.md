@@ -59,6 +59,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the same `Call-ID` with the demanded floor, once; an incoming interval below
   §5's ninety seconds is answered 422 before the application sees it.
 - `StatusCode::SESSION_INTERVAL_TOO_SMALL`.
+- Reliable provisional responses on the answering side (RFC 3262). `ring` sends
+  reliably exactly when the INVITE asked — §3 leaves no choice either way — and
+  the PRACK is answered 2xx here, with an answer to any offer it carried. A
+  reliable response that carried a description holds the 2xx to the INVITE until
+  it is acknowledged (§5), so an application that answers early has its 200 kept
+  and sent on the PRACK rather than putting two unanswered offers on the wire.
+  In the other direction an offer arriving in a reliable provisional is reported
+  by `answer_wanted` on `CallProgress` and answered with
+  `UserAgent::answer_early`, which puts it in the PRACK where §5 wants it.
+- A `Require` naming an extension that is not implemented is answered 420 with
+  the token in `Unsupported` (§8.2.2.3), before the application sees the call.
 - The reference loop, behind the `reference-loop` feature and off by default.
   `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
   per socket doing the blocking reads, and a `Handler` with two methods. It

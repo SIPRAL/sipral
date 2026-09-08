@@ -42,6 +42,7 @@ mod calls;
 mod error;
 mod event;
 mod registration;
+mod reliable;
 mod renegotiate;
 #[cfg(feature = "reference-loop")]
 mod runtime;

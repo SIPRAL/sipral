@@ -339,6 +339,7 @@ impl UserAgent {
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let event = self.on_registration_event(event, now)?;
         let event = self.on_call_event(event, now)?;
+        let event = self.on_reliable_event(event, now)?;
         self.on_session_event(event, now)
     }
 

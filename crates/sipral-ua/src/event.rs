@@ -188,6 +188,12 @@ pub enum UaEvent {
         status: StatusCode,
         /// The response, whole; early media is in it when there is any.
         response: OwnedMessage,
+        /// Whether this response carried an offer whose answer has to travel
+        /// in the PRACK that acknowledges it (RFC 3262 §5). Only ever true for
+        /// a call placed without an offer, and answered with
+        /// [`UserAgent::answer_early`](crate::UserAgent::answer_early) — until
+        /// it is, the response is retransmitted and the call does not proceed.
+        answer_wanted: bool,
     },
     /// One INVITE opened a second dialog: a proxy forked it, and more than one
     /// phone is ringing.

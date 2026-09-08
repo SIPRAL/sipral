@@ -2543,3 +2543,204 @@ fn answering_a_call_settles_the_timer_in_the_2xx() {
         "9 only demands a Require when the other end has to act"
     );
 }
+
+// -- reliable provisional responses ------------------------------------------
+
+/// The same message with extra header fields, inserted after the start line.
+fn plus(message: &[u8], extra: &str) -> Vec<u8> {
+    let head = message
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(message.len(), |at| at + 1);
+    let mut out = message[..head].to_vec();
+    out.extend_from_slice(extra.as_bytes());
+    out.extend_from_slice(&message[head..]);
+    out
+}
+
+/// An INVITE that arrives asking for reliable provisional responses.
+fn incoming_100rel(branch: &str, require: bool) -> Vec<u8> {
+    let list = if require { "Require" } else { "Supported" };
+    plus(
+        &incoming_invite(branch, Some(OFFER)),
+        &format!("{list}: 100rel\r\n"),
+    )
+}
+
+fn call_arriving(agent: &mut UserAgent, bytes: &[u8], now: Instant) -> CallHandle {
+    deliver(agent, bytes, now);
+    transmits(agent);
+    events(agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling")
+}
+
+#[test]
+fn a_provisional_goes_reliably_when_the_invite_asked_for_it() {
+    // 3: "The UAS MUST send any non-100 provisional response reliably if the
+    // initial request contained a Require header field with the option tag"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_100rel("rel1", true), t0);
+
+    agent.ring(call, None, t0).expect("180 goes");
+    let ringing = sent(&mut agent);
+    assert!(ringing.starts_with(b"SIP/2.0 180 "));
+    assert!(
+        String::from_utf8_lossy(&header(&ringing, HeaderName::Require)).contains("100rel"),
+        "3: a reliable provisional carries Require: 100rel"
+    );
+    assert!(
+        !header(&ringing, HeaderName::RSeq).is_empty(),
+        "3: and an RSeq"
+    );
+}
+
+#[test]
+fn a_provisional_does_not_go_reliably_when_nothing_asked_for_it() {
+    // 3: "If the request did not include either a Supported or Require header
+    // field indicating this feature, the UAS MUST NOT send the provisional
+    // response reliably"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("plain", Some(OFFER)), t0);
+
+    agent.ring(call, None, t0).expect("180 goes");
+    let ringing = sent(&mut agent);
+    assert!(header(&ringing, HeaderName::RSeq).is_empty());
+    assert!(header(&ringing, HeaderName::Require).is_empty());
+}
+
+#[test]
+fn a_prack_is_answered_and_the_response_stops_being_retransmitted() {
+    // 3: "it MUST be responded to with a 2xx response"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_100rel("rel2", true), t0);
+    agent.ring(call, None, t0).expect("180 goes");
+    let ringing = sent(&mut agent);
+    let rseq = String::from_utf8_lossy(&header(&ringing, HeaderName::RSeq)).into_owned();
+
+    let prack = plus(
+        &in_dialog(&ringing, "PRACK", "rel2prack", 2),
+        &format!("RAck: {rseq} 1 INVITE\r\n"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(header(&answer, HeaderName::CSeq), b"2 PRACK");
+}
+
+#[test]
+fn the_2xx_waits_for_a_reliable_response_that_carried_a_description() {
+    // 5: "the UAS MUST delay sending the 2xx until the provisional response is
+    // acknowledged". Two unanswered offers on the wire at once is a session
+    // negotiated twice
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_100rel("rel3", true), t0);
+
+    agent
+        .ring(call, Some(Arc::from(ANSWER)), t0)
+        .expect("183 with early media");
+    let progress = sent(&mut agent);
+    assert!(progress.starts_with(b"SIP/2.0 183 "));
+
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the answer is taken");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "the 200 is held until the 183 is acknowledged"
+    );
+
+    let rseq = String::from_utf8_lossy(&header(&progress, HeaderName::RSeq)).into_owned();
+    let prack = plus(
+        &in_dialog(&progress, "PRACK", "rel3prack", 2),
+        &format!("RAck: {rseq} 1 INVITE\r\n"),
+    );
+    deliver(&mut agent, &prack, t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 200 OK\r\n")
+                && header(bytes, HeaderName::CSeq) == b"1 INVITE"),
+        "and goes the moment it is"
+    );
+}
+
+#[test]
+fn an_offer_in_a_reliable_response_is_answered_in_the_prack() {
+    // 5: "If the UAC receives an offer in a reliable provisional response, it
+    // MUST generate an answer in the PRACK."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    // no offer of ours, so theirs comes back in the provisional
+    let call = agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+
+    let progress = plus(
+        &answered(&invite, 183, "Session Progress", "desk", Some(ANSWER)),
+        "Require: 100rel\r\nRSeq: 314\r\n",
+    );
+    deliver(&mut agent, &progress, t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "nothing is acknowledged until there is an answer to put in it"
+    );
+    let wanted = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::CallProgress { answer_wanted, .. } => Some(answer_wanted),
+            _ => None,
+        })
+        .expect("the progress is reported");
+    assert!(wanted, "and the application is told an answer is owed");
+
+    agent
+        .answer_early(call, OFFER, t0)
+        .expect("the PRACK carries it");
+    let prack = sent(&mut agent);
+    assert!(prack.starts_with(b"PRACK "));
+    assert_eq!(header(&prack, HeaderName::RAck), b"314 1 INVITE");
+    assert!(body_of(&prack).contains("m=audio 8000 RTP/AVP 0\r\n"));
+}
+
+#[test]
+fn a_require_nobody_here_implements_is_refused_with_420() {
+    // 8.2.2.3: the response says which token it was, so the far end can try
+    // again without it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(
+        &mut agent,
+        &plus(
+            &incoming_invite("odd", Some(OFFER)),
+            "Require: gruu, 100rel\r\n",
+        ),
+        t0,
+    );
+
+    let refusal = last(&mut agent);
+    assert!(refusal.starts_with(b"SIP/2.0 420 "));
+    assert_eq!(header(&refusal, HeaderName::Unsupported), b"gruu");
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::IncomingCall { .. })),
+        "there is nothing for the application to decide"
+    );
+}
