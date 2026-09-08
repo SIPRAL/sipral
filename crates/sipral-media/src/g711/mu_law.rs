@@ -4,10 +4,11 @@
 //! mu-law, the PCMU of RFC 3551 §4.5.14.
 //!
 //! The bias is what turns the law into arithmetic instead of a table. Adding
-//! 0x84 to the magnitude before anything else forces bit 7 on, so the chord is
-//! nothing but the position of the top set bit, and the same constant is the
-//! chord floor plus half a step that the decoder has to put back. It comes off
-//! again at the end of a decode.
+//! 0x84 to the magnitude before anything else puts every value at 128 or
+//! above, so the top set bit is never below bit 7 and the chord is nothing but
+//! the position of that bit. The same constant is chord 0's floor plus half of
+//! its step, which is what the decoder has to put back, so it comes off again
+//! at the end of a decode.
 //!
 //! The octet is complemented on its way out. That is why silence travels as
 //! 0xFF and the loudest negative sample as 0x00, and why the sign bit reads as

@@ -5,10 +5,12 @@
 //!
 //! Both laws fold a 16-bit linear sample into one octet the same way: a sign
 //! bit, a three-bit chord and a four-bit step inside that chord. The step
-//! doubles from one chord to the next, which is the whole trick — quiet
-//! passages are quantised finely and loud ones coarsely, and eight bits end up
-//! sounding like fourteen. The laws differ in where the chords start and in
-//! what is done to the octet before it goes on the wire.
+//! grows with the chord, which is the whole trick — quiet passages are
+//! quantised finely and loud ones coarsely, and eight bits end up sounding
+//! like fourteen. Where it starts to grow differs: mu-law doubles it at every
+//! chord, and A-law gives its first two chords the same step and doubles from
+//! there. The laws also differ in where the chords start and in what is done
+//! to the octet before it goes on the wire.
 //!
 //! RFC 3551 §4.5.14 adds one rule of its own: "The sign bit of each G.711
 //! octet SHALL correspond to the most significant bit of the octet in the RTP
@@ -17,12 +19,19 @@
 pub mod a_law;
 pub mod mu_law;
 
-/// The clock rate both laws run at, in hertz (RFC 3551 §6). It is also the
-/// rate written after the encoding name on an `a=rtpmap` line.
+/// The clock rate the static payload types are registered at, in hertz
+/// (RFC 3551 §6), and the rate written after the encoding name on an
+/// `a=rtpmap` line for them.
+///
+/// Not a property of the law. Table 1 of §4.5 gives the sampling rate for both
+/// as "var.", and §6's own example of a dynamic binding is "payload type 96
+/// indicates PCMU encoding, 8,000 Hz sampling rate, 2 channels" — so an
+/// encoding bound dynamically may say something else, and a caller that reads
+/// an `a=rtpmap` should believe it rather than this.
 pub const CLOCK_RATE: u32 = 8_000;
 
-/// One. G.711 samples a single channel, and RFC 3551 §6 registers both payload
-/// types that way.
+/// One, which is how the static payload types are registered (RFC 3551 §6).
+/// As with the clock rate, a dynamic binding may say otherwise.
 pub const CHANNELS: u8 = 1;
 
 /// The packetisation interval RFC 3551 §4.5 gives as the default for both

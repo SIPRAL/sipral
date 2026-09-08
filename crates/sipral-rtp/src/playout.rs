@@ -16,6 +16,15 @@
 //! accident. It also means the buffer cannot grow: a consumer that stops
 //! pulling does not turn into unbounded memory, it turns into a counter going
 //! up.
+//!
+//! The slot a number names is found by its distance from the window's base,
+//! not by the number itself modulo the ring. That is not a stylistic choice:
+//! sequence numbers wrap at sixty-five thousand and a ring of, say, ten slots
+//! does not divide that, so the raw modulus stops being one-to-one exactly
+//! when the window straddles the wrap — and two live packets would then land
+//! in the same slot, one of them read as a duplicate of the other. The
+//! distance is computed with wrapping arithmetic and is smaller than the
+//! depth by the time it is used, so it is one-to-one for every depth.
 
 use crate::wire::RtpPacket;
 
@@ -108,6 +117,9 @@ struct Slot {
 #[derive(Debug)]
 pub struct JitterBuffer {
     slots: Vec<Slot>,
+    /// Which slot the window's base sits in. It moves with the base rather
+    /// than being derived from the sequence number; see the module note.
+    origin: usize,
     depth: u16,
     prefill: u16,
     held: u16,
@@ -136,6 +148,7 @@ impl JitterBuffer {
         slots.resize_with(usize::from(depth), Slot::default);
         Self {
             slots,
+            origin: 0,
             depth,
             prefill: prefill.min(depth),
             held: 0,
@@ -161,6 +174,7 @@ impl JitterBuffer {
         if !self.anchored {
             self.anchored = true;
             self.next = sequence;
+            self.origin = 0;
             self.highest = sequence.wrapping_sub(1);
         }
 
@@ -236,12 +250,12 @@ impl JitterBuffer {
                 self.playing = false;
                 return Pull::Empty;
             }
-            self.next = self.next.wrapping_add(1);
+            self.advance_base(1);
             self.stats.lost = self.stats.lost.saturating_add(1);
             return Pull::Missing;
         }
 
-        self.next = self.next.wrapping_add(1);
+        self.advance_base(1);
         self.held = self.held.saturating_sub(1);
         if self.held == 0 {
             // fill up again before playing on, or the next packet to arrive
@@ -270,6 +284,10 @@ impl JitterBuffer {
         for slot in &mut self.slots {
             slot.filled = false;
         }
+        // what was waiting is thrown away, and saying so is the difference
+        // between a counter that accounts for every packet taken in and one
+        // that quietly loses some
+        self.stats.discarded = self.stats.discarded.saturating_add(u64::from(self.held));
         self.held = 0;
         self.anchored = false;
         self.playing = false;
@@ -328,17 +346,27 @@ impl JitterBuffer {
         // consumer will never be told about any other way
         let skipped = u64::from(advance).saturating_sub(u64::from(displaced));
         self.stats.lost = self.stats.lost.saturating_add(skipped);
-        self.next = target;
+        self.advance_base(advance);
         displaced
     }
 
+    /// Which slot holds `sequence`, by its distance from the window's base.
     fn index_of(&self, sequence: u16) -> usize {
         let len = self.slots.len();
         if len == 0 {
-            0
-        } else {
-            usize::from(sequence) % len
+            return 0;
         }
+        let ahead = usize::from(sequence.wrapping_sub(self.next));
+        (self.origin + ahead) % len
+    }
+
+    /// Move the base of the window forward, taking the ring's origin with it.
+    fn advance_base(&mut self, by: u16) {
+        let len = self.slots.len();
+        if len != 0 {
+            self.origin = (self.origin + usize::from(by) % len) % len;
+        }
+        self.next = self.next.wrapping_add(by);
     }
 }
 
@@ -377,6 +405,56 @@ mod tests {
         match buffer.pull() {
             Pull::Packet(frame) => Some(frame.sequence),
             Pull::Missing | Pull::Empty => None,
+        }
+    }
+
+    #[test]
+    fn a_window_that_straddles_the_wrap_still_names_one_slot_per_number() {
+        // the ring is indexed by distance from the base, not by the sequence
+        // number itself: 65536 is not a multiple of ten, so the raw modulus
+        // would put 65530 and 0 in the same slot and read the second as a
+        // duplicate of the first
+        let mut buffer = JitterBuffer::new(10, 1);
+        for sequence in [65_530_u16, 65_531, 65_532, 65_533, 65_534, 65_535] {
+            let bytes = datagram(sequence, false);
+            let packet = RtpPacket::parse(&bytes).expect("a packet");
+            assert_eq!(buffer.insert(&packet), Insert::Accepted);
+        }
+        let bytes = datagram(0, false);
+        let packet = RtpPacket::parse(&bytes).expect("a packet");
+        assert_eq!(
+            buffer.insert(&packet),
+            Insert::Accepted,
+            "the packet after the wrap is live audio, not a duplicate"
+        );
+        assert_eq!(buffer.held(), 7);
+        assert_eq!(buffer.stats().duplicated, 0);
+
+        // and it comes out where it belongs
+        for expected in [65_530_u16, 65_531, 65_532, 65_533, 65_534, 65_535, 0] {
+            assert_eq!(pull(&mut buffer), Some(expected));
+        }
+    }
+
+    #[test]
+    fn every_depth_holds_a_full_window_across_the_wrap() {
+        // the same property, stated for the depths a caller might pick rather
+        // than for the one that happened to break
+        for depth in 1_u16..=24 {
+            let mut buffer = JitterBuffer::new(depth, 1);
+            let base = 65_536_u32.wrapping_sub(u32::from(depth) / 2);
+            for step in 0..depth {
+                let sequence = u16::try_from((base + u32::from(step)) % 65_536).unwrap();
+                let bytes = datagram(sequence, false);
+                let packet = RtpPacket::parse(&bytes).expect("a packet");
+                assert_eq!(
+                    buffer.insert(&packet),
+                    Insert::Accepted,
+                    "depth {depth}, sequence {sequence}"
+                );
+            }
+            assert_eq!(buffer.held(), depth, "depth {depth}");
+            assert_eq!(buffer.stats().duplicated, 0, "depth {depth}");
         }
     }
 

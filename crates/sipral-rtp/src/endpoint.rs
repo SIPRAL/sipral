@@ -64,8 +64,14 @@ pub enum Discard {
     ForeignAddress,
     /// A different synchronization source than the one being listened to.
     SecondSource(u32),
-    /// The source has not yet sent two packets in a row, so nothing it says
-    /// is believed (RFC 3550 A.1).
+    /// The source has not yet sent two packets in a row, so its audio is not
+    /// played (RFC 3550 A.1).
+    ///
+    /// Its address and its SSRC are taken all the same, and deliberately: the
+    /// latch has to close on the first packet that is shaped right, or there
+    /// is a window two packets wide in which any address on the network is
+    /// still a candidate. Probation decides whether a stream is worth
+    /// listening to, not whose stream it is.
     Probation,
     /// A sequence number too far from the stream to belong to it.
     BadSequence,
@@ -142,6 +148,12 @@ impl RtpSession {
     /// then the payload type, then where it came from, then who sent it, then
     /// whether its sequence number belongs to the stream. A packet only
     /// reaches the buffer once all five agree.
+    ///
+    /// The third and fourth of those also *decide* the address and the source,
+    /// on the first packet that gets that far — before probation, which is
+    /// the fifth. That order is deliberate: closing the latch late would leave
+    /// a window in which every address is still a candidate, which is wider
+    /// than the one it would close.
     pub fn receive(&mut self, datagram: &[u8], from: SocketAddr) -> Received {
         let packet = match RtpPacket::parse(datagram) {
             Ok(packet) => packet,

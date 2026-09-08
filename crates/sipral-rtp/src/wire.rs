@@ -200,9 +200,9 @@ impl<'a> RtpPacket<'a> {
 
         // "If the padding bit is set ... the last octet of the padding
         // contains a count of how many padding octets should be ignored,
-        // including itself" (§5.1), and A.1 wants that count to fit
-        // A.1 wants the count "less than the total packet length minus the
-        // header size"; taken as written that refuses a packet which is all
+        // including itself" (§5.1). A.1 wants that count "less than the total
+        // packet length minus the header size"; taken as written that refuses
+        // a packet which is all
         // padding, which slices perfectly well and which no profile forbids,
         // so the check here is that the count fits rather than that it leaves
         // something behind
