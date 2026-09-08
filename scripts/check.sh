@@ -148,9 +148,11 @@ fi
 
 step "build"
 cargo fmt --all --check >/dev/null 2>&1 && pass "cargo fmt" || fail "cargo fmt --all"
-cargo clippy --workspace --all-targets -- -D warnings >/dev/null 2>&1 \
-    && pass "cargo clippy" || fail "cargo clippy --workspace --all-targets"
-cargo test --workspace >/dev/null 2>&1 && pass "cargo test" || fail "cargo test --workspace"
+# --all-features, because the reference loop is behind one and CI lints it
+cargo clippy --workspace --all-targets --all-features -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy" || fail "cargo clippy --workspace --all-targets --all-features"
+cargo test --workspace --all-features >/dev/null 2>&1 \
+    && pass "cargo test" || fail "cargo test --workspace --all-features"
 cargo build --workspace --release >/dev/null 2>&1 && pass "release build" || fail "cargo build --release"
 
 step "dependency licences"

@@ -12,6 +12,12 @@ keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
 
+[features]
+# The loop over `std::net` from `docs/04-ua.md`. Off by default: it opens
+# sockets, which nothing else in this workspace does, and it resolves names
+# with what the standard library gives rather than with RFC 3263's SRV.
+reference-loop = []
+
 [dependencies]
 sipral-core.workspace = true
 

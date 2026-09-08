@@ -85,14 +85,15 @@ caller answers.
 
 `sipral-ua` ships a reference loop for callers who do not want to write one. It
 is deliberately the plainest thing that works — `std::net`, blocking sockets,
-UDP and TCP — and it is **off by default**, behind a feature flag, because two
-things it cannot do are things a real deployment needs:
+one thread each, UDP and TCP — and it is **off by default**, behind the
+`reference-loop` feature, because two things it cannot do are things a real
+deployment needs:
 
 - **NAPTR and SRV.** `std::net` resolves a name to addresses and nothing else,
   so the reference loop answers `ResolveNeeded` with an A lookup and takes what
   it gets. A deployment that has to reach a carrier through SRV supplies its own
   resolver — the platform has one, and on mobile it is the only one allowed to
-  answer while the radio is asleep. The task is 5.7 in the roadmap.
+  answer while the radio is asleep.
 - **TLS.** No TLS implementation is linked here, and none will be: a stack that
   picks one imposes it on every embedder. `TransportProtocol::Tls` describes a
   transport the caller has already secured, and the caller supplies the

@@ -17,8 +17,8 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 |---|---|---|---|
 | 3261 | SIP: Session Initiation Protocol | sipral-core | phase 1 |
 | 3263 | Locating SIP servers: transport selection, the `maddr` target, the default port, and what counts as a failed hop | sipral-core | phase 1 |
-| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller (reference loop, 5.7) | phase 1 |
-| 2782 | SRV records: ordering candidates by priority and weight | caller (reference loop, 5.7) | phase 1 |
+| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller; the reference loop does the A query only | phase 1 |
+| 2782 | SRV records: ordering candidates by priority and weight | caller; `std::net` cannot ask for SRV | phase 1 |
 | 3264 | Offer/answer model with SDP | sipral-core | phase 1 |
 | 4566 | SDP | sipral-core | phase 1 |
 | 3581 | Symmetric response routing (`rport`) | sipral-core | phase 1 |

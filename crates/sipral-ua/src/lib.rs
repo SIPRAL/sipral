@@ -43,6 +43,8 @@ mod error;
 mod event;
 mod registration;
 mod renegotiate;
+#[cfg(feature = "reference-loop")]
+mod runtime;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -52,6 +54,8 @@ pub use agent::UserAgent;
 pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+#[cfg(feature = "reference-loop")]
+pub use runtime::{Control, Handler, Runtime};
 pub use session::Hold;
 
 /// What a caller needs from the layer below to drive this one, re-exported so

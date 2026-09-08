@@ -48,9 +48,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call as unreachable. Without it a far end that stops answering leaves a line
   busy for as long as the process runs.
 - `OutgoingResponse::status`, to read back what a response was built with.
+- The reference loop, behind the `reference-loop` feature and off by default.
+  `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
+  per socket doing the blocking reads, and a `Handler` with two methods. It
+  answers `ResolveNeeded` with an A lookup and `TransportWanted` by opening the
+  TCP connection §18.1.1 asks for; it does not do SRV, does not link TLS, and
+  binds to a named address rather than a wildcard, because `std::net` cannot
+  say which local address a datagram arrived on and RFC 3581 §4 needs that.
+  With it comes the first test in this workspace where two stacks talk to each
+  other over real sockets rather than to a peer written in the same file: an
+  INVITE, a 180, a 200, the ACK, a hold and a BYE, on loopback.
 
 ### Fixed
 
+- The reference loop could end without writing what it had been given. A
+  handler that hangs up and stops in the same breath is the ordinary shape of
+  an application, and the BYE was still in the queue when the loop came out —
+  so the far end kept the call. Found by the loopback test on its first run,
+  which is what that test is for.
 - A re-INVITE with no session description could start a second offer/answer
   exchange on top of an unfinished one. §14.1 has such a request ask *this* end
   to offer, so it is the same exchange starting over, and it now meets the same
