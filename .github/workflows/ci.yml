@@ -46,33 +46,34 @@ jobs:
         run: |
           mkdir -p pcap
           docker compose up -d
-      # an active probe rather than a fixed sleep: FreeSWITCH is much the
+      # An active probe rather than a fixed sleep: FreeSWITCH is much the
       # slowest of the three to open its socket, and how slow depends on the
-      # runner. /proc/net/udp rather than netstat, because the kernel always
-      # has it and a minimal image may not have the tool. 13C4 is 5060
+      # runner. Read from the log rather than from inside the container — the
+      # Kamailio image is built without a shell, so there is nothing in there
+      # to run a check with, and a probe that needs the image's contents is a
+      # probe that breaks when the image is rebuilt.
+      #
+      # Asterisk is up but not gated on: nothing in the flows below talks to
+      # it yet, and waiting for a server we do not use would only add ways to
+      # fail.
       - name: wait for the servers to listen
         working-directory: interop
         run: |
-          for service in kamailio freeswitch asterisk; do
-            ready=""
+          wait_for() {
             for _ in $(seq 1 45); do
-              if docker compose exec -T "$service" sh -c \
-                  'cat /proc/net/udp /proc/net/udp6 2>/dev/null | grep -qi ":13C4"'; then
-                ready=yes
-                break
+              if docker compose logs --no-color "$1" 2>/dev/null | grep -qF "$2"; then
+                echo "$1 is up"
+                return 0
               fi
               sleep 2
             done
-            if [ -z "$ready" ]; then
-              echo "$service never opened 5060"
-              docker compose ps
-              echo "--- what the probe saw ---"
-              docker compose exec -T "$service" sh -c 'cat /proc/net/udp' || true
-              docker compose logs --no-color "$service" | tail -60
-              exit 1
-            fi
-            echo "$service is listening"
-          done
+            echo "$1 never said it was up"
+            docker compose ps
+            docker compose logs --no-color "$1" | tail -60
+            return 1
+          }
+          wait_for kamailio "Listening on"
+          wait_for freeswitch "FreeSWITCH Started"
       - name: start the capture
         working-directory: interop
         run: docker compose --profile capture up -d capture
