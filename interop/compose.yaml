@@ -23,10 +23,12 @@ services:
 
   freeswitch:
     image: safarov/freeswitch:1.10.12
+    # names vanilla does not use, in directories it includes by glob: the
+    # entrypoint copies its own tree over /etc/freeswitch at every start, so
+    # anything mounted at one of its paths is a fight it wins
     volumes:
-      - ./freeswitch/1000.xml:/etc/freeswitch/directory/default/1000.xml:ro
-      - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/default/00_lab.xml:ro
-      - ./freeswitch/vars_lab.xml:/etc/freeswitch/vars_lab.xml:ro
+      - ./freeswitch/lab_user.xml:/etc/freeswitch/directory/default/lab_user.xml:ro
+      - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/public/zz_sipral_lab.xml:ro
     networks: [lab]
 
   asterisk:

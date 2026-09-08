@@ -1,0 +1,22 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+A user vanilla does not ship, under a name vanilla does not use. The image's
+entrypoint copies the whole vanilla tree over /etc/freeswitch on every start,
+so a file mounted at one of its own paths is either overwritten or, mounted
+read-only, makes the copy fail — and the directory is included by glob, so a
+new name is picked up with nothing else changed.
+-->
+<include>
+  <user id="9001">
+    <params>
+      <param name="password" value="labpass"/>
+    </params>
+    <variables>
+      <variable name="user_context" value="default"/>
+      <variable name="effective_caller_id_name" value="Lab 9001"/>
+      <variable name="effective_caller_id_number" value="9001"/>
+    </variables>
+  </user>
+</include>

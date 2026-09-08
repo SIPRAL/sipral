@@ -73,7 +73,7 @@ jobs:
             return 1
           }
           wait_for kamailio "Listening on"
-          wait_for freeswitch "FreeSWITCH Started"
+          wait_for freeswitch "MSG Thread 0 Started"
       - name: start the capture
         working-directory: interop
         run: docker compose --profile capture up -d capture
