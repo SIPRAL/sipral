@@ -7,6 +7,11 @@
 # port, and the RTP ranges these servers ship with would be tens of thousands
 # of them.
 #
+# The capture is not a service here: it has to join the proxy's network
+# namespace, and asking Compose for that makes it restart the proxy first and
+# then find the namespace it just invalidated. It is started with a plain
+# `docker run --network container:...` once the servers are up.
+#
 # Images are pinned by version tag rather than latest: `andrius/asterisk:22`
 # changed digest six days before this was written, and a lab that moves under
 # you is not a lab. Refresh the pins deliberately.
@@ -37,21 +42,6 @@ services:
       - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
     networks: [lab]
-
-  capture:
-    image: alpine:3.22
-    network_mode: "service:kamailio"
-    cap_add: [NET_ADMIN, NET_RAW]
-    command:
-      - sh
-      - -c
-      - "apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap"
-    volumes:
-      - ./pcap:/pcap
-    # not started with the rest: it joins the proxy's network namespace, and
-    # that namespace has to exist and be settled first. Started by hand once
-    # the servers are listening
-    profiles: ["capture"]
 
 networks:
   lab:

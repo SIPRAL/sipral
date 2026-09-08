@@ -74,9 +74,17 @@ jobs:
           }
           wait_for kamailio "Listening on"
           wait_for freeswitch "MSG Thread 0 Started"
+      # plain docker run, joining the proxy's namespace directly: asking
+      # Compose to do it restarts the proxy first and invalidates the very
+      # namespace the capture is trying to enter
       - name: start the capture
         working-directory: interop
-        run: docker compose --profile capture up -d capture
+        run: |
+          docker run -d --name sipral-capture \
+            --network "container:$(docker compose ps -q kamailio)" \
+            --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/pcap:/pcap" alpine:3.22 \
+            sh -c 'apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap'
       - name: register, call, hold, resume
         working-directory: interop
         run: |
@@ -90,7 +98,9 @@ jobs:
       - name: keep the capture
         if: always()
         working-directory: interop
-        run: docker compose down
+        run: |
+          docker stop sipral-capture >/dev/null 2>&1 || true
+          docker compose down
       - uses: actions/upload-artifact@v4
         if: always()
         with:
