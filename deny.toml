@@ -67,6 +67,20 @@ allow = ["AGPL-3.0-only"]
 multiple-versions = "warn"
 wildcards = "deny"
 
+# Both call themselves MIT and "pure Rust". Both are bcg729 transliterated from
+# C: the file names match bcg729's one for one, down to its own misspelling of
+# "adaptative", and the comments inside the functions are word for word the
+# same. bcg729 is GPL-3, and neither names it. A licence scanner reads the
+# manifest and sees MIT, so the ban has to be by name.
+#
+# They are the first hits for "g729" on crates.io, which is exactly why this
+# entry exists: the next person to look does not have to repeat the diff.
+[[bans.deny]]
+name = "g729-sys"
+
+[[bans.deny]]
+name = "audio-codec"
+
 [advisories]
 yanked = "deny"
 
