@@ -132,6 +132,7 @@ struct Script {
     seen: Seen,
     call: Option<CallHandle>,
     step: Step,
+    asked: bool,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -196,14 +197,12 @@ impl Handler for Script {
     }
 
     fn on_tick(&mut self, agent: &mut UserAgent, now: Instant) -> Control {
-        if self.step == Step::Registering
-            && !self.seen.has(Fact::Registered)
-            && self.seen.refused.is_none()
-        {
-            // the first tick: nothing has been asked for yet
-            if now.duration_since(self.started) < Duration::from_millis(1) {
-                let _ = agent.register(self.account, now);
-            }
+        // once, not once per tick inside some window: the loop turns as fast as
+        // the socket lets it, and a window let a single flow open a dozen
+        // REGISTER transactions before the first answer came back
+        if !self.asked {
+            self.asked = true;
+            let _ = agent.register(self.account, now);
         }
         if self.step == Step::Done || now > self.started + PATIENCE {
             return Control::Stop;
@@ -325,6 +324,7 @@ fn run(flow: Flow, server: &str, remote: SocketAddr, extension: &str) -> Result<
         seen: Seen::default(),
         call: None,
         step: Step::Registering,
+        asked: false,
     };
     runtime
         .run(&mut script)

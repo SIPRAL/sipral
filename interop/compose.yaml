@@ -35,6 +35,7 @@ services:
     volumes:
       - ./freeswitch/lab_user.xml:/etc/freeswitch/directory/default/lab_user.xml:ro
       - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/public/zz_sipral_lab.xml:ro
+      - ./freeswitch/lab_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab.xml:ro
     networks: [lab]
 
   asterisk:

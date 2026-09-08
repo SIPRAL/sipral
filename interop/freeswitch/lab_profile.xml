@@ -1,0 +1,44 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+A profile of the lab's own, because neither one vanilla ships will do. Internal
+on 5060 authenticates every call and answers a proxied one with 407. External
+on 5080 does not, but it carries ext-sip-ip="auto-nat", so on a cloud runner it
+discovers the host's public address and writes that into Contact — after which
+every in-dialog request is routed out of the network and the call can be set up
+but never modified or ended.
+
+Named so vanilla does not have it: sofia.conf.xml includes sip_profiles/*.xml by
+glob, and the image's entrypoint copies its own tree over /etc/freeswitch at
+every start, so a new name is the only mount that survives.
+-->
+<profile name="lab">
+  <settings>
+    <param name="sip-port" value="5090"/>
+    <param name="context" value="public"/>
+    <param name="dialplan" value="XML"/>
+    <param name="rfc2833-pt" value="101"/>
+
+    <!-- the address it binds, and the address it advertises, are the same one.
+         That is the entire point of this file -->
+    <param name="sip-ip" value="$${local_ip_v4}"/>
+    <param name="rtp-ip" value="$${local_ip_v4}"/>
+    <param name="apply-nat-acl" value="none"/>
+    <param name="aggressive-nat-detection" value="false"/>
+
+    <!-- the proxy in front has already authenticated the user; challenging
+         again is what made the first version of this lab answer 407 -->
+    <param name="auth-calls" value="false"/>
+    <param name="accept-blind-reg" value="false"/>
+    <param name="accept-blind-auth" value="false"/>
+
+    <param name="inbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="outbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="inbound-codec-negotiation" value="generous"/>
+    <param name="disable-transcoding" value="true"/>
+
+    <param name="manage-presence" value="false"/>
+    <param name="tls" value="false"/>
+  </settings>
+</profile>
