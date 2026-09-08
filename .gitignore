@@ -26,3 +26,6 @@ obj/
 !**/.env.example
 
 .DS_Store
+
+# captures from the interop lab; the anonymised subset lives in fixtures/
+interop/pcap/

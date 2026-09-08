@@ -59,6 +59,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the same `Call-ID` with the demanded floor, once; an incoming interval below
   §5's ninety seconds is answered 422 before the application sees it.
 - `StatusCode::SESSION_INTERVAL_TOO_SMALL`.
+- `sipral-rtp`, phase one's share of it: the fixed header read and written
+  (RFC 3550 §5.1), the validity checks a receiver makes before it believes a
+  source (Appendix A.1) including the probation state machine and sequence
+  wraparound, the marker-bit rule the audio profile adds (RFC 3551 §4.1),
+  symmetric RTP with latching onto the first valid packet's source, and a
+  fixed-depth de-jitter buffer that takes reordering as normal, drops
+  duplicates by sequence number and never grows past its depth. Sans-I/O, with
+  no dependency on `sipral-core`. RTCP, the adaptive buffer, loss concealment,
+  DTMF and SRTP are later phases and are not stubbed here.
+- `sipral-media`, phase one's share: G.711 mu-law and A-law, encode and decode,
+  written from the companding law, with the frame arithmetic a caller needs and
+  the two payload types RFC 3551 fixes. Every one of the 512 code points is
+  round-tripped in the tests, which is the strongest property the code has.
+- The interop lab under `interop/`: Kamailio, FreeSWITCH and Asterisk on
+  default settings in Compose, a capture beside them, and a harness that drives
+  `sipral-ua` through register, call, and hold and resume, judging each flow
+  against conditions written before the run. It runs as its own CI job on
+  Linux. Every other test in this workspace runs the stack against a peer we
+  wrote; this is the first that does not.
 - Reliable provisional responses on the answering side (RFC 3262). `ring` sends
   reliably exactly when the INVITE asked — §3 leaves no choice either way — and
   the PRACK is answered 2xx here, with an answer to any offer it carried. A

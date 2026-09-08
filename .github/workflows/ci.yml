@@ -31,6 +31,55 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --release
 
+  # the lab is real software on default settings, so it finds the class of
+  # failure a test against ourselves never can. It is a job of its own because
+  # it pulls three images and boots them, and nothing else should wait for that
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p sipral-interop
+      - name: bring the lab up
+        working-directory: interop
+        run: |
+          mkdir -p pcap
+          docker compose up -d
+      - name: wait for the proxy to answer
+        working-directory: interop
+        run: |
+          for _ in $(seq 1 60); do
+            if docker compose exec -T kamailio kamcmd core.version >/dev/null 2>&1; then
+              echo "kamailio is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "kamailio never came up"
+          docker compose logs
+          exit 1
+      - name: register, call, hold, resume
+        working-directory: interop
+        run: |
+          docker compose run --rm --no-deps \
+            -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
+            --entrypoint /harness kamailio kamailio 5060 9000
+      - name: what the servers said
+        if: always()
+        working-directory: interop
+        run: docker compose logs --no-color
+      - name: keep the capture
+        if: always()
+        working-directory: interop
+        run: docker compose down
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: interop-capture
+          path: interop/pcap/
+          if-no-files-found: warn
+
   licences:
     runs-on: ubuntu-latest
     steps:

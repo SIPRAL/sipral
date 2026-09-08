@@ -1,0 +1,14 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+The stock vars.xml resolves external_rtp_ip and external_sip_ip with a live
+STUN query at config-load time, which on a CI network with no outbound UDP/3478
+either stalls the boot for the timeout or resolves to nothing useful — and then
+it looks like the server is slow to listen, which gets blamed on the client's
+retry logic. Fixing both to the container's own address removes the question.
+-->
+<include>
+  <X-PRE-PROCESS cmd="set" data="external_rtp_ip=$${local_ip_v4}"/>
+  <X-PRE-PROCESS cmd="set" data="external_sip_ip=$${local_ip_v4}"/>
+</include>

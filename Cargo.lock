@@ -19,6 +19,14 @@ name = "sipral-headless"
 version = "0.0.1"
 
 [[package]]
+name = "sipral-interop"
+version = "0.0.1"
+dependencies = [
+ "sipral-core",
+ "sipral-ua",
+]
+
+[[package]]
 name = "sipral-io-coreaudio"
 version = "0.0.1"
 

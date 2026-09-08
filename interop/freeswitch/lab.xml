@@ -1,0 +1,16 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+9000 answers and plays the built-in stream, so the lab needs no sound files of
+its own. Hold and resume need nothing here: mod_sofia handles the re-INVITE and
+switches to hold_music by itself.
+-->
+<include>
+  <extension name="lab_answer">
+    <condition field="destination_number" expression="^9000$">
+      <action application="answer"/>
+      <action application="playback" data="local_stream://moh"/>
+    </condition>
+  </extension>
+</include>

@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+# The interop lab. Three servers on default-ish settings, one capture, and the
+# harness talking to all of them over a bridge network so that no port has to
+# be published to the host — Docker creates one iptables rule per published
+# port, and the RTP ranges these servers ship with would be tens of thousands
+# of them.
+#
+# Images are pinned by version tag rather than latest: `andrius/asterisk:22`
+# changed digest six days before this was written, and a lab that moves under
+# you is not a lab. Refresh the pins deliberately.
+
+name: sipral-interop
+
+services:
+  kamailio:
+    image: ghcr.io/kamailio/kamailio-ci:6.1.4-alpine
+    command: ["kamailio", "-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
+    volumes:
+      - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    networks: [lab]
+
+  freeswitch:
+    image: safarov/freeswitch:1.10.12
+    volumes:
+      - ./freeswitch/1000.xml:/etc/freeswitch/directory/default/1000.xml:ro
+      - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/default/00_lab.xml:ro
+      - ./freeswitch/vars_lab.xml:/etc/freeswitch/vars_lab.xml:ro
+    networks: [lab]
+
+  asterisk:
+    image: andrius/asterisk:22.10.1_debian-trixie
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+    networks: [lab]
+
+  capture:
+    image: alpine:3.22
+    network_mode: "service:kamailio"
+    cap_add: [NET_ADMIN, NET_RAW]
+    command:
+      - sh
+      - -c
+      - "apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap"
+    volumes:
+      - ./pcap:/pcap
+    depends_on: [kamailio]
+
+networks:
+  lab:
+    driver: bridge

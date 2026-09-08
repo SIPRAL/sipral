@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "interop/harness"]
 # fuzz/ needs a nightly compiler, so it keeps its own toolchain pin and its
 # own lockfile rather than dragging one into the workspace
 exclude = ["fuzz"]

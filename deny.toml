@@ -58,6 +58,10 @@ allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
 name = "sipral-ffi"
 allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
+# the interop harness under interop/, which drives the lab and is never shipped
+name = "sipral-interop"
+allow = ["AGPL-3.0-only"]
 
 [bans]
 multiple-versions = "warn"

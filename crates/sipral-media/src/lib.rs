@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! Audio pipeline.
+//! Audio for a SIP call.
 //!
-//! Resampling, mixing, codec framing, and the seam where an external echo
-//! canceller, gain control and noise suppressor are attached.
+//! What is here is G.711: the two companding laws every carrier still accepts,
+//! in both directions, with the arithmetic a caller needs to cut a frame.
 //!
-//! Echo cancellation itself is signal processing research, not product, and is
-//! linked from a permissively licensed implementation rather than written here.
+//! Nothing here opens a device or a socket. Samples arrive in a slice and
+//! leave in one, so the whole crate is testable without either.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
     html_favicon_url = "https://sipral.org/brand/favicon.svg"
 )]
+// tests say what they mean; the no-panic discipline is for the library
+#![cfg_attr(
+    test,
+    allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )
+)]
+
+pub mod g711;

@@ -1,0 +1,18 @@
+[package]
+name = "sipral-interop"
+description = "Drives sipral-ua against the container lab and judges each flow."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+sipral-core.workspace = true
+sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1", features = ["reference-loop"] }
+
+[lints]
+workspace = true
