@@ -573,14 +573,29 @@ fn run(
         .map_err(|error| format!("the loop stopped: {error}"))?;
     script.verdict()?;
     let heard = script.media.heard();
-    Ok(if heard.sent == 0 {
-        String::new()
-    } else {
-        format!(
-            "   ({} sent, {} back, {} audible, {} refused)",
-            heard.sent, heard.received, heard.audible, heard.refused
-        )
-    })
+    if heard.sent == 0 {
+        return Ok(String::new());
+    }
+    let mut said = format!(
+        "   ({} sent, {} back, {} audible, {} refused",
+        heard.sent, heard.received, heard.audible, heard.refused
+    );
+    // the buffer's own account of the path, which is the only thing that says
+    // anything under an impaired network: how much never arrived, how late the
+    // rest was, and how much had to be invented
+    if let Some(quality) = script.media.quality() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            said,
+            "; lost {}, late {}, jitter {}ms, delay {}ms",
+            quality.lost,
+            quality.discarded_late,
+            quality.jitter.as_millis(),
+            quality.delay.as_millis()
+        );
+    }
+    said.push(')');
+    Ok(said)
 }
 
 /// The address to put in `Contact`, which is the one the far end can reach.

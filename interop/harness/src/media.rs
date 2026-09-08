@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 
 use sipral_core::sdp::MediaPlan;
 use sipral_media::g711::Law;
-use sipral_rtp::{Activity, BufferConfig, PayloadTypes, Pull, Received, RtpSession, StreamConfig};
+use sipral_rtp::{
+    Activity, BufferConfig, PayloadTypes, Pull, Quality, Received, RtpSession, StreamConfig,
+};
 
 /// Twenty milliseconds at eight kilohertz.
 const FRAME: usize = 160;
@@ -209,6 +211,11 @@ impl Media {
     /// What came back.
     pub(crate) const fn heard(&self) -> &Heard {
         &self.heard
+    }
+
+    /// What the de-jitter buffer made of it. Empty before a call is up.
+    pub(crate) fn quality(&self) -> Option<Quality> {
+        self.session.as_ref().map(RtpSession::quality)
     }
 }
 

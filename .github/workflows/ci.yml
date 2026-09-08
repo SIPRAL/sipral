@@ -134,6 +134,28 @@ jobs:
               sleep 1
               kill %1 2>/dev/null
               exit $status'
+      # The same call again, over a link deliberately made bad. netem shapes
+      # egress, so it is our packets that are delayed, lost in bursts and
+      # reordered; the echo means the return path suffers too, since a packet
+      # that never arrived is never echoed. What is being asked is narrow and
+      # honest: with a fifth of a talk spurt missing and the rest arriving out
+      # of order, does audio still come back, and does the buffer say what it
+      # cost. The numbers it prints are the phase two baseline.
+      - name: the same call, over a bad network
+        working-directory: interop
+        run: |
+          docker run --rm --network sipral-interop_lab \
+            --cap-add NET_ADMIN \
+            -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=register,call \
+            -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
+            debian:trixie-slim sh -c '
+              apt-get -qq update >/dev/null && apt-get -qq install -y iproute2 >/dev/null
+              link=$(ip route | awk "/^default/{print \$5}")
+              tc qdisc add dev "$link" root netem \
+                delay 40ms 15ms loss gemodel 4% 40% 60% 2% reorder 1% 30%
+              tc -s qdisc show dev "$link"
+              /harness kamailio 5060 9000'
+
       - name: what the servers said
         if: always()
         working-directory: interop
