@@ -32,10 +32,16 @@ use sipral_ua::{
 /// than this has not gone slowly, it has gone wrong.
 const PATIENCE: Duration = Duration::from_secs(20);
 
-/// The offer the harness makes. G.711 mu-law, one stream, because that is what
-/// phase one negotiates and what every server in the lab accepts.
+/// The offer the harness makes: G.711, both laws, one stream.
+///
+/// Both, because offering one is not what a client does. The lab's servers
+/// were configured here and all of them took mu-law; the first real PBX this
+/// met allows A-law only, which is the ordinary European default, and answered
+/// 488. `sipral-media` has had both laws since the day it was written — only
+/// the offer was narrow.
 const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 {ip}\r\ns=-\r\nc=IN IP4 {ip}\r\n\
-t=0 0\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+t=0 0\r\nm=audio 40000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n";
 
 fn main() -> ExitCode {
     let server = env::args().nth(1).unwrap_or_else(|| "kamailio".to_owned());
