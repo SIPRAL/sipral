@@ -29,12 +29,15 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and four of the six exit criteria met.** Every line of the
+**Status: written, and five of the six exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
-`sipral-media`. What is left is a paid carrier account and transfer against
-both servers. The criteria are demonstrations, not code, and the first of them
-found a real defect the whole unit suite could not: a call a PBX challenges was
-acknowledged and then abandoned, because the lab's proxy never challenges one.
+`sipral-media` — and five flows run against two servers on every push. What is
+left is one paid carrier account.
+
+The criteria are demonstrations rather than code, and they earned their place
+on the first day they ran: a call a PBX challenges was acknowledged and then
+abandoned, because the lab's proxy never challenges one and so nothing in the
+unit suite had ever asked.
 
 **Exit, all of them:**
 
@@ -48,7 +51,8 @@ acknowledged and then abandoned, because the lab's proxy never challenges one.
   messages rejected without a panic;
 - **met** — the parser survives a continuous fuzzing run without a crash or a
   hang;
-- blind and attended transfer complete against both FreeSWITCH and Asterisk.
+- **met** — blind and attended transfer complete against both FreeSWITCH and
+  Asterisk.
 
 ## Phase 2 — media
 
