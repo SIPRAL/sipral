@@ -42,7 +42,7 @@ use sipral_core::transaction::{
 use crate::account::AccountId;
 use crate::agent::UserAgent;
 use crate::call::{
-    Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall,
+    Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall, Refusal,
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
@@ -604,26 +604,7 @@ impl UserAgent {
                 status,
                 reason,
                 ref response,
-            } => {
-                // RFC 4028 §7.3: a 422 says the session interval was too
-                // short, not that the call cannot happen
-                if status.map(StatusCode::get) == Some(422)
-                    && let Some(call) = self.by_invite.get(&invite).copied()
-                    && let Some(refusal) = response.as_ref()
-                {
-                    let refusal = refusal.clone();
-                    if self.on_session_too_brief(call, &refusal.as_raw(), now) {
-                        return None;
-                    }
-                }
-                let ended = match reason {
-                    FailureReason::Refused => CallEndReason::Refused,
-                    // the enum is non-exhaustive across crate versions, and
-                    // anything new is still a call that did not connect
-                    _ => CallEndReason::Unreachable,
-                };
-                self.end_branches(invite, ended, status, response.as_ref(), now)
-            }
+            } => self.on_call_failed(invite, status, reason, response.as_ref(), now),
             Event::Cancelled { invite } => {
                 self.end_branches(invite, CallEndReason::Cancelled, None, None, now)
             }
@@ -647,7 +628,11 @@ impl UserAgent {
                 let AnyTransactionId::InviteClient(invite) = transaction else {
                     return Some(event);
                 };
-                let call = self.by_invite.get(&invite).copied()?;
+                // an INVITE this layer did not place is a re-INVITE, and that
+                // belongs to the session layer. Claiming it here would drop it
+                let Some(call) = self.by_invite.get(&invite).copied() else {
+                    return Some(event);
+                };
                 self.on_call_challenged(call, transaction, now);
                 None
             }
@@ -916,6 +901,71 @@ impl UserAgent {
         })
     }
 
+    /// An INVITE came back refused. Two of those are not what they look like.
+    fn on_call_failed(
+        &mut self,
+        invite: TransactionId<InviteClient>,
+        status: Option<StatusCode>,
+        reason: FailureReason,
+        response: Option<&OwnedMessage>,
+        now: Instant,
+    ) -> Option<Event> {
+        // RFC 4028 §7.3: a 422 says the session interval was too short, not
+        // that the call cannot happen
+        if status.map(StatusCode::get) == Some(422)
+            && let Some(call) = self.by_invite.get(&invite).copied()
+            && let Some(refusal) = response
+        {
+            let refusal = refusal.clone();
+            if self.on_session_too_brief(call, &refusal.as_raw(), now) {
+                return None;
+            }
+        }
+        let ended = match reason {
+            FailureReason::Refused => CallEndReason::Refused,
+            // the enum is non-exhaustive across crate versions, and anything
+            // new is still a call that did not connect
+            _ => CallEndReason::Unreachable,
+        };
+        // §22.2 and §22.3: a challenge is a refusal that says how to ask
+        // again, and the core reports the refusal before it reports that.
+        // Ending the call here would leave nothing to retry
+        if matches!(status.map(StatusCode::get), Some(401 | 407))
+            && self.by_invite.contains_key(&invite)
+        {
+            self.challenged.insert(
+                invite,
+                Refusal {
+                    reason: ended,
+                    status,
+                    response: response.cloned(),
+                },
+            );
+            return None;
+        }
+        self.end_branches(invite, ended, status, response, now)
+    }
+
+    /// A refusal that carried a challenge and got no retry was a refusal.
+    ///
+    /// The core answers a challenge once: the same nonce coming back without
+    /// `stale` is §22.1's way of saying the password was wrong, and repeating
+    /// it is how a client locks an account. So nothing follows the refusal in
+    /// that case, and the silence is the answer.
+    pub(crate) fn settle_call_challenges(&mut self, now: Instant) {
+        let refused: Vec<(TransactionId<InviteClient>, Refusal)> =
+            self.challenged.drain().collect();
+        for (invite, refusal) in refused {
+            self.end_branches(
+                invite,
+                refusal.reason,
+                refusal.status,
+                refusal.response.as_ref(),
+                now,
+            );
+        }
+    }
+
     /// End every branch of one INVITE.
     ///
     /// A refusal names the transaction, not a dialog, and one transaction can
@@ -1056,6 +1106,9 @@ impl UserAgent {
         };
         if let AnyTransactionId::InviteClient(old) = transaction {
             self.by_invite.remove(&old);
+            // the refusal that came with the challenge was the first half of
+            // this, not news
+            self.challenged.remove(&old);
         }
         self.by_invite.insert(retried, call);
         if let Some(held) = self.calls.get_mut(&call) {

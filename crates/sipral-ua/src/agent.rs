@@ -33,7 +33,7 @@ use sipral_core::transaction::{
 };
 
 use crate::account::{Account, AccountId};
-use crate::call::{Call, CallHandle};
+use crate::call::{Call, CallHandle, Refusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::registration::{
@@ -60,6 +60,10 @@ pub struct UserAgent {
     pub(crate) by_request: HashMap<AnyTransactionId, CallHandle>,
     /// The re-INVITEs and UPDATEs offering a session change.
     pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
+    /// Refusals of an INVITE that carried a challenge, held until the drain
+    /// ends. Whether one was a refusal or the first half of a retry is decided
+    /// by whether a challenge follows it.
+    pub(crate) challenged: HashMap<TransactionId<InviteClient>, Refusal>,
     pub(crate) events: VecDeque<UaEvent>,
     next_account: u32,
     pub(crate) next_call: u32,
@@ -84,6 +88,7 @@ impl UserAgent {
             by_dialog: HashMap::new(),
             by_request: HashMap::new(),
             by_offer: HashMap::new(),
+            challenged: HashMap::new(),
             events: VecDeque::new(),
             next_account: 0,
             next_call: 0,
@@ -332,6 +337,7 @@ impl UserAgent {
             }
         }
         self.settle_challenges();
+        self.settle_call_challenges(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing

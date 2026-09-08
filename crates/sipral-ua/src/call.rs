@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::TransportId;
-use sipral_core::msg::{HeaderName, OwnedMessage, Uri};
+use sipral_core::msg::{HeaderName, OwnedMessage, StatusCode, Uri};
 use sipral_core::sdp::SessionDescription;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, ProvisionalResponseId, TransactionId,
@@ -158,6 +158,20 @@ pub enum CallEndReason {
     /// The session timer ran out and no refresh arrived (RFC 4028 §10). The
     /// far end is not there any more, whatever it thinks.
     Expired,
+}
+
+/// A refusal that arrived with a challenge, kept until the drain is over.
+///
+/// The core reports that the request failed before it reports that the failure
+/// is answerable, and both arrive in the same drain. Acting on the first would
+/// tear the call down and leave nothing for the second to retry, which is what
+/// a PBX challenging an INVITE used to get. Registrations park a 401 the same
+/// way and for the same reason.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) reason: CallEndReason,
+    pub(crate) status: Option<StatusCode>,
+    pub(crate) response: Option<OwnedMessage>,
 }
 
 impl core::fmt::Display for CallEndReason {

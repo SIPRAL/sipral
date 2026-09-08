@@ -342,6 +342,39 @@ fn answering_the_same_challenge_twice_is_refused() {
 }
 
 #[test]
+fn a_call_a_uas_challenges_is_reported_as_refused_and_then_as_challenged() {
+    // a PBX challenges as a UAS, with 401 and WWW-Authenticate (§22.2), and
+    // the refusal is reported before the note about what can be done with it.
+    // sipral-ua depends on that order: it parks the refusal and lets the
+    // challenge cancel it, the way it already did for a registration. Change
+    // the order here and a challenged call ends instead of being retried
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let invite = endpoint
+        .invite(&super::tests::invite_request(), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&bytes, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+
+    let order: Vec<&'static str> = events(&mut endpoint)
+        .iter()
+        .filter_map(|event| match *event {
+            Event::Failed { .. } => Some("failed"),
+            Event::Challenged { transaction, .. } => {
+                assert_eq!(transaction, AnyTransactionId::InviteClient(invite));
+                Some("challenged")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["failed", "challenged"]);
+}
+
+#[test]
 fn a_challenged_call_is_retried_as_a_call() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);

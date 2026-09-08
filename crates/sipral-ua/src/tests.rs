@@ -1334,6 +1334,152 @@ fn a_cancel_that_lost_its_race_leaves_a_call_that_is_hung_up() {
     );
 }
 
+// -- credentials on a call ---------------------------------------------------
+
+/// What a PBX challenges with: its own, as a UAS (§22.2), rather than a
+/// proxy's Proxy-Authenticate (§22.3).
+const CHALLENGE: &str = "WWW-Authenticate: Digest realm=\"asterisk\", \
+                         nonce=\"abc123\", qop=\"auth\"\r\n";
+
+fn credentialled() -> Account {
+    account().credentials(Credentials::new("alice", "open sesame"))
+}
+
+/// A refusal that carries a challenge, with the `To` tag a UAS puts on it.
+fn challenge(request: &[u8], status: u16, reason: &str, field: &str) -> Vec<u8> {
+    let to = text(request, HeaderName::To);
+    let to = if to.contains(";tag=") {
+        to
+    } else {
+        format!("{to};tag=ast")
+    };
+    let mut out = format!("SIP/2.0 {status} {reason}\r\n").into_bytes();
+    for (name, value) in [
+        ("Via", header(request, HeaderName::Via)),
+        ("From", header(request, HeaderName::From)),
+        ("To", to.into_bytes()),
+        ("Call-ID", header(request, HeaderName::CallId)),
+        ("CSeq", header(request, HeaderName::CSeq)),
+    ] {
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(&value);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(field.as_bytes());
+    out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+    out
+}
+
+/// The 401 a PBX answers a request of ours with.
+fn unauthorized(request: &[u8]) -> Vec<u8> {
+    challenge(request, 401, "Unauthorized", CHALLENGE)
+}
+
+/// The one request out of `out` written with `method`.
+fn only(out: &[Vec<u8>], method: &str) -> Vec<u8> {
+    let mut found = out
+        .iter()
+        .filter(|bytes| bytes.starts_with(method.as_bytes()));
+    let first = found
+        .next()
+        .unwrap_or_else(|| panic!("no {method} went out"));
+    assert!(found.next().is_none(), "more than one {method} went out");
+    first.clone()
+}
+
+/// What the credentials on a retry have to say, whichever header they are in.
+fn credentials_of(bytes: &[u8], name: HeaderName<'_>) -> String {
+    let value = text(bytes, name);
+    assert!(value.starts_with("Digest "), "{value}");
+    assert!(value.contains("username=\"alice\""), "{value}");
+    assert!(value.contains("nonce=\"abc123\""), "{value}");
+    assert!(
+        !value.contains("open sesame"),
+        "the password does not travel: {value}"
+    );
+    value
+}
+
+#[test]
+fn an_invite_a_pbx_challenges_goes_again_with_credentials() {
+    // 8.1.3.5: a 401 is answered by sending the request again with credentials
+    // for the challenge, not by reporting the call refused. Asterisk
+    // challenges as a UAS, so the challenge is WWW-Authenticate and the answer
+    // is Authorization (§22.2)
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+    assert!(header(&first, HeaderName::Authorization).is_empty());
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+
+    let out = transmits(&mut agent);
+    // 17.1.1.3: the refusal is acknowledged before anything else happens
+    let _ = only(&out, "ACK ");
+    let retry = only(&out, "INVITE ");
+    credentials_of(&retry, HeaderName::Authorization);
+    // §22.2: the retry moves the CSeq on, and it is a new transaction
+    assert_eq!(header(&retry, HeaderName::CSeq), b"2 INVITE");
+    assert_ne!(
+        text(&retry, HeaderName::Via),
+        text(&first, HeaderName::Via),
+        "a new branch is a new transaction"
+    );
+    assert_eq!(
+        header(&retry, HeaderName::CallId),
+        header(&first, HeaderName::CallId)
+    );
+
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::CallEnded { .. })),
+        "the call is still being placed"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+
+    deliver(
+        &mut agent,
+        &answered(&retry, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    assert!(ack.starts_with(b"ACK "));
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_call_challenged_twice_with_the_same_nonce_gives_up_rather_than_looping() {
+    // 22.1: the same nonce back without `stale` means the password was wrong,
+    // and the registration path already stops there. A call does the same
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+    let retry = only(&transmits(&mut agent), "INVITE ");
+    events(&mut agent);
+
+    deliver(&mut agent, &unauthorized(&retry), t0);
+    let out = transmits(&mut agent);
+    let _ = only(&out, "ACK ");
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"INVITE ")),
+        "nothing goes out a third time"
+    );
+    assert_eq!(
+        ended(&mut agent),
+        Some((call, CallEndReason::Refused)),
+        "the refusal is reported once the challenge has run out"
+    );
+    assert_eq!(agent.call_state(call), None);
+}
+
 // -- forks -------------------------------------------------------------------
 
 #[test]
