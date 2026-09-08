@@ -92,12 +92,16 @@ jobs:
             --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/pcap:/pcap" alpine:3.22 \
             sh -c 'apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap'
+      # a glibc image, because the runner builds against glibc and the proxy's
+      # own image is musl — the binary is not portable between them, and the
+      # error when it is not is "no such file or directory" for a file that is
+      # plainly there
       - name: register, call, hold, resume
         working-directory: interop
         run: |
-          docker compose run --rm --no-deps \
+          docker run --rm --network sipral-interop_lab \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
-            --entrypoint /harness kamailio kamailio 5060 9000
+            debian:trixie-slim /harness kamailio 5060 9000
       - name: what the servers said
         if: always()
         working-directory: interop
