@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use sipral_ua::{
     Account, AccountId, CallHandle, CallState, Control, Credentials, EndpointConfig, Handler,
-    OutgoingCall, Runtime, UaEvent, Uri, UserAgent,
+    OutgoingCall, Runtime, UaError, UaEvent, Uri, UserAgent,
 };
 
 /// How long any one flow may take before it is a failure. Every step in these
@@ -243,7 +243,8 @@ impl Handler for Script {
         // REGISTER transactions before the first answer came back
         if !self.asked {
             self.asked = true;
-            let _ = agent.register(self.account, now);
+            let asked = agent.register(self.account, now);
+            self.tried("register", asked);
         }
         if self.step == Step::Done || now > self.started + PATIENCE {
             return Control::Stop;
@@ -279,19 +280,22 @@ impl Script {
             Step::Talking if self.flow == Flow::Hold => {
                 self.step = Step::Holding;
                 if let Some(call) = self.call {
-                    let _ = agent.hold(call, now);
+                    let asked = agent.hold(call, now);
+                    self.tried("hold", asked);
                 }
             }
             Step::Holding => {
                 self.step = Step::Resuming;
                 if let Some(call) = self.call {
-                    let _ = agent.resume(call, now);
+                    let asked = agent.resume(call, now);
+                    self.tried("resume", asked);
                 }
             }
             Step::Talking if self.flow == Flow::Blind => {
                 self.step = Step::Transferring;
                 if let (Some(call), Some(target)) = (self.call, self.target()) {
-                    let _ = agent.transfer(call, &target, now);
+                    let asked = agent.transfer(call, &target, now);
+                    self.tried("transfer", asked);
                 }
             }
             Step::Talking if self.flow == Flow::Attended => {
@@ -309,11 +313,23 @@ impl Script {
             Step::Consulting => {
                 self.step = Step::Transferring;
                 if let (Some(call), Some(other)) = (self.call, self.consulted) {
-                    let _ = agent.transfer_to(call, other, now);
+                    let asked = agent.transfer_to(call, other, now);
+                    self.tried("attended transfer", asked);
                 }
             }
             Step::Talking | Step::Resuming | Step::Transferring => self.hang_up(agent, now),
             Step::Placing | Step::Ending | Step::Done => (),
+        }
+    }
+
+    /// Ask the stack for something, and remember it if it says no.
+    ///
+    /// Swallowing these is how a flow ends up reporting that the far end never
+    /// answered, when the truth is that nothing was ever sent.
+    fn tried(&mut self, what: &str, outcome: Result<(), UaError>) {
+        if let Err(error) = outcome {
+            self.seen.refused = Some(format!("{what}: {error}"));
+            self.step = Step::Ending;
         }
     }
 
