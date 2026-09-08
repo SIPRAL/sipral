@@ -344,6 +344,7 @@ impl UserAgent {
     /// here has a policy for it, in which case it reaches the application
     /// unchanged.
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let event = self.on_options_event(event, now)?;
         let event = self.on_registration_event(event, now)?;
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;

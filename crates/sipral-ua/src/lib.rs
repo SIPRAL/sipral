@@ -41,6 +41,7 @@ mod call;
 mod calls;
 mod error;
 mod event;
+mod options;
 mod registration;
 mod reliable;
 mod renegotiate;

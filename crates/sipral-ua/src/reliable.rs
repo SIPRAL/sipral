@@ -43,7 +43,7 @@ use crate::renegotiate::ALLOW;
 /// [`crate::timers`] does, `replaces` because [`crate::transfer`] does, and
 /// nothing else. RFC 3261 §8.2.2.3 answers a `Require` outside this list with
 /// a 420 and says which token it was.
-const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
+pub(crate) const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
 
 /// What a reliable provisional this end sent is still waiting for.
 #[derive(Clone, Debug)]

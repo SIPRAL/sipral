@@ -1279,13 +1279,16 @@ Content-Type: application/sdp\r\n"
     }
 
     #[test]
-    fn what_this_abi_has_no_word_for_is_counted_rather_than_delivered() {
+    fn an_options_is_answered_by_the_stack_and_never_reaches_the_caller() {
         let mut observed = Observed::default();
         let (handle, _) = line(&mut observed);
         poll(handle, 1_000);
-        // an OPTIONS is what a proxy pings a phone with, and this vocabulary
-        // has no word for one; the count is what admits that rather than a
-        // silence the caller cannot tell from nothing happening
+        // an OPTIONS is what a proxy pings a phone with, and §11.2 makes
+        // answering it a MUST. It used to arrive here as one more unclaimed
+        // event that nothing replied to, and an Asterisk that got no reply
+        // marked the contact unreachable and refused every inbound call to
+        // it with 503. There is no decision in the answer, so the stack
+        // gives it and the caller never hears about it
         let ping = b"OPTIONS sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-are-you-there\r\n\
 Max-Forwards: 70\r\n\
@@ -1296,16 +1299,34 @@ CSeq: 1 OPTIONS\r\n\
 Content-Length: 0\r\n\r\n";
         deliver(handle, ping, 1_100);
 
+        // before the poll, which drains the transmit queue on the caller's
+        // behalf and would carry the answer away with it
+        let answers: Vec<String> = sent(handle)
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .filter(|text| text.contains("CSeq: 1 OPTIONS"))
+            .collect();
+        let [answer] = answers.as_slice() else {
+            panic!("expected exactly one answer to the OPTIONS, got {answers:?}");
+        };
+        assert!(answer.starts_with("SIP/2.0 200 "), "{answer}");
+        // §11.2: built as though the request had been an INVITE, so it says
+        // what this end can do rather than only that it is alive
+        assert!(answer.contains("Allow: "), "{answer}");
+        assert!(answer.contains("OPTIONS"), "{answer}");
+        assert!(answer.contains("Accept: application/sdp"), "{answer}");
+        assert!(answer.contains("Supported: "), "{answer}");
+
         let before = observed.events.len();
         let result = poll(handle, 1_100);
         assert_eq!(
-            result.events_unclaimed, 1,
-            "the OPTIONS was neither delivered nor counted"
+            result.events_unclaimed, 0,
+            "the OPTIONS was answered, so there was nothing left over"
         );
         assert_eq!(
             observed.events.len(),
             before,
-            "and nothing carrying no information reached the callback"
+            "and nothing the application has to decide reached the callback"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
