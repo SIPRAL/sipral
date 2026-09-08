@@ -29,16 +29,20 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, not finished.** Every line of the phase is in the tree —
-`sipral-core`, `sipral-ua`, `sipral-rtp` and `sipral-media` — and the exit
-criteria below are what remains. They are demonstrations, not code.
+**Status: written, and four of the six exit criteria met.** Every line of the
+phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
+`sipral-media`. What is left is a paid carrier account and transfer against
+both servers. The criteria are demonstrations, not code, and the first of them
+found a real defect the whole unit suite could not: a call a PBX challenges was
+acknowledged and then abandoned, because the lab's proxy never challenges one.
 
 **Exit, all of them:**
 
 - **met** — registration and a bidirectional call through the lab Kamailio and
   FreeSWITCH, with hold and resume, judged against conditions written before
   the run and checked on every push;
-- the same against Asterisk with `chan_pjsip` at defaults, in a container;
+- **met** — the same against Asterisk with `chan_pjsip` at defaults, in a
+  container, with no proxy in front of it;
 - the same against at least one real carrier, on a paid account;
 - **met** — the RFC 4475 torture corpus passes: valid messages parsed, invalid
   messages rejected without a panic;
