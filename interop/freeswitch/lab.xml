@@ -11,7 +11,13 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
   <extension name="sipral_lab">
     <condition field="destination_number" expression="^9000$">
       <action application="answer"/>
-      <action application="playback" data="local_stream://moh"/>
+      <!-- a generated tone, not local_stream://moh: music on hold needs the
+           sound files and a profile configured to serve them, and when it is
+           missing playback fails and the channel hangs up half a millisecond
+           after the ACK. A call that ends that fast still looks like a call
+           that connected, which is how it went unnoticed. -->
+      <action application="playback" data="tone_stream://%(60000,0,350,440)"/>
+      <action application="hangup"/>
     </condition>
   </extension>
 </include>

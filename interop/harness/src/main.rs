@@ -100,6 +100,8 @@ enum Fact {
     Up,
     Held,
     Resumed,
+    /// We asked for the call to end, rather than watching it end by itself.
+    Ours,
     Over,
 }
 
@@ -255,6 +257,7 @@ impl Script {
     fn hang_up(&mut self, agent: &mut UserAgent, now: Instant) {
         self.step = Step::Ending;
         if let Some(call) = self.call {
+            self.seen.saw(Fact::Ours);
             let _ = agent.hangup(call, now);
         }
     }
@@ -274,9 +277,13 @@ impl Script {
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Unregistered, "the binding was not given back"),
             ],
+            // Ours, and before Over: a far end that answers and hangs up half a
+            // millisecond later satisfies "connected" and "ended" without the
+            // call ever having been one
             Flow::Call => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
+                (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
             Flow::Hold => &[
@@ -284,6 +291,7 @@ impl Script {
                 (Fact::Up, "the call did not connect"),
                 (Fact::Held, "the hold was not agreed"),
                 (Fact::Resumed, "the resume was not agreed"),
+                (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
         };
