@@ -46,10 +46,10 @@ services:
       - "apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap"
     volumes:
       - ./pcap:/pcap
-    depends_on: [kamailio]
-    # it joins kamailio's network namespace, so it cannot start before that
-    # namespace exists; a proxy that took a moment to boot must not fail the run
-    restart: on-failure
+    # not started with the rest: it joins the proxy's network namespace, and
+    # that namespace has to exist and be settled first. Started by hand once
+    # the servers are listening
+    profiles: ["capture"]
 
 networks:
   lab:
