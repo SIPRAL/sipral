@@ -7,7 +7,14 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::playout::{Insert, JitterBuffer, Pull, StreamStats};
+use crate::playout::{Activity, BufferConfig, Insert, JitterBuffer, Pull, Quality, clock_ticks};
+use crate::rtcp::{
+    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, ReceiverReportBuilder,
+    ReportBlock, RtcpBuildError, RtcpError, RtcpPacket, SdesItem, SenderInfo, SenderOrReceiver,
+    SenderReportBuilder, SourceDescriptionBuilder,
+};
+use crate::rtcp_stats::{ReceptionTracker, round_trip_time};
+use crate::rtcp_timer::{Due, IntervalTimer};
 use crate::source::{SeqUpdate, SequenceState};
 use crate::wire::{BuildError, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket};
 
@@ -17,7 +24,7 @@ use crate::wire::{BuildError, PacketBuilder, PacketError, PayloadTypes, RtpHeade
 /// caller because RFC 3550 §5.1 wants all three unpredictable and nothing here
 /// draws a random number. Every other field comes out of the offer and the
 /// answer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct StreamConfig {
     /// Our synchronization source identifier.
     pub ssrc: u32,
@@ -37,10 +44,15 @@ pub struct StreamConfig {
     /// may say: RFC 3551 §4.1 has applications without silence suppression set
     /// it to zero on every packet.
     pub silence_suppression: bool,
-    /// De-jitter buffer depth, in packets.
-    pub depth: u16,
-    /// Packets held before playout starts.
-    pub prefill: u16,
+    /// How the de-jitter buffer is sized and how far it may move its delay.
+    pub playout: BufferConfig,
+    /// This stream's CNAME, sent in every SDES (RFC 3550 §6.5.1): "user@host",
+    /// or "host" alone with no user to name.
+    pub cname: String,
+    /// This session's share of the call's RTCP bandwidth, in octets per
+    /// second (§6.2). "RECOMMENDED that the fraction of the session
+    /// bandwidth added for RTCP be fixed at 5%".
+    pub rtcp_bandwidth: f64,
 }
 
 /// What became of a datagram.
@@ -81,16 +93,38 @@ pub enum Discard {
     Late,
 }
 
-/// One RTP stream in each direction.
+/// What an incoming compound RTCP packet said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RtcpReceived<'a> {
+    /// An SR or RR was read; any reception statistics or round-trip time it
+    /// carried about this session were folded in
+    /// ([`RtpSession::round_trip_time`]).
+    Report,
+    /// The remote source said it is leaving.
+    Goodbye {
+        /// Why, if it said (RFC 3550 §6.6).
+        reason: &'a [u8],
+    },
+    /// Not a well-formed compound RTCP packet.
+    Malformed(RtcpError),
+}
+
+/// One RTP stream in each direction, plus the RTCP that goes with it.
 ///
 /// Sans-I/O throughout: the caller reads datagrams off a socket and hands them
 /// over with the address they came from, pulls frames at whatever pace its
 /// audio device sets, and gets back bytes to send and the address to send them
-/// to.
+/// to. RTCP works the same way: [`RtpSession::rtcp_due`] says when to build a
+/// report, and this crate reads no clock and draws no random number to decide
+/// that, so `now`, the wall-clock NTP timestamp a sender report carries, and
+/// the random draw §6.2 asks for all arrive from the caller.
 #[derive(Debug)]
 pub struct RtpSession {
     outbound: Outbound,
     inbound: Inbound,
+    cname: String,
+    timer: IntervalTimer,
+    round_trip: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -102,6 +136,9 @@ struct Outbound {
     timestamp: u32,
     silence_suppression: bool,
     spurt_start: bool,
+    packets_sent: u32,
+    octets_sent: u32,
+    sent_since_report: bool,
 }
 
 #[derive(Debug)]
@@ -112,13 +149,43 @@ struct Inbound {
     source: Option<u32>,
     sequence: SequenceState,
     buffer: JitterBuffer,
+    rtcp: ReceptionTracker,
+    /// Whether §6.3's member table already has an entry for the remote
+    /// side, so it is only counted once.
+    member_known: bool,
+    /// Whether the remote side has been heard sending RTP, for the sender
+    /// count §6.3.1's interval calculation splits out from members.
+    sender_known: bool,
 }
 
 impl RtpSession {
     /// Open a stream. Nothing is sent and nothing is expected until the caller
     /// says so.
+    ///
+    /// `unit_interval` is the random draw §6.2 asks for when scheduling the
+    /// first RTCP report, uniform on `[0, 1)`.
     #[must_use]
-    pub fn new(config: &StreamConfig) -> Self {
+    pub fn new(config: &StreamConfig, unit_interval: f64) -> Self {
+        let cname_item = [SdesItem {
+            kind: CNAME,
+            text: config.cname.as_bytes(),
+        }];
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[ChunkBuilder {
+                ssrc: config.ssrc,
+                items: &cname_item,
+            }],
+        };
+        let rr = ReceiverReportBuilder {
+            ssrc: config.ssrc,
+            reports: &[],
+        };
+        // §6.3.2: "avg_rtcp_size [set] to the probable size of the first
+        // RTCP packet that the application will later construct" — this is
+        // exactly that packet, an empty RR plus this session's own CNAME
+        let first_report_size =
+            CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes).encoded_len();
+
         Self {
             outbound: Outbound {
                 ssrc: config.ssrc,
@@ -130,6 +197,9 @@ impl RtpSession {
                 // the first packet of the call is the first packet of a talk
                 // spurt, since there is nothing contiguous behind it
                 spurt_start: true,
+                packets_sent: 0,
+                octets_sent: 0,
+                sent_since_report: false,
             },
             inbound: Inbound {
                 accepted: config.accepted,
@@ -137,8 +207,14 @@ impl RtpSession {
                 latch: None,
                 source: None,
                 sequence: SequenceState::new(),
-                buffer: JitterBuffer::new(config.depth, config.prefill),
+                buffer: JitterBuffer::new(config.clock_rate, &config.playout),
+                rtcp: ReceptionTracker::new(),
+                member_known: false,
+                sender_known: false,
             },
+            cname: config.cname.clone(),
+            timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
+            round_trip: None,
         }
     }
 
@@ -154,7 +230,12 @@ impl RtpSession {
     /// the fifth. That order is deliberate: closing the latch late would leave
     /// a window in which every address is still a candidate, which is wider
     /// than the one it would close.
-    pub fn receive(&mut self, datagram: &[u8], from: SocketAddr) -> Received {
+    ///
+    /// `now` is this stream's own clock, on whatever timeline the caller
+    /// likes, and feeds only the interarrival jitter estimate (§6.4.1): nothing
+    /// here reads a clock of its own, so a caller that does not care about
+    /// RTCP may pass anything monotonic.
+    pub fn receive(&mut self, datagram: &[u8], from: SocketAddr, now: Duration) -> Received {
         let packet = match RtpPacket::parse(datagram) {
             Ok(packet) => packet,
             Err(error) => return Received::Dropped(Discard::Malformed(error)),
@@ -200,11 +281,29 @@ impl RtpSession {
         match self.inbound.sequence.update(header.sequence) {
             SeqUpdate::Probation => return Received::Dropped(Discard::Probation),
             SeqUpdate::Rejected => return Received::Dropped(Discard::BadSequence),
-            SeqUpdate::Restarted => self.inbound.buffer.restart(),
+            SeqUpdate::Restarted => {
+                self.inbound.buffer.restart();
+                // the loss and jitter bookkeeping describe a stream that no
+                // longer exists once the far end has restarted, the same
+                // reasoning `SequenceState::rebase` already applies to itself
+                self.inbound.rtcp.restart();
+            }
             SeqUpdate::InOrder | SeqUpdate::Misordered => {}
         }
 
-        match self.inbound.buffer.insert(&packet) {
+        if !self.inbound.member_known {
+            self.inbound.member_known = true;
+            self.timer.note_member();
+        }
+        if !self.inbound.sender_known {
+            self.inbound.sender_known = true;
+            self.timer.note_sender();
+        }
+        self.inbound
+            .rtcp
+            .on_packet(header.timestamp, clock_ticks(self.outbound.clock_rate, now));
+
+        match self.inbound.buffer.insert(&packet, now) {
             Insert::Accepted | Insert::Displaced(_) => Received::Queued,
             Insert::Duplicate => Received::Dropped(Discard::Duplicate),
             Insert::Late => Received::Dropped(Discard::Late),
@@ -212,8 +311,14 @@ impl RtpSession {
     }
 
     /// Take the next frame due for playout.
-    pub fn pull(&mut self) -> Pull<'_> {
-        self.inbound.buffer.pull()
+    ///
+    /// `activity` says whether what was played a frame ago was speech or a
+    /// pause, which is what decides whether the buffer is allowed to move its
+    /// delay right now. A caller with no voice activity detector passes
+    /// [`Activity::Speech`] and gets a buffer that never adapts after it has
+    /// started, which is worse but not wrong.
+    pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
+        self.inbound.buffer.pull(activity)
     }
 
     /// Write the next packet into `out` and say how long it is.
@@ -245,6 +350,15 @@ impl RtpSession {
         self.outbound.spurt_start = false;
         self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
         self.outbound.timestamp = self.outbound.timestamp.wrapping_add(samples);
+        if self.outbound.packets_sent == 0 {
+            self.timer.note_local_sender();
+        }
+        self.outbound.packets_sent = self.outbound.packets_sent.wrapping_add(1);
+        self.outbound.octets_sent = self
+            .outbound
+            .octets_sent
+            .wrapping_add(u32::try_from(payload.len()).unwrap_or(u32::MAX));
+        self.outbound.sent_since_report = true;
         Ok(written)
     }
 
@@ -285,10 +399,11 @@ impl RtpSession {
         self.outbound.ssrc
     }
 
-    /// The counters for the receiving direction.
+    /// What the receiving direction has cost so far, and what it is costing
+    /// now.
     #[must_use]
-    pub const fn stats(&self) -> StreamStats {
-        self.inbound.buffer.stats()
+    pub fn quality(&self) -> Quality {
+        self.inbound.buffer.quality()
     }
 
     /// How many timestamp ticks `span` is at the negotiated clock rate.
@@ -318,6 +433,7 @@ impl RtpSession {
         self.inbound.source = Some(ssrc);
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
+        self.inbound.rtcp = ReceptionTracker::new();
     }
 
     /// Listen to whichever source arrives next. For a stream that has been
@@ -327,6 +443,203 @@ impl RtpSession {
         self.inbound.source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
+        self.inbound.rtcp = ReceptionTracker::new();
+    }
+
+    /// Whether a periodic RTCP report is due, or how long to wait (§6.3.6).
+    /// Call again no earlier than a returned [`Due::Wait`] says; on
+    /// [`Due::Send`], build the report with [`RtpSession::build_report`].
+    ///
+    /// `unit_interval` is a fresh random draw on `[0, 1)`, independent of
+    /// any other this session has been given (§6.3.1 point 4).
+    pub fn rtcp_due(&mut self, now: Duration, unit_interval: f64) -> Due {
+        self.timer.due(now, unit_interval)
+    }
+
+    /// Build the compound RTCP report [`RtpSession::rtcp_due`] said was due,
+    /// and schedule the next one, returning the octets written and that
+    /// deadline.
+    ///
+    /// An SR is sent if this session has sent RTP since the last report, an
+    /// RR otherwise (§6.4); either way a reception report block about the
+    /// remote source is included once one is known, and an SDES with this
+    /// session's own CNAME always is (§6.1). `ntp` is the wall clock at this
+    /// instant, in the 64-bit form §6.4.1 asks a sender report to carry.
+    ///
+    /// # Errors
+    /// [`RtcpBuildError`], for a buffer too small. Nothing is scheduled and
+    /// nothing is sent when this returns an error.
+    pub fn build_report(
+        &mut self,
+        out: &mut [u8],
+        now: Duration,
+        ntp: u64,
+        unit_interval: f64,
+    ) -> Result<(usize, Duration), RtcpBuildError> {
+        let sequence = self.inbound.sequence;
+        let block = self
+            .inbound
+            .source
+            .map(|ssrc| self.inbound.rtcp.block(ssrc, &sequence, ntp));
+        let reports: &[ReportBlock] = block.as_slice();
+
+        let cname_item = [SdesItem {
+            kind: CNAME,
+            text: self.cname.as_bytes(),
+        }];
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[ChunkBuilder {
+                ssrc: self.outbound.ssrc,
+                items: &cname_item,
+            }],
+        };
+        let report = if self.outbound.sent_since_report {
+            SenderOrReceiver::Sender(SenderReportBuilder {
+                ssrc: self.outbound.ssrc,
+                info: SenderInfo {
+                    ntp,
+                    rtp_timestamp: self.outbound.timestamp,
+                    packet_count: self.outbound.packets_sent,
+                    octet_count: self.outbound.octets_sent,
+                },
+                reports,
+            })
+        } else {
+            SenderOrReceiver::Receiver(ReceiverReportBuilder {
+                ssrc: self.outbound.ssrc,
+                reports,
+            })
+        };
+
+        let written = CompoundBuilder::new(report, sdes).write(out)?;
+        self.outbound.sent_since_report = false;
+        let next = self.timer.sent(now, written, unit_interval);
+        Ok((written, next))
+    }
+
+    /// Build a BYE for this stream's own SSRC, to send on hangup, and fold
+    /// its size into the schedule the way any other RTCP packet's would be
+    /// (§6.3.7). Always sends immediately rather than backing off — see
+    /// [`RtpSession::bye_should_back_off`] for when that would not be
+    /// correct.
+    ///
+    /// # Errors
+    /// [`RtcpBuildError`], for a buffer too small.
+    pub fn send_bye(
+        &mut self,
+        out: &mut [u8],
+        now: Duration,
+        reason: &[u8],
+        unit_interval: f64,
+    ) -> Result<usize, RtcpBuildError> {
+        let cname_item = [SdesItem {
+            kind: CNAME,
+            text: self.cname.as_bytes(),
+        }];
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[ChunkBuilder {
+                ssrc: self.outbound.ssrc,
+                items: &cname_item,
+            }],
+        };
+        let rr = ReceiverReportBuilder {
+            ssrc: self.outbound.ssrc,
+            reports: &[],
+        };
+        let bye = GoodbyeBuilder {
+            sources: &[self.outbound.ssrc],
+            reason,
+        };
+        let compound = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes).with_bye(bye);
+        let written = compound.write(out)?;
+        self.timer.leaving(now, written, unit_interval);
+        Ok(written)
+    }
+
+    /// Take in a compound RTCP datagram, whichever socket it arrived on
+    /// (§6.3.3, RFC 5761 for a socket shared with RTP).
+    pub fn rtcp_receive<'a>(
+        &mut self,
+        datagram: &'a [u8],
+        now: Duration,
+        ntp: u64,
+    ) -> RtcpReceived<'a> {
+        self.timer.observe(datagram.len());
+        let compound = match CompoundPacket::parse(datagram) {
+            Ok(compound) => compound,
+            Err(error) => return RtcpReceived::Malformed(error),
+        };
+        if !self.inbound.member_known {
+            self.inbound.member_known = true;
+            self.timer.note_member();
+        }
+
+        let mut goodbye = None;
+        for packet in compound.packets() {
+            match packet {
+                RtcpPacket::SenderReport(sr) => {
+                    if Some(sr.ssrc()) == self.inbound.source {
+                        self.inbound.rtcp.on_sender_report(sr.info().ntp, ntp);
+                    }
+                    self.note_round_trip(sr.reports(), ntp);
+                }
+                RtcpPacket::ReceiverReport(rr) => self.note_round_trip(rr.reports(), ntp),
+                RtcpPacket::Goodbye(bye) => {
+                    if bye.sources().any(|ssrc| Some(ssrc) == self.inbound.source) {
+                        self.timer.remove_member(now);
+                        if self.inbound.sender_known {
+                            self.timer.remove_sender();
+                        }
+                        goodbye = Some(bye.reason().unwrap_or_default());
+                    }
+                }
+                RtcpPacket::SourceDescription(_) | RtcpPacket::Other { .. } => {}
+            }
+        }
+        match goodbye {
+            Some(reason) => RtcpReceived::Goodbye { reason },
+            None => RtcpReceived::Report,
+        }
+    }
+
+    /// Whichever of a report's blocks describes this session's own SSRC
+    /// carries the round trip to whoever sent it (§6.4.1, A.3: LSR and
+    /// DLSR).
+    fn note_round_trip(&mut self, reports: impl Iterator<Item = ReportBlock>, arrival_ntp: u64) {
+        for block in reports {
+            if block.ssrc == self.outbound.ssrc {
+                self.round_trip = round_trip_time(&block, arrival_ntp);
+            }
+        }
+    }
+
+    /// The most recently measured round-trip time to the remote side, from
+    /// the last reception report block it sent describing this session's own
+    /// SSRC. `None` until one has, or if it never received an SR to measure
+    /// from.
+    #[must_use]
+    pub const fn round_trip_time(&self) -> Option<Duration> {
+        self.round_trip
+    }
+
+    /// When the next periodic RTCP report is scheduled, without the side
+    /// effect [`RtpSession::rtcp_due`] has of updating `pmembers` — for a
+    /// caller that only wants to know, such as arming a wakeup timer.
+    #[must_use]
+    pub const fn next_rtcp_deadline(&self) -> Duration {
+        self.timer.next_deadline()
+    }
+
+    /// Whether §6.3.7's BYE backoff would apply if this session left the
+    /// call right now: "a participant MUST execute the following algorithm
+    /// if the number of members is more than 50 when the participant
+    /// chooses to leave." [`RtpSession::send_bye`] always sends immediately
+    /// regardless, which §6.3.7 also allows below that threshold — a
+    /// two-party call never reaches it, so this is here for a caller built
+    /// on top of a session with a larger membership than this crate assumes.
+    #[must_use]
+    pub fn bye_should_back_off(&self) -> bool {
+        self.timer.should_back_off_bye()
     }
 }
 
@@ -335,8 +648,14 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use super::{Discard, Received, RtpSession, StreamConfig};
-    use crate::playout::Pull;
+    use super::{Discard, Received, RtcpReceived, RtpSession, StreamConfig};
+    use crate::playout::{Activity, BufferConfig, Pull};
+    use crate::rtcp::{
+        CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder,
+        ReceiverReportBuilder, ReportBlock, RtcpPacket, SdesItem, SenderOrReceiver,
+        SourceDescriptionBuilder,
+    };
+    use crate::rtcp_timer::Due;
     use crate::wire::{PacketBuilder, PacketError, RtpHeader, RtpPacket};
 
     const PEER: &str = "198.51.100.7:16384";
@@ -356,13 +675,20 @@ mod tests {
             timestamp: 500_000,
             remote: addr("192.0.2.10:5004"),
             silence_suppression: true,
-            depth: 8,
-            prefill: 1,
+            playout: BufferConfig {
+                depth: 8,
+                packet_samples: 160,
+                min_delay: 1,
+                start_delay: 1,
+                max_delay: 4,
+            },
+            cname: "tester@203.0.113.1".to_string(),
+            rtcp_bandwidth: 800.0,
         }
     }
 
     fn session() -> RtpSession {
-        RtpSession::new(&config())
+        RtpSession::new(&config(), 0.5)
     }
 
     /// A packet from the far end, with the sequence number in the payload.
@@ -386,14 +712,24 @@ mod tests {
     /// Two packets in a row, which is what A.1 asks for before a source counts.
     fn establish(session: &mut RtpSession, ssrc: u32, from: SocketAddr) -> u16 {
         assert_eq!(
-            session.receive(&datagram(ssrc, 100, 8), from),
+            session.receive(&datagram(ssrc, 100, 8), from, Duration::ZERO),
             Received::Dropped(Discard::Probation)
         );
         assert_eq!(
-            session.receive(&datagram(ssrc, 101, 8), from),
+            session.receive(&datagram(ssrc, 101, 8), from, Duration::ZERO),
             Received::Queued
         );
         102
+    }
+
+    /// One SDES chunk naming `ssrc` with only a CNAME, the least a compound
+    /// packet arriving from a peer needs to be accepted.
+    fn cname_chunk(ssrc: u32) -> ChunkBuilder<'static> {
+        const ITEMS: &[SdesItem<'static>] = &[SdesItem {
+            kind: CNAME,
+            text: b"peer@198.51.100.7",
+        }];
+        ChunkBuilder { ssrc, items: ITEMS }
     }
 
     #[test]
@@ -406,7 +742,7 @@ mod tests {
             "until a packet arrives, the answer is all there is to go on"
         );
 
-        session.receive(&datagram(7, 100, 8), addr(PEER));
+        session.receive(&datagram(7, 100, 8), addr(PEER), Duration::ZERO);
         assert_eq!(session.latched(), Some(addr(PEER)));
         assert_eq!(
             session.destination(),
@@ -421,7 +757,7 @@ mod tests {
         let next = establish(&mut session, 7, addr(PEER));
 
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(IMPOSTOR)),
+            session.receive(&datagram(7, next, 8), addr(IMPOSTOR), Duration::ZERO),
             Received::Dropped(Discard::ForeignAddress)
         );
         assert_eq!(
@@ -431,14 +767,14 @@ mod tests {
         );
         assert_eq!(session.destination(), addr(PEER));
         assert_eq!(
-            session.stats().received,
+            session.quality().received,
             1,
             "nothing of it reached the buffer"
         );
 
         // and the real peer carries on unaffected
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
     }
@@ -451,7 +787,7 @@ mod tests {
 
         // same address, different SSRC: one machine, two streams
         assert_eq!(
-            session.receive(&datagram(9, next, 8), addr(PEER)),
+            session.receive(&datagram(9, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::SecondSource(9))
         );
         assert_eq!(session.remote_ssrc(), Some(7));
@@ -461,7 +797,7 @@ mod tests {
         session.follow(9);
         assert_eq!(session.remote_ssrc(), Some(9));
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::SecondSource(7))
         );
         establish(&mut session, 9, addr(PEER));
@@ -483,7 +819,7 @@ mod tests {
         // does not understand"
         let mut session = session();
         assert_eq!(
-            session.receive(&datagram(7, 100, 96), addr(PEER)),
+            session.receive(&datagram(7, 100, 96), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::PayloadType(96))
         );
         assert_eq!(
@@ -497,7 +833,7 @@ mod tests {
     fn a_datagram_that_is_not_a_packet_never_gets_as_far_as_the_latch() {
         let mut session = session();
         assert_eq!(
-            session.receive(b"not rtp", addr(IMPOSTOR)),
+            session.receive(b"not rtp", addr(IMPOSTOR), Duration::ZERO),
             Received::Dropped(Discard::Malformed(PacketError::TooShort { got: 7 }))
         );
         assert_eq!(session.latched(), None);
@@ -508,12 +844,12 @@ mod tests {
         // RFC 3550 A.1: two in a row before a source counts
         let mut session = session();
         assert_eq!(
-            session.receive(&datagram(7, 100, 8), addr(PEER)),
+            session.receive(&datagram(7, 100, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Probation)
         );
-        assert!(matches!(session.pull(), Pull::Empty));
+        assert!(matches!(session.pull(Activity::Speech), Pull::Empty));
         assert_eq!(
-            session.receive(&datagram(7, 101, 8), addr(PEER)),
+            session.receive(&datagram(7, 101, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
     }
@@ -523,16 +859,16 @@ mod tests {
         let mut session = session();
         let next = establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.receive(&datagram(7, 40000, 8), addr(PEER)),
+            session.receive(&datagram(7, 40000, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::BadSequence)
         );
         // the second one says the far end restarted, and the stream follows it
         assert_eq!(
-            session.receive(&datagram(7, 40001, 8), addr(PEER)),
+            session.receive(&datagram(7, 40001, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::BadSequence),
             "the old numbering is gone with the stream it belonged to"
         );
@@ -543,21 +879,24 @@ mod tests {
         let mut session = session();
         let next = establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Duplicate)
         );
 
-        while matches!(session.pull(), Pull::Packet(_) | Pull::Missing) {}
+        while matches!(
+            session.pull(Activity::Speech),
+            Pull::Packet(_) | Pull::Conceal
+        ) {}
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER)),
+            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Late)
         );
-        assert_eq!(session.stats().duplicated, 1);
-        assert_eq!(session.stats().discarded, 1);
+        assert_eq!(session.quality().duplicates, 1);
+        assert_eq!(session.quality().discarded_late, 1);
     }
 
     #[test]
@@ -566,12 +905,12 @@ mod tests {
         establish(&mut session, 7, addr(PEER));
         for sequence in [104_u16, 102, 103] {
             assert_eq!(
-                session.receive(&datagram(7, sequence, 8), addr(PEER)),
+                session.receive(&datagram(7, sequence, 8), addr(PEER), Duration::ZERO),
                 Received::Queued
             );
         }
         for expected in [101_u16, 102, 103, 104] {
-            let Pull::Packet(frame) = session.pull() else {
+            let Pull::Packet(frame) = session.pull(Activity::Speech) else {
                 panic!("a packet");
             };
             assert_eq!(frame.sequence, expected);
@@ -579,12 +918,12 @@ mod tests {
             assert_eq!(frame.timestamp, u32::from(expected) * 160);
         }
         assert_eq!(
-            session.stats().reordered,
+            session.quality().reordered,
             2,
             "both 102 and 103 came after 104"
         );
         assert_eq!(
-            session.stats().lost,
+            session.quality().lost,
             0,
             "reordering inside the window is not loss"
         );
@@ -659,10 +998,13 @@ mod tests {
         // RFC 3551 §4.1: "Applications without silence suppression MUST set
         // the marker bit to zero"
         let mut out = [0_u8; 256];
-        let mut session = RtpSession::new(&StreamConfig {
-            silence_suppression: false,
-            ..config()
-        });
+        let mut session = RtpSession::new(
+            &StreamConfig {
+                silence_suppression: false,
+                ..config()
+            },
+            0.5,
+        );
         for _ in 0..3 {
             let n = session.send(&[0; 160], 160, &mut out).expect("room");
             assert!(
@@ -710,7 +1052,207 @@ mod tests {
         session.relocate(addr(IMPOSTOR));
         assert_eq!(session.latched(), None);
         assert_eq!(session.destination(), addr(IMPOSTOR));
-        session.receive(&datagram(7, 102, 8), addr(IMPOSTOR));
+        session.receive(&datagram(7, 102, 8), addr(IMPOSTOR), Duration::ZERO);
         assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+    }
+
+    #[test]
+    fn a_new_session_has_nothing_to_report_but_an_empty_rr_and_its_own_cname() {
+        let mut session = session();
+        let mut out = [0_u8; 256];
+        let (n, next) = session
+            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .expect("room");
+        assert!(next > Duration::ZERO, "a deadline was scheduled");
+
+        let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
+        let mut packets = compound.packets();
+        let Some(RtcpPacket::ReceiverReport(rr)) = packets.next() else {
+            panic!("an RR first: nothing has been sent yet");
+        };
+        assert_eq!(rr.ssrc(), 0x0102_0304);
+        assert_eq!(rr.report_count(), 0, "no remote source is known yet");
+        let Some(RtcpPacket::SourceDescription(sdes)) = packets.next() else {
+            panic!("an SDES second");
+        };
+        assert_eq!(sdes.cname(), Some(&b"tester@203.0.113.1"[..]));
+        assert!(packets.next().is_none());
+    }
+
+    #[test]
+    fn a_session_that_has_sent_reports_itself_as_a_sender() {
+        let mut session = session();
+        session
+            .send(&[0_u8; 160], 160, &mut [0_u8; 256])
+            .expect("room");
+        session
+            .send(&[0_u8; 160], 160, &mut [0_u8; 256])
+            .expect("room");
+
+        let mut out = [0_u8; 256];
+        let (n, _) = session
+            .build_report(&mut out, Duration::ZERO, 0x0102_0304_0506_0708, 0.5)
+            .expect("room");
+        let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
+        let Some(RtcpPacket::SenderReport(sr)) = compound.packets().next() else {
+            panic!("an SR: this session has sent");
+        };
+        assert_eq!(sr.info().packet_count, 2);
+        assert_eq!(sr.info().octet_count, 320);
+        assert_eq!(sr.info().ntp, 0x0102_0304_0506_0708);
+        assert_eq!(sr.info().rtp_timestamp, 500_320);
+    }
+
+    #[test]
+    fn a_report_carries_a_reception_block_once_a_remote_source_is_known() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+
+        let mut out = [0_u8; 256];
+        let (n, _) = session
+            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .expect("room");
+        let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
+        let Some(RtcpPacket::ReceiverReport(rr)) = compound.packets().next() else {
+            panic!("an RR");
+        };
+        assert_eq!(rr.report_count(), 1);
+        let block = rr.reports().next().expect("one block");
+        assert_eq!(block.ssrc, 7);
+    }
+
+    #[test]
+    fn an_incoming_report_about_this_sessions_own_ssrc_yields_a_round_trip_time() {
+        let mut session = session();
+        assert_eq!(session.round_trip_time(), None);
+
+        // §6.4.1 Figure 2's own worked example: A - LSR - DLSR = 6.125s
+        let block = ReportBlock {
+            ssrc: 0x0102_0304, // this session's own SSRC
+            last_sr: 0xb705_2000,
+            delay_since_last_sr: 0x0005_4000,
+            ..ReportBlock::default()
+        };
+        let rr = ReceiverReportBuilder {
+            ssrc: 99,
+            reports: &[block],
+        };
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[cname_chunk(99)],
+        };
+        let mut incoming = [0_u8; 256];
+        let n = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .write(&mut incoming)
+            .expect("room");
+
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], Duration::ZERO, arrival_ntp),
+            RtcpReceived::Report
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+    }
+
+    #[test]
+    fn a_goodbye_from_the_established_source_is_reported_with_its_reason() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+
+        let rr = ReceiverReportBuilder {
+            ssrc: 7,
+            reports: &[],
+        };
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[cname_chunk(7)],
+        };
+        let bye = GoodbyeBuilder {
+            sources: &[7],
+            reason: b"call ended",
+        };
+        let mut incoming = [0_u8; 256];
+        let n = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .with_bye(bye)
+            .write(&mut incoming)
+            .expect("room");
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended"
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_rtcp_datagram_is_reported_rather_than_panicking() {
+        let mut session = session();
+        assert!(matches!(
+            session.rtcp_receive(b"not rtcp", Duration::ZERO, 0),
+            RtcpReceived::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn send_bye_writes_a_compound_packet_with_the_reason_and_this_sessions_ssrc() {
+        let mut session = session();
+        let mut out = [0_u8; 256];
+        let n = session
+            .send_bye(&mut out, Duration::ZERO, b"hanging up", 0.5)
+            .expect("room");
+
+        let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
+        let mut packets = compound.packets();
+        assert!(matches!(
+            packets.next(),
+            Some(RtcpPacket::ReceiverReport(_))
+        ));
+        assert!(matches!(
+            packets.next(),
+            Some(RtcpPacket::SourceDescription(_))
+        ));
+        let Some(RtcpPacket::Goodbye(bye)) = packets.next() else {
+            panic!("a goodbye third");
+        };
+        assert_eq!(bye.sources().collect::<Vec<_>>(), [0x0102_0304]);
+        assert_eq!(bye.reason(), Some(&b"hanging up"[..]));
+    }
+
+    #[test]
+    fn rtcp_due_waits_until_its_own_deadline_and_then_says_send() {
+        let mut session = session();
+        let Due::Wait(deadline) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("a brand new session has nothing due yet");
+        };
+        assert_eq!(session.rtcp_due(Duration::ZERO, 0.5), Due::Wait(deadline));
+        assert_eq!(session.rtcp_due(deadline, 0.5), Due::Send);
+    }
+
+    #[test]
+    fn building_a_report_reschedules_the_next_deadline_forward() {
+        let mut session = session();
+        let Due::Wait(first) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("not due yet");
+        };
+        let (_, next) = session
+            .build_report(&mut [0_u8; 256], first, 0, 0.5)
+            .expect("room");
+        assert!(next > first, "the schedule moves forward, not back");
+    }
+
+    #[test]
+    fn is_rtcp_tells_a_built_report_apart_from_an_rtp_packet_for_rtcp_mux() {
+        // RFC 5761 §4: demultiplexing a socket carrying both by payload type
+        let mut session = session();
+        let mut out = [0_u8; 256];
+        let (n, _) = session
+            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .expect("room");
+        assert!(crate::rtcp::is_rtcp(&out[..n]));
+
+        let rtp = datagram(7, 100, 8);
+        assert!(!crate::rtcp::is_rtcp(&rtp));
     }
 }

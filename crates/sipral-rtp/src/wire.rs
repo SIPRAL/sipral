@@ -374,7 +374,9 @@ impl<'a> PacketBuilder<'a> {
 /// Copy `bytes` in at `at` and say where the next field starts. A field that
 /// does not fit is dropped rather than truncated, which cannot happen here
 /// because the buffer was cut to [`PacketBuilder::encoded_len`] first.
-fn put(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+///
+/// Shared with `rtcp`, whose builders cut their buffers the same way.
+pub(crate) fn put(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
     let end = at.saturating_add(bytes.len());
     if let Some(room) = out.get_mut(at..end) {
         room.copy_from_slice(bytes);
