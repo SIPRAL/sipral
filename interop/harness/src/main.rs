@@ -378,15 +378,14 @@ impl Script {
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
-            // no Ours here: a transfer that worked is a call this end is not
-            // in any more, and the far end is right to hang it up
+            // No Ours: a transfer that worked is a call this end is not in
+            // any more, and the far end is right to hang it up. And no
+            // Transferring either — RFC 3515 §2.4.4 asks for a 100 Trying
+            // first only when there is something to wait for, and FreeSWITCH
+            // sends one NOTIFY, terminated, carrying the final status
             Flow::Blind => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
-                (
-                    Fact::Transferring,
-                    "the far end never said it was transferring",
-                ),
                 (Fact::Transferred, "the transfer did not complete"),
                 (Fact::Over, "the call did not end"),
             ],
@@ -394,10 +393,6 @@ impl Script {
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
                 (Fact::Consulted, "the consultation call did not connect"),
-                (
-                    Fact::Transferring,
-                    "the far end never said it was transferring",
-                ),
                 (Fact::Transferred, "the transfer did not complete"),
                 (Fact::Over, "the call did not end"),
             ],
