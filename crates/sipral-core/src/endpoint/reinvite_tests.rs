@@ -549,6 +549,35 @@ fn a_491_says_how_long_to_wait_and_the_call_stays_up() {
 }
 
 #[test]
+fn a_refusal_frees_the_dialog_before_the_transaction_is_over() {
+    // 14.1: "the TU MUST wait until the transaction reaches the completed or
+    // terminated state before initiating the new INVITE" — completed, which a
+    // refusal reaches at once. Waiting for terminated would be waiting 32
+    // seconds for timer D, and the 491 above asks for the change again after
+    // four
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (_, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+    deliver(
+        &mut endpoint,
+        &reply(&reinvite, 491, "Request Pending", "desk", None),
+        t0,
+    );
+    events(&mut endpoint);
+    transmits(&mut endpoint);
+
+    let again = endpoint
+        .reinvite(dialog, &renegotiation(), t0 + Duration::from_secs(3))
+        .expect("the dialog is free once the refusal has arrived");
+    assert_ne!(
+        endpoint.transaction_state(again),
+        None,
+        "and the second one is running"
+    );
+}
+
+#[test]
 fn the_end_that_did_not_place_the_call_waits_less() {
     // the two ranges do not overlap, which is what stops the second collision
     let t0 = Instant::now();

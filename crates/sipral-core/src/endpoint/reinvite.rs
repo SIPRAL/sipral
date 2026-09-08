@@ -62,6 +62,10 @@ struct Sent {
     request: OwnedMessage,
     /// Whether a 2xx has arrived, which is what makes an ACK possible.
     answered: bool,
+    /// Whether any final response has. §14.1 lets a new INVITE go once the
+    /// transaction is "completed or terminated", and a refusal completes it —
+    /// the ACK for a non-2xx is the transaction's own, not the dialog's.
+    settled: bool,
     /// The ACK once the caller has built it, kept for the retransmissions.
     ack: Option<OwnedMessage>,
 }
@@ -96,6 +100,7 @@ impl Reinvites {
                 dialog,
                 request,
                 answered: false,
+                settled: false,
                 ack: None,
             },
         );
@@ -121,7 +126,26 @@ impl Reinvites {
     fn answer(&mut self, id: TransactionId<InviteClient>) {
         if let Some(sent) = self.ours.get_mut(&id) {
             sent.answered = true;
+            sent.settled = true;
         }
+    }
+
+    /// A final response that is not a 2xx arrived.
+    fn settle(&mut self, id: TransactionId<InviteClient>) {
+        if let Some(sent) = self.ours.get_mut(&id) {
+            sent.settled = true;
+        }
+    }
+
+    /// Whether §14.1 still forbids a second INVITE because of this one.
+    fn outstanding(&self, id: TransactionId<InviteClient>) -> bool {
+        self.ours.get(&id).is_some_and(|sent| {
+            if sent.answered {
+                sent.ack.is_none()
+            } else {
+                !sent.settled
+            }
+        })
     }
 
     fn answered(&self, id: TransactionId<InviteClient>) -> bool {
@@ -256,14 +280,18 @@ impl Endpoint {
 
     /// Whether this end has an INVITE outstanding in the dialog (§14.1).
     ///
-    /// Outstanding means sent and not yet acknowledged, rather than "its
-    /// client transaction still exists". RFC 6026 keeps that transaction alive
-    /// for 64·T1 after the 2xx so that a retransmission is not read as a
-    /// stray, and a hold asked for two seconds into a call must not be refused
-    /// because of a timer that is only there to absorb duplicates.
+    /// Outstanding is not "its client transaction still exists". §14.1 lets a
+    /// new INVITE go once the old transaction is "completed or terminated",
+    /// and both a 2xx that has been acknowledged and a refusal complete it —
+    /// the ACK for a non-2xx belongs to the transaction, not to the dialog.
+    /// Reading it any other way would hold the dialog shut for the timer that
+    /// only exists to absorb duplicates: 64·T1 after a 2xx under RFC 6026, or
+    /// 32 seconds after a refusal, which is a great deal longer than the 2.1
+    /// to 4 seconds §14.1 gives a 491 before it wants the change offered
+    /// again.
     pub(super) fn invite_outstanding(&self, dialog: DialogId) -> bool {
         if let Some(id) = self.reinvites.ours_in(dialog) {
-            return !self.reinvites.acknowledged(id);
+            return self.reinvites.outstanding(id);
         }
         if self.dialogs.opening_invite(dialog).is_none() {
             return false;
@@ -287,13 +315,6 @@ impl Endpoint {
         request: OwnedMessage,
     ) {
         self.reinvites.start(id, dialog, request);
-    }
-}
-
-impl Reinvites {
-    /// Whether the ACK for this re-INVITE has been built and sent.
-    fn acknowledged(&self, id: TransactionId<InviteClient>) -> bool {
-        self.ours.get(&id).is_some_and(|sent| sent.ack.is_some())
     }
 }
 
@@ -357,6 +378,7 @@ impl Endpoint {
             return;
         }
 
+        self.reinvites.settle(id);
         if status == StatusCode::REQUEST_PENDING {
             // §14.1: "it SHOULD start a timer with a value T chosen as
             // follows" — and try once more when it fires, if the session still

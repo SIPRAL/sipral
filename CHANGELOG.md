@@ -45,6 +45,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- A refused re-INVITE held its dialog shut. §14.1 lets a new INVITE go once the
+  old transaction is "completed or terminated", and a refusal completes it at
+  once — the ACK for a non-2xx belongs to the transaction, not to the dialog —
+  but the endpoint waited for an ACK it would never build, so nothing could be
+  offered again for the thirty-two seconds of timer D. §14.1 asks for a change
+  refused with 491 to be offered again after two to four.
 - A re-INVITE could not finish. Its responses were offered to the dialog set
   that follows a forked INVITE, which a re-INVITE has none of, so every answer
   to one — 200, 488, 491 — was dropped in silence and the call could never be

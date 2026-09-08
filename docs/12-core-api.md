@@ -947,6 +947,14 @@ its first. RFC 3311 §5.2 says the same about a second UPDATE and that one is
 answered here too; its sibling rules turn on whether an offer is outstanding,
 which is offer/answer state and lives in `sipral-ua`.
 
+"In flight" there means what §14.1 means by it — the transaction has not
+reached "completed or terminated" — and not "the transaction handle still
+exists". A refusal completes it at once, because the ACK for a non-2xx belongs
+to the transaction rather than to the dialog; a 2xx completes it when
+`ack_reinvite` has been called. Reading it the other way would hold the dialog
+shut for the timer that only absorbs duplicates, and §14.1 asks for a change
+refused with 491 to be offered again after two to four seconds.
+
 `OwnedMessage` rides in events rather than a summary struct, so the layer above
 can read any header, including ones the core has no opinion about, without the
 core growing a field for each.
