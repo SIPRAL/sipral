@@ -35,12 +35,11 @@ jobs:
   # failure a test against ourselves never can. It is a job of its own because
   # it pulls three images and boots them, and nothing else should wait for that
   #
-  # Run by hand until it has passed once. The lab is new, the servers are
-  # third-party images with entrypoints of their own, and a job that is red for
+  # It ran by hand until it had passed once, because a job that is red for
   # reasons that have nothing to do with the stack teaches everyone to ignore a
-  # red build. It goes back on every push the day it is green.
+  # red build. On 8 September 2026 all three flows passed against Kamailio and
+  # FreeSWITCH, so it runs on every push from here.
   interop:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

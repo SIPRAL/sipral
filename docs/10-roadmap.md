@@ -35,13 +35,15 @@ criteria below are what remains. They are demonstrations, not code.
 
 **Exit, all of them:**
 
-- registration and a bidirectional call through the lab Kamailio and
-  FreeSWITCH;
+- **met** — registration and a bidirectional call through the lab Kamailio and
+  FreeSWITCH, with hold and resume, judged against conditions written before
+  the run and checked on every push;
 - the same against Asterisk with `chan_pjsip` at defaults, in a container;
 - the same against at least one real carrier, on a paid account;
-- the RFC 4475 torture corpus passes: valid messages parsed, invalid messages
-  rejected without a panic;
-- the parser survives a continuous fuzzing run without a crash or a hang;
+- **met** — the RFC 4475 torture corpus passes: valid messages parsed, invalid
+  messages rejected without a panic;
+- **met** — the parser survives a continuous fuzzing run without a crash or a
+  hang;
 - blind and attended transfer complete against both FreeSWITCH and Asterisk.
 
 ## Phase 2 — media
