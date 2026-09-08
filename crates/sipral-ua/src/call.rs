@@ -18,10 +18,11 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use sipral_core::dialog::CallId;
 use sipral_core::endpoint::TransportId;
-use sipral_core::msg::{HeaderName, Uri};
+use sipral_core::msg::{HeaderName, OwnedMessage, Uri};
 use sipral_core::sdp::SessionDescription;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, TransactionId,
@@ -29,6 +30,7 @@ use sipral_core::transaction::{
 
 use crate::account::{AccountId, Extra};
 use crate::session::Session;
+use crate::timers::SessionTimer;
 
 /// One call the application is talking to.
 ///
@@ -138,6 +140,9 @@ pub enum CallEndReason {
     /// The branch was still ringing when the answer window closed
     /// (§13.2.2.4), or the proxy told it another branch had won.
     Abandoned,
+    /// The session timer ran out and no refresh arrived (RFC 4028 §10). The
+    /// far end is not there any more, whatever it thinks.
+    Expired,
 }
 
 impl core::fmt::Display for CallEndReason {
@@ -150,6 +155,7 @@ impl core::fmt::Display for CallEndReason {
             Self::Unreachable => "unreachable",
             Self::ForkLost => "another branch was kept",
             Self::Abandoned => "abandoned",
+            Self::Expired => "the session expired",
         })
     }
 }
@@ -262,6 +268,21 @@ pub(crate) struct Call {
     pub(crate) awaiting_ack: Option<TransactionId<InviteServer>>,
     /// When to offer the change again after a 491 (§14.1, RFC 3311 §5.3).
     pub(crate) retry_at: Option<Instant>,
+    /// The session timer, once one has been negotiated (RFC 4028).
+    pub(crate) timer: Option<SessionTimer>,
+    /// What was dialled, kept so that a 422 can be answered by asking again
+    /// with the interval the far end demanded (RFC 4028 §7.3).
+    pub(crate) placed: Option<OutgoingCall>,
+    /// And what arrived, for a call that came in: the answer to it has to
+    /// know what the INVITE asked for, and it is written later than this.
+    pub(crate) invited: Option<OwnedMessage>,
+    /// The `Call-ID` of this end's INVITE, and the number it used. §7.3 has
+    /// the retry keep the first and move the second.
+    pub(crate) id: Option<CallId>,
+    pub(crate) cseq: u32,
+    /// The interval this end asked for, which is what §7.2 falls back to when
+    /// the far end answers without saying anything about timers.
+    pub(crate) asked: Option<Duration>,
 }
 
 /// A session change this end has offered.
@@ -271,11 +292,15 @@ pub(crate) struct Offer {
     /// is one. Absent between a 491 and the retry it asks for.
     pub(crate) transaction: Option<AnyTransactionId>,
     /// What was offered, kept for that retry and for the moment it is taken.
-    pub(crate) description: SessionDescription,
+    /// Absent for a session-timer refresh over UPDATE, which carries none.
+    pub(crate) description: Option<SessionDescription>,
     /// The hold this change asks for.
     pub(crate) held: bool,
     /// §14.1 says to attempt it once more, not to keep attempting it.
     pub(crate) retried: bool,
+    /// Whether this is a session-timer refresh rather than a change: the
+    /// session stays exactly as it is, and only the clock moves.
+    pub(crate) refresh: bool,
 }
 
 /// One the far end offered, waiting for the application to answer it.
@@ -307,6 +332,12 @@ impl Call {
             answering: None,
             awaiting_ack: None,
             retry_at: None,
+            timer: None,
+            placed: None,
+            invited: None,
+            id: None,
+            cseq: 1,
+            asked: None,
         }
     }
 
@@ -333,6 +364,12 @@ impl Call {
             answering: None,
             awaiting_ack: None,
             retry_at: None,
+            timer: None,
+            placed: None,
+            invited: None,
+            id: None,
+            cseq: 1,
+            asked: None,
         }
     }
 
@@ -357,6 +394,12 @@ impl Call {
             answering: None,
             awaiting_ack: None,
             retry_at: None,
+            timer: None,
+            placed: None,
+            invited: None,
+            id: None,
+            cseq: 1,
+            asked: None,
         }
     }
 }

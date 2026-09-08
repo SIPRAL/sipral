@@ -48,6 +48,7 @@ mod runtime;
 mod session;
 #[cfg(test)]
 mod tests;
+mod timers;
 
 pub use account::{Account, AccountId};
 pub use agent::UserAgent;

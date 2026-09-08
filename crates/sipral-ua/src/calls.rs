@@ -29,6 +29,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse, TerminationReason,
 };
@@ -46,6 +47,7 @@ use crate::call::{
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::renegotiate::ALLOW;
+use crate::timers::FLOOR;
 
 /// The refusal a call gets when it is hung up before it was answered.
 ///
@@ -68,19 +70,64 @@ impl UserAgent {
         now: Instant,
     ) -> Result<CallHandle, UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        let contact = config.contact_value();
+        let asked = config.session_interval;
+        let mut call = Call::outgoing(account, outgoing.forks, contact);
+        // minted here rather than by the endpoint, because §7.3 has a 422
+        // asked again on the same Call-ID with the number moved on
+        call.id = Some(CallId::new(&self.endpoint.token()));
+        call.placed = Some(outgoing.clone());
+        call.asked = asked;
+        if let Some(described) = outgoing
+            .offer
+            .as_deref()
+            .and_then(|sdp| sdp::parse(sdp).ok())
+        {
+            call.session.set_local(described);
+        }
+        let handle = self.keep(call);
+        self.dial(account, outgoing, handle, now)?;
+        self.drain(now);
+        Ok(handle)
+    }
+
+    /// Put the INVITE on the wire for a call that already has a handle.
+    ///
+    /// Called again, with a higher number and the same `Call-ID`, when a 422
+    /// says the session interval was too short (RFC 4028 §7.3).
+    pub(crate) fn dial(
+        &mut self,
+        account: AccountId,
+        outgoing: &OutgoingCall,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
         let (transport, remote) = outgoing
             .destination
             .unwrap_or((config.transport, config.remote));
         let contact = config.contact_value();
+        let from = config.sender_value();
+        let (call_id, cseq, asked) = {
+            let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
+            (held.id.clone(), held.cseq, held.asked)
+        };
         let mut request =
             OutgoingRequest::new(Method::Invite, outgoing.target.clone(), transport, remote)
                 .to(&bracketed(&outgoing.target))
-                .from(&config.sender_value())
+                .from(&from)
                 .contact(&contact)
                 // RFC 3311 §4: "a UAC compliant to this specification SHOULD
                 // also include an Allow header field in the INVITE request,
                 // listing the method UPDATE"
-                .header(HeaderName::Allow, ALLOW);
+                .header(HeaderName::Allow, ALLOW)
+                .cseq(cseq);
+        if let Some(call_id) = call_id {
+            request = request.call_id(call_id);
+        }
+        for (name, value) in &self.asking_for(call, asked) {
+            request = request.header(*name, value);
+        }
         if let Some(ref offer) = outgoing.offer {
             request = request.body(b"application/sdp", Arc::clone(offer));
         }
@@ -91,19 +138,11 @@ impl UserAgent {
         }
 
         let invite = self.endpoint.invite(&request, now)?;
-        let mut call = Call::outgoing(account, outgoing.forks, contact);
-        call.invite = Some(invite);
-        if let Some(described) = outgoing
-            .offer
-            .as_deref()
-            .and_then(|sdp| sdp::parse(sdp).ok())
-        {
-            call.session.set_local(described);
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.invite = Some(invite);
         }
-        let handle = self.keep(call);
-        self.by_invite.insert(invite, handle);
-        self.drain(now);
-        Ok(handle)
+        self.by_invite.insert(invite, call);
+        Ok(())
     }
 
     /// Say the phone is ringing (180), optionally with early media (183).
@@ -173,7 +212,19 @@ impl UserAgent {
         // listing the UPDATE method"
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
-            .header(HeaderName::Allow, ALLOW);
+            .header(HeaderName::Allow, ALLOW)
+            .header(HeaderName::Supported, b"timer");
+        let invited = self.calls.get(&call).and_then(|held| held.invited.clone());
+        if let Some(ref invited) = invited
+            && let Some((value, demand)) = self.timer_for_answer(call, &invited.as_raw(), now)
+        {
+            response = response.header(HeaderName::SessionExpires, &value);
+            if demand {
+                // §9: refresher=uac obliges the UAS to say the far end has to
+                // understand this, because it is the one that has to act
+                response = response.header(HeaderName::Require, b"timer");
+            }
+        }
         let described = sdp.as_deref().and_then(|sdp| sdp::parse(sdp).ok());
         if let Some(sdp) = sdp {
             response = response.body(b"application/sdp", sdp);
@@ -381,6 +432,11 @@ impl UserAgent {
         self.forget(call);
     }
 
+    /// The session timer ran out and nobody refreshed it (RFC 4028 §10).
+    pub(crate) fn finish_expired(&mut self, call: CallHandle, now: Instant) {
+        self.finish(call, CallEndReason::Expired, None, None, now);
+    }
+
     fn forget(&mut self, call: CallHandle) {
         self.by_invite.retain(|_, held| *held != call);
         self.by_server.retain(|_, held| *held != call);
@@ -481,6 +537,17 @@ impl UserAgent {
                 reason,
                 ref response,
             } => {
+                // RFC 4028 §7.3: a 422 says the session interval was too
+                // short, not that the call cannot happen
+                if status.map(StatusCode::get) == Some(422)
+                    && let Some(call) = self.by_invite.get(&invite).copied()
+                    && let Some(refusal) = response.as_ref()
+                {
+                    let refusal = refusal.clone();
+                    if self.on_session_too_brief(call, &refusal.as_raw(), now) {
+                        return None;
+                    }
+                }
                 let ended = match reason {
                     FailureReason::Refused => CallEndReason::Refused,
                     // the enum is non-exhaustive across crate versions, and
@@ -588,12 +655,26 @@ impl UserAgent {
                 transaction,
                 ref request,
             } => {
+                // RFC 4028 §9: an interval below the floor is refused with the
+                // floor, and the far end asks again. There is no policy in it,
+                // so the application is not troubled with it
+                if Self::too_brief(&request.as_raw()) {
+                    let refusal = OutgoingResponse::new(StatusCode::SESSION_INTERVAL_TOO_SMALL)
+                        .header(HeaderName::MinSe, &crate::timers::seconds(FLOOR));
+                    self.endpoint
+                        .respond_invite(transaction, &refusal, now)
+                        .ok();
+                    return None;
+                }
                 let account = self.line_for(&request.as_raw());
                 let contact = account.and_then(|id| self.accounts.get(&id)).map_or_else(
                     || Box::from(&b""[..]),
                     crate::account::Account::contact_value,
                 );
                 let call = self.keep(Call::incoming(account, transaction, contact));
+                if let Some(held) = self.calls.get_mut(&call) {
+                    held.invited = Some(request.clone());
+                }
                 self.by_server.insert(transaction, call);
                 self.note_allow(call, &request.as_raw());
                 if let Some(offer) = sdp::parse(request.as_raw().body()).ok()
@@ -777,6 +858,7 @@ impl UserAgent {
         now: Instant,
     ) {
         self.note_session(call, response);
+        self.on_timer_answer(call, &response.as_raw(), now);
         let Some(held) = self.calls.get(&call) else {
             return;
         };

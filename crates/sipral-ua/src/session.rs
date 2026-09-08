@@ -125,6 +125,17 @@ impl Session {
         description.origin.version = self.version;
     }
 
+    /// The description already agreed, byte for byte.
+    ///
+    /// RFC 4028 §7.4 has a session-timer refresh carry an offer "even if the
+    /// details of the session have not changed. In that case, the offer MUST
+    /// indicate that it has not changed" — and RFC 3264 §8 says an unchanged
+    /// `o=` version is exactly how that is said. So this deliberately does not
+    /// move the version.
+    pub(crate) fn repeat(&self) -> Option<SessionDescription> {
+        self.local.clone()
+    }
+
     /// The description this end would offer, held or not (RFC 3264 §8.4).
     pub(crate) fn offer(&mut self, held: bool) -> Option<SessionDescription> {
         let mut offer = self.local.clone()?;

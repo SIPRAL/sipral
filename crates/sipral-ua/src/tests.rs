@@ -1583,10 +1583,13 @@ fn a_call_and_a_registration_do_not_confuse_each_other() {
     );
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
 
+    // the call's own session timer is due by now too, so both go out
     agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let written = transmits(&mut agent);
     assert!(
-        sent(&mut agent).starts_with(b"REGISTER "),
-        "the refresh is not disturbed by a call being up"
+        written.iter().any(|bytes| bytes.starts_with(b"REGISTER ")),
+        "the refresh is not disturbed by a call being up: {}",
+        written.len()
     );
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
 }
@@ -2226,4 +2229,317 @@ fn an_offer_the_application_wrote_gets_a_version_that_has_moved() {
     let reinvite = sent(&mut agent);
     let offer = body_of(&reinvite);
     assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+// -- session timers ----------------------------------------------------------
+
+/// A 2xx that settles the timer the way a server that understands RFC 4028
+/// does: an interval, and which end refreshes it.
+fn timed(request: &[u8], body: Option<&[u8]>, session: &str) -> Vec<u8> {
+    let mut out = answered(request, 200, "OK", "desk", body);
+    let head = out
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(out.len(), |at| at + 1);
+    let mut with = out[..head].to_vec();
+    with.extend_from_slice(format!("Session-Expires: {session}\r\n").as_bytes());
+    with.extend_from_slice(&out[head..]);
+    out = with;
+    out
+}
+
+#[test]
+fn an_invite_says_it_understands_session_timers_and_asks_for_one() {
+    // 7.1: Supported goes on every request, and the interval is what §4
+    // recommends
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+
+    let invite = sent(&mut agent);
+    let supported = String::from_utf8_lossy(&header(&invite, HeaderName::Supported)).into_owned();
+    assert!(supported.contains("timer"), "{supported}");
+    assert_eq!(header(&invite, HeaderName::SessionExpires), b"1800");
+    // 7.1 recommends leaving the refresher out so the negotiation settles it
+    assert!(
+        !String::from_utf8_lossy(&header(&invite, HeaderName::SessionExpires))
+            .contains("refresher")
+    );
+}
+
+#[test]
+fn an_account_can_ask_for_no_timer_at_all() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().session_interval(None));
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+
+    let invite = sent(&mut agent);
+    assert!(header(&invite, HeaderName::SessionExpires).is_empty());
+    // but it still says it understands them, because that is what lets the far
+    // end ask
+    assert!(
+        String::from_utf8_lossy(&header(&invite, HeaderName::Supported)).contains("timer"),
+        "7.1 puts Supported on every request either way"
+    );
+}
+
+#[test]
+fn the_refresher_sends_a_refresh_at_half_the_interval() {
+    // 7.2: "once half the session interval has elapsed"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(299));
+    assert!(transmits(&mut agent).is_empty(), "not yet");
+
+    agent.handle_timeout(t0 + Duration::from_secs(300));
+    let refresh = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the session is kept alive");
+    assert_eq!(
+        header(&refresh, HeaderName::SessionExpires),
+        b"600;refresher=uac"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_refresh_repeats_the_description_it_already_agreed() {
+    // 7.4: "a re-INVITE SHOULD contain one, even if the details of the session
+    // have not changed. In that case, the offer MUST indicate that it has not
+    // changed" — and RFC 3264 §8 says an unchanged version is how that is said
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(300));
+    let refresh = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the refresh");
+    let offer = body_of(&refresh);
+    assert!(offer.contains("o=- 1 1 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+#[test]
+fn the_end_that_does_not_refresh_hangs_up_when_nothing_arrives() {
+    // 10: "it SHOULD send a BYE to terminate the session, slightly before the
+    // session expiration", by the minimum of 32 seconds and a third of it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uas"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // 600 - 32, because a third of 600 is more than 32
+    agent.handle_timeout(t0 + Duration::from_secs(567));
+    assert!(transmits(&mut agent).is_empty(), "not yet");
+
+    agent.handle_timeout(t0 + Duration::from_secs(568));
+    let bye = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"BYE "))
+        .expect("the session ran out");
+    assert!(bye.starts_with(b"BYE sip:bob@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Expired)
+    );
+    assert_eq!(agent.call_state(call), None);
+}
+
+#[test]
+fn a_refresh_that_arrives_puts_the_clock_back() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uas"),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    // their refresh, most of the way through
+    let mut refresh = reversed(&ack, "UPDATE", "keepalive", 1, None);
+    let head = refresh
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(refresh.len(), |at| at + 1);
+    let mut with = refresh[..head].to_vec();
+    with.extend_from_slice(b"Session-Expires: 600;refresher=uas\r\n");
+    with.extend_from_slice(&refresh[head..]);
+    refresh = with;
+    deliver(&mut agent, &refresh, t0 + Duration::from_secs(500));
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(
+        header(&answer, HeaderName::SessionExpires),
+        b"600;refresher=uas",
+        "the answer says what is still agreed"
+    );
+
+    // the old deadline passes and nothing happens, because the clock moved
+    agent.handle_timeout(t0 + Duration::from_secs(569));
+    assert!(transmits(&mut agent).is_empty());
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_422_asks_again_with_the_interval_that_was_demanded() {
+    // 7.3: the retry is a new transaction that "SHOULD have the same value as
+    // the Call-ID, To, and From of the previous request"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+    assert_eq!(header(&first, HeaderName::CSeq), b"1 INVITE");
+
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            422,
+            "Session Interval Too Small",
+            "Min-SE: 1200\r\n",
+        ),
+        t0,
+    );
+    let again = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("it is asked again, not given up on");
+
+    assert_eq!(header(&again, HeaderName::CSeq), b"2 INVITE");
+    assert_eq!(
+        header(&again, HeaderName::CallId),
+        header(&first, HeaderName::CallId),
+        "the same call, asked again"
+    );
+    assert_eq!(header(&again, HeaderName::SessionExpires), b"1200");
+    // 7.4: once a floor has been demanded it rides on every request after it
+    assert_eq!(header(&again, HeaderName::MinSe), b"1200");
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+
+    // and a second 422 is the far end contradicting itself
+    deliver(
+        &mut agent,
+        &reply(
+            &again,
+            422,
+            "Session Interval Too Small",
+            "Min-SE: 1800\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Refused),
+        "asked once more, not for ever"
+    );
+}
+
+#[test]
+fn an_interval_below_the_floor_is_refused_with_the_floor() {
+    // 9: a UAS may reject with 422 and MUST say its minimum, which "MUST NOT
+    // be lower than 90 seconds"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let mut invite = incoming_invite("brief", Some(OFFER));
+    let head = invite
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(invite.len(), |at| at + 1);
+    let mut with = invite[..head].to_vec();
+    with.extend_from_slice(b"Supported: timer\r\nSession-Expires: 30\r\n");
+    with.extend_from_slice(&invite[head..]);
+    invite = with;
+    deliver(&mut agent, &invite, t0);
+
+    let refusal = last(&mut agent);
+    assert!(refusal.starts_with(b"SIP/2.0 422 "));
+    assert_eq!(header(&refusal, HeaderName::MinSe), b"90");
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::IncomingCall { .. })),
+        "nothing the application has to decide"
+    );
+}
+
+#[test]
+fn answering_a_call_settles_the_timer_in_the_2xx() {
+    // 9: "The UAS MUST set the value of the refresher parameter in the
+    // Session-Expires header field in the 2xx response."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let mut invite = incoming_invite("timed", Some(OFFER));
+    let head = invite
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(invite.len(), |at| at + 1);
+    let mut with = invite[..head].to_vec();
+    with.extend_from_slice(b"Supported: timer\r\nSession-Expires: 600\r\n");
+    with.extend_from_slice(&invite[head..]);
+    invite = with;
+    deliver(&mut agent, &invite, t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+
+    let ok = sent(&mut agent);
+    // the far end expressed no preference, so this end takes the work: it is
+    // the uas of this dialog
+    assert_eq!(
+        header(&ok, HeaderName::SessionExpires),
+        b"600;refresher=uas"
+    );
+    assert!(
+        header(&ok, HeaderName::Require).is_empty(),
+        "9 only demands a Require when the other end has to act"
+    );
 }

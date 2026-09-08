@@ -256,9 +256,10 @@ impl UserAgent {
         if let Some(call_state) = self.calls.get_mut(&call) {
             call_state.offering = Some(Offer {
                 transaction: Some(transaction),
-                description: offer,
+                description: Some(offer),
                 held,
                 retried,
+                refresh: false,
             });
         }
         self.by_offer.insert(transaction, call);
@@ -275,8 +276,11 @@ impl UserAgent {
         else {
             return;
         };
+        let Some(description) = offer.description else {
+            return;
+        };
         if self
-            .send_offer(call, offer.description, offer.held, true, now)
+            .send_offer(call, description, offer.held, true, now)
             .is_err()
         {
             self.events.push_back(UaEvent::SessionChangeFailed {
@@ -289,8 +293,9 @@ impl UserAgent {
     }
 
     /// Whatever this layer scheduled for a call: the second attempt after a
-    /// 491.
+    /// 491, and the session timer.
     pub(crate) fn fire_call_timers(&mut self, now: Instant) {
+        self.fire_session_timers(now);
         let due: Vec<CallHandle> = self
             .calls
             .iter()
@@ -307,7 +312,11 @@ impl UserAgent {
 
     /// When this layer next has something to do about a call.
     pub(crate) fn call_deadline(&self) -> Option<Instant> {
-        self.calls.values().filter_map(|held| held.retry_at).min()
+        self.calls
+            .values()
+            .flat_map(|held| [held.retry_at, held.timer.map(|timer| timer.due)])
+            .flatten()
+            .min()
     }
 
     fn answer_with(
@@ -508,7 +517,14 @@ impl UserAgent {
             return;
         };
         held.retry_at = None;
-        held.session.set_local(offer.description);
+        // a session-timer refresh changes nothing but the clock (RFC 4028
+        // §7.4), so there is no session to commit and nothing to report
+        if offer.refresh {
+            return;
+        }
+        if let Some(description) = offer.description {
+            held.session.set_local(description);
+        }
         held.session.hold.local = offer.held;
         if let Ok(described) = sdp::parse(answer) {
             held.session.set_remote(described);
@@ -616,6 +632,9 @@ impl UserAgent {
     ) {
         let raw = request.as_raw();
         self.note_allow(call, &raw);
+        // RFC 4028 §7.4: any request inside the dialog that carries a
+        // Session-Expires is a refresh, whatever else it is doing
+        self.on_refresh_in(call, &raw, now);
         let arriving = arriving(&raw);
         let invite = matches!(transaction, AnyTransactionId::InviteServer(_));
 
@@ -709,10 +728,13 @@ impl UserAgent {
             };
             (answer, held.contact.clone())
         };
-        let response = OutgoingResponse::new(StatusCode::OK)
+        let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&prepared.1)
             .header(HeaderName::Allow, ALLOW)
             .body(b"application/sdp", Arc::from(prepared.0.to_bytes()));
+        if let Some(value) = self.timer_echo(call) {
+            response = response.header(HeaderName::SessionExpires, &value);
+        }
         if self.answer_with(call, transaction, &response, now).is_err() {
             return false;
         }
@@ -736,6 +758,9 @@ impl UserAgent {
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&prepared.1)
             .header(HeaderName::Allow, ALLOW);
+        if let Some(value) = self.timer_echo(call) {
+            response = response.header(HeaderName::SessionExpires, &value);
+        }
         if let Some(ref description) = prepared.0 {
             response = response.body(b"application/sdp", Arc::from(description.to_bytes()));
         }
@@ -755,9 +780,12 @@ impl UserAgent {
             .get(&call)
             .map(|held| held.contact.clone())
             .unwrap_or_default();
-        let response = OutgoingResponse::new(StatusCode::OK)
+        let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
+        if let Some(value) = self.timer_echo(call) {
+            response = response.header(HeaderName::SessionExpires, &value);
+        }
         self.answer_with(call, transaction, &response, now).ok();
     }
 

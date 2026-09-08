@@ -48,6 +48,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   call as unreachable. Without it a far end that stops answering leaves a line
   busy for as long as the process runs.
 - `OutgoingResponse::status`, to read back what a response was built with.
+- Session timers (RFC 4028) in `sipral-ua`. `Supported: timer` on every request,
+  an interval asked for per account and thirty minutes by default, the
+  refresher left to the negotiation on the first INVITE and carried afterwards.
+  The refresher refreshes at half the interval (§7.2) and the other end hangs up
+  shortly before expiry (§10), reporting `CallEndReason::Expired`. The refresh
+  is an UPDATE where the peer takes one and a re-INVITE where it does not,
+  repeating the description already agreed unchanged, which is how §7.4 and
+  RFC 3264 §8 together say nothing has moved. A 422 sends the INVITE again on
+  the same `Call-ID` with the demanded floor, once; an incoming interval below
+  §5's ninety seconds is answered 422 before the application sees it.
+- `StatusCode::SESSION_INTERVAL_TOO_SMALL`.
 - The reference loop, behind the `reference-loop` feature and off by default.
   `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
   per socket doing the blocking reads, and a `Handler` with two methods. It

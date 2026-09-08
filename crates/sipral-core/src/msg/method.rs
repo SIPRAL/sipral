@@ -142,6 +142,9 @@ impl StatusCode {
     /// 488, which refuses a session description rather than the request that
     /// carried it (RFC 3264 §6, RFC 3311 §5.2).
     pub const NOT_ACCEPTABLE_HERE: Self = Self(488);
+    /// 422, which refuses a session interval as too short and says in
+    /// `Min-SE` what would be accepted (RFC 4028 §6).
+    pub const SESSION_INTERVAL_TOO_SMALL: Self = Self(422);
     /// 491, which §14.2 answers an INVITE that crossed one of our own inside
     /// the same dialog with.
     pub const REQUEST_PENDING: Self = Self(491);

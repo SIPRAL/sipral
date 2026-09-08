@@ -55,6 +55,9 @@ pub struct Account {
     /// `Clone`, so that the password exists once however many places name it.
     pub(crate) credentials: Option<Arc<Credentials>>,
     pub(crate) expires: Duration,
+    /// The session interval to ask for on a call (RFC 4028). `None` asks for
+    /// none, and takes one only if the far end insists.
+    pub(crate) session_interval: Option<Duration>,
     pub(crate) instance_id: Option<Box<str>>,
     pub(crate) transport: TransportId,
     pub(crate) remote: SocketAddr,
@@ -83,6 +86,7 @@ impl Account {
             display_name: None,
             credentials: None,
             expires: DEFAULT_EXPIRES,
+            session_interval: Some(crate::timers::RECOMMENDED),
             instance_id: None,
             transport,
             remote,
@@ -135,6 +139,19 @@ impl Account {
     #[must_use]
     pub fn instance_id(mut self, urn: &str) -> Self {
         self.instance_id = Some(Box::from(urn));
+        self
+    }
+
+    /// How long a call may go without a refresh before it is hung up
+    /// (RFC 4028 §4).
+    ///
+    /// Thirty minutes by default, which is the value §4 recommends. `None`
+    /// asks for no timer at all — the far end may still impose one, and then
+    /// it is honoured, because refusing to refresh a session the other end is
+    /// timing is a call that drops for no visible reason.
+    #[must_use]
+    pub const fn session_interval(mut self, interval: Option<Duration>) -> Self {
+        self.session_interval = interval;
         self
     }
 
