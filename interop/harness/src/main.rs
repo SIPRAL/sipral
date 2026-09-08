@@ -16,6 +16,7 @@
 //! does not have to read the log to know.
 
 mod media;
+mod pair;
 
 use std::env;
 use std::net::SocketAddr;
@@ -94,6 +95,21 @@ fn main() -> ExitCode {
             }
         }
     }
+    // only when a second account is named: it needs two registrations on the
+    // same server, and one of them has to have been left with a wide codec list
+    if let (Ok(wide_user), Ok(wide_pass)) =
+        (env::var("SIPRAL_USER_WIDE"), env::var("SIPRAL_PASS_WIDE"))
+        && (wanted.is_empty() || wanted.split(',').any(|name| name.trim() == "inbound"))
+    {
+        match pair::run(&server, remote, &wide_user, &wide_pass, &user, &pass) {
+            Ok(said) => println!("  pass  inbound, narrowed{said}"),
+            Err(why) => {
+                println!("  FAIL  inbound, narrowed — {why}");
+                failures += 1;
+            }
+        }
+    }
+
     if failures == 0 {
         println!("every flow passed");
         return ExitCode::SUCCESS;
@@ -603,7 +619,7 @@ fn run(
 /// Binding to a wildcard gives back `0.0.0.0`, and a registrar told to send
 /// calls there will send them nowhere. The address that reaches the lab is the
 /// one on the route to it.
-fn advertised(local: SocketAddr, remote: SocketAddr) -> SocketAddr {
+pub(crate) fn advertised(local: SocketAddr, remote: SocketAddr) -> SocketAddr {
     if local.ip().is_unspecified() {
         return SocketAddr::new(route_to(remote), local.port());
     }
@@ -646,7 +662,7 @@ fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
         .next()
 }
 
-fn uri(text: &str) -> Result<Uri, String> {
+pub(crate) fn uri(text: &str) -> Result<Uri, String> {
     Uri::parse_str(text).map_err(|_| format!("{text} is not a URI"))
 }
 
