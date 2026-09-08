@@ -20,13 +20,61 @@ use super::error::SdpError;
 use super::media::MediaDescription;
 use super::session::{Attribute, Connection, Origin, SessionDescription, Timing};
 
+/// Bounds that stop a hostile peer from making the parser do unbounded work.
+///
+/// A body arrives from a stranger, inside a message that a proxy may have
+/// grown on the way, and every line of it turns into an allocation. The header
+/// parser has had bounds since it was written ([`crate::msg::Limits`]); this is
+/// the same idea one layer down.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Largest body accepted.
+    pub max_body_bytes: u32,
+    /// Most `m=` blocks accepted.
+    pub max_media: u16,
+    /// Most `a=` lines accepted in the whole description, session level and
+    /// media level together — the product of two per-block bounds is not a
+    /// bound.
+    pub max_attributes: u16,
+}
+
+impl Limits {
+    /// The defaults: 16 KiB, 16 streams, 256 attributes. Room for a
+    /// description carrying ICE candidates on a handful of streams, and
+    /// nothing like room for a megabyte of `a=` lines.
+    pub const DEFAULT: Self = Self {
+        max_body_bytes: 16_384,
+        max_media: 16,
+        max_attributes: 256,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Read a session description.
 ///
 /// # Errors
 /// See [`SdpError`].
 pub fn parse(bytes: &[u8]) -> Result<SessionDescription, SdpError> {
+    parse_with_limits(bytes, Limits::DEFAULT)
+}
+
+/// [`parse`], with bounds of your own.
+///
+/// # Errors
+/// See [`SdpError`].
+pub fn parse_with_limits(bytes: &[u8], limits: Limits) -> Result<SessionDescription, SdpError> {
+    if u32::try_from(bytes.len()).unwrap_or(u32::MAX) > limits.max_body_bytes {
+        return Err(SdpError::BodyTooLarge {
+            limit: limits.max_body_bytes,
+        });
+    }
     let text = core::str::from_utf8(bytes).map_err(|_| SdpError::NotUtf8)?;
-    Parser::new().run(text)
+    Parser::new().run(text, limits)
 }
 
 /// Where each type letter may appear at session level. The order is §5's, and
@@ -69,6 +117,7 @@ struct Parser {
     session: SessionFields,
     media: Vec<MediaDescription>,
     rank: u8,
+    attributes: usize,
 }
 
 #[derive(Default)]
@@ -105,10 +154,11 @@ impl Parser {
             },
             media: Vec::new(),
             rank: 0,
+            attributes: 0,
         }
     }
 
-    fn run(mut self, text: &str) -> Result<SessionDescription, SdpError> {
+    fn run(mut self, text: &str, limits: Limits) -> Result<SessionDescription, SdpError> {
         if text.trim().is_empty() {
             return Err(SdpError::Empty);
         }
@@ -121,7 +171,20 @@ impl Parser {
                 continue;
             }
             let (kind, value) = split_line(line, number)?;
+            if kind == 'a' {
+                self.attributes += 1;
+                if self.attributes > limits.max_attributes as usize {
+                    return Err(SdpError::TooManyAttributes {
+                        limit: limits.max_attributes,
+                    });
+                }
+            }
             if kind == 'm' {
+                if self.media.len() >= limits.max_media as usize {
+                    return Err(SdpError::TooManyStreams {
+                        limit: limits.max_media,
+                    });
+                }
                 self.rank = 0;
                 self.media.push(media_line(value, number)?);
                 continue;
@@ -318,7 +381,7 @@ fn number16(value: &str, line: usize) -> Result<u16, SdpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{Limits, parse, parse_with_limits};
     use crate::sdp::{Direction, SdpError};
 
     const OFFER: &str = "v=0\r\n\
@@ -502,6 +565,82 @@ m=audio 49170 RTP/AVP 0\r\n";
         assert_eq!(
             parse(b"v=0\r\no=- x 1 IN IP4 192.0.2.1\r\n").unwrap_err(),
             SdpError::BadNumber { line: 2 }
+        );
+    }
+
+    #[test]
+    fn limits_are_enforced() {
+        let small = Limits {
+            max_body_bytes: 8,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(OFFER.as_bytes(), small).unwrap_err(),
+            SdpError::BodyTooLarge { limit: 8 }
+        );
+
+        let few = Limits {
+            max_media: 1,
+            ..Limits::DEFAULT
+        };
+        let two_streams = format!("{OFFER}m=video 51372 RTP/AVP 31\r\n");
+        assert_eq!(
+            parse_with_limits(two_streams.as_bytes(), few).unwrap_err(),
+            SdpError::TooManyStreams { limit: 1 }
+        );
+        assert!(parse_with_limits(OFFER.as_bytes(), few).is_ok(), "one fits");
+
+        let narrow = Limits {
+            max_attributes: 3,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(OFFER.as_bytes(), narrow).unwrap_err(),
+            SdpError::TooManyAttributes { limit: 3 }
+        );
+    }
+
+    #[test]
+    fn the_attribute_bound_counts_the_whole_description_not_one_block() {
+        // one attribute at session level and two on each of four streams
+        let body = "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+a=sendrecv\r\n\
+m=audio 5000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n\
+m=audio 5002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n\
+m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n\
+m=audio 5006 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n";
+        let nine = Limits {
+            max_attributes: 9,
+            ..Limits::DEFAULT
+        };
+        assert!(parse_with_limits(body.as_bytes(), nine).is_ok());
+        let eight = Limits {
+            max_attributes: 8,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(body.as_bytes(), eight).unwrap_err(),
+            SdpError::TooManyAttributes { limit: 8 }
+        );
+    }
+
+    #[test]
+    fn the_default_bounds_take_what_a_call_actually_carries() {
+        assert!(parse(OFFER.as_bytes()).is_ok());
+        // and refuse what no call carries: a body of nothing but attributes
+        let flood = format!("{OFFER}{}", "a=x\r\n".repeat(1000));
+        assert_eq!(
+            parse(flood.as_bytes()).unwrap_err(),
+            SdpError::TooManyAttributes { limit: 256 }
+        );
+        let long = format!("{OFFER}a={}\r\n", "x".repeat(20_000));
+        assert_eq!(
+            parse(long.as_bytes()).unwrap_err(),
+            SdpError::BodyTooLarge { limit: 16_384 }
         );
     }
 

@@ -13,6 +13,10 @@ version = "0.0.1"
 [[package]]
 name = "sipral-ffi"
 version = "0.0.1"
+dependencies = [
+ "sipral-core",
+ "sipral-ua",
+]
 
 [[package]]
 name = "sipral-headless"
@@ -37,6 +41,9 @@ version = "0.0.1"
 [[package]]
 name = "sipral-nat"
 version = "0.0.1"
+dependencies = [
+ "sipral-core",
+]
 
 [[package]]
 name = "sipral-rtp"

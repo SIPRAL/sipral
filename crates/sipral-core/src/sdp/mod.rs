@@ -19,15 +19,24 @@
 //! No policy lives here. Which codecs to offer, which to keep, whether to put
 //! a call on hold — all of it arrives as arguments and none of it is decided
 //! here.
+//!
+//! [`MediaCapabilities`] and [`MediaPlan`] also live here rather than in a
+//! media crate, because they are the two ends of this negotiation seen from
+//! outside: what to write into an offer, and what the answer settled on.
 
 mod answer;
 mod error;
 mod media;
 mod parse;
+mod plan;
 mod session;
 
 pub use answer::{AcceptedStream, StreamAnswer};
 pub use error::SdpError;
 pub use media::{Direction, MediaDescription, RtpMap};
-pub use parse::parse;
+pub use parse::{Limits, parse, parse_with_limits};
+pub use plan::{
+    Crypto, Keying, MediaCapabilities, MediaPlan, NegotiatedCodec, RtcpPlan, SrtpSupport,
+    static_rtpmap,
+};
 pub use session::{Attribute, Connection, Origin, SessionDescription, Timing};

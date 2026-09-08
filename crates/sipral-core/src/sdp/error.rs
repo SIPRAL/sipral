@@ -67,6 +67,63 @@ pub enum SdpError {
         /// Which stream, counted from zero.
         stream: usize,
     },
+    /// The body is longer than the configured bound.
+    BodyTooLarge {
+        /// The bound that was exceeded.
+        limit: u32,
+    },
+    /// More `m=` blocks than the configured bound.
+    TooManyStreams {
+        /// The bound that was exceeded.
+        limit: u16,
+    },
+    /// More `a=` lines than the configured bound.
+    TooManyAttributes {
+        /// The bound that was exceeded.
+        limit: u16,
+    },
+    /// A plan was asked for a stream one of the two descriptions does not
+    /// have.
+    NoSuchStream {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
+    /// Two descriptions of one session with different numbers of streams.
+    /// RFC 3264 §6 matches them up by position, so there is no way to tell
+    /// which stream is which.
+    StreamMismatch {
+        /// How many this end wrote.
+        local: usize,
+        /// How many the peer wrote.
+        remote: usize,
+    },
+    /// A stream whose `c=` is a host name rather than an address. Resolving it
+    /// is I/O, and nothing here does I/O.
+    NoAddress {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
+    /// A stream both ends accepted with no codec in common, which should have
+    /// been a rejected stream instead.
+    NoCodec {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
+    /// An `a=crypto` in one description that answers nothing in the other.
+    /// RFC 4568 §5.1.2 has the answer carry "the tag and crypto-suite from the
+    /// accepted crypto attribute in the offer", so a tag that was never
+    /// offered means the two ends are not talking about the same key.
+    CryptoNotOffered {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
+    /// A stream on a secure profile that ended up with no keying material at
+    /// all. Sending in the clear because the keys did not arrive is the one
+    /// outcome worse than dropping the stream.
+    CryptoMissing {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
 }
 
 impl fmt::Display for SdpError {
@@ -91,6 +148,23 @@ impl fmt::Display for SdpError {
             ),
             Self::NoCommonFormat { stream } => {
                 write!(f, "stream {stream} was accepted with no offered format")
+            }
+            Self::BodyTooLarge { limit } => write!(f, "body exceeds {limit} bytes"),
+            Self::TooManyStreams { limit } => write!(f, "more than {limit} media descriptions"),
+            Self::TooManyAttributes { limit } => write!(f, "more than {limit} attributes"),
+            Self::NoSuchStream { stream } => write!(f, "there is no stream {stream}"),
+            Self::StreamMismatch { local, remote } => {
+                write!(f, "we describe {local} streams and the peer {remote}")
+            }
+            Self::NoAddress { stream } => {
+                write!(f, "stream {stream} has no connection address")
+            }
+            Self::NoCodec { stream } => write!(f, "stream {stream} settled on no codec"),
+            Self::CryptoNotOffered { stream } => {
+                write!(f, "stream {stream} names keys that were never offered")
+            }
+            Self::CryptoMissing { stream } => {
+                write!(f, "stream {stream} is secured and has no keys")
             }
         }
     }
