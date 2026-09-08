@@ -13,6 +13,12 @@ categories.workspace = true
 publish.workspace = true
 
 [dependencies]
+# libopus, vendored and built by opusic-sys. Pinned exactly: this is the one
+# component of the audio path that is linked rather than written, and the
+# version that gets built is a fact worth being able to point at.
+# `build-bindgen` stays off — opusic-sys ships generated bindings, and turning
+# it on would pull bindgen and clang into the build for no gain.
+opus = "=0.4.0"
 
 [lints]
 workspace = true

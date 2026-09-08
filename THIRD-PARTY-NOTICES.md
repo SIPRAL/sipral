@@ -9,10 +9,81 @@ Ship this file, or an equivalent notice screen, with any binary that contains
 Sipral. Both licence arms require it, because the components below require it
 themselves.
 
-**Sipral has no third-party dependencies at this commit.** The list is empty on
-purpose: the protocol core is written from the RFCs. Components are added only
-as the phases in `docs/10-roadmap.md` reach them, and each addition lands here in
-the same commit that adds it to a `Cargo.toml`.
+The protocol core is written from the RFCs and depends on nothing. Components
+are added only as the phases in `docs/10-roadmap.md` reach them, and each
+addition lands here in the same commit that adds it to a `Cargo.toml`.
+
+## Components linked into Sipral
+
+### Opus
+
+`sipral-media` links libopus. It is the only codec in that crate that is not
+written in-tree, for the reason `docs/05-media.md` gives: a competitive Opus
+implementation is years of signal-processing work, and the reference one is
+permissively licensed. Three components, one chain, each licence read from the
+component's own file:
+
+| Component | What it is | Licence |
+|---|---|---|
+| `opus` 0.4.0 | safe Rust bindings, the only thing `sipral-media` names | MIT OR Apache-2.0 |
+| `opusic-sys` 0.7.5 | the raw declarations, and the build that produces the library | BSD-3-Clause |
+| libopus 1.6.1 | the codec itself, vendored inside `opusic-sys` | BSD-3-Clause |
+
+The `opus` crate declares its licence in the deprecated `MIT/Apache-2.0` form,
+which is the dual licence and is read as such; its own `LICENSE-MIT` and
+`LICENSE-APACHE` files are both present.
+
+libopus's `COPYING` is a **single BSD-3-Clause block**, not one licence per
+contributor. Its copyright line reads:
+
+> Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin,
+> Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding,
+> Erik de Castro Lopo, Mozilla, Amazon
+
+So one reproduction of that notice and the three BSD conditions discharges the
+obligation for all of them at once. `opusic-sys` ships the same block as its
+own `LICENSE`. A binary containing Sipral must reproduce it, which is what the
+"or an equivalent notice screen" at the top of this file means.
+
+`opusic-sys` builds the vendored source with CMake; a build host needs `cmake`
+on its path. Its `build-bindgen` feature is deliberately left off — the
+bindings ship pre-generated, and enabling it would pull `bindgen` and a
+libclang dependency into every build for nothing.
+
+#### Patent position
+
+This is the question a commercial licensee's lawyer asks, so it is written
+down rather than assumed.
+
+libopus's `COPYING` points at three IPR disclosures on the IETF datatracker:
+Xiph.Org (1524), Broadcom (1526) and Microsoft (1914). The Xiph.Org and
+Broadcom grants are word for word the same: a perpetual, worldwide,
+non-exclusive, no-charge, royalty-free, irrevocable licence to make, have made,
+use, offer to sell, sell, import, transfer, run, modify and reproduce any
+implementation that complies with the specification. Both terminate
+retroactively if the licensee files a patent infringement claim against an
+implementation — defensive termination, and the reason the grants are safe to
+rely on. Microsoft's grant, which came with its purchase of Skype, is worded
+differently and split between the decoder specification and the reference
+implementation, but is likewise perpetual, worldwide, no-charge, royalty-free
+and irrevocable, and terminates on litigation or on an attempt to license the
+same claims on a royalty-bearing basis.
+
+Four companies that did not take part in developing Opus — Qualcomm, Huawei,
+France Telecom and Ericsson — filed IPR disclosures with potentially
+royalty-bearing terms. The only statement worth recording about those is the
+one that is attributable: the licence page at `opus-codec.org/license` states
+that external counsel Dergosits & Noah advised the Opus authors that Opus can
+be implemented without needing to license the patents disclosed by those four.
+That is advice given to them, not to this project, and it is recorded here as
+what it is. IETF rules require a disclosure to name actual patent numbers, so a
+licensee who needs more than that can have their own counsel read them.
+
+#### Build-time only
+
+`cmake` 0.1.58, `cc` 1.4.5, `shlex` 2.0.1 and `find-msvc-tools` 0.1.12 arrive
+through `opusic-sys`. All four are MIT OR Apache-2.0, all four run during the
+build, and none of them is linked into anything that ships.
 
 ## Allowed licences
 
@@ -32,7 +103,6 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 
 | Component | Use | Licence |
 |---|---|---|
-| Opus | wideband codec | BSD-3-Clause, with patent grants from Xiph, Broadcom and Microsoft |
 | libsrtp2 | SRTP | BSD-3-Clause (Cisco) |
 | webrtc-audio-processing | AEC3, AGC, noise suppression | BSD-3-Clause |
 | sippy/libg722 | G.722 | CMU 1993 portion unrestricted; Sippy Software portion BSD-2-Clause with attribution |

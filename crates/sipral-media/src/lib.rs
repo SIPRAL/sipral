@@ -11,6 +11,12 @@
 //! [`drift`] to keep two clocks that disagree from emptying a buffer over the
 //! length of a call, and [`mix`] for a conference leg or a local tone.
 //!
+//! [`opus`] is the exception to all of that: the wideband codec worth
+//! defaulting to, linked rather than written, wrapped here so that libopus
+//! stops at this crate's edge. It brings its own concealment and its own
+//! forward error correction, which are better than [`plc`]'s and are used
+//! instead of it on an Opus stream.
+//!
 //! [`vad`] decides whether a frame is speech or a pause, which the jitter
 //! buffer's adjustment schedule and [`comfort_noise`]'s silence suppression
 //! both need. [`comfort_noise`] is RFC 3389: the payload a carrier expects
@@ -42,6 +48,7 @@ pub mod comfort_noise;
 pub mod drift;
 pub mod g711;
 pub mod mix;
+pub mod opus;
 pub mod plc;
 pub mod processor;
 pub mod resample;
