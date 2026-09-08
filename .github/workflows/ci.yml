@@ -85,18 +85,17 @@ jobs:
           wait_for freeswitch "Started Profile lab" \
             || echo "lab profile not seen in the log; continuing to the flows anyway"
           wait_for asterisk "Asterisk Ready"
-      # plain docker run, joining the proxy's namespace directly: asking
-      # Compose to do it restarts the proxy first and invalidates the very
-      # namespace the capture is trying to enter. The container name is fixed
-      # because compose.yaml names the project
+      # On the host's bridge, not inside a container. Joining the proxy's
+      # network namespace sees only the proxy's own traffic, so a flow that
+      # talks straight to Asterisk is invisible — which is exactly the flow
+      # that failed the first time it ran, with nothing to look at.
       - name: start the capture
         working-directory: interop
         run: |
-          docker run -d --name sipral-capture \
-            --network container:sipral-interop-kamailio-1 \
-            --cap-add NET_ADMIN --cap-add NET_RAW \
-            -v "$PWD/pcap:/pcap" alpine:3.22 \
-            sh -c 'apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap'
+          bridge="br-$(docker network inspect sipral-interop_lab -f '{{.Id}}' | cut -c1-12)"
+          ip link show "$bridge"
+          sudo tcpdump -i "$bridge" -s 0 -U -w pcap/lab.pcap >/dev/null 2>&1 &
+          sleep 2
       # a glibc image, because the runner builds against glibc and the proxy's
       # own image is musl — the binary is not portable between them, and the
       # error when it is not is "no such file or directory" for a file that is
@@ -124,7 +123,9 @@ jobs:
         if: always()
         working-directory: interop
         run: |
-          docker stop sipral-capture >/dev/null 2>&1 || true
+          sudo pkill -INT tcpdump >/dev/null 2>&1 || true
+          sleep 1
+          sudo chmod a+r pcap/lab.pcap 2>/dev/null || true
           docker compose down
       - uses: actions/upload-artifact@v4
         if: always()
