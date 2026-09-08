@@ -21,7 +21,8 @@ name: sipral-interop
 services:
   kamailio:
     image: ghcr.io/kamailio/kamailio-ci:6.1.4-alpine
-    command: ["kamailio", "-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
+    # no command: the image's own entrypoint knows how to start it, and
+    # replacing that is how it ends up running and then quietly exiting
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
     networks: [lab]
