@@ -3,11 +3,25 @@
 
 //! Audio for a SIP call.
 //!
-//! What is here is G.711: the two companding laws every carrier still accepts,
-//! in both directions, with the arithmetic a caller needs to cut a frame.
+//! What is here is G.711 — the two companding laws every carrier still
+//! accepts, in both directions, with the arithmetic a caller needs to cut a
+//! frame — the concealment that fills the frames the network loses on the way,
+//! and the pipeline that sits between a codec and whatever produces or
+//! consumes samples: [`resample`] between the device rate and the codec rate,
+//! [`drift`] to keep two clocks that disagree from emptying a buffer over the
+//! length of a call, and [`mix`] for a conference leg or a local tone.
 //!
-//! Nothing here opens a device or a socket. Samples arrive in a slice and
-//! leave in one, so the whole crate is testable without either.
+//! [`vad`] decides whether a frame is speech or a pause, which the jitter
+//! buffer's adjustment schedule and [`comfort_noise`]'s silence suppression
+//! both need. [`comfort_noise`] is RFC 3389: the payload a carrier expects
+//! during a suppressed silence, and the noise generated from it on receive.
+//! [`processor`] is the seam echo cancellation, gain control and noise
+//! suppression attach at — not implemented in this crate, and the module
+//! docs say why.
+//!
+//! Nothing here opens a device or a socket, and nothing allocates once it has
+//! been built. Samples arrive in a slice and leave in one, so the whole crate
+//! is testable without either.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
@@ -24,4 +38,11 @@
     )
 )]
 
+pub mod comfort_noise;
+pub mod drift;
 pub mod g711;
+pub mod mix;
+pub mod plc;
+pub mod processor;
+pub mod resample;
+pub mod vad;
