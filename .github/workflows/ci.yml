@@ -46,19 +46,29 @@ jobs:
         run: |
           mkdir -p pcap
           docker compose up -d
-      - name: wait for the proxy to answer
+      # an active probe rather than a fixed sleep: FreeSWITCH is much the
+      # slowest of the three to open its socket, and how slow depends on the
+      # runner
+      - name: wait for the servers to listen
         working-directory: interop
         run: |
-          for _ in $(seq 1 60); do
-            if docker compose exec -T kamailio kamcmd core.version >/dev/null 2>&1; then
-              echo "kamailio is up"
-              exit 0
+          for service in kamailio freeswitch asterisk; do
+            ready=""
+            for _ in $(seq 1 60); do
+              if docker compose exec -T "$service" sh -c \
+                  'netstat -lun 2>/dev/null | grep -q ":5060"'; then
+                ready=yes
+                break
+              fi
+              sleep 2
+            done
+            if [ -z "$ready" ]; then
+              echo "$service never opened 5060"
+              docker compose logs --no-color "$service" | tail -50
+              exit 1
             fi
-            sleep 2
+            echo "$service is listening"
           done
-          echo "kamailio never came up"
-          docker compose logs
-          exit 1
       - name: register, call, hold, resume
         working-directory: interop
         run: |

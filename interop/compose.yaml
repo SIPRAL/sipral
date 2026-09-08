@@ -47,6 +47,9 @@ services:
     volumes:
       - ./pcap:/pcap
     depends_on: [kamailio]
+    # it joins kamailio's network namespace, so it cannot start before that
+    # namespace exists; a proxy that took a moment to boot must not fail the run
+    restart: on-failure
 
 networks:
   lab:
