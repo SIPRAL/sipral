@@ -139,6 +139,9 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
+    /// 488, which refuses a session description rather than the request that
+    /// carried it (RFC 3264 §6, RFC 3311 §5.2).
+    pub const NOT_ACCEPTABLE_HERE: Self = Self(488);
     /// 491, which §14.2 answers an INVITE that crossed one of our own inside
     /// the same dialog with.
     pub const REQUEST_PENDING: Self = Self(491);

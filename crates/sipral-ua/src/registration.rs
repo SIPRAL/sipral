@@ -143,7 +143,7 @@ pub(crate) fn backoff_delay(failures: u32, entropy: &[u8]) -> Duration {
 }
 
 /// Thirty-two bits off the front of a hexadecimal token.
-fn spread(entropy: &[u8]) -> u32 {
+pub(crate) fn spread(entropy: &[u8]) -> u32 {
     let mut value = 0_u32;
     for byte in entropy.iter().take(8) {
         let digit = match *byte {

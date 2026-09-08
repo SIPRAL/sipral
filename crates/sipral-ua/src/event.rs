@@ -9,6 +9,7 @@
 //! policy for arrives already decided: a registration that is live, one that
 //! is being retried and when, one that will never succeed and why.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use sipral_core::endpoint::Event;
@@ -16,6 +17,7 @@ use sipral_core::msg::{OwnedMessage, StatusCode};
 
 use crate::account::AccountId;
 use crate::call::{CallEndReason, CallHandle, CallState};
+use crate::session::Hold;
 
 /// Where a registration is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -215,6 +217,51 @@ pub enum UaEvent {
         response: Option<OwnedMessage>,
         /// Whether the ACK is waiting for a session description.
         answer_wanted: bool,
+    },
+    /// The session inside a live call changed: a hold, a resume, or an offer
+    /// either end made and had accepted.
+    ///
+    /// Both descriptions ride along because the user agent writes some of them
+    /// itself — the held version of an offer is derived here, from RFC 3264
+    /// §8.4, and this is the only place the application sees it.
+    SessionChanged {
+        /// The call.
+        call: CallHandle,
+        /// Which way it is now held.
+        hold: Hold,
+        /// What this end is describing.
+        local: Option<Arc<[u8]>>,
+        /// And what the far end is.
+        remote: Option<Arc<[u8]>>,
+    },
+    /// The far end offered a change this layer has no policy for: a codec
+    /// swap, a stream added, a body that is not a session description.
+    ///
+    /// The transaction is held open for it. Answer with
+    /// [`UserAgent::accept_reoffer`](crate::UserAgent::accept_reoffer) or
+    /// refuse with
+    /// [`UserAgent::reject_reoffer`](crate::UserAgent::reject_reoffer) — a
+    /// re-INVITE nobody answers is retransmitted and then ends the call.
+    Reoffer {
+        /// The call.
+        call: CallHandle,
+        /// The re-INVITE or UPDATE, whole.
+        request: OwnedMessage,
+    },
+    /// A change this end offered was refused, or will not be answered.
+    ///
+    /// §14.1: the session stands exactly as it was. `retry_in` is set only for
+    /// a 491, where two offers crossed and this one is going out again by
+    /// itself when the wait is over.
+    SessionChangeFailed {
+        /// The call.
+        call: CallHandle,
+        /// The status, when one arrived.
+        status: Option<StatusCode>,
+        /// When the change goes out again, if it is going to.
+        retry_in: Option<Duration>,
+        /// The refusal, whole.
+        response: Option<OwnedMessage>,
     },
     /// The call is over and its handle is about to go stale.
     CallEnded {

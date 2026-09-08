@@ -18,12 +18,17 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{HeaderName, Uri};
-use sipral_core::transaction::{DialogId, InviteClient, InviteServer, TransactionId};
+use sipral_core::sdp::SessionDescription;
+use sipral_core::transaction::{
+    AnyTransactionId, DialogId, InviteClient, InviteServer, TransactionId,
+};
 
 use crate::account::{AccountId, Extra};
+use crate::session::Session;
 
 /// One call the application is talking to.
 ///
@@ -231,9 +236,6 @@ pub(crate) struct Call {
     pub(crate) dialog: Option<DialogId>,
     /// What to do with the siblings this branch may acquire.
     pub(crate) forks: ForkPolicy,
-    /// Whether the INVITE carried an offer, which decides whether the ACK has
-    /// to carry an answer.
-    pub(crate) offered: bool,
     /// Whether the 2xx has been acknowledged.
     pub(crate) acknowledged: bool,
     /// A hangup was asked for and could not go yet: a CANCEL may not leave
@@ -242,19 +244,47 @@ pub(crate) struct Call {
     /// cancel.
     pub(crate) hangup_wanted: bool,
     /// `Contact`, kept because every request inside the dialog needs it and a
-    /// re-INVITE will need it again in 5.3.
+    /// re-INVITE carries it again to refresh the target.
     pub(crate) contact: Box<[u8]>,
     /// The branch this one was forked from, for the events that say so.
     pub(crate) forked_from: Option<CallHandle>,
+    /// What each end has described, and which way it is held.
+    pub(crate) session: Session,
+    /// Whether the far end listed UPDATE in an `Allow` (RFC 3311 §4).
+    pub(crate) update_allowed: bool,
+    /// The session change this end has in flight, or is waiting to try again.
+    pub(crate) offering: Option<Offer>,
+    /// One the far end offered that only the application can answer.
+    pub(crate) answering: Option<Answering>,
+    /// When to offer the change again after a 491 (§14.1, RFC 3311 §5.3).
+    pub(crate) retry_at: Option<Instant>,
+}
+
+/// A session change this end has offered.
+#[derive(Debug)]
+pub(crate) struct Offer {
+    /// The transaction carrying it — a re-INVITE or an UPDATE — while there
+    /// is one. Absent between a 491 and the retry it asks for.
+    pub(crate) transaction: Option<AnyTransactionId>,
+    /// What was offered, kept for that retry and for the moment it is taken.
+    pub(crate) description: SessionDescription,
+    /// The hold this change asks for.
+    pub(crate) held: bool,
+    /// §14.1 says to attempt it once more, not to keep attempting it.
+    pub(crate) retried: bool,
+}
+
+/// One the far end offered, waiting for the application to answer it.
+#[derive(Debug)]
+pub(crate) struct Answering {
+    /// The transaction to answer on.
+    pub(crate) transaction: AnyTransactionId,
+    /// The offer, when it was a session description this stack could read.
+    pub(crate) offer: Option<SessionDescription>,
 }
 
 impl Call {
-    pub(crate) fn outgoing(
-        account: AccountId,
-        forks: ForkPolicy,
-        offered: bool,
-        contact: Box<[u8]>,
-    ) -> Self {
+    pub(crate) fn outgoing(account: AccountId, forks: ForkPolicy, contact: Box<[u8]>) -> Self {
         Self {
             account: Some(account),
             direction: Direction::Outgoing,
@@ -263,11 +293,15 @@ impl Call {
             server: None,
             dialog: None,
             forks,
-            offered,
             acknowledged: false,
             hangup_wanted: false,
             contact,
             forked_from: None,
+            session: Session::default(),
+            update_allowed: false,
+            offering: None,
+            answering: None,
+            retry_at: None,
         }
     }
 
@@ -284,12 +318,15 @@ impl Call {
             server: Some(server),
             dialog: None,
             forks: ForkPolicy::KeepFirst,
-            // the offer, if there is one, is theirs; ours goes in the 200
-            offered: false,
             acknowledged: false,
             hangup_wanted: false,
             contact,
             forked_from: None,
+            session: Session::default(),
+            update_allowed: false,
+            offering: None,
+            answering: None,
+            retry_at: None,
         }
     }
 
@@ -303,11 +340,16 @@ impl Call {
             server: None,
             dialog: None,
             forks: other.forks,
-            offered: other.offered,
             acknowledged: false,
             hangup_wanted: false,
             contact: other.contact.clone(),
             forked_from: Some(forked_from),
+            // the branches of one fork were all offered the same thing
+            session: other.session.clone(),
+            update_allowed: other.update_allowed,
+            offering: None,
+            answering: None,
+            retry_at: None,
         }
     }
 }

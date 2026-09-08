@@ -42,6 +42,8 @@ mod calls;
 mod error;
 mod event;
 mod registration;
+mod renegotiate;
+mod session;
 #[cfg(test)]
 mod tests;
 
@@ -50,6 +52,7 @@ pub use agent::UserAgent;
 pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+pub use session::Hold;
 
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.

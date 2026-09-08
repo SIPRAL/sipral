@@ -12,6 +12,35 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- Hold and resume in `sipral-ua`, and the offers that come after them. Hold is
+  RFC 3264 §8.4's: the description already negotiated, with a stream that was
+  `sendrecv` marked `sendonly` and one that was `recvonly` marked `inactive`,
+  and the `o=` version moved on. The stack writes it, so the application says
+  hold rather than `a=sendonly`, and resume puts back the direction each stream
+  started with rather than assuming `sendrecv`. `Hold` has a flag per
+  direction, because §8.4 holds each one separately; the far end holding us is
+  read off `sendonly`, `inactive`, or the `0.0.0.0` address RFC 2543 used, and
+  reported as `SessionChanged`.
+  Which request carries the change is the dialog's decision first: a confirmed
+  call uses a re-INVITE, which RFC 3311 §5.1 recommends outright, and an early
+  one uses UPDATE, because §14.1 forbids a second INVITE while the first is
+  running — and only when the far end listed UPDATE in an `Allow` (§4), which
+  this end now advertises on its INVITE, on a provisional carrying a
+  description, and on the 2xx.
+  An offer arriving from the far end is answered here when it keeps the streams
+  and the formats that were negotiated, because the answer is then this end's
+  own ports with the direction §6.1 leaves. One that changes the codecs or the
+  stream list arrives as `Reoffer` with the transaction still open, for
+  `accept_reoffer` or `reject_reoffer`; a body that claims to be a session
+  description and is not gets a 488 with the `Warning` §14.2 asks for.
+  Glare is handled from both sides: a 491 carries the wait §14.1 draws and the
+  change goes out again once, and an offer that crosses one of ours is answered
+  491 while one that arrives on top of an unanswered offer of theirs is
+  answered 500 with a drawn `Retry-After` (RFC 3311 §5.2, generalised to both
+  requests).
+- `StatusCode::NOT_ACCEPTABLE_HERE`, the refusal that is about the session
+  description rather than about the request that carried it.
+
 - Calls in `sipral-ua`: place, answer, refuse, hang up, and forks handled
   rather than hidden. A `CallHandle` names one dialog, so an INVITE a proxy
   forked to three phones becomes three calls under one attempt, each reported
@@ -51,6 +80,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   but the endpoint waited for an ACK it would never build, so nothing could be
   offered again for the thirty-two seconds of timer D. §14.1 asks for a change
   refused with 491 to be offered again after two to four.
+- A response to a non-INVITE request `sipral-ua` did not send was dropped
+  instead of being passed through. Anything the application starts through
+  `UserAgent::endpoint` is its own news, and `UaEvent::Unclaimed` promises that
+  nothing is lost on the way through.
 - A re-INVITE could not finish. Its responses were offered to the dialog set
   that follows a forked INVITE, which a re-INVITE has none of, so every answer
   to one — 200, 488, 491 — was dropped in silence and the call could never be

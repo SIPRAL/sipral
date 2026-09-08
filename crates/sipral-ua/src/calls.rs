@@ -33,6 +33,7 @@ use sipral_core::endpoint::{
     DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
+use sipral_core::sdp;
 use sipral_core::transaction::{AnyTransactionId, DialogId, InviteClient, TransactionId};
 
 use crate::account::AccountId;
@@ -42,6 +43,7 @@ use crate::call::{
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::renegotiate::ALLOW;
 
 /// The refusal a call gets when it is hung up before it was answered.
 ///
@@ -72,7 +74,11 @@ impl UserAgent {
             OutgoingRequest::new(Method::Invite, outgoing.target.clone(), transport, remote)
                 .to(&bracketed(&outgoing.target))
                 .from(&config.sender_value())
-                .contact(&contact);
+                .contact(&contact)
+                // RFC 3311 §4: "a UAC compliant to this specification SHOULD
+                // also include an Allow header field in the INVITE request,
+                // listing the method UPDATE"
+                .header(HeaderName::Allow, ALLOW);
         if let Some(ref offer) = outgoing.offer {
             request = request.body(b"application/sdp", Arc::clone(offer));
         }
@@ -83,8 +89,15 @@ impl UserAgent {
         }
 
         let invite = self.endpoint.invite(&request, now)?;
-        let mut call = Call::outgoing(account, outgoing.forks, outgoing.offer.is_some(), contact);
+        let mut call = Call::outgoing(account, outgoing.forks, contact);
         call.invite = Some(invite);
+        if let Some(described) = outgoing
+            .offer
+            .as_deref()
+            .and_then(|sdp| sdp::parse(sdp).ok())
+        {
+            call.session.set_local(described);
+        }
         let handle = self.keep(call);
         self.by_invite.insert(invite, handle);
         self.drain(now);
@@ -112,7 +125,10 @@ impl UserAgent {
             StatusCode::RINGING
         };
         let contact = self.contact_of(call)?;
-        let mut response = OutgoingResponse::new(status).contact(&contact);
+        let mut response = OutgoingResponse::new(status)
+            .contact(&contact)
+            .header(HeaderName::Allow, ALLOW);
+        let described = early.as_deref().and_then(|sdp| sdp::parse(sdp).ok());
         if let Some(sdp) = early {
             response = response.body(b"application/sdp", sdp);
         }
@@ -124,6 +140,9 @@ impl UserAgent {
                 CallState::EarlyMedia
             };
             held.dialog = dialog;
+            if let Some(described) = described {
+                held.session.set_local(described);
+            }
         }
         if let Some(dialog) = dialog {
             self.by_dialog.insert(dialog, call);
@@ -148,7 +167,12 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let transaction = self.answerable(call)?;
         let contact = self.contact_of(call)?;
-        let mut response = OutgoingResponse::new(StatusCode::OK).contact(&contact);
+        // RFC 3311 §4: "a 2xx response SHOULD contain an Allow header field
+        // listing the UPDATE method"
+        let mut response = OutgoingResponse::new(StatusCode::OK)
+            .contact(&contact)
+            .header(HeaderName::Allow, ALLOW);
+        let described = sdp.as_deref().and_then(|sdp| sdp::parse(sdp).ok());
         if let Some(sdp) = sdp {
             response = response.body(b"application/sdp", sdp);
         }
@@ -158,6 +182,12 @@ impl UserAgent {
             // §12.1.1 confirms the dialog here, but the call is not up until
             // the ACK arrives; until then the 2xx is still being retransmitted
             held.state = CallState::Ringing;
+            if let Some(described) = described {
+                // an INVITE that carried nothing is answered with an offer,
+                // and §13.2.2.4 puts the answer to it in the ACK
+                held.session.answer_owed = !held.session.has_remote();
+                held.session.set_local(described);
+            }
         }
         if let Some(dialog) = dialog {
             self.by_dialog.insert(dialog, call);
@@ -206,8 +236,12 @@ impl UserAgent {
         }
         let dialog = held.dialog.ok_or(UaError::WrongState(state))?;
         self.endpoint.ack_2xx(dialog, answer, now)?;
+        let described = answer.and_then(|sdp| sdp::parse(sdp).ok());
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = true;
+            if let Some(described) = described {
+                held.session.set_local(described);
+            }
         }
         self.drain(now);
         Ok(())
@@ -339,6 +373,7 @@ impl UserAgent {
         self.by_server.retain(|_, held| *held != call);
         self.by_dialog.retain(|_, held| *held != call);
         self.by_request.retain(|_, held| *held != call);
+        self.by_offer.retain(|_, held| *held != call);
         self.calls.remove(&call);
     }
 
@@ -485,9 +520,12 @@ impl UserAgent {
             }
             Event::Response { transaction, .. } | Event::RequestFailed { transaction, .. } => {
                 // a BYE, a CANCEL or a PRACK this layer sent. Its answer
-                // changes nothing the application has not already been told
+                // changes nothing the application has not already been told.
+                // Anything else is not ours, and goes on
                 let id = AnyTransactionId::NonInviteClient(transaction);
-                self.by_request.contains_key(&id).then_some(())?;
+                if !self.by_request.contains_key(&id) {
+                    return Some(event);
+                }
                 None
             }
             Event::TransactionTerminated { transaction, .. } => {
@@ -533,6 +571,12 @@ impl UserAgent {
                 );
                 let call = self.keep(Call::incoming(account, transaction, contact));
                 self.by_server.insert(transaction, call);
+                self.note_allow(call, &request.as_raw());
+                if let Some(offer) = sdp::parse(request.as_raw().body()).ok()
+                    && let Some(held) = self.calls.get_mut(&call)
+                {
+                    held.session.set_remote(offer);
+                }
                 self.events.push_back(UaEvent::IncomingCall {
                     call,
                     account,
@@ -547,17 +591,28 @@ impl UserAgent {
                 self.finish(call, CallEndReason::Cancelled, None, None);
                 None
             }
-            Event::IncomingAck { dialog, .. } => {
+            Event::IncomingAck {
+                dialog,
+                ref request,
+            } => {
                 let call = self.by_dialog.get(&dialog).copied()?;
+                // a re-INVITE is acknowledged here too, and a call is only
+                // confirmed once
+                let first = self.calls.get(&call).is_some_and(|held| !held.acknowledged);
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.state = CallState::Confirmed;
                     held.acknowledged = true;
                 }
-                self.events.push_back(UaEvent::CallConfirmed {
-                    call,
-                    response: None,
-                    answer_wanted: false,
-                });
+                if first {
+                    self.events.push_back(UaEvent::CallConfirmed {
+                        call,
+                        response: None,
+                        answer_wanted: false,
+                    });
+                }
+                // the answer to an offer this end put in a 2xx travels here
+                let request = request.clone();
+                self.on_ack(call, &request);
                 None
             }
             Event::IncomingBye {
@@ -616,6 +671,18 @@ impl UserAgent {
         Some(handle)
     }
 
+    /// What a response the far end sent says about the session and about what
+    /// the far end can be asked to do.
+    fn note_session(&mut self, call: CallHandle, response: &OwnedMessage) {
+        let raw = response.as_raw();
+        self.note_allow(call, &raw);
+        if let Ok(described) = sdp::parse(raw.body())
+            && let Some(held) = self.calls.get_mut(&call)
+        {
+            held.session.set_remote(described);
+        }
+    }
+
     /// Whether the INVITE that would open this call is still running.
     fn still_calling(&self, call: CallHandle) -> bool {
         self.calls.get(&call).is_some_and(|held| {
@@ -651,6 +718,7 @@ impl UserAgent {
     }
 
     fn on_progress(&mut self, call: CallHandle, status: StatusCode, response: &OwnedMessage) {
+        self.note_session(call, response);
         let early = !response.as_raw().body().is_empty();
         let state = if early {
             CallState::EarlyMedia
@@ -682,10 +750,15 @@ impl UserAgent {
         response: &OwnedMessage,
         now: Instant,
     ) {
+        self.note_session(call, response);
         let Some(held) = self.calls.get(&call) else {
             return;
         };
-        let (offered, forks, forked) = (held.offered, held.forks, held.forked_from.is_some());
+        let (offered, forks, forked) = (
+            held.session.has_local(),
+            held.forks,
+            held.forked_from.is_some(),
+        );
 
         // §13.2.2.4: the ACK goes now unless it has to carry an answer that
         // only the application has. A 2xx nobody acknowledges is retransmitted

@@ -11,6 +11,7 @@
 use core::fmt;
 
 use sipral_core::endpoint::{AckError, RespondError, SendError};
+use sipral_core::sdp::SdpError;
 
 use crate::call::CallState;
 
@@ -31,6 +32,17 @@ pub enum UaError {
     Respond(RespondError),
     /// The 2xx could not be acknowledged.
     Ack(AckError),
+    /// Nothing has been described yet, so there is nothing to hold, resume or
+    /// re-offer.
+    NoSession,
+    /// A session change is already running. §14.1 allows one INVITE at a time
+    /// inside a dialog, and RFC 3311 §5.2 says the same for UPDATE.
+    ChangeInProgress,
+    /// Nothing can carry the change: the call is not up, so §14.1 rules out a
+    /// re-INVITE, and the far end never advertised UPDATE (RFC 3311 §4).
+    CannotRenegotiate,
+    /// The session description could not be read.
+    Sdp(SdpError),
 }
 
 impl fmt::Display for UaError {
@@ -42,6 +54,12 @@ impl fmt::Display for UaError {
             Self::Send(ref error) => write!(f, "cannot send it: {error}"),
             Self::Respond(ref error) => write!(f, "cannot answer it: {error}"),
             Self::Ack(ref error) => write!(f, "cannot acknowledge it: {error}"),
+            Self::NoSession => f.write_str("nothing has been described yet"),
+            Self::ChangeInProgress => f.write_str("a session change is already running"),
+            Self::CannotRenegotiate => {
+                f.write_str("the call is not up and the far end cannot take an UPDATE")
+            }
+            Self::Sdp(ref error) => write!(f, "cannot read the description: {error}"),
         }
     }
 }

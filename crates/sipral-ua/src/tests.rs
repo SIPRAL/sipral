@@ -19,6 +19,7 @@ use crate::account::{Account, AccountId};
 use crate::agent::UserAgent;
 use crate::call::{CallEndReason, CallHandle, CallState, ForkPolicy, OutgoingCall};
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
+use crate::session::Hold;
 use crate::{
     Credentials, EndpointConfig, Input, StatusCode, TransportId, TransportProtocol, UaError, Uri,
 };
@@ -919,13 +920,21 @@ Contact: <sip:bob@192.0.2.9>\r\n"
     out
 }
 
-/// A request from the far end inside a dialog we answered, mirroring the
-/// tags of the 200 we sent.
-fn in_dialog(ours: &[u8], method: &str, branch: &str, cseq: u32) -> Vec<u8> {
-    let from = String::from_utf8_lossy(&header(ours, HeaderName::From)).into_owned();
-    let to = String::from_utf8_lossy(&header(ours, HeaderName::To)).into_owned();
-    let call_id = String::from_utf8_lossy(&header(ours, HeaderName::CallId)).into_owned();
-    format!(
+fn text(bytes: &[u8], name: HeaderName<'_>) -> String {
+    String::from_utf8_lossy(&header(bytes, name)).into_owned()
+}
+
+/// A request the far end sends inside a dialog.
+fn peer_request(
+    from: &str,
+    to: &str,
+    call_id: &str,
+    method: &str,
+    branch: &str,
+    cseq: u32,
+    body: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut out = format!(
         "{method} sip:alice@192.0.2.1 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
 Max-Forwards: 70\r\n\
@@ -933,10 +942,52 @@ From: {from}\r\n\
 To: {to}\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: {cseq} {method}\r\n\
-Content-Length: 0\r\n\
-\r\n"
+Contact: <sip:bob@192.0.2.9>\r\n"
     )
-    .into_bytes()
+    .into_bytes();
+    match body {
+        Some(sdp) => {
+            out.extend_from_slice(b"Content-Type: application/sdp\r\n");
+            out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", sdp.len()).as_bytes());
+            out.extend_from_slice(sdp);
+        }
+        None => out.extend_from_slice(b"Content-Length: 0\r\n\r\n"),
+    }
+    out
+}
+
+/// A request from the far end inside a dialog we answered, mirroring the
+/// tags of the 200 we sent.
+fn in_dialog(ours: &[u8], method: &str, branch: &str, cseq: u32) -> Vec<u8> {
+    peer_request(
+        &text(ours, HeaderName::From),
+        &text(ours, HeaderName::To),
+        &text(ours, HeaderName::CallId),
+        method,
+        branch,
+        cseq,
+        None,
+    )
+}
+
+/// And one inside a dialog this end opened, where From and To are the other
+/// way round because they are written by whoever sends.
+fn reversed(ours: &[u8], method: &str, branch: &str, cseq: u32, body: Option<&[u8]>) -> Vec<u8> {
+    peer_request(
+        &text(ours, HeaderName::To),
+        &text(ours, HeaderName::From),
+        &text(ours, HeaderName::CallId),
+        method,
+        branch,
+        cseq,
+        body,
+    )
+}
+
+fn body_of(bytes: &[u8]) -> String {
+    with(bytes, |message| {
+        String::from_utf8_lossy(message.body()).into_owned()
+    })
 }
 
 fn ended(agent: &mut UserAgent) -> Option<(CallHandle, CallEndReason)> {
@@ -1538,4 +1589,494 @@ fn a_call_and_a_registration_do_not_confuse_each_other() {
         "the refresh is not disturbed by a call being up"
     );
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+// -- hold, resume, and the offers that follow --------------------------------
+
+/// What the far end sends when it puts us on hold (RFC 3264 §8.4).
+const THEIR_HOLD: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=sendonly\r\n";
+/// The same thing the way RFC 2543 did it, which §8.4 still requires everyone
+/// to understand.
+const THEIR_OLD_HOLD: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 0.0.0.0\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\n";
+/// Their answer to a hold of ours: §6.1 leaves them nothing else.
+const THEIR_RECVONLY: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=recvonly\r\n";
+/// A different codec, which is a renegotiation and not a hold.
+const THEIR_NEW_CODEC: &[u8] = b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 8\r\n";
+
+/// The last thing the agent wrote, for the cases where a 100 Trying goes
+/// first.
+fn last(agent: &mut UserAgent) -> Vec<u8> {
+    transmits(agent).pop().expect("at least one message out")
+}
+
+/// The same response, with an `Allow` that says UPDATE is understood
+/// (RFC 3311 §4).
+fn with_allow(response: &[u8]) -> Vec<u8> {
+    let head = response
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(response.len(), |at| at + 1);
+    let mut out = Vec::with_capacity(response.len() + 40);
+    out.extend_from_slice(&response[..head]);
+    out.extend_from_slice(b"Allow: INVITE, ACK, CANCEL, BYE, UPDATE\r\n");
+    out.extend_from_slice(&response[head..]);
+    out
+}
+
+fn session_changed(agent: &mut UserAgent) -> Option<Hold> {
+    events(agent).into_iter().find_map(|event| match event {
+        UaEvent::SessionChanged { hold, .. } => Some(hold),
+        _ => None,
+    })
+}
+
+/// Place a call, be up, and hold it: the re-INVITE as it went out.
+fn on_hold(agent: &mut UserAgent, account: AccountId, now: Instant) -> (CallHandle, Vec<u8>) {
+    let (call, _) = call_up(agent, account, now);
+    agent.hold(call, now).expect("the re-INVITE goes");
+    (call, sent(agent))
+}
+
+#[test]
+fn a_call_says_it_can_take_an_update() {
+    // RFC 3311 §4: the INVITE and the 2xx both advertise it, because that is
+    // the only way the far end learns an UPDATE is worth sending
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&header(&invite, HeaderName::Allow)).contains("UPDATE"),
+        "the INVITE lists UPDATE"
+    );
+
+    deliver(&mut agent, &incoming_invite("allow1", Some(OFFER)), t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&header(&ok, HeaderName::Allow)).contains("UPDATE"));
+}
+
+#[test]
+fn pressing_hold_offers_the_same_session_with_the_direction_turned_down() {
+    // 8.4: "If the stream to be placed on hold was previously a sendrecv media
+    // stream, it is placed on hold by marking it as sendonly"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+
+    assert!(reinvite.starts_with(b"INVITE sip:bob@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(header(&reinvite, HeaderName::CSeq), b"2 INVITE");
+    // 8.1.1.8 makes it a MUST on anything that can refresh a target
+    assert_eq!(
+        header(&reinvite, HeaderName::Contact),
+        b"<sip:alice@192.0.2.1>"
+    );
+    let offer = body_of(&reinvite);
+    assert!(offer.contains("a=sendonly\r\n"), "{offer}");
+    assert!(offer.contains("m=audio 8000 RTP/AVP 0\r\n"), "{offer}");
+    // RFC 3264 §8: "the version in the origin field MUST increment by one"
+    assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    assert!(ack.starts_with(b"ACK sip:bob@192.0.2.9 SIP/2.0\r\n"));
+    // 13.2.2.4: the ACK takes the CSeq of the request it acknowledges
+    assert_eq!(header(&ack, HeaderName::CSeq), b"2 ACK");
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: true,
+            remote: false
+        })
+    );
+}
+
+#[test]
+fn resuming_puts_back_the_direction_the_stream_started_with() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.resume(call, t0).expect("the re-INVITE goes");
+    let again = sent(&mut agent);
+    let offer = body_of(&again);
+    assert!(offer.contains("a=sendrecv\r\n"), "{offer}");
+    assert!(offer.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"), "{offer}");
+
+    deliver(
+        &mut agent,
+        &answered(&again, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        agent.hold_state(call),
+        Some(Hold {
+            local: false,
+            remote: false
+        })
+    );
+}
+
+#[test]
+fn holding_a_call_that_is_already_held_sends_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("nothing to do");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a hold that is already in place is not a session change"
+    );
+}
+
+#[test]
+fn a_confirmed_call_changes_by_reinvite_even_when_update_is_allowed() {
+    // RFC 3311 §5.1: "Although UPDATE can be used on confirmed dialogs, it is
+    // RECOMMENDED that a re-INVITE be used instead"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mut ok = answered(&invite, 200, "OK", "desk", Some(ANSWER));
+    ok = with_allow(&ok);
+    deliver(&mut agent, &ok, t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("the change goes");
+    let change = sent(&mut agent);
+    assert!(
+        change.starts_with(b"INVITE "),
+        "a confirmed dialog re-INVITEs"
+    );
+}
+
+#[test]
+fn an_early_session_changes_by_update_because_a_second_invite_is_forbidden() {
+    // 14.1: "a UAC MUST NOT initiate a new INVITE transaction within a dialog
+    // while another INVITE transaction is in progress"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let progress = with_allow(&answered(
+        &invite,
+        183,
+        "Session Progress",
+        "desk",
+        Some(ANSWER),
+    ));
+    deliver(&mut agent, &progress, t0);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("the UPDATE goes");
+    let change = sent(&mut agent);
+    assert!(
+        change.starts_with(b"UPDATE sip:bob@192.0.2.9 SIP/2.0\r\n"),
+        "{}",
+        String::from_utf8_lossy(&change)
+    );
+    assert!(body_of(&change).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn an_early_session_cannot_change_when_the_far_end_never_offered_update() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    events(&mut agent);
+
+    assert_eq!(agent.hold(call, t0), Err(UaError::CannotRenegotiate));
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn the_far_end_holding_us_is_answered_and_reported() {
+    // 8.4: "The recipient of an offer for a stream on-hold SHOULD NOT
+    // automatically return an answer with the corresponding stream on hold" —
+    // and 6.1 leaves recvonly as the only answer to sendonly anyway
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "theirhold", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    let body = body_of(&answer);
+    assert!(body.contains("a=recvonly\r\n"), "{body}");
+    assert!(body.contains("m=audio 8000 RTP/AVP 0\r\n"), "{body}");
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: true
+        })
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.remote), Some(true));
+}
+
+#[test]
+fn a_hold_written_the_way_rfc_2543_did_it_is_still_a_hold() {
+    // 8.4: "An agent MUST be capable of receiving SDP with a connection
+    // address of 0.0.0.0"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "oldhold", 1, Some(THEIR_OLD_HOLD)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(agent.hold_state(call).map(|hold| hold.remote), Some(true));
+}
+
+#[test]
+fn an_offer_that_changes_the_codecs_is_the_applications() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .all(|bytes| bytes.starts_with(b"SIP/2.0 100 ")),
+        "nothing is answered on the application's behalf"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Reoffer { .. })),
+        "a codec change needs a device this layer does not have"
+    );
+
+    agent
+        .accept_reoffer(call, Some(ANSWER), t0)
+        .expect("the 200 goes");
+    let answer = sent(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert!(body_of(&answer).contains("m=audio 9000 RTP/AVP 0\r\n"));
+}
+
+#[test]
+fn a_description_that_cannot_be_read_is_refused_with_488_and_a_warning() {
+    // 14.2: "the UAS can reject it by returning a 488 (Not Acceptable Here)
+    // response ... This response SHOULD include a Warning header field"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "junk", 1, Some(b"v=9\r\nnot sdp\r\n")),
+        t0,
+    );
+    let refusal = last(&mut agent);
+    assert!(refusal.starts_with(b"SIP/2.0 488 "));
+    assert!(
+        String::from_utf8_lossy(&header(&refusal, HeaderName::Warning)).starts_with("399 "),
+        "20.43's miscellaneous warning"
+    );
+}
+
+#[test]
+fn a_reinvite_with_no_offer_is_answered_with_one_and_the_answer_comes_in_the_ack() {
+    // 14.1: a re-INVITE may carry no description, "in which case the first
+    // reliable non-failure response will contain the offer"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(&mut agent, &reversed(&ack, "INVITE", "empty", 1, None), t0);
+    let answer = last(&mut agent);
+    let offer = body_of(&answer);
+    assert!(offer.contains("m=audio 8000 RTP/AVP 0\r\n"), "{offer}");
+    assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "ACK", "emptyack", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: true
+        }),
+        "the answer to an offer in a 2xx travels in the ACK"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn an_update_that_crosses_an_offer_of_ours_is_refused_with_491() {
+    // RFC 3311 §5.2: "if an UPDATE is received that contains an offer, and the
+    // UAS has generated an offer ... to which it has not yet received an
+    // answer, the UAS MUST reject the UPDATE with a 491 response"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    agent.hold(call, t0).expect("the hold goes");
+    let _ = sent(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "UPDATE", "crossed", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    let refusal = last(&mut agent);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 491 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+}
+
+#[test]
+fn a_refused_change_leaves_the_session_exactly_as_it_was() {
+    // 14.1: "the session parameters MUST remain unchanged, as if no re-INVITE
+    // had been issued"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 488, "Not Acceptable Here", "desk", None),
+        t0,
+    );
+    transmits(&mut agent);
+    let failure = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed {
+                status, retry_in, ..
+            } => Some((status, retry_in)),
+            _ => None,
+        })
+        .expect("the change was refused");
+    assert_eq!(failure.0.map(StatusCode::get), Some(488));
+    assert_eq!(failure.1, None, "a 488 is not worth trying again");
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn two_changes_that_cross_back_off_once_and_then_give_up() {
+    // 14.1: "the UAC SHOULD attempt the re-INVITE once more, if it still
+    // desires for that session modification to take place"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 491, "Request Pending", "desk", None),
+        t0,
+    );
+    transmits(&mut agent);
+    let wait = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => retry_in,
+            _ => None,
+        })
+        .expect("491 says to wait and try again");
+    // the end that generated the Call-ID draws from 2.1 to 4 seconds
+    assert!(
+        wait >= Duration::from_millis(2_100) && wait <= Duration::from_secs(4),
+        "{wait:?}"
+    );
+
+    agent.handle_timeout(t0 + wait);
+    let again = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the change goes out again");
+    assert_eq!(header(&again, HeaderName::CSeq), b"3 INVITE");
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &answered(&again, 491, "Request Pending", "desk", None),
+        t0 + wait,
+    );
+    transmits(&mut agent);
+    let second = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => Some(retry_in),
+            _ => None,
+        })
+        .expect("and is refused again");
+    assert_eq!(second, None, "once more, not until it works");
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
 }

@@ -57,6 +57,8 @@ pub struct UserAgent {
     /// The BYEs, CANCELs and PRACKs a call has in flight, so that their
     /// answers are this layer's news rather than the application's.
     pub(crate) by_request: HashMap<AnyTransactionId, CallHandle>,
+    /// The re-INVITEs and UPDATEs offering a session change.
+    pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
     pub(crate) events: VecDeque<UaEvent>,
     next_account: u32,
     pub(crate) next_call: u32,
@@ -80,6 +82,7 @@ impl UserAgent {
             by_server: HashMap::new(),
             by_dialog: HashMap::new(),
             by_request: HashMap::new(),
+            by_offer: HashMap::new(),
             events: VecDeque::new(),
             next_account: 0,
             next_call: 0,
@@ -100,6 +103,7 @@ impl UserAgent {
     pub fn handle_timeout(&mut self, now: Instant) {
         self.endpoint.handle_timeout(now);
         self.fire_due(now);
+        self.fire_call_timers(now);
         self.drain(now);
     }
 
@@ -118,7 +122,12 @@ impl UserAgent {
     /// When to call [`UserAgent::handle_timeout`], if nothing arrives first.
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        let mine = self.registrations.values().filter_map(|reg| reg.due).min();
+        let mine = self
+            .registrations
+            .values()
+            .filter_map(|reg| reg.due)
+            .chain(self.call_deadline())
+            .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (left, right) => left.or(right),
@@ -329,7 +338,8 @@ impl UserAgent {
     /// unchanged.
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let event = self.on_registration_event(event, now)?;
-        self.on_call_event(event, now)
+        let event = self.on_call_event(event, now)?;
+        self.on_session_event(event, now)
     }
 
     /// `None` when the event belonged to a registration and has been dealt
