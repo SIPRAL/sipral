@@ -76,12 +76,13 @@ jobs:
           wait_for freeswitch "MSG Thread 0 Started"
       # plain docker run, joining the proxy's namespace directly: asking
       # Compose to do it restarts the proxy first and invalidates the very
-      # namespace the capture is trying to enter
+      # namespace the capture is trying to enter. The container name is fixed
+      # because compose.yaml names the project
       - name: start the capture
         working-directory: interop
         run: |
           docker run -d --name sipral-capture \
-            --network "container:$(docker compose ps -q kamailio)" \
+            --network container:sipral-interop-kamailio-1 \
             --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/pcap:/pcap" alpine:3.22 \
             sh -c 'apk add --no-cache tcpdump >/dev/null && tcpdump -i any -s 0 -w /pcap/lab.pcap'
