@@ -85,22 +85,30 @@ jobs:
           wait_for freeswitch "Started Profile lab" \
             || echo "lab profile not seen in the log; continuing to the flows anyway"
           wait_for asterisk "Asterisk Ready"
-      # The lab's bridge, seen from the host's network namespace, so every leg
-      # is visible. Joining the proxy's namespace saw only the proxy's own
-      # traffic, and the first flow to talk straight to Asterisk failed with
-      # nothing to look at. It is still a detached container rather than a
-      # background process in this step: a process backgrounded here does not
-      # survive to the step that runs the flows.
+      # The lab's bridge, so every leg is visible: joining the proxy's network
+      # namespace saw only the proxy's own traffic, and the first flow to talk
+      # straight to Asterisk failed with nothing to look at.
+      #
+      # setsid, because a process merely backgrounded in a workflow step is
+      # killed with the step's process group, and the capture has to outlive
+      # the step that starts it.
       - name: start the capture
         working-directory: interop
         run: |
           bridge="br-$(docker network inspect sipral-interop_lab -f '{{.Id}}' | cut -c1-12)"
           ip link show "$bridge"
-          docker run -d --name sipral-capture --net=host \
-            --cap-add NET_ADMIN --cap-add NET_RAW \
-            -v "$PWD/pcap:/pcap" alpine:3.22 \
-            sh -c "apk add --no-cache tcpdump >/dev/null && tcpdump -i $bridge -s 0 -U -w /pcap/lab.pcap"
-          sleep 5
+          sudo setsid nohup tcpdump -i "$bridge" -s 0 -U -w "$PWD/pcap/lab.pcap" \
+            </dev/null >/dev/null 2>&1 &
+          # wait for the file to exist rather than sleeping a guessed amount:
+          # the capture used to run in a container that installed tcpdump at
+          # start, and when the install was slow it began after the flows had
+          # already run. An empty capture reads as "nothing happened"
+          for _ in $(seq 1 30); do
+            [ -s pcap/lab.pcap ] && break
+            sleep 1
+          done
+          sudo test -s pcap/lab.pcap || { echo "the capture never started"; exit 1; }
+          pgrep -af "tcpdump -i $bridge"
       # a glibc image, because the runner builds against glibc and the proxy's
       # own image is musl — the binary is not portable between them, and the
       # error when it is not is "no such file or directory" for a file that is
@@ -128,8 +136,9 @@ jobs:
         if: always()
         working-directory: interop
         run: |
-          docker stop sipral-capture >/dev/null 2>&1 || true
-          docker rm sipral-capture >/dev/null 2>&1 || true
+          sudo pkill -INT -f "tcpdump -i br-" >/dev/null 2>&1 || true
+          sleep 1
+          sudo chmod a+r pcap/lab.pcap 2>/dev/null || true
           docker compose down
       - uses: actions/upload-artifact@v4
         if: always()
