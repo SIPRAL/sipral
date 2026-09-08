@@ -565,7 +565,9 @@ mod tests {
     /// just match its own assertion.
     #[test]
     fn the_unregister_doc_cites_removing_bindings_not_the_clock() {
-        let source = include_str!("account.rs");
+        // the needle spans a line break, and a Windows checkout puts a CR in
+        // front of it
+        let source = include_str!("account.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
             source.contains(&format!("`Expires: 0` ({section}10.2.2)")),

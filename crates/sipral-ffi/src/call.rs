@@ -1094,7 +1094,9 @@ Content-Type: application/sdp\r\n"
     /// runtime so this test does not just match its own assertion.
     #[test]
     fn the_module_doc_cites_the_section_that_puts_the_answer_in_the_ack() {
-        let source = include_str!("call.rs");
+        // the needle spans a line break, and a Windows checkout puts a CR in
+        // front of it
+        let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
             source.contains(&format!("is legal ({section}13.2.1) and is")),
@@ -1212,7 +1214,9 @@ Content-Type: application/sdp\r\n"
     /// assertion.
     #[test]
     fn the_held_answer_doc_matches_what_recvonly_means() {
-        let source = include_str!("call.rs");
+        // the needle spans a line break, and a Windows checkout puts a CR in
+        // front of it
+        let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
             source.contains(&format!(
@@ -1343,7 +1347,9 @@ Content-Length: 0\r\n\r\n";
     /// this test inspecting its own file does not just match itself.
     #[test]
     fn the_keypad_doc_cites_a_section_rfc_4733_actually_has() {
-        let source = include_str!("call.rs");
+        // the needle spans a line break, and a Windows checkout puts a CR in
+        // front of it
+        let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
             source.contains(&format!("(RFC 4733 {section}3.2, Table 3)")),

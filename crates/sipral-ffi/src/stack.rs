@@ -824,7 +824,9 @@ pub(crate) mod tests {
     /// own assertion.
     #[test]
     fn the_entropy_doc_cites_tags_not_via_for_unguessability() {
-        let source = include_str!("stack.rs");
+        // the needle spans a line break, and a Windows checkout puts a CR in
+        // front of it
+        let source = include_str!("stack.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
             source.contains(&format!("{section}19.3 wants a tag unguessable")),
