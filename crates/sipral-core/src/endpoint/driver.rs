@@ -52,6 +52,8 @@ use crate::transaction::{Raw, TimerHandle, Timers};
 pub(super) enum Deadline {
     /// A double CRLF is due on a byte stream (RFC 5626 §4.4.1).
     Keepalive(TransportId),
+    /// A ping has gone unanswered long enough that §4.4.1 calls the flow dead.
+    PongOverdue(TransportId),
     /// A reliable provisional response has to go out again (RFC 3262 §3).
     Reliable(Raw),
 }
@@ -93,6 +95,10 @@ pub struct Endpoint {
     /// refusal with the same nonce can be told from a fresh challenge.
     /// §22.1 does not answer the first twice.
     pub(super) carried_auth: HashMap<AnyTransactionId, AuthCache>,
+    /// How many requests have been refused for want of room. Only ever grows,
+    /// because the number an operator wants is "how often has this happened",
+    /// not "how often since somebody last looked".
+    pub(super) refused: u64,
 }
 
 impl Endpoint {
@@ -124,6 +130,7 @@ impl Endpoint {
             challenges: Challenges::new(),
             dialogs_of: HashMap::new(),
             carried_auth: HashMap::new(),
+            refused: 0,
         }
     }
 
@@ -167,6 +174,7 @@ impl Endpoint {
         while let Some(deadline) = self.deadlines.fire(now) {
             match deadline {
                 Deadline::Keepalive(transport) => self.send_keepalive(transport, now),
+                Deadline::PongOverdue(transport) => self.flow_failed(transport),
                 Deadline::Reliable(raw) => self.retransmit_reliable(raw, now),
             }
         }
@@ -251,6 +259,17 @@ impl Endpoint {
     #[must_use]
     pub fn in_flight(&self) -> (usize, usize) {
         (self.transactions.len(), self.dialogs.len())
+    }
+
+    /// How many requests have been refused with a 503 for want of room
+    /// ([`EndpointConfig::max_server_transactions`],
+    /// [`EndpointConfig::max_dialogs`]).
+    ///
+    /// The same number [`Event::Overloaded`] carries, for a caller that would
+    /// rather sample a gauge than watch events go by.
+    #[must_use]
+    pub const fn refused(&self) -> u64 {
+        self.refused
     }
 
     pub(crate) const fn store(&self) -> &Transactions {

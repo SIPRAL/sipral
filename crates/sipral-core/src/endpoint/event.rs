@@ -416,6 +416,35 @@ pub enum Event {
         /// The transport, when the URI or the scheme named one.
         protocol: Option<TransportProtocol>,
     },
+    /// A keep-alive went unanswered for ten seconds, so RFC 5626 §4.4.1 calls
+    /// the flow dead and this end has taken it down.
+    ///
+    /// Everything running on it has already been failed, and the endpoint has
+    /// forgotten the transport. What is left is the caller's: close the socket,
+    /// and open a replacement if the flow was carrying a registration — §4.5
+    /// wants a new flow rather than a retry on the old one. Binding the
+    /// replacement under the same [`super::TransportId`] is what puts the
+    /// account back where it was.
+    FlowFailed {
+        /// The transport that is gone.
+        transport: super::TransportId,
+    },
+    /// A request was refused because this endpoint is already holding as many
+    /// server transactions or dialogs as it is configured to
+    /// ([`super::EndpointConfig::max_server_transactions`],
+    /// [`super::EndpointConfig::max_dialogs`]).
+    ///
+    /// A 503 has gone back statelessly — §21.5.4 is the code for "temporarily
+    /// unable to process the request due to a temporary overloading" — because
+    /// refusing where the far end can see it beats dropping the request and
+    /// being retransmitted at for thirty-two seconds. The count is cumulative,
+    /// so an operator watching it climb is watching either a flood or a ceiling
+    /// set too low.
+    Overloaded {
+        /// How many requests this endpoint has refused this way since it was
+        /// created.
+        refused: u64,
+    },
     /// A message is too large for any datagram transport that is open, and
     /// there is no stream transport to move it to.
     ///

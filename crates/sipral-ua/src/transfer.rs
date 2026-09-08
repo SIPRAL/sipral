@@ -23,6 +23,13 @@
 //! with the target — so the target replaces a call it is already in rather
 //! than getting a second one. Everything else is the same code.
 //!
+//! **The attended one needs a second call first**, to the target, and that call
+//! is not an ordinary one: it exists so that the transferor can speak to the
+//! target before handing the caller over, and it is the dialog the `Replaces`
+//! will name. So it is placed with [`UserAgent::consult`] and it says what it
+//! is — [`CallState::Consulting`] — rather than being an ordinary confirmed
+//! call the application has to remember the purpose of.
+//!
 //! **What `Replaces` matches, and what it does not.** §3 is exact about it,
 //! and every branch is a different status code: no match is 481, a dialog that
 //! has already ended is 603, an early dialog this end did not originate is
@@ -99,14 +106,58 @@ impl UserAgent {
         self.refer(call, &value, now)
     }
 
+    /// Call the transfer target, so that there is somebody to hand the call to.
+    ///
+    /// This is the second leg of an attended transfer — the consultation call —
+    /// and it is placed here rather than with
+    /// [`call`](crate::UserAgent::call) so that the two legs know about each
+    /// other. It is answered like any other call, and while it is up its state
+    /// is [`CallState::Consulting`]: a confirmed dialog whose reason for
+    /// existing is the transfer that follows. [`UserAgent::transfer_to`] is
+    /// what follows.
+    ///
+    /// Putting `call` on hold first is the application's, because it is a
+    /// session change and this layer does not make those uninvited. If the
+    /// consultation ends without a transfer, hanging it up leaves `call`
+    /// exactly where it was.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when `call` is not up
+    /// or is already consulting somebody, [`UaError::NoSuchAccount`], or
+    /// [`UaError::Send`].
+    pub fn consult(
+        &mut self,
+        call: CallHandle,
+        outgoing: &OutgoingCall,
+        now: Instant,
+    ) -> Result<CallHandle, UaError> {
+        let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
+        let state = held.state;
+        if !state.is_confirmed() || held.consulting.is_some() {
+            return Err(UaError::WrongState(state));
+        }
+        let account = held.account.ok_or(UaError::NoSuchAccount)?;
+        let placed = self.call(account, outgoing, now)?;
+        if let Some(second) = self.calls.get_mut(&placed) {
+            second.consulting_for = Some(call);
+        }
+        if let Some(first) = self.calls.get_mut(&call) {
+            first.consulting = Some(placed);
+        }
+        Ok(placed)
+    }
+
     /// Hand this call to the far end of another one (RFC 3891).
     ///
     /// The `Replaces` names the dialog `other` is in, so the party at its far
     /// end replaces the call it already has rather than answering a second.
+    /// `other` is normally the consultation call [`UserAgent::consult`] placed,
+    /// and any other call that is up may be named instead — RFC 3891 replaces a
+    /// dialog, not a role.
     ///
     /// # Errors
-    /// As [`UserAgent::transfer`], and [`UaError::WrongState`] when `other`
-    /// has no dialog to name.
+    /// As [`UserAgent::transfer`], and [`UaError::WrongState`] when `other` is
+    /// not up or has no dialog to name.
     pub fn transfer_to(
         &mut self,
         call: CallHandle,
@@ -115,6 +166,12 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let held = self.calls.get(&other).ok_or(UaError::NoSuchCall)?;
         let state = held.state;
+        // an early dialog is not something to hand over: §3 has the far end
+        // refuse a Replaces naming one it did not originate, and this end
+        // would have hung up a call that was never taken
+        if !state.is_confirmed() {
+            return Err(UaError::WrongState(state));
+        }
         let dialog = held.dialog.ok_or(UaError::WrongState(state))?;
         let snapshot = self
             .endpoint
@@ -244,7 +301,7 @@ impl UserAgent {
                 held.state,
             )
         };
-        if state != CallState::Confirmed {
+        if !state.is_confirmed() {
             return Err(UaError::WrongState(state));
         }
         // §2: "REFER creates a dialog, and MAY be Record-Routed, hence MUST
@@ -474,12 +531,12 @@ impl UserAgent {
                 // §3: "the UA SHOULD decline the request with a 603 Declined"
                 Err(StatusCode::new(603).unwrap_or(StatusCode::BUSY_HERE))
             }
-            CallState::Confirmed if early_only => {
+            CallState::Confirmed | CallState::Consulting if early_only => {
                 // §3: "If the flag is present, the UA rejects the request with
                 // a 486 Busy response."
                 Err(StatusCode::BUSY_HERE)
             }
-            CallState::Confirmed => Ok(Some(handle)),
+            CallState::Confirmed | CallState::Consulting => Ok(Some(handle)),
             // §3: an early dialog this end did not originate cannot be
             // replaced by this end at all
             _ if direction == Direction::Outgoing => Ok(Some(handle)),

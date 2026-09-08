@@ -153,6 +153,9 @@ impl StatusCode {
     pub const CALL_DOES_NOT_EXIST: Self = Self(481);
     /// 500, which §12.2.2 answers a request whose `CSeq` runs backwards with.
     pub const SERVER_ERROR: Self = Self(500);
+    /// 503, "temporarily unable to process the request due to a temporary
+    /// overloading" (§21.5.4).
+    pub const SERVICE_UNAVAILABLE: Self = Self(503);
     /// 504 Server Time-out.
     pub const SERVER_TIMEOUT: Self = Self(504);
 

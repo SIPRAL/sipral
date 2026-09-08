@@ -136,6 +136,12 @@ impl Transactions {
             + self.non_invite_servers.len()
     }
 
+    /// How many of them somebody else started, which is the half a peer
+    /// decides the size of.
+    pub(crate) fn servers_len(&self) -> usize {
+        self.invite_servers.len() + self.non_invite_servers.len()
+    }
+
     /// Send an INVITE.
     ///
     /// # Errors

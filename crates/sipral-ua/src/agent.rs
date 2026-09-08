@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest, ReceiveError, Transmit,
+    TransportId,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode};
 use sipral_core::transaction::{
@@ -372,6 +373,12 @@ impl UserAgent {
                 self.on_challenged(account, transaction, now);
                 None
             }
+            // the flow a binding lives on is dead (RFC 5626 §4.4.1), and the
+            // application still has to hear it: it owns the socket
+            Event::FlowFailed { transport } => {
+                self.on_flow_failed(transport, now);
+                Some(event)
+            }
             Event::TransactionTerminated { transaction, .. } => {
                 // plumbing this layer owns: a registration transaction ends
                 // after every registration, and the application is told about
@@ -534,6 +541,37 @@ impl UserAgent {
         }
         if self.send_register(account, false, now).is_err() {
             self.give_up(account, RegistrationFailure::Unreachable, None, None);
+        }
+    }
+
+    /// A keep-alive went unanswered and the flow is gone (RFC 5626 §4.4.1).
+    ///
+    /// §4.4: "If a flow with a registration has failed, the UA follows the
+    /// procedures in Section 4.2 to form a new flow to replace the failed one."
+    /// Forming it is the application's — nothing here opens a socket — and what
+    /// this layer owes is the rest: the binding is not live any more, and the
+    /// REGISTER that says so again goes on the §4.5 back-off rather than at
+    /// once, because a server that has just lost a thousand flows does not want
+    /// them all back in the same second.
+    ///
+    /// Only a settled binding is touched. One with a REGISTER in flight loses
+    /// its transaction with the transport and is retried by the failure that
+    /// follows, and counting the same outage twice would double the wait.
+    fn on_flow_failed(&mut self, transport: TransportId, now: Instant) {
+        let lost: Vec<AccountId> = self
+            .accounts
+            .iter()
+            .filter(|(id, account)| {
+                account.transport == transport
+                    && self
+                        .registrations
+                        .get(id)
+                        .is_some_and(|reg| reg.state == RegistrationState::Registered)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for account in lost {
+            self.retry_later(account, None, None, None, now);
         }
     }
 

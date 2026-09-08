@@ -31,7 +31,7 @@ use sipral_core::msg::{HeaderName, Method, Params, RawMessage, digits};
 use sipral_core::transaction::AnyTransactionId;
 
 use crate::agent::UserAgent;
-use crate::call::{CallHandle, CallState, Direction, Offer};
+use crate::call::{CallHandle, Direction, Offer};
 
 /// §4: "1800 seconds (30 minutes) is RECOMMENDED as the value for the
 /// Session-Expires header field."
@@ -441,7 +441,7 @@ impl UserAgent {
         }
         let (contact, confirmed, allows_update, description) = (
             state.contact.clone(),
-            state.state == CallState::Confirmed,
+            state.state.is_confirmed(),
             state.update_allowed,
             state.session.repeat(),
         );

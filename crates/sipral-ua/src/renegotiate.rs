@@ -232,7 +232,7 @@ impl UserAgent {
             )
         };
         let method = match state {
-            CallState::Confirmed => Method::Invite,
+            CallState::Confirmed | CallState::Consulting => Method::Invite,
             early if early.is_early() && allows_update => Method::Update,
             _ => return Err(UaError::CannotRenegotiate),
         };

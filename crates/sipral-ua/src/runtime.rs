@@ -256,6 +256,17 @@ impl Runtime {
                     protocol,
                     destination,
                 }) => self.open(protocol, destination),
+                // RFC 5626 §4.4.1 called the flow dead. The endpoint has
+                // already forgotten it; the socket is this loop's, and dropping
+                // the last handle to it is what closes it
+                UaEvent::Unclaimed(Event::FlowFailed { transport }) => {
+                    self.links.remove(&transport);
+                    handler.on_event(
+                        &mut self.agent,
+                        UaEvent::Unclaimed(Event::FlowFailed { transport }),
+                        now,
+                    );
+                }
                 other => handler.on_event(&mut self.agent, other, now),
             }
         }

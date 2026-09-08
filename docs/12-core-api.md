@@ -463,6 +463,8 @@ impl StreamFramer {
     pub fn next_message(&mut self, mode: ParseMode) -> Result<Option<RawMessage<'_>>, ParseError>;
     /// RFC 5626 §4.4.1: a double CRLF arrived and a single CRLF owes it an answer.
     pub fn take_ping(&mut self) -> bool;
+    /// And the other half: a single CRLF arrived, so a ping of ours was answered.
+    pub fn take_pong(&mut self) -> bool;
     pub fn pending(&self) -> usize;
     pub fn reset(&mut self);
 }
@@ -494,8 +496,14 @@ scratch would only be able to get the lifetimes wrong. A message without
 `Content-Length` is `MissingContentLength`, not a body read to the end of the
 buffer: §18.3 makes the field mandatory on a stream, and guessing would
 swallow whatever came after it. Keep-alives (RFC 5626 §4.4.1) are skipped
-between messages and counted, so the layer that owns the connection can send
-the single CRLF a ping is owed.
+between messages and counted, pings apart from pongs, so the layer that owns
+the connection can send the single CRLF a ping is owed and can see the one that
+answered its own. A pair is a ping and the odd CRLF left over is a pong,
+reported the moment it arrives rather than held to see whether a second follows
+it: on an idle connection the second one may never come, and the pong is the
+only thing that says the flow is alive. The cost is that a ping torn in half by
+the network counts as a pong and then as the ping it was — still answered, one
+keep-alive interval late.
 
 Work is bounded per byte received rather than per call: the search for the end
 of the headers resumes where it stopped, and once the body's length is known
@@ -677,6 +685,12 @@ pub struct EndpointConfig {
     /// than a period: §4.4.1 requires the interval to be drawn at random
     /// between it and 20% below it. Default 25 s, see `03`.
     pub keepalive_interval: Option<Duration>,
+    /// The ceiling on what a peer can make this endpoint hold. Past either
+    /// one, a request from outside every dialog we already have is answered
+    /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so. Defaults
+    /// 256 and 128 — an order of magnitude past what a softphone reaches.
+    pub max_server_transactions: usize,
+    pub max_dialogs: usize,
 }
 
 /// What the caller describes. The endpoint fills in the branch, the sent-by,
@@ -829,6 +843,9 @@ impl Endpoint {
     /// Live transactions and live dialogs, for a caller deciding whether it
     /// can shut down.
     pub fn in_flight(&self) -> (usize, usize);
+    /// How many requests have been refused with a 503 for want of room, for a
+    /// caller that would rather sample a gauge than watch events go by.
+    pub fn refused(&self) -> u64;
 }
 
 pub struct DialogSnapshot {
@@ -926,6 +943,15 @@ pub enum Event {
     /// is open to move it to. Opening one is the caller's; the request is not
     /// held, and goes when it is sent again.
     TransportWanted { protocol: TransportProtocol, destination: SocketAddr },
+    /// A keep-alive went ten seconds unanswered, so RFC 5626 §4.4.1 calls the
+    /// flow dead and the endpoint has taken it down. Everything that was
+    /// running on it has already failed. Closing the socket and opening a
+    /// replacement is the caller's; binding the new one under the same
+    /// `TransportId` is what puts a registration back where it was.
+    FlowFailed { transport: TransportId },
+    /// A request from outside every dialog we hold arrived with no room for
+    /// it, and was answered 503 statelessly. `refused` is cumulative.
+    Overloaded { refused: u64 },
     TransactionTerminated { transaction: AnyTransactionId, reason: TerminationReason },
     DialogTerminated { dialog: DialogId, reason: DialogEndReason },
 }

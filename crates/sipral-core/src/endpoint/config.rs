@@ -96,6 +96,20 @@ pub struct EndpointConfig {
     /// be picked at random between it and 20% below it, so that a server does
     /// not get every client's ping at the same instant.
     pub keepalive_interval: Option<Duration>,
+    /// The most server transactions a peer may have open here at once.
+    ///
+    /// Once the parser has refused what it can refuse, an arriving request is a
+    /// well-formed request, and a peer that sends a thousand of them a second
+    /// costs a transaction each. This is the ceiling on that: past it a request
+    /// that would create a new server transaction is answered 503 rather than
+    /// held, and the endpoint keeps answering the ones it already has.
+    pub max_server_transactions: usize,
+    /// The most dialogs that may be live at once, in either direction.
+    ///
+    /// A transaction lasts seconds and a dialog lasts as long as the call, so
+    /// this is the one a slow flood reaches: a thousand INVITEs that are all
+    /// answered leave a thousand calls standing.
+    pub max_dialogs: usize,
 }
 
 impl EndpointConfig {
@@ -107,6 +121,12 @@ impl EndpointConfig {
     /// routinely do not; a softphone that discovers a dead flow two minutes
     /// after it died has already missed the call it existed for. The cost is
     /// four bytes every 25 seconds per connection.
+    ///
+    /// The two ceilings are set where a softphone will never see them and a
+    /// flood will: 256 concurrent server transactions is an order of magnitude
+    /// more than a busy desk phone reaches, and 128 live dialogs is more calls
+    /// than one person can hold. A media server built on this crate raises
+    /// them; nothing here has to guess how far.
     pub const DEFAULT: Self = Self {
         timers: TimerConfig::DEFAULT,
         parse_mode: ParseMode::Lenient,
@@ -114,6 +134,8 @@ impl EndpointConfig {
         datagram_limit: DatagramLimit::DEFAULT,
         always_request_rport: true,
         keepalive_interval: Some(Duration::from_secs(25)),
+        max_server_transactions: 256,
+        max_dialogs: 128,
     };
 }
 
@@ -185,5 +207,7 @@ mod tests {
         assert_eq!(config.datagram_limit.max_datagram_bytes, 1_300);
         assert_eq!(config.datagram_limit.headroom_bytes, 200);
         assert_eq!(config.datagram_limit.path_mtu, None);
+        assert_eq!(config.max_server_transactions, 256);
+        assert_eq!(config.max_dialogs, 128);
     }
 }

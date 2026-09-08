@@ -28,7 +28,9 @@ use super::reliable;
 use super::table::Flow;
 use super::via;
 use crate::dialog::{Dialog, DialogKey, DialogState, Fork, Incoming};
-use crate::msg::{Method, OwnedMessage, ParseScratch, RawMessage, StatusCode, parse_with_limits};
+use crate::msg::{
+    Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder, StatusCode, parse_with_limits,
+};
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
     Notify, Raw, Server, ServerKey, TimerName, TransactionId, cancel_for_request,
@@ -38,6 +40,14 @@ use crate::transaction::{
 const PONG: &[u8] = b"\r\n";
 /// The ping itself.
 const PING: &[u8] = b"\r\n\r\n";
+/// §4.4.1: "If a pong is not received within 10 seconds after sending a ping
+/// ... then the client MUST treat the flow as failed."
+///
+/// Not configurable. The interval between pings is a trade-off between battery
+/// and availability and the RFC says so; this one is the MUST, and a stack that
+/// let it be turned up would be a stack that can be configured out of
+/// conformance.
+const PONG_DUE: core::time::Duration = core::time::Duration::from_secs(10);
 
 impl Endpoint {
     pub(super) fn on_datagram(
@@ -126,6 +136,14 @@ impl Endpoint {
                 }
                 .transmit(Arc::from(PONG)),
             );
+        }
+        // and the answer to ours is the only thing that says the flow is alive
+        let mut answered = false;
+        while framer.take_pong() {
+            answered = true;
+        }
+        if answered {
+            self.pong_arrived(transport);
         }
 
         match outcome {
@@ -382,6 +400,11 @@ impl Endpoint {
         }
 
         let method = request.method();
+        // an ACK creates nothing and is never answered, so there is nothing to
+        // refuse and nothing to refuse it with
+        if method != Some(Method::Ack) && self.refuse_when_full(request, flow) {
+            return;
+        }
         match method {
             // "when a UAS core sends a 2xx response to INVITE, the server
             // transaction is destroyed. This means that when the ACK arrives,
@@ -392,6 +415,64 @@ impl Endpoint {
             Some(_) => self.on_other_request(request, flow, now),
             None => (),
         }
+    }
+
+    /// The ceiling on what a stranger may make this endpoint hold.
+    ///
+    /// A request inside a dialog we already have is never refused, whatever the
+    /// count says: it manages state that exists, and a BYE turned away leaves
+    /// the call standing for the life of the process. Nor is a CANCEL that
+    /// matches an INVITE of ours, for the same reason and because §9.2 makes
+    /// answering it a MUST. A stranger's request is the other case, and past
+    /// the ceiling it gets §21.5.4's 503 — "temporarily unable to process the
+    /// request due to a temporary overloading" — written straight to the flow,
+    /// because the point of refusing is not to keep anything. No `Retry-After`
+    /// goes with it: §21.5.4 has a client that gets none treat it as a 500 and
+    /// try somewhere else, which is what should happen, while one that names a
+    /// delay asks a proxy to stop sending here for that long.
+    fn refuse_when_full(&mut self, request: &RawMessage<'_>, flow: Flow) -> bool {
+        let ours = DialogKey::as_uas(request)
+            .ok()
+            .is_some_and(|key| self.dialogs.find(&key).is_some());
+        if ours {
+            return false;
+        }
+        // and neither is a CANCEL that matches something: §9.2 makes answering
+        // one a MUST, and it ends a transaction rather than starting one worth
+        // counting. A CANCEL that matches nothing is a stranger like any other
+        if request.method() == Some(Method::Cancel)
+            && ServerKey::for_cancelled(request)
+                .ok()
+                .and_then(|key| self.transactions.server_by_key(&key))
+                .is_some()
+        {
+            return false;
+        }
+        let transactions = self.transactions.servers_len() >= self.config.max_server_transactions;
+        // a call is refused before it rings rather than after it is answered:
+        // the dialog would be created by our own 2xx, and by then the far end
+        // has heard ringback
+        let dialogs = request.method() == Some(Method::Invite)
+            && self.dialogs.len() >= self.config.max_dialogs;
+        if !transactions && !dialogs {
+            return false;
+        }
+
+        self.refused = self.refused.saturating_add(1);
+        let refused = self.refused;
+        self.push(Event::Overloaded { refused });
+        // §8.2.6.2 wants a tag on every response but a 100. It is minted and
+        // forgotten: nothing here holds a transaction to remember it against,
+        // so a retransmission of the request earns a second refusal with a
+        // second tag, which is what a stateless answer costs
+        let tag = self.mint_tag();
+        let built = ResponseBuilder::for_request(request, StatusCode::SERVICE_UNAVAILABLE)
+            .to_tag(&tag)
+            .build();
+        if let Ok(message) = built {
+            self.queue(flow.transmit(message.bytes()));
+        }
+        true
     }
 
     fn on_known_request(
@@ -718,16 +799,45 @@ impl Endpoint {
             .keepalive_interval
             .map(|interval| now + self.tokens.jitter(interval))
             .map(|at| self.schedule(at, Deadline::Keepalive(transport)));
+        // one deadline for the flow rather than one per ping: a pong is not
+        // matched to the ping it answers, so the ten seconds run from the
+        // earliest ping still unanswered
+        let armed = self.transports.get(transport).and_then(|bound| bound.pong);
+        let overdue = armed
+            .unwrap_or_else(|| self.schedule(now + PONG_DUE, Deadline::PongOverdue(transport)));
         if let Some(bound) = self.transports.get_mut(transport) {
             bound.keepalive = next;
+            bound.pong = Some(overdue);
         }
     }
 
+    /// The far end answered, so the flow is alive and the clock stops.
+    fn pong_arrived(&mut self, transport: super::TransportId) {
+        let Some(handle) = self
+            .transports
+            .get_mut(transport)
+            .and_then(|bound| bound.pong.take())
+        else {
+            return;
+        };
+        self.deadlines.cancel(handle);
+    }
+
+    /// Ten seconds without a pong: §4.4.1 makes this a dead flow, and a dead
+    /// flow is taken down rather than kept and hoped for.
+    pub(super) fn flow_failed(&mut self, transport: super::TransportId) {
+        if self.transports.get(transport).is_none() {
+            return;
+        }
+        self.push(Event::FlowFailed { transport });
+        self.lose_transport(transport);
+    }
+
     pub(super) fn lose_transport(&mut self, transport: super::TransportId) {
-        if let Some(bound) = self.transports.unbind(transport)
-            && let Some(handle) = bound.keepalive
-        {
-            self.deadlines.cancel(handle);
+        if let Some(bound) = self.transports.unbind(transport) {
+            for handle in [bound.keepalive, bound.pong].into_iter().flatten() {
+                self.deadlines.cancel(handle);
+            }
         }
         let mut hit = core::mem::take(&mut self.hit);
         self.transactions.on_transport(transport, &mut hit);

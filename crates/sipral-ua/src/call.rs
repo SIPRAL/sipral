@@ -67,6 +67,18 @@ pub enum CallState {
     EarlyMedia,
     /// Up.
     Confirmed,
+    /// Up, and up in order to be transferred: the second leg of an attended
+    /// transfer, placed with [`crate::UserAgent::consult`] from a call that is
+    /// waiting for it.
+    ///
+    /// A confirmed dialog in every protocol sense — it is held, hung up and
+    /// renegotiated like any other — and a separate state because the
+    /// difference is what the call is for. An attended transfer needs a
+    /// consultation call and a call to hand over, and a stack that does not
+    /// name which is which leaves the application to remember, in the middle of
+    /// a three-party operation where getting it the wrong way round hands the
+    /// wrong person to the wrong person.
+    Consulting,
     /// A CANCEL or a BYE has gone and the call is not over until it is
     /// answered.
     Terminating,
@@ -75,10 +87,10 @@ pub enum CallState {
 }
 
 impl CallState {
-    /// Whether the call is up.
+    /// Whether the call is up, whatever it is up for.
     #[must_use]
     pub const fn is_confirmed(self) -> bool {
-        matches!(self, Self::Confirmed)
+        matches!(self, Self::Confirmed | Self::Consulting)
     }
 
     /// Whether it is still being set up, in either direction.
@@ -99,6 +111,7 @@ impl core::fmt::Display for CallState {
             Self::Ringing => "ringing",
             Self::EarlyMedia => "early media",
             Self::Confirmed => "confirmed",
+            Self::Consulting => "consulting",
             Self::Terminating => "terminating",
             Self::Terminated => "terminated",
         })
@@ -290,6 +303,14 @@ pub(crate) struct Call {
     pub(crate) reporting_to: Option<CallHandle>,
     /// The call this one replaces, once it is answered (RFC 3891 §3).
     pub(crate) replaces: Option<CallHandle>,
+    /// The call this one was placed to consult about, for the second leg of an
+    /// attended transfer. It is what makes the state `Consulting` when the
+    /// answer arrives, and what `transfer_to` reads to know the two legs
+    /// belong together.
+    pub(crate) consulting_for: Option<CallHandle>,
+    /// And the other way round: the consultation call placed from this one,
+    /// while it is live.
+    pub(crate) consulting: Option<CallHandle>,
     /// What was dialled, kept so that a 422 can be answered by asking again
     /// with the interval the far end demanded (RFC 4028 §7.3).
     pub(crate) placed: Option<OutgoingCall>,
@@ -333,6 +354,16 @@ pub(crate) struct Answering {
 }
 
 impl Call {
+    /// What "up" means for this one: an ordinary call, or the leg an attended
+    /// transfer was placed to build.
+    pub(crate) const fn up(&self) -> CallState {
+        if self.consulting_for.is_some() {
+            CallState::Consulting
+        } else {
+            CallState::Confirmed
+        }
+    }
+
     pub(crate) fn outgoing(account: AccountId, forks: ForkPolicy, contact: Box<[u8]>) -> Self {
         Self {
             account: Some(account),
@@ -360,6 +391,8 @@ impl Call {
             asked_to_refer: None,
             reporting_to: None,
             replaces: None,
+            consulting_for: None,
+            consulting: None,
             placed: None,
             invited: None,
             id: None,
@@ -399,6 +432,8 @@ impl Call {
             asked_to_refer: None,
             reporting_to: None,
             replaces: None,
+            consulting_for: None,
+            consulting: None,
             placed: None,
             invited: None,
             id: None,
@@ -436,6 +471,8 @@ impl Call {
             asked_to_refer: None,
             reporting_to: None,
             replaces: None,
+            consulting_for: None,
+            consulting: None,
             placed: None,
             invited: None,
             id: None,

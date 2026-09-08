@@ -389,7 +389,7 @@ impl UserAgent {
                 let _ = server;
                 self.reject(call, NOT_NOW, now)
             }
-            CallState::Confirmed => {
+            CallState::Confirmed | CallState::Consulting => {
                 let dialog = dialog.ok_or(UaError::WrongState(state))?;
                 let bye = self.endpoint.bye(dialog, now)?;
                 self.by_request
@@ -498,6 +498,19 @@ impl UserAgent {
     }
 
     fn forget(&mut self, call: CallHandle) {
+        for other in self.calls.values_mut() {
+            if other.consulting == Some(call) {
+                other.consulting = None;
+            }
+            // the call it was placed to be handed to is gone, so there is
+            // nobody left to hand it to: an ordinary call from here on
+            if other.consulting_for == Some(call) {
+                other.consulting_for = None;
+                if other.state == CallState::Consulting {
+                    other.state = CallState::Confirmed;
+                }
+            }
+        }
         self.by_invite.retain(|_, held| *held != call);
         self.by_server.retain(|_, held| *held != call);
         self.by_dialog.retain(|_, held| *held != call);
@@ -982,7 +995,7 @@ impl UserAgent {
         let acknowledged = offered && self.endpoint.ack_2xx(dialog, None, now).is_ok();
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = acknowledged;
-            held.state = CallState::Confirmed;
+            held.state = held.up();
         }
 
         // a branch that lost, under the policy that keeps one: acknowledged

@@ -1186,6 +1186,310 @@ fn a_lost_transport_takes_its_keepalive_deadline_with_it() {
     );
 }
 
+/// An endpoint with one TCP transport bound, and its first keep-alive already
+/// on the wire.
+fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [seed; 32]);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    let due = endpoint.poll_timeout().expect("a keepalive is due");
+    endpoint.handle_timeout(due);
+    assert_eq!(
+        transmits(&mut endpoint).first().map(|t| t.payload.to_vec()),
+        Some(b"\r\n\r\n".to_vec()),
+        "the ping went"
+    );
+    (endpoint, due)
+}
+
+/// Feed bytes in on the stream transport.
+fn stream(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
+    endpoint
+        .receive(
+            Input::StreamData {
+                transport: TCP,
+                data: bytes,
+            },
+            now,
+        )
+        .expect("bytes on a stream");
+}
+
+#[test]
+fn a_ping_that_is_never_answered_fails_the_flow_after_ten_seconds() {
+    // 4.4.1: "If a pong is not received within 10 seconds after sending a ping
+    // ... then the client MUST treat the flow as failed"
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = pinged(9, t0);
+
+    endpoint.handle_timeout(pinged_at + Duration::from_secs(9));
+    assert!(
+        !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { .. })),
+        "nine seconds is not ten"
+    );
+
+    endpoint.handle_timeout(pinged_at + Duration::from_secs(10));
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { transport } if transport == TCP)),
+        "ten seconds with no pong is a dead flow"
+    );
+    // and the flow is gone rather than reported and kept
+    assert_eq!(endpoint.poll_timeout(), None);
+}
+
+#[test]
+fn a_pong_stops_the_clock_and_the_next_ping_starts_it_again() {
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = pinged(10, t0);
+
+    stream(&mut endpoint, b"\r\n", pinged_at + Duration::from_secs(1));
+    endpoint.handle_timeout(pinged_at + Duration::from_secs(20));
+    assert!(
+        !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { .. })),
+        "the far end answered"
+    );
+
+    // the ping after it arms the deadline afresh, and this one goes unanswered
+    let next = endpoint.poll_timeout().expect("the next keepalive");
+    endpoint.handle_timeout(next);
+    transmits(&mut endpoint);
+    endpoint.handle_timeout(next + Duration::from_secs(10));
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { .. })),
+    );
+}
+
+#[test]
+fn a_message_is_not_a_pong() {
+    // §4.4.1 asks for the CRLF, and a busy connection that never answers one
+    // is exactly the flow this is meant to catch
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = pinged(11, t0);
+
+    let mut request = incoming("OPTIONS", "streamed", "");
+    // §18.3 makes Content-Length the framing on a stream, and it is there
+    let at = pinged_at + Duration::from_secs(1);
+    stream(&mut endpoint, &request, at);
+    request.clear();
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    endpoint.handle_timeout(pinged_at + Duration::from_secs(10));
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { .. })),
+        "traffic is not an answer"
+    );
+}
+
+#[test]
+fn a_flow_that_failed_takes_what_was_running_on_it_down_too() {
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = pinged(12, t0);
+    let id = endpoint
+        .request(
+            &OutgoingRequest::new(Method::Options, uri("sip:bob@example.com"), TCP, peer())
+                .to(b"<sip:bob@example.com>")
+                .from(b"Alice <sip:alice@example.com>"),
+            t0,
+        )
+        .expect("the request goes");
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    endpoint.handle_timeout(pinged_at + Duration::from_secs(10));
+    let events = events(&mut endpoint);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(*event, Event::FlowFailed { .. })),
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            *event,
+            Event::RequestFailed { transaction, reason }
+                if transaction == id && reason == FailureReason::TransportFailed
+        )),
+        "{events:?}"
+    );
+}
+
+// -- the ceiling on what a stranger may create -------------------------------
+
+#[test]
+fn a_stranger_past_the_transaction_ceiling_is_refused_with_a_503() {
+    // §21.5.4: "temporarily unable to process the request due to a temporary
+    // overloading"
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(
+        EndpointConfig {
+            max_server_transactions: 2,
+            ..EndpointConfig::DEFAULT
+        },
+        [13; 32],
+    );
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+
+    for branch in ["one", "two"] {
+        deliver(&mut endpoint, &incoming("MESSAGE", branch, ""), t0);
+    }
+    assert_eq!(endpoint.in_flight().0, 2);
+    events(&mut endpoint);
+    transmits(&mut endpoint);
+
+    deliver(&mut endpoint, &incoming("MESSAGE", "three", ""), t0);
+    let refusal = sent(&mut endpoint);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    // §8.2.6.2: a tag on every response but a 100
+    assert!(
+        String::from_utf8_lossy(&header(&refusal, HeaderName::To)).contains(";tag="),
+        "no To tag on the refusal"
+    );
+    assert_eq!(
+        endpoint.in_flight().0,
+        2,
+        "the refusal kept nothing, which is the point of it"
+    );
+    assert_eq!(endpoint.refused(), 1);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::Overloaded { refused: 1 })),
+    );
+}
+
+#[test]
+fn a_call_past_the_dialog_ceiling_is_refused_before_it_rings() {
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(
+        EndpointConfig {
+            max_dialogs: 0,
+            ..EndpointConfig::DEFAULT
+        },
+        [14; 32],
+    );
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+
+    deliver(&mut endpoint, &incoming("INVITE", "call", ""), t0);
+    let refusal = sent(&mut endpoint);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    assert!(
+        !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::IncomingInvite { .. })),
+        "the application was not troubled with a call it has no room for"
+    );
+}
+
+#[test]
+fn a_bye_is_never_refused_however_full_the_endpoint_is() {
+    // a dialog that cannot be ended is a dialog that stands for the life of the
+    // process, which is worse than anything the ceiling protects against
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    endpoint.config.max_server_transactions = 0;
+    endpoint.config.max_dialogs = 0;
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+    let bye = format!(
+        "BYE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKfullbye;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=desk\r\n\
+To: Alice <sip:alice@example.com>;tag={}\r\n\
+Call-ID: {}\r\n\
+CSeq: 7 BYE\r\n\
+Content-Length: 0\r\n\
+\r\n",
+        String::from_utf8_lossy(snapshot.local_tag.as_bytes()),
+        String::from_utf8_lossy(snapshot.call_id.as_bytes()),
+    );
+    deliver(&mut endpoint, bye.as_bytes(), t0);
+    let events = events(&mut endpoint);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(*event, Event::IncomingBye { .. })),
+        "{events:?}"
+    );
+    assert_eq!(endpoint.refused(), 0);
+}
+
+#[test]
+fn a_cancel_that_matches_is_never_refused_either() {
+    // 9.2: "the UAS MUST immediately respond to the CANCEL with a 200", and a
+    // CANCEL ends a transaction rather than starting one worth counting
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "full1", ""), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    endpoint.config.max_server_transactions = 0;
+    deliver(&mut endpoint, &incoming("CANCEL", "full1", ""), t0);
+    let statuses: Vec<_> = transmits(&mut endpoint)
+        .iter()
+        .map(|transmit| with(&transmit.payload, |m| m.status().map(StatusCode::get)))
+        .collect();
+    assert_eq!(statuses, vec![Some(200), Some(487)], "{statuses:?}");
+    assert_eq!(endpoint.refused(), 0);
+
+    // one that matches nothing is a stranger like any other
+    deliver(&mut endpoint, &incoming("CANCEL", "nosuch", ""), t0);
+    assert!(sent(&mut endpoint).starts_with(b"SIP/2.0 503 "));
+    assert_eq!(endpoint.refused(), 1);
+}
+
 #[test]
 fn nothing_is_left_in_flight_when_a_call_is_over() {
     let t0 = Instant::now();

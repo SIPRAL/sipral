@@ -63,6 +63,10 @@ pub(crate) struct Bound {
     /// connection can take its deadline down with it rather than leaving one
     /// to fire on a transport that is gone.
     pub(crate) keepalive: Option<TimerHandle>,
+    /// When the pong for a ping already sent stops being late and starts
+    /// meaning the flow is dead (RFC 5626 §4.4.1). Armed by the ping, cancelled
+    /// by the answer.
+    pub(crate) pong: Option<TimerHandle>,
 }
 
 /// Every transport the caller has told the endpoint about.
@@ -104,6 +108,7 @@ impl Transports {
                     .is_stream()
                     .then(|| StreamFramer::with_limits(limits)),
                 keepalive: None,
+                pong: None,
             },
         );
     }

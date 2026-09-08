@@ -82,6 +82,26 @@ the socket.
   endpoint. The core owns the CRLF timer and emits the keepalive as a
   `Transmit`; the `OPTIONS` variant, and any per-account policy, live in
   `sipral-ua`, which has accounts and the core does not.
+- **Dead-flow detection**, which is what the keepalive is for. §4.4.1: "If a
+  pong is not received within 10 seconds after sending a ping ... then the
+  client MUST treat the flow as failed." The framer counts the answering CRLF
+  apart from the ping, ten seconds without one takes the flow down and reports
+  `Event::FlowFailed`, and everything running on it fails with the transport.
+  The ten seconds are not configurable — the interval between pings is a
+  trade-off the RFC leaves open and this is the MUST, and a setting for it would
+  be a setting that turns conformance off. Opening the replacement flow is the
+  caller's, here as everywhere; `sipral-ua` puts the registration that was on it
+  back on the §4.5 back-off rather than retrying at once.
+- **A ceiling on what a peer can make the endpoint hold.** Once the parser has
+  refused what it can refuse, an arriving request is a well-formed request, and
+  a peer that sends a thousand a second costs a server transaction each. So
+  `max_server_transactions` and `max_dialogs` are configuration with defaults an
+  order of magnitude past what a softphone reaches (256 and 128), and past
+  either one a request that belongs to no dialog we already hold is answered
+  §21.5.4's 503 — statelessly, so that refusing costs nothing — and counted, so
+  that an operator can watch the number climb. A request inside a dialog that
+  exists is never refused, whatever the count says: a BYE turned away leaves the
+  call standing for the life of the process.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 

@@ -25,6 +25,7 @@ use crate::{
 };
 
 const UDP: TransportId = TransportId(1);
+const TCP: TransportId = TransportId(2);
 const HOUR: Duration = Duration::from_hours(1);
 
 fn local() -> SocketAddr {
@@ -143,6 +144,43 @@ fn deliver(agent: &mut UserAgent, bytes: &[u8], now: Instant) {
             now,
         )
         .expect("a well formed datagram");
+}
+
+/// A user agent whose account registers over a byte stream, which is the only
+/// kind of transport RFC 5626 §4.4.1 keep-alives run on.
+fn over_tcp(now: Instant) -> (UserAgent, AccountId) {
+    let mut agent = UserAgent::new(EndpointConfig::default(), [12; 32]);
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(registrar()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    let account = agent.add_account(Account::new(
+        uri("sip:alice@example.com"),
+        uri("sip:example.com"),
+        uri("sip:alice@192.0.2.1"),
+        TCP,
+        registrar(),
+    ));
+    (agent, account)
+}
+
+fn stream(agent: &mut UserAgent, bytes: &[u8], now: Instant) {
+    agent
+        .receive(
+            Input::StreamData {
+                transport: TCP,
+                data: bytes,
+            },
+            now,
+        )
+        .expect("bytes on a stream");
 }
 
 /// Register and take the 200, leaving the binding live.
@@ -1006,6 +1044,22 @@ fn call_up(agent: &mut UserAgent, account: AccountId, now: Instant) -> (CallHand
     deliver(
         agent,
         &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        now,
+    );
+    let ack = sent(agent);
+    events(agent);
+    (call, ack)
+}
+
+/// Place the second leg of an attended transfer and have the target answer it.
+fn consulted(agent: &mut UserAgent, from: CallHandle, now: Instant) -> (CallHandle, Vec<u8>) {
+    let call = agent
+        .consult(from, &outgoing(), now)
+        .expect("the consultation INVITE goes");
+    let invite = sent(agent);
+    deliver(
+        agent,
+        &answered(&invite, 200, "OK", "target", Some(ANSWER)),
         now,
     );
     let ack = sent(agent);
@@ -3068,4 +3122,197 @@ fn a_replaces_that_names_a_live_call_takes_it_over() {
         *event,
         UaEvent::CallReplaced { replaced, .. } if replaced == first
     )));
+}
+
+// -- the consultation call ---------------------------------------------------
+
+#[test]
+fn a_consultation_call_says_what_it_is_while_it_is_up() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+
+    let second = agent
+        .consult(first, &outgoing(), t0)
+        .expect("the second INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(agent.call_state(second), Some(CallState::Calling));
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "target", Some(ANSWER)),
+        t0,
+    );
+    sent(&mut agent);
+    events(&mut agent);
+    assert_eq!(agent.call_state(second), Some(CallState::Consulting));
+    // and it is a confirmed dialog in every other sense, so everything a call
+    // can do it can do
+    assert!(
+        agent
+            .call_state(second)
+            .is_some_and(CallState::is_confirmed)
+    );
+    assert_eq!(agent.call_state(first), Some(CallState::Confirmed));
+}
+
+#[test]
+fn the_attended_transfer_hands_over_the_call_the_consultation_named() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, ack) = consulted(&mut agent, first, t0);
+    assert_eq!(agent.call_state(second), Some(CallState::Consulting));
+
+    agent
+        .transfer_to(first, second, t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    let refer_to = String::from_utf8_lossy(&header(&refer, HeaderName::ReferTo)).into_owned();
+    // §6.1: the dialog named is the consultation call's, from the target's
+    // point of view
+    assert!(
+        refer_to.contains(&format!("%3Bto-tag%3D{}", tag_of(&ack, HeaderName::To))),
+        "{refer_to}"
+    );
+}
+
+#[test]
+fn a_call_that_is_not_up_can_neither_consult_nor_be_handed_over() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+
+    // still ringing: there is no dialog to name in a Replaces, and RFC 3891 §3
+    // has the far end refuse one that names an early dialog it did not open
+    let ringing = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    transmits(&mut agent);
+    assert_eq!(
+        agent.transfer_to(first, ringing, t0),
+        Err(UaError::WrongState(CallState::Calling))
+    );
+    assert_eq!(
+        agent.consult(ringing, &outgoing(), t0),
+        Err(UaError::WrongState(CallState::Calling))
+    );
+}
+
+#[test]
+fn one_consultation_at_a_time() {
+    // two would leave the application to say which one the transfer meant, and
+    // the whole point of naming the state is that it does not have to
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, _) = consulted(&mut agent, first, t0);
+
+    assert_eq!(
+        agent.consult(first, &outgoing(), t0),
+        Err(UaError::WrongState(CallState::Confirmed))
+    );
+    // until the first consultation is over, and then it can be tried again
+    agent.hangup(second, t0).expect("the BYE goes");
+    let bye = sent(&mut agent);
+    deliver(&mut agent, &reply(&bye, 200, "OK", ""), t0);
+    events(&mut agent);
+    agent
+        .consult(first, &outgoing(), t0)
+        .expect("a second attempt at the target");
+}
+
+#[test]
+fn a_consultation_whose_reason_hung_up_is_an_ordinary_call_again() {
+    // the transferor gave up on the transfer and stayed with the target; there
+    // is nobody left to hand over, so the state says so
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, _) = consulted(&mut agent, first, t0);
+
+    agent.hangup(first, t0).expect("the BYE goes");
+    let bye = sent(&mut agent);
+    deliver(&mut agent, &reply(&bye, 200, "OK", ""), t0);
+    events(&mut agent);
+    assert_eq!(agent.call_state(first), None);
+    assert_eq!(agent.call_state(second), Some(CallState::Confirmed));
+}
+
+// -- a flow that dies under a registration -----------------------------------
+
+#[test]
+fn a_ping_that_is_never_answered_takes_the_registration_with_it() {
+    // RFC 5626 §4.4: "If a flow with a registration has failed, the UA follows
+    // the procedures in Section 4.2 to form a new flow to replace the failed
+    // one" — forming it is the application's, and everything before it is not
+    let t0 = Instant::now();
+    let (mut agent, id) = over_tcp(t0);
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    stream(&mut agent, &granted(&request, 3_600), t0);
+    events(&mut agent);
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Registered)
+    );
+
+    let ping_at = agent.poll_timeout().expect("a keepalive is due");
+    agent.handle_timeout(ping_at);
+    assert_eq!(transmits(&mut agent), vec![b"\r\n\r\n".to_vec()]);
+
+    agent.handle_timeout(ping_at + Duration::from_secs(10));
+    let events = events(&mut agent);
+    assert!(
+        events.iter().any(|event| matches!(
+            *event,
+            UaEvent::RegistrationFailed {
+                account,
+                reason: RegistrationFailure::Unreachable,
+                retry_in: Some(_),
+                ..
+            } if account == id
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            *event,
+            UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { .. })
+        )),
+        "the application owns the socket and has to be told to close it"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Retrying)
+    );
+}
+
+#[test]
+fn a_pong_leaves_the_registration_alone() {
+    let t0 = Instant::now();
+    let (mut agent, id) = over_tcp(t0);
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    stream(&mut agent, &granted(&request, 3_600), t0);
+    events(&mut agent);
+
+    let ping_at = agent.poll_timeout().expect("a keepalive is due");
+    agent.handle_timeout(ping_at);
+    transmits(&mut agent);
+    stream(&mut agent, b"\r\n", ping_at + Duration::from_secs(1));
+
+    agent.handle_timeout(ping_at + Duration::from_secs(10));
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::RegistrationFailed { .. })),
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Registered)
+    );
 }

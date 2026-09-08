@@ -19,8 +19,10 @@
 //!
 //! Between messages a peer may send keep-alives (RFC 5626 §4.4.1): a double
 //! CRLF is a ping, which a server MUST answer with a single CRLF, and a single
-//! CRLF is that answer. They are skipped here and counted, so the layer that
-//! owns the connection can reply — see [`StreamFramer::take_ping`].
+//! CRLF is that answer. They are skipped here and counted separately, so the
+//! layer that owns the connection can reply to one and take the other as proof
+//! the flow is alive — see [`StreamFramer::take_ping`] and
+//! [`StreamFramer::take_pong`].
 //!
 //! Work is bounded per byte received rather than per call. A peer that feeds
 //! one byte at a time cannot make this re-scan the whole pending buffer each
@@ -47,6 +49,10 @@ pub struct StreamFramer {
     /// Total bytes this message needs, once the body's length is known.
     need: Option<usize>,
     pings: u32,
+    pongs: u32,
+    /// A CRLF that has been read as a pong and could still turn out to be the
+    /// first half of a ping split between two reads.
+    dangling: bool,
     limits: Limits,
 }
 
@@ -70,6 +76,8 @@ impl StreamFramer {
             scanned: 0,
             need: None,
             pings: 0,
+            pongs: 0,
+            dangling: false,
             limits,
         }
     }
@@ -162,6 +170,19 @@ impl StreamFramer {
         true
     }
 
+    /// Consume one keep-alive pong, if one arrived.
+    ///
+    /// This is the half of §4.4.1 the client depends on: a ping that is not
+    /// answered within ten seconds means the flow is dead, and nothing else on
+    /// an idle connection says otherwise.
+    pub fn take_pong(&mut self) -> bool {
+        if self.pongs == 0 {
+            return false;
+        }
+        self.pongs -= 1;
+        true
+    }
+
     /// How many bytes are held for a message that is not complete yet.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -175,6 +196,8 @@ impl StreamFramer {
         self.scanned = 0;
         self.need = None;
         self.pings = 0;
+        self.pongs = 0;
+        self.dangling = false;
     }
 
     /// Drop the bytes of messages already handed out.
@@ -187,7 +210,7 @@ impl StreamFramer {
         self.start = 0;
     }
 
-    /// Skip the CRLFs a peer sends between messages, counting the pings.
+    /// Skip the CRLFs a peer sends between messages, counting pings and pongs.
     ///
     /// Only whole pairs are consumed: a lone `\r` at the end of the buffer is
     /// half of a CRLF that has not finished arriving, and eating it would
@@ -198,10 +221,25 @@ impl StreamFramer {
             self.start += 2;
             crlfs += 1;
         }
-        // a double CRLF is the ping; an odd one left over is the pong coming
-        // back, or padding, and needs no answer
-        self.pings += crlfs / 2;
         self.scanned = self.scanned.max(self.start);
+
+        // A pair is a ping; the odd CRLF left over is a pong, and it is
+        // reported the moment it arrives rather than held back to see whether a
+        // second one follows. On an idle connection that second one may never
+        // come, and the pong is the only thing that says the flow is alive. The
+        // cost is that a ping split between two reads counts as a pong and then
+        // as the ping it was, so it is still answered — four bytes torn in half
+        // by the network buy the far end one keep-alive interval, and nothing
+        // else.
+        let run = crlfs + u32::from(self.dangling);
+        self.pings += run / 2;
+        let odd = run % 2 == 1;
+        if odd && !self.dangling {
+            self.pongs += 1;
+        }
+        // a byte that cannot continue the run ends it, so the next lone CRLF is
+        // a pong of its own rather than the other half of this one
+        self.dangling = odd && self.buf.get(self.start).is_none_or(|byte| *byte == b'\r');
     }
 
     /// Whether the blank line that ends the headers has arrived, resuming the
@@ -352,6 +390,102 @@ Content-Length: 0\r\n\
         );
         // a lone CRLF is the pong coming back, and needs no answer
         assert!(!f.take_ping());
+        assert!(f.take_pong());
+        assert!(!f.take_pong());
+    }
+
+    #[test]
+    fn a_pong_on_its_own_is_seen_without_anything_following_it() {
+        // the flow-failure timer depends on this: the pong is usually the last
+        // thing on the connection for the next twenty-five seconds
+        let mut f = framer();
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_pong());
+        assert!(!f.take_ping());
+    }
+
+    #[test]
+    fn two_pongs_are_two_pongs_and_not_a_ping() {
+        // a run is only a ping when it arrives as one; a CRLF that was already
+        // read as a pong does not pair up with the next message's
+        let mut f = framer();
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        f.push(INVITE).expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_some()
+        );
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_pong());
+        assert!(f.take_pong());
+        assert!(!f.take_pong());
+        assert!(!f.take_ping());
+    }
+
+    #[test]
+    fn a_ping_torn_in_half_by_the_network_is_still_answered() {
+        // answering it is the MUST; the pong it is counted as first only costs
+        // the far end a keep-alive interval
+        let mut f = framer();
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        f.push(b"\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_ping());
+        assert!(!f.take_ping());
+    }
+
+    #[test]
+    fn three_crlfs_in_one_read_are_a_ping_and_a_pong() {
+        let mut f = framer();
+        f.push(b"\r\n\r\n\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        assert!(f.take_ping());
+        assert!(!f.take_ping());
+        assert!(f.take_pong());
+        assert!(!f.take_pong());
+    }
+
+    #[test]
+    fn a_replaced_connection_forgets_the_keepalives_it_had_counted() {
+        let mut f = framer();
+        f.push(b"\r\n\r\n\r\n").expect("pushed");
+        assert!(
+            f.next_message(ParseMode::Strict)
+                .expect("no error")
+                .is_none()
+        );
+        f.reset();
+        assert!(!f.take_ping());
+        assert!(!f.take_pong());
     }
 
     #[test]
