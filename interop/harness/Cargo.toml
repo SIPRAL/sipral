@@ -12,6 +12,8 @@ publish = false
 
 [dependencies]
 sipral-core.workspace = true
+sipral-media = { path = "../../crates/sipral-media", version = "0.0.1" }
+sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
 sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1", features = ["reference-loop"] }
 
 [lints]

@@ -102,6 +102,7 @@ jobs:
         run: |
           docker run --rm --network sipral-interop_lab \
             --cap-add NET_RAW --cap-add NET_ADMIN \
+            -e SIPRAL_REQUIRE_AUDIO=1 \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
             -v "$PWD/pcap:/pcap" \
             debian:trixie-slim sh -c '
@@ -121,6 +122,7 @@ jobs:
         run: |
           docker run --rm --network sipral-interop_lab \
             --cap-add NET_RAW --cap-add NET_ADMIN \
+            -e SIPRAL_REQUIRE_AUDIO=1 \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
             -v "$PWD/pcap:/pcap" \
             debian:trixie-slim sh -c '

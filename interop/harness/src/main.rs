@@ -15,6 +15,8 @@
 //! with the failing condition named, and the process exits non-zero so that CI
 //! does not have to read the log to know.
 
+mod media;
+
 use std::env;
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -22,6 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sipral_core::msg::{HeaderName, OwnedMessage};
+use sipral_core::sdp;
+
+use crate::media::Media;
 use sipral_ua::{
     Account, AccountId, CallHandle, CallState, Control, Credentials, EndpointConfig, Handler,
     OutgoingCall, Runtime, UaError, UaEvent, Uri, UserAgent,
@@ -32,6 +37,11 @@ use sipral_ua::{
 /// than this has not gone slowly, it has gone wrong.
 const PATIENCE: Duration = Duration::from_secs(20);
 
+/// How long a plain call stays up before it is hung up. Long enough for a
+/// hundred frames each way, which is enough to tell a tone coming back from a
+/// line that is merely open.
+const DWELL: Duration = Duration::from_secs(2);
+
 /// The offer the harness makes: G.711, both laws, one stream.
 ///
 /// Both, because offering one is not what a client does. The lab's servers
@@ -40,7 +50,7 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// 488. `sipral-media` has had both laws since the day it was written — only
 /// the offer was narrow.
 const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 {ip}\r\ns=-\r\nc=IN IP4 {ip}\r\n\
-t=0 0\r\nm=audio 40000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
+t=0 0\r\nm=audio {port} RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n";
 
 fn main() -> ExitCode {
@@ -77,7 +87,7 @@ fn main() -> ExitCode {
             continue;
         }
         match run(flow, &server, remote, &extension, &other, &user, &pass) {
-            Ok(()) => println!("  pass  {}", flow.name()),
+            Ok(media) => println!("  pass  {}{media}", flow.name()),
             Err(why) => {
                 println!("  FAIL  {} — {why}", flow.name());
                 failures += 1;
@@ -192,6 +202,12 @@ struct Script {
     consulted: Option<CallHandle>,
     step: Step,
     asked: bool,
+    /// The socket, the RTP session and the tone.
+    media: Media,
+    /// What we offered, kept so the answer can be read against it.
+    offer: Option<String>,
+    /// When to hang up a call that is only there to carry audio.
+    listen_until: Option<Instant>,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -231,11 +247,14 @@ impl Handler for Script {
                 state: CallState::Ringing | CallState::EarlyMedia,
                 ..
             } => self.seen.saw(Fact::Ringing),
-            UaEvent::CallConfirmed { call, .. } => {
+            UaEvent::CallConfirmed {
+                call, ref response, ..
+            } => {
                 if Some(call) == self.consulted {
                     self.seen.saw(Fact::Consulted);
                 } else {
                     self.seen.saw(Fact::Up);
+                    self.open_media(response.as_ref(), now);
                 }
                 self.advance(agent, now);
             }
@@ -292,6 +311,11 @@ impl Handler for Script {
             let asked = agent.register(self.account, now);
             self.tried("register", asked);
         }
+        self.media.turn(now);
+        if self.listen_until.is_some_and(|due| now >= due) {
+            self.listen_until = None;
+            self.hang_up(agent, now);
+        }
         if self.step == Step::Done || now > self.started + PATIENCE {
             return Control::Stop;
         }
@@ -315,8 +339,10 @@ impl Script {
                     self.step = Step::Done;
                     return;
                 };
-                let offer = OFFER.replace("{ip}", &self.local.ip().to_string());
-                let placing = OutgoingCall::new(target).offer(Arc::from(offer.into_bytes()));
+                let offer = self.offer();
+                let placing =
+                    OutgoingCall::new(target).offer(Arc::from(offer.clone().into_bytes()));
+                self.offer = Some(offer);
                 match agent.call(self.account, &placing, now) {
                     Ok(call) => self.call = Some(call),
                     Err(_) => self.step = Step::Done,
@@ -346,7 +372,7 @@ impl Script {
             }
             Step::Talking if self.flow == Flow::Attended => {
                 self.step = Step::Consulting;
-                let offer = OFFER.replace("{ip}", &self.local.ip().to_string());
+                let offer = self.offer();
                 if let (Some(call), Some(target)) = (self.call, self.target()) {
                     let placing = OutgoingCall::new(target).offer(Arc::from(offer.into_bytes()));
                     match agent.consult(call, &placing, now) {
@@ -362,6 +388,10 @@ impl Script {
                     let asked = agent.transfer_to(call, other, now);
                     self.tried("attended transfer", asked);
                 }
+            }
+            // a plain call is the one that carries the tone, so it waits
+            Step::Talking if self.flow == Flow::Call => {
+                self.listen_until = Some(now + DWELL);
             }
             Step::Talking | Step::Resuming | Step::Transferring => self.hang_up(agent, now),
             Step::Placing | Step::Ending | Step::Done => (),
@@ -382,6 +412,33 @@ impl Script {
     /// Who a transfer hands the call to.
     fn target(&self) -> Option<Uri> {
         Uri::parse_str(&format!("sip:{}@{}", self.other, self.server)).ok()
+    }
+
+    /// The offer this flow makes, naming the port the RTP socket really has.
+    fn offer(&self) -> String {
+        OFFER
+            .replace("{ip}", &self.local.ip().to_string())
+            .replace("{port}", &self.media.port().unwrap_or(0).to_string())
+    }
+
+    /// Read the answer against our offer and start the media.
+    ///
+    /// This is the first thing outside sipral-core's own tests to put a real
+    /// answer through `media_plan`, which is the whole point of the seam.
+    fn open_media(&mut self, response: Option<&OwnedMessage>, now: Instant) {
+        let (Some(response), Some(offer)) = (response, self.offer.as_ref()) else {
+            return;
+        };
+        let body = response.as_raw().body();
+        if body.is_empty() {
+            return;
+        }
+        let (Ok(ours), Ok(theirs)) = (sdp::parse(offer.as_bytes()), sdp::parse(body)) else {
+            return;
+        };
+        if let Ok(Some(plan)) = ours.media_plan(&theirs, 0) {
+            self.media.start(&plan, 0x5149_5241, now);
+        }
     }
 
     fn hang_up(&mut self, agent: &mut UserAgent, now: Instant) {
@@ -448,6 +505,21 @@ impl Script {
                 return Err((*why).to_owned());
             }
         }
+        // Audio is asked for only when something is known to echo. A tone sent
+        // into a call that plays a recording comes back as the recording, and
+        // "sound arrived" would then say nothing about what we sent.
+        let heard = self.media.heard();
+        // and only of the plain call, which is the one that dwells: the others
+        // hang up as soon as what they came to prove has happened
+        if self.flow == Flow::Call
+            && std::env::var("SIPRAL_REQUIRE_AUDIO").is_ok()
+            && heard.audible == 0
+        {
+            return Err(format!(
+                "nothing audible came back: {} sent, {} received, {} refused",
+                heard.sent, heard.received, heard.refused
+            ));
+        }
         Ok(())
     }
 }
@@ -460,10 +532,11 @@ fn run(
     other: &str,
     user: &str,
     pass: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let bind: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|_| "cannot parse the bind address".to_owned())?;
+    let media = Media::bind(Instant::now())?;
     let mut runtime = Runtime::bind(EndpointConfig::default(), seed(flow), bind)
         .map_err(|error| format!("cannot bind: {error}"))?;
     let local = runtime.local();
@@ -491,11 +564,23 @@ fn run(
         consulted: None,
         step: Step::Registering,
         asked: false,
+        media,
+        offer: None,
+        listen_until: None,
     };
     runtime
         .run(&mut script)
         .map_err(|error| format!("the loop stopped: {error}"))?;
-    script.verdict()
+    script.verdict()?;
+    let heard = script.media.heard();
+    Ok(if heard.sent == 0 {
+        String::new()
+    } else {
+        format!(
+            "   ({} sent, {} back, {} audible, {} refused)",
+            heard.sent, heard.received, heard.audible, heard.refused
+        )
+    })
 }
 
 /// The address to put in `Contact`, which is the one the far end can reach.
