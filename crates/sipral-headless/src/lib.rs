@@ -14,3 +14,39 @@
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
     html_favicon_url = "https://sipral.org/brand/favicon.svg"
 )]
+// tests say what they mean; the no-panic discipline is for the library
+#![cfg_attr(
+    test,
+    allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )
+)]
+
+mod audio;
+mod codec;
+mod control;
+mod frame;
+mod json;
+mod latency;
+mod registry;
+mod session;
+
+pub use audio::{
+    AudioConfig, AudioError, DEFAULT_FRAME_DURATION_MS, SampleRate, read_samples, write_samples,
+};
+pub use codec::{
+    DecodeError, Decoded, Decoder, EncodeError, MAX_CONTROL_PAYLOAD, encode_audio, encode_control,
+};
+pub use control::{
+    Answer, BargeIn, CallState, CallStateKind, ControlError, ControlMessage, DtmfDigit,
+    DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall, Reject,
+    SessionOpen, Transfer,
+};
+pub use frame::{Frame, FrameDecoder, FrameError, HEADER_LEN, write_frame};
+pub use json::{JsonError, Value, parse as parse_json};
+pub use latency::LatencyBudget;
+pub use registry::{RegistryError, SessionRegistry};
+pub use session::{Session, SessionError, SessionState};
