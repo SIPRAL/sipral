@@ -215,7 +215,9 @@ impl UserAgent {
         call: CallHandle,
         interval: Option<Duration>,
     ) -> Vec<(HeaderName<'static>, Box<[u8]>)> {
-        let mut out = vec![(HeaderName::Supported, Box::from(&b"timer"[..]))];
+        // RFC 3891 §6.2: "UAs which support the Replaces header MUST include
+        // the replaces option tag in a Supported header field"
+        let mut out = vec![(HeaderName::Supported, Box::from(&b"timer, replaces"[..]))];
         let Some(interval) = interval else {
             return out;
         };

@@ -54,7 +54,7 @@ use crate::session::Hold;
 /// is worth sending (RFC 3311 §4).
 ///
 /// It lists what is answered here and nothing more.
-pub(crate) const ALLOW: &[u8] = b"INVITE, ACK, CANCEL, BYE, UPDATE, PRACK";
+pub(crate) const ALLOW: &[u8] = b"INVITE, ACK, CANCEL, BYE, UPDATE, PRACK, REFER, NOTIFY";
 
 /// §14.1 and RFC 3311 §5.3: the wait for the end that generated the `Call-ID`,
 /// in milliseconds.

@@ -50,6 +50,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 mod timers;
+mod transfer;
 
 pub use account::{Account, AccountId};
 pub use agent::UserAgent;

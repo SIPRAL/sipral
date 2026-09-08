@@ -40,9 +40,10 @@ use crate::renegotiate::ALLOW;
 /// Everything this agent will answer `Require` for.
 ///
 /// `100rel` because this module implements it, `timer` because
-/// [`crate::timers`] does, and nothing else. RFC 3261 §8.2.2.3 answers a
-/// `Require` outside this list with a 420 and says which token it was.
-const UNDERSTOOD: [&[u8]; 2] = [b"100rel", b"timer"];
+/// [`crate::timers`] does, `replaces` because [`crate::transfer`] does, and
+/// nothing else. RFC 3261 §8.2.2.3 answers a `Require` outside this list with
+/// a 420 and says which token it was.
+const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
 
 /// What a reliable provisional this end sent is still waiting for.
 #[derive(Clone, Debug)]

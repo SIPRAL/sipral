@@ -2744,3 +2744,328 @@ fn a_require_nobody_here_implements_is_refused_with_420() {
         "there is nothing for the application to decide"
     );
 }
+
+// -- transfer ----------------------------------------------------------------
+
+/// The `tag=` parameter of a header value.
+fn tag_of(bytes: &[u8], name: HeaderName<'_>) -> String {
+    let value = String::from_utf8_lossy(&header(bytes, name)).into_owned();
+    value
+        .split(";tag=")
+        .nth(1)
+        .map(|rest| rest.split(';').next().unwrap_or("").to_owned())
+        .unwrap_or_default()
+}
+
+/// A NOTIFY from the transferee, reporting how the referred call is going.
+fn notify(ours: &[u8], cseq: u32, status: &str, state: &str) -> Vec<u8> {
+    let body = format!("SIP/2.0 {status}\r\n");
+    let head = reversed(ours, "NOTIFY", &format!("nfy{cseq}"), cseq, None);
+    let head = plus(
+        &head,
+        &format!("Event: refer\r\nSubscription-State: {state}\r\n"),
+    );
+    // put the sipfrag in, replacing the empty body
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let text = text.replace(
+        "Content-Length: 0\r\n\r\n",
+        &format!(
+            "Content-Type: message/sipfrag;version=2.0\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    text.into_bytes()
+}
+
+#[test]
+fn a_blind_transfer_refers_the_far_end_and_waits_to_be_told() {
+    // 2.4.4: the far end reports in NOTIFYs, and this end does not hang up
+    // until it knows the transfer worked
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    assert!(refer.starts_with(b"REFER sip:bob@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(
+        header(&refer, HeaderName::ReferTo),
+        b"<sip:carol@example.com>"
+    );
+    // 2: "REFER creates a dialog ... hence MUST contain a single Contact"
+    assert_eq!(
+        header(&refer, HeaderName::Contact),
+        b"<sip:alice@192.0.2.1>"
+    );
+    deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+    events(&mut agent);
+
+    deliver(&mut agent, &notify(&ack, 1, "100 Trying", "active"), t0);
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::TransferProgress { status, .. } if status == StatusCode::TRYING
+        )),
+        "the far end is trying"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+
+    deliver(
+        &mut agent,
+        &notify(&ack, 2, "200 OK", "terminated;reason=noresource"),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(
+        written.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "and now this end is not in the call any more"
+    );
+    assert!(events(&mut agent).iter().any(|event| matches!(
+        *event,
+        UaEvent::TransferDone { status, .. } if status == StatusCode::OK
+    )));
+}
+
+#[test]
+fn a_transfer_that_failed_leaves_the_call_exactly_where_it_was() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &notify(&ack, 1, "486 Busy Here", "terminated;reason=noresource"),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(
+        !written.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "nothing was transferred, so nothing was given up"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn an_attended_transfer_names_the_dialog_it_wants_replaced() {
+    // RFC 3891 §6.1: exactly one to-tag and one from-tag, and they name the
+    // dialog from the point of view of the end being replaced
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer_to(first, second, t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    let refer_to = String::from_utf8_lossy(&header(&refer, HeaderName::ReferTo)).into_owned();
+    assert!(refer_to.contains("?Replaces="), "{refer_to}");
+    // the semicolons are escaped, or they would end the URI header
+    assert!(!refer_to.contains(";to-tag"), "{refer_to}");
+    assert!(refer_to.contains("%3Bto-tag%3D"), "{refer_to}");
+
+    let ours = tag_of(&ack, HeaderName::From);
+    let theirs = tag_of(&ack, HeaderName::To);
+    assert!(
+        refer_to.contains(&format!("%3Bfrom-tag%3D{ours}")),
+        "{refer_to}"
+    );
+    assert!(
+        refer_to.contains(&format!("%3Bto-tag%3D{theirs}")),
+        "{refer_to}"
+    );
+}
+
+#[test]
+fn a_refer_that_arrives_is_the_applications_to_take_or_refuse() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("ref1", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "ref1ack", 1), t0);
+    events(&mut agent);
+
+    let refer = plus(
+        &in_dialog(&ok, "REFER", "ref1refer", 2),
+        "Refer-To: <sip:carol@example.com>\r\n",
+    );
+    deliver(&mut agent, &refer, t0);
+    let asked = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::TransferRequested {
+                call,
+                target,
+                attended,
+                ..
+            } => Some((call, target, attended)),
+            _ => None,
+        })
+        .expect("somebody wants a transfer");
+    assert_eq!(asked.0, call);
+    assert_eq!(asked.1.as_bytes(), b"sip:carol@example.com");
+    assert!(!asked.2, "no Replaces, so a blind one");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "nothing is answered on the application's behalf"
+    );
+
+    let placed = agent
+        .accept_transfer(call, t0)
+        .expect("the transfer is taken");
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 202 ")),
+        "2.4.2 wants a 202 before the transaction expires"
+    );
+    assert!(
+        written.iter().any(|bytes| bytes.starts_with(b"NOTIFY ")),
+        "2.4.4 makes the subscription real at once"
+    );
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"INVITE sip:carol@example.com")),
+        "and the call it asked for is placed"
+    );
+    assert_eq!(agent.call_state(placed), Some(CallState::Calling));
+}
+
+#[test]
+fn a_refer_can_be_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("ref2", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "ref2ack", 1), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "ref2refer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    events(&mut agent);
+    let refused = StatusCode::new(603).expect("603");
+    agent
+        .reject_transfer(call, refused, t0)
+        .expect("the refusal goes");
+    assert!(sent(&mut agent).starts_with(b"SIP/2.0 603 "));
+}
+
+#[test]
+fn a_refer_with_the_wrong_number_of_targets_is_a_bad_request() {
+    // 2.4.2: "MUST return a 400 (Bad Request) if the request contained zero or
+    // more than one Refer-To header field values"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("ref3", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "ref3ack", 1), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(&in_dialog(&ok, "REFER", "ref3refer", 2), ""),
+        t0,
+    );
+    assert!(sent(&mut agent).starts_with(b"SIP/2.0 400 "));
+}
+
+#[test]
+fn a_replaces_that_names_nothing_is_refused_rather_than_answered() {
+    // RFC 3891 §3: "If no match is found, the UAS rejects the INVITE and
+    // returns a 481 Call/Transaction Does Not Exist response."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(
+        &mut agent,
+        &plus(
+            &incoming_invite("rep1", Some(OFFER)),
+            "Replaces: nosuchcall;to-tag=a;from-tag=b\r\n",
+        ),
+        t0,
+    );
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 481 "));
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::IncomingCall { .. }))
+    );
+}
+
+#[test]
+fn a_replaces_that_names_a_live_call_takes_it_over() {
+    // RFC 3891 §3: "it accepts the new INVITE by sending a 200-class response,
+    // and shuts down the replaced dialog by sending a BYE."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let first = call_arriving(&mut agent, &incoming_invite("rep2", Some(OFFER)), t0);
+    agent
+        .answer(first, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "rep2ack", 1), t0);
+    events(&mut agent);
+
+    let ours = tag_of(&ok, HeaderName::To);
+    let theirs = tag_of(&ok, HeaderName::From);
+    let call_id = String::from_utf8_lossy(&header(&ok, HeaderName::CallId)).into_owned();
+    let replacing = plus(
+        &incoming_invite("rep3", Some(OFFER)),
+        &format!("Replaces: {call_id};to-tag={ours};from-tag={theirs}\r\n"),
+    );
+    deliver(&mut agent, &replacing, t0);
+    transmits(&mut agent);
+    let second = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("the replacing call arrives for the application to answer");
+
+    agent
+        .answer(second, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let written = transmits(&mut agent);
+    assert!(
+        written.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "and the one it replaced is shut down"
+    );
+    assert!(events(&mut agent).iter().any(|event| matches!(
+        *event,
+        UaEvent::CallReplaced { replaced, .. } if replaced == first
+    )));
+}

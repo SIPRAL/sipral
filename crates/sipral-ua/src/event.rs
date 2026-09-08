@@ -269,6 +269,48 @@ pub enum UaEvent {
         /// The refusal, whole.
         response: Option<OwnedMessage>,
     },
+    /// The far end asked this one to call somebody else (RFC 3515).
+    ///
+    /// Take it with
+    /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer),
+    /// which answers 202 and places the call, or refuse it with
+    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer). A
+    /// REFER nobody answers is retransmitted until it gives up.
+    TransferRequested {
+        /// The call it arrived in.
+        call: CallHandle,
+        /// Who to call.
+        target: sipral_core::msg::Uri,
+        /// Whether it named a dialog to replace, which makes it an attended
+        /// transfer rather than a blind one (RFC 3891).
+        attended: bool,
+        /// The REFER, whole.
+        request: OwnedMessage,
+    },
+    /// A transfer this end asked for is under way, as the far end reports it
+    /// in a `message/sipfrag` (RFC 3515 §2.4.5).
+    TransferProgress {
+        /// The call that was transferred.
+        call: CallHandle,
+        /// What the far end's own call is doing.
+        status: StatusCode,
+    },
+    /// And how it ended. A success hangs this call up, because this end is not
+    /// in it any more; a failure leaves it exactly where it was.
+    TransferDone {
+        /// The call that was transferred.
+        call: CallHandle,
+        /// The final status the far end reported.
+        status: StatusCode,
+    },
+    /// A call arrived carrying a `Replaces` that named one already up, and
+    /// took it over (RFC 3891). The replaced call is being hung up.
+    CallReplaced {
+        /// The one that arrived.
+        call: CallHandle,
+        /// The one it replaced.
+        replaced: CallHandle,
+    },
     /// The call is over and its handle is about to go stale.
     CallEnded {
         /// The call.

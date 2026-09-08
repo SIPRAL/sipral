@@ -70,6 +70,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `UserAgent::answer_early`, which puts it in the PRACK where §5 wants it.
 - A `Require` naming an extension that is not implemented is answered 420 with
   the token in `Unsupported` (§8.2.2.3), before the application sees the call.
+- Transfer, both kinds (RFC 3515, RFC 3891). `transfer` sends a REFER and
+  reports what the transferee says in its `message/sipfrag` NOTIFYs as
+  `TransferProgress` and `TransferDone`; the call is given up only when the
+  transfer has actually succeeded, because hanging up when the REFER goes turns
+  a failure into a call that vanished. `transfer_to` sends the other call's
+  remote target with an escaped `Replaces` naming its dialog, which is the only
+  difference between an attended transfer and a blind one.
+  A REFER that arrives is `TransferRequested`, taken with `accept_transfer` —
+  202, the opening NOTIFY, and the call it asked for — or refused with
+  `reject_transfer`; anything but exactly one `Refer-To` is answered 400.
+  `Replaces` on an incoming INVITE is matched before the application sees it,
+  with §3's status code for each way it can fail: 481 for no match or several,
+  603 for a dialog that has ended, 486 for `early-only` against a confirmed
+  one. A match is replaced when the new call is answered, and reported as
+  `CallReplaced`.
 - The reference loop, behind the `reference-loop` feature and off by default.
   `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
   per socket doing the blocking reads, and a `Handler` with two methods. It

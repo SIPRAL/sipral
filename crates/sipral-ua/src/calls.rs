@@ -264,6 +264,9 @@ impl UserAgent {
         if let Some(dialog) = dialog {
             self.by_dialog.insert(dialog, call);
         }
+        // §3891 §3: "it accepts the new INVITE by sending a 200-class
+        // response, and shuts down the replaced dialog"
+        self.shut_down_replaced(call, now);
         self.drain(now);
         Ok(())
     }
@@ -555,7 +558,7 @@ impl UserAgent {
                 ref response,
             } => {
                 let call = self.branch(invite, dialog)?;
-                self.on_progress(call, status, response, false);
+                self.on_progress(call, status, response, false, now);
                 None
             }
             Event::ReliableProvisional {
@@ -695,7 +698,7 @@ impl UserAgent {
                 .calls
                 .get(&call)
                 .is_some_and(|held| !held.session.has_local());
-        self.on_progress(call, status, response, offered);
+        self.on_progress(call, status, response, offered, now);
         if offered {
             if let Some(held) = self.calls.get_mut(&call) {
                 held.owed_prack = Some(provisional);
@@ -744,6 +747,15 @@ impl UserAgent {
                     self.refuse_extension(transaction, &missing, now);
                     return None;
                 }
+                // RFC 3891 §3: a Replaces names one of this end's own calls,
+                // and every way it can fail to is a different status code
+                let replaced = match self.replaced_by(&request.as_raw()) {
+                    Ok(replaced) => replaced,
+                    Err(status) => {
+                        self.refuse_replaces(transaction, status, now);
+                        return None;
+                    }
+                };
                 if Self::too_brief(&request.as_raw()) {
                     let refusal = OutgoingResponse::new(StatusCode::SESSION_INTERVAL_TOO_SMALL)
                         .header(HeaderName::MinSe, &crate::timers::seconds(FLOOR));
@@ -760,6 +772,7 @@ impl UserAgent {
                 let call = self.keep(Call::incoming(account, transaction, contact));
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.invited = Some(request.clone());
+                    held.replaces = replaced;
                 }
                 self.by_server.insert(transaction, call);
                 self.note_allow(call, &request.as_raw());
@@ -916,6 +929,7 @@ impl UserAgent {
         status: StatusCode,
         response: &OwnedMessage,
         answer_wanted: bool,
+        now: Instant,
     ) {
         self.note_session(call, response);
         let early = !response.as_raw().body().is_empty();
@@ -940,6 +954,7 @@ impl UserAgent {
             response: response.clone(),
             answer_wanted,
         });
+        self.report_transfer(call, status, now);
     }
 
     /// A 2xx for one of our INVITEs.
@@ -991,6 +1006,8 @@ impl UserAgent {
             response: Some(response.clone()),
             answer_wanted: !acknowledged,
         });
+        // a call placed because of a REFER owes the referrer a last word
+        self.report_transfer(call, StatusCode::OK, now);
         // a CANCEL that lost its race leaves the call up and the wish to end it
         if self.calls.get(&call).is_some_and(|held| held.hangup_wanted) {
             self.hangup(call, now).ok();

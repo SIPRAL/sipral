@@ -32,6 +32,7 @@ use crate::account::{AccountId, Extra};
 use crate::reliable::Unacknowledged;
 use crate::session::Session;
 use crate::timers::SessionTimer;
+use crate::transfer::{ReferTo, Referred};
 
 /// One call the application is talking to.
 ///
@@ -277,6 +278,18 @@ pub(crate) struct Call {
     /// One that arrived carrying an offer, whose answer §5 puts in the PRACK
     /// and which only the application has.
     pub(crate) owed_prack: Option<ProvisionalResponseId>,
+    /// The REFER this end sent, while the subscription it opened is live
+    /// (RFC 3515 §2.4.4).
+    pub(crate) referring: Option<AnyTransactionId>,
+    /// One this end received.
+    pub(crate) referred: Option<Referred>,
+    /// What that REFER asked for, until the application says yes or no.
+    pub(crate) asked_to_refer: Option<ReferTo>,
+    /// The call whose transfer this one is reporting on, for a call placed
+    /// because of a REFER.
+    pub(crate) reporting_to: Option<CallHandle>,
+    /// The call this one replaces, once it is answered (RFC 3891 §3).
+    pub(crate) replaces: Option<CallHandle>,
     /// What was dialled, kept so that a 422 can be answered by asking again
     /// with the interval the far end demanded (RFC 4028 §7.3).
     pub(crate) placed: Option<OutgoingCall>,
@@ -342,6 +355,11 @@ impl Call {
             timer: None,
             unacknowledged: None,
             owed_prack: None,
+            referring: None,
+            referred: None,
+            asked_to_refer: None,
+            reporting_to: None,
+            replaces: None,
             placed: None,
             invited: None,
             id: None,
@@ -376,6 +394,11 @@ impl Call {
             timer: None,
             unacknowledged: None,
             owed_prack: None,
+            referring: None,
+            referred: None,
+            asked_to_refer: None,
+            reporting_to: None,
+            replaces: None,
             placed: None,
             invited: None,
             id: None,
@@ -408,6 +431,11 @@ impl Call {
             timer: None,
             unacknowledged: None,
             owed_prack: None,
+            referring: None,
+            referred: None,
+            asked_to_refer: None,
+            reporting_to: None,
+            replaces: None,
             placed: None,
             invited: None,
             id: None,
