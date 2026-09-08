@@ -48,15 +48,16 @@ jobs:
           docker compose up -d
       # an active probe rather than a fixed sleep: FreeSWITCH is much the
       # slowest of the three to open its socket, and how slow depends on the
-      # runner
+      # runner. /proc/net/udp rather than netstat, because the kernel always
+      # has it and a minimal image may not have the tool. 13C4 is 5060
       - name: wait for the servers to listen
         working-directory: interop
         run: |
           for service in kamailio freeswitch asterisk; do
             ready=""
-            for _ in $(seq 1 60); do
+            for _ in $(seq 1 45); do
               if docker compose exec -T "$service" sh -c \
-                  'netstat -lun 2>/dev/null | grep -q ":5060"'; then
+                  'cat /proc/net/udp /proc/net/udp6 2>/dev/null | grep -qi ":13C4"'; then
                 ready=yes
                 break
               fi
@@ -64,7 +65,7 @@ jobs:
             done
             if [ -z "$ready" ]; then
               echo "$service never opened 5060"
-              docker compose logs --no-color "$service" | tail -50
+              docker compose logs --no-color "$service" | tail -60
               exit 1
             fi
             echo "$service is listening"
