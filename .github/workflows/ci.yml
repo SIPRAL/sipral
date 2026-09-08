@@ -80,6 +80,12 @@ jobs:
           }
           wait_for kamailio "Listening on"
           wait_for freeswitch "MSG Thread 0 Started"
+          # calls are relayed to the external profile, which comes up after the
+          # core does. Not fatal on its own: the harness is the verdict, and a
+          # readiness probe that guesses at log wording should not be the thing
+          # that fails the run
+          wait_for freeswitch "Started Profile external" \
+            || echo "external profile not seen in the log; continuing to the flows anyway"
       # plain docker run, joining the proxy's namespace directly: asking
       # Compose to do it restarts the proxy first and invalidates the very
       # namespace the capture is trying to enter. The container name is fixed

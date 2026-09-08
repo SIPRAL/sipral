@@ -6,6 +6,7 @@ CLAUDE.md
 .cursor*
 .aider*
 AGENTS.md
+.codex/
 
 # live captures hold real numbers and IPs; they stay in the private fixture repo
 /fixtures/private/
