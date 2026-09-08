@@ -49,6 +49,10 @@ pub(crate) struct InviteServerMachine {
     timer_h: Option<Instant>,
     timer_i: Option<Instant>,
     timer_l: Option<Instant>,
+    /// Whether the ACK for a 2xx arrived. §13.3.1.4 has the user send a BYE
+    /// when it never does, and timer L running out is the only moment anyone
+    /// can know that.
+    acked: bool,
 }
 
 impl InviteServerMachine {
@@ -75,6 +79,7 @@ impl InviteServerMachine {
             timer_h: None,
             timer_i: None,
             timer_l: None,
+            acked: false,
         };
         let effects = Effects {
             send: trying,
@@ -152,7 +157,10 @@ impl InviteServerMachine {
             }
             // the dialog's ACK, for a 2xx: "MUST be passed directly to the TU
             // and not absorbed"
-            InviteServerState::Accepted => Effects::notify(Notify::Ack),
+            InviteServerState::Accepted => {
+                self.acked = true;
+                Effects::notify(Notify::Ack)
+            }
             InviteServerState::Proceeding
             | InviteServerState::Confirmed
             | InviteServerState::Terminated => Effects::default(),
@@ -191,8 +199,23 @@ impl InviteServerMachine {
             return Some((TimerName::I, Effects::terminated()));
         }
         if self.timer_l == Some(due) {
+            // §13.3.1.4: "If the UAS generates a 2xx response and never
+            // receives an ACK, it SHOULD generate a BYE" — which the user can
+            // only do if it is told, and this is the moment it can be
+            let acked = self.acked;
             self.terminate();
-            return Some((TimerName::L, Effects::terminated()));
+            return Some((
+                TimerName::L,
+                if acked {
+                    Effects::terminated()
+                } else {
+                    Effects {
+                        notify: Some(Notify::TimedOut),
+                        terminated: true,
+                        ..Effects::default()
+                    }
+                },
+            ));
         }
         None
     }
@@ -373,6 +396,32 @@ Content-Length: 0\r\n\
         assert_eq!(effects.notify, Some(Notify::Ack));
         assert!(!effects.terminated);
         assert_eq!(machine.state(), InviteServerState::Accepted);
+    }
+
+    #[test]
+    fn a_2xx_that_is_never_acknowledged_says_so_when_the_wait_runs_out() {
+        // 13.3.1.4: "If the UAS generates a 2xx response and never receives an
+        // ACK, it SHOULD generate a BYE" — which needs somebody to be told
+        let (mut machine, _, now, config) = start(false);
+        machine.respond(response(200), now);
+        let (name, done) = machine
+            .handle_timeout(now + config.sixty_four_t1())
+            .expect("timer L");
+        assert_eq!(name, TimerName::L);
+        assert_eq!(done.notify, Some(Notify::TimedOut));
+        assert!(done.terminated);
+    }
+
+    #[test]
+    fn one_that_is_acknowledged_ends_quietly() {
+        let (mut machine, _, now, config) = start(false);
+        machine.respond(response(200), now);
+        machine.on_ack(now);
+        let (_, done) = machine
+            .handle_timeout(now + config.sixty_four_t1())
+            .expect("timer L");
+        assert_eq!(done.notify, None, "nothing went wrong");
+        assert!(done.terminated);
     }
 
     #[test]

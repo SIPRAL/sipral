@@ -30,11 +30,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sipral_core::endpoint::{
-    DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse,
+    DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse, TerminationReason,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp;
-use sipral_core::transaction::{AnyTransactionId, DialogId, InviteClient, TransactionId};
+use sipral_core::transaction::{
+    AnyTransactionId, DialogId, InviteClient, InviteServer, TransactionId,
+};
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
@@ -182,6 +184,8 @@ impl UserAgent {
             // §12.1.1 confirms the dialog here, but the call is not up until
             // the ACK arrives; until then the 2xx is still being retransmitted
             held.state = CallState::Ringing;
+            // and §13.3.1.4 wants a BYE if it never is
+            held.awaiting_ack = Some(transaction);
             if let Some(described) = described {
                 // an INVITE that carried nothing is answered with an offer,
                 // and §13.2.2.4 puts the answer to it in the ACK
@@ -209,7 +213,7 @@ impl UserAgent {
         let transaction = self.answerable(call)?;
         self.endpoint
             .respond_invite(transaction, &OutgoingResponse::new(status), now)?;
-        self.finish(call, CallEndReason::LocalHangup, Some(status), None);
+        self.finish(call, CallEndReason::LocalHangup, Some(status), None, now);
         self.drain(now);
         Ok(())
     }
@@ -351,13 +355,22 @@ impl UserAgent {
         reason: CallEndReason,
         status: Option<StatusCode>,
         response: Option<OwnedMessage>,
+        now: Instant,
     ) {
+        if self
+            .calls
+            .get(&call)
+            .is_none_or(|held| held.state == CallState::Terminated)
+        {
+            return;
+        }
+        // §15.1.2: a request of theirs that is still waiting for an answer
+        // gets one before the dialog goes, or it is retransmitted at the far
+        // end until it gives up
+        self.abandon_change(call, now);
         let Some(held) = self.calls.get_mut(&call) else {
             return;
         };
-        if held.state == CallState::Terminated {
-            return;
-        }
         held.state = CallState::Terminated;
         self.events.push_back(UaEvent::CallEnded {
             call,
@@ -474,10 +487,10 @@ impl UserAgent {
                     // anything new is still a call that did not connect
                     _ => CallEndReason::Unreachable,
                 };
-                self.end_branches(invite, ended, status, response.as_ref())
+                self.end_branches(invite, ended, status, response.as_ref(), now)
             }
             Event::Cancelled { invite } => {
-                self.end_branches(invite, CallEndReason::Cancelled, None, None)
+                self.end_branches(invite, CallEndReason::Cancelled, None, None, now)
             }
             Event::CancelSent { invite, cancel } => {
                 let call = self.by_invite.get(&invite).copied()?;
@@ -494,22 +507,7 @@ impl UserAgent {
             | Event::IncomingCancel { .. }
             | Event::IncomingAck { .. }
             | Event::IncomingBye { .. } => self.on_incoming(event, now),
-            Event::DialogTerminated { dialog, reason } => {
-                let call = self.by_dialog.get(&dialog).copied()?;
-                // a refusal reported by the dialog layer is the same refusal
-                // the INVITE transaction is about to report, and that one
-                // knows whether the 487 was one we asked for. Wait for it
-                // rather than answer first and answer worse
-                if reason == DialogEndReason::Refused && self.still_calling(call) {
-                    self.by_dialog.remove(&dialog);
-                    if let Some(held) = self.calls.get_mut(&call) {
-                        held.dialog = None;
-                    }
-                    return None;
-                }
-                self.finish(call, ended_by(reason), None, None);
-                None
-            }
+            Event::DialogTerminated { dialog, reason } => self.on_dialog_over(dialog, reason, now),
             Event::Challenged { transaction, .. } => {
                 let AnyTransactionId::InviteClient(invite) = transaction else {
                     return Some(event);
@@ -528,12 +526,38 @@ impl UserAgent {
                 }
                 None
             }
-            Event::TransactionTerminated { transaction, .. } => {
-                self.on_transaction_over(transaction).then_some(())?;
+            Event::TransactionTerminated {
+                transaction,
+                reason,
+            } => {
+                self.on_transaction_over(transaction, reason, now);
                 None
             }
             other => Some(other),
         }
+    }
+
+    /// A dialog has ended, and with it the call that was in it.
+    fn on_dialog_over(
+        &mut self,
+        dialog: DialogId,
+        reason: DialogEndReason,
+        now: Instant,
+    ) -> Option<Event> {
+        let call = self.by_dialog.get(&dialog).copied()?;
+        // a refusal reported by the dialog layer is the same refusal the
+        // INVITE transaction is about to report, and that one knows whether
+        // the 487 was one we asked for. Wait for it rather than answer first
+        // and answer worse
+        if reason == DialogEndReason::Refused && self.still_calling(call) {
+            self.by_dialog.remove(&dialog);
+            if let Some(held) = self.calls.get_mut(&call) {
+                held.dialog = None;
+            }
+            return None;
+        }
+        self.finish(call, ended_by(reason), None, None, now);
+        None
     }
 
     /// The CANCEL lost its race and the call connected anyway.
@@ -588,7 +612,7 @@ impl UserAgent {
                 let call = self.by_server.get(&invite).copied()?;
                 // the endpoint has already sent the 200 and the 487; §9.2
                 // makes both unconditional, and what is left is to stop ringing
-                self.finish(call, CallEndReason::Cancelled, None, None);
+                self.finish(call, CallEndReason::Cancelled, None, None, now);
                 None
             }
             Event::IncomingAck {
@@ -602,6 +626,7 @@ impl UserAgent {
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.state = CallState::Confirmed;
                     held.acknowledged = true;
+                    held.awaiting_ack = None;
                 }
                 if first {
                     self.events.push_back(UaEvent::CallConfirmed {
@@ -625,7 +650,7 @@ impl UserAgent {
                 self.endpoint
                     .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
                     .ok();
-                self.finish(call, CallEndReason::RemoteHangup, None, None);
+                self.finish(call, CallEndReason::RemoteHangup, None, None, now);
                 None
             }
             other => Some(other),
@@ -704,6 +729,7 @@ impl UserAgent {
         reason: CallEndReason,
         status: Option<StatusCode>,
         response: Option<&OwnedMessage>,
+        now: Instant,
     ) -> Option<Event> {
         let branches: Vec<CallHandle> = self
             .calls
@@ -712,7 +738,7 @@ impl UserAgent {
             .map(|(handle, _)| *handle)
             .collect();
         for call in branches {
-            self.finish(call, reason, status, response.cloned());
+            self.finish(call, reason, status, response.cloned(), now);
         }
         None
     }
@@ -780,7 +806,7 @@ impl UserAgent {
             if acknowledged {
                 self.hangup(call, now).ok();
             } else {
-                self.finish(call, CallEndReason::ForkLost, None, None);
+                self.finish(call, CallEndReason::ForkLost, None, None, now);
             }
             return;
         }
@@ -828,30 +854,58 @@ impl UserAgent {
         }
     }
 
-    /// Whether a transaction that has just ended was one of ours.
-    fn on_transaction_over(&mut self, transaction: AnyTransactionId) -> bool {
-        if self.by_request.remove(&transaction).is_some() {
-            return true;
+    /// A transaction has ended. Most of that is plumbing; one case is not.
+    fn on_transaction_over(
+        &mut self,
+        transaction: AnyTransactionId,
+        reason: TerminationReason,
+        now: Instant,
+    ) {
+        self.by_request.remove(&transaction);
+        let AnyTransactionId::InviteServer(id) = transaction else {
+            // the INVITE this end sent keeps its mapping until the call goes:
+            // a fork's late 2xx is reported after the transaction is retired,
+            // and the branch it names still has to be found
+            return;
+        };
+        if let Some(call) = self.by_server.remove(&id)
+            && let Some(held) = self.calls.get_mut(&call)
+        {
+            held.server = None;
         }
-        match transaction {
-            AnyTransactionId::InviteClient(id) => {
-                // the mapping stays until the call does: a fork's late 2xx is
-                // reported after the transaction is retired, and the branch it
-                // names still has to be found
-                self.by_invite.contains_key(&id)
-            }
-            AnyTransactionId::InviteServer(id) => {
-                let Some(call) = self.by_server.get(&id).copied() else {
-                    return false;
-                };
-                if let Some(held) = self.calls.get_mut(&call) {
-                    held.server = None;
-                }
-                self.by_server.remove(&id);
-                true
-            }
-            AnyTransactionId::NonInviteClient(_) | AnyTransactionId::NonInviteServer(_) => false,
+        if reason == TerminationReason::TimedOut {
+            self.on_unacknowledged(id, now);
         }
+    }
+
+    /// A 2xx this end sent was never acknowledged.
+    ///
+    /// §13.3.1.4, and §14.2 says the same about a re-INVITE: "If a UAS
+    /// generates a 2xx response and never receives an ACK, it SHOULD generate
+    /// a BYE to terminate the dialog." Nothing else will — the far end is not
+    /// answering, and a dialog left standing here would keep a line busy for
+    /// as long as the process runs.
+    fn on_unacknowledged(&mut self, id: TransactionId<InviteServer>, now: Instant) {
+        let Some(call) = self
+            .calls
+            .iter()
+            .find(|(_, held)| held.awaiting_ack == Some(id))
+            .map(|(handle, _)| *handle)
+        else {
+            // a non-2xx that went unacknowledged is the transaction's own
+            // business, and there is no dialog to end
+            return;
+        };
+        let dialog = self.calls.get(&call).and_then(|held| held.dialog);
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.awaiting_ack = None;
+        }
+        if let Some(dialog) = dialog {
+            self.endpoint.bye(dialog, now).ok();
+        }
+        // reported before the BYE's own dialog event arrives, so the reason
+        // says what happened rather than who sent the last message
+        self.finish(call, CallEndReason::Unreachable, None, None, now);
     }
 }
 

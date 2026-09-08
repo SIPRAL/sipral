@@ -276,6 +276,12 @@ impl OutgoingResponse {
         }
     }
 
+    /// The status it will carry, read back.
+    #[must_use]
+    pub const fn status(&self) -> StatusCode {
+        self.status
+    }
+
     /// A reason phrase of your own, in place of the registered one.
     ///
     /// §21 makes the phrase advisory and explicitly allows replacing it, and

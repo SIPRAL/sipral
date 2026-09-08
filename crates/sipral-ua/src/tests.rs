@@ -2080,3 +2080,150 @@ fn two_changes_that_cross_back_off_once_and_then_give_up() {
     assert_eq!(second, None, "once more, not until it works");
     assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
 }
+
+#[test]
+fn a_call_answered_and_never_acknowledged_is_ended_with_a_bye() {
+    // 13.3.1.4: "If the UAS generates a 2xx response and never receives an
+    // ACK, it SHOULD generate a BYE to terminate the dialog." Nothing else
+    // will: the far end is not answering, and the line would stay busy
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(&mut agent, &incoming_invite("noack", Some(OFFER)), t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // 64*T1 with nothing coming back
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    let bye = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"BYE "))
+        .expect("the dialog is ended rather than left standing");
+    assert!(bye.starts_with(b"BYE sip:bob@192.0.2.9 SIP/2.0\r\n"));
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Unreachable)
+    );
+}
+
+#[test]
+fn a_call_that_was_acknowledged_ends_nothing_when_the_transaction_retires() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(&mut agent, &incoming_invite("acked", Some(OFFER)), t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "ackedack", 1), t0);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    assert!(transmits(&mut agent).is_empty(), "nothing to say");
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_reinvite_with_no_offer_is_refused_while_an_offer_of_theirs_is_unanswered() {
+    // RFC 3311 §5.2, and 14.1's rule that one offer/answer exchange finishes
+    // before the next starts. A re-INVITE with no description asks *this* end
+    // to offer, so it is the same exchange starting over and not exempt
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "UPDATE", "theirs", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Reoffer { .. })),
+        "the codec change is the application's"
+    );
+    transmits(&mut agent);
+
+    deliver(&mut agent, &reversed(&ack, "INVITE", "empty", 2, None), t0);
+    let refusal = last(&mut agent);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 500 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    assert!(
+        !header(&refusal, HeaderName::RetryAfter).is_empty(),
+        "5.2 wants it to say when to come back"
+    );
+}
+
+#[test]
+fn a_change_the_far_end_is_waiting_on_is_answered_when_the_call_ends() {
+    // 15.1.2: "The UAS MUST still respond to any pending requests received for
+    // that dialog. It is RECOMMENDED that a 487 (Request Terminated) response
+    // be generated to those pending requests."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "UPDATE", "pending", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    events(&mut agent);
+    transmits(&mut agent);
+
+    agent.hangup(call, t0).expect("the BYE goes");
+    let written = transmits(&mut agent);
+    assert!(
+        written.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "the call ends"
+    );
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 487 ")),
+        "and their request is not left unanswered"
+    );
+}
+
+#[test]
+fn an_offer_the_application_wrote_gets_a_version_that_has_moved() {
+    // RFC 3264 §8: "the version in the origin field MUST increment by one" —
+    // and its other half, that an unchanged version promises unchanged bytes,
+    // is a promise the stack is not going to let an application break
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    // the same version the call was placed with
+    agent.reoffer(call, OFFER, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    let offer = body_of(&reinvite);
+    assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+}

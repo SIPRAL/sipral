@@ -40,6 +40,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   requests).
 - `StatusCode::NOT_ACCEPTABLE_HERE`, the refusal that is about the session
   description rather than about the request that carried it.
+- A 2xx that is never acknowledged now ends the dialog with a BYE, which
+  §13.3.1.4 asks for and §14.2 repeats for a re-INVITE. RFC 6026's timer L was
+  ending the transaction in silence, so the layer above could not tell an ACK
+  that arrived from one that never did; it now reports
+  `TerminationReason::TimedOut`, and `sipral-ua` sends the BYE and reports the
+  call as unreachable. Without it a far end that stops answering leaves a line
+  busy for as long as the process runs.
+- `OutgoingResponse::status`, to read back what a response was built with.
+
+### Fixed
+
+- A re-INVITE with no session description could start a second offer/answer
+  exchange on top of an unfinished one. §14.1 has such a request ask *this* end
+  to offer, so it is the same exchange starting over, and it now meets the same
+  491 or 500 that one carrying an offer does.
+- A request the far end was still waiting on was abandoned when the call ended.
+  §15.1.2: "The UAS MUST still respond to any pending requests received for
+  that dialog. It is RECOMMENDED that a 487 (Request Terminated) response be
+  generated to those pending requests." Left alone it was retransmitted at the
+  far end until it gave up.
+- An offer written by the application is given an `o=` version that has moved.
+  RFC 3264 §8 makes an unchanged version a promise that the bytes are
+  unchanged, and that is not a promise to leave a caller free to break.
 
 - Calls in `sipral-ua`: place, answer, refuse, hang up, and forks handled
   rather than hidden. A `CallHandle` names one dialog, so an INVITE a proxy

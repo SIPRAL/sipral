@@ -107,6 +107,24 @@ impl Session {
         self.remote = Some(description);
     }
 
+    /// Give a description this end is about to offer a version that has
+    /// moved (RFC 3264 §8), leaving one the caller has already numbered past
+    /// ours alone.
+    ///
+    /// §8 makes the number the way an end says "this differs from what I said
+    /// before", and pairs it with the other half of the rule: an unchanged
+    /// number promises unchanged bytes. An application that hands us the same
+    /// version twice with different content would be making that promise
+    /// falsely, so the number is ours to write.
+    pub(crate) fn stamp(&mut self, description: &mut SessionDescription) {
+        if description.origin.version > self.version {
+            self.version = description.origin.version;
+            return;
+        }
+        self.version = self.version.saturating_add(1);
+        description.origin.version = self.version;
+    }
+
     /// The description this end would offer, held or not (RFC 3264 §8.4).
     pub(crate) fn offer(&mut self, held: bool) -> Option<SessionDescription> {
         let mut offer = self.local.clone()?;
@@ -215,6 +233,12 @@ const fn holding(base: Direction) -> Direction {
 /// what putting somebody on hold means. So does an address of `0.0.0.0`:
 /// RFC 2543 held calls that way, §8.4 no longer recommends it, and "an agent
 /// MUST be capable of receiving SDP with a connection address of 0.0.0.0".
+///
+/// Every live stream has to say it, because that is §8.4's own definition —
+/// "an SDP with all streams on hold is referred to as held SDP" — and one
+/// flag for the call cannot mean anything else. A call with two streams held
+/// separately needs a flag per stream, and there will be two streams when
+/// there is video, which is phase 2.
 fn holds_us(description: &SessionDescription) -> bool {
     let mut any = false;
     for media in description

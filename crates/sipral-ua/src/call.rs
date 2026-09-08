@@ -256,6 +256,10 @@ pub(crate) struct Call {
     pub(crate) offering: Option<Offer>,
     /// One the far end offered that only the application can answer.
     pub(crate) answering: Option<Answering>,
+    /// A 2xx this end sent whose ACK has not arrived. §13.3.1.4 has the dialog
+    /// ended with a BYE when it never does, and the transaction running out is
+    /// the only moment that can be known.
+    pub(crate) awaiting_ack: Option<TransactionId<InviteServer>>,
     /// When to offer the change again after a 491 (§14.1, RFC 3311 §5.3).
     pub(crate) retry_at: Option<Instant>,
 }
@@ -301,6 +305,7 @@ impl Call {
             update_allowed: false,
             offering: None,
             answering: None,
+            awaiting_ack: None,
             retry_at: None,
         }
     }
@@ -326,6 +331,7 @@ impl Call {
             update_allowed: false,
             offering: None,
             answering: None,
+            awaiting_ack: None,
             retry_at: None,
         }
     }
@@ -349,6 +355,7 @@ impl Call {
             update_allowed: other.update_allowed,
             offering: None,
             answering: None,
+            awaiting_ack: None,
             retry_at: None,
         }
     }

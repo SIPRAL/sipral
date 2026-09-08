@@ -118,14 +118,12 @@ impl UserAgent {
     /// As [`UserAgent::hold`], plus [`UaError::Sdp`] when the description
     /// cannot be read.
     pub fn reoffer(&mut self, call: CallHandle, sdp: &[u8], now: Instant) -> Result<(), UaError> {
-        let description = sdp::parse(sdp).map_err(UaError::Sdp)?;
-        let held = self
-            .calls
-            .get(&call)
-            .ok_or(UaError::NoSuchCall)?
-            .session
-            .hold
-            .local;
+        let mut description = sdp::parse(sdp).map_err(UaError::Sdp)?;
+        let held = {
+            let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+            state.session.stamp(&mut description);
+            state.session.hold.local
+        };
         self.send_offer(call, description, held, false, now)
     }
 
@@ -160,7 +158,7 @@ impl UserAgent {
             }
             None => None,
         };
-        self.answer_with(answering.transaction, &response, now)?;
+        self.answer_with(call, answering.transaction, &response, now)?;
         if let Some(held) = self.calls.get_mut(&call) {
             if let Some(offer) = answering.offer {
                 held.session.set_remote(offer);
@@ -194,7 +192,7 @@ impl UserAgent {
         if status == StatusCode::NOT_ACCEPTABLE_HERE {
             response = response.header(HeaderName::Warning, WHY_488);
         }
-        self.answer_with(answering.transaction, &response, now)?;
+        self.answer_with(call, answering.transaction, &response, now)?;
         self.drain(now);
         Ok(())
     }
@@ -314,6 +312,7 @@ impl UserAgent {
 
     fn answer_with(
         &mut self,
+        call: CallHandle,
         transaction: AnyTransactionId,
         response: &OutgoingResponse,
         now: Instant,
@@ -321,6 +320,12 @@ impl UserAgent {
         match transaction {
             AnyTransactionId::InviteServer(id) => {
                 self.endpoint.respond_invite(id, response, now)?;
+                // §13.3.1.4 wants a BYE if this one is never acknowledged
+                if response.status().is_success()
+                    && let Some(held) = self.calls.get_mut(&call)
+                {
+                    held.awaiting_ack = Some(id);
+                }
             }
             AnyTransactionId::NonInviteServer(id) => {
                 self.endpoint.respond(id, response, now)?;
@@ -611,42 +616,47 @@ impl UserAgent {
     ) {
         let raw = request.as_raw();
         self.note_allow(call, &raw);
+        let arriving = arriving(&raw);
+        let invite = matches!(transaction, AnyTransactionId::InviteServer(_));
 
-        match arriving(&raw) {
-            // §14.1's re-INVITE with no description asks this end to offer,
-            // and the answer to it comes back in the ACK. An UPDATE with none
-            // is only refreshing the target, and there is nothing to answer
-            Arriving::Nothing => match transaction {
-                AnyTransactionId::InviteServer(_) => self.offer_in_answer(call, transaction, now),
-                _ => self.acknowledge_only(call, transaction, now),
-            },
-            // RFC 3311 §5.2, and generalised to both requests: an offer that
-            // crossed one of ours earns a 491, and one that arrives while an
-            // earlier offer of theirs is still unanswered earns a 500 saying
-            // when to come back
-            Arriving::Offer(_) | Arriving::Foreign
-                if self
-                    .calls
-                    .get(&call)
-                    .is_some_and(|held| held.offering.is_some()) =>
-            {
-                let pending = OutgoingResponse::new(StatusCode::REQUEST_PENDING);
-                self.answer_with(transaction, &pending, now).ok();
-            }
-            Arriving::Offer(_) | Arriving::Foreign
-                if self
-                    .calls
-                    .get(&call)
-                    .is_some_and(|held| held.answering.is_some()) =>
-            {
-                let busy = self.too_soon(StatusCode::SERVER_ERROR);
-                self.answer_with(transaction, &busy, now).ok();
-            }
+        // an UPDATE with no description only refreshes the target: there is
+        // nothing to answer, and nothing it could collide with
+        if matches!(arriving, Arriving::Nothing) && !invite {
+            self.acknowledge_only(call, transaction, now);
+            return;
+        }
+
+        // RFC 3311 §5.2, generalised to both requests: an offer that crossed
+        // one of ours earns a 491, and one that arrives while an earlier offer
+        // of theirs is still unanswered earns a 500 saying when to come back.
+        // A re-INVITE with no description is not exempt — §14.1 has it ask
+        // *this* end to offer, which is the same exchange starting over
+        if self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.offering.is_some())
+        {
+            let pending = OutgoingResponse::new(StatusCode::REQUEST_PENDING);
+            self.answer_with(call, transaction, &pending, now).ok();
+            return;
+        }
+        if self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.answering.is_some())
+        {
+            let busy = self.too_soon(StatusCode::SERVER_ERROR);
+            self.answer_with(call, transaction, &busy, now).ok();
+            return;
+        }
+
+        match arriving {
+            Arriving::Nothing => self.offer_in_answer(call, transaction, now),
             // a body that says it is a session description and is not one
             Arriving::Unreadable => {
                 let refusal = OutgoingResponse::new(StatusCode::NOT_ACCEPTABLE_HERE)
                     .header(HeaderName::Warning, WHY_488);
-                self.answer_with(transaction, &refusal, now).ok();
+                self.answer_with(call, transaction, &refusal, now).ok();
             }
             Arriving::Foreign => self.hand_over(call, transaction, None, request),
             Arriving::Offer(offer) => {
@@ -655,6 +665,26 @@ impl UserAgent {
                 }
             }
         }
+    }
+
+    /// A change the far end offered will not be answered after all, because
+    /// the dialog it was in has ended.
+    ///
+    /// §15.1.2: "The UAS MUST still respond to any pending requests received
+    /// for that dialog. It is RECOMMENDED that a 487 (Request Terminated)
+    /// response be generated to those pending requests." Left alone, that
+    /// transaction is retransmitted at the far end until it gives up.
+    pub(crate) fn abandon_change(&mut self, call: CallHandle, now: Instant) {
+        let Some(answering) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|held| held.answering.take())
+        else {
+            return;
+        };
+        let gone = OutgoingResponse::new(StatusCode::REQUEST_TERMINATED);
+        self.answer_with(call, answering.transaction, &gone, now)
+            .ok();
     }
 
     /// Answer an offer that changes nothing this layer would have to ask
@@ -683,7 +713,7 @@ impl UserAgent {
             .contact(&prepared.1)
             .header(HeaderName::Allow, ALLOW)
             .body(b"application/sdp", Arc::from(prepared.0.to_bytes()));
-        if self.answer_with(transaction, &response, now).is_err() {
+        if self.answer_with(call, transaction, &response, now).is_err() {
             return false;
         }
         if let Some(held) = self.calls.get_mut(&call) {
@@ -709,7 +739,7 @@ impl UserAgent {
         if let Some(ref description) = prepared.0 {
             response = response.body(b"application/sdp", Arc::from(description.to_bytes()));
         }
-        if self.answer_with(transaction, &response, now).is_err() {
+        if self.answer_with(call, transaction, &response, now).is_err() {
             return;
         }
         if let (Some(held), Some(description)) = (self.calls.get_mut(&call), prepared.0) {
@@ -728,7 +758,7 @@ impl UserAgent {
         let response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
-        self.answer_with(transaction, &response, now).ok();
+        self.answer_with(call, transaction, &response, now).ok();
     }
 
     /// Hand a change to the application, keeping the transaction open for it.
@@ -760,10 +790,13 @@ impl UserAgent {
         if !held.session.answer_owed {
             return;
         }
+        // owed either way: an answer that cannot be read is not going to
+        // arrive a second time, and leaving the flag set would have the next
+        // ACK on this dialog read as one
+        held.session.answer_owed = false;
         let Ok(answer) = sdp::parse(body) else {
             return;
         };
-        held.session.answer_owed = false;
         held.session.set_remote(answer);
         self.report_session(call);
     }

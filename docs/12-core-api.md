@@ -939,6 +939,14 @@ pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed, Gone
 no answer at all. No BYE goes out for it — the far end has just said there is
 no such dialog, and a BYE would earn the same 481.
 
+`TerminationReason::TimedOut` on an INVITE server transaction means one of two
+things, told apart by what was answered. After a non-2xx it is §17.2.1's timer
+H: the ACK the transaction was owed never came, and nothing follows. After a
+2xx it is RFC 6026's timer L, and it is the only moment anyone can learn that
+the ACK never arrived — which §13.3.1.4 answers with a BYE. The core does not
+send that BYE, because it does not know whether the dialog is still wanted;
+`sipral-ua` does.
+
 An INVITE that arrives inside a dialog while another is in flight is answered
 by the endpoint and never reaches the caller, because §14.2 makes both answers
 MUSTs and neither is a decision: 491 when the crossing one is ours, and 500
