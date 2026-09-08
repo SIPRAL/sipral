@@ -58,9 +58,8 @@ jobs:
       # to run a check with, and a probe that needs the image's contents is a
       # probe that breaks when the image is rebuilt.
       #
-      # Asterisk is up but not gated on: nothing in the flows below talks to
-      # it yet, and waiting for a server we do not use would only add ways to
-      # fail.
+      # Asterisk says "Asterisk Ready." and means it; it is the fastest of the
+      # three.
       - name: wait for the servers to listen
         working-directory: interop
         run: |
@@ -85,6 +84,7 @@ jobs:
           # that fails the run
           wait_for freeswitch "Started Profile lab" \
             || echo "lab profile not seen in the log; continuing to the flows anyway"
+          wait_for asterisk "Asterisk Ready"
       # plain docker run, joining the proxy's namespace directly: asking
       # Compose to do it restarts the proxy first and invalidates the very
       # namespace the capture is trying to enter. The container name is fixed
@@ -101,12 +101,21 @@ jobs:
       # own image is musl — the binary is not portable between them, and the
       # error when it is not is "no such file or directory" for a file that is
       # plainly there
-      - name: register, call, hold, resume
+      - name: register, call, hold, resume — through the proxy
         working-directory: interop
         run: |
           docker run --rm --network sipral-interop_lab \
             -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
             debian:trixie-slim /harness kamailio 5060 9000
+      # No proxy in front of this one, and a different stack behind it. The
+      # point of the second server is that a rule we read one way and Kamailio
+      # reads the same way may still be read differently by res_pjsip.
+      - name: register, call, hold, resume — straight at Asterisk
+        working-directory: interop
+        run: |
+          docker run --rm --network sipral-interop_lab \
+            -v "$GITHUB_WORKSPACE/target/release/sipral-interop:/harness:ro" \
+            debian:trixie-slim /harness asterisk 5060 9000
       - name: what the servers said
         if: always()
         working-directory: interop
