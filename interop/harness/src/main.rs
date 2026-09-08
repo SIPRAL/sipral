@@ -43,6 +43,7 @@ fn main() -> ExitCode {
         .and_then(|text| text.parse().ok())
         .unwrap_or(5060);
     let extension = env::args().nth(3).unwrap_or_else(|| "9000".to_owned());
+    let other = env::args().nth(4).unwrap_or_else(|| "9001".to_owned());
 
     let Some(remote) = resolve(&server, port) else {
         println!("cannot resolve {server}:{port}");
@@ -51,8 +52,14 @@ fn main() -> ExitCode {
     println!("lab: {server}:{port} at {remote}, extension {extension}");
 
     let mut failures = 0;
-    for flow in [Flow::Register, Flow::Call, Flow::Hold] {
-        match run(flow, &server, remote, &extension) {
+    for flow in [
+        Flow::Register,
+        Flow::Call,
+        Flow::Hold,
+        Flow::Blind,
+        Flow::Attended,
+    ] {
+        match run(flow, &server, remote, &extension, &other) {
             Ok(()) => println!("  pass  {}", flow.name()),
             Err(why) => {
                 println!("  FAIL  {} — {why}", flow.name());
@@ -77,6 +84,11 @@ enum Flow {
     Call,
     /// The same, put on hold and taken off it again.
     Hold,
+    /// A call handed to somebody else without asking them first (RFC 3515).
+    Blind,
+    /// A call handed over after speaking to the person taking it, so the
+    /// REFER names the dialog to replace (RFC 3891).
+    Attended,
 }
 
 impl Flow {
@@ -85,6 +97,8 @@ impl Flow {
             Self::Register => "register",
             Self::Call => "call",
             Self::Hold => "hold and resume",
+            Self::Blind => "blind transfer",
+            Self::Attended => "attended transfer",
         }
     }
 }
@@ -100,6 +114,12 @@ enum Fact {
     Up,
     Held,
     Resumed,
+    /// The second call of an attended transfer is up.
+    Consulted,
+    /// The far end reported the transfer under way, in a sipfrag.
+    Transferring,
+    /// And reported it finished, with a status that says it worked.
+    Transferred,
     /// We asked for the call to end, rather than watching it end by itself.
     Ours,
     Over,
@@ -128,11 +148,15 @@ struct Script {
     flow: Flow,
     account: AccountId,
     extension: String,
+    /// Who a transfer hands the call to.
+    other: String,
     server: String,
     local: SocketAddr,
     started: Instant,
     seen: Seen,
     call: Option<CallHandle>,
+    /// The second leg of an attended transfer.
+    consulted: Option<CallHandle>,
     step: Step,
     asked: bool,
 }
@@ -146,6 +170,8 @@ enum Step {
     Talking,
     Holding,
     Resuming,
+    Consulting,
+    Transferring,
     Ending,
     Done,
 }
@@ -172,8 +198,21 @@ impl Handler for Script {
                 state: CallState::Ringing | CallState::EarlyMedia,
                 ..
             } => self.seen.saw(Fact::Ringing),
-            UaEvent::CallConfirmed { .. } => {
-                self.seen.saw(Fact::Up);
+            UaEvent::CallConfirmed { call, .. } => {
+                if Some(call) == self.consulted {
+                    self.seen.saw(Fact::Consulted);
+                } else {
+                    self.seen.saw(Fact::Up);
+                }
+                self.advance(agent, now);
+            }
+            UaEvent::TransferProgress { .. } => self.seen.saw(Fact::Transferring),
+            UaEvent::TransferDone { status, .. } => {
+                if status.is_success() {
+                    self.seen.saw(Fact::Transferred);
+                } else {
+                    self.seen.refused = Some(format!("the transfer ended {}", status.get()));
+                }
                 self.advance(agent, now);
             }
             UaEvent::SessionChanged { hold, .. } => {
@@ -249,9 +288,38 @@ impl Script {
                     let _ = agent.resume(call, now);
                 }
             }
-            Step::Talking | Step::Resuming => self.hang_up(agent, now),
+            Step::Talking if self.flow == Flow::Blind => {
+                self.step = Step::Transferring;
+                if let (Some(call), Some(target)) = (self.call, self.target()) {
+                    let _ = agent.transfer(call, &target, now);
+                }
+            }
+            Step::Talking if self.flow == Flow::Attended => {
+                self.step = Step::Consulting;
+                let offer = OFFER.replace("{ip}", &self.local.ip().to_string());
+                if let (Some(call), Some(target)) = (self.call, self.target()) {
+                    let placing = OutgoingCall::new(target).offer(Arc::from(offer.into_bytes()));
+                    match agent.consult(call, &placing, now) {
+                        Ok(second) => self.consulted = Some(second),
+                        Err(_) => self.step = Step::Done,
+                    }
+                }
+            }
+            // the second leg is up, so there is somebody to hand the call to
+            Step::Consulting => {
+                self.step = Step::Transferring;
+                if let (Some(call), Some(other)) = (self.call, self.consulted) {
+                    let _ = agent.transfer_to(call, other, now);
+                }
+            }
+            Step::Talking | Step::Resuming | Step::Transferring => self.hang_up(agent, now),
             Step::Placing | Step::Ending | Step::Done => (),
         }
+    }
+
+    /// Who a transfer hands the call to.
+    fn target(&self) -> Option<Uri> {
+        Uri::parse_str(&format!("sip:{}@{}", self.other, self.server)).ok()
     }
 
     fn hang_up(&mut self, agent: &mut UserAgent, now: Instant) {
@@ -294,6 +362,29 @@ impl Script {
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
+            // no Ours here: a transfer that worked is a call this end is not
+            // in any more, and the far end is right to hang it up
+            Flow::Blind => &[
+                (Fact::Registered, "no binding was granted"),
+                (Fact::Up, "the call did not connect"),
+                (
+                    Fact::Transferring,
+                    "the far end never said it was transferring",
+                ),
+                (Fact::Transferred, "the transfer did not complete"),
+                (Fact::Over, "the call did not end"),
+            ],
+            Flow::Attended => &[
+                (Fact::Registered, "no binding was granted"),
+                (Fact::Up, "the call did not connect"),
+                (Fact::Consulted, "the consultation call did not connect"),
+                (
+                    Fact::Transferring,
+                    "the far end never said it was transferring",
+                ),
+                (Fact::Transferred, "the transfer did not complete"),
+                (Fact::Over, "the call did not end"),
+            ],
         };
         for (fact, why) in owed {
             if !self.seen.has(*fact) {
@@ -304,7 +395,13 @@ impl Script {
     }
 }
 
-fn run(flow: Flow, server: &str, remote: SocketAddr, extension: &str) -> Result<(), String> {
+fn run(
+    flow: Flow,
+    server: &str,
+    remote: SocketAddr,
+    extension: &str,
+    other: &str,
+) -> Result<(), String> {
     let bind: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|_| "cannot parse the bind address".to_owned())?;
@@ -326,11 +423,13 @@ fn run(flow: Flow, server: &str, remote: SocketAddr, extension: &str) -> Result<
         flow,
         account,
         extension: extension.to_owned(),
+        other: other.to_owned(),
         server: server.to_owned(),
         local,
         started: Instant::now(),
         seen: Seen::default(),
         call: None,
+        consulted: None,
         step: Step::Registering,
         asked: false,
     };
@@ -380,5 +479,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Register => [17; 32],
         Flow::Call => [29; 32],
         Flow::Hold => [41; 32],
+        Flow::Blind => [53; 32],
+        Flow::Attended => [67; 32],
     }
 }

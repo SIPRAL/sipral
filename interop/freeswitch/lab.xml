@@ -20,4 +20,13 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="hangup"/>
     </condition>
   </extension>
+  <!-- somewhere for a transfer to go. A different tone, so a capture says
+       which leg is which without reading the SDP -->
+  <extension name="sipral_lab_transfer">
+    <condition field="destination_number" expression="^9001$">
+      <action application="answer"/>
+      <action application="playback" data="tone_stream://%(60000,0,480,620)"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
 </include>
