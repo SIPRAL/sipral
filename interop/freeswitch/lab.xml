@@ -8,14 +8,24 @@ plays the built-in stream, so the lab needs no sound files of its own; hold and
 resume need nothing at all, since mod_sofia handles the re-INVITE itself.
 -->
 <include>
+  <!-- Bridged to a loopback leg rather than answering and playing on its own.
+       A channel that answers by itself is a one-legged call, and mod_sofia
+       refuses to transfer one: "Cannot Blind Transfer 1 Legged calls", and
+       "Cannot transfer channels that are not in a bridge". There has to be
+       somebody on the other side to hand over. -->
   <extension name="sipral_lab">
     <condition field="destination_number" expression="^9000$">
+      <action application="bridge" data="loopback/9002/public"/>
+    </condition>
+  </extension>
+  <!-- the far side of that bridge. A generated tone, not local_stream://moh:
+       music on hold needs the sound files and a profile configured to serve
+       them, and when it is missing playback fails and the channel hangs up
+       half a millisecond after the ACK — which still looks like a call that
+       connected, and is how it went unnoticed. -->
+  <extension name="sipral_lab_media">
+    <condition field="destination_number" expression="^9002$">
       <action application="answer"/>
-      <!-- a generated tone, not local_stream://moh: music on hold needs the
-           sound files and a profile configured to serve them, and when it is
-           missing playback fails and the channel hangs up half a millisecond
-           after the ACK. A call that ends that fast still looks like a call
-           that connected, which is how it went unnoticed. -->
       <action application="playback" data="tone_stream://%(60000,0,350,440)"/>
       <action application="hangup"/>
     </condition>
