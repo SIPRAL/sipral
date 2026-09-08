@@ -21,6 +21,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sipral_core::msg::{HeaderName, OwnedMessage};
 use sipral_ua::{
     Account, AccountId, CallHandle, CallState, Control, Credentials, EndpointConfig, Handler,
     OutgoingCall, Runtime, UaError, UaEvent, Uri, UserAgent,
@@ -45,11 +46,18 @@ fn main() -> ExitCode {
     let extension = env::args().nth(3).unwrap_or_else(|| "9000".to_owned());
     let other = env::args().nth(4).unwrap_or_else(|| "9001".to_owned());
 
+    // the lab's own account unless something else is named. A real server is
+    // reached with real credentials, and those do not belong in a repository
+    // that becomes public
+    let user = env::var("SIPRAL_USER").unwrap_or_else(|_| "labuser".to_owned());
+    let pass = env::var("SIPRAL_PASS").unwrap_or_else(|_| "labpass".to_owned());
+    let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
+
     let Some(remote) = resolve(&server, port) else {
         println!("cannot resolve {server}:{port}");
         return ExitCode::FAILURE;
     };
-    println!("lab: {server}:{port} at {remote}, extension {extension}");
+    println!("lab: {server}:{port} at {remote}, extension {extension}, as {user}");
 
     let mut failures = 0;
     for flow in [
@@ -59,7 +67,10 @@ fn main() -> ExitCode {
         Flow::Blind,
         Flow::Attended,
     ] {
-        match run(flow, &server, remote, &extension, &other) {
+        if !wanted.is_empty() && !wanted.split(',').any(|name| name.trim() == flow.key()) {
+            continue;
+        }
+        match run(flow, &server, remote, &extension, &other, &user, &pass) {
             Ok(()) => println!("  pass  {}", flow.name()),
             Err(why) => {
                 println!("  FAIL  {} — {why}", flow.name());
@@ -99,6 +110,17 @@ impl Flow {
             Self::Hold => "hold and resume",
             Self::Blind => "blind transfer",
             Self::Attended => "attended transfer",
+        }
+    }
+
+    /// The name `SIPRAL_FLOWS` selects it by.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Call => "call",
+            Self::Hold => "hold",
+            Self::Blind => "blind",
+            Self::Attended => "attended",
         }
     }
 }
@@ -151,6 +173,11 @@ struct Script {
     /// Who a transfer hands the call to.
     other: String,
     server: String,
+    /// The address to write into the offer, which is the one the far end can
+    /// answer to. Binding to a wildcard gives back 0.0.0.0, and `c=IN IP4
+    /// 0.0.0.0` is not an address at all — RFC 3264 §8.4 makes it hold. The
+    /// lab tolerated it and every call there was connecting to a black hole;
+    /// a real Asterisk answers 488.
     local: SocketAddr,
     started: Instant,
     seen: Seen,
@@ -223,11 +250,24 @@ impl Handler for Script {
                 }
                 self.advance(agent, now);
             }
-            UaEvent::CallEnded { reason, status, .. } => {
+            UaEvent::CallEnded {
+                reason,
+                status,
+                ref response,
+                ..
+            } => {
                 self.seen.saw(Fact::Over);
                 if !self.seen.has(Fact::Up) {
                     self.seen.refused = Some(match status {
-                        Some(status) => format!("{reason} ({})", status.get()),
+                        // a refusal usually says why in the reason phrase or a
+                        // Warning, and the number alone sends you guessing
+                        Some(status) => {
+                            format!(
+                                "{reason} ({}{})",
+                                status.get(),
+                                explained(response.as_ref())
+                            )
+                        }
                         None => reason.to_string(),
                     });
                 }
@@ -412,6 +452,8 @@ fn run(
     remote: SocketAddr,
     extension: &str,
     other: &str,
+    user: &str,
+    pass: &str,
 ) -> Result<(), String> {
     let bind: SocketAddr = "0.0.0.0:0"
         .parse()
@@ -421,12 +463,12 @@ fn run(
     let local = runtime.local();
     let transport = runtime.transport();
 
-    let aor = uri(&format!("sip:labuser@{server}"))?;
+    let aor = uri(&format!("sip:{user}@{server}"))?;
     let registrar = uri(&format!("sip:{server}"))?;
-    let contact = uri(&format!("sip:labuser@{}", advertised(local, remote)))?;
+    let contact = uri(&format!("sip:{user}@{}", advertised(local, remote)))?;
     let account = runtime.agent().add_account(
         Account::new(aor, registrar, contact, transport, remote)
-            .credentials(Credentials::new("labuser", "labpass"))
+            .credentials(Credentials::new(user, pass))
             .expires(Duration::from_secs(300)),
     );
 
@@ -436,7 +478,7 @@ fn run(
         extension: extension.to_owned(),
         other: other.to_owned(),
         server: server.to_owned(),
-        local,
+        local: advertised(local, remote),
         started: Instant::now(),
         seen: Seen::default(),
         call: None,
@@ -472,6 +514,24 @@ fn route_to(remote: SocketAddr) -> std::net::IpAddr {
         .map_or(std::net::IpAddr::from([127, 0, 0, 1]), |address| {
             address.ip()
         })
+}
+
+/// What a refusal said about itself, beyond its number.
+fn explained(response: Option<&OwnedMessage>) -> String {
+    let Some(response) = response else {
+        return String::new();
+    };
+    let raw = response.as_raw();
+    let mut said = String::new();
+    if let Some(reason) = raw.reason() {
+        said.push(' ');
+        said.push_str(&String::from_utf8_lossy(reason));
+    }
+    if let Some(warning) = HeaderName::from_bytes(b"Warning").and_then(|name| raw.header(name)) {
+        said.push_str(" — ");
+        said.push_str(&String::from_utf8_lossy(warning));
+    }
+    said
 }
 
 fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
