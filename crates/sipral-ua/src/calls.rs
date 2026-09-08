@@ -514,9 +514,12 @@ impl UserAgent {
         self.by_invite.retain(|_, held| *held != call);
         self.by_server.retain(|_, held| *held != call);
         self.by_dialog.retain(|_, held| *held != call);
-        self.by_request.retain(|_, held| *held != call);
         self.by_offer.retain(|_, held| *held != call);
         self.calls.remove(&call);
+        // by_request is not touched: the BYE that ended the call outlives the
+        // call, and its answer is still this layer's rather than the
+        // application's. `on_transaction_over` clears the entry when the
+        // transaction it names ends, which is what bounds the map
     }
 
     /// The account an incoming INVITE was addressed to, when it can be told.
@@ -814,10 +817,12 @@ impl UserAgent {
             } => {
                 let call = self.by_dialog.get(&dialog).copied()?;
                 // a re-INVITE is acknowledged here too, and a call is only
-                // confirmed once
+                // confirmed once. What "up" means is the call's to say: a
+                // consultation stays one across every change the target asks
+                // for
                 let first = self.calls.get(&call).is_some_and(|held| !held.acknowledged);
                 if let Some(held) = self.calls.get_mut(&call) {
-                    held.state = CallState::Confirmed;
+                    held.state = held.up();
                     held.acknowledged = true;
                     held.awaiting_ack = None;
                 }

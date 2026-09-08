@@ -122,9 +122,9 @@ impl UserAgent {
     /// exactly where it was.
     ///
     /// # Errors
-    /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when `call` is not up
-    /// or is already consulting somebody, [`UaError::NoSuchAccount`], or
-    /// [`UaError::Send`].
+    /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when `call` is not up,
+    /// is already consulting somebody, or is itself a consultation,
+    /// [`UaError::NoSuchAccount`], or [`UaError::Send`].
     pub fn consult(
         &mut self,
         call: CallHandle,
@@ -133,7 +133,9 @@ impl UserAgent {
     ) -> Result<CallHandle, UaError> {
         let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
         let state = held.state;
-        if !state.is_confirmed() || held.consulting.is_some() {
+        // one consultation at a time, and a consultation is not a call to
+        // consult from: a chain of them names no transfer at all
+        if !state.is_confirmed() || held.consulting.is_some() || held.consulting_for.is_some() {
             return Err(UaError::WrongState(state));
         }
         let account = held.account.ok_or(UaError::NoSuchAccount)?;

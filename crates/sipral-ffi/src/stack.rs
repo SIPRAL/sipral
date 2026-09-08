@@ -132,8 +132,8 @@ pub struct SipralStackConfig {
     /// Thirty-two bytes of entropy, from the platform's own generator.
     ///
     /// Every branch parameter, tag and `Call-ID` is derived from it, and
-    /// §8.1.1.7 wants them unguessable, so this is not a place for a counter
-    /// or a clock. Two stacks must never be given the same bytes.
+    /// §19.3 wants a tag unguessable — cryptographically random, not a
+    /// counter or a clock. Two stacks must never be given the same bytes.
     pub entropy: *const u8,
     /// How many bytes of it. Thirty-two.
     pub entropy_len: usize,
@@ -815,6 +815,21 @@ pub(crate) mod tests {
         config.entropy = ptr::null();
         config.entropy_len = 0;
         assert_eq!(create(&config).0, SipralStatus::InvalidArgument);
+    }
+
+    /// RFC 3261 §8.1.1.7 (Via) only requires the branch parameter to be
+    /// unique across space and time; the "cryptographically random"
+    /// requirement the entropy field's doc leans on is §19.3, Tags. The
+    /// needle is assembled at runtime so this test does not just match its
+    /// own assertion.
+    #[test]
+    fn the_entropy_doc_cites_tags_not_via_for_unguessability() {
+        let source = include_str!("stack.rs");
+        let section = '\u{a7}';
+        assert!(
+            source.contains(&format!("{section}19.3 wants a tag unguessable")),
+            "the cryptographic-randomness requirement is in §19.3, not §8.1.1.7"
+        );
     }
 
     #[test]

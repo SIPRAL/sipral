@@ -45,15 +45,25 @@ const MAX_TEXT_LEN: usize = 255;
 /// every compound packet built here carries.
 pub const CNAME: u8 = 1;
 
+/// The span RFC 5761 §4 hands to RTCP on a multiplexed socket. Future RTCP
+/// types "SHOULD be made after the current assignments in the range 209-223,
+/// then in the range 194-199", which together with the obsolete 192-193 and
+/// everything assigned since puts the whole of 192-223 on the RTCP side —
+/// the same span as the RTP marker bit set over payload types 64-95, which
+/// is exactly what §4 blocks in return.
+const MUX_FIRST: u8 = 192;
+const MUX_LAST: u8 = 223;
+
 /// Whether `datagram` is RTCP rather than RTP, for a socket carrying both
 /// (RFC 5761 §4). The RTCP packet type sits where the RTP marker bit and
-/// payload type would be; 200-213 covers every type assigned so far plus
-/// the range future ones are asked to come from first, and keeping payload
-/// types out of that window is the other half of the bargain this crate
-/// does not police.
+/// payload type would be, and anything in [`MUX_FIRST`]`..=`[`MUX_LAST`]
+/// reads as RTCP — not only what is assigned today, since a peer sending a
+/// packet type registered after this was written must still not have it
+/// parsed as audio. Keeping payload types out of that window is the other
+/// half of the bargain, and this crate does not police it.
 #[must_use]
 pub fn is_rtcp(datagram: &[u8]) -> bool {
-    matches!(datagram.get(1), Some(&byte) if (200..=213).contains(&byte))
+    matches!(datagram.get(1), Some(&byte) if (MUX_FIRST..=MUX_LAST).contains(&byte))
 }
 
 /// The RTCP port for an RTP port allocated as the classic even/odd pair
@@ -1563,10 +1573,19 @@ mod tests {
 
     #[test]
     fn is_rtcp_reads_the_mux_range_from_the_second_octet_rfc5761_s4() {
-        assert!(!is_rtcp(&[0x80, 199]));
-        assert!(is_rtcp(&[0x80, 200]));
-        assert!(is_rtcp(&[0x80, 213]));
-        assert!(!is_rtcp(&[0x80, 214]));
+        // §4 reserves 209-223 and then 194-199 for RTCP types not yet
+        // assigned, and blocks RTP payload types 64-95 -- 192-223 with the
+        // marker bit -- to pay for it. The whole span belongs to RTCP, so a
+        // type registered after this was written still does not reach the
+        // audio path.
+        assert!(!is_rtcp(&[0x80, 191]));
+        assert!(is_rtcp(&[0x80, 192])); // the obsolete FIR
+        assert!(is_rtcp(&[0x80, 195])); // second range offered to new types
+        assert!(is_rtcp(&[0x80, 200])); // SR
+        assert!(is_rtcp(&[0x80, 208])); // RSI, the last one assigned
+        assert!(is_rtcp(&[0x80, 220])); // first range offered to new types
+        assert!(is_rtcp(&[0x80, 223]));
+        assert!(!is_rtcp(&[0x80, 224]));
         assert!(!is_rtcp(&[0x80])); // no second octet at all
         assert!(!is_rtcp(&[]));
     }

@@ -1878,6 +1878,42 @@ fn an_early_session_changes_by_update_because_a_second_invite_is_forbidden() {
 }
 
 #[test]
+fn the_answer_to_an_update_of_ours_reaches_the_session_it_belongs_to() {
+    // an UPDATE is a non-INVITE transaction, and so is a REGISTER; the answer
+    // to one has to survive the layer that owns the other
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let progress = with_allow(&answered(
+        &invite,
+        183,
+        "Session Progress",
+        "desk",
+        Some(ANSWER),
+    ));
+    deliver(&mut agent, &progress, t0);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("the UPDATE goes");
+    let update = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&update, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: true,
+            remote: false
+        })
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(true));
+}
+
+#[test]
 fn an_early_session_cannot_change_when_the_far_end_never_offered_update() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
@@ -3222,6 +3258,56 @@ fn one_consultation_at_a_time() {
     agent
         .consult(first, &outgoing(), t0)
         .expect("a second attempt at the target");
+}
+
+#[test]
+fn a_consultation_call_cannot_consult_in_its_turn() {
+    // a chain of them names no transfer at all: the second leg would be both
+    // the call being handed over and the one it is handed to
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, _) = consulted(&mut agent, first, t0);
+
+    assert_eq!(
+        agent.consult(second, &outgoing(), t0),
+        Err(UaError::WrongState(CallState::Consulting))
+    );
+    assert!(transmits(&mut agent).is_empty(), "and nothing was placed");
+}
+
+#[test]
+fn a_change_the_target_asks_for_leaves_the_consultation_a_consultation() {
+    // the ACK for a re-INVITE arrives on the dialog, not on the INVITE that
+    // founded it, so it says nothing about what the call is for. A target that
+    // puts the consultation on hold does not turn it into an ordinary call
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let (second, ack) = consulted(&mut agent, first, t0);
+    assert_eq!(agent.call_state(second), Some(CallState::Consulting));
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "targethold", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 OK\r\n"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    deliver(&mut agent, &reversed(&ack, "ACK", "targetack", 1, None), t0);
+    events(&mut agent);
+
+    assert_eq!(agent.call_state(second), Some(CallState::Consulting));
+    assert!(
+        agent.transfer_to(first, second, t0).is_ok(),
+        "and it is still the leg the transfer names"
+    );
 }
 
 #[test]

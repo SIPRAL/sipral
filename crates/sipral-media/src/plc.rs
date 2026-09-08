@@ -33,6 +33,16 @@
 //! matters: at the first concealed sample the gain is one and the correction
 //! is whole, so that sample is determined, not approximated.
 //!
+//! The same constant is added again at every loop point, and what it does
+//! there is worth stating exactly, because a lag is only ever the pitch to the
+//! nearest sample and the arithmetic looks the same whether or not that is
+//! true. With it, the step into the first sample of a repeat is the step the
+//! source itself made into that sample. Without it, the step is whatever
+//! separates the two ends of the lag, which is the same number only when the
+//! lag is the true period exactly. The correction is re-applied, never
+//! summed: an extension that kept accumulating the drift would walk away from
+//! the voice it was measured on well before the sixty millisecond bound.
+//!
 //! Chosen here, from the behaviour wanted rather than from any published
 //! table: the search range of 50 to 400 Hz, the preference for the longest lag
 //! within five percent of the best score, the four millisecond cross-fade, the
@@ -240,8 +250,13 @@ struct Gap {
     /// period or the fade would still be running when the next one starts.
     taper: usize,
     emitted: usize,
-    /// How far the last real sample sat from its counterpart one period back,
-    /// added at each loop point and faded out over the taper.
+    /// How far the last real sample sat from its counterpart one period back:
+    /// the drift the lag failed to account for.
+    ///
+    /// Added at the splice and at every loop point, then faded out over the
+    /// taper. Adding it makes the step into `period[0]` the step the source
+    /// made into that same sample; leaving it out makes the step the distance
+    /// between the two ends of the lag instead.
     seam: i64,
     gain: i64,
     previous_gain: i64,
@@ -448,7 +463,8 @@ fn to_pcm(scaled: i64) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Concealer, Concealment, HISTORY, MAX_GAP_SAMPLES, MAX_PERIOD, MIN_PERIOD, OVERLAP,
+        Concealer, Concealment, HISTORY, MAX_GAP_SAMPLES, MAX_PERIOD, MIN_PERIOD, ONE, OVERLAP,
+        period_gain,
     };
     use crate::g711;
 
@@ -767,6 +783,80 @@ mod tests {
         let mut resumed = vec![1_000_i16; FRAME];
         concealer.received(&mut resumed);
         assert_eq!(concealer.gap_samples(), 0);
+    }
+
+    /// One sample of a smooth wave whose cycle is 149.3 samples long.
+    ///
+    /// The three shapes above are all exactly periodic at an integer lag,
+    /// which is the one case where the seam correction is zero and any
+    /// arithmetic for it looks right. This one is not: whatever whole number
+    /// of samples the search settles on, it is a fraction of a cycle away
+    /// from the truth, so a period back from the last real sample is a long
+    /// way from it and the correction is doing visible work. Integer
+    /// throughout — a phase accumulator and the same smoothstep the module
+    /// uses for its fades — so the wave is bit-identical everywhere.
+    fn near_periodic(index: usize) -> i16 {
+        let phase = (i64::try_from(index).unwrap() * 655_360 / 1_493) % 65_536;
+        let rising = phase < 32_768;
+        let step = if rising { phase } else { phase - 32_768 };
+        let square = (step * step) >> 15;
+        let cube = (square * step) >> 15;
+        let shape = (3 * square - 2 * cube).clamp(0, 32_768);
+        let swing = 2 * 8_000 * shape / 32_768;
+        i16::try_from(if rising { swing - 8_000 } else { 8_000 - swing }).unwrap()
+    }
+
+    fn steepest(samples: &[i16]) -> i32 {
+        samples
+            .windows(2)
+            .map(|pair| (i32::from(pair[1]) - i32::from(pair[0])).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_loop_point_steps_by_what_the_source_stepped_by() {
+        let history: Vec<i16> = (0..HISTORY).map(near_periodic).collect();
+        let mut concealer = Concealer::new();
+        let mut sent = history.clone();
+        concealer.received(&mut sent);
+
+        // two whole repeats and then some, all of it before the closing fade
+        let mut patch = vec![0_i16; 400];
+        assert_eq!(concealer.conceal(&mut patch), Concealment::Extended);
+        let period = concealer.pitch_period().unwrap();
+        assert!(2 * period < patch.len());
+
+        // the signal has to be one that can tell the candidates apart: with an
+        // exactly periodic shape every formula for the correction agrees at
+        // zero and the test proves nothing
+        let drift = i32::from(history[HISTORY - 1]) - i32::from(history[HISTORY - 1 - period]);
+        assert!(drift.abs() > 1_000, "drift of {drift} proves nothing");
+
+        // what the source did on its way into the sample each repeat starts
+        // from is what each loop point should do, scaled by the gain that
+        // period is being played at
+        let source_step =
+            i32::from(history[HISTORY - period]) - i32::from(history[HISTORY - period - 1]);
+        for repeat in 1..=2 {
+            let at = repeat * period;
+            let step = i32::from(patch[at]) - i32::from(patch[at - 1]);
+            let gain = period_gain((repeat - 1) * period, period);
+            let expected = i32::try_from(i64::from(source_step) * gain / ONE).unwrap();
+            assert!(
+                (step - expected).abs() <= 2,
+                "repeat {repeat} stepped {step} where the source stepped {expected}"
+            );
+        }
+
+        // and nothing anywhere in the extension moves faster than the source
+        // ever did, which is where an uncorrected repeat gives itself away
+        assert!(
+            steepest(&patch) <= steepest(&history),
+            "extension moves at {} against the source's {}",
+            steepest(&patch),
+            steepest(&history)
+        );
     }
 
     #[test]

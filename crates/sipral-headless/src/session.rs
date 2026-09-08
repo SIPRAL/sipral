@@ -17,7 +17,7 @@ use core::fmt;
 use std::collections::VecDeque;
 
 use crate::audio::AudioConfig;
-use crate::control::{ErrorCode, ErrorMessage};
+use crate::control::{ErrorCode, ErrorMessage, OtherErrorCode};
 use crate::latency::LatencyBudget;
 
 /// Where a session is in its lifecycle.
@@ -56,6 +56,15 @@ impl QueueKind {
             Self::Playback => "playback",
         }
     }
+}
+
+/// `code` as [`ErrorCode::Other`], falling back to [`ErrorCode::Internal`]
+/// on the unreachable case that it collides with one of the six reserved
+/// strings — every caller here builds `code` from a literal or a queue
+/// name, never from anything a peer sent, so the fallback is defensive
+/// rather than expected to fire.
+fn other_error_code(code: impl Into<String>) -> ErrorCode {
+    OtherErrorCode::new(code.into()).map_or(ErrorCode::Internal, ErrorCode::Other)
 }
 
 /// A bounded run of PCM frames, oldest first.
@@ -283,7 +292,7 @@ impl Session {
         let name = kind.as_str();
         if matches!(self.state, SessionState::Ended) {
             return Err(self.drop_message(
-                ErrorCode::Other("call_ended".to_owned()),
+                other_error_code("call_ended"),
                 format!("{name} frame dropped: call already ended"),
             ));
         }
@@ -295,7 +304,7 @@ impl Session {
             Ok(())
         } else {
             Err(self.drop_message(
-                ErrorCode::Other(format!("{name}_queue_full")),
+                other_error_code(format!("{name}_queue_full")),
                 format!("{name} queue full, frame dropped"),
             ))
         }
@@ -360,7 +369,7 @@ impl core::error::Error for SessionError {}
 mod tests {
     use super::{Session, SessionError, SessionState};
     use crate::audio::{AudioConfig, SampleRate};
-    use crate::control::ErrorCode;
+    use crate::control::{ErrorCode, OtherErrorCode};
 
     fn config() -> AudioConfig {
         AudioConfig::new(SampleRate::Hz8000) // 20 ms frames, 320 bytes each
@@ -505,7 +514,9 @@ mod tests {
         let error = session.push_capture(frame()).expect_err("queue is full");
         assert_eq!(
             error.code,
-            ErrorCode::Other("capture_queue_full".to_owned())
+            ErrorCode::Other(
+                OtherErrorCode::new("capture_queue_full".to_owned()).expect("not a reserved code")
+            )
         );
         assert_eq!(session.capture_depth(), 2);
     }
@@ -516,7 +527,9 @@ mod tests {
         let error = session.push_playback(frame()).expect_err("no headroom");
         assert_eq!(
             error.code,
-            ErrorCode::Other("playback_queue_full".to_owned())
+            ErrorCode::Other(
+                OtherErrorCode::new("playback_queue_full".to_owned()).expect("not a reserved code")
+            )
         );
         assert_eq!(session.playback_depth(), 0);
     }
@@ -526,7 +539,12 @@ mod tests {
         let mut session = session(4, 4);
         session.hangup().expect("ringing to ended");
         let error = session.push_capture(frame()).expect_err("call is over");
-        assert_eq!(error.code, ErrorCode::Other("call_ended".to_owned()));
+        assert_eq!(
+            error.code,
+            ErrorCode::Other(
+                OtherErrorCode::new("call_ended".to_owned()).expect("not a reserved code")
+            )
+        );
         assert_eq!(session.capture_depth(), 0);
     }
 
@@ -586,9 +604,21 @@ mod tests {
         assert_eq!(discarded, 50);
         assert_eq!(session.playback_depth(), 0);
 
-        // this is the number the document actually measures: not how many
-        // frames were thrown away, but how much of the accounted pipeline
-        // is left standing between the request and silence on the wire
-        assert!(session.latency().playback_latency_ms() < 100);
+        // this is the number the document actually measures: time from the
+        // request to silence on the wire, in accounted frames rather than
+        // wall clock. Not playback_latency_ms() alone -- that only counts
+        // the encode-and-one-frame term already past the queue, and holds
+        // regardless of what barge_in() did -- but that term plus whatever
+        // is still queued, drained at the frame duration. Skip the
+        // barge_in() call above and playback_depth() stays at fifty, this
+        // sum lands at a full second, and the assertion below catches it.
+        let still_queued_ms = u32::try_from(session.playback_depth())
+            .expect("fits in a test")
+            .saturating_mul(session.audio().frame_duration_ms());
+        let residual_ms = still_queued_ms.saturating_add(session.latency().playback_latency_ms());
+        assert!(
+            residual_ms < 100,
+            "residual latency after barge-in: {residual_ms} ms"
+        );
     }
 }

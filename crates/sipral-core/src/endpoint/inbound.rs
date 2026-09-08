@@ -125,8 +125,15 @@ impl Endpoint {
                 Err(error) => outcome = Err(ReceiveError::Malformed(error)),
             }
         }
-        // RFC 5626 4.4.1 makes answering a ping a MUST for whoever receives it
+        // RFC 5626 5.4 makes answering a ping a MUST for whoever receives it,
+        // and owes one CRLF per double-CRLF. It says nothing about how many
+        // writes that is, and a segment holds thousands of pings: one write
+        // each would let a peer trade four bytes in for a syscall out
+        let mut pings = 0usize;
         while framer.take_ping() {
+            pings = pings.saturating_add(1);
+        }
+        if pings > 0 {
             self.queue(
                 Flow {
                     transport,
@@ -134,7 +141,7 @@ impl Endpoint {
                     source: None,
                     protocol,
                 }
-                .transmit(Arc::from(PONG)),
+                .transmit(Arc::from(PONG.repeat(pings))),
             );
         }
         // and the answer to ours is the only thing that says the flow is alive

@@ -112,8 +112,8 @@ const RATIO_DENOMINATOR: i64 = 2;
 const ZCR_NUMERATOR: usize = 3;
 const ZCR_DENOMINATOR: usize = 8;
 
-/// The least the noise floor is ever read as, regardless of what it has
-/// adapted down to. Without it, a stream of literal digital silence settles
+/// The least the noise floor is ever allowed to sit at, whatever the
+/// background does. Without it, a stream of literal digital silence settles
 /// the floor at zero and then a single bit of decoder truncation error reads
 /// as speech forever after. The value is a mean-square energy corresponding
 /// to an amplitude of about five, which is below anything a real microphone
@@ -170,10 +170,10 @@ impl Vad {
         self.primed = false;
     }
 
-    /// The current noise floor, as the same mean-square energy [`process`]
-    /// compares frames against. Zero before the first frame has primed it.
-    /// For diagnostics; nothing in this module reads it back from the
-    /// outside.
+    /// The current noise floor: the same mean-square energy [`process`]
+    /// compares frames against, never below [`MIN_FLOOR`] once a frame has
+    /// primed it, and zero before that. For diagnostics; nothing in this
+    /// module reads it back from the outside.
     ///
     /// [`process`]: Self::process
     #[must_use]
@@ -228,6 +228,8 @@ impl Vad {
     }
 
     fn scores_as_speech(&self, energy: i64, crossings: usize, len: usize) -> bool {
+        // the stored floor is already held at the minimum; this covers the
+        // one frame that arrives before anything has primed it
         let floor = self.noise_floor.max(MIN_FLOOR);
         if energy.saturating_mul(RATIO_DENOMINATOR) >= floor.saturating_mul(RATIO_NUMERATOR) {
             return true;
@@ -248,7 +250,10 @@ impl Vad {
         } else {
             FALL_DIVISOR
         };
-        self.noise_floor = step_toward(self.noise_floor, energy, divisor);
+        // held at the minimum here rather than only where it is compared, so
+        // that a long run of digital silence cannot walk the stored floor
+        // below the value every decision is actually made against
+        self.noise_floor = step_toward(self.noise_floor, energy, divisor).max(MIN_FLOOR);
     }
 }
 
@@ -299,7 +304,7 @@ fn zero_crossings(frame: &[i16]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, Vad, mean_energy, step_toward, zero_crossings};
+    use super::{Activity, MIN_FLOOR, Vad, mean_energy, step_toward, zero_crossings};
 
     /// A constant-amplitude frame has an exact mean energy of `amplitude *
     /// amplitude`, which makes it easy to prime the noise floor at a known
@@ -505,6 +510,29 @@ mod tests {
         // speech resumes before the hangover ran out
         assert_eq!(vad.process(&flat(15_000, 160)), Activity::Speech);
         assert_eq!(vad.noise_floor(), seeded, "the floor was never touched");
+    }
+
+    #[test]
+    fn a_long_run_of_digital_silence_stops_the_floor_where_the_comparison_stops() {
+        let mut vad = Vad::with_hangover_ms(8_000, 0);
+        converge(&mut vad, &flat(30, 160)); // energy 900
+        assert_eq!(vad.noise_floor(), 900);
+
+        // a muted microphone, or a codec handing over exact zeroes: the floor
+        // falls the whole way down, and it has to stop where the comparison
+        // stops reading it, or what the accessor reports is not what any
+        // decision was made against. `converge` cannot reach this: it stops
+        // at the first frame that does not move the floor, which is the same
+        // frame either way
+        for _ in 0..200 {
+            assert_eq!(vad.process(&flat(0, 160)), Activity::Silence);
+        }
+        assert_eq!(vad.noise_floor(), MIN_FLOOR);
+
+        // and the number it reports is the one frames are judged against:
+        // energy 49 clears the margin over 25, energy 25 does not
+        assert_eq!(vad.process(&flat(7, 160)), Activity::Speech);
+        assert_eq!(vad.process(&flat(5, 160)), Activity::Silence);
     }
 
     #[test]

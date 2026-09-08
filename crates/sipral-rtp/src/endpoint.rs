@@ -105,6 +105,9 @@ pub enum RtcpReceived<'a> {
         /// Why, if it said (RFC 3550 §6.6).
         reason: &'a [u8],
     },
+    /// From somewhere other than the peer this session is talking to, so
+    /// nothing in it was believed.
+    ForeignAddress,
     /// Not a well-formed compound RTCP packet.
     Malformed(RtcpError),
 }
@@ -146,6 +149,11 @@ struct Inbound {
     accepted: PayloadTypes,
     signalled: SocketAddr,
     latch: Option<SocketAddr>,
+    /// Where RTCP is heard from, latched the way `latch` is but only onto a
+    /// host this session already had reason to expect. Separate because
+    /// RFC 3550 §11 puts RTCP on its own port, so the port differs from the
+    /// RTP one even when the host does not.
+    rtcp_latch: Option<SocketAddr>,
     source: Option<u32>,
     sequence: SequenceState,
     buffer: JitterBuffer,
@@ -205,6 +213,7 @@ impl RtpSession {
                 accepted: config.accepted,
                 signalled: config.remote,
                 latch: None,
+                rtcp_latch: None,
                 source: None,
                 sequence: SequenceState::new(),
                 buffer: JitterBuffer::new(config.clock_rate, &config.playout),
@@ -424,6 +433,7 @@ impl RtpSession {
     pub fn relocate(&mut self, remote: SocketAddr) {
         self.inbound.signalled = remote;
         self.inbound.latch = None;
+        self.inbound.rtcp_latch = None;
     }
 
     /// Listen to a different synchronization source, for a far end that has
@@ -556,19 +566,36 @@ impl RtpSession {
         Ok(written)
     }
 
-    /// Take in a compound RTCP datagram, whichever socket it arrived on
-    /// (§6.3.3, RFC 5761 for a socket shared with RTP).
+    /// Take in a compound RTCP datagram and the address it came from,
+    /// whichever socket it arrived on (§6.3.3, RFC 5761 for a socket shared
+    /// with RTP).
+    ///
+    /// The origin is checked before anything in the packet is believed, for
+    /// the same reason [`RtpSession::receive`] checks it: SSRCs travel in
+    /// the clear in every packet of the call, so anyone who can watch the
+    /// stream can name ours in a report block and move this session's
+    /// round-trip estimate and its report cadence from off to the side.
+    /// Only the parse comes first, so that a datagram that is not RTCP at
+    /// all never decides where RTCP is heard from.
     pub fn rtcp_receive<'a>(
         &mut self,
         datagram: &'a [u8],
+        from: SocketAddr,
         now: Duration,
         ntp: u64,
     ) -> RtcpReceived<'a> {
-        self.timer.observe(datagram.len());
         let compound = match CompoundPacket::parse(datagram) {
             Ok(compound) => compound,
             Err(error) => return RtcpReceived::Malformed(error),
         };
+        if !self.rtcp_origin_accepted(from) {
+            return RtcpReceived::ForeignAddress;
+        }
+        // §6.3.3 folds in the size of "each compound RTCP packet received",
+        // which is this one and not a datagram that failed to be one:
+        // avg_rtcp_size is the numerator of §6.3.1's interval, so anything
+        // counted here moves this session's own reporting cadence.
+        self.timer.observe(datagram.len());
         if !self.inbound.member_known {
             self.inbound.member_known = true;
             self.timer.note_member();
@@ -600,6 +627,47 @@ impl RtpSession {
             Some(reason) => RtcpReceived::Goodbye { reason },
             None => RtcpReceived::Report,
         }
+    }
+
+    /// Whether RTCP from `from` belongs to this call, latching onto the
+    /// first sender that does.
+    ///
+    /// The latch is the RTP one's counterpart and starts from the same
+    /// address [`RtpSession::destination`] does: where the audio is actually
+    /// coming from once it is coming from anywhere, and the address the
+    /// answer named until then. Only the host is compared, because the port
+    /// is the part that legitimately differs — the classic pair puts RTCP one
+    /// above the RTP port (§11) and RFC 5761 puts it on the RTP port itself.
+    /// Once a report has arrived the full address is pinned, and a later one
+    /// from anywhere else is dropped rather than merged.
+    ///
+    /// Falling back to the answer's address rather than to whoever speaks
+    /// first is the safe half of a trade, and not a free one. A peer behind
+    /// a NAT sends its reports from an address the answer never named, so on
+    /// a stream that receives no RTP to latch onto — one-way paging, a held
+    /// call, listen-only monitoring — its reports are refused for the whole
+    /// call, and this session goes without a round-trip estimate and counts
+    /// one member fewer. The cost is paid in statistics. The other way round
+    /// it would be paid in the call itself: those are exactly the streams
+    /// where nothing ever arrives to correct a wrong guess.
+    ///
+    /// A latch taken before RTP arrived was taken on the weaker of the two
+    /// addresses, so RTP overrules it: when the media turns out to come from
+    /// another host, that earlier latch is dropped instead of kept, or one
+    /// early report would shut the real peer out of its own call.
+    fn rtcp_origin_accepted(&mut self, from: SocketAddr) -> bool {
+        let expected = self.destination().ip();
+        if let Some(latched) = self.inbound.rtcp_latch {
+            if latched.ip() == expected {
+                return latched == from;
+            }
+            self.inbound.rtcp_latch = None;
+        }
+        if from.ip() != expected {
+            return false;
+        }
+        self.inbound.rtcp_latch = Some(from);
+        true
     }
 
     /// Whichever of a report's blocks describes this session's own SSRC
@@ -659,6 +727,15 @@ mod tests {
     use crate::wire::{PacketBuilder, PacketError, RtpHeader, RtpPacket};
 
     const PEER: &str = "198.51.100.7:16384";
+    /// The peer's RTCP port: the RTP one plus one, as RFC 3550 §11 pairs
+    /// them, so its reports arrive from a port its audio never uses.
+    const PEER_RTCP: &str = "198.51.100.7:16385";
+    /// Where the answer said the peer is, which is not where its packets
+    /// come from: a NAT rewrote the address on the way out, as one usually
+    /// has.
+    const SIGNALLED: &str = "192.0.2.10:5004";
+    /// The RTCP port beside it, for a peer nothing rewrote.
+    const SIGNALLED_RTCP: &str = "192.0.2.10:5005";
     const IMPOSTOR: &str = "203.0.113.9:40000";
 
     fn addr(text: &str) -> SocketAddr {
@@ -673,7 +750,7 @@ mod tests {
             clock_rate: 8000,
             sequence: 1000,
             timestamp: 500_000,
-            remote: addr("192.0.2.10:5004"),
+            remote: addr(SIGNALLED),
             silence_suppression: true,
             playout: BufferConfig {
                 depth: 8,
@@ -732,13 +809,36 @@ mod tests {
         ChunkBuilder { ssrc, items: ITEMS }
     }
 
+    /// A compound RR sent by `ssrc`, carrying one block about this session's
+    /// own SSRC with the LSR and DLSR of §6.4.1 Figure 2's worked example,
+    /// where A - LSR - DLSR comes to 6.125 seconds. This is the packet that
+    /// sets the round-trip estimate.
+    fn round_trip_report(out: &mut [u8], ssrc: u32) -> usize {
+        let block = ReportBlock {
+            ssrc: 0x0102_0304,
+            last_sr: 0xb705_2000,
+            delay_since_last_sr: 0x0005_4000,
+            ..ReportBlock::default()
+        };
+        let rr = ReceiverReportBuilder {
+            ssrc,
+            reports: &[block],
+        };
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[cname_chunk(ssrc)],
+        };
+        CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .write(out)
+            .expect("room")
+    }
+
     #[test]
     fn the_stream_latches_onto_the_source_of_the_first_packet_it_believes() {
         let mut session = session();
         assert_eq!(session.latched(), None);
         assert_eq!(
             session.destination(),
-            addr("192.0.2.10:5004"),
+            addr(SIGNALLED),
             "until a packet arrives, the answer is all there is to go on"
         );
 
@@ -1124,30 +1224,14 @@ mod tests {
     #[test]
     fn an_incoming_report_about_this_sessions_own_ssrc_yields_a_round_trip_time() {
         let mut session = session();
+        establish(&mut session, 7, addr(PEER));
         assert_eq!(session.round_trip_time(), None);
 
-        // §6.4.1 Figure 2's own worked example: A - LSR - DLSR = 6.125s
-        let block = ReportBlock {
-            ssrc: 0x0102_0304, // this session's own SSRC
-            last_sr: 0xb705_2000,
-            delay_since_last_sr: 0x0005_4000,
-            ..ReportBlock::default()
-        };
-        let rr = ReceiverReportBuilder {
-            ssrc: 99,
-            reports: &[block],
-        };
-        let sdes = SourceDescriptionBuilder {
-            chunks: &[cname_chunk(99)],
-        };
         let mut incoming = [0_u8; 256];
-        let n = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
-            .write(&mut incoming)
-            .expect("room");
-
+        let n = round_trip_report(&mut incoming, 99);
         let arrival_ntp = 0xb710_8000_u64 << 16;
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
             RtcpReceived::Report
         );
         assert_eq!(
@@ -1179,7 +1263,7 @@ mod tests {
             .expect("room");
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], Duration::ZERO, 0),
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
             RtcpReceived::Goodbye {
                 reason: b"call ended"
             }
@@ -1190,9 +1274,230 @@ mod tests {
     fn a_malformed_rtcp_datagram_is_reported_rather_than_panicking() {
         let mut session = session();
         assert!(matches!(
-            session.rtcp_receive(b"not rtcp", Duration::ZERO, 0),
+            session.rtcp_receive(b"not rtcp", addr(PEER_RTCP), Duration::ZERO, 0),
             RtcpReceived::Malformed(_)
         ));
+    }
+
+    #[test]
+    fn an_rtcp_report_from_another_address_is_dropped_not_believed() {
+        // an SSRC is in the clear in every packet of the call, so naming
+        // ours in a report block proves nothing about who is sending it
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            RtcpReceived::ForeignAddress
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            None,
+            "nothing in it was believed"
+        );
+
+        // while the same report from the peer's own RTCP port is: §11 puts
+        // it one above the RTP port, so the port differs and the host does
+        // not
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            RtcpReceived::Report
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+    }
+
+    #[test]
+    fn rtcp_pins_the_port_its_first_report_arrived_from() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+        // same host, another port: one peer sends its reports from one
+        // socket, so this is somebody else
+        assert_eq!(
+            session.rtcp_receive(
+                &incoming[..n],
+                addr("198.51.100.7:40001"),
+                Duration::ZERO,
+                0
+            ),
+            RtcpReceived::ForeignAddress
+        );
+
+        // a re-INVITE that moves the far end opens the latch again
+        session.relocate(addr(IMPOSTOR));
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+    }
+
+    #[test]
+    fn a_stream_that_never_receives_rtp_does_not_hand_rtcp_to_whoever_speaks_first() {
+        // one-way paging, a held call, listen-only monitoring: no inbound
+        // audio ever arrives, so the RTP latch stays open for the whole
+        // call and there is no race to win -- the first speaker would
+        // simply keep the session
+        let mut session = session();
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            RtcpReceived::ForeignAddress
+        );
+        assert_eq!(
+            session.latched(),
+            None,
+            "and nothing is coming to settle it"
+        );
+        assert_eq!(session.round_trip_time(), None);
+
+        // the address the answer named is heard, since with no media it is
+        // the only thing the session knows about the far end
+        assert_eq!(
+            session.rtcp_receive(
+                &incoming[..n],
+                addr(SIGNALLED_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
+            RtcpReceived::Report
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+    }
+
+    #[test]
+    fn an_impostor_ahead_of_the_first_rtp_packet_does_not_win_the_race() {
+        // §6.3.1 holds the first report back 2.5 seconds while audio starts
+        // at once, so anyone who has read the answer has that long to get a
+        // report in before the media settles where the peer is
+        let mut session = session();
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            RtcpReceived::ForeignAddress
+        );
+        assert_eq!(session.round_trip_time(), None);
+
+        establish(&mut session, 7, addr(PEER));
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            RtcpReceived::Report,
+            "and the peer it tried to impersonate is not shut out by it"
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+    }
+
+    #[test]
+    fn an_rtcp_latch_taken_before_rtp_gives_way_to_where_the_media_turned_out_to_be() {
+        let mut session = session();
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        // a report arrives from the answer's address before any audio does
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+
+        // and then the media turns up from the address the peer's NAT
+        // allocated, which is the better of the two
+        establish(&mut session, 7, addr(PEER));
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            RtcpReceived::Report
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+
+        // the earlier address does not speak for the call any more
+        assert_eq!(
+            session.rtcp_receive(
+                &incoming[..n],
+                addr(SIGNALLED_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
+            RtcpReceived::ForeignAddress
+        );
+    }
+
+    #[test]
+    fn rtcp_multiplexed_onto_the_rtp_port_arrives_from_the_address_the_audio_uses() {
+        // RFC 5761 §4: one socket for both, so the reports come from the
+        // very address the audio does, ports and all
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(PEER), Duration::ZERO, arrival_ntp),
+            RtcpReceived::Report
+        );
+        assert_eq!(
+            session.round_trip_time(),
+            Some(Duration::new(6, 125_000_000))
+        );
+        assert_eq!(
+            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            RtcpReceived::ForeignAddress
+        );
+    }
+
+    #[test]
+    fn a_datagram_that_is_not_rtcp_does_not_move_the_reporting_interval() {
+        // §6.3.3 folds "each compound RTCP packet received" into
+        // avg_rtcp_size, and §6.3.1 divides by it -- so a datagram that
+        // never parsed must not reach it, or a peer sets this session's own
+        // report cadence with 1200 octets of nothing
+        let quiet = StreamConfig {
+            // low enough that the five-second floor is not what decides the
+            // interval, leaving avg_rtcp_size the only thing that can move it
+            rtcp_bandwidth: 1.0,
+            ..config()
+        };
+        let mut untouched = RtpSession::new(&quiet, 0.5);
+        let mut fed = RtpSession::new(&quiet, 0.5);
+
+        for _ in 0..8 {
+            assert!(matches!(
+                fed.rtcp_receive(&[0_u8; 1200], addr(PEER_RTCP), Duration::ZERO, 0),
+                RtcpReceived::Malformed(_)
+            ));
+        }
+
+        assert_eq!(
+            fed.rtcp_due(Duration::ZERO, 0.5),
+            untouched.rtcp_due(Duration::ZERO, 0.5)
+        );
     }
 
     #[test]

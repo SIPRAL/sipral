@@ -354,15 +354,23 @@ impl UserAgent {
                 status,
                 ref response,
             } => {
-                let account = self.owner_of(transaction)?;
-                self.on_response(account, status, response, now);
+                // a REGISTER and an UPDATE are both non-INVITE transactions,
+                // and dropping the ones that are not ours would take the
+                // answer to somebody else's request with them
+                let Some(account) = self.owner_of(transaction) else {
+                    return Some(event);
+                };
+                let response = response.clone();
+                self.on_response(account, status, &response, now);
                 None
             }
             Event::RequestFailed {
                 transaction,
                 reason,
             } => {
-                let account = self.owner_of(transaction)?;
+                let Some(account) = self.owner_of(transaction) else {
+                    return Some(event);
+                };
                 self.on_request_failed(account, reason, now);
                 None
             }

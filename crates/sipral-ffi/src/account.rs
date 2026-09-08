@@ -254,7 +254,7 @@ entry! {
 }
 
 entry! {
-    /// Give the binding up: a REGISTER with `Expires: 0` (§10.2.5).
+    /// Give the binding up: a REGISTER with `Expires: 0` (§10.2.2).
     ///
     /// Only this device's binding. A `Contact: *` would remove every binding
     /// the address of record has, including the one belonging to the desk
@@ -557,6 +557,20 @@ mod tests {
         );
         assert_eq!(poll(handle, 0).transmits_discarded, 1);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// RFC 3261 §10.2.5 is Setting the Internal Clock; the rule that a UA
+    /// removes a binding by sending `Expires: 0` is §10.2.2, Removing
+    /// Bindings. The needle is assembled at runtime so this test does not
+    /// just match its own assertion.
+    #[test]
+    fn the_unregister_doc_cites_removing_bindings_not_the_clock() {
+        let source = include_str!("account.rs");
+        let section = '\u{a7}';
+        assert!(
+            source.contains(&format!("`Expires: 0` ({section}10.2.2)")),
+            "removing a binding with Expires: 0 is §10.2.2, not §10.2.5"
+        );
     }
 
     #[test]

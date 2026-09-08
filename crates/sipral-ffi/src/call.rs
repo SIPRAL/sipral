@@ -10,7 +10,7 @@
 //! about.
 //!
 //! A call is placed with a session description and answered with one. Offering
-//! nothing and letting the far end offer in its 2xx is legal (§14.1) and is
+//! nothing and letting the far end offer in its 2xx is legal (§13.2.1) and is
 //! deliberately not reachable from here: the answer would then have to travel
 //! in the ACK, written by an application that has no media layer on this side
 //! of the boundary to write it with.
@@ -44,7 +44,7 @@ const DEFAULT_DTMF_MS: u32 = 160;
 /// milliseconds where it meant seconds finds out.
 const MAX_DTMF_MS: u32 = 10_000;
 
-/// The sixteen events a keypad has (RFC 4733 §3.10).
+/// The sixteen events a keypad has (RFC 4733 §3.2, Table 3).
 const KEYPAD: &[u8] = b"0123456789*#ABCD";
 
 /// What a call is placed with.
@@ -424,7 +424,7 @@ entry! {
     /// Send DTMF on a call that is up, one INFO per digit.
     ///
     /// `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-    /// RFC 4733 §3.10, in the order they were pressed. `duration_ms` is how
+    /// RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how
     /// long each one is said to have been held, or zero for 160 ms.
     ///
     /// # Safety
@@ -771,7 +771,7 @@ m=audio 41000 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=sendrecv\r\n";
 
-    /// What the far end answers a hold with: it will send, and not receive
+    /// What the far end answers a hold with: it will receive, and not send
     /// (RFC 3264 §6.1).
     const HELD_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 2 IN IP4 203.0.113.5\r\n\
@@ -1087,6 +1087,21 @@ Content-Type: application/sdp\r\n"
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The rule that an offerless INVITE gets its answer in the ACK is
+    /// RFC 3261 §13.2.1 (Creating the Initial INVITE); §14.1 is UAC behavior
+    /// for a re-INVITE that modifies a session already up, a different rule
+    /// this same file cites correctly elsewhere. The needle is assembled at
+    /// runtime so this test does not just match its own assertion.
+    #[test]
+    fn the_module_doc_cites_the_section_that_puts_the_answer_in_the_ack() {
+        let source = include_str!("call.rs");
+        let section = '\u{a7}';
+        assert!(
+            source.contains(&format!("is legal ({section}13.2.1) and is")),
+            "offering nothing and answering in the ACK is §13.2.1, not §14.1"
+        );
+    }
+
     #[test]
     fn a_target_that_is_not_a_uri_is_refused() {
         let mut observed = Observed::default();
@@ -1188,6 +1203,23 @@ Content-Type: application/sdp\r\n"
             observed.kinds()
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `HELD_ANSWER` carries `a=recvonly`, which per RFC 4566 means the party
+    /// that wrote it — the far end — will receive and not send. The doc
+    /// comment above the constant had the two swapped. The needle is
+    /// assembled at runtime so this test does not just match its own
+    /// assertion.
+    #[test]
+    fn the_held_answer_doc_matches_what_recvonly_means() {
+        let source = include_str!("call.rs");
+        let section = '\u{a7}';
+        assert!(
+            source.contains(&format!(
+                "it will receive, and not send\n    /// (RFC 3264 {section}6.1)"
+            )),
+            "a=recvonly means the far end receives and does not send"
+        );
     }
 
     #[test]
@@ -1300,6 +1332,29 @@ Content-Length: 0\r\n\r\n";
                 "{refused:?} was taken for a keypad"
             );
         }
+    }
+
+    /// RFC 4733's section 3 has only 3.1, 3.2 and 3.3; the sixteen DTMF event
+    /// codes are Table 3 in 3.2. A doc comment pointing at a section that
+    /// does not exist is a defect cbindgen would copy into the public header
+    /// verbatim, so it is checked here rather than left to be noticed by eye.
+    ///
+    /// The needles are assembled at runtime, not written as one literal, so
+    /// this test inspecting its own file does not just match itself.
+    #[test]
+    fn the_keypad_doc_cites_a_section_rfc_4733_actually_has() {
+        let source = include_str!("call.rs");
+        let section = '\u{a7}';
+        assert!(
+            source.contains(&format!("(RFC 4733 {section}3.2, Table 3)")),
+            "the KEYPAD constant should point at Table 3 in §3.2"
+        );
+        assert!(
+            source.contains(&format!(
+                "RFC 4733 {section}3.2, in the order they were pressed"
+            )),
+            "sipral_call_send_dtmf's doc should point at §3.2 as well"
+        );
     }
 
     #[test]

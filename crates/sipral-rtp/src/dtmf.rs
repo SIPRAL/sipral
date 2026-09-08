@@ -292,10 +292,11 @@ pub struct Reported {
 /// What one incoming frame did to the event this receiver is following.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Not this receiver's payload type, or a straggler for an event
-    /// already reported — one of the final packet's other two
-    /// retransmissions, or a stale duplicate, arriving after the first was
-    /// enough.
+    /// Not this receiver's payload type, or a packet with nothing left to
+    /// say: one of the final packet's other two retransmissions, a stale
+    /// duplicate of an event already reported, or a straggler whose
+    /// timestamp is behind the event currently open, which belongs to an
+    /// event that has already lapsed.
     Ignored,
     /// Extended the event already open. Nothing to report yet.
     Updated,
@@ -325,6 +326,11 @@ impl Open {
     }
 }
 
+/// Half the RTP timestamp clock. A difference smaller than this is ahead of
+/// what it was measured from, and one larger is behind it, which is the only
+/// way to order two timestamps on a field that wraps.
+const HALF_CLOCK: u32 = 1 << 31;
+
 /// Collapses the packets RFC 4733 sends for one event — every duration
 /// update, and the final packet's two retransmissions (§2.5.1.4) — into a
 /// single reported digit, keyed on the RTP timestamp that identifies the
@@ -332,8 +338,9 @@ impl Open {
 /// gets wrong: reporting on every packet turns one digit into three or five.
 ///
 /// Meant to sit downstream of the jitter buffer, fed frames in roughly
-/// sequence order; a straggler more than one event stale is not something it
-/// tries to place correctly.
+/// sequence order; a packet whose timestamp is behind the event currently
+/// open is dropped rather than placed, since an event that has already
+/// lapsed is not one this receiver can still report.
 #[derive(Clone, Debug)]
 pub struct EventReceiver {
     payload_type: u8,
@@ -384,6 +391,9 @@ impl EventReceiver {
                 }
             }
             _ => {
+                if !self.is_next_event(frame.timestamp) {
+                    return Ok(Outcome::Ignored);
+                }
                 let closed = self.open.take();
                 let fresh = Open {
                     timestamp: frame.timestamp,
@@ -415,6 +425,28 @@ impl EventReceiver {
         }
     }
 
+    /// Whether `timestamp` is ahead of every event this receiver knows
+    /// about, which is what makes it the next one.
+    ///
+    /// §2.5.2.2 closes a tone when the receiver "receives the next tone,
+    /// distinguished by a different timestamp value" — the *next* one, later
+    /// on the same clock. A timestamp behind what is already open is not a
+    /// tone that has started, it is a report for one that has lapsed, and
+    /// §2.5.2.2 says further reports for such an event "MUST be ignored".
+    /// The two look identical if only the difference from the open event is
+    /// tested, which is how a single reordered packet ends up reporting a
+    /// digit at the wrong duration and silencing the rest of it.
+    fn is_next_event(&self, timestamp: u32) -> bool {
+        let Some(known) = self.open.map(|open| open.timestamp).or(self.last_reported) else {
+            // nothing has been seen yet, so there is nothing to be stale
+            // against
+            return true;
+        };
+        // timestamps wrap, so "later" is the half of the circle ahead of
+        // what is known rather than a plain comparison
+        (1..HALF_CLOCK).contains(&timestamp.wrapping_sub(known))
+    }
+
     /// The stream went quiet — silence, a payload type change, or the call
     /// ending — so whatever event was open is as over as it is going to
     /// get. This receiver has no clock of its own; the caller decides when
@@ -442,6 +474,21 @@ mod tests {
             marker: false,
             payload,
         }
+    }
+
+    /// One event payload at volume zero, for the tests that care about which
+    /// event and when rather than how loud.
+    fn payload(event: u8, end: bool, duration: u16) -> [u8; EVENT_LEN] {
+        let mut out = [0_u8; EVENT_LEN];
+        EventReport {
+            event,
+            end,
+            volume: 0,
+            duration,
+        }
+        .write(&mut out)
+        .expect("room");
+        out
     }
 
     #[test]
@@ -945,6 +992,100 @@ mod tests {
                 timestamp: 2000,
             }),
             "the second event was never touched by the straggler"
+        );
+    }
+
+    #[test]
+    fn a_packet_behind_the_open_event_is_stale_and_does_not_cut_it_short() {
+        // §2.5.2.2 closes a tone on "the next tone, distinguished by a
+        // different timestamp value" -- a next tone, later on the clock.
+        // One tick earlier is a straggler, and taking it for a new event
+        // reports the open one at whatever duration it had reached, then
+        // swallows every packet it has left, end packet included.
+        let mut rx = EventReceiver::new(101);
+        assert_eq!(
+            rx.receive(frame(101, 1000, &payload(4, false, 160))),
+            Ok(Outcome::Updated)
+        );
+        assert_eq!(
+            rx.receive(frame(101, 1000, &payload(4, false, 320))),
+            Ok(Outcome::Updated)
+        );
+
+        assert_eq!(
+            rx.receive(frame(101, 999, &payload(9, false, 80))),
+            Ok(Outcome::Ignored),
+            "not a digit anyone pressed"
+        );
+
+        // and the real event runs to its own end, reported once and whole
+        assert_eq!(
+            rx.receive(frame(101, 1000, &payload(4, false, 480))),
+            Ok(Outcome::Updated)
+        );
+        assert_eq!(
+            rx.receive(frame(101, 1000, &payload(4, true, 640))),
+            Ok(Outcome::Reported(Reported {
+                event: 4,
+                digit: Some('4'),
+                volume: 0,
+                duration: 640,
+                timestamp: 1000,
+            }))
+        );
+        assert_eq!(rx.flush(), None, "with nothing invented left behind it");
+    }
+
+    #[test]
+    fn a_packet_behind_the_last_reported_event_is_stale_with_nothing_open() {
+        // §2.5.2.2: once a receiver can tell a packet "corresponds to an
+        // event already played out and lapsed", "further reports for the
+        // event MUST be ignored" -- and an event older than the last one
+        // reported has certainly lapsed
+        let mut rx = EventReceiver::new(101);
+        assert_eq!(
+            rx.receive(frame(101, 2000, &payload(7, true, 320))),
+            Ok(Outcome::Reported(Reported {
+                event: 7,
+                digit: Some('7'),
+                volume: 0,
+                duration: 320,
+                timestamp: 2000,
+            }))
+        );
+
+        assert_eq!(
+            rx.receive(frame(101, 1000, &payload(3, false, 160))),
+            Ok(Outcome::Ignored)
+        );
+        assert_eq!(
+            rx.flush(),
+            None,
+            "and it did not open an event that would surface at the flush"
+        );
+    }
+
+    #[test]
+    fn an_event_whose_timestamp_wrapped_is_still_the_next_one() {
+        // RTP timestamps wrap (RFC 3550 §5.1), and a call that outlasts the
+        // 32-bit clock must not have everything after the wrap read as
+        // stale
+        let mut rx = EventReceiver::new(101);
+        let before_wrap = u32::MAX - 80;
+        assert_eq!(
+            rx.receive(frame(101, before_wrap, &payload(1, false, 160))),
+            Ok(Outcome::Updated)
+        );
+        assert_eq!(
+            rx.receive(frame(101, 0, &payload(2, false, 160))),
+            Ok(Outcome::Reported(Reported {
+                event: 1,
+                digit: Some('1'),
+                volume: 0,
+                duration: 160,
+                timestamp: before_wrap,
+            })),
+            "81 ticks later, on the far side of zero"
         );
     }
 }

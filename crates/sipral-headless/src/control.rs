@@ -450,10 +450,28 @@ pub enum ErrorCode {
     Internal,
     /// A code from outside this list, kept rather than collapsed into
     /// `Internal` so a caller that defined it still gets it back.
-    Other(String),
+    /// [`OtherErrorCode`] cannot equal one of the six strings above, so
+    /// nothing held here can be misread as one of them on the way back in.
+    Other(OtherErrorCode),
 }
 
 impl ErrorCode {
+    /// `code` as one of the six built-in variants, or `None` when it names
+    /// none of them — the single place both [`ErrorCode::parse`] and
+    /// [`OtherErrorCode::new`] check, so the two can never disagree about
+    /// which strings are reserved.
+    fn reserved(code: &str) -> Option<Self> {
+        Some(match code {
+            "protocol_violation" => Self::ProtocolViolation,
+            "frame_too_large" => Self::FrameTooLarge,
+            "invalid_audio_frame" => Self::InvalidAudioFrame,
+            "unknown_call" => Self::UnknownCall,
+            "session_not_open" => Self::SessionNotOpen,
+            "internal" => Self::Internal,
+            _ => return None,
+        })
+    }
+
     fn as_str(&self) -> &str {
         match self {
             Self::ProtocolViolation => "protocol_violation",
@@ -462,20 +480,42 @@ impl ErrorCode {
             Self::UnknownCall => "unknown_call",
             Self::SessionNotOpen => "session_not_open",
             Self::Internal => "internal",
-            Self::Other(code) => code,
+            Self::Other(code) => code.as_str(),
         }
     }
 
     fn parse(code: &str) -> Self {
-        match code {
-            "protocol_violation" => Self::ProtocolViolation,
-            "frame_too_large" => Self::FrameTooLarge,
-            "invalid_audio_frame" => Self::InvalidAudioFrame,
-            "unknown_call" => Self::UnknownCall,
-            "session_not_open" => Self::SessionNotOpen,
-            "internal" => Self::Internal,
-            other => Self::Other(other.to_owned()),
+        // `reserved` already turned away every string `OtherErrorCode::new`
+        // would refuse, so building one straight from the leftover is safe.
+        Self::reserved(code).unwrap_or_else(|| Self::Other(OtherErrorCode(code.to_owned())))
+    }
+}
+
+/// A caller-defined [`ErrorCode`] outside this crate's own six.
+///
+/// Cannot equal one of them: on the wire a code is just its string, so a
+/// value that collided would read back through [`ErrorCode::parse`] as the
+/// reserved variant instead of `Other`, changing identity with no error.
+/// Refusing the collision here, at construction, is cheaper than teaching
+/// the wire format to tell the two apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherErrorCode(String);
+
+impl OtherErrorCode {
+    /// `None` if `code` is one of [`ErrorCode`]'s six reserved strings.
+    #[must_use]
+    pub fn new(code: String) -> Option<Self> {
+        if ErrorCode::reserved(&code).is_some() {
+            None
+        } else {
+            Some(Self(code))
         }
+    }
+
+    /// The code text, exactly as given to [`OtherErrorCode::new`].
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -733,8 +773,8 @@ impl core::error::Error for ControlError {}
 mod tests {
     use super::{
         Answer, BargeIn, CallState, CallStateKind, ControlError, ControlMessage, DtmfDigit,
-        DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall, Reject,
-        SessionOpen, Transfer,
+        DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall,
+        OtherErrorCode, Reject, SessionOpen, Transfer,
     };
     use crate::audio::SampleRate;
 
@@ -809,7 +849,9 @@ mod tests {
         }));
         round_trips(&ControlMessage::Error(ErrorMessage {
             call_id: None,
-            code: ErrorCode::Other("vendor_specific".to_owned()),
+            code: ErrorCode::Other(
+                OtherErrorCode::new("vendor_specific".to_owned()).expect("not a reserved code"),
+            ),
             message: "custom".to_owned(),
         }));
     }
@@ -927,7 +969,32 @@ mod tests {
             decoded,
             ControlMessage::Error(ErrorMessage {
                 call_id: None,
-                code: ErrorCode::Other("vendor_x".to_owned()),
+                code: ErrorCode::Other(
+                    OtherErrorCode::new("vendor_x".to_owned()).expect("not a reserved code")
+                ),
+                message: "m".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_code_colliding_with_a_reserved_string_cannot_become_other() {
+        // "internal" is one of ErrorCode's own six strings. On the wire a
+        // code is nothing but that string, so an `Other` holding it would be
+        // indistinguishable from `ErrorCode::Internal` and would read back
+        // as one, silently changing identity. Refusing the collision at
+        // construction is what rules that out, rather than the decode side
+        // merely happening to prefer the reserved variant.
+        assert_eq!(OtherErrorCode::new("internal".to_owned()), None);
+
+        let bytes = br#"{"call_id":null,"code":"internal","message":"m"}"#;
+        let decoded =
+            ControlMessage::decode(FrameKind::Error.to_u8(), bytes).expect("valid payload");
+        assert_eq!(
+            decoded,
+            ControlMessage::Error(ErrorMessage {
+                call_id: None,
+                code: ErrorCode::Internal,
                 message: "m".to_owned(),
             })
         );

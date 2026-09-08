@@ -256,7 +256,7 @@ impl Parser<'_> {
     }
 
     fn value(&mut self, depth: usize) -> Result<Value, JsonError> {
-        if depth > MAX_DEPTH {
+        if depth >= MAX_DEPTH {
             return Err(JsonError::TooDeep);
         }
         self.skip_ws();
@@ -530,7 +530,7 @@ impl core::error::Error for JsonError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonError, Value, parse};
+    use super::{JsonError, MAX_DEPTH, Value, parse};
 
     #[test]
     fn the_primitive_values_round_trip() {
@@ -651,6 +651,21 @@ mod tests {
         let mut text = "[".repeat(1_000);
         text.push_str(&"]".repeat(1_000));
         assert_eq!(parse(text.as_bytes()), Err(JsonError::TooDeep));
+    }
+
+    #[test]
+    fn exactly_max_depth_arrays_nest_but_one_more_does_not() {
+        // MAX_DEPTH is documented as how many arrays or objects may nest
+        // inside one another, so that many must parse and one more must not
+        // -- not MAX_DEPTH + 1, which is what `depth > MAX_DEPTH` would
+        // have let through with depth starting at zero.
+        let mut fits = "[".repeat(MAX_DEPTH);
+        fits.push_str(&"]".repeat(MAX_DEPTH));
+        assert!(parse(fits.as_bytes()).is_ok());
+
+        let mut one_too_many = "[".repeat(MAX_DEPTH + 1);
+        one_too_many.push_str(&"]".repeat(MAX_DEPTH + 1));
+        assert_eq!(parse(one_too_many.as_bytes()), Err(JsonError::TooDeep));
     }
 
     #[test]

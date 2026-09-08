@@ -1122,6 +1122,40 @@ fn a_ping_on_a_stream_is_answered_with_a_single_crlf() {
 }
 
 #[test]
+fn a_segment_full_of_pings_is_answered_in_one_write() {
+    // §5.4 owes a CRLF to every double-CRLF that arrives and says nothing
+    // about how many writes that is. One write per ping would let a peer turn
+    // a single 64 KB segment into thousands of two-byte sends, which is a
+    // better amplifier than it is a keep-alive
+    const PINGS: usize = 4096;
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [15; 32]);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+
+    let burst = b"\r\n\r\n".repeat(PINGS);
+    stream(&mut endpoint, &burst, t0);
+
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 1, "one segment in, one write out");
+    assert_eq!(
+        out.first().map(|t| t.payload.to_vec()),
+        Some(b"\r\n".repeat(PINGS)),
+        "and still one pong per ping, on the same connection"
+    );
+}
+
+#[test]
 fn a_stream_transport_is_pinged_on_a_jittered_interval() {
     let t0 = Instant::now();
     let mut endpoint = Endpoint::new(EndpointConfig::default(), [5; 32]);

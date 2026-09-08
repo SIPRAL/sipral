@@ -459,7 +459,9 @@ impl<'a> Message<'a> {
                     if length < 4 {
                         false
                     } else {
-                        let class = attribute.value.get(2).copied().unwrap_or_default();
+                        // the five high bits of this byte are reserved; only
+                        // the bottom three are the class (§14.8)
+                        let class = attribute.value.get(2).copied().unwrap_or_default() & 0x07;
                         let number = attribute.value.get(3).copied().unwrap_or_default();
                         if !(3..=6).contains(&class) || number > 99 {
                             return Err(ParseError::ErrorCode { class, number });
@@ -636,7 +638,9 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn error_code(&self) -> Option<ErrorCode<'a>> {
         let value = self.find(AttributeType::ERROR_CODE)?;
-        let class = u16::from(*value.get(2)?);
+        // the five high bits of this byte are reserved; only the bottom
+        // three are the class, and receivers MUST ignore the rest (§14.8)
+        let class = u16::from(*value.get(2)? & 0x07);
         let number = u16::from(*value.get(3)?);
         Some(ErrorCode::new(class * 100 + number, value.get(4..)?))
     }
@@ -1132,6 +1136,18 @@ mod tests {
         let error = message.error_code().unwrap();
         assert_eq!(error.code(), 401);
         assert_eq!(error.reason_text(), Some("Unauthenticated"));
+    }
+
+    #[test]
+    fn an_error_code_ignores_the_reserved_bits() {
+        // every reserved bit set: the class must come from the bottom three
+        // bits of the third byte and nothing else (§14.8). A server that
+        // leaves them set the way the RFC allows must not be refused
+        // outright, and must not decode into a class of 0xf4.
+        let bytes = assemble(0x0111, &attribute(0x0009, &[0xff, 0xff, 0xf4, 0x28]));
+        let message = Message::parse(&bytes).expect("reserved bits must not fail parsing");
+        let error = message.error_code().unwrap();
+        assert_eq!(error.code(), 440);
     }
 
     #[test]
