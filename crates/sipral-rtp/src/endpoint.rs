@@ -7,6 +7,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::dtmf::{EVENT_LEN, EventSender, HALF_CLOCK, Outgoing};
 use crate::playout::{Activity, BufferConfig, Insert, JitterBuffer, Pull, Quality, clock_ticks};
 use crate::rtcp::{
     CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, ReceiverReportBuilder,
@@ -371,6 +372,100 @@ impl RtpSession {
         Ok(written)
     }
 
+    /// Begin a named telephone event at the timestamp the next packet would
+    /// have carried.
+    ///
+    /// An event begins at the instant its RTP timestamp names (RFC 4733
+    /// §2.2.1), and that instant is the audio stream's to give: §2.1 has
+    /// events "use the same sequence number and timestamp base as the regular
+    /// audio channel". Drive the sender this returns with
+    /// [`EventSender::update`] while the digit is held, [`EventSender::end`]
+    /// when it is released and [`EventSender::retransmit`] twice after that,
+    /// putting each packet on the wire with [`RtpSession::send_event`].
+    #[must_use]
+    pub const fn start_event(&self, event: u8, volume: u8) -> EventSender {
+        EventSender::new(event, volume, self.outbound.timestamp)
+    }
+
+    /// Write one packet of an outgoing named telephone event into `out` and
+    /// say how long it is.
+    ///
+    /// `payload_type` is the one the answer settled on: the format "does not
+    /// have a static payload type number, but uses an RTP payload type number
+    /// established dynamically and out-of-band" (§2.1), so it is neither this
+    /// stream's audio payload type nor anything a configuration could have
+    /// fixed in advance.
+    ///
+    /// Everything else comes from the stream, because §2.1 says it must. The
+    /// event carries the audio SSRC and spends the next sequence number, each
+    /// packet as an audio packet would — retransmissions included, "to permit
+    /// the receiver to detect lost packets" (§2.5.1.6).
+    ///
+    /// The audio timestamp does not move for the event's own packets, which
+    /// all carry the instant the event began (§2.5.1.2). It moves across the
+    /// event instead: one that began at `t` and reports a duration of `d`
+    /// ended at `t + d`, the arithmetic §2.5.1.3 does for itself when a long
+    /// event starts a new segment "with the RTP timestamp set to the time at
+    /// which the previous segment ended". That is where the audio after the
+    /// digit resumes. The two retransmissions of the final packet report the
+    /// same duration and so add nothing to it; the real time they take is
+    /// silence like any other, and [`RtpSession::suppress`] is what accounts
+    /// for that.
+    ///
+    /// # Errors
+    /// [`BuildError::Short`] when `out` cannot hold the packet,
+    /// [`BuildError::PayloadType`] for an event payload type too wide for the
+    /// field, and [`BuildError::EventVolume`] for a volume too wide for its
+    /// own. Either way nothing has been written and no sequence number has
+    /// been spent.
+    pub fn send_event(
+        &mut self,
+        event: Outgoing,
+        payload_type: u8,
+        out: &mut [u8],
+    ) -> Result<usize, BuildError> {
+        let mut payload = [0_u8; EVENT_LEN];
+        if event.report.write(&mut payload).is_err() {
+            // the buffer is exactly as wide as the payload, so the volume is
+            // the only thing left that can refuse to be written
+            return Err(BuildError::EventVolume(event.report.volume));
+        }
+        let header = RtpHeader {
+            marker: event.marker,
+            payload_type,
+            sequence: self.outbound.sequence,
+            timestamp: event.timestamp,
+            ssrc: self.outbound.ssrc,
+        };
+        let written = PacketBuilder::new(header, &payload).write(out)?;
+        self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
+
+        let ended = event
+            .timestamp
+            .wrapping_add(u32::from(event.report.duration));
+        // timestamps wrap, so "past where the stream has already reached" is
+        // the half of the circle ahead of it. An event ending behind that —
+        // a caller that kept sending audio after the digit started — must not
+        // drag the audio clock backwards.
+        if (1..HALF_CLOCK).contains(&ended.wrapping_sub(self.outbound.timestamp)) {
+            self.outbound.timestamp = ended;
+        }
+        // no audio went out for as long as the event lasted, so whatever
+        // follows it begins a talk spurt (RFC 3551 §4.1)
+        self.outbound.spurt_start = true;
+
+        if self.outbound.packets_sent == 0 {
+            self.timer.note_local_sender();
+        }
+        self.outbound.packets_sent = self.outbound.packets_sent.wrapping_add(1);
+        self.outbound.octets_sent = self
+            .outbound
+            .octets_sent
+            .wrapping_add(u32::try_from(payload.len()).unwrap_or(u32::MAX));
+        self.outbound.sent_since_report = true;
+        Ok(written)
+    }
+
     /// Account for `samples` of silence that were not sent.
     ///
     /// The timestamp moves and the sequence number does not, which is what
@@ -717,14 +812,15 @@ mod tests {
     use std::time::Duration;
 
     use super::{Discard, Received, RtcpReceived, RtpSession, StreamConfig};
-    use crate::playout::{Activity, BufferConfig, Pull};
+    use crate::dtmf::{EventReceiver, EventReport, Outcome, Outgoing, Reported};
+    use crate::playout::{Activity, BufferConfig, Frame, Pull};
     use crate::rtcp::{
         CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder,
         ReceiverReportBuilder, ReportBlock, RtcpPacket, SdesItem, SenderOrReceiver,
         SourceDescriptionBuilder,
     };
     use crate::rtcp_timer::Due;
-    use crate::wire::{PacketBuilder, PacketError, RtpHeader, RtpPacket};
+    use crate::wire::{BuildError, PacketBuilder, PacketError, RtpHeader, RtpPacket};
 
     const PEER: &str = "198.51.100.7:16384";
     /// The peer's RTCP port: the RTP one plus one, as RFC 3550 §11 pairs
@@ -830,6 +926,49 @@ mod tests {
         CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
             .write(out)
             .expect("room")
+    }
+
+    /// The telephone-event payload type this call negotiated: dynamic, as
+    /// RFC 4733 §2.1 requires, and nothing like the audio one beside it.
+    const EVENT_PT: u8 = 101;
+
+    /// One event packet, as far as the wire is concerned.
+    fn event_packet(session: &mut RtpSession, outgoing: Outgoing) -> Vec<u8> {
+        let mut out = vec![0; 64];
+        let n = session
+            .send_event(outgoing, EVENT_PT, &mut out)
+            .expect("room");
+        out.truncate(n);
+        out
+    }
+
+    /// A whole digit, driven the way §2.5.1 asks: two updates while it is held
+    /// down, then the final packet three times over (§2.5.1.4). Twenty
+    /// milliseconds apart at eight kilohertz, so the digit lasts 480 ticks.
+    fn digit(session: &mut RtpSession, event: u8, volume: u8) -> Vec<Vec<u8>> {
+        let mut sender = session.start_event(event, volume);
+        let mut packets = vec![
+            event_packet(session, sender.update(160)),
+            event_packet(session, sender.update(320)),
+            event_packet(session, sender.end(480)),
+        ];
+        while let Some(again) = sender.retransmit() {
+            packets.push(event_packet(session, again));
+        }
+        packets
+    }
+
+    /// What a receiver downstream of the jitter buffer sees for a datagram
+    /// this session wrote.
+    fn frame(datagram: &[u8]) -> Frame<'_> {
+        let packet = RtpPacket::parse(datagram).expect("a packet");
+        Frame {
+            sequence: packet.header().sequence,
+            timestamp: packet.header().timestamp,
+            payload_type: packet.header().payload_type,
+            marker: packet.header().marker,
+            payload: packet.payload(),
+        }
     }
 
     #[test]
@@ -1132,6 +1271,242 @@ mod tests {
             1000,
             "the failed attempt left no gap in the numbering"
         );
+    }
+
+    #[test]
+    fn a_digit_goes_out_on_its_own_payload_type_in_the_streams_sequence_space() {
+        // §2.1: named events are "carried as part of the audio stream and MUST
+        // use the same sequence number and timestamp base as the regular audio
+        // channel", on a payload type "established dynamically and
+        // out-of-band"
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        session.send(&[0xD5; 160], 160, &mut out).expect("room");
+
+        let packets = digit(&mut session, 5, 10);
+        assert_eq!(
+            packets.len(),
+            5,
+            "two updates, then the final packet three times"
+        );
+
+        for (offset, datagram) in packets.iter().enumerate() {
+            let packet = RtpPacket::parse(datagram).expect("a packet");
+            let header = packet.header();
+            assert_eq!(
+                header.payload_type, EVENT_PT,
+                "the negotiated event type, not the stream's audio one"
+            );
+            assert_eq!(header.ssrc, 0x0102_0304, "the audio stream's own source");
+            assert_eq!(
+                header.sequence,
+                1001 + u16::try_from(offset).expect("five packets"),
+                "§2.5.1.6: every packet spends the next sequence number"
+            );
+            assert_eq!(
+                header.marker,
+                offset == 0,
+                "§2.5.1.2: the first packet for an event, and only that one"
+            );
+            let report = EventReport::parse(packet.payload()).expect("an event");
+            assert_eq!(report.event, 5);
+            assert_eq!(report.volume, 10);
+        }
+    }
+
+    #[test]
+    fn every_packet_of_one_digit_carries_the_instant_it_began_and_a_longer_duration() {
+        // §2.5.1.2: "The update packets MUST have the same RTP timestamp value
+        // as the initial packet for the event, but the duration MUST be
+        // increased to reflect the total cumulative duration since the
+        // beginning of the event"
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        session.send(&[0xD5; 160], 160, &mut out).expect("room");
+
+        let durations: Vec<u16> = digit(&mut session, 5, 10)
+            .iter()
+            .map(|datagram| {
+                let packet = RtpPacket::parse(datagram).expect("a packet");
+                assert_eq!(
+                    packet.header().timestamp,
+                    500_160,
+                    "the instant the digit began, unmoving for as long as it lasts"
+                );
+                EventReport::parse(packet.payload())
+                    .expect("an event")
+                    .duration
+            })
+            .collect();
+        assert_eq!(durations, [160, 320, 480, 480, 480]);
+    }
+
+    #[test]
+    fn the_final_packet_goes_out_three_times_with_only_its_sequence_number_moving() {
+        // §2.5.1.4: "sent a total of three times", so the end of a digit
+        // survives a lost packet -- while §2.5.1.6 has the sequence number
+        // increment anyway, "to permit the receiver to detect lost packets"
+        let mut session = session();
+        let packets = digit(&mut session, 5, 10);
+        let ends = &packets[2..];
+
+        let first = RtpPacket::parse(&packets[2]).expect("a packet");
+        for (offset, datagram) in ends.iter().enumerate() {
+            let packet = RtpPacket::parse(datagram).expect("a packet");
+            assert_eq!(
+                packet.payload(),
+                first.payload(),
+                "the same four octets, retransmission and all"
+            );
+            assert!(
+                EventReport::parse(packet.payload()).expect("an event").end,
+                "§2.5.1.4: once the E bit is set it stays set"
+            );
+            assert_eq!(
+                RtpHeader {
+                    sequence: first.header().sequence,
+                    ..packet.header()
+                },
+                first.header(),
+                "nothing but the sequence number differs"
+            );
+            assert_eq!(
+                packet.header().sequence,
+                1002 + u16::try_from(offset).expect("three packets")
+            );
+        }
+    }
+
+    #[test]
+    fn the_audio_after_a_digit_resumes_where_the_digit_ended() {
+        // Every packet of the event carries the instant it began (§2.5.1.2),
+        // so the audio clock cannot advance packet by packet; the event still
+        // occupies the ticks its duration counts (§2.3.5), and §2.5.1.3 does
+        // the arithmetic itself when a long event starts its next segment
+        // "with the RTP timestamp set to the time at which the previous
+        // segment ended". Either mistake is a drift of frames that nothing
+        // hears until a codec stops keeping sync.
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        session.send(&[0xD5; 160], 160, &mut out).expect("room");
+
+        assert_eq!(digit(&mut session, 5, 10).len(), 5);
+
+        let n = session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        let resumed = RtpPacket::parse(&out[..n]).expect("a packet");
+        assert_eq!(resumed.header().payload_type, 8, "audio again");
+        assert_eq!(
+            resumed.header().timestamp,
+            500_160 + 480,
+            "the digit began at 500_160 and lasted 480 ticks; the two \
+             retransmissions of its final packet added none of their own"
+        );
+        assert_eq!(
+            resumed.header().sequence,
+            1006,
+            "five event packets, five sequence numbers"
+        );
+        assert!(
+            resumed.header().marker,
+            "no audio went out while the digit did, so this starts a spurt"
+        );
+    }
+
+    #[test]
+    fn a_digit_that_ended_behind_the_stream_does_not_rewind_the_audio_clock() {
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        // the event is claimed at 500_000 and then outrun by the audio, which
+        // is a caller confusing itself; the clock still only goes forward
+        let mut sender = session.start_event(1, 0);
+        session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        session
+            .send_event(sender.end(80), EVENT_PT, &mut out)
+            .expect("room");
+
+        let n = session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        let resumed = RtpPacket::parse(&out[..n]).expect("a packet");
+        assert_eq!(
+            resumed.header().timestamp,
+            500_160,
+            "an event ending at 500_080 cannot pull the stream back to it"
+        );
+    }
+
+    #[test]
+    fn a_digit_this_session_sent_is_one_digit_to_a_receiver() {
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        let n = session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        let mut stream = vec![out[..n].to_vec()];
+        stream.extend(digit(&mut session, 5, 10));
+        let n = session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        stream.push(out[..n].to_vec());
+
+        let mut rx = EventReceiver::new(EVENT_PT);
+        let mut reported = Vec::new();
+        for datagram in &stream {
+            if let Outcome::Reported(digit) = rx.receive(frame(datagram)).expect("a whole event") {
+                reported.push(digit);
+            }
+        }
+
+        assert_eq!(
+            reported,
+            [Reported {
+                event: 5,
+                digit: Some('5'),
+                volume: 10,
+                duration: 480,
+                timestamp: 500_160,
+            }],
+            "one digit, however many packets it took to say it"
+        );
+        assert_eq!(rx.flush(), None, "and nothing left half-open behind it");
+    }
+
+    #[test]
+    fn an_event_that_does_not_fit_spends_nothing() {
+        let mut small = [0_u8; 8];
+        let mut session = session();
+        let mut sender = session.start_event(5, 10);
+        let first = sender.update(160);
+        assert!(matches!(
+            session.send_event(first, EVENT_PT, &mut small),
+            Err(BuildError::Short { .. })
+        ));
+
+        let mut out = [0_u8; 64];
+        let n = session.send_event(first, EVENT_PT, &mut out).expect("room");
+        let packet = RtpPacket::parse(&out[..n]).expect("a packet");
+        assert_eq!(
+            packet.header().sequence,
+            1000,
+            "the failed attempt left no gap in the numbering"
+        );
+        assert_eq!(
+            packet.header().timestamp,
+            500_000,
+            "nor did it move the clock the digit begins on"
+        );
+    }
+
+    #[test]
+    fn an_event_volume_wider_than_six_bits_is_refused_before_the_stream_moves() {
+        // §2.3.4 gives the volume six bits, so 64 has nowhere to go
+        let mut out = [0_u8; 256];
+        let mut session = session();
+        let mut sender = session.start_event(5, 64);
+        let first = sender.update(160);
+        assert_eq!(
+            session.send_event(first, EVENT_PT, &mut out),
+            Err(BuildError::EventVolume(64))
+        );
+
+        let n = session.send(&[0xD5; 160], 160, &mut out).expect("room");
+        let audio = RtpPacket::parse(&out[..n]).expect("a packet");
+        assert_eq!(audio.header().sequence, 1000);
+        assert_eq!(audio.header().timestamp, 500_000);
     }
 
     #[test]

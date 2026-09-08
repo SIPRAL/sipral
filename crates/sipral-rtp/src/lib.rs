@@ -10,6 +10,10 @@
 //! it sees, and RTCP's sender and receiver reports, source description and
 //! goodbye (§6), scheduled the way §6.2 and §6.3 describe.
 //!
+//! DTMF and the other named telephone events ride in that same stream and are
+//! sent from the same session, since RFC 4733 §2.1 gives them its SSRC, its
+//! sequence numbers and its timestamp base.
+//!
 //! Sans-I/O, like the rest of the tree. Nothing here opens a socket, reads a
 //! clock or draws a random number: the caller supplies datagrams and the
 //! address each arrived from, supplies the SSRC and the starting sequence
@@ -17,8 +21,8 @@
 //! random draw RTCP's own scheduling needs, and takes back bytes to send,
 //! the address to send them to, and when to be called again.
 //!
-//! Written from RFC 3550, RFC 3551 and RFC 5761; see `docs/02-clean-room.md`
-//! for why that matters here.
+//! Written from RFC 3550, RFC 3551, RFC 4733 and RFC 5761; see
+//! `docs/02-clean-room.md` for why that matters here.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",

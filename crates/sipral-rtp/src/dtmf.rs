@@ -329,7 +329,7 @@ impl Open {
 /// Half the RTP timestamp clock. A difference smaller than this is ahead of
 /// what it was measured from, and one larger is behind it, which is the only
 /// way to order two timestamps on a field that wraps.
-const HALF_CLOCK: u32 = 1 << 31;
+pub(crate) const HALF_CLOCK: u32 = 1 << 31;
 
 /// Collapses the packets RFC 4733 sends for one event — every duration
 /// update, and the final packet's two retransmissions (§2.5.1.4) — into a

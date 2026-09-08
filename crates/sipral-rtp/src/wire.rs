@@ -457,6 +457,11 @@ pub enum BuildError {
     },
     /// A payload type that does not fit seven bits.
     PayloadType(u8),
+    /// A named telephone event whose volume is wider than the six bits its
+    /// field has (RFC 4733 §2.3.4). Audio is opaque octets here and can
+    /// never produce this; an event is the one payload this layer builds
+    /// rather than copies.
+    EventVolume(u8),
     /// More contributing sources than the four-bit count can name.
     TooManyCsrc(usize),
     /// An extension that is not a whole number of 32-bit words, or longer than
@@ -469,6 +474,7 @@ impl fmt::Display for BuildError {
         match *self {
             Self::Short { need, got } => write!(f, "packet needs {need} octets, {got} offered"),
             Self::PayloadType(pt) => write!(f, "payload type {pt} does not fit seven bits"),
+            Self::EventVolume(v) => write!(f, "event volume {v} does not fit six bits"),
             Self::TooManyCsrc(n) => write!(f, "{n} contributing sources, {MAX_CSRC} is the most"),
             Self::ExtensionLength(n) => write!(f, "extension of {n} octets is not whole words"),
         }
