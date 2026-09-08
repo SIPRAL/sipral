@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+# How the C header is generated from this crate.
+#
+# The header is generated rather than written, because a header written by
+# hand is a second declaration of the ABI and the two drift: a member appended
+# to a struct here and forgotten there is a caller reading a field the library
+# never filled, and nothing catches it at compile time. The build runs
+# cbindgen over this file; nothing in the crate depends on it, and the
+# workspace stays dependency-free.
+#
+# Everything that crosses the boundary already carries its own documentation,
+# so the header carries it too: a binding author reading the header should not
+# have to open the Rust to find out what a member means.
+
+language = "C"
+include_guard = "SIPRAL_H"
+pragma_once = false
+cpp_compat = true
+documentation = true
+documentation_style = "doxy"
+style = "type"
+tab_width = 4
+line_length = 80
+usize_is_size_t = true
+
+# Only what the crate declares. Every type that crosses the boundary is
+# defined here, and a header that pulled in a dependency's types would be
+# declaring an ABI this crate does not own.
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+no_includes = true
+
+header = """
+/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+ * Copyright (c) 2026 Tiberiu Balasea
+ *
+ * Generated from the Rust source. Do not edit: the next build overwrites it.
+ *
+ * Every function here returns a SipralStatus except where its own comment
+ * says otherwise, sets the calling thread's last error on failure, and
+ * catches any panic rather than letting one reach C. A stack may be used
+ * from any thread but only one at a time, and may not be re-entered from
+ * inside its own event callback; both are SIPRAL_STATUS_BUSY rather than a
+ * deadlock. sipral_stack_destroy is the one exception, and works from
+ * inside the callback.
+ */
+"""
+
+[parse]
+parse_deps = false
+
+[export]
+# Structs get the snake_case name the documents use. Enums keep theirs,
+# because cbindgen builds each constant's name out of the type's, and
+# renaming the type would put the suffix in the middle of every constant:
+# SipralStatus gives SIPRAL_STATUS_OK, which is the name a C caller expects.
+#
+# A struct added without a line here is still exported, under its Rust name.
+# That is a cosmetic inconsistency in the header rather than a drift in the
+# ABI, which is why this table is allowed to be a table.
+[export.rename]
+"SipralHandle" = "sipral_handle_t"
+"SipralStackConfig" = "sipral_stack_config_t"
+"SipralPollResult" = "sipral_poll_result_t"
+"SipralAccountConfig" = "sipral_account_config_t"
+"SipralCallConfig" = "sipral_call_config_t"
+"SipralAbiVersion" = "sipral_abi_version_t"
+"SipralEvent" = "sipral_event_t"
+"SipralEventPayload" = "sipral_event_payload_t"
+"SipralRegistrationEvent" = "sipral_registration_event_t"
+"SipralCallEvent" = "sipral_call_event_t"
+"SipralTransferEvent" = "sipral_transfer_event_t"
+
+[enum]
+# SIPRAL_STATUS_OK, SIPRAL_EVENT_KIND_STARTED, SIPRAL_TRANSPORT_UDP. The
+# repr on the Rust side is what fixes each one's width, so a C compiler that
+# would otherwise pick its own gets told.
+rename_variants = "QualifiedScreamingSnakeCase"
+prefix_with_name = true
+
+[fn]
+# Declaration order follows the source, so that the header reads the way the
+# modules do rather than alphabetically.
+sort_by = "None"
+args = "horizontal"
