@@ -370,9 +370,15 @@ impl UserAgent {
     /// queue the event, and a policy consulted after that has been asked about
     /// something the application has already seen.
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let event = self.on_screening_event(event, now)?;
+        // Screening first, so a scanner that writes a Require header still
+        // meets the rate limiter. Then this, before every handler that acts on
+        // a request -- OPTIONS included, which used to answer 200 to anything
+        // it was handed and so answered 200 to a Require it could not honour.
+        // §8.2.2.3 refuses the request; it does not undo what honouring it did.
+        let event = self.on_require_event(event, now)?;
         let event = self.on_options_event(event, now)?;
         let event = self.on_registration_event(event, now)?;
-        let event = self.on_screening_event(event, now)?;
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;
         let event = self.on_transfer_event(event, now)?;

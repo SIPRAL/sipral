@@ -45,6 +45,10 @@ use crate::renegotiate::ALLOW;
 /// a 420 and says which token it was.
 pub(crate) const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
 
+/// §21.4.15, and the only status §8.2.2.3 allows for an option tag this agent
+/// has not implemented.
+const BAD_EXTENSION: StatusCode = StatusCode::BAD_EXTENSION;
+
 /// What a reliable provisional this end sent is still waiting for.
 #[derive(Clone, Debug)]
 pub(crate) struct Unacknowledged {
@@ -201,25 +205,77 @@ impl UserAgent {
 
     /// §8.2.2.3: a `Require` this agent cannot honour is a 420, and the
     /// response says which token it was so the far end can try without it.
+    /// §8.2.2.3 for every request that arrives, not only the one that opens a
+    /// call.
+    ///
+    /// "If a UAS does not understand an option-tag listed in a Require header
+    /// field, it MUST respond by generating a response with status code 420
+    /// (Bad Extension)." It says a UAS, not an INVITE: a re-INVITE, an UPDATE,
+    /// an OPTIONS or a NOTIFY that demands an extension this agent has not
+    /// implemented cannot be honoured as sent, and answering it as though it
+    /// could is worse than saying so — a peer that asked for something and got
+    /// a 200 believes it got it.
+    ///
+    /// This runs before the handlers that would act on the request, for the
+    /// same reason the screening hook runs before the call layer: by the time
+    /// a session change has been applied, refusing it is a second change.
+    ///
+    /// CANCEL and ACK are not here and must not be. The same section: "Note
+    /// that Require and Proxy-Require MUST NOT be used in a SIP CANCEL
+    /// request, or in an ACK request sent for a non-2xx response. These header
+    /// fields MUST be ignored if they are present in these requests." Neither
+    /// arrives as one of the events below.
+    pub(crate) fn on_require_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let missing = match event {
+            Event::IncomingReinvite { ref request, .. }
+            | Event::IncomingInDialog { ref request, .. }
+            | Event::IncomingOutOfDialog { ref request, .. } => unsupported(&request.as_raw()),
+            _ => return Some(event),
+        };
+        if missing.is_empty() {
+            return Some(event);
+        }
+        let refusal =
+            OutgoingResponse::new(BAD_EXTENSION).header(HeaderName::Unsupported, &listed(&missing));
+        match event {
+            Event::IncomingReinvite { transaction, .. } => {
+                self.endpoint
+                    .respond_invite(transaction, &refusal, now)
+                    .ok();
+            }
+            Event::IncomingInDialog { transaction, .. }
+            | Event::IncomingOutOfDialog { transaction, .. } => {
+                self.endpoint.respond(transaction, &refusal, now).ok();
+            }
+            _ => return Some(event),
+        }
+        None
+    }
+
     pub(crate) fn refuse_extension(
         &mut self,
         transaction: TransactionId<InviteServer>,
         missing: &[Vec<u8>],
         now: Instant,
     ) {
-        let mut listed: Vec<u8> = Vec::new();
-        for token in missing {
-            if !listed.is_empty() {
-                listed.extend_from_slice(b", ");
-            }
-            listed.extend_from_slice(token);
-        }
-        let Ok(status) = StatusCode::new(420) else {
-            return;
-        };
-        let refusal = OutgoingResponse::new(status).header(HeaderName::Unsupported, &listed);
+        let refusal =
+            OutgoingResponse::new(BAD_EXTENSION).header(HeaderName::Unsupported, &listed(missing));
         self.endpoint
             .respond_invite(transaction, &refusal, now)
             .ok();
     }
+}
+
+/// §8.2.2.3: "The UAS MUST add an Unsupported header field, and list in it
+/// those options it does not understand amongst those in the Require header
+/// field of the request."
+fn listed(missing: &[Vec<u8>]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for token in missing {
+        if !out.is_empty() {
+            out.extend_from_slice(b", ");
+        }
+        out.extend_from_slice(token);
+    }
+    out
 }

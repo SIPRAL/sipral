@@ -151,6 +151,9 @@ impl StatusCode {
     /// 481, which answers a request naming a dialog or a transaction that is
     /// not there (§12.2.2, RFC 3262 §3).
     pub const CALL_DOES_NOT_EXIST: Self = Self(481);
+    /// 420, which §8.2.2.3 makes the only answer to a `Require` naming an
+    /// extension this end has not implemented.
+    pub const BAD_EXTENSION: Self = Self(420);
     /// 500, which §12.2.2 answers a request whose `CSeq` runs backwards with.
     pub const SERVER_ERROR: Self = Self(500);
     /// 503, "temporarily unable to process the request due to a temporary

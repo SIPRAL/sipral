@@ -42,6 +42,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   reads back what a stack is actually running on, since a zero in the config
   means "the default" and the effective figure is otherwise unknowable.
 
+### Fixed
+
+- A `Require` this agent cannot honour is refused on every request, not only on
+  the INVITE that opens a call. §8.2.2.3 says a UAS, not an INVITE: a re-INVITE,
+  an UPDATE, an OPTIONS or a NOTIFY demanding an extension that is not
+  implemented cannot be honoured as sent, and answering it as though it could is
+  worse than declining — a peer that asked for something and got a 200 believes
+  it got it. Writing the test found that the OPTIONS handler answered 200 to
+  anything it was handed, including this, because it sat first in the event
+  chain; it now runs after the check. Only the tags that are actually unknown
+  come back in `Unsupported`, which the section asks for by name.
+
 ### Added
 
 - An INVITE nobody asked for can be refused before anything sees it. Scanners

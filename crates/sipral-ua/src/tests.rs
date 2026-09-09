@@ -3306,7 +3306,144 @@ fn tag_of(bytes: &[u8], name: HeaderName<'_>) -> String {
         .unwrap_or_default()
 }
 
-/// A NOTIFY from the transferee, reporting how the referred call is going.
+// -- §8.2.2.3, on every request and not only the one that opens a call -------
+
+/// The `Unsupported` header of the 420 among what went out.
+///
+/// Not `only`: an INVITE gets a 100 from the core before anything above it
+/// has an opinion, so the 420 shares the batch with it.
+fn refused_extension(out: &[Vec<u8>]) -> String {
+    let answer = out
+        .iter()
+        .find(|bytes| bytes.starts_with(b"SIP/2.0 420 "))
+        .unwrap_or_else(|| {
+            panic!(
+                "no 420 went out; what did: {:?}",
+                out.iter()
+                    .map(
+                        |bytes| String::from_utf8_lossy(bytes.get(..12).unwrap_or(bytes))
+                            .into_owned()
+                    )
+                    .collect::<Vec<_>>()
+            )
+        });
+    text(answer, HeaderName::Unsupported)
+}
+
+#[test]
+fn an_update_demanding_an_extension_we_lack_is_refused_rather_than_applied() {
+    // the INVITE that opens a call was already refused; a request inside one
+    // was not, and a session change honoured because nobody read its Require
+    // is a change that has to be undone rather than declined
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    let theirs = plus(
+        &reversed(&ack, "UPDATE", "req", 1, None),
+        "Require: rendering-of-the-caller-in-oils\r\n",
+    );
+    deliver(&mut agent, &theirs, t0);
+
+    assert_eq!(
+        refused_extension(&transmits(&mut agent)),
+        "rendering-of-the-caller-in-oils"
+    );
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Reoffer { .. })),
+        "the application is not asked about a request that was refused"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_reinvite_demanding_an_extension_we_lack_is_refused_on_its_own_transaction() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    let theirs = plus(
+        &reversed(&ack, "INVITE", "req2", 1, Some(THEIR_HOLD)),
+        "Require: rendering-of-the-caller-in-oils\r\n",
+    );
+    deliver(&mut agent, &theirs, t0);
+
+    assert_eq!(
+        refused_extension(&transmits(&mut agent)),
+        "rendering-of-the-caller-in-oils"
+    );
+}
+
+#[test]
+fn only_the_tags_we_do_not_know_are_listed_back() {
+    // "list in it those options it does not understand amongst those in the
+    // Require header field" -- the ones we do understand are not a complaint
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    let theirs = plus(
+        &reversed(&ack, "UPDATE", "req3", 1, None),
+        "Require: timer, oils, replaces, gilt\r\n",
+    );
+    deliver(&mut agent, &theirs, t0);
+
+    assert_eq!(refused_extension(&transmits(&mut agent)), "oils, gilt");
+}
+
+#[test]
+fn an_extension_we_do_implement_is_not_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    let theirs = plus(
+        &reversed(&ack, "UPDATE", "req4", 1, Some(THEIR_HOLD)),
+        "Require: timer\r\n",
+    );
+    deliver(&mut agent, &theirs, t0);
+
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
+fn an_options_demanding_an_extension_we_lack_is_refused_too() {
+    // §8.2.2.3 says a UAS, not an INVITE, and the OPTIONS handler answers 200
+    // to anything it is given
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let _ = agent.add_account(account());
+
+    let probe = concat!(
+        "OPTIONS sip:alice@192.0.2.1 SIP/2.0\r\n",
+        "Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKopt\r\n",
+        "From: <sip:probe@192.0.2.9>;tag=p1\r\n",
+        "To: <sip:alice@192.0.2.1>\r\n",
+        "Call-ID: opt-require\r\n",
+        "CSeq: 1 OPTIONS\r\n",
+        "Max-Forwards: 70\r\n",
+        "Require: rendering-of-the-caller-in-oils\r\n",
+        "Content-Length: 0\r\n\r\n",
+    );
+    deliver(&mut agent, probe.as_bytes(), t0);
+
+    assert_eq!(
+        refused_extension(&transmits(&mut agent)),
+        "rendering-of-the-caller-in-oils"
+    );
+}
+
 #[test]
 fn a_notify_for_another_event_package_is_not_eaten_as_a_transfer_report() {
     // RFC 6665 §8.2.1 makes the Event header what identifies a notification,
@@ -3359,6 +3496,7 @@ fn a_notify_for_another_event_package_is_not_eaten_as_a_transfer_report() {
     );
 }
 
+/// A NOTIFY from the transferee, reporting how the referred call is going.
 fn notify(ours: &[u8], cseq: u32, status: &str, state: &str) -> Vec<u8> {
     let body = format!("SIP/2.0 {status}\r\n");
     let head = reversed(ours, "NOTIFY", &format!("nfy{cseq}"), cseq, None);
