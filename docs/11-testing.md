@@ -29,6 +29,34 @@ verified rather than waited for. And a recorded session replays to the same
 bytes, which is what makes a failure caught in the field into a test that stays
 (`docs/13-client-requirements.md`, D2).
 
+## Bad networks are fixtures, not arguments
+
+`interop/impairment/` holds the shapes of bad link a call is measured over, one
+file each, and `scripts/lab.sh netem` runs them. They are committed rather than
+typed because a threshold measured against a profile that lives in somebody's
+shell history is a threshold nobody can reproduce.
+
+Four of them: bursty loss with jitter and reordering; a mobile leg losing two
+per cent in bursts on a link whose delay moves; a geostationary carrier, where
+the interesting failure is arithmetic rather than audio, since a retransmission
+schedule tuned on a fast path gives up before a satellite answers; and a link
+that disappears for eight seconds in the middle of the call.
+
+The last is the one worth having, and it is the one an easy simulator does not
+produce. Loss and delay held constant for the length of a call are a bad line,
+not an interruption. What it asks is not whether audio survived — eight seconds
+of nothing cannot be concealed — but whether the stack is still there
+afterwards: the dialog kept, no timer having fired into the gap and torn the
+session down, and a buffer that goes back to the target it had rather than
+staying where the gap left it.
+
+**A profile declares what must be true after it is applied, and the runner reads
+it back.** `tc` accepts settings the kernel then discards in silence: on a 3.10
+kernel `delay` goes and `loss` stays. A run whose impairment never happened is
+byte for byte a clean run, and it passes. That is worse than no run, so the
+runner refuses to report a pass when what the profile asked for is not in the
+qdisc, and says the run proves nothing instead.
+
 ## Layers of testing
 
 **Unit, with a fake clock.** Every transaction and dialog state machine is

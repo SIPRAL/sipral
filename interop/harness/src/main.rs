@@ -47,12 +47,29 @@ use sipral_ua::{
 /// How long any one flow may take before it is a failure. Every step in these
 /// flows is a round trip on a loopback bridge; a whole flow that needs more
 /// than this has not gone slowly, it has gone wrong.
-const PATIENCE: Duration = Duration::from_secs(20);
+///
+/// Both this and [`dwell`] are overridable, and one impairment profile needs
+/// it: a link that disappears for eight seconds cannot be measured on a call
+/// that lasts two.
+fn patience() -> Duration {
+    seconds_from("SIPRAL_PATIENCE_MS", 20_000)
+}
 
 /// How long a plain call stays up before it is hung up. Long enough for a
 /// hundred frames each way, which is enough to tell a tone coming back from a
 /// line that is merely open.
-const DWELL: Duration = Duration::from_secs(2);
+fn dwell() -> Duration {
+    seconds_from("SIPRAL_DWELL_MS", 2_000)
+}
+
+fn seconds_from(name: &str, fallback: u64) -> Duration {
+    Duration::from_millis(
+        env::var(name)
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(fallback),
+    )
+}
 
 /// How long to wait for the far end to become transferable before asking
 /// anyway.
@@ -385,7 +402,7 @@ impl Handler for Script {
             self.settled_by = None;
             self.advance(agent, now);
         }
-        if self.step == Step::Done || now > self.started + PATIENCE {
+        if self.step == Step::Done || now > self.started + patience() {
             return Control::Stop;
         }
         Control::Continue
@@ -466,7 +483,7 @@ impl Script {
             }
             // a plain call is the one that carries the tone, so it waits
             Step::Talking if self.flow == Flow::Call => {
-                self.listen_until = Some(now + DWELL);
+                self.listen_until = Some(now + dwell());
             }
             Step::Talking | Step::Resuming | Step::Transferring => self.hang_up(agent, now),
             Step::Placing | Step::Ending | Step::Done => (),

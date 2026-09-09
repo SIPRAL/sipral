@@ -10,6 +10,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- The shapes of bad network a call is measured over, as fixtures in
+  `interop/impairment/` rather than as arguments somebody types. A threshold
+  measured against a profile that lives in a shell history is a threshold
+  nobody can reproduce. Four of them: bursty loss with jitter and reordering; a
+  mobile leg losing two per cent in bursts on a link whose delay moves; a
+  geostationary carrier, where the interesting failure is arithmetic rather
+  than audio, because a retransmission schedule tuned on a fast path gives up
+  before a satellite answers; and a link that disappears for eight seconds in
+  the middle of the call.
+  That last one is the one worth having, and the one an easy simulator does not
+  produce: loss and delay held constant for a whole call are a bad line, not an
+  interruption. It does not ask whether audio survived, since eight seconds of
+  nothing cannot be concealed, but whether the stack is still there afterwards
+  — the dialog kept, no timer having fired into the gap, and a buffer that
+  returns to the target it had rather than staying where the gap left it. Each
+  profile declares what must appear in the qdisc once it is applied, and the
+  runner reads it back, because `tc` accepts settings the kernel then discards
+  in silence and a run whose impairment never happened is byte for byte a clean
+  one.
+
 ### Fixed
 
 - A challenge to any request inside a call is now answered, not given up on.

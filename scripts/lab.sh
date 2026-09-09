@@ -11,7 +11,11 @@
 #                               then the same call over a link made bad
 #   scripts/lab.sh kamailio     one server only
 #   scripts/lab.sh asterisk
-#   scripts/lab.sh netem        only the run over the bad link
+#   scripts/lab.sh netem        only the runs over a bad link, every profile
+#   PROFILE=blackout scripts/lab.sh netem      one of them
+#
+# The profiles are interop/impairment/*.sh, and its README says what each one
+# is for and how to write another.
 #
 # Needs Docker. That is the whole requirement, and it is why this is a script
 # and not a hosted workflow: it runs wherever there is a Linux kernel with
@@ -117,7 +121,9 @@ flows() {
         -v "$HARNESS:/harness:ro" \
         -v "$ROOT/interop/pcap:/pcap" \
         debian:trixie-slim sh -c "
-            apt-get -qq update >/dev/null && apt-get -qq install -y tcpdump >/dev/null
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
             tcpdump -i any -s 0 -U -w /pcap/$capture.pcap 2>/dev/null &
             sleep 2
             /harness $server 5060 9000
@@ -130,32 +136,55 @@ flows() {
 # The same call again, over a link deliberately made bad. netem shapes egress,
 # so it is our packets that are delayed, lost in bursts and reordered; the echo
 # means the return path suffers too, since a packet that never arrived is never
-# echoed. What is being asked is narrow: with a fifth of a talk spurt missing
-# and the rest arriving out of order, does audio still come back, and does the
-# buffer say what it cost.
+# echoed.
+#
+# The shapes live in interop/impairment/ rather than here, because a threshold
+# is only meaningful against a profile somebody else can run.
+#
 # `tc` accepts what the kernel it is talking to does not necessarily apply, and
 # says nothing when it does not: on a 3.10 kernel the delay is dropped in
 # silence while the loss goes through. A run whose impairment never happened
 # reads exactly like a clean one, which is worse than no run at all -- so the
-# qdisc is read back and the flows only count as an impaired run if what was
-# asked for is actually there.
+# qdisc is read back against what the profile said it needed.
 bad_network() {
+    local profile="$1"
+    # shellcheck disable=SC1090
+    WHY=""; NETEM=""; REQUIRE=""; DWELL_MS=""; DURING=""
+    . "$ROOT/interop/impairment/$profile.sh"
+    printf '  %-10s %s\n' "$profile" "$WHY"
     docker run --rm --network sipral-interop_lab \
         --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=register,call \
+        -e "SIPRAL_DWELL_MS=${DWELL_MS:-2000}" \
+        -e "SIPRAL_PATIENCE_MS=$(( ${DWELL_MS:-2000} + 20000 ))" \
+        -e "NETEM=$NETEM" -e "REQUIRE=$REQUIRE" -e "DURING=$DURING" \
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim sh -c '
-            apt-get -qq update >/dev/null && apt-get -qq install -y iproute2 >/dev/null
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y iproute2 >/dev/null 2>&1
             link=$(ip route | awk "/^default/{print \$5}")
-            tc qdisc add dev "$link" root netem \
-              delay 40ms 15ms loss gemodel 4% 40% 60% 2% reorder 1% 30%
+            # shellcheck disable=SC2086
+            tc qdisc add dev "$link" root netem $NETEM
             applied=$(tc qdisc show dev "$link")
-            echo "$applied"
-            case "$applied" in
-              *delay*) ;;
-              *) echo "IMPAIRMENT-NOT-APPLIED"; exit 3 ;;
-            esac
-            /harness kamailio 5060 9000'
+            echo "  $applied"
+            if [ -n "$REQUIRE" ]; then
+                case "$applied" in
+                  *"$REQUIRE"*) ;;
+                  *) echo "IMPAIRMENT-NOT-APPLIED"; exit 3 ;;
+                esac
+            fi
+            if [ -n "$DURING" ]; then
+                ( eval "$DURING" ) > /tmp/during 2>&1 &
+            fi
+            /harness kamailio 5060 9000
+            status=$?
+            wait
+            if grep -q IMPAIRMENT-NOT-APPLIED /tmp/during 2>/dev/null; then
+                cat /tmp/during
+                exit 3
+            fi
+            exit $status'
 }
 
 if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
@@ -173,14 +202,20 @@ fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
     step "the same call, over a bad network"
-    bad_network
-    case $? in
-        0) pass "audio survived the impairment" ;;
-        3) printf '  note  this kernel took the loss and dropped the delay, so the\n' 
-           printf '        impairment did not happen and the run proves nothing.\n'
-           printf '        netem needs a kernel newer than 3.10 for this profile.\n' ;;
-        *) fail "the impaired run" ;;
-    esac
+    for profile in ${PROFILE:-lossy mobile satellite blackout}; do
+        [ -f "$ROOT/interop/impairment/$profile.sh" ] || {
+            fail "no such profile: $profile"; continue
+        }
+        bad_network "$profile"
+        case $? in
+            0) pass "$profile: audio survived it" ;;
+            3) printf '  note  %s: this kernel took what it liked and dropped the\n' "$profile"
+               printf '        rest in silence, so the impairment did not happen and\n'
+               printf '        the run proves nothing. netem needs a kernel newer\n'
+               printf '        than 3.10 for this profile.\n' ;;
+            *) fail "$profile" ;;
+        esac
+    done
 fi
 
 step "the capture"
