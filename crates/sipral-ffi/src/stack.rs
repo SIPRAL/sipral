@@ -601,6 +601,26 @@ pub(crate) mod tests {
             Some(unsafe { sipral_stack_poll(event.stack, 0, ptr::null_mut()) });
     }
 
+    /// Call in from a thread that is not the one holding the stack.
+    ///
+    /// Spawning and joining inside the callback is what makes the race
+    /// deterministic: the other thread runs while this one is provably still
+    /// inside the poll.
+    unsafe extern "C" fn poll_from_another_thread(
+        event: *const SipralEvent,
+        user_data: *mut c_void,
+    ) {
+        let observed = unsafe { &mut *user_data.cast::<Observed>() };
+        let event = unsafe { &*event };
+        observed.events.push((event.stack, event.kind, event.size));
+        let held = event.stack;
+        observed.reentrant_status = Some(
+            std::thread::spawn(move || unsafe { sipral_stack_poll(held, 0, ptr::null_mut()) })
+                .join()
+                .expect("the thread finished"),
+        );
+    }
+
     unsafe extern "C" fn destroy_from_inside(event: *const SipralEvent, user_data: *mut c_void) {
         let observed = unsafe { &mut *user_data.cast::<Observed>() };
         let event = unsafe { &*event };
@@ -994,6 +1014,23 @@ pub(crate) mod tests {
             last_error_text().is_empty(),
             "the poll succeeded, so what failed inside it is not this thread's last error"
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_second_thread_calling_in_while_the_stack_is_held_is_told_so() {
+        // The test above covers one thread re-entering itself. This is the
+        // other half of the same promise, and the half a binding author will
+        // actually hit: any thread may call, one at a time, and the one that
+        // loses gets a status rather than a deadlock or a fault.
+        let mut observed = Observed::default();
+        let (status, handle) = create(&config(poll_from_another_thread, &mut observed));
+        assert_eq!(status, SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_stack_poll(handle, 0, ptr::null_mut()) },
+            SipralStatus::Ok
+        );
+        assert_eq!(observed.reentrant_status, Some(SipralStatus::Busy));
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
