@@ -24,9 +24,13 @@ report unchanged.
 
 **This is not a message trace.** A trace says what arrived, and a packet
 capture says that better. A record says what was *decided* about it, which
-nothing else says at all. The two numbers from the incident B1 describes — the
-request measured 1785 bytes, the path allowed 1300 — are one entry here and are
-in no log anywhere.
+nothing else says at all. The two numbers from the incident B1 describes — a
+request of 1785 bytes against the 1300 §18.1.1 allows before a stream is
+required — are one entry here and are in no log anywhere. Note that they are
+not the physical path: that was a 1500-byte link, and the reason the request
+fragmented rather than being refused is that nothing was applying the smaller
+number the RFC names. The record carries the number the decision was taken on,
+which is the one worth having.
 
 Most of this is not new work. The decisions were already made and already
 named; what was missing was that the naming be stable and the memory bounded.
