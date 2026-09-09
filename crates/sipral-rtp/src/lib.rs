@@ -53,7 +53,7 @@ pub use dtmf::{
     EVENT_LEN, EventError, EventReceiver, EventReport, EventSender, MAX_DURATION, MAX_VOLUME,
     Outcome, Outgoing, Reported, dtmf_digit,
 };
-pub use endpoint::{Discard, Received, RtcpReceived, RtpSession, StreamConfig};
+pub use endpoint::{Discard, MediaFlow, Received, RtcpReceived, RtpSession, StreamConfig};
 pub use playout::{Activity, BufferConfig, Frame, Insert, JitterBuffer, MAX_DEPTH, Pull, Quality};
 pub use rtcp::{
     CNAME, Chunk, ChunkBuilder, Chunks, CompoundBuilder, CompoundPacket, Goodbye, GoodbyeBuilder,

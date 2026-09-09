@@ -87,13 +87,12 @@ fn in_spurt(elapsed: Duration) -> bool {
     elapsed.as_millis() % cycle < SPURT.as_millis()
 }
 
-/// A tone the far end cannot produce by itself, so hearing it back means it
-/// came from us. Roughly 440 Hz, square rather than sine.
+/// What this end sends. Roughly 440 Hz, square rather than sine.
 ///
 /// Square because it needs no floating point and lands exactly on values
 /// G.711 represents, so nothing about the signal can be blamed for what comes
-/// back. Its harmonics alias, and for the question being asked — did sound
-/// return — that does not matter.
+/// back. Its harmonics alias, and for the question being asked that does not
+/// matter.
 fn tone(samples: &mut [i16], phase: &mut u32, rate: u32) {
     let period = (rate / TONE_HZ).max(2);
     for slot in samples.iter_mut() {
@@ -259,6 +258,10 @@ impl Media {
                 playout: BufferConfig::new(FRAME_TICKS),
                 cname: format!("sipral-interop@{}", plan.local.ip()),
                 rtcp_bandwidth: 1000.0,
+                // shorter than the ten seconds a client would use: a flow
+                // here lasts seconds, and a watchdog that could never fire
+                // inside one would go untested by every run
+                media_timeout: Some(Duration::from_secs(3)),
             },
             1.0,
         ));

@@ -44,6 +44,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- The RTP session notices when the media stops. Signalling stays healthy while
+  audio dies — inbound RTP freezes, both ends sit there, and neither hangs up,
+  because to the dialog the call is still up. Nothing in the protocol notices,
+  which is why every client ends up writing this watchdog and why it is here
+  instead. `RtpSession::media_check` reports on the edge, once when the stream
+  goes quiet and once when it comes back, and `media_deadline` says when to ask
+  again so a caller sets a timer rather than guessing a poll interval. A packet
+  refused for its address or its payload type does not count as the media being
+  alive: one is somebody else's and the other is nobody's.
+  Recovery is deliberately not here. What fixes a stalled stream is a
+  renegotiation, and this crate has no signalling and is not going to grow any.
+
 - One declaration for the ABI's event numbers, and disagreeing with it is a
   build failure. The kinds, their names and their numbers are generated from a
   single list, with an assertion that the list runs `1, 2, 3, …` with nothing
