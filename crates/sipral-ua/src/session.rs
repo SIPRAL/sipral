@@ -219,12 +219,42 @@ impl Session {
             return StreamAnswer::Reject;
         }
         let supported: Vec<&str> = ours.formats.iter().map(String::as_str).collect();
-        let accepted = AcceptedStream::in_offer_order(ours.port, offered, &supported);
+        let mut accepted = AcceptedStream::in_offer_order(ours.port, offered, &supported);
         if accepted.formats.is_empty() {
             return StreamAnswer::Reject;
         }
+        accepted.attributes = carried(ours, offered);
         StreamAnswer::Accept(accepted.with_direction(self.wanted(index, held)))
     }
+}
+
+/// What this end said about a stream last time and has to go on saying.
+///
+/// An answer is not a fresh description. Everything a previous negotiation
+/// settled that the offer still asks for belongs in it, because an answer that
+/// leaves it out is an answer that withdrew it — and a hold arriving from the
+/// far end would then take multiplexing away from a call that had it, moving
+/// RTCP to a port nothing is listening on, without either end saying anything.
+/// RFC 5761 §5.1.1 makes `rtcp-mux` mutual, so it is repeated only where the
+/// offer still carries it; `ptime` and `maxptime` are this end's own statement
+/// about what it wants to receive and stand whatever the offer says.
+///
+/// **`crypto` is deliberately not here.** RFC 4568 §5.1.2 wants an answer to
+/// name the tag it accepted and carry a key of this end's own, and §7.1.4
+/// makes a re-offer an opportunity to re-key; neither is a line that can be
+/// copied forward, and copying one would be answering a negotiation this layer
+/// had not read. A secured call re-offered to a user agent writing its own
+/// answers is the gap `docs/05-media.md` names, and it is a gap rather than a
+/// silence.
+fn carried(ours: &MediaDescription, offered: &MediaDescription) -> Vec<Attribute> {
+    let mutual = ["rtcp-mux"]
+        .iter()
+        .filter(|name| offered.attribute(name).is_some());
+    let ours_alone = ["ptime", "maxptime"].iter();
+    mutual
+        .chain(ours_alone)
+        .filter_map(|name| ours.attribute(name).cloned())
+        .collect()
 }
 
 /// §8.4: "If the stream to be placed on hold was previously a sendrecv media
@@ -277,4 +307,112 @@ fn set_direction(media: &mut MediaDescription, direction: Direction) {
         .attributes
         .retain(|attribute| Direction::from_name(&attribute.name).is_none());
     media.attributes.push(Attribute::flag(direction.as_str()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Session, set_direction};
+    use sipral_core::sdp::{
+        Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription,
+    };
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn address() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
+    }
+
+    /// One audio stream carrying PCMU, plus whatever the caller adds.
+    fn description(port: u16, attributes: Vec<Attribute>) -> SessionDescription {
+        let mut description =
+            SessionDescription::new(Origin::new(1, 1, address()), Connection::new(address()));
+        let mut media = MediaDescription::new("audio", port, "RTP/AVP", vec!["0".to_owned()]);
+        media.attributes = attributes;
+        set_direction(&mut media, Direction::SendRecv);
+        description.media.push(media);
+        description
+    }
+
+    /// The far end putting a call on hold re-offers the session it already
+    /// negotiated. An answer that dropped what the first one settled would be
+    /// this end withdrawing it, and for multiplexing that means RTCP moving
+    /// back to a port nobody is listening on, silently.
+    #[test]
+    fn an_answer_repeats_the_multiplexing_the_first_negotiation_settled() {
+        let mut session = Session::default();
+        session.set_local(description(40_000, vec![Attribute::flag("rtcp-mux")]));
+        let offer = description(40_002, vec![Attribute::flag("rtcp-mux")]);
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, true).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert!(
+            media.attribute("rtcp-mux").is_some(),
+            "the hold took multiplexing away: {media:?}"
+        );
+    }
+
+    /// And it is mutual, so an offer that stopped asking for it gets an answer
+    /// that stops promising it (RFC 5761 §5.1.1).
+    #[test]
+    fn an_offer_that_no_longer_asks_to_multiplex_is_not_answered_as_if_it_did() {
+        let mut session = Session::default();
+        session.set_local(description(40_000, vec![Attribute::flag("rtcp-mux")]));
+        let offer = description(40_002, Vec::new());
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, false).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert!(media.attribute("rtcp-mux").is_none());
+    }
+
+    /// `ptime` is this end's own statement about what it wants to receive, so
+    /// it stands whether or not the offer repeated it.
+    #[test]
+    fn the_packet_length_this_end_asked_for_survives_a_re_offer() {
+        let mut session = Session::default();
+        session.set_local(description(
+            40_000,
+            vec![Attribute::with_value("ptime", "30")],
+        ));
+        let offer = description(40_002, Vec::new());
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, false).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert_eq!(
+            media.attribute("ptime").and_then(|a| a.value.as_deref()),
+            Some("30")
+        );
+    }
+
+    /// A key is not copied forward. §5.1.2 wants an answer to name the tag it
+    /// accepted and carry a key of this end's own, and a layer that has never
+    /// read a crypto line cannot do either — so it says nothing rather than
+    /// repeating a line it did not negotiate.
+    #[test]
+    fn a_crypto_line_is_not_repeated_by_a_layer_that_never_read_one() {
+        let mut session = Session::default();
+        session.set_local(description(
+            40_000,
+            vec![Attribute::with_value(
+                "crypto",
+                "1 AES_CM_128_HMAC_SHA1_80 inline:x",
+            )],
+        ));
+        let offer = description(
+            40_002,
+            vec![Attribute::with_value(
+                "crypto",
+                "1 AES_CM_128_HMAC_SHA1_80 inline:y",
+            )],
+        );
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, false).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert!(
+            media.attribute("crypto").is_none(),
+            "a key was copied forward rather than negotiated"
+        );
+    }
 }
