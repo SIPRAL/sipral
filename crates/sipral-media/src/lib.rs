@@ -47,6 +47,7 @@
 pub mod comfort_noise;
 pub mod drift;
 pub mod g711;
+pub mod g722;
 pub mod mix;
 pub mod opus;
 pub mod plc;

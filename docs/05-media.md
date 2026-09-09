@@ -168,10 +168,20 @@ The pipeline between the codec and whatever produces or consumes samples.
   a long call.
 - **Mixing** for conferencing and for local tones.
 - **Codecs.** G.711 A-law and µ-law written in-tree, a couple of hundred lines
-  and public domain as an algorithm. Opus linked, and the only wideband codec
-  worth defaulting to. G.722 linked from an unrestricted implementation. G.729
-  only if a carrier forces it, and then written in-tree, because the common
-  implementation is GPL.
+  and public domain as an algorithm. G.722 written in-tree as well: this used
+  to say "linked from an unrestricted implementation", and there is not one.
+  The library everyone reaches for is spandsp's, which `docs/02-clean-room.md`
+  forbids by name; the Rust crate that looks free of it keeps spandsp's
+  headers and its comments word for word. So it is implemented from the
+  Recommendation, which is what a specification is for — a filter pair, two
+  ADPCM sub-bands and about a dozen tables. Opus linked, and the codec worth
+  defaulting to where the far end has it. G.729 only if a carrier forces it,
+  and then written in-tree too, because the common implementation is GPL.
+
+  G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
+  so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
+  ticks. Any code that keeps one constant for "samples in a frame" and "ticks
+  in a frame" is correct for G.711 and wrong here.
 - **Echo cancellation, gain control, noise suppression** are attached at a seam,
   not implemented here. This is signal processing research, it exists under a
   permissive licence, and rewriting it would buy nothing that a customer pays

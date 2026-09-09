@@ -12,6 +12,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- G.722 in `sipral-media`, written from ITU-T Recommendation G.722 (09/2012).
+  The twenty-four-tap filter pair that splits sixteen kilohertz into two bands
+  of eight and puts them back together, six-bit ADPCM on the lower band and
+  two-bit on the higher, the logarithmic scale factor and its adaptation, the
+  sixth-order zero section and second-order pole section, and all three
+  decoder modes. Every arithmetic operation is §6.2's, including its
+  definition of multiplication as a shift and its saturating addition, because
+  a wrapping add here decodes to noise only on loud passages.
+  The roadmap used to say this would be linked. There is nothing to link: the
+  usual library is spandsp's, which the clean-room rule forbids by name, and
+  the Rust crate that looks free of it carries spandsp's comments word for
+  word. A Recommendation is a specification, and this is implemented from it.
+  Every table was read off the document twice, independently, and compared;
+  the one cell the two readings disagreed on was settled against the closed
+  form the table follows. Two of the document's own slips are handled and
+  written down: Table 19 prints six characters for a five-bit codeword, and
+  Table 14 prints two of its columns two rows lower than the address they are
+  addressed by.
+  G.722's RTP clock rate is 8000 although it samples at 16000 (RFC 3551
+  §4.5.2), so `SAMPLE_RATE` and `CLOCK_RATE` are separate constants and
+  `frame_samples`, `frame_octets` and `frame_ticks` are three different
+  numbers for the same frame.
 - SRTP and SRTCP in `sipral-rtp`, written from RFC 3711. Counter mode and f8
   keystreams, HMAC-SHA-1 tags, the key derivation of §4.3 with erratum 3712
   applied to the SRTCP index, the implicit packet index of §3.3.1 with
