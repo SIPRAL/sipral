@@ -69,9 +69,13 @@ record! {
         /// How many times a call's jitter buffer had to shrink or stretch the
         /// stream to keep its delay where it was aiming.
         pub jitter_buffer_events: u64,
-        /// How many times this build has had to promote a request onto a stream
-        /// transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
-        pub transport_promotions: u64,
+        /// How many times a request would not fit a datagram and there was no
+        /// stream to the destination to put it on, so the stack asked for one
+        /// (RFC 3261 §18.1.1, B1).
+        ///
+        /// A request promoted onto a connection that already existed does not
+        /// raise it; those are in the diagnostic record instead.
+        pub stream_transport_wanted: u64,
         /// Calls with media running right now. The one gauge in this struct: it
         /// moves both ways, and it is what every other member here is not.
         pub active_calls: u64,
@@ -108,7 +112,7 @@ fn counters_of(counters: Counters) -> SipralCounters {
         calls_ended_expired: counters.calls_ended.expired.get(),
         media_gaps: counters.media_gaps.get(),
         jitter_buffer_events: counters.jitter_buffer_events.get(),
-        transport_promotions: counters.transport_promotions.get(),
+        stream_transport_wanted: counters.stream_transport_wanted.get(),
         active_calls: counters.active_calls.get(),
     }
 }
@@ -164,7 +168,7 @@ mod tests {
             calls_ended_expired: u64::MAX,
             media_gaps: u64::MAX,
             jitter_buffer_events: u64::MAX,
-            transport_promotions: u64::MAX,
+            stream_transport_wanted: u64::MAX,
             active_calls: u64::MAX,
         }
     }
@@ -185,7 +189,7 @@ mod tests {
         assert_eq!(read.calls_ended_local_hangup, 0);
         assert_eq!(read.media_gaps, 0);
         assert_eq!(read.jitter_buffer_events, 0);
-        assert_eq!(read.transport_promotions, 0);
+        assert_eq!(read.stream_transport_wanted, 0);
         assert_eq!(read.active_calls, 0);
     }
 

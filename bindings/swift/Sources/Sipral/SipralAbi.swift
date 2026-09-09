@@ -611,7 +611,7 @@ public enum Sipral {
 
     /// The ABI's minor version, raised by every function or struct member
     /// added.
-    public static let aBIVERSIONMINOR: UInt32 = 5
+    public static let aBIVERSIONMINOR: UInt32 = 6
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let aBIVERSIONPATCH: UInt32 = 0

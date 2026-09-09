@@ -49,7 +49,7 @@ typedef uint64_t sipral_handle_t;
  * The ABI's minor version, raised by every function or struct member
  * added.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)5)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)6)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -1045,10 +1045,14 @@ struct sipral_counters {
      */
     uint64_t jitter_buffer_events;
     /**
-     * How many times this build has had to promote a request onto a stream
-     * transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
+     * How many times a request would not fit a datagram and there was no
+     * stream to the destination to put it on, so the stack asked for one
+     * (RFC 3261 §18.1.1, B1).
+     *
+     * A request promoted onto a connection that already existed does not
+     * raise it; those are in the diagnostic record instead.
      */
-    uint64_t transport_promotions;
+    uint64_t stream_transport_wanted;
     /**
      * Calls with media running right now. The one gauge in this struct: it
      * moves both ways, and it is what every other member here is not.

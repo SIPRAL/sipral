@@ -43,7 +43,7 @@ The full list, and what each one is:
 | `calls_ended.expired` | counter | … `CallEndReason::Expired` |
 | `media_gaps` | counter | `MediaEvent::Stalled` (B5's watchdog) |
 | `jitter_buffer_events` | counter | `sipral_rtp::Quality::shrunk + Quality::stretched`, folded in from `MediaEvent::Ended` as each call finishes |
-| `transport_promotions` | counter | `UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted { .. })` — B1 |
+| `stream_transport_wanted` | counter | `UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted { .. })` — B1. Named for what it counts: a request that would not fit a datagram **and had no stream to the destination to go on**. One promoted onto a connection that already existed raises nothing, because nothing was asked for; those are `transport.promoted.size` in the diagnostic record (`docs/14-diagnostics.md`). Read as "how often does promotion happen" it would read low and say the path is fine |
 | `active_calls` | gauge | `+1` on `MediaEvent::Started`, `-1` on `MediaEvent::Ended` |
 
 Across the C ABI, `sipral_stack_counters` writes the same numbers into a flat

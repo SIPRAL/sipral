@@ -903,10 +903,14 @@ public struct SipralCounters
     /// </summary>
     public ulong JitterBufferEvents;
     /// <summary>
-    /// How many times this build has had to promote a request onto a stream
-    /// transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
+    /// How many times a request would not fit a datagram and there was no
+    /// stream to the destination to put it on, so the stack asked for one
+    /// (RFC 3261 §18.1.1, B1).
+    ///
+    /// A request promoted onto a connection that already existed does not
+    /// raise it; those are in the diagnostic record instead.
     /// </summary>
-    public ulong TransportPromotions;
+    public ulong StreamTransportWanted;
     /// <summary>
     /// Calls with media running right now. The one gauge in this struct: it
     /// moves both ways, and it is what every other member here is not.
@@ -2312,7 +2316,7 @@ public static class Sipral
     /// The ABI's minor version, raised by every function or struct member
     /// added.
     /// </summary>
-    public const uint ABIVERSIONMINOR = 5;
+    public const uint ABIVERSIONMINOR = 6;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.

@@ -13,8 +13,8 @@
 //! numbers this crate is the first place able to say at all, because they
 //! live where signalling and media meet: how many gaps the stall watchdog
 //! caught, how many times a call's jitter buffer had to shrink or stretch to
-//! stay in sequence, and how many requests this build has had to promote onto
-//! a stream transport because they would not fit a datagram.
+//! stay in sequence, and how many requests would not fit a datagram and found
+//! no stream to the destination to go on instead.
 //!
 //! # Counters and gauges are not the same shape
 //!
@@ -266,10 +266,18 @@ pub struct Counters {
     /// from becoming audible, and a deployment where this climbs is one whose
     /// network is getting worse before a caller can describe why.
     pub jitter_buffer_events: Counter,
-    /// How many times this build has had to promote a request onto a stream
-    /// transport because it would not fit a datagram — RFC 3261 §18.1.1, B1's
-    /// own failure story counted rather than only logged.
-    pub transport_promotions: Counter,
+    /// How many times a request would not fit a datagram and there was no
+    /// stream to the destination to put it on, so the stack asked for one —
+    /// RFC 3261 §18.1.1, B1's own failure story counted rather than only
+    /// logged.
+    ///
+    /// Named for what it counts rather than for what it is about. A request
+    /// promoted onto a connection that already existed does **not** raise it,
+    /// because nothing is asked for and no event goes out; those live in the
+    /// diagnostic record as `transport.promoted.size`
+    /// (`docs/14-diagnostics.md`). An operator reading this as "how often does
+    /// promotion happen" would read it low and conclude the path is fine.
+    pub stream_transport_wanted: Counter,
     /// Calls with media running right now.
     pub active_calls: Gauge,
 }
@@ -286,12 +294,12 @@ impl Counters {
             UaEvent::Registered { .. } => self.registrations_succeeded.tick(),
             UaEvent::RegistrationFailed { reason, .. } => self.registrations_failed.tick(*reason),
             UaEvent::CallEnded { reason, .. } => self.calls_ended.tick(*reason),
-            // B1: a message would not fit a datagram and this build has
-            // promoted it onto a stream transport. sipral-ua has no policy
-            // for the event and passes it through whole; counting it here
-            // does not need one either.
+            // B1: a message would not fit a datagram and there was no stream
+            // to the destination to put it on, so the endpoint asked for one.
+            // sipral-ua has no policy for the event and passes it through
+            // whole; counting it here does not need one either.
             UaEvent::Unclaimed(CoreEvent::TransportWanted { .. }) => {
-                self.transport_promotions.tick();
+                self.stream_transport_wanted.tick();
             }
             _ => {}
         }
@@ -331,7 +339,7 @@ impl core::ops::Sub for Counters {
             calls_ended: self.calls_ended - earlier.calls_ended,
             media_gaps: self.media_gaps - earlier.media_gaps,
             jitter_buffer_events: self.jitter_buffer_events - earlier.jitter_buffer_events,
-            transport_promotions: self.transport_promotions - earlier.transport_promotions,
+            stream_transport_wanted: self.stream_transport_wanted - earlier.stream_transport_wanted,
             active_calls: self.active_calls,
         }
     }
@@ -543,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_too_large_for_a_datagram_counts_as_a_transport_promotion() {
+    fn a_message_too_large_for_a_datagram_with_nowhere_to_go_is_counted() {
         let mut counters = Counters::default();
         let event = UaEvent::Unclaimed(CoreEvent::TransportWanted {
             protocol: TransportProtocol::Tcp,
@@ -553,14 +561,14 @@ mod tests {
         });
         counters.observe_signalling(&event);
         counters.observe_signalling(&event);
-        assert_eq!(counters.transport_promotions.get(), 2);
+        assert_eq!(counters.stream_transport_wanted.get(), 2);
     }
 
     #[test]
-    fn an_unclaimed_event_that_is_not_a_transport_promotion_counts_nowhere() {
+    fn an_unclaimed_event_that_is_not_about_transport_size_counts_nowhere() {
         let mut counters = Counters::default();
         counters.observe_signalling(&UaEvent::Unclaimed(CoreEvent::Overloaded { refused: 9 }));
-        assert_eq!(counters.transport_promotions.get(), 0);
+        assert_eq!(counters.stream_transport_wanted.get(), 0);
     }
 
     #[test]

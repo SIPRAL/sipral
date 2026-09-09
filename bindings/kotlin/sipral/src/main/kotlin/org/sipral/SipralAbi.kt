@@ -948,10 +948,14 @@ data class SipralCounters(
      */
     val jitterBufferEvents: Long,
     /**
-     * How many times this build has had to promote a request onto a stream
-     * transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
+     * How many times a request would not fit a datagram and there was no
+     * stream to the destination to put it on, so the stack asked for one
+     * (RFC 3261 §18.1.1, B1).
+     *
+     * A request promoted onto a connection that already existed does not
+     * raise it; those are in the diagnostic record instead.
      */
-    val transportPromotions: Long,
+    val streamTransportWanted: Long,
     /**
      * Calls with media running right now. The one gauge in this struct: it
      * moves both ways, and it is what every other member here is not.
@@ -1523,7 +1527,7 @@ object Sipral {
      * The ABI's minor version, raised by every function or struct member
      * added.
      */
-    const val ABI_VERSION_MINOR: Long = 5
+    const val ABI_VERSION_MINOR: Long = 6
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.

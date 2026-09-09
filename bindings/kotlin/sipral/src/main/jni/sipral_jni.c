@@ -193,7 +193,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
         slots[14] = (jlong)counters_value.calls_ended_expired;
         slots[15] = (jlong)counters_value.media_gaps;
         slots[16] = (jlong)counters_value.jitter_buffer_events;
-        slots[17] = (jlong)counters_value.transport_promotions;
+        slots[17] = (jlong)counters_value.stream_transport_wanted;
         slots[18] = (jlong)counters_value.active_calls;
         (*env)->SetLongArrayRegion(env, counters, 0, 19, slots);
     }
