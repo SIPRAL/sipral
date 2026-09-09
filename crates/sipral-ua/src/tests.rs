@@ -18,8 +18,10 @@ use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
 use crate::account::{Account, AccountId};
 use crate::agent::UserAgent;
 use crate::call::{CallEndReason, CallHandle, CallState, ForkPolicy, OutgoingCall};
+use crate::dialoginfo::{DialogInfoTable, DialogPhase};
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::session::Hold;
+use crate::subscription::{Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 use crate::{
     Credentials, EndpointConfig, Incoming, Input, Rate, Refusals, Screening, StatusCode,
     TransportId, TransportProtocol, UaError, Uri,
@@ -4292,5 +4294,1265 @@ fn a_refer_that_was_refused_leaves_the_call_able_to_ask_again() {
     assert_eq!(
         header(&again, HeaderName::ReferTo),
         b"<sip:dave@example.com>"
+    );
+}
+
+// -- subscriptions (RFC 6665) ------------------------------------------------
+
+/// The `dialog` package a busy lamp field watches (RFC 4235 §3.1).
+const DIALOG: &str = "dialog";
+
+fn watching(extension: &str) -> Subscribe {
+    Subscribe::new(uri(&format!("sip:{extension}@example.com")), DIALOG)
+}
+
+/// A notification from whoever answered a SUBSCRIBE we wrote.
+///
+/// §4.4.1 matches it to the SUBSCRIBE on three things, and all three are taken
+/// from that request here: the `Call-ID`, the `To` tag — which is the `From`
+/// tag of the SUBSCRIBE — and the `Event`.
+fn notification(
+    subscribe: &[u8],
+    cseq: u32,
+    tag: &str,
+    state: &str,
+    body: Option<(&str, &str)>,
+) -> Vec<u8> {
+    notification_of(subscribe, cseq, tag, DIALOG, state, body, "")
+}
+
+fn notification_of(
+    subscribe: &[u8],
+    cseq: u32,
+    tag: &str,
+    event: &str,
+    state: &str,
+    body: Option<(&str, &str)>,
+    extra: &str,
+) -> Vec<u8> {
+    let mut out = format!(
+        "NOTIFY sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKn{tag}{cseq}\r\n\
+Max-Forwards: 70\r\n\
+From: {};tag={tag}\r\n\
+To: {}\r\n\
+Call-ID: {}\r\n\
+CSeq: {cseq} NOTIFY\r\n\
+Contact: <sip:notifier@192.0.2.9>\r\n\
+Event: {event}\r\n\
+Subscription-State: {state}\r\n\
+{extra}",
+        text(subscribe, HeaderName::To),
+        text(subscribe, HeaderName::From),
+        text(subscribe, HeaderName::CallId),
+    )
+    .into_bytes();
+    match body {
+        Some((kind, document)) => {
+            out.extend_from_slice(format!("Content-Type: {kind}\r\n").as_bytes());
+            out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", document.len()).as_bytes());
+            out.extend_from_slice(document.as_bytes());
+        }
+        None => out.extend_from_slice(b"Content-Length: 0\r\n\r\n"),
+    }
+    out
+}
+
+/// One dialog-info document saying where the watched extension is.
+fn dialog_info(version: u32, full: bool, phase: &str) -> String {
+    let state = if full { "full" } else { "partial" };
+    format!(
+        "<?xml version=\"1.0\"?>\
+<dialog-info xmlns=\"urn:ietf:params:xml:ns:dialog-info\" version=\"{version}\" \
+state=\"{state}\" entity=\"sip:201@example.com\">\
+<dialog id=\"d1\"><state>{phase}</state></dialog></dialog-info>"
+    )
+}
+
+/// The 200 a notifier sends to a SUBSCRIBE, which §3.1.1 makes carry the
+/// duration it actually granted.
+fn accepted(subscribe: &[u8], seconds: u32) -> Vec<u8> {
+    reply(
+        subscribe,
+        200,
+        "OK",
+        &format!("Expires: {seconds}\r\nContact: <sip:notifier@192.0.2.9>\r\n"),
+    )
+}
+
+/// Subscribe, take the 200 and the first notification, and leave it active.
+fn subscribed(
+    agent: &mut UserAgent,
+    account: AccountId,
+    now: Instant,
+) -> (SubscriptionHandle, Vec<u8>) {
+    let handle = agent
+        .subscribe(account, &watching("201"), now)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(agent), "SUBSCRIBE ");
+    deliver(agent, &accepted(&subscribe, 3_600), now);
+    deliver(
+        agent,
+        &notification(&subscribe, 1, "notifier", "active;expires=3600", None),
+        now,
+    );
+    transmits(agent);
+    events(agent);
+    (handle, subscribe)
+}
+
+#[test]
+fn a_subscribe_carries_what_the_event_framework_puts_in_it() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+
+    let bytes = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert!(bytes.starts_with(b"SUBSCRIBE sip:201@example.com SIP/2.0\r\n"));
+    // §3.1.2: "Subscribers MUST include exactly one Event header field in
+    // SUBSCRIBE requests"
+    assert_eq!(header(&bytes, HeaderName::Event), b"dialog");
+    // §3.1.1: "SUBSCRIBE requests SHOULD contain an Expires header field"
+    assert_eq!(header(&bytes, HeaderName::Expires), b"3600");
+    // §8.1.1.8 of RFC 3261: a request that can establish a dialog carries one
+    assert_eq!(
+        header(&bytes, HeaderName::Contact),
+        b"<sip:alice@192.0.2.1>"
+    );
+    assert_eq!(header(&bytes, HeaderName::To), b"<sip:201@example.com>");
+    assert!(text(&bytes, HeaderName::From).contains(";tag="));
+    assert_eq!(header(&bytes, HeaderName::CSeq), b"1 SUBSCRIBE");
+    assert!(
+        header(&bytes, HeaderName::Accept).is_empty(),
+        "§3.1.3 leaves the body type to the package when none is asked for"
+    );
+}
+
+#[test]
+fn the_dialog_is_opened_by_the_notify_and_takes_its_route_set_from_it() {
+    // §4.4.1: "Because the dialog usage is established by the NOTIFY request,
+    // the route set at the subscriber is taken from the NOTIFY request itself,
+    // as opposed to the route set present in the 200-class response to the
+    // SUBSCRIBE request."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+
+    // the 200 record-routes through one proxy and the NOTIFY through another;
+    // only the NOTIFY's may be followed
+    deliver(
+        &mut agent,
+        &reply(
+            &subscribe,
+            200,
+            "OK",
+            "Expires: 3600\r\nRecord-Route: <sip:wrong.example.com;lr>\r\n",
+        ),
+        t0,
+    );
+    let notify = notification_of(
+        &subscribe,
+        1,
+        "notifier",
+        DIALOG,
+        "active;expires=3600",
+        None,
+        "Record-Route: <sip:right.example.com;lr>\r\n",
+    );
+    deliver(&mut agent, &notify, t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert_eq!(
+        header(&refresh, HeaderName::Route),
+        b"<sip:right.example.com;lr>",
+        "the route set is the NOTIFY's"
+    );
+    assert!(
+        text(&refresh, HeaderName::To).contains(";tag=notifier"),
+        "and the dialog knows who answered"
+    );
+}
+
+#[test]
+fn a_refresh_continues_the_numbering_the_subscribe_started() {
+    // the dialog does not exist when the SUBSCRIBE goes, so nothing in
+    // RFC 3261 §12 has counted it. Starting the refresh at one again is a CSeq
+    // running backwards, which §12.2.2 answers with a 500
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, subscribe) = subscribed(&mut agent, id, t0);
+    assert_eq!(header(&subscribe, HeaderName::CSeq), b"1 SUBSCRIBE");
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert_eq!(header(&refresh, HeaderName::CSeq), b"2 SUBSCRIBE");
+    assert_eq!(
+        header(&refresh, HeaderName::CallId),
+        header(&subscribe, HeaderName::CallId),
+        "a refresh is the same dialog, not a new subscription"
+    );
+    assert_eq!(header(&refresh, HeaderName::Expires), b"3600");
+}
+
+#[test]
+fn a_notification_that_beats_the_two_hundred_still_makes_the_subscription() {
+    // §4.1.2.4: "Due to the potential for out-of-order messages, packet loss,
+    // and forking, the subscriber MUST be prepared to receive NOTIFY requests
+    // before the SUBSCRIBE transaction has completed."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+
+    deliver(
+        &mut agent,
+        &notification(&subscribe, 1, "notifier", "active;expires=3600", None),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 "),
+        "not a 481: {}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Active)
+    );
+
+    // and the 200 that follows changes nothing that has already happened
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Active)
+    );
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::Subscribed { subscription, state: SubscriptionState::Active, .. }
+                if subscription == handle
+        )),
+        "the state is an event"
+    );
+}
+
+#[test]
+fn a_subscription_that_cannot_be_sent_is_an_event_and_leaves_nothing_behind() {
+    // the requirement's own sentence. The interface the account named has gone
+    // — an address that no longer exists, a socket closed under it — and there
+    // is no round trip in which to notice
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(Account::new(
+        uri("sip:alice@example.com"),
+        uri("sip:example.com"),
+        uri("sip:alice@192.0.2.1"),
+        TransportId(9),
+        registrar(),
+    ));
+    let quiet = agent.poll_timeout();
+
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the handle is minted before anything is sent");
+
+    let reported = events(&mut agent);
+    assert!(
+        matches!(
+            reported.as_slice(),
+            [UaEvent::SubscriptionEnded {
+                subscription,
+                reason: SubscriptionEnd::Unreachable,
+                retry_in: None,
+                ..
+            }] if *subscription == handle
+        ),
+        "one event, and it says it is not coming back: {reported:?}"
+    );
+    assert!(transmits(&mut agent).is_empty());
+    assert_eq!(
+        agent.subscription_state(handle),
+        None,
+        "the handle names nothing"
+    );
+    assert!(agent.dialog_info(handle).is_none());
+    assert_eq!(
+        agent.poll_timeout(),
+        quiet,
+        "nothing was scheduled, so there is nothing to come back for"
+    );
+
+    // and a year later there is still nothing to trip over
+    agent.handle_timeout(t0 + Duration::from_secs(31_536_000));
+    assert!(events(&mut agent).is_empty());
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn a_refresh_that_cannot_be_sent_is_the_same_event_on_a_live_subscription() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, _) = subscribed(&mut agent, id, t0);
+
+    // the transport goes while the subscription is settled and its refresh is
+    // most of an hour out
+    agent.remove_account(id);
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                subscription,
+                reason: SubscriptionEnd::Unreachable,
+                ..
+            } if subscription == handle
+        )),
+        "a refresh that cannot go is reported the same way"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+    agent.handle_timeout(t0 + Duration::from_secs(31_536_000));
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn thirty_extensions_go_up_in_one_pass_and_not_thirty_round_trips() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let wanted: Vec<Subscribe> = (200..230)
+        .map(|extension| watching(&extension.to_string()))
+        .collect();
+
+    let handles = agent
+        .subscribe_many(id, &wanted, t0)
+        .expect("the batch goes");
+    assert_eq!(handles.len(), 30);
+
+    // one drain, thirty requests: nothing waited for anything
+    let out = transmits(&mut agent);
+    assert_eq!(out.len(), 30, "thirty SUBSCRIBEs, in one pass");
+    let mut call_ids: Vec<Vec<u8>> = out
+        .iter()
+        .map(|bytes| {
+            assert!(bytes.starts_with(b"SUBSCRIBE "));
+            header(bytes, HeaderName::CallId)
+        })
+        .collect();
+    call_ids.sort_unstable();
+    call_ids.dedup();
+    assert_eq!(call_ids.len(), 30, "each is its own subscription");
+    assert!(
+        handles
+            .iter()
+            .all(|handle| agent.subscription_state(*handle) == Some(SubscriptionState::Requesting))
+    );
+}
+
+#[test]
+fn a_batch_reports_the_one_that_could_not_go_and_sends_the_rest() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let wanted = vec![
+        watching("201"),
+        // an address the account was never told about
+        watching("202").to_address(TransportId(9), registrar()),
+        watching("203"),
+    ];
+
+    let handles = agent
+        .subscribe_many(id, &wanted, t0)
+        .expect("the batch goes");
+    assert_eq!(handles.len(), 3, "every target is named, including the one");
+    assert_eq!(transmits(&mut agent).len(), 2);
+    assert_eq!(agent.subscription_state(handles[1]), None);
+    assert_eq!(
+        agent.subscription_state(handles[2]),
+        Some(SubscriptionState::Requesting),
+        "the one behind it was not stopped"
+    );
+}
+
+#[test]
+fn a_subscription_nothing_notifies_is_over_when_timer_n_fires() {
+    // §4.1.2.4: "If this Timer N expires prior to the receipt of a NOTIFY
+    // request, the subscriber considers the subscription failed, and cleans up
+    // any state associated with the subscription attempt."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    events(&mut agent);
+
+    // 64*T1 is 32 seconds at the default T1
+    agent.handle_timeout(t0 + Duration::from_secs(31));
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Requesting),
+        "a cheerful 200 does not make a subscription"
+    );
+
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    let ended = events(&mut agent);
+    assert!(
+        ended.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::NoNotify,
+                retry_in: Some(_),
+                ..
+            }
+        )),
+        "{ended:?}"
+    );
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Retrying)
+    );
+}
+
+#[test]
+fn a_terminated_notification_says_why_and_the_reason_decides_what_follows() {
+    // §4.1.3's reason codes, and the three it tells clients not to come back
+    // from
+    for (reason, expected, comes_back) in [
+        ("rejected", SubscriptionEnd::Rejected, false),
+        ("noresource", SubscriptionEnd::NoResource, false),
+        ("invariant", SubscriptionEnd::Invariant, false),
+        ("probation", SubscriptionEnd::Probation, true),
+        ("deactivated", SubscriptionEnd::Deactivated, true),
+        ("giveup", SubscriptionEnd::GaveUp, true),
+        ("timeout", SubscriptionEnd::Timeout, true),
+    ] {
+        assert_eq!(
+            expected.as_reason(),
+            Some(reason),
+            "the wire token reads back as it was written"
+        );
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (handle, subscribe) = subscribed(&mut agent, id, t0);
+
+        deliver(
+            &mut agent,
+            &notification(
+                &subscribe,
+                2,
+                "notifier",
+                &format!("terminated;reason={reason}"),
+                None,
+            ),
+            t0,
+        );
+        transmits(&mut agent);
+        let reported = events(&mut agent);
+        assert!(
+            reported.iter().any(|event| matches!(
+                *event,
+                UaEvent::SubscriptionEnded {
+                    subscription,
+                    reason: got,
+                    retry_in,
+                    ..
+                } if subscription == handle
+                    && got == expected
+                    && retry_in.is_some() == comes_back
+            )),
+            "{reason}: {reported:?}"
+        );
+        assert_eq!(
+            agent.subscription_state(handle).is_some(),
+            comes_back,
+            "{reason} leaves {} behind",
+            if comes_back { "a retry" } else { "nothing" }
+        );
+    }
+}
+
+#[test]
+fn a_probation_notification_waits_at_least_as_long_as_it_was_asked_to() {
+    // §4.1.3: "If a retry-after parameter is also present, the client SHOULD
+    // wait at least the number of seconds specified by that parameter"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, subscribe) = subscribed(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            2,
+            "notifier",
+            "terminated;reason=probation;retry-after=1800",
+            None,
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(1_799));
+    assert!(transmits(&mut agent).is_empty(), "not before it was asked");
+    agent.handle_timeout(t0 + Duration::from_secs(1_801));
+    let again = only(&transmits(&mut agent), "SUBSCRIBE ");
+    // §4.1.2.2: "an unrelated initial SUBSCRIBE request with a freshly
+    // generated Call-ID and a new, unique From tag"
+    assert_ne!(
+        header(&again, HeaderName::CallId),
+        header(&subscribe, HeaderName::CallId)
+    );
+    assert_ne!(
+        text(&again, HeaderName::From),
+        text(&subscribe, HeaderName::From)
+    );
+    assert_eq!(header(&again, HeaderName::CSeq), b"1 SUBSCRIBE");
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Requesting),
+        "the handle the application holds survives the re-subscription"
+    );
+}
+
+#[test]
+fn the_duration_the_notifier_states_wins_over_the_one_asked_for() {
+    // §4.1.3: under active, "the subscriber SHOULD take it as the
+    // authoritative subscription duration and adjust accordingly"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    deliver(
+        &mut agent,
+        &notification(&subscribe, 1, "notifier", "active;expires=120", None),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // 0.85 of an hour would be 3060 seconds away; two minutes puts the refresh
+    // ninety seconds out, which is the thirty-second margin
+    agent.handle_timeout(t0 + Duration::from_secs(89));
+    assert!(transmits(&mut agent).is_empty());
+    agent.handle_timeout(t0 + Duration::from_secs(91));
+    assert!(!transmits(&mut agent).is_empty(), "the notifier's number");
+}
+
+#[test]
+fn a_subscription_nothing_refreshes_lapses_when_the_notifier_said_it_would() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, _) = subscribed(&mut agent, id, t0);
+
+    // every refresh is lost, so nothing renews it and the hour runs out
+    agent.handle_timeout(t0 + Duration::from_secs(3_601));
+    let ended = events(&mut agent);
+    assert!(
+        ended.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::Expired,
+                ..
+            }
+        )),
+        "{ended:?}"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+}
+
+#[test]
+fn a_notification_nobody_subscribed_to_is_refused() {
+    // §4.1.3: "the subscriber should check that it matches at least one of its
+    // outstanding subscriptions; if not, it MUST return a 481"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let unsolicited = b"NOTIFY sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKprobe\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:probe@example.net>;tag=probe\r\n\
+To: <sip:alice@192.0.2.1>;tag=guessed\r\n\
+Call-ID: not-ours\r\n\
+CSeq: 1 NOTIFY\r\n\
+Contact: <sip:probe@192.0.2.9>\r\n\
+Event: message-summary\r\n\
+Subscription-State: active\r\n\
+Content-Length: 0\r\n\r\n";
+    deliver(&mut agent, unsolicited, t0);
+
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 481 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
+fn a_notification_for_another_package_on_our_own_dialog_is_refused_489() {
+    // §4.1.3: "If, for some reason, the event package designated in the Event
+    // header field of the NOTIFY request is not supported, the subscriber will
+    // respond with a 489 (Bad Event) response."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, subscribe) = subscribed(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            2,
+            "notifier",
+            "message-summary",
+            "active",
+            None,
+            "",
+        ),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 489 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
+fn an_event_that_carries_an_id_we_never_sent_does_not_match_ours() {
+    // §8.2.1: "An Event header field containing an id parameter never matches
+    // an Event header field without an id parameter."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "dialog;id=4321",
+            "active;expires=3600",
+            None,
+            "",
+        ),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 489 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Requesting),
+        "and it did not take the subscription with it"
+    );
+}
+
+#[test]
+fn a_transfer_notification_still_reaches_the_transfer_handler() {
+    // the seam. A subscription machine that claims every NOTIFY swallows the
+    // one RFC 3515 §2.4.4 opens with a REFER, and a transfer stops being
+    // reported
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    subscribed(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = only(&transmits(&mut agent), "REFER ");
+    deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+    events(&mut agent);
+
+    deliver(&mut agent, &notify(&ack, 1, "200 OK", "terminated"), t0);
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::TransferDone { call: reported, .. } if reported == call
+        )),
+        "the transfer package is still the transfer handler's"
+    );
+}
+
+#[test]
+fn a_notification_in_a_call_that_belongs_to_no_subscription_is_still_refused() {
+    // this used to be answered by the transfer handler, and moved when the
+    // subscription machine took over §4.1.3
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, ack) = call_up(&mut agent, id, t0);
+
+    let stray = plus(
+        &reversed(&ack, "NOTIFY", "stray", 9, None),
+        "Event: message-summary\r\nSubscription-State: active\r\n",
+    );
+    deliver(&mut agent, &stray, t0);
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 481 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
+fn the_lamp_reads_the_document_and_says_nothing_once_the_subscription_stops() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            1,
+            "notifier",
+            "active;expires=3600",
+            Some((
+                "application/dialog-info+xml",
+                &dialog_info(0, true, "confirmed"),
+            )),
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+
+    let reported = events(&mut agent);
+    assert!(
+        reported.iter().any(|event| matches!(
+            *event,
+            UaEvent::Notified { subscription, info: Some(ref info), .. }
+                if subscription == handle && info.version == 0
+        )),
+        "{reported:?}"
+    );
+    assert_eq!(
+        agent.dialog_info(handle).and_then(DialogInfoTable::phase),
+        Some(DialogPhase::Confirmed),
+        "the extension is on a call"
+    );
+
+    // the notifier hands the subscription on, so nothing is known any more
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            2,
+            "notifier",
+            "terminated;reason=deactivated",
+            None,
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(
+        agent.dialog_info(handle).is_none(),
+        "a table nothing refreshes is not evidence that anybody is free"
+    );
+}
+
+#[test]
+fn a_partial_document_with_a_gap_asks_for_full_state_back() {
+    // RFC 4235 §4.3: "If the document did not contain full state, the
+    // subscriber SHOULD generate a refresh request (SUBSCRIBE) to trigger a
+    // full state notification."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, subscribe) = subscribed(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            2,
+            "notifier",
+            "active;expires=3600",
+            Some((
+                "application/dialog-info+xml",
+                &dialog_info(0, true, "confirmed"),
+            )),
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // version 7 where 1 was due: six notifications were lost, and this one
+    // only says what changed
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            3,
+            "notifier",
+            "active;expires=3600",
+            Some((
+                "application/dialog-info+xml",
+                &dialog_info(7, false, "early"),
+            )),
+        ),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(
+        out.iter().any(|bytes| bytes.starts_with(b"SUBSCRIBE ")),
+        "the gap is chased with a refresh"
+    );
+}
+
+#[test]
+fn a_document_that_will_not_read_leaves_the_lamp_where_it_was() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, subscribe) = subscribed(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            2,
+            "notifier",
+            "active;expires=3600",
+            Some((
+                "application/dialog-info+xml",
+                &dialog_info(0, true, "confirmed"),
+            )),
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &notification(
+            &subscribe,
+            3,
+            "notifier",
+            "active;expires=3600",
+            Some(("application/dialog-info+xml", "<!DOCTYPE lol [ <!ENTITY")),
+        ),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 "),
+        "the NOTIFY is answered"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Notified { info: None, .. })),
+        "and the body it could not read is reported as none"
+    );
+    assert_eq!(
+        agent.dialog_info(handle).and_then(DialogInfoTable::phase),
+        Some(DialogPhase::Confirmed),
+        "the last thing a working notifier said still stands"
+    );
+}
+
+#[test]
+fn an_unsubscribe_asks_with_expires_zero_and_waits_for_the_last_word() {
+    // §4.1.2.3, and §4.4.1: "the subscription is not considered terminated
+    // until the NOTIFY transaction with a Subscription-State of terminated
+    // completes"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, subscribe) = subscribed(&mut agent, id, t0);
+
+    agent.unsubscribe(handle, t0).expect("the request goes");
+    let last = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert_eq!(header(&last, HeaderName::Expires), b"0");
+    deliver(&mut agent, &accepted(&last, 0), t0);
+    assert!(
+        agent.subscription_state(handle).is_some(),
+        "it is not over until the notifier says so"
+    );
+
+    deliver(
+        &mut agent,
+        &notification(&subscribe, 2, "notifier", "terminated;reason=timeout", None),
+        t0,
+    );
+    transmits(&mut agent);
+    let reported = events(&mut agent);
+    assert!(
+        reported.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::Unsubscribed,
+                retry_in: None,
+                ..
+            }
+        )),
+        "the reason is what we asked for, not what the notifier called it: \
+         {reported:?}"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+    agent.handle_timeout(t0 + Duration::from_secs(31_536_000));
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn a_challenged_subscribe_goes_again_with_credentials_and_keeps_its_numbering() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "secret")));
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let first = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            401,
+            "Unauthorized",
+            "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc123\"\r\n",
+        ),
+        t0,
+    );
+
+    let retry = only(&transmits(&mut agent), "SUBSCRIBE ");
+    // §22.2: "it MUST increment the CSeq header field value"
+    assert_eq!(header(&retry, HeaderName::CSeq), b"2 SUBSCRIBE");
+    credentials_of(&retry, HeaderName::Authorization);
+
+    deliver(&mut agent, &accepted(&retry, 3_600), t0);
+    deliver(
+        &mut agent,
+        &notification(&retry, 1, "notifier", "active;expires=3600", None),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Active)
+    );
+
+    // and the dialog continues from where the answered SUBSCRIBE left off
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert_eq!(header(&refresh, HeaderName::CSeq), b"3 SUBSCRIBE");
+}
+
+#[test]
+fn a_challenge_that_comes_back_a_second_time_is_the_password_being_wrong() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "wrong")));
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let first = only(&transmits(&mut agent), "SUBSCRIBE ");
+    let refusal = "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc123\"\r\n";
+    deliver(&mut agent, &reply(&first, 401, "Unauthorized", refusal), t0);
+    let retry = only(&transmits(&mut agent), "SUBSCRIBE ");
+    events(&mut agent);
+    deliver(&mut agent, &reply(&retry, 401, "Unauthorized", refusal), t0);
+
+    let reported = events(&mut agent);
+    assert!(
+        reported.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::Refused,
+                retry_in: None,
+                ..
+            }
+        )),
+        "§22.1's second refusal is not retried: {reported:?}"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+}
+
+#[test]
+fn a_refresh_refused_with_a_five_hundred_leaves_the_subscription_standing() {
+    // §4.1.2.2: "the original subscription is still considered valid for the
+    // duration of the most recently known Expires value"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, _) = subscribed(&mut agent, id, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &reply(&refresh, 500, "Server Internal Error", ""),
+        t0 + Duration::from_secs(3_060),
+    );
+
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Active),
+        "one bad refresh is not the end of a subscription"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::SubscriptionEnded { .. })),
+        "and nothing said it was"
+    );
+    assert!(agent.dialog_info(handle).is_some());
+}
+
+#[test]
+fn a_refresh_refused_with_a_four_eighty_one_ends_it() {
+    // the same section's other half: 404, 405, 410, 416, 480-485, 489, 501 and
+    // 604 mean the subscription is gone
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (handle, _) = subscribed(&mut agent, id, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &reply(&refresh, 481, "Subscription Does Not Exist", ""),
+        t0 + Duration::from_secs(3_060),
+    );
+
+    let reported = events(&mut agent);
+    assert!(
+        reported.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::Refused,
+                retry_in: None,
+                ..
+            }
+        )),
+        "{reported:?}"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+}
+
+#[test]
+fn a_four_eighty_nine_says_the_package_is_not_supported_and_stops() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &reply(&subscribe, 489, "Bad Event", ""), t0);
+
+    let reported = events(&mut agent);
+    assert!(
+        reported.iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::BadEvent,
+                retry_in: None,
+                ..
+            }
+        )),
+        "{reported:?}"
+    );
+    assert_eq!(agent.subscription_state(handle), None);
+    agent.handle_timeout(t0 + Duration::from_secs(31_536_000));
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn one_subscribe_answered_by_two_notifiers_installs_two_subscriptions() {
+    // §4.1.4 and RFC 4235 §3.9: "Subscribers to this package MUST be prepared
+    // to install subscription state for each NOTIFY generated as a result of a
+    // single SUBSCRIBE."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+
+    for tag in ["desk", "mobile"] {
+        deliver(
+            &mut agent,
+            &notification(&subscribe, 1, tag, "active;expires=3600", None),
+            t0,
+        );
+    }
+    for answer in transmits(&mut agent) {
+        assert!(
+            answer.starts_with(b"SIP/2.0 200 "),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+    }
+    let sibling = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SubscriptionForked {
+                subscription,
+                sibling,
+            } if subscription == handle => Some(sibling),
+            _ => None,
+        });
+    let sibling = sibling.expect("the second notifier gets a subscription of its own");
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Active)
+    );
+    assert_eq!(
+        agent.subscription_state(sibling),
+        Some(SubscriptionState::Active)
+    );
+
+    // and each refreshes in its own dialog
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let out = transmits(&mut agent);
+    assert_eq!(out.len(), 2, "one refresh each");
+    let mut tags: Vec<String> = out
+        .iter()
+        .map(|bytes| text(bytes, HeaderName::To))
+        .collect();
+    tags.sort();
+    assert!(tags[0].contains(";tag=desk"), "{tags:?}");
+    assert!(tags[1].contains(";tag=mobile"), "{tags:?}");
+}
+
+#[test]
+fn a_second_notifier_after_timer_n_has_passed_is_refused() {
+    // §4.1.2.4: "After the expiration of Timer N, the subscriber SHOULD reject
+    // any such NOTIFY requests that would otherwise establish a new dialog
+    // usage with a 481"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &notification(&subscribe, 1, "desk", "active;expires=3600", None),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let late = t0 + Duration::from_secs(40);
+    agent.handle_timeout(late);
+    transmits(&mut agent);
+    deliver(
+        &mut agent,
+        &notification(&subscribe, 1, "mobile", "active;expires=3600", None),
+        late,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 481 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
+fn a_dead_flow_stops_the_lamp_saying_anything() {
+    // the failure this is for: the socket goes while somebody is on a call,
+    // the refresh is fifty minutes away, and the lamp shows them free
+    let t0 = Instant::now();
+    let (mut agent, id) = over_tcp(t0);
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    stream(&mut agent, &accepted(&subscribe, 3_600), t0);
+    stream(
+        &mut agent,
+        &notification(
+            &subscribe,
+            1,
+            "notifier",
+            "active;expires=3600",
+            Some((
+                "application/dialog-info+xml",
+                &dialog_info(0, true, "confirmed"),
+            )),
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(
+        agent.dialog_info(handle).and_then(DialogInfoTable::phase),
+        Some(DialogPhase::Confirmed)
+    );
+
+    // RFC 5626 §4.4.1 calls the flow dead when a keep-alive goes ten seconds
+    // unanswered, and the core takes the transport down
+    let ping_at = agent.poll_timeout().expect("a keepalive is due");
+    agent.handle_timeout(ping_at);
+    transmits(&mut agent);
+    agent.handle_timeout(ping_at + Duration::from_secs(10));
+
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::SubscriptionEnded {
+                subscription,
+                reason: SubscriptionEnd::Unreachable,
+                retry_in: Some(_),
+                ..
+            } if subscription == handle
+        )),
+        "the subscription says it is not live"
+    );
+    assert!(
+        agent.dialog_info(handle).is_none(),
+        "and nothing may be read out of what it last held"
     );
 }

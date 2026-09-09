@@ -29,10 +29,10 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 | 3515 | The REFER method | sipral-ua | phase 1 |
 | 3891 | The Replaces header | sipral-ua | phase 1 |
 | 3892 | The Referred-By mechanism | sipral-ua | phase 1 |
-| 6665 | Event notification framework | sipral-ua | phase 2 |
-| 3842 | Message waiting indication | sipral-ua | phase 2 |
-| 4235 | Dialog event package (what busy lamp field is built on) | sipral-ua | phase 2 |
-| 3856 | Presence event package | sipral-ua | phase 2 |
+| 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515), and `Allow-Events` is read but not yet advertised | sipral-ua | phase 1 |
+| 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body reaches the application whole | sipral-ua | phase 2 |
+| 4235 | Dialog event package, and the `application/dialog-info+xml` reader a busy lamp field is built on | sipral-ua | phase 1 |
+| 3856 | Presence event package: the subscription is the framework's, and the PIDF body reaches the application whole | sipral-ua | phase 2 |
 | 6026 | Correct transaction handling for 2xx | sipral-core | phase 1 |
 | 5626 | Outbound: managing client connections | sipral-ua | phase 2 |
 | 3327 | The Path header, which Outbound registrations travel on | sipral-ua | phase 2 |

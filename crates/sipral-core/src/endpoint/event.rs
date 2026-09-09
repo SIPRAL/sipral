@@ -91,6 +91,13 @@ pub enum DialogEndReason {
     /// it, or no answer at all (§12.2.1.2). No BYE goes out — the peer has
     /// just said there is no such dialog, and a BYE would earn the same 481.
     Gone,
+    /// What the dialog was carrying is over, and no request says so.
+    ///
+    /// A subscription is the case: RFC 6665 §4.4.1 makes "the destruction of a
+    /// subscription result in the termination of its associated dialog", and
+    /// there is no BYE for one — the closing NOTIFY has already been answered
+    /// by the time this is true.
+    Closed,
 }
 
 impl core::fmt::Display for DialogEndReason {
@@ -102,6 +109,7 @@ impl core::fmt::Display for DialogEndReason {
             Self::Abandoned => "abandoned",
             Self::Failed => "failed",
             Self::Gone => "gone at the far end",
+            Self::Closed => "closed",
         })
     }
 }

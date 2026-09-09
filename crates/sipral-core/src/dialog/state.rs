@@ -383,6 +383,27 @@ impl Dialog {
         self.state = DialogState::Terminated;
     }
 
+    /// Continue the numbering of a request this end sent before the dialog
+    /// existed (RFC 6665 §4.4.1).
+    ///
+    /// One case, and it is the subscriber's. A SUBSCRIBE opens no dialog; the
+    /// NOTIFY that answers it does, and §4.4.1 has the route set taken from
+    /// that NOTIFY rather than from the 200. So by the time there is a dialog,
+    /// this end has already sent a request with this `Call-ID` and this tag,
+    /// and the refresh that follows is the *second* one. Starting again at one
+    /// is a `CSeq` running backwards, which §12.2.2 has the notifier refuse
+    /// with a 500 — and a subscription that can never be refreshed lapses an
+    /// hour later for no visible reason.
+    ///
+    /// Only ever moves the number forward. A caller that knows less than the
+    /// dialog does cannot make it repeat one it has already handed out.
+    pub const fn resume_from(&mut self, seq: u32) {
+        match self.local_seq {
+            Some(previous) if previous >= seq => (),
+            _ => self.local_seq = Some(seq),
+        }
+    }
+
     /// The 2xx has gone out, so an early dialog is now confirmed (§12.1.1).
     ///
     /// The other direction has [`Dialog::on_response`], which reads the 2xx
@@ -435,7 +456,14 @@ fn state_for(status: StatusCode) -> Result<DialogState, DialogError> {
 /// target refresh request defined is re-INVITE", and RFC 3311 §5.1 adds
 /// UPDATE. "Note that an ACK is NOT a target refresh request."
 fn is_target_refresh(method: Method<'_>) -> bool {
-    matches!(method, Method::Invite | Method::Update)
+    // RFC 6665 §3.1 and §3.2 add the other two: "SUBSCRIBE requests are target
+    // refresh requests" and "NOTIFY is a target refresh request". Without them
+    // a notifier that moves — a cluster member handing the subscription on —
+    // keeps being addressed at the box that no longer holds it.
+    matches!(
+        method,
+        Method::Invite | Method::Update | Method::Subscribe | Method::Notify
+    )
 }
 
 fn request_uri_is_secure(request: &RawMessage<'_>) -> bool {

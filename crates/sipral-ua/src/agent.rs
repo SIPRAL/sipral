@@ -41,6 +41,7 @@ use crate::registration::{
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
+use crate::subscription::{Subscription, SubscriptionHandle};
 
 /// One user agent: several accounts over one endpoint.
 #[derive(Debug)]
@@ -73,12 +74,25 @@ pub struct UserAgent {
     /// The same, for a session change: an offer refused with a challenge is
     /// not refused until the drain ends without a retry.
     pub(crate) challenged_offers: HashMap<AnyTransactionId, ParkedOffer>,
+    /// The subscriptions this layer is keeping alive (RFC 6665), by the handle
+    /// the application holds. A subscription that has ended is removed rather
+    /// than kept in a terminated state: nothing else names it, and a record
+    /// left behind is one a later sweep would visit for ever.
+    pub(crate) subscriptions: HashMap<SubscriptionHandle, Subscription>,
+    /// The SUBSCRIBE each one has in flight. One entry per subscription,
+    /// replaced when it sends the next, so a refresh an hour does not grow it.
+    pub(crate) by_subscribe: HashMap<AnyTransactionId, SubscriptionHandle>,
     pub(crate) events: VecDeque<UaEvent>,
     /// What an incoming INVITE meets before anything else here does, and the
     /// count of what it turned away.
     pub(crate) guard: Guard,
+    /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
+    /// the only deadline this layer takes from the transaction timings, and
+    /// the endpoint does not hand its configuration back out.
+    pub(crate) timer_n: Duration,
     next_account: u32,
     pub(crate) next_call: u32,
+    pub(crate) next_subscription: u32,
 }
 
 impl UserAgent {
@@ -89,6 +103,7 @@ impl UserAgent {
     /// never be given the same one.
     #[must_use]
     pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self {
+        let timer_n = config.timers.sixty_four_t1();
         Self {
             endpoint: Endpoint::new(config, seed),
             accounts: HashMap::new(),
@@ -103,10 +118,14 @@ impl UserAgent {
             by_offer: HashMap::new(),
             challenged: HashMap::new(),
             challenged_offers: HashMap::new(),
+            subscriptions: HashMap::new(),
+            by_subscribe: HashMap::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
+            timer_n,
             next_account: 0,
             next_call: 0,
+            next_subscription: 0,
         }
     }
 
@@ -128,6 +147,7 @@ impl UserAgent {
         self.endpoint.handle_timeout(now);
         self.fire_due(now);
         self.fire_call_timers(now);
+        self.fire_subscription_timers(now);
         self.drain(now);
     }
 
@@ -151,6 +171,7 @@ impl UserAgent {
             .values()
             .filter_map(|reg| reg.due)
             .chain(self.call_deadline())
+            .chain(self.subscription_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -160,10 +181,11 @@ impl UserAgent {
 
     /// The endpoint underneath, for what this layer has no policy for yet.
     ///
-    /// Calls, subscriptions and transfers are still the core's to drive, and
-    /// their events arrive as [`UaEvent::Unclaimed`]. Registration is not: a
-    /// REGISTER sent from here would be one this layer does not know it owns,
-    /// and would neither be refreshed nor retried.
+    /// What this layer has no policy for arrives as [`UaEvent::Unclaimed`] and
+    /// is answered through here. Registration, calls, transfers and
+    /// subscriptions are not among them: a REGISTER or a SUBSCRIBE sent from
+    /// here would be one this layer does not know it owns, and would neither
+    /// be refreshed nor retried.
     #[must_use]
     pub const fn endpoint(&mut self) -> &mut Endpoint {
         &mut self.endpoint
@@ -357,6 +379,7 @@ impl UserAgent {
         self.settle_challenges();
         self.settle_call_challenges(now);
         self.settle_offer_challenges();
+        self.settle_subscription_challenges(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing
@@ -382,6 +405,17 @@ impl UserAgent {
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;
         let event = self.on_transfer_event(event, now)?;
+        // Below transfer, and it has to be: both claim NOTIFYs, and they
+        // divide them by the `Event` header. Transfer claims the `refer`
+        // package inside a call it is running -- a subscription this machine
+        // never opened, because RFC 3515 §2.4.4 opens it with a REFER rather
+        // than with a SUBSCRIBE -- and everything it leaves is either one of
+        // these subscriptions or nobody's. This one is what says which, and
+        // RFC 6665 §4.1.3 leaves exactly one answer for nobody's: a 481. That
+        // answer can only be given once everything holding a subscription of
+        // its own has had its turn, which is what puts the general case under
+        // the special one rather than over it.
+        let event = self.on_subscription_event(event, now)?;
         self.on_session_event(event, now)
     }
 

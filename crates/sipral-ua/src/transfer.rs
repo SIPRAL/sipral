@@ -380,7 +380,13 @@ impl UserAgent {
                 dialog,
                 ref request,
             } if request.as_raw().method() == Some(Method::Refer) => {
-                let call = self.by_dialog.get(&dialog).copied()?;
+                // a dialog that is not a call is not one this handler has
+                // anything to say about, and swallowing the request here would
+                // leave the far end retransmitting into silence for
+                // thirty-two seconds. Subscriptions have dialogs too now
+                let Some(call) = self.by_dialog.get(&dialog).copied() else {
+                    return Some(event);
+                };
                 let request = request.clone();
                 self.on_refer(call, transaction, &request, now);
                 None
@@ -399,32 +405,24 @@ impl UserAgent {
             } if request.as_raw().method() == Some(Method::Notify)
                 && package_is(&request.as_raw(), REFER) =>
             {
-                let call = self.by_dialog.get(&dialog).copied()?;
+                // and likewise: a `refer` notification in a dialog that is not
+                // a call belongs to nobody here, and the subscription machine
+                // below is what says so with a 481
+                let Some(call) = self.by_dialog.get(&dialog).copied() else {
+                    return Some(event);
+                };
                 let request = request.clone();
                 self.on_notify(call, transaction, &request, now);
                 None
             }
-            // §4.1.3: "if not, it MUST return a 481 (Subscription does not
-            // exist) response". Until there is a subscription machine there is
-            // nothing else it could match, and leaving it unanswered is worse
-            // than refusing it: the notifier retransmits for thirty-two
-            // seconds and then decides this end is gone.
-            Event::IncomingInDialog {
-                transaction,
-                dialog,
-                ref request,
-            } if request.as_raw().method() == Some(Method::Notify)
-                && self.by_dialog.contains_key(&dialog) =>
-            {
-                self.endpoint
-                    .respond(
-                        transaction,
-                        &OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
-                        now,
-                    )
-                    .ok();
-                None
-            }
+            // Everything else goes on. RFC 6665 §4.1.3's answer for a
+            // notification nobody subscribed to -- "it MUST return a 481
+            // (Subscription does not exist) response" -- used to be given
+            // here, because this was the only thing in the crate that knew
+            // what a subscription was. It belongs to the subscription machine
+            // now: this handler knows about one event package inside a call,
+            // and a 481 written from here would be refusing on behalf of every
+            // subscription it cannot see.
             other => Some(other),
         }
     }

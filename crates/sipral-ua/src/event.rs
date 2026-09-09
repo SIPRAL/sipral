@@ -17,7 +17,9 @@ use sipral_core::msg::{OwnedMessage, StatusCode};
 
 use crate::account::AccountId;
 use crate::call::{CallEndReason, CallHandle, CallState};
+use crate::dialoginfo::DialogInfo;
 use crate::session::Hold;
+use crate::subscription::{SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 
 /// Where a registration is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -303,6 +305,90 @@ pub enum UaEvent {
         /// The final status the far end reported.
         status: StatusCode,
     },
+    /// A SUBSCRIBE is on its way and nothing has answered yet (RFC 6665
+    /// §4.1.2.1).
+    Subscribing {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// The account it goes out on.
+        account: AccountId,
+    },
+    /// The notifier has the subscription.
+    ///
+    /// `state` says whether it is granted or still being decided — §4.1.3's
+    /// `pending` means "there is insufficient policy information to grant or
+    /// deny the subscription yet", and nothing is known about the resource
+    /// until it becomes `active`. `expires` is what the notifier granted,
+    /// which wins over what was asked for (§3.1.1).
+    ///
+    /// Sent when the state changes and not on every refresh: a lamp does not
+    /// move when a refresh is scheduled, and thirty subscriptions saying so
+    /// every hour is noise.
+    Subscribed {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// Where it is now.
+        state: SubscriptionState,
+        /// The granted lifetime.
+        expires: Duration,
+        /// How long until the refresh.
+        refresh_in: Duration,
+    },
+    /// One SUBSCRIBE was answered by two notifiers, so there are now two
+    /// subscriptions (RFC 6665 §4.1.4).
+    ///
+    /// `sibling` is a subscription of its own from here on, with its own
+    /// dialog, its own refresh and its own state. RFC 4235 §3.9 makes this the
+    /// normal case for dialog state: "a forked SUBSCRIBE request for dialog
+    /// state can install multiple subscriptions", one per device the address
+    /// of record is registered on.
+    SubscriptionForked {
+        /// The one that was already known.
+        subscription: SubscriptionHandle,
+        /// The one that has just appeared.
+        sibling: SubscriptionHandle,
+    },
+    /// A notification arrived and has been answered (RFC 6665 §4.1.3).
+    ///
+    /// `info` is there when the body was an `application/dialog-info+xml`
+    /// document that could be read, and it is what changed rather than the
+    /// whole picture — RFC 4235 §3.8 lets a notifier send only the dialogs
+    /// whose state moved. The merged picture is
+    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info). A body that
+    /// could not be read leaves both alone and arrives here as `None` with the
+    /// request whole, because a lamp showing what was last known beats one
+    /// showing what a malformed document happened to contain.
+    Notified {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// The NOTIFY, whole. Every package that is not `dialog` is read from
+        /// here.
+        request: OwnedMessage,
+        /// The dialog state it carried, when it carried readable dialog state.
+        info: Option<Arc<DialogInfo>>,
+    },
+    /// The subscription is not live.
+    ///
+    /// `retry_in` is set when the user agent is going to start a fresh one by
+    /// itself — §4.1.2.2 makes that "an unrelated initial SUBSCRIBE request
+    /// with a freshly generated Call-ID and a new, unique From tag", under the
+    /// same handle — and absent when it has stopped, in which case the handle
+    /// names nothing from here on. Either way what a `dialog` subscription had
+    /// been told is no longer evidence about anything, and
+    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info) says so by
+    /// answering nothing.
+    SubscriptionEnded {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// Why.
+        reason: SubscriptionEnd,
+        /// The status, when a response said so.
+        status: Option<StatusCode>,
+        /// When the next attempt goes, if there is going to be one.
+        retry_in: Option<Duration>,
+        /// The refusal, whole, when there was one.
+        response: Option<OwnedMessage>,
+    },
     /// A call arrived carrying a `Replaces` that named one already up, and
     /// took it over (RFC 3891). The replaced call is being hung up.
     CallReplaced {
@@ -325,9 +411,7 @@ pub enum UaEvent {
     },
     /// A protocol event this layer has no policy for.
     ///
-    /// Registration is what `sipral-ua` owns today; calls, subscriptions and
-    /// transfers arrive here whole, and an application that needs one now acts
-    /// on it directly. Nothing the endpoint says is dropped on the way
-    /// through, and nothing that passes here has been interpreted.
+    /// Nothing the endpoint says is dropped on the way through, and nothing
+    /// that passes here has been interpreted.
     Unclaimed(Event),
 }

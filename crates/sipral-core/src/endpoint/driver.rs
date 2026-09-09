@@ -689,6 +689,76 @@ impl Endpoint {
         Ok(())
     }
 
+    /// Open a dialog around a request that arrived outside one
+    /// (RFC 6665 §4.4.1).
+    ///
+    /// The one method that needs this is NOTIFY. A SUBSCRIBE creates no dialog
+    /// when it is answered — §4.4.1: "the dialog usage is established by the
+    /// NOTIFY request, the route set at the subscriber is taken from the
+    /// NOTIFY request itself, as opposed to the route set present in the
+    /// 200-class response to the SUBSCRIBE request" — so the subscriber's side
+    /// of the dialog is built here, from the notification, and everything
+    /// afterwards is an ordinary in-dialog request.
+    ///
+    /// `local_seq` is the sequence number of the request this end already sent
+    /// outside the dialog, so that the refresh continues the series rather than
+    /// restarting it; see [`Dialog::resume_from`](crate::dialog::Dialog::resume_from).
+    /// `None` for a caller with nothing to continue.
+    ///
+    /// `None` comes back when the transaction has gone, or when the request
+    /// cannot name a dialog: no tag in `To` — which is our own tag echoed
+    /// back, so a request without one matched nothing to begin with — no
+    /// `Contact` to address later requests to, or an address that will not
+    /// parse.
+    ///
+    /// Call it **before** answering the request, not after. The dialog is
+    /// built from the request and the flow it arrived on, and both live on the
+    /// server transaction — which §17.2.2 retires the moment a final response
+    /// goes out on a reliable transport, because Timer J is zero there.
+    #[must_use]
+    pub fn open_dialog(
+        &mut self,
+        transaction: TransactionId<NonInviteServer>,
+        local_seq: Option<u32>,
+    ) -> Option<DialogId> {
+        let entry = self.transactions.non_invite_server(transaction)?;
+        let flow = entry.flow;
+        let request = entry.request.clone();
+        let tag = request.as_raw().to().ok()?.tag()?;
+        if tag.is_empty() {
+            return None;
+        }
+        // 12.1.1 has the state a dialog starts in decided by the response;
+        // there is no early half here, so the dialog exists confirmed or not
+        // at all
+        let dialog = self.open_uas_dialog(&request, &tag, StatusCode::OK, flow)?;
+        if let (Some(seq), Some(state)) = (local_seq, self.dialogs.get_mut(dialog)) {
+            state.resume_from(seq);
+        }
+        Some(dialog)
+    }
+
+    /// Forget a dialog whose usage is over, when nothing on the wire ends it
+    /// (RFC 6665 §4.4.1).
+    ///
+    /// The counterpart of [`Endpoint::open_dialog`], and the other half of a
+    /// subscription's life: "the destruction of a subscription results in the
+    /// termination of its associated dialog", and there is no request that
+    /// says so — the closing NOTIFY has already been answered. Without this a
+    /// phone watching thirty extensions across a day of re-subscriptions
+    /// accumulates a dialog per attempt and never gives one back.
+    ///
+    /// A [`Event::DialogTerminated`] with [`DialogEndReason::Closed`] follows,
+    /// so anything above that was holding the handle hears about it the same
+    /// way it hears about a BYE. Calling it twice does nothing the second
+    /// time.
+    pub fn close_dialog(&mut self, dialog: DialogId) {
+        if let Some(state) = self.dialogs.get_mut(dialog) {
+            state.terminate();
+        }
+        self.forget_dialog(dialog, super::event::DialogEndReason::Closed);
+    }
+
     /// Answer an INVITE.
     ///
     /// A 2xx opens the dialog and hands it back; anything else does not. The

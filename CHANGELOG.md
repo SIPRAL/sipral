@@ -56,6 +56,46 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Subscriptions, and the busy-lamp field on top of them** (RFC 6665, RFC 4235)
+  — the largest piece of protocol the stack was missing, and the one a desktop
+  client cannot ship without. Establish, refresh, expire, re-subscribe after
+  failure, and report every state change including the termination and its
+  reason, which is the half that tells an application whether to try again.
+
+  The dialog is established by the first notification and not by the 2xx,
+  because §4.4.1 says so and because the notification really does arrive first
+  in the field. Writing that turned up something sharper: on a reliable
+  transport the server transaction is gone the instant its final response is
+  sent, and the request and the flow the dialog is built from live on that
+  transaction — so the dialog has to be opened before the 200, not after. Found
+  by a test that passed on UDP and failed on TCP.
+
+  A subscription that ends takes its dialog with it, since there is no BYE for
+  one. Without that a phone watching thirty extensions leaks a dialog per lamp
+  per refresh.
+
+  The `dialog-info+xml` reader is deliberately not an XML parser and must not
+  become one. No DOCTYPE, so there is no entity to expand and the billion-laughs
+  shape cannot be written; no CDATA; the five predefined entities and numeric
+  references only; and depth, element count, attribute count and value length
+  all bounded before the first byte is read. Above it sits §4.3's coherence
+  table and §3.7.2's state machine, which is what a lamp actually shows.
+
+  Notifications are divided with the transfer handler by their event package,
+  and the general machine runs last: a transfer owns `refer` inside a call it is
+  driving, and only once everyone holding a subscription has had a turn can
+  anything say a notification belongs to nobody — which is answered 481, as
+  §4.1.3 requires. Two silent `?` in the transfer path that swallowed a REFER or
+  a NOTIFY arriving on a dialog that is not a call are now reachable, because
+  subscriptions have dialogs too.
+
+  Not built, with the seams named: no notifier role, so an incoming SUBSCRIBE
+  still reaches the application unclaimed; `Allow-Events` is read but not yet
+  advertised; and the REFER subscription stays as it is rather than being
+  half-converted — it opens with a REFER, its dialog already belongs to a call,
+  and this end is the notifier there, which is three real differences and a
+  rewrite that needs the notifier role first.
+
 - **A call can be placed through the C ABI.** It could not: `sipral_stack_poll`
   counted what the stack wanted written and threw it away, and nothing could
   hand it bytes that had arrived. The only thing that ever read an outgoing

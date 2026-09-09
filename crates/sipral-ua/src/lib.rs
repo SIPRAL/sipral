@@ -40,6 +40,7 @@ mod account;
 mod agent;
 mod call;
 mod calls;
+mod dialoginfo;
 mod error;
 mod event;
 mod options;
@@ -50,6 +51,7 @@ mod renegotiate;
 mod runtime;
 mod screening;
 mod session;
+mod subscription;
 #[cfg(test)]
 mod tests;
 mod timers;
@@ -58,12 +60,19 @@ mod transfer;
 pub use account::{Account, AccountId};
 pub use agent::UserAgent;
 pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
+pub use dialoginfo::{
+    DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
+    WatchedDialog,
+};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, Refusals, Screen, Screening};
 pub use session::Hold;
+pub use subscription::{
+    DEFAULT_EXPIRES, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState,
+};
 
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.

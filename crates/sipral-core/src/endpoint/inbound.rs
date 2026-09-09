@@ -1028,7 +1028,14 @@ impl Endpoint {
         Ok(())
     }
 
-    /// A dialog we open by answering an INVITE (§12.1.1).
+    /// A dialog we open by answering a request (§12.1.1).
+    ///
+    /// Two callers, and the second is the reason this says "request" rather
+    /// than "INVITE": answering a NOTIFY is what opens a subscriber's dialog
+    /// (RFC 6665 §4.4.1), and everything §12.1.1 asks for — the route set in
+    /// the order it arrived, the remote target from the `Contact`, the two
+    /// URIs, the remote sequence number — is read off the request the same
+    /// way whichever method it was.
     pub(super) fn open_uas_dialog(
         &mut self,
         request: &OwnedMessage,

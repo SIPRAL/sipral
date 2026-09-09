@@ -23,6 +23,8 @@ pub enum UaError {
     NoSuchAccount,
     /// The handle names a call that has ended, or never existed.
     NoSuchCall,
+    /// The handle names a subscription that has ended, or never existed.
+    NoSuchSubscription,
     /// The call is not somewhere this can be done: answering one that was
     /// placed from here, acknowledging one that is not waiting for it.
     WrongState(CallState),
@@ -50,6 +52,7 @@ impl fmt::Display for UaError {
         match *self {
             Self::NoSuchAccount => f.write_str("no such account"),
             Self::NoSuchCall => f.write_str("no such call"),
+            Self::NoSuchSubscription => f.write_str("no such subscription"),
             Self::WrongState(state) => write!(f, "the call is {state}"),
             Self::Send(ref error) => write!(f, "cannot send it: {error}"),
             Self::Respond(ref error) => write!(f, "cannot answer it: {error}"),

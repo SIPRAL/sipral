@@ -9,6 +9,7 @@ use std::sync::Arc;
 use super::addr::{ContactIter, Contacts, NameAddrRef};
 use super::auth::{ChallengeRef, CredentialsRef};
 use super::error::HeaderError;
+use super::events::{EventRef, SubscriptionStateRef};
 use super::header::HeaderName;
 use super::lex::{CommaList, trim};
 use super::method::{Method, StatusCode};
@@ -362,6 +363,35 @@ impl<'a> RawMessage<'a> {
     /// that nothing is.
     pub fn allow(&self) -> impl Iterator<Item = Method<'a>> + use<'a> {
         TokenIter::new(self.field_values(HeaderName::Allow)).filter_map(Method::from_bytes)
+    }
+
+    /// `Allow-Events` (RFC 6665 §8.2.2): the event packages the peer can
+    /// notify for.
+    ///
+    /// §4.4.4 makes the list "comprehensive and inclusive", so a package that
+    /// is not in a list that is present is one the peer will refuse with a
+    /// 489. Absent says nothing at all.
+    #[must_use]
+    pub fn allow_events(&self) -> TokenIter<'a> {
+        TokenIter::new(self.field_values(HeaderName::AllowEvents))
+    }
+
+    /// `Event` (RFC 6665 §8.2.1).
+    ///
+    /// # Errors
+    /// See [`EventRef::parse`] and [`RawMessage::single`]. §8.2.1: "There MUST
+    /// be exactly one event type listed per `Event` header field. Multiple
+    /// events per message are disallowed."
+    pub fn event(&self) -> Result<EventRef<'a>, HeaderError> {
+        EventRef::parse(self.single(HeaderName::Event)?)
+    }
+
+    /// `Subscription-State` (RFC 6665 §8.2.3).
+    ///
+    /// # Errors
+    /// See [`SubscriptionStateRef::parse`] and [`RawMessage::single`].
+    pub fn subscription_state(&self) -> Result<SubscriptionStateRef<'a>, HeaderError> {
+        SubscriptionStateRef::parse(self.single(HeaderName::SubscriptionState)?)
     }
 
     /// `Content-Type` (RFC 3261 §20.15).
