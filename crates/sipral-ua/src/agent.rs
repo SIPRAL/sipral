@@ -39,6 +39,7 @@ use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::registration::{
     Registration, backoff_delay, granted_expiry, min_expires, refresh_after, retry_after,
 };
+use crate::renegotiate::ParkedOffer;
 
 /// One user agent: several accounts over one endpoint.
 #[derive(Debug)]
@@ -55,15 +56,22 @@ pub struct UserAgent {
     pub(crate) by_invite: HashMap<TransactionId<InviteClient>, CallHandle>,
     pub(crate) by_server: HashMap<TransactionId<InviteServer>, CallHandle>,
     pub(crate) by_dialog: HashMap<DialogId, CallHandle>,
-    /// The BYEs, CANCELs and PRACKs a call has in flight, so that their
-    /// answers are this layer's news rather than the application's.
+    /// The BYEs, CANCELs, PRACKs, REFERs and NOTIFYs a call has in flight, so
+    /// that their answers are this layer's news rather than the application's.
     pub(crate) by_request: HashMap<AnyTransactionId, CallHandle>,
+    /// The account behind each of those, kept beside rather than inside the
+    /// call: a BYE outlives the call it ended, and a challenge to it can only
+    /// be answered by whoever still knows the password.
+    pub(crate) account_of: HashMap<AnyTransactionId, AccountId>,
     /// The re-INVITEs and UPDATEs offering a session change.
     pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
     /// Refusals of an INVITE that carried a challenge, held until the drain
     /// ends. Whether one was a refusal or the first half of a retry is decided
     /// by whether a challenge follows it.
     pub(crate) challenged: HashMap<TransactionId<InviteClient>, Refusal>,
+    /// The same, for a session change: an offer refused with a challenge is
+    /// not refused until the drain ends without a retry.
+    pub(crate) challenged_offers: HashMap<AnyTransactionId, ParkedOffer>,
     pub(crate) events: VecDeque<UaEvent>,
     next_account: u32,
     pub(crate) next_call: u32,
@@ -87,8 +95,10 @@ impl UserAgent {
             by_server: HashMap::new(),
             by_dialog: HashMap::new(),
             by_request: HashMap::new(),
+            account_of: HashMap::new(),
             by_offer: HashMap::new(),
             challenged: HashMap::new(),
+            challenged_offers: HashMap::new(),
             events: VecDeque::new(),
             next_account: 0,
             next_call: 0,
@@ -338,6 +348,7 @@ impl UserAgent {
         }
         self.settle_challenges();
         self.settle_call_challenges(now);
+        self.settle_offer_challenges();
     }
 
     /// `None` when this layer claimed the event; the event back when nothing

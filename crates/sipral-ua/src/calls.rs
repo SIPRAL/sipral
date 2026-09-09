@@ -320,8 +320,7 @@ impl UserAgent {
             .endpoint
             .prack(provisional, Some(Arc::from(sdp.to_vec())), now)
             .map_err(|_| UaError::WrongState(state))?;
-        self.by_request
-            .insert(AnyTransactionId::NonInviteClient(prack), call);
+        self.remember_request(call, AnyTransactionId::NonInviteClient(prack));
         if let Some(held) = self.calls.get_mut(&call) {
             held.session.set_local(described);
         }
@@ -392,8 +391,7 @@ impl UserAgent {
             CallState::Confirmed | CallState::Consulting => {
                 let dialog = dialog.ok_or(UaError::WrongState(state))?;
                 let bye = self.endpoint.bye(dialog, now)?;
-                self.by_request
-                    .insert(AnyTransactionId::NonInviteClient(bye), call);
+                self.remember_request(call, AnyTransactionId::NonInviteClient(bye));
                 self.mark(call, CallState::Terminating);
                 self.drain(now);
                 Ok(())
@@ -515,6 +513,8 @@ impl UserAgent {
         self.by_server.retain(|_, held| *held != call);
         self.by_dialog.retain(|_, held| *held != call);
         self.by_offer.retain(|_, held| *held != call);
+        self.challenged_offers
+            .retain(|_, parked| parked.call != call);
         self.calls.remove(&call);
         // by_request is not touched: the BYE that ended the call outlives the
         // call, and its answer is still this layer's rather than the
@@ -610,8 +610,7 @@ impl UserAgent {
             }
             Event::CancelSent { invite, cancel } => {
                 let call = self.by_invite.get(&invite).copied()?;
-                self.by_request
-                    .insert(AnyTransactionId::NonInviteClient(cancel), call);
+                self.remember_request(call, AnyTransactionId::NonInviteClient(cancel));
                 self.mark(call, CallState::Terminating);
                 None
             }
@@ -625,25 +624,38 @@ impl UserAgent {
             | Event::IncomingBye { .. } => self.on_incoming(event, now),
             Event::DialogTerminated { dialog, reason } => self.on_dialog_over(dialog, reason, now),
             Event::Challenged { transaction, .. } => {
-                let AnyTransactionId::InviteClient(invite) = transaction else {
-                    return Some(event);
-                };
-                // an INVITE this layer did not place is a re-INVITE, and that
-                // belongs to the session layer. Claiming it here would drop it
-                let Some(call) = self.by_invite.get(&invite).copied() else {
-                    return Some(event);
-                };
-                self.on_call_challenged(call, transaction, now);
-                None
+                if self.on_challenge_in_call(transaction, now) {
+                    None
+                } else {
+                    Some(event)
+                }
             }
-            Event::Response { transaction, .. } | Event::RequestFailed { transaction, .. } => {
-                // a BYE, a CANCEL or a PRACK this layer sent. Its answer
-                // changes nothing the application has not already been told.
+            Event::Response {
+                transaction,
+                status,
+                ..
+            } => {
+                // a request this layer sent inside a call. Its answer changes
+                // nothing the application has not already been told, save that
+                // a REFER which was refused frees the call to try again.
                 // Anything else is not ours, and goes on
                 let id = AnyTransactionId::NonInviteClient(transaction);
                 if !self.by_request.contains_key(&id) {
                     return Some(event);
                 }
+                // not on a challenge: that is not a refusal yet, and the
+                // retry which follows keeps the seat it is holding
+                if status.is_final() && !matches!(status.get(), 401 | 407) {
+                    self.release_refer(id);
+                }
+                None
+            }
+            Event::RequestFailed { transaction, .. } => {
+                let id = AnyTransactionId::NonInviteClient(transaction);
+                if !self.by_request.contains_key(&id) {
+                    return Some(event);
+                }
+                self.release_refer(id);
                 None
             }
             Event::TransactionTerminated {
@@ -705,8 +717,7 @@ impl UserAgent {
                 held.owed_prack = Some(provisional);
             }
         } else if let Ok(prack) = self.endpoint.prack(provisional, None, now) {
-            self.by_request
-                .insert(AnyTransactionId::NonInviteClient(prack), call);
+            self.remember_request(call, AnyTransactionId::NonInviteClient(prack));
         }
     }
 
@@ -1082,6 +1093,92 @@ impl UserAgent {
         }
     }
 
+    /// Remember a request this layer sent inside a call.
+    ///
+    /// The account goes into a map of its own rather than being read back off
+    /// the call, because the BYE that ends a call outlives it and a challenge
+    /// to that BYE still has to be answered.
+    pub(crate) fn remember_request(&mut self, call: CallHandle, id: AnyTransactionId) {
+        self.by_request.insert(id, call);
+        if let Some(account) = self.calls.get(&call).and_then(|held| held.account) {
+            self.account_of.insert(id, account);
+        }
+    }
+
+    /// A challenge to something this layer sent. `true` when it was ours.
+    fn on_challenge_in_call(&mut self, transaction: AnyTransactionId, now: Instant) -> bool {
+        match transaction {
+            // an INVITE this layer did not place is a re-INVITE, and that
+            // belongs to the session layer. Claiming it here would drop it
+            AnyTransactionId::InviteClient(invite) => {
+                let Some(call) = self.by_invite.get(&invite).copied() else {
+                    return false;
+                };
+                self.on_call_challenged(call, transaction, now);
+                true
+            }
+            // a BYE, a CANCEL, a PRACK, a REFER or the NOTIFY that reports one.
+            // An UPDATE is not in this map and goes on to the session layer
+            AnyTransactionId::NonInviteClient(_) if self.by_request.contains_key(&transaction) => {
+                self.on_request_challenged(transaction, now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A request this layer sent inside a call was challenged (§22.2).
+    ///
+    /// Everything that is not the INVITE opening the call arrives here: BYE,
+    /// CANCEL, PRACK, REFER, and the NOTIFY that says how a transfer is going.
+    fn on_request_challenged(&mut self, transaction: AnyTransactionId, now: Instant) {
+        let Some(call) = self.by_request.get(&transaction).copied() else {
+            return;
+        };
+        let account = self.account_of.get(&transaction).copied();
+        let credentials = account
+            .and_then(|account| self.accounts.get(&account))
+            .and_then(|config| config.credentials.clone());
+        let Some(credentials) = credentials else {
+            return;
+        };
+        let Ok(retried) = self
+            .endpoint
+            .retry_with_credentials(transaction, &credentials, now)
+        else {
+            return;
+        };
+        self.by_request.remove(&transaction);
+        self.account_of.remove(&transaction);
+        self.by_request.insert(retried, call);
+        if let Some(account) = account {
+            self.account_of.insert(retried, account);
+        }
+        // the REFER is the one of these the call holds a seat for, and the
+        // seat has to follow it or a transfer can never be asked for again
+        if let Some(held) = self.calls.get_mut(&call)
+            && held.referring == Some(transaction)
+        {
+            held.referring = Some(retried);
+        }
+    }
+
+    /// A REFER that was refused leaves the call free to ask again.
+    ///
+    /// Without this the seat taken when the REFER went out is never given
+    /// back, and every later transfer on that call is refused by this end
+    /// before anything is sent.
+    fn release_refer(&mut self, id: AnyTransactionId) {
+        let Some(call) = self.by_request.get(&id).copied() else {
+            return;
+        };
+        if let Some(held) = self.calls.get_mut(&call)
+            && held.referring == Some(id)
+        {
+            held.referring = None;
+        }
+    }
+
     /// A proxy challenged an INVITE. The account has the password.
     fn on_call_challenged(
         &mut self,
@@ -1125,6 +1222,7 @@ impl UserAgent {
         now: Instant,
     ) {
         self.by_request.remove(&transaction);
+        self.account_of.remove(&transaction);
         let AnyTransactionId::InviteServer(id) = transaction else {
             // the INVITE this end sent keeps its mapping until the call goes:
             // a fork's late 2xx is reported after the transaction is retired,

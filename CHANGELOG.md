@@ -10,6 +10,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- A challenge to any request inside a call is now answered, not given up on.
+  Only REGISTER and the INVITE that opened a call were retried with
+  credentials; a 401 or 407 on a BYE, CANCEL, PRACK, REFER, re-INVITE or
+  UPDATE fell through to the application as an unclaimed event, and §22.2 does
+  not stop at the first request of a dialog. The one with teeth is the BYE: a
+  carrier that challenges it is told nothing more, and keeps a call open that
+  this end has hung up. Three things had to be settled underneath. A BYE ends
+  its dialog as it goes, so by the time the challenge arrives there is no
+  dialog to take a `CSeq` from — it now comes from the request that was
+  refused, which is right precisely because nothing will ever ask that dialog
+  for another number. The account behind a request is kept beside the call
+  rather than inside it, since a BYE outlives the call it ended. And a REFER
+  that is refused now gives back the seat it took, without which the first
+  refusal was the last transfer that call could ever attempt.
+
 ### Added
 
 - `scripts/lab.sh` and `scripts/fuzz.sh`, and no CI configuration at all.

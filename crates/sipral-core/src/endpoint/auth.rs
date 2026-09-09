@@ -135,14 +135,17 @@ impl Endpoint {
         // normally when sending an updated request" — which inside a dialog
         // means asking the dialog, so that the number it hands out next does
         // not collide with this one
-        let cseq = match held.dialog {
-            Some(dialog) => self
-                .dialogs
-                .get_mut(dialog)
-                .ok_or(AuthRetryError::NoSuchDialog)?
+        let cseq = match held.dialog.and_then(|dialog| self.dialogs.get_mut(dialog)) {
+            Some(state) => state
                 .next_request(method)
                 .map_err(|_| AuthRetryError::NoSuchDialog)?
                 .cseq(),
+            // Either there was no dialog, or there is no longer one because
+            // the request was the BYE that ended it — §15.1.1 leaves nothing
+            // behind, and a challenged BYE still has to go again or the far
+            // end keeps a call this end has hung up. Both want the number
+            // after the one that was refused, and in the second case nothing
+            // will ever ask this dialog for another.
             None => raw
                 .cseq()
                 .map_err(|_| AuthRetryError::NoChallenge)?

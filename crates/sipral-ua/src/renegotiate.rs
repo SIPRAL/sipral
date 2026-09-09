@@ -50,6 +50,19 @@ use crate::event::UaEvent;
 use crate::registration::spread;
 use crate::session::Hold;
 
+/// An offer refused with a challenge, kept until the drain round ends.
+///
+/// The core reports the refusal before it reports the challenge, so acting on
+/// the refusal at once would tear down the offer the retry needs. This is that
+/// refusal, held back; `settle_offer_challenges` delivers it if no retry took
+/// its place.
+#[derive(Debug)]
+pub(crate) struct ParkedOffer {
+    pub(crate) call: CallHandle,
+    pub(crate) status: Option<StatusCode>,
+    pub(crate) response: Option<OwnedMessage>,
+}
+
 /// What this agent will answer, advertised so that the far end knows an UPDATE
 /// is worth sending (RFC 3311 §4).
 ///
@@ -421,7 +434,7 @@ impl UserAgent {
                     return Some(event);
                 };
                 let response = response.clone();
-                self.on_offer_refused(call, id, status, response);
+                self.on_offer_refused_or_challenged(call, id, status, response);
                 None
             }
             Event::ReinviteGlare {
@@ -459,6 +472,15 @@ impl UserAgent {
                 // §12.2.1.2 treats no answer as a 408, and the dialog goes
                 // with it; the call layer hears that separately
                 self.on_offer_refused(call, id, None, None);
+                None
+            }
+            // §22.2: an offer refused with a challenge is asked again with the
+            // credentials, whether it went as a re-INVITE or as an UPDATE
+            Event::Challenged { transaction, .. } => {
+                if !self.by_offer.contains_key(&transaction) {
+                    return Some(event);
+                }
+                self.on_offer_challenged(transaction, now);
                 None
             }
             other => self.on_change_arriving(other, now),
@@ -529,6 +551,76 @@ impl UserAgent {
             held.session.set_remote(described);
         }
         self.report_session(call);
+    }
+
+    /// It did not — but a refusal that carries a challenge is not one yet.
+    ///
+    /// §22.2 makes a 401 or a 407 a request to ask again with credentials, and
+    /// the core reports the refusal before it reports the challenge. Delivering
+    /// the refusal here would take the offer with it and leave the retry
+    /// nothing to send, so it waits for the round to end.
+    fn on_offer_refused_or_challenged(
+        &mut self,
+        call: CallHandle,
+        id: AnyTransactionId,
+        status: Option<StatusCode>,
+        response: Option<OwnedMessage>,
+    ) {
+        if matches!(status.map(StatusCode::get), Some(401 | 407)) {
+            self.challenged_offers.insert(
+                id,
+                ParkedOffer {
+                    call,
+                    status,
+                    response,
+                },
+            );
+            return;
+        }
+        self.on_offer_refused(call, id, status, response);
+    }
+
+    /// A proxy or a registrar challenged the offer. The account has the
+    /// password.
+    fn on_offer_challenged(&mut self, id: AnyTransactionId, now: Instant) {
+        let Some(call) = self.by_offer.get(&id).copied() else {
+            return;
+        };
+        let credentials = self
+            .calls
+            .get(&call)
+            .and_then(|held| held.account)
+            .and_then(|account| self.accounts.get(&account))
+            .and_then(|config| config.credentials.clone());
+        let Some(credentials) = credentials else {
+            return;
+        };
+        let Ok(retried) = self.endpoint.retry_with_credentials(id, &credentials, now) else {
+            return;
+        };
+        self.by_offer.remove(&id);
+        // the refusal that came with the challenge was the first half of this
+        self.challenged_offers.remove(&id);
+        self.by_offer.insert(retried, call);
+        if let Some(offer) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|held| held.offering.as_mut())
+        {
+            offer.transaction = Some(retried);
+        }
+    }
+
+    /// An offer refused with a challenge that got no retry was refused.
+    ///
+    /// The core answers a challenge once; the same nonce coming back is §22.1
+    /// saying the password is wrong, and repeating it is how an account gets
+    /// locked. So the silence after it is the answer.
+    pub(crate) fn settle_offer_challenges(&mut self) {
+        let parked: Vec<(AnyTransactionId, ParkedOffer)> = self.challenged_offers.drain().collect();
+        for (id, offer) in parked {
+            self.on_offer_refused(offer.call, id, offer.status, offer.response);
+        }
     }
 
     /// It did not.
@@ -618,7 +710,7 @@ impl UserAgent {
             self.on_glare(call, id, retry_in, Some(response.clone()), now);
             return;
         }
-        self.on_offer_refused(call, id, Some(status), Some(response.clone()));
+        self.on_offer_refused_or_challenged(call, id, Some(status), Some(response.clone()));
     }
 
     /// A request the far end sent to change the session.

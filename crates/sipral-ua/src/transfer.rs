@@ -316,8 +316,7 @@ impl UserAgent {
         if let Some(held) = self.calls.get_mut(&call) {
             held.referring = Some(AnyTransactionId::NonInviteClient(transaction));
         }
-        self.by_request
-            .insert(AnyTransactionId::NonInviteClient(transaction), call);
+        self.remember_request(call, AnyTransactionId::NonInviteClient(transaction));
         self.drain(now);
         Ok(())
     }
@@ -336,8 +335,7 @@ impl UserAgent {
             .header(HeaderName::SubscriptionState, state)
             .body(b"message/sipfrag;version=2.0", Arc::from(sipfrag.to_vec()));
         if let Ok(id) = self.endpoint.request_in_dialog(dialog, &request, now) {
-            self.by_request
-                .insert(AnyTransactionId::NonInviteClient(id), call);
+            self.remember_request(call, AnyTransactionId::NonInviteClient(id));
         }
     }
 

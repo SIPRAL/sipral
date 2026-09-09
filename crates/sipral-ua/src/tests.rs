@@ -3548,3 +3548,246 @@ fn a_pong_leaves_the_registration_alone() {
         Some(RegistrationState::Registered)
     );
 }
+
+// -- challenges inside a call ------------------------------------------------
+//
+// §22.2 does not stop at the request that opened the dialog. A PBX that
+// challenges one request challenges all of them, and every one of these was
+// answered by giving up until an Asterisk in the lab said otherwise.
+
+#[test]
+fn a_bye_a_pbx_challenges_goes_again_with_credentials() {
+    // 15.1.1: the BYE is what ends the call, so one refused for want of
+    // credentials leaves the far end holding a call this end has hung up
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent.hangup(call, t0).expect("the BYE goes");
+    let first = only(&transmits(&mut agent), "BYE ");
+    assert!(header(&first, HeaderName::Authorization).is_empty());
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+
+    let retry = only(&transmits(&mut agent), "BYE ");
+    credentials_of(&retry, HeaderName::Authorization);
+    // §22.2 moves the CSeq on. The dialog is gone -- the BYE ended it -- so
+    // the number comes from the request that was refused
+    assert_eq!(header(&retry, HeaderName::CSeq), b"3 BYE");
+    assert_ne!(text(&retry, HeaderName::Via), text(&first, HeaderName::Via));
+    assert_eq!(
+        header(&retry, HeaderName::CallId),
+        header(&first, HeaderName::CallId)
+    );
+}
+
+#[test]
+fn a_bye_challenged_twice_with_the_same_nonce_stops() {
+    // 22.1: the same nonce back is the password being wrong, and a client that
+    // keeps answering it locks the account
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent.hangup(call, t0).expect("the BYE goes");
+    let first = only(&transmits(&mut agent), "BYE ");
+    deliver(&mut agent, &unauthorized(&first), t0);
+    let retry = only(&transmits(&mut agent), "BYE ");
+
+    deliver(&mut agent, &unauthorized(&retry), t0);
+    assert!(
+        !transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"BYE ")),
+        "nothing goes out a third time"
+    );
+}
+
+#[test]
+fn a_reinvite_a_pbx_challenges_is_offered_again_with_credentials() {
+    // 14.1: the session stays as it was until the change is taken, and a
+    // challenge is not the far end declining the change
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let first = only(&transmits(&mut agent), "INVITE ");
+    assert!(header(&first, HeaderName::Authorization).is_empty());
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+
+    let out = transmits(&mut agent);
+    // 17.1.1.3: the refusal is acknowledged first
+    let _ = only(&out, "ACK ");
+    let retry = only(&out, "INVITE ");
+    credentials_of(&retry, HeaderName::Authorization);
+    assert_eq!(header(&retry, HeaderName::CSeq), b"3 INVITE");
+    assert!(body_of(&retry).contains("a=sendonly\r\n"), "the same offer");
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SessionChangeFailed { .. })),
+        "a challenge is not a refusal"
+    );
+
+    deliver(
+        &mut agent,
+        &answered(&retry, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SessionChanged { .. })),
+        "the change goes through on the retry"
+    );
+}
+
+#[test]
+fn an_update_a_pbx_challenges_goes_again_with_credentials() {
+    // the same rule, over the request an early dialog has to use (RFC 3311)
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &with_allow(&answered(
+            &invite,
+            183,
+            "Session Progress",
+            "desk",
+            Some(ANSWER),
+        )),
+        t0,
+    );
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("the UPDATE goes");
+    let first = only(&transmits(&mut agent), "UPDATE ");
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+
+    let retry = only(&transmits(&mut agent), "UPDATE ");
+    credentials_of(&retry, HeaderName::Authorization);
+    assert_ne!(
+        header(&retry, HeaderName::CSeq),
+        header(&first, HeaderName::CSeq)
+    );
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SessionChangeFailed { .. })),
+    );
+}
+
+#[test]
+fn an_offer_challenged_twice_is_reported_refused_once() {
+    // the give-up path has to end in the refusal the application was waiting
+    // for, not in silence
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let first = only(&transmits(&mut agent), "INVITE ");
+    deliver(&mut agent, &unauthorized(&first), t0);
+    let retry = only(&transmits(&mut agent), "INVITE ");
+    events(&mut agent);
+
+    deliver(&mut agent, &unauthorized(&retry), t0);
+    let out = transmits(&mut agent);
+    let _ = only(&out, "ACK ");
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"INVITE ")),
+        "nothing goes out a third time"
+    );
+    let reported: Vec<_> = events(&mut agent)
+        .into_iter()
+        .filter(|event| matches!(*event, UaEvent::SessionChangeFailed { .. }))
+        .collect();
+    assert_eq!(reported.len(), 1, "reported once, and only once");
+    assert!(matches!(
+        reported.first(),
+        Some(UaEvent::SessionChangeFailed {
+            status: Some(status),
+            ..
+        }) if status.get() == 401
+    ));
+    assert_eq!(
+        agent.call_state(call),
+        Some(CallState::Confirmed),
+        "14.1: the call is where it was"
+    );
+}
+
+#[test]
+fn a_refer_a_pbx_challenges_goes_again_with_credentials() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let first = only(&transmits(&mut agent), "REFER ");
+
+    deliver(&mut agent, &unauthorized(&first), t0);
+
+    let retry = only(&transmits(&mut agent), "REFER ");
+    credentials_of(&retry, HeaderName::Authorization);
+    assert_eq!(
+        header(&retry, HeaderName::ReferTo),
+        b"<sip:carol@example.com>"
+    );
+    assert_ne!(
+        header(&retry, HeaderName::CSeq),
+        header(&first, HeaderName::CSeq)
+    );
+
+    // and the transfer runs to its end on the retry's subscription
+    deliver(&mut agent, &reply(&retry, 202, "Accepted", ""), t0);
+    events(&mut agent);
+    deliver(&mut agent, &notify(&ack, 1, "200 OK", "terminated"), t0);
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::TransferDone { call: reported, .. } if reported == call
+        )),
+        "the transfer is reported on the retry"
+    );
+}
+
+#[test]
+fn a_refer_that_was_refused_leaves_the_call_able_to_ask_again() {
+    // the seat a REFER takes has to be given back, or the first refusal is the
+    // last transfer that call will ever attempt
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = only(&transmits(&mut agent), "REFER ");
+    deliver(&mut agent, &reply(&refer, 603, "Decline", ""), t0);
+    events(&mut agent);
+
+    agent
+        .transfer(call, &uri("sip:dave@example.com"), t0)
+        .expect("a second transfer may be asked for");
+    let again = only(&transmits(&mut agent), "REFER ");
+    assert_eq!(
+        header(&again, HeaderName::ReferTo),
+        b"<sip:dave@example.com>"
+    );
+}
