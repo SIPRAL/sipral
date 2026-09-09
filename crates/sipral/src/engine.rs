@@ -51,6 +51,7 @@ use sipral_ua::{AccountId, CallHandle, OutgoingCall, StatusCode, UaEvent, UserAg
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCatalog};
+use crate::counters::Counters;
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
 use crate::session::{Datagram, MediaConfig, MediaSession, StreamIdentity};
@@ -96,6 +97,9 @@ pub struct MediaEngine {
     sessions: BTreeMap<CallHandle, MediaSession>,
     calls: BTreeMap<CallHandle, Managed>,
     events: VecDeque<(CallHandle, MediaEvent)>,
+    /// D3's health counters, fed from the same drain that hands events to
+    /// the application — see `crate::counters`.
+    counters: Counters,
 }
 
 impl MediaEngine {
@@ -112,6 +116,7 @@ impl MediaEngine {
             sessions: BTreeMap::new(),
             calls: BTreeMap::new(),
             events: VecDeque::new(),
+            counters: Counters::default(),
         }
     }
 
@@ -119,6 +124,16 @@ impl MediaEngine {
     #[must_use]
     pub const fn catalog(&self) -> &CodecCatalog {
         &self.catalog
+    }
+
+    /// D3's flat set of health counters, kept since this engine was created.
+    ///
+    /// One struct copy: nothing here walks the call table or the session
+    /// map, so this is cheap enough to sample on a timer and ship as
+    /// telemetry.
+    #[must_use]
+    pub const fn counters(&self) -> Counters {
+        self.counters
     }
 
     /// One call's media, once there is any.
@@ -220,12 +235,15 @@ impl MediaEngine {
     /// [`MediaEvent::Started`] sees them in the order they happened.
     pub fn poll_event(&mut self, agent: &mut UserAgent, now: Instant) -> Option<Event> {
         if let Some((call, event)) = self.events.pop_front() {
+            self.counters.observe_media(&event);
             return Some(Event::Media { call, event });
         }
         if let Some((call, event)) = self.session_event() {
+            self.counters.observe_media(&event);
             return Some(Event::Media { call, event });
         }
         let signalling = agent.poll_event()?;
+        self.counters.observe_signalling(&signalling);
         self.absorb(&signalling, agent, now);
         Some(Event::Signalling(signalling))
     }
@@ -692,5 +710,165 @@ const fn nibble(digit: u8) -> u8 {
         b'a'..=b'f' => digit - b'a' + 10,
         b'A'..=b'F' => digit - b'A' + 10,
         _ => 0,
+    }
+}
+
+// -- D3's counters are fed from both of poll_event's Media branches ---------
+
+#[cfg(test)]
+mod counter_wiring {
+    //! `poll_event` hands out a media event from two places: the queue
+    //! `self.events` fills (a call starting, changing or ending) and
+    //! [`MediaEngine::session_event`], which asks each session directly for
+    //! what it has queued on its own (a stall, a resume, a recording that
+    //! stopped). `crates/sipral/src/counters.rs` is thorough about what
+    //! `Counters::observe_media` does with a [`MediaEvent`] once it has one;
+    //! what only a test through this module can show is that both places
+    //! that hand one out actually call it. This is the one that goes through
+    //! `session_event`, built without a SIP exchange because the negotiation
+    //! is not what is under test — the plan is written by hand and the
+    //! session opened directly, the way `crates/sipral/src/tests.rs`'s own
+    //! harness does it with two real stacks instead of one hand-written plan.
+
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+
+    use sipral_core::sdp::{Direction, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_ua::{
+        Account, CallHandle, EndpointConfig, Input, OutgoingCall, TransportId, TransportProtocol,
+        Uri, UserAgent,
+    };
+
+    use super::MediaEngine;
+    use crate::clock::WallClock;
+    use crate::codec::CodecCatalog;
+    use crate::event::{Event, MediaEvent};
+    use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+
+    const TRANSPORT: TransportId = TransportId(3);
+
+    fn local() -> SocketAddr {
+        "192.0.2.20:5060".parse().expect("an address")
+    }
+
+    fn media_local() -> SocketAddr {
+        "192.0.2.20:40000".parse().expect("an address")
+    }
+
+    fn media_remote() -> SocketAddr {
+        "203.0.113.9:40010".parse().expect("an address")
+    }
+
+    /// A call this engine has never negotiated anything for, with a session
+    /// inserted directly: enough to reach [`MediaEngine::session_event`]
+    /// without an offer, an answer or a second stack.
+    fn call_with_a_stalling_session(
+        engine: &mut MediaEngine,
+        now: Instant,
+    ) -> (UserAgent, CallHandle) {
+        let mut agent = UserAgent::new(EndpointConfig::default(), [5; 32]);
+        agent
+            .receive(
+                Input::TransportBound {
+                    transport: TRANSPORT,
+                    protocol: TransportProtocol::Udp,
+                    local: local(),
+                    remote: None,
+                },
+                now,
+            )
+            .expect("binding a transport");
+        let account = agent.add_account(Account::new(
+            Uri::parse_str("sip:wired@example.com").expect("a URI"),
+            Uri::parse_str("sip:example.com").expect("a URI"),
+            Uri::parse_str("sip:wired@192.0.2.20").expect("a URI"),
+            TRANSPORT,
+            "192.0.2.99:5060".parse().expect("an address"),
+        ));
+        let call = agent
+            .call(
+                account,
+                &OutgoingCall::new(Uri::parse_str("sip:bob@example.com").expect("a URI")),
+                now,
+            )
+            .expect("the INVITE can be built now that a transport is bound");
+
+        let plan = MediaPlan {
+            local: media_local(),
+            remote: media_remote(),
+            codec: NegotiatedCodec::new(RtpMap {
+                payload: 0,
+                encoding: "PCMU".to_owned(),
+                clock_rate: 8_000,
+                parameters: None,
+            }),
+            direction: Direction::SendRecv,
+            dtmf: None,
+            rtcp: RtcpPlan::Off,
+            keying: None,
+        };
+        let config = MediaConfig {
+            // short enough that the test does not need to fake a ten-second
+            // clock jump to reach it
+            stall_after: Some(Duration::from_millis(50)),
+            ..MediaConfig::default()
+        };
+        let identity = StreamIdentity {
+            ssrc: 1,
+            sequence: 0,
+            timestamp: 0,
+            seed: 1,
+        };
+        let session = MediaSession::open(
+            &plan,
+            20,
+            &config,
+            identity,
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            now,
+        )
+        .expect("PCMU is always in this build's catalogue");
+        engine.sessions.insert(call, session);
+        (agent, call)
+    }
+
+    #[test]
+    fn a_stall_reached_through_session_event_still_moves_the_counters() {
+        let now = Instant::now();
+        let mut engine = MediaEngine::new(
+            CodecCatalog::new(),
+            MediaConfig::default(),
+            WallClock::from_unix(now, 1_700_000_000, 0),
+        );
+        let (mut agent, _call) = call_with_a_stalling_session(&mut engine, now);
+        assert_eq!(
+            engine.counters().media_gaps.get(),
+            0,
+            "nothing has stalled yet"
+        );
+
+        let later = now + Duration::from_millis(200);
+        engine.handle_timeout(later);
+
+        let mut saw_stalled = false;
+        while let Some(event) = engine.poll_event(&mut agent, later) {
+            if let Event::Media {
+                event: MediaEvent::Stalled { .. },
+                ..
+            } = event
+            {
+                saw_stalled = true;
+            }
+        }
+        assert!(
+            saw_stalled,
+            "the session's own stall never reached poll_event's session_event branch"
+        );
+        assert_eq!(
+            engine.counters().media_gaps.get(),
+            1,
+            "session_event's branch of poll_event has to feed the counters too, not only \
+             the branch that drains self.events"
+        );
     }
 }

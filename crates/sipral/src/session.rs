@@ -164,9 +164,9 @@ pub struct MediaConfig {
     /// which is what [`MediaSession::attach_processor`] aligns its reference
     /// against.
     ///
-    /// Zero unless the application says otherwise, and it can only say so
-    /// from the platform: CoreAudio reports it per device, WASAPI per stream,
-    /// and no portable guess is worth making. It is kept whether or not a
+    /// Zero unless the application says otherwise, and it can only say so from
+    /// the platform, through whichever `sipral-io-*` it linked: no portable
+    /// guess is worth making. It is kept whether or not a
     /// processor is ever attached — attaching one later must not need the
     /// number set a second time — and refused above
     /// [`MAX_RENDER_DELAY`](crate::MAX_RENDER_DELAY), because a delay that

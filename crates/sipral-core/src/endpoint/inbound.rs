@@ -27,13 +27,14 @@ use super::event::{DialogEndReason, Event, FailureReason, TerminationReason};
 use super::reliable;
 use super::table::Flow;
 use super::via;
-use crate::dialog::{Dialog, DialogKey, DialogState, Fork, Incoming};
+use crate::diag::{Decision, Direction, Reason, WireEvent};
+use crate::dialog::{CallId, Dialog, DialogKey, DialogState, Fork, Incoming};
 use crate::msg::{
     Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder, StatusCode, parse_with_limits,
 };
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
-    Notify, Raw, Server, ServerKey, TimerName, TransactionId, cancel_for_request,
+    Notify, Raw, Role, Server, ServerKey, TimerName, TransactionId, cancel_for_request,
 };
 
 /// A single CRLF, the answer a double-CRLF ping is owed (RFC 5626 §4.4.1).
@@ -259,14 +260,20 @@ impl Endpoint {
                 }
                 self.on_challenge(AnyTransactionId::NonInviteClient(id), response, sent, flow);
             }
-            Some(Notify::TimedOut) => self.push(Event::RequestFailed {
-                transaction: id,
-                reason: FailureReason::Timeout,
-            }),
-            Some(Notify::TransportFailed) => self.push(Event::RequestFailed {
-                transaction: id,
-                reason: FailureReason::TransportFailed,
-            }),
+            Some(Notify::TimedOut) => {
+                self.note_failure_for(response, FailureReason::Timeout);
+                self.push(Event::RequestFailed {
+                    transaction: id,
+                    reason: FailureReason::Timeout,
+                });
+            }
+            Some(Notify::TransportFailed) => {
+                self.note_failure_for(response, FailureReason::TransportFailed);
+                self.push(Event::RequestFailed {
+                    transaction: id,
+                    reason: FailureReason::TransportFailed,
+                });
+            }
             Some(Notify::Ack) | None => (),
         }
     }
@@ -286,6 +293,11 @@ impl Endpoint {
         let notify = effects.notify;
         let cancel_due = entry.machine.take_deferred_cancel();
         let renegotiated = self.reinvites.dialog_of(id);
+        // read while the request is still here and only when it is wanted:
+        // `sent` is handed to `on_challenge` further down
+        let call = (notify == Some(Notify::TimedOut))
+            .then(|| sent.as_raw().call_id().ok().map(CallId::new))
+            .flatten();
         self.apply(effects, flow, AnyTransactionId::InviteClient(id));
 
         if notify == Some(Notify::Response) {
@@ -300,7 +312,7 @@ impl Endpoint {
             self.on_challenge(AnyTransactionId::InviteClient(id), response, sent, flow);
         }
         if notify == Some(Notify::TimedOut) {
-            self.invite_gave_up(id, renegotiated, FailureReason::Timeout);
+            self.invite_gave_up(id, renegotiated, FailureReason::Timeout, call.as_ref());
         }
         // 9.1: the CANCEL was asked for before anything had come back, and
         // the first provisional response is what releases it
@@ -329,6 +341,7 @@ impl Endpoint {
                 let fresh = self.dialogs.find(&key).is_none();
                 let dialog = self.dialogs.name_branch(set, key.clone(), flow);
                 if fresh {
+                    self.note_wire(response, Reason::DialogCreated, Direction::Inbound, flow);
                     self.ask_to_resolve(dialog);
                 }
                 if status.is_success() {
@@ -340,9 +353,15 @@ impl Endpoint {
                         .dialogs
                         .set(set)
                         .and_then(|branches| branches.ack_for(&key))
-                        .map(OwnedMessage::bytes)
+                        .cloned()
                     {
-                        self.queue(flow.transmit(ack));
+                        self.note_wire(
+                            &ack.as_raw(),
+                            Reason::RequestRetransmitted,
+                            Direction::Outbound,
+                            flow,
+                        );
+                        self.queue(flow.transmit(ack.bytes()));
                         return;
                     }
                     if self.was_cancelled(id) {
@@ -369,6 +388,7 @@ impl Endpoint {
             }
             Fork::Refused => {
                 self.end_branches(set, DialogEndReason::Refused);
+                self.note_failure_for(response, FailureReason::Refused);
                 if status.get() == 487 && self.was_cancelled(id) {
                     self.push(Event::Cancelled { invite: id });
                 } else {
@@ -467,6 +487,19 @@ impl Endpoint {
 
         self.refused = self.refused.saturating_add(1);
         let refused = self.refused;
+        // on the endpoint's record rather than the call's: a flood arrives
+        // with a fresh Call-ID every time, and refusals that made records of
+        // their own would evict the calls this endpoint is actually carrying
+        let mut decision =
+            Decision::of(Reason::RequestRefusedWhenFull).at_address(flow.destination);
+        if let Some(method) = request.method() {
+            decision = decision.caused_by(WireEvent::request(
+                method,
+                Direction::Inbound,
+                request.as_bytes().len(),
+            ));
+        }
+        self.note(None, decision);
         self.push(Event::Overloaded { refused });
         // §8.2.6.2 wants a tag on every response but a 100. It is minted and
         // forgotten: nothing here holds a transaction to remember it against,
@@ -729,9 +762,18 @@ impl Endpoint {
                     // read before applying: timer B terminates the
                     // transaction, and retiring it forgets what it was
                     let renegotiated = self.reinvites.dialog_of(inner);
-                    self.apply(effects, flow, id);
-                    if name == TimerName::B && notify == Some(Notify::TimedOut) {
-                        self.invite_gave_up(inner, renegotiated, FailureReason::Timeout);
+                    let over = name == TimerName::B && notify == Some(Notify::TimedOut);
+                    // and the same for the name the record is kept under, which
+                    // is why it is read here and not where it is used
+                    let call = over.then(|| self.call_of(id)).flatten();
+                    self.apply_again(effects, flow, id);
+                    if over {
+                        self.invite_gave_up(
+                            inner,
+                            renegotiated,
+                            FailureReason::Timeout,
+                            call.as_ref(),
+                        );
                     }
                 }
             }
@@ -743,8 +785,11 @@ impl Endpoint {
                 {
                     let flow = self.flow_of(id);
                     let notify = effects.notify;
-                    self.apply(effects, flow, id);
-                    if notify == Some(Notify::TimedOut) {
+                    let over = notify == Some(Notify::TimedOut);
+                    let call = over.then(|| self.call_of(id)).flatten();
+                    self.apply_again(effects, flow, id);
+                    if over {
+                        self.note_failure(call.as_ref(), FailureReason::Timeout);
                         self.push(Event::RequestFailed {
                             transaction: inner,
                             reason: FailureReason::Timeout,
@@ -759,7 +804,20 @@ impl Endpoint {
                     .and_then(|entry| entry.machine.handle_timeout(now))
                 {
                     let flow = self.flow_of(id);
-                    self.apply(effects, flow, id);
+                    // timer H: the final response was repeated for 64*T1 and
+                    // the far end never acknowledged it. Nothing above hears
+                    // about this, so the record is the only place it exists
+                    let unacknowledged = effects.notify == Some(Notify::TimedOut);
+                    let call = unacknowledged.then(|| self.call_of(id)).flatten();
+                    self.apply_again(effects, flow, id);
+                    if unacknowledged {
+                        self.note(
+                            call.as_ref().map(CallId::as_bytes),
+                            Decision::of(Reason::TransactionUnacknowledged)
+                                .at_address(flow.destination)
+                                .over(flow.protocol),
+                        );
+                    }
                 }
                 let _ = inner;
             }
@@ -770,7 +828,7 @@ impl Endpoint {
                     .and_then(|entry| entry.machine.handle_timeout(now))
                 {
                     let flow = self.flow_of(id);
-                    self.apply(effects, flow, id);
+                    self.apply_again(effects, flow, id);
                 }
                 let _ = inner;
             }
@@ -833,15 +891,23 @@ impl Endpoint {
     /// Ten seconds without a pong: §4.4.1 makes this a dead flow, and a dead
     /// flow is taken down rather than kept and hoped for.
     pub(super) fn flow_failed(&mut self, transport: super::TransportId) {
-        if self.transports.get(transport).is_none() {
+        let Some(bound) = self.transports.get(transport) else {
             return;
-        }
+        };
+        let decision = Decision::of(Reason::FlowDead)
+            .at_address(bound.remote.unwrap_or(bound.local))
+            .over(bound.protocol);
+        self.note(None, decision);
         self.push(Event::FlowFailed { transport });
         self.lose_transport(transport);
     }
 
     pub(super) fn lose_transport(&mut self, transport: super::TransportId) {
         if let Some(bound) = self.transports.unbind(transport) {
+            let decision = Decision::of(Reason::TransportLost)
+                .at_address(bound.remote.unwrap_or(bound.local))
+                .over(bound.protocol);
+            self.note(None, decision);
             for handle in [bound.keepalive, bound.pong].into_iter().flatten() {
                 self.deadlines.cancel(handle);
             }
@@ -875,6 +941,7 @@ impl Endpoint {
             return;
         };
         let notify = effects.notify;
+        let call = self.call_of(id);
         let renegotiated = match id {
             AnyTransactionId::InviteClient(inner) => self.reinvites.dialog_of(inner),
             AnyTransactionId::NonInviteClient(_)
@@ -885,12 +952,20 @@ impl Endpoint {
         if notify == Some(Notify::TransportFailed) {
             match id {
                 AnyTransactionId::InviteClient(inner) => {
-                    self.invite_gave_up(inner, renegotiated, FailureReason::TransportFailed);
+                    self.invite_gave_up(
+                        inner,
+                        renegotiated,
+                        FailureReason::TransportFailed,
+                        call.as_ref(),
+                    );
                 }
-                AnyTransactionId::NonInviteClient(inner) => self.push(Event::RequestFailed {
-                    transaction: inner,
-                    reason: FailureReason::TransportFailed,
-                }),
+                AnyTransactionId::NonInviteClient(inner) => {
+                    self.note_failure(call.as_ref(), FailureReason::TransportFailed);
+                    self.push(Event::RequestFailed {
+                        transaction: inner,
+                        reason: FailureReason::TransportFailed,
+                    });
+                }
                 AnyTransactionId::InviteServer(_) | AnyTransactionId::NonInviteServer(_) => (),
             }
         }
@@ -902,9 +977,7 @@ impl Endpoint {
 impl Endpoint {
     /// Send what a machine asked to send, and retire it if it is done.
     pub(super) fn apply(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
-        if let Some(message) = effects.send {
-            self.queue(flow.transmit(message.bytes()));
-        }
+        self.send_from(effects.send, flow, id, false);
         if effects.terminated {
             let reason = match effects.notify {
                 Some(Notify::TimedOut) => TerminationReason::TimedOut,
@@ -915,9 +988,58 @@ impl Endpoint {
         }
     }
 
+    /// The same, for a send a retransmission timer asked for.
+    ///
+    /// Split from [`Endpoint::apply`] rather than given a flag by every caller
+    /// because `fire_transaction` is the only place a timer drives one, and a
+    /// retransmission is the entry in the record that says a datagram is not
+    /// arriving.
+    pub(super) fn apply_again(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
+        self.send_from(effects.send, flow, id, true);
+        if effects.terminated {
+            let reason = match effects.notify {
+                Some(Notify::TimedOut) => TerminationReason::TimedOut,
+                Some(Notify::TransportFailed) => TerminationReason::TransportFailed,
+                _ => TerminationReason::Completed,
+            };
+            self.retire(id, reason);
+        }
+    }
+
+    /// Queue what a machine handed over, and write down that it went.
+    ///
+    /// A client transaction's first send goes through
+    /// [`Endpoint::apply_client`], so anything a client sends from here is
+    /// either a retransmission or the ACK for a refusal.
+    fn send_from(
+        &mut self,
+        message: Option<OwnedMessage>,
+        flow: Flow,
+        id: AnyTransactionId,
+        repeat: bool,
+    ) {
+        let Some(message) = message else {
+            return;
+        };
+        let reason = match (id.role() == Role::Client, repeat) {
+            (true, false) => Reason::RequestSent,
+            (true, true) => Reason::RequestRetransmitted,
+            (false, false) => Reason::ResponseSent,
+            (false, true) => Reason::ResponseRetransmitted,
+        };
+        self.note_wire(&message.as_raw(), reason, Direction::Outbound, flow);
+        self.queue(flow.transmit(message.bytes()));
+    }
+
     /// Send what a client machine asked to send at the moment it started.
     pub(super) fn apply_client(&mut self, effects: Effects, flow: Flow) {
         if let Some(message) = effects.send {
+            self.note_wire(
+                &message.as_raw(),
+                Reason::RequestSent,
+                Direction::Outbound,
+                flow,
+            );
             self.queue(flow.transmit(message.bytes()));
         }
     }
@@ -976,7 +1098,13 @@ impl Endpoint {
     }
 
     pub(super) fn forget_dialog(&mut self, dialog: DialogId, reason: DialogEndReason) {
+        // read before the forget, which is what takes the name away
+        let call = self.call_of_dialog(dialog);
         if self.dialogs.forget(dialog).is_some() {
+            self.note(
+                call.as_ref().map(CallId::as_bytes),
+                Decision::of(Reason::DialogDestroyed),
+            );
             self.forget_reliable_in(dialog);
             self.reinvites.forget_dialog(dialog);
             self.push(Event::DialogTerminated { dialog, reason });
@@ -993,7 +1121,9 @@ impl Endpoint {
         id: TransactionId<InviteClient>,
         renegotiated: Option<DialogId>,
         reason: FailureReason,
+        call: Option<&CallId>,
     ) {
+        self.note_failure(call, reason);
         match renegotiated {
             Some(dialog) => self.reinvite_gave_up(id, dialog, reason),
             None => self.push(Event::Failed {
@@ -1060,6 +1190,7 @@ impl Endpoint {
         let secure = flow.protocol.is_secure();
         let dialog = Dialog::from_request(&raw, tag, status, secure).ok()?;
         let named = self.dialogs.answer(dialog, flow);
+        self.note_wire(&raw, Reason::DialogCreated, Direction::Inbound, flow);
         self.ask_to_resolve(named);
         Some(named)
     }

@@ -258,6 +258,19 @@ pub enum SipralRegistrationState {
     Unregistered = 6,
     /// The registrar refused in a way that trying again cannot fix.
     Failed = 7,
+    /// A binding a registrar really granted, over a transport that has since
+    /// been suspended or lost, which nothing has proved since.
+    ///
+    /// Not registered, because it is no longer evidence; not failed, because
+    /// nothing refused it. A monotonic clock does not advance while a machine
+    /// sleeps, so a stack that slept eight hours comes back believing eight
+    /// milliseconds passed and every binding still valid — this is the state
+    /// that says otherwise, and an application that shows a line as ready on
+    /// the strength of it will show it ready when it is not.
+    Unverified = 8,
+    /// A binding read back from a snapshot rather than granted in this
+    /// process. It has not been proved either.
+    Restored = 9,
 }
 
 /// Why a registration is not live. Names for
@@ -996,6 +1009,8 @@ pub(crate) fn registration_state(state: Option<RegistrationState>) -> SipralRegi
         Some(RegistrationState::Retrying) => SipralRegistrationState::Retrying,
         Some(RegistrationState::Unregistered) => SipralRegistrationState::Unregistered,
         Some(RegistrationState::Failed) => SipralRegistrationState::Failed,
+        Some(RegistrationState::Unverified) => SipralRegistrationState::Unverified,
+        Some(RegistrationState::Restored) => SipralRegistrationState::Restored,
         // nothing to ask about, or a state the layer below has grown and this
         // ABI has no number for; saying so beats picking one that is wrong
         None | Some(_) => SipralRegistrationState::Unknown,
@@ -1128,6 +1143,14 @@ mod tests {
                 SipralRegistrationState::Unregistered,
             ),
             (RegistrationState::Failed, SipralRegistrationState::Failed),
+            (
+                RegistrationState::Unverified,
+                SipralRegistrationState::Unverified,
+            ),
+            (
+                RegistrationState::Restored,
+                SipralRegistrationState::Restored,
+            ),
         ];
         for (state, expected) in all {
             assert_eq!(registration_state(Some(state)), expected);

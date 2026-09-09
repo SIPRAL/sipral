@@ -12,6 +12,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A refresh that could not leave no longer kills the account for the life of
+  the process.** A scheduled registration refresh whose REGISTER failed to
+  reach a transport was treated as a registrar that had refused: the state went
+  to `Failed` with no retry, and nothing would ever try again. That is not what
+  happened — nothing on the wire said anything — and the shape it happens in is
+  the ordinary one on a machine that slept: the deadline falls due before the
+  socket has been rebuilt. It backs off and tries again now, which is what the
+  same failure gets when it happens on the wire.
+
 - A request too large for the path now says how large, and the check now covers
   the request that made the trouble. `Event::TransportWanted` carries the size
   of the request that did not fit and the size that would have, so
@@ -55,6 +64,86 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   come back in `Unsupported`, which the section asks for by name.
 
 ### Added
+
+- **Every call carries the story of what the stack decided** (D1). An ordered,
+  bounded record per `Call-ID`: a stable reason code, the wire event that caused
+  it with its size on the wire, a monotonic offset, and the addresses and limits
+  involved — serialising to JSON that can be attached to a bug report unchanged.
+  Eighteen codes to start with, and the rule that a code's wire form never
+  changes and is never reused is written next to the type rather than hoped for.
+
+  The bound is the part that is easy to get wrong twice. A record that overflows
+  says how much it lost instead of quietly becoming a lie, records are evicted
+  by least-recently-written so an hour-long call survives churn, and a request
+  refused for want of room goes to the endpoint's own record — otherwise a
+  scanner dialling extensions all night would evict every live call.
+
+- **A stack that knows the device sleeps** (C2, C3). An application woken by a
+  push tells the stack a call is expected on this account from this caller; the
+  stack pre-warms the transport and refreshes the binding on the fastest path
+  it has, matches the INVITE that follows to that announcement so the call
+  screen already on the screen is the one that gets the call, and reports an
+  announced call that never arrived as its own diagnosis rather than as an
+  error. The INVITE that beats its own push, the call cancelled before the
+  device woke, and two calls in quick succession are all tested rather than
+  hoped for.
+
+  A push carries no `Call-ID` and cannot be made to, so the match is on the
+  account plus the user and host of the `From`. Full §19.1.4 equivalence is
+  wrong in both directions here: it fails on a proxy that adds `;user=phone`,
+  and failing to match sounds safe but produces a second call screen for a call
+  the person is already looking at.
+
+  Registration can also be frozen and thawed across a cold start, with a
+  versioned format that refuses a snapshot from a later version rather than
+  misreading it, and a restored binding says it is restored rather than
+  claiming to be proved. Time-to-ready is measured and reported, because it is
+  what decides how long a queue rings a sleeping phone before skipping it. RFC
+  8599's `pn-provider`, `pn-prid` and `pn-param` go on the REGISTER contact and
+  nowhere else — and a de-registration leaves the push identifier out.
+
+- **A lifecycle for a machine that suspends** (D4, A7, C5), and the state that
+  was missing from it. `suspending`, `resumed`, `network_changed(from, to)`,
+  `interface_lost` and `name_resolution_lost`, each with a written recovery
+  ladder and each tested under the conditions that actually break it rather
+  than only the path where everything works.
+
+  The idea the rest hangs off: **a monotonic clock cannot tell you that you
+  slept.** It does not advance during suspend, so a stack that slept eight
+  hours comes back believing eight milliseconds passed, with every deadline
+  still in the future and every binding still valid, and nothing it can measure
+  contradicts that. Hence `Unverified` — a binding a registrar really granted,
+  over a transport since suspended or lost, that nothing has proved since.
+  Neither registered nor failed, and the direct answer to a cached registration
+  that read as valid while name resolution had gone.
+
+  `suspending` sends nothing at all. A graceful unregister cannot be observed
+  to have left, and if it does leave, a de-registered device cannot be woken by
+  a push.
+
+- **Health counters and an honest answer about what this build can do** (D3,
+  D8). Registrations attempted, succeeded and failed **by reason**; calls by
+  disposition; media gaps; jitter-buffer events; transport promotions; and one
+  gauge for calls in progress. A snapshot differences against an earlier one,
+  so a deployment's health is a subtraction rather than a search through text.
+  Capabilities are derived from the build — the codec catalogue, the transports
+  and features actually compiled in — never hand-maintained, because a
+  capability list that can drift from the build is worse than none: it is
+  believed.
+
+- **The device crates report the delay the canceller needs.** WASAPI had it in
+  one property; CoreAudio has four per direction across two kinds of object,
+  and a rate to convert them by, so `sipral-io-coreaudio` assembles it and both
+  crates now answer the same question in the same shape. On a laptop's own
+  speakers and microphone that comes to a hundred milliseconds — most of it the
+  devices' own processing rather than buffering — and about half that through
+  the voice-processing unit. Measured on real hardware, not estimated.
+
+  On Windows the stream is now opened as a communications stream, which is what
+  puts the operating system's own capture-side processing in the path. What it
+  cannot do is confirm that anything is cancelling: Windows offers no
+  per-stream way to report it, so the crate says what was asked and accepted
+  and stops there rather than implying more.
 
 - **A call can be dialled into, and hears what is dialled at it** (RFC 4733).
   The packet and everything §2.1 does to the sequence number and the timestamp

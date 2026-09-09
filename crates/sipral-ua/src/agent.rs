@@ -33,11 +33,13 @@ use sipral_core::transaction::{
 };
 
 use crate::account::{Account, AccountId};
+use crate::announce::{Announcement, Arrival, WINDOW};
 use crate::call::{Call, CallHandle, Refusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
+use crate::lifecycle::Machine;
 use crate::registration::{
-    Registration, backoff_delay, granted_expiry, min_expires, refresh_after, retry_after,
+    Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
@@ -48,7 +50,7 @@ use crate::subscription::{Subscription, SubscriptionHandle};
 pub struct UserAgent {
     pub(crate) endpoint: Endpoint,
     pub(crate) accounts: HashMap<AccountId, Account>,
-    registrations: HashMap<AccountId, Registration>,
+    pub(crate) registrations: HashMap<AccountId, Registration>,
     /// Which account a transaction belongs to. A challenge answered gives a
     /// new transaction, so this moves rather than being written once.
     owners: HashMap<AnyTransactionId, AccountId>,
@@ -90,9 +92,23 @@ pub struct UserAgent {
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
     pub(crate) timer_n: Duration,
+    /// What the operating system last said about sleeping, moving and losing a
+    /// network, and how far up the recovery ladder that left this.
+    pub(crate) life: Machine,
+    /// Calls a push said were coming and whose INVITE has not arrived yet.
+    /// A handful at most, and each one leaves within the window.
+    pub(crate) announcements: Vec<Announcement>,
+    /// And what each incoming call looked like when it arrived, so that a push
+    /// which lost the race to its own INVITE can still find it.
+    pub(crate) arrivals: HashMap<CallHandle, Arrival>,
+    pub(crate) announce_window: Duration,
+    /// When the application said this process was launched or woken, for the
+    /// time-to-ready measurement. Nothing here reads a clock.
+    pub(crate) cold: Option<Instant>,
     next_account: u32,
     pub(crate) next_call: u32,
     pub(crate) next_subscription: u32,
+    pub(crate) next_announcement: u32,
 }
 
 impl UserAgent {
@@ -123,9 +139,15 @@ impl UserAgent {
             events: VecDeque::new(),
             guard: Guard::default(),
             timer_n,
+            life: Machine::default(),
+            announcements: Vec::new(),
+            arrivals: HashMap::new(),
+            announce_window: WINDOW,
+            cold: None,
             next_account: 0,
             next_call: 0,
             next_subscription: 0,
+            next_announcement: 0,
         }
     }
 
@@ -137,7 +159,11 @@ impl UserAgent {
         // where the bytes came from is on the input and nowhere else by the
         // time an event names them, and screening an INVITE needs it
         self.guard.arrived(&input);
+        let bound = crate::announce::bound_transport(&input);
         let outcome = self.endpoint.receive(input, now);
+        if let Some(transport) = bound {
+            self.on_transport_bound(transport, now);
+        }
         self.drain(now);
         outcome
     }
@@ -148,6 +174,8 @@ impl UserAgent {
         self.fire_due(now);
         self.fire_call_timers(now);
         self.fire_subscription_timers(now);
+        self.fire_lifecycle_timers(now);
+        self.fire_announce_timers(now);
         self.drain(now);
     }
 
@@ -172,6 +200,8 @@ impl UserAgent {
             .filter_map(|reg| reg.due)
             .chain(self.call_deadline())
             .chain(self.subscription_deadline())
+            .chain(self.lifecycle_deadline())
+            .chain(self.announce_deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -266,7 +296,7 @@ impl UserAgent {
 // -- sending -----------------------------------------------------------------
 
 impl UserAgent {
-    fn send_register(
+    pub(crate) fn send_register(
         &mut self,
         account: AccountId,
         unregistering: bool,
@@ -295,6 +325,7 @@ impl UserAgent {
         reg.unregistering = unregistering;
         reg.unanswered = None;
         reg.due = None;
+        reg.owed = false;
         reg.state = if unregistering {
             RegistrationState::Unregistered
         } else if refreshing {
@@ -333,10 +364,15 @@ impl UserAgent {
             if let Some(reg) = self.registrations.get_mut(&account) {
                 reg.due = None;
             }
-            // a failure here is reported the same way one on the wire is: the
-            // transport can have gone since the refresh was scheduled
+            // A failure here is a refresh that could not leave, which is not
+            // the same thing as a registrar that refused. The transport can
+            // have gone since the refresh was scheduled -- which is the normal
+            // case on a machine that slept: the deadline falls due before the
+            // socket has been rebuilt -- so it backs off and tries again
+            // rather than declaring the account dead for the life of the
+            // process. Nothing on the wire said otherwise.
             if let Err(error) = self.send_register(account, false, now) {
-                self.give_up(account, RegistrationFailure::Unreachable, None, None);
+                self.retry_later(account, None, None, None, now);
                 let _ = error;
             }
         }
@@ -356,7 +392,9 @@ fn build_register(account: &Account, reg: &Registration, expires: Duration) -> O
     .from(&account.sender_value())
     .call_id(reg.call_id.clone())
     .cseq(reg.cseq.saturating_add(1))
-    .contact(&account.contact_value())
+    // the one request the RFC 8599 push parameters belong in, and a
+    // de-registration leaves the identifier out of them (§4.1.2)
+    .contact(&account.register_contact_value(expires.is_zero()))
     .header(HeaderName::Expires, seconds.as_bytes());
     for extra in &account.extra {
         if let Some(name) = HeaderName::from_bytes(&extra.name) {
@@ -380,6 +418,7 @@ impl UserAgent {
         self.settle_call_challenges(now);
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
+        self.settle_announcements(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing
@@ -569,6 +608,7 @@ impl UserAgent {
 
         let granted =
             granted_expiry(&response.as_raw(), &config.contact, reg.asking).unwrap_or(reg.asking);
+        let echo = echoed(&response.as_raw(), config);
         // a granted zero is a binding the registrar did not keep; there is
         // nothing to refresh and nothing to celebrate
         if granted.is_zero() {
@@ -581,10 +621,12 @@ impl UserAgent {
             return;
         }
 
-        let refresh_in = refresh_after(granted);
+        let cold = self.cold;
         let Some(reg) = self.registrations.get_mut(&account) else {
             return;
         };
+        reg.echo = echo;
+        let refresh_in = reg.bound(granted, cold, now);
         reg.state = RegistrationState::Registered;
         reg.failures = 0;
         reg.raised = false;
@@ -594,6 +636,7 @@ impl UserAgent {
             expires: granted,
             refresh_in,
         });
+        self.registration_proved();
     }
 
     /// §10.2.8: "a UA receives a 423 ... it MAY retry the registration after

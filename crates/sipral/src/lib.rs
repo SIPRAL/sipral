@@ -98,8 +98,10 @@
     )
 )]
 
+mod capabilities;
 mod clock;
 mod codec;
+mod counters;
 mod dtmf;
 mod echo;
 mod engine;
@@ -112,8 +114,10 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
+pub use capabilities::Capabilities;
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
 pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, SHORTEST_DIGIT};
 pub use echo::MAX_RENDER_DELAY;
 pub use engine::MediaEngine;

@@ -15,9 +15,10 @@
 //!
 //! So this keeps the recent past of the loudspeaker and hands back the slice
 //! that lines up. How far back to look is the render-to-capture delay of the
-//! device, which only the platform knows — CoreAudio reports it per device,
-//! WASAPI per stream — so it arrives from above rather than being guessed
-//! here.
+//! device, which only the platform knows and which neither platform reports
+//! the same way — WASAPI answers it per stream, CoreAudio has to be asked four
+//! properties per direction — so it arrives from above rather than being
+//! guessed here. The `sipral-io-*` crates are what assemble it.
 //!
 //! Everything is allocated when a processor is attached and not before. A
 //! build with nothing attached, which includes every headless one, carries no
@@ -31,12 +32,12 @@ use sipral_media::processor::Processor;
 
 /// The longest render-to-capture delay history is kept for.
 ///
-/// Half a second is far beyond any device that works: a headset is a few
-/// milliseconds, a Bluetooth link with its own codec is tens, and a delay
-/// above about a hundred is heard as an echo by the person on the other end
-/// whether or not anything cancels it. The limit exists so that a wrong number
-/// arriving from a platform is refused rather than turned into megabytes of
-/// ring per call.
+/// Half a second is far beyond any device that works, and the margin is wider
+/// than it first looks: a laptop's own speakers and microphone measure a
+/// hundred milliseconds together — most of it the devices' own processing
+/// rather than buffering — and its voice-processing unit about half that. The
+/// limit exists so that a wrong number arriving from a platform is refused
+/// rather than turned into megabytes of ring per call.
 pub const MAX_RENDER_DELAY: Duration = Duration::from_millis(500);
 
 /// A processor, the loudspeaker history it needs, and the frames it works in.

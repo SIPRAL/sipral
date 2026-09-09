@@ -39,6 +39,7 @@ use super::error::AckError;
 use super::event::{DialogEndReason, Event, FailureReason};
 use super::outgoing::OutgoingResponse;
 use super::table::Flow;
+use crate::diag::{Direction, Reason};
 use crate::dialog::DialogState;
 use crate::msg::{HeaderName, OwnedMessage, RawMessage, StatusCode};
 use crate::transaction::{
@@ -248,8 +249,9 @@ impl Endpoint {
         &mut self,
         invite: TransactionId<InviteClient>,
         answer: Option<&[u8]>,
-        _now: Instant,
+        now: Instant,
     ) -> Result<(), AckError> {
+        self.mark(now);
         let dialog = self
             .reinvites
             .dialog_of(invite)
@@ -274,6 +276,12 @@ impl Endpoint {
             .map_err(|_| AckError::NotAnswered)?;
         let ack = self.build_in_dialog(&plan, flow, None, answer)?;
         self.reinvites.keep_ack(invite, ack.clone());
+        self.note_wire(
+            &ack.as_raw(),
+            Reason::RequestSent,
+            Direction::Outbound,
+            flow,
+        );
         self.queue(flow.transmit(ack.bytes()));
         Ok(())
     }
@@ -346,9 +354,15 @@ impl Endpoint {
         // time a retransmission of the 2xx final response that triggered the
         // ACK arrives." The caller heard about the answer once
         if status.is_success()
-            && let Some(ack) = self.reinvites.ack_for(id).map(OwnedMessage::bytes)
+            && let Some(ack) = self.reinvites.ack_for(id).cloned()
         {
-            self.queue(flow.transmit(ack));
+            self.note_wire(
+                &ack.as_raw(),
+                Reason::RequestRetransmitted,
+                Direction::Outbound,
+                flow,
+            );
+            self.queue(flow.transmit(ack.bytes()));
             return;
         }
 

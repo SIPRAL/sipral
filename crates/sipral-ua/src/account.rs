@@ -13,6 +13,11 @@
 //! whoever owns the sockets; and the instance identifier, because RFC 5626
 //! §4.1 requires it to survive a power cycle, and a library with no storage
 //! cannot promise that.
+//!
+//! A third is the push resource identifier. RFC 8599 §4.1.1 puts it in the
+//! `Contact` of a REGISTER so that the network can wake a suspended device,
+//! and getting one is a conversation with a notification service that has
+//! nothing to do with SIP.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,6 +45,140 @@ pub(crate) struct Extra {
     pub(crate) value: Box<[u8]>,
 }
 
+/// Where a push notification for this account is delivered (RFC 8599 §4.1.1).
+///
+/// The three values are opaque here and mean something only to the
+/// notification service named by `provider`: §8.7 says "the format and
+/// semantics of pn-prid and pn-param are specific to the pn-provider value",
+/// and §10 to §12 register one triple each for Apple, Firebase and RFC 8030.
+/// Obtaining them is the application's — it talks to the service, it owns the
+/// entitlements, and a stack that guessed would guess wrong on every platform.
+///
+/// They go out on REGISTER and nowhere else. §4.1 forbids the parameters in
+/// any other request, because a `pn-prid` in the `Contact` of an INVITE hands
+/// the far end a token that wakes this device whenever it likes.
+#[derive(Clone, Debug)]
+pub struct Push {
+    provider: Box<str>,
+    prid: Box<str>,
+    param: Option<Box<str>>,
+    /// `+sip.pnsreg` (§4.1.4): this device can wake itself to refresh.
+    wakes_itself: bool,
+}
+
+impl Push {
+    /// Notifications of type `provider`, addressed to `prid`.
+    ///
+    /// `provider` is the registered name of the service — `apns`, `fcm`,
+    /// `webpush` — and `prid` the resource identifier it issued for this
+    /// installation.
+    #[must_use]
+    pub fn new(provider: &str, prid: &str) -> Self {
+        Self {
+            provider: Box::from(provider),
+            prid: Box::from(prid),
+            param: None,
+            wakes_itself: false,
+        }
+    }
+
+    /// The extra value a service needs beside the identifier: the application
+    /// bundle for Apple, the sender for Firebase.
+    ///
+    /// §4.1.1 makes it mandatory "if required for the specific PNS", so it is
+    /// optional here and the service decides.
+    #[must_use]
+    pub fn param(mut self, param: &str) -> Self {
+        self.param = Some(Box::from(param));
+        self
+    }
+
+    /// This device can send a binding refresh without being woken by a push,
+    /// which §4.1.4 makes it say with a `+sip.pnsreg` media feature tag.
+    ///
+    /// It is the application's fact and not this crate's to guess: a process
+    /// the operating system has suspended has no timer that runs, and one that
+    /// claims otherwise gets a registrar that stops sending the wake-ups the
+    /// device is relying on.
+    #[must_use]
+    pub const fn wakes_itself(mut self) -> Self {
+        self.wakes_itself = true;
+        self
+    }
+
+    /// The service this asks for, as it goes on the wire.
+    #[must_use]
+    pub const fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// `;pn-provider=…;pn-param=…;pn-prid=…`, in the order §4.1.4's example
+    /// writes them.
+    ///
+    /// `removing` leaves out the identifier: §4.1.2 says a REGISTER that gives
+    /// up the binding "MUST NOT insert the 'pn-prid' SIP URI parameter", and
+    /// its absence is how the network is told to stop sending notifications
+    /// for it.
+    fn write(&self, out: &mut Vec<u8>, removing: bool) {
+        out.extend_from_slice(b";pn-provider=");
+        escape(out, &self.provider);
+        if let Some(ref param) = self.param {
+            out.extend_from_slice(b";pn-param=");
+            escape(out, param);
+        }
+        if !removing {
+            out.extend_from_slice(b";pn-prid=");
+            escape(out, &self.prid);
+        }
+    }
+}
+
+/// A URI parameter value, escaped as §25.1's `pvalue` requires.
+///
+/// A push identifier is whatever the notification service made of it, and two
+/// of the three registered services hand out something that is not a SIP token
+/// — a base64 identifier carries `=`, a Web Push identifier is a whole URL.
+/// §8.7 says as much: "parameter value characters that are not part of pvalue
+/// need to be escaped".
+fn escape(out: &mut Vec<u8>, value: &str) {
+    for byte in value.as_bytes() {
+        // param-unreserved / unreserved, §25.1
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                *byte,
+                b'-' | b'_'
+                    | b'.'
+                    | b'!'
+                    | b'~'
+                    | b'*'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'['
+                    | b']'
+                    | b'/'
+                    | b':'
+                    | b'&'
+                    | b'+'
+                    | b'$'
+            )
+        {
+            out.push(*byte);
+            continue;
+        }
+        out.push(b'%');
+        out.push(hex(byte >> 4));
+        out.push(hex(byte & 0x0f));
+    }
+}
+
+const fn hex(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        _ => b'A' + nibble - 10,
+    }
+}
+
 /// A registrar, an identity, and how to prove it.
 #[derive(Clone, Debug)]
 pub struct Account {
@@ -62,6 +201,7 @@ pub struct Account {
     pub(crate) transport: TransportId,
     pub(crate) remote: SocketAddr,
     pub(crate) extra: Vec<Extra>,
+    pub(crate) push: Option<Push>,
 }
 
 impl Account {
@@ -91,6 +231,7 @@ impl Account {
             transport,
             remote,
             extra: Vec::new(),
+            push: None,
         }
     }
 
@@ -155,6 +296,21 @@ impl Account {
         self
     }
 
+    /// Ask the network to wake this device with push notifications
+    /// (RFC 8599 §4.1.1).
+    ///
+    /// The parameters ride on the `Contact` of every REGISTER and on nothing
+    /// else. Whether the network acts on them is
+    /// [`UserAgent::push_echo`](crate::UserAgent::push_echo): §4.1.1 says a UA
+    /// that gets no `sip.pns` back "MUST NOT assume the proxy will request
+    /// that push notifications are sent", and a phone that assumes it goes to
+    /// sleep and is never woken again.
+    #[must_use]
+    pub fn push(mut self, push: Push) -> Self {
+        self.push = Some(push);
+        self
+    }
+
     /// A header field on every REGISTER this account sends.
     #[must_use]
     pub fn header(mut self, name: HeaderName<'_>, value: &[u8]) -> Self {
@@ -215,10 +371,42 @@ impl Account {
     }
 
     /// `Contact`, with the instance identifier when the account has one.
+    ///
+    /// No push parameters, whatever the account was configured with. This is
+    /// the `Contact` of a dialog — an INVITE, the 200 that answers one — and
+    /// RFC 8599 §4.1 says a UA "MUST NOT insert the SIP URI parameters ... in
+    /// non-REGISTER requests in order to prevent the PNS information
+    /// associated with the UA from reaching the remote peer". A `pn-prid` that
+    /// leaks here is a token that lets whoever it reached wake this device at
+    /// will. [`Account::register_contact_value`] is the other one.
     pub(crate) fn contact_value(&self) -> Box<[u8]> {
-        let mut out = Vec::with_capacity(self.contact.as_bytes().len() + 64);
+        self.contact_with(None, false)
+    }
+
+    /// `Contact` for a REGISTER, which is the only request the push
+    /// parameters belong in.
+    ///
+    /// `removing` is a REGISTER with `Expires: 0`, where §4.1.2 leaves the
+    /// identifier out.
+    pub(crate) fn register_contact_value(&self, removing: bool) -> Box<[u8]> {
+        self.contact_with(self.push.as_ref(), removing)
+    }
+
+    fn contact_with(&self, push: Option<&Push>, removing: bool) -> Box<[u8]> {
+        let bytes = self.contact.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len() + 128);
         out.push(b'<');
-        out.extend_from_slice(self.contact.as_bytes());
+        // URI parameters go before the URI headers (§19.1.1), so a contact
+        // written with headers has to be opened up rather than appended to
+        let cut = bytes
+            .iter()
+            .position(|byte| *byte == b'?')
+            .unwrap_or(bytes.len());
+        out.extend_from_slice(bytes.get(..cut).unwrap_or(bytes));
+        if let Some(push) = push {
+            push.write(&mut out, removing);
+        }
+        out.extend_from_slice(bytes.get(cut..).unwrap_or_default());
         out.push(b'>');
         if let Some(ref urn) = self.instance_id {
             // RFC 3840 §9: the value is a quoted string, and RFC 5626 §4.1
@@ -227,6 +415,71 @@ impl Account {
             out.extend_from_slice(urn.as_bytes());
             out.push(b'"');
         }
+        if push.is_some_and(|push| push.wakes_itself) {
+            // §8.5: the media feature tag has no values
+            out.extend_from_slice(b";+sip.pnsreg");
+        }
         out.into_boxed_slice()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Account, Push};
+    use std::net::SocketAddr;
+
+    use sipral_core::endpoint::TransportId;
+    use sipral_core::msg::Uri;
+
+    fn uri(text: &str) -> Uri {
+        Uri::parse_str(text).expect("a URI")
+    }
+
+    fn account(contact: &str) -> Account {
+        Account::new(
+            uri("sip:alice@example.com"),
+            uri("sip:example.com"),
+            uri(contact),
+            TransportId(1),
+            "192.0.2.9:5060".parse::<SocketAddr>().expect("an address"),
+        )
+    }
+
+    fn rendered(account: &Account, removing: bool) -> String {
+        String::from_utf8_lossy(&account.register_contact_value(removing)).into_owned()
+    }
+
+    #[test]
+    fn a_push_identifier_that_is_a_url_survives_being_a_uri_parameter() {
+        // RFC 8599 §12: an RFC 8030 identifier is a whole push endpoint, and
+        // §8.7 says what is not a pvalue has to be escaped
+        let account = account("sip:alice@192.0.2.1")
+            .push(Push::new("webpush", "https://push.example.net/sub/A1?k=v#f").param("aBcD=="));
+        assert_eq!(
+            rendered(&account, false),
+            "<sip:alice@192.0.2.1;pn-provider=webpush;pn-param=aBcD%3D%3D;\
+             pn-prid=https://push.example.net/sub/A1%3Fk%3Dv%23f>"
+        );
+    }
+
+    #[test]
+    fn the_push_parameters_go_in_front_of_the_uri_headers_and_not_after_them() {
+        // §19.1.1 puts parameters before headers, and appending to a contact
+        // that already has headers would produce a URI nobody can parse
+        let account = account("sip:alice@192.0.2.1?Subject=call").push(Push::new("apns", "p1"));
+        assert_eq!(
+            rendered(&account, false),
+            "<sip:alice@192.0.2.1;pn-provider=apns;pn-prid=p1?Subject=call>"
+        );
+    }
+
+    #[test]
+    fn an_account_without_push_writes_the_contact_it_always_wrote() {
+        let account = account("sip:alice@192.0.2.1").instance_id("urn:uuid:1234");
+        assert_eq!(rendered(&account, false), rendered(&account, true));
+        assert_eq!(
+            rendered(&account, false),
+            "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:1234\""
+        );
     }
 }

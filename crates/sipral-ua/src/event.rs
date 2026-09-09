@@ -16,8 +16,10 @@ use sipral_core::endpoint::Event;
 use sipral_core::msg::{OwnedMessage, StatusCode};
 
 use crate::account::AccountId;
+use crate::announce::Announcement;
 use crate::call::{CallEndReason, CallHandle, CallState};
 use crate::dialoginfo::DialogInfo;
+use crate::lifecycle::{LifecycleState, RecoveryFailure, Rung};
 use crate::session::Hold;
 use crate::subscription::{SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 
@@ -33,12 +35,31 @@ pub enum RegistrationState {
     Registered,
     /// A refresh is in flight. The binding stands until it is answered.
     Refreshing,
+    /// A binding the registrar really did grant, over a transport this process
+    /// has since suspended or lost, that nothing has proved since.
+    ///
+    /// Not evidence, and that is the whole point of it existing: the worst
+    /// failure of a softphone is a refresh going out on a timer after a wake,
+    /// over a transport that died while nobody was watching, and the reason no
+    /// amount of checking prevents it is that "are we registered?" answers yes.
+    /// See `docs/16-lifecycle.md`.
+    Unverified,
     /// Something recoverable went wrong and the next attempt is scheduled.
     Retrying,
     /// The binding was given up on purpose.
     Unregistered,
     /// The registrar refused in a way that trying again cannot fix.
     Failed,
+    /// A snapshot was restored, and nothing has spoken to the registrar since
+    /// (see [`UserAgent::thaw_registration`](crate::UserAgent::thaw_registration)).
+    ///
+    /// There is a binding on paper. It is deliberately not `Registered`: what
+    /// was restored is what a registrar said before the device slept, and a
+    /// cached registration that still read as valid while name resolution had
+    /// gone is a failure this project has had. Nothing may be inferred from
+    /// this state except that the next REGISTER can be a refresh rather than a
+    /// new registration.
+    Restored,
 }
 
 impl core::fmt::Display for RegistrationState {
@@ -48,9 +69,11 @@ impl core::fmt::Display for RegistrationState {
             Self::Registering => "registering",
             Self::Registered => "registered",
             Self::Refreshing => "refreshing",
+            Self::Unverified => "unverified",
             Self::Retrying => "retrying",
             Self::Unregistered => "unregistered",
             Self::Failed => "failed",
+            Self::Restored => "restored",
         })
     }
 }
@@ -162,6 +185,43 @@ pub enum UaEvent {
     Unregistered {
         /// Which account.
         account: AccountId,
+    },
+    /// The INVITE for a call a push had already announced has arrived
+    /// (RFC 8599).
+    ///
+    /// Queued immediately before the [`UaEvent::IncomingCall`] naming the same
+    /// call, and never without one, so that an application reading the queue
+    /// in order knows the call belongs to a screen it has already raised
+    /// before it is told there is a call at all. That is the whole point: on a
+    /// phone the ringing screen exists first, and a stack that reports the
+    /// INVITE without saying which announcement it answers has made the
+    /// application guess.
+    ///
+    /// It is a separate event rather than a field on `IncomingCall` because a
+    /// variant that grows a field breaks every pattern that names its fields —
+    /// here, and in the C ABI and the bindings generated from it, where
+    /// `docs/13-client-requirements.md` B7 makes "adding a function cannot
+    /// leave a platform behind" a requirement rather than a preference.
+    CallAnnounced {
+        /// The call the INVITE opened.
+        call: CallHandle,
+        /// What announced it.
+        announcement: Announcement,
+    },
+    /// An announced call never arrived.
+    ///
+    /// Not an error. A wake-up chain has a notification service, a proxy, a
+    /// bucket timer and a radio in it, and when a call does not come through
+    /// it this is the only place that says which end gave up: the push was
+    /// delivered, this device woke, refreshed its binding, and no INVITE
+    /// followed. RFC 8599 §5.6.2 has several ways for that to be the proxy's
+    /// doing — the caller hung up, the push request failed, the bucket timer
+    /// ran out — and none of them reaches this device as a SIP message.
+    AnnouncedCallMissing {
+        /// What was expected.
+        announcement: Announcement,
+        /// How long it was waited for.
+        waited: Duration,
     },
     /// Somebody is calling.
     ///
@@ -408,6 +468,36 @@ pub enum UaEvent {
         /// The refusal, whole, when there was one. A 302 names where to try
         /// instead, and a 380 carries an alternative service.
         response: Option<OwnedMessage>,
+    },
+    /// The lifecycle machine moved: the machine was told it sleeps, that it
+    /// woke, or that the network under it is a different one.
+    ///
+    /// `rung` is what was just done about it and `next_in` is when the next
+    /// thing is tried. A rung of [`Rung::WantTransport`] or
+    /// [`Rung::WantAddress`] is a request: nothing here opens a socket or
+    /// resolves a name, so the recovery stops there until
+    /// [`UserAgent::rebind`](crate::UserAgent::rebind) is called, or until the
+    /// wait runs out and the ladder climbs on without it.
+    Lifecycle {
+        /// Where the machine is now.
+        state: LifecycleState,
+        /// What was just tried, when anything was.
+        rung: Option<Rung>,
+        /// How long until the next rung, when there is going to be one.
+        next_in: Option<Duration>,
+    },
+    /// Every rung of a recovery ladder was climbed and none of them worked.
+    ///
+    /// Nothing more happens by itself. Bindings whose REGISTER reached a
+    /// transport are still on their own back-off; `unverified` counts the ones
+    /// that never got that far, which are the ones nothing is retrying.
+    RecoveryGaveUp {
+        /// The last thing that was tried.
+        rung: Rung,
+        /// Why it stopped.
+        reason: RecoveryFailure,
+        /// Bindings left unproved.
+        unverified: usize,
     },
     /// A protocol event this layer has no policy for.
     ///

@@ -276,12 +276,46 @@ pub(crate) mod hardware {
     /// hardware for a while, which is why the question can be asked at all.
     pub(crate) const PROPERTY_DEVICE_IS_ALIVE: u32 = code(*b"livn");
 
+    /// `kAudioDevicePropertyLatency`: a `UInt32` of frames, and different on
+    /// each side of the device, so it is asked for on a direction's scope. The
+    /// header says a device's streams may add latency of their own and that
+    /// the two are summed rather than one standing for the other.
+    pub(crate) const PROPERTY_LATENCY: u32 = code(*b"ltnc");
+
+    /// `kAudioStreamPropertyLatency`, which the header defines as the device
+    /// selector asked of a stream object. The same four characters; a
+    /// different object, and the other half of the sum above.
+    pub(crate) const PROPERTY_STREAM_LATENCY: u32 = PROPERTY_LATENCY;
+
+    /// `kAudioDevicePropertySafetyOffset`: a `UInt32` of frames, being how far
+    /// ahead of the hardware position for output, or behind it for input, the
+    /// IO has to stay to be safe.
+    pub(crate) const PROPERTY_SAFETY_OFFSET: u32 = code(*b"saft");
+
+    /// `kAudioDevicePropertyBufferFrameSize`: a `UInt32` of frames in one IO
+    /// buffer. One of those passes between a frame being handed over and the
+    /// hardware having it.
+    pub(crate) const PROPERTY_BUFFER_FRAME_SIZE: u32 = code(*b"fsiz");
+
+    /// `kAudioDevicePropertyStreams`: an array of `AudioStreamID`, per
+    /// direction. They are objects in their own right, with their own
+    /// properties, which is why the latency above has to be asked for twice.
+    pub(crate) const PROPERTY_STREAMS: u32 = code(*b"stm#");
+
+    /// `kAudioDevicePropertyNominalSampleRate`: a `Float64`, and what turns
+    /// every count of frames above into a time.
+    pub(crate) const PROPERTY_NOMINAL_SAMPLE_RATE: u32 = code(*b"nsrt");
+
     /// `kCFStringEncodingUTF8`.
     pub(crate) const ENCODING_UTF8: u32 = 0x0800_0100;
 
     #[cfg(test)]
     mod tests {
-        use super::{PROPERTY_DEVICES, PropertyAddress, SCOPE_GLOBAL, code};
+        use super::{
+            PROPERTY_BUFFER_FRAME_SIZE, PROPERTY_DEVICES, PROPERTY_LATENCY,
+            PROPERTY_NOMINAL_SAMPLE_RATE, PROPERTY_SAFETY_OFFSET, PROPERTY_STREAM_LATENCY,
+            PROPERTY_STREAMS, PropertyAddress, SCOPE_GLOBAL, code,
+        };
         use core::mem::{align_of, offset_of, size_of};
 
         #[test]
@@ -296,6 +330,18 @@ pub(crate) mod hardware {
             assert_eq!(address.element, 0);
             assert_eq!(address.selector, code(*b"dev#"));
             assert_eq!(address.scope, code(*b"glob"));
+        }
+
+        #[test]
+        fn the_parts_of_a_delay_are_the_selectors_the_header_spells() {
+            assert_eq!(PROPERTY_LATENCY, code(*b"ltnc"));
+            assert_eq!(PROPERTY_SAFETY_OFFSET, code(*b"saft"));
+            assert_eq!(PROPERTY_BUFFER_FRAME_SIZE, code(*b"fsiz"));
+            assert_eq!(PROPERTY_STREAMS, code(*b"stm#"));
+            assert_eq!(PROPERTY_NOMINAL_SAMPLE_RATE, code(*b"nsrt"));
+            // the header defines the stream's as the device's, so asking a
+            // stream object for a different selector would ask for nothing
+            assert_eq!(PROPERTY_STREAM_LATENCY, PROPERTY_LATENCY);
         }
     }
 }

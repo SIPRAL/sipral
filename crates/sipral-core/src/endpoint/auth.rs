@@ -30,6 +30,7 @@ use super::error::AuthRetryError;
 use super::event::Event;
 use super::table::Flow;
 use crate::auth::{AuthCache, Credentials, Learned};
+use crate::diag::{Direction, Reason};
 use crate::msg::{HeaderName, Method, OwnedMessage, RawMessage, RequestBuilder, StatusCode};
 use crate::transaction::{AnyTransactionId, DialogId};
 
@@ -115,6 +116,7 @@ impl Endpoint {
         credentials: &Credentials,
         now: Instant,
     ) -> Result<AnyTransactionId, AuthRetryError> {
+        self.mark(now);
         let mut held = self
             .challenges
             .take(failed)
@@ -175,8 +177,9 @@ impl Endpoint {
         // The credentials are what made it large. §18.1.1 has to be applied
         // here as well as on the first send, or the one request in a call that
         // is certain to have grown is the one request nobody checked.
+        let call = held.request.as_raw().call_id().ok();
         if let Some((stream, stream_local)) = self
-            .promote_if_too_big(flow, message.len())
+            .promote_if_too_big(flow, message.len(), call)
             .map_err(AuthRetryError::Unsendable)?
         {
             flow = stream;
@@ -191,6 +194,12 @@ impl Endpoint {
                 .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
         }
 
+        self.note_wire(
+            &message.as_raw(),
+            Reason::ChallengeAnswered,
+            Direction::Outbound,
+            flow,
+        );
         let dialog = held.dialog;
         let timers = self.config.timers;
         let retried = if method == Method::Invite {
@@ -256,6 +265,12 @@ impl Endpoint {
             return;
         }
 
+        self.note_wire(
+            response,
+            Reason::ChallengeReceived,
+            Direction::Inbound,
+            flow,
+        );
         for challenge in cache.challenges() {
             self.events.push_back(Event::Challenged {
                 transaction: id,

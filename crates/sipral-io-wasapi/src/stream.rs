@@ -38,11 +38,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::abi::{
-    AudioCaptureClient, AudioCaptureClientVtable, AudioClient, AudioClientVtable,
-    AudioRenderClient, AudioRenderClientVtable, BUFFERFLAGS_DATA_DISCONTINUITY, BUFFERFLAGS_SILENT,
-    CLSCTX_ALL, Handle, Interface, REFERENCE_TIMES_PER_SECOND, SHARE_MODE_SHARED,
-    STREAMFLAGS_EVENTCALLBACK, WAIT_OBJECT_0, WAIT_TIMEOUT, WaveFormat, WaveFormatExtensible,
+    AudioCaptureClient, AudioCaptureClientVtable, AudioClient, AudioClient2, AudioClient2Vtable,
+    AudioClientProperties, AudioClientVtable, AudioRenderClient, AudioRenderClientVtable,
+    BUFFERFLAGS_DATA_DISCONTINUITY, BUFFERFLAGS_SILENT, CLSCTX_ALL, Handle, Interface,
+    REFERENCE_TIMES_PER_SECOND, SHARE_MODE_SHARED, STREAMFLAGS_EVENTCALLBACK, Unknown,
+    WAIT_OBJECT_0, WAIT_TIMEOUT, WaveFormat, WaveFormatExtensible,
 };
+use crate::category::Category;
 use crate::com::{Apartment, Com, Event, Priority, TaskMemory};
 use crate::convert::{fold, silence, spread};
 use crate::counters::Counters;
@@ -280,6 +282,7 @@ struct Opened {
     delivered: StreamFormat,
     latency: Duration,
     buffer_frames: u32,
+    category: Category,
 }
 
 /// The half of a stream that is the same in both directions.
@@ -291,6 +294,9 @@ struct Session {
     delivered: StreamFormat,
     latency: Duration,
     buffer_frames: u32,
+    /// What Windows made of being told this is a call. Asked once, before the
+    /// client was initialised, because that is the only moment it can be.
+    category: Category,
     /// Kept so that a reopen can ask for the same thing again and have the
     /// choice resolved against the machine as it is then.
     config: StreamConfig,
@@ -363,6 +369,7 @@ impl Session {
             delivered: opened.delivered,
             latency: opened.latency,
             buffer_frames: opened.buffer_frames,
+            category: opened.category,
             config: config.clone(),
             channel,
             started: false,
@@ -548,9 +555,35 @@ macro_rules! session_methods {
 
         /// What `IAudioClient::GetStreamLatency` says the engine adds, which is
         /// the part of the mouth-to-ear budget that belongs to Windows.
+        ///
+        /// One endpoint's worth, because a WASAPI client is one direction. An
+        /// echo canceller attached above wants the whole loop, which is this
+        /// number from the speaker's stream added to this number from the
+        /// microphone's — the pair of them being what
+        /// `sipral_io_coreaudio::Stream::latency` reports in one go, since the
+        /// unit there is duplex.
         #[must_use]
         pub const fn latency(&self) -> Duration {
             self.session.latency
+        }
+
+        /// Whether Windows took the stream as a call.
+        ///
+        /// [`Category::Communications`] is what the endpoint's own echo
+        /// cancellation, noise suppression and gain control apply to, and this
+        /// crate asks for it on every stream in both directions — the
+        /// loudspeaker's as much as the microphone's, because a canceller
+        /// whose reference is a stream Windows is treating as media is
+        /// cancelling against the wrong thing.
+        ///
+        /// It says what was asked and accepted, not that anything is
+        /// cancelling: Windows has no per-stream way to report that, and
+        /// [`Category`] says why. When it is not
+        /// [`Category::Communications`], there is no system processing at all
+        /// and the application's own is the only kind there will be.
+        #[must_use]
+        pub const fn category(&self) -> Category {
+            self.session.category
         }
 
         /// Frames in the engine's own buffer, which is the period it comes back
@@ -835,6 +868,12 @@ fn build(
     let client = unsafe { Com::<AudioClientVtable>::from_raw(raw.cast::<AudioClient>()) }
         .ok_or(Error::NoDevice)?;
 
+    // Before anything else is asked of the client, because the category is
+    // what the rest of the answers depend on: what Windows offers a
+    // communications stream and what it offers a media one are not obliged to
+    // be the same format, the same period, or the same processing.
+    let category = ask_for_communications(&client);
+
     let settled = negotiate(&client, wanted.sample_rate_hz())?;
     let format = mixformat::describe(&settled)?;
 
@@ -913,8 +952,56 @@ fn build(
             delivered,
             latency: reference_time(latency),
             buffer_frames,
+            category,
         },
     ))
+}
+
+/// Tell the client this stream is a call, before it is too late to say so.
+///
+/// Windows runs the endpoint's voice processing — the echo canceller among it
+/// — on streams that have declared themselves `AudioCategory_Communications`,
+/// and the declaration is only accepted between activating the client and
+/// initialising it. There is no way to add it afterwards and no way to ask
+/// later what it was, so it is done here and the answer is carried out with
+/// the stream.
+///
+/// A refusal is not a reason to fail the open. A stream without the category
+/// is an ordinary stream that carries a call perfectly well, minus whatever
+/// the endpoint would have done to it; what would be wrong is opening one and
+/// letting the application believe otherwise, which is what [`Category`] is
+/// for.
+fn ask_for_communications(client: &Com<AudioClientVtable>) -> Category {
+    // bound to a local so that what is pointed at outlives the call
+    let interface = AudioClient2Vtable::IID;
+    let mut raw: *mut c_void = ptr::null_mut();
+    // SAFETY: every vtable in `abi` begins with the three IUnknown slots, so
+    // this is the same cast the C headers make; the identifier and the
+    // out-parameter are live locals.
+    let status = unsafe {
+        (client.vtable().unknown.query_interface)(
+            client.as_ptr().cast::<Unknown>(),
+            &raw const interface,
+            &raw mut raw,
+        )
+    };
+    if !HResult::new(status).is_ok() {
+        return Category::Unavailable;
+    }
+    // SAFETY: the call succeeded, so this is a live `IAudioClient2` carrying a
+    // reference of its own, which this value gives back when it goes.
+    let Some(client) = (unsafe { Com::<AudioClient2Vtable>::from_raw(raw.cast::<AudioClient2>()) })
+    else {
+        // a success that handed over nothing, which no implementation does
+        return Category::Unavailable;
+    };
+
+    let asked = AudioClientProperties::COMMUNICATIONS;
+    // SAFETY: a live client and a live structure that outlives the call, whose
+    // own first field says how much of it Windows may read.
+    let status =
+        unsafe { (client.vtable().set_client_properties)(client.as_ptr(), &raw const asked) };
+    Category::from_status(HResult::new(status))
 }
 
 /// A `REFERENCE_TIME` as a duration.
@@ -1365,8 +1452,8 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptureStream, DEFAULT_DEPTH_FRAMES, PlaybackStream, Session, Shared, StreamConfig,
-        carry_on, read_wave, survivable,
+        CaptureStream, Category, DEFAULT_DEPTH_FRAMES, PlaybackStream, Session, Shared,
+        StreamConfig, carry_on, read_wave, survivable,
     };
     use crate::abi::{WAVE_FORMAT_PCM, WaveFormat, WaveFormatExtensible};
     use crate::device::Device;
@@ -1427,6 +1514,7 @@ mod tests {
             delivered: StreamFormat::narrowband(),
             latency: Duration::ZERO,
             buffer_frames: 480,
+            category: Category::Communications,
             config: StreamConfig::default(),
             channel: Arc::clone(channel),
             started: false,
@@ -1482,6 +1570,34 @@ mod tests {
         session.started = true;
         assert_eq!(session.stop(), Ok(()));
         assert!(!session.started);
+    }
+
+    #[test]
+    fn what_windows_made_of_the_category_reaches_the_caller_in_both_directions() {
+        use crate::status::HResult;
+
+        let channel = channel();
+        let speaker = PlaybackStream {
+            session: detached(&channel),
+        };
+        assert_eq!(speaker.category(), Category::Communications);
+        assert!(
+            speaker.category().is_communications(),
+            "the loudspeaker is asked for the category too, so a canceller's \
+             reference is not a stream Windows is treating as media"
+        );
+
+        // AUDCLNT_E_ALREADY_INITIALIZED: what a client asked in the wrong
+        // order would answer, and the stream still opens
+        let mut session = detached(&channel);
+        session.category = Category::Refused(HResult::new(0x8889_0002_u32.cast_signed()));
+        let microphone = CaptureStream { session };
+        assert!(!microphone.category().is_communications());
+        assert!(
+            microphone.category().to_string().contains("0x88890002"),
+            "a refusal has to carry what Windows said: {}",
+            microphone.category()
+        );
     }
 
     #[test]
@@ -1622,13 +1738,18 @@ mod tests {
             match PlaybackStream::open(&StreamConfig::new(wanted)) {
                 Ok(mut stream) => {
                     println!(
-                        "render at {rate}: {} on \"{}\", delivering {}, {} frames, {:?}, pro audio {}",
+                        "render at {rate}: {} on \"{}\", delivering {}, {} frames, {:?}, pro audio {}, {}",
                         stream.device_format(),
                         stream.device().name,
                         stream.format(),
                         stream.buffer_frames(),
                         stream.latency(),
-                        stream.priority_raised()
+                        stream.priority_raised(),
+                        stream.category()
+                    );
+                    assert!(
+                        stream.category().is_communications(),
+                        "the endpoint would not take the communications category"
                     );
                     stream.start().expect("start the render endpoint");
                     thread::sleep(Duration::from_millis(120));
@@ -1641,13 +1762,18 @@ mod tests {
             match CaptureStream::open(&StreamConfig::new(wanted)) {
                 Ok(mut stream) => {
                     println!(
-                        "capture at {rate}: {} on \"{}\", delivering {}, {} frames, {:?}, pro audio {}",
+                        "capture at {rate}: {} on \"{}\", delivering {}, {} frames, {:?}, pro audio {}, {}",
                         stream.device_format(),
                         stream.device().name,
                         stream.format(),
                         stream.buffer_frames(),
                         stream.latency(),
-                        stream.priority_raised()
+                        stream.priority_raised(),
+                        stream.category()
+                    );
+                    assert!(
+                        stream.category().is_communications(),
+                        "the endpoint would not take the communications category"
                     );
                     stream.start().expect("start the capture endpoint");
                     thread::sleep(Duration::from_millis(120));
@@ -1764,6 +1890,9 @@ mod tests {
         let mut microphone = CaptureStream::open(&StreamConfig::on(source.id.clone(), wanted))
             .expect("open the cable's capture endpoint");
 
+        // The category is not printed here: the test above says what the
+        // machine's own endpoints made of it, which is the same claim, and
+        // this one is about the tone getting through the cable.
         println!(
             "render  \"{}\"\n        endpoint {}, delivering {}, {} frames a period, {:?}, pro audio {}",
             sink.name,

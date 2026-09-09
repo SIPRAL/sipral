@@ -28,6 +28,11 @@ That is why the history is never squashed and never rewritten.
 | [10-roadmap.md](10-roadmap.md) | phases and their exit criteria |
 | [11-testing.md](11-testing.md) | test corpus, fixtures, the interoperability matrix |
 | [12-core-api.md](12-core-api.md) | the public surface of `sipral-core`, signatures only, with walkthroughs and what was rejected |
+| [13-client-requirements.md](13-client-requirements.md) | what a production softphone asks of this stack, and in what order |
+| [14-diagnostics.md](14-diagnostics.md) | the diagnostic record: reason codes, the memory bound, the JSON a bug report carries |
+| [15-mobile.md](15-mobile.md) | a call announced by a push before it arrives, and a registration that freezes and thaws |
+| [16-lifecycle.md](16-lifecycle.md) | suspend, resume, a network that changed, and what the stack costs when idle |
+| [17-observability.md](17-observability.md) | health counters, capability reporting, and the B2 audit of configuration entry points |
 
 ## Conventions
 

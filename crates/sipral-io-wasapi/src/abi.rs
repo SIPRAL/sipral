@@ -281,6 +281,98 @@ impl Interface for AudioClientVtable {
     );
 }
 
+/// `IAudioClient2Vtbl`, from `Audioclient.h`. `IAudioClient2` derives from
+/// `IAudioClient`, so its table is that whole table and then
+/// `IsOffloadCapable`, `SetClientProperties`, `GetBufferSizeLimits`. Eighteen
+/// slots, of which this crate calls the middle one of the three.
+///
+/// It embeds [`AudioClientVtable`] entire for the same reason every table here
+/// embeds [`UnknownVtable`]: that is what the C header does, and it is what
+/// makes the derived interface usable as the base one — the same object
+/// answers to both, so the client this crate initialises and the client it
+/// sets properties on are one client and not two.
+#[repr(C)]
+pub(crate) struct AudioClient2Vtable {
+    pub(crate) client: AudioClientVtable,
+    pub(crate) is_offload_capable:
+        unsafe extern "system" fn(*mut AudioClient2, i32, *mut i32) -> Hr,
+    pub(crate) set_client_properties:
+        unsafe extern "system" fn(*mut AudioClient2, *const AudioClientProperties) -> Hr,
+    pub(crate) get_buffer_size_limits: unsafe extern "system" fn(
+        *mut AudioClient2,
+        *const WaveFormat,
+        i32,
+        *mut i64,
+        *mut i64,
+    ) -> Hr,
+}
+
+/// `IAudioClient2`.
+pub(crate) type AudioClient2 = Object<AudioClient2Vtable>;
+
+impl Interface for AudioClient2Vtable {
+    /// `726778CD-F60A-4EDA-82DE-E47610CD78AA`.
+    const IID: Guid = Guid::new(
+        0x7267_78cd,
+        0xf60a,
+        0x4eda,
+        [0x82, 0xde, 0xe4, 0x76, 0x10, 0xcd, 0x78, 0xaa],
+    );
+}
+
+/// `AudioClientProperties`, from `Audioclient.h`: a size, a flag, a category
+/// and a set of options. Four four-octet fields and no padding.
+///
+/// `cbSize` is how Windows tells which version of the structure it has been
+/// handed: the Windows 8 one ended after the category and was twelve octets,
+/// and the options field arrived with 8.1. Sixteen is therefore not a
+/// formality, it is the statement that the fourth field is there to be read.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AudioClientProperties {
+    pub(crate) size: u32,
+    /// `bIsOffload`, a `BOOL`. Offload is hardware-accelerated playback of
+    /// long media, it has to be asked about with `IsOffloadCapable` first, and
+    /// a call is neither long nor media.
+    pub(crate) is_offload: i32,
+    /// `eCategory`, an `AUDIO_STREAM_CATEGORY`.
+    pub(crate) category: i32,
+    /// `Options`, an `AUDCLNT_STREAMOPTIONS` bitmask.
+    pub(crate) options: i32,
+}
+
+impl AudioClientProperties {
+    /// What `cbSize` carries: the octets of the structure itself.
+    pub(crate) const BYTES: u32 = 16;
+
+    /// A call. The category Windows applies its communications processing to,
+    /// no offload, and nothing bypassed.
+    ///
+    /// `AUDCLNT_STREAMOPTIONS_RAW` is the option that matters here and it is
+    /// the one deliberately not set: raw takes the stream past the endpoint's
+    /// processing objects, which is exactly where the echo canceller lives.
+    pub(crate) const COMMUNICATIONS: Self = Self {
+        size: Self::BYTES,
+        is_offload: 0,
+        category: AUDIO_CATEGORY_COMMUNICATIONS,
+        options: STREAMOPTIONS_NONE,
+    };
+}
+
+/// `AudioCategory_Communications`, from the `AUDIO_STREAM_CATEGORY`
+/// enumeration in `audiosessiontypes.h`.
+///
+/// The fourth entry, counting `AudioCategory_Other` as the zeroth. It is what
+/// Windows reads to decide that a stream is a call: which endpoint it follows
+/// when the user has chosen a separate one for communications, whether other
+/// applications are ducked under it, and whether the endpoint's own voice
+/// processing runs on it.
+pub(crate) const AUDIO_CATEGORY_COMMUNICATIONS: i32 = 3;
+
+/// `AUDCLNT_STREAMOPTIONS_NONE`, from `audiosessiontypes.h`: the default
+/// treatment, which is the one wanted.
+pub(crate) const STREAMOPTIONS_NONE: i32 = 0;
+
 /// `IAudioRenderClientVtbl`, from `Audioclient.h`: `GetBuffer`,
 /// `ReleaseBuffer`. Five slots.
 #[repr(C)]
@@ -599,11 +691,11 @@ pub(crate) const REFERENCE_TIMES_PER_SECOND: i64 = 10_000_000;
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioCaptureClientVtable, AudioClientVtable, AudioRenderClientVtable,
-        CLSID_DEVICE_ENUMERATOR, DeviceCollectionVtable, DeviceEnumeratorVtable, Guid, Interface,
-        MmDeviceVtable, NotificationClientVtable, PKEY_DEVICE_FRIENDLY_NAME, PropVariant,
-        PropertyKey, PropertyStoreVtable, SUBTYPE_IEEE_FLOAT, SUBTYPE_PCM, UnknownVtable,
-        WaveFormat, WaveFormatExtensible,
+        AudioCaptureClientVtable, AudioClient2Vtable, AudioClientProperties, AudioClientVtable,
+        AudioRenderClientVtable, CLSID_DEVICE_ENUMERATOR, DeviceCollectionVtable,
+        DeviceEnumeratorVtable, Guid, Interface, MmDeviceVtable, NotificationClientVtable,
+        PKEY_DEVICE_FRIENDLY_NAME, PropVariant, PropertyKey, PropertyStoreVtable,
+        SUBTYPE_IEEE_FLOAT, SUBTYPE_PCM, UnknownVtable, WaveFormat, WaveFormatExtensible,
     };
     use core::mem::{align_of, offset_of, size_of};
 
@@ -646,6 +738,9 @@ mod tests {
         assert_eq!(offset_of!(MmDeviceVtable, unknown), 0);
         assert_eq!(offset_of!(PropertyStoreVtable, unknown), 0);
         assert_eq!(offset_of!(AudioClientVtable, unknown), 0);
+        // through two derivations for this one, which is what makes releasing
+        // an IAudioClient2 through a cast to IUnknown right
+        assert_eq!(offset_of!(AudioClient2Vtable, client.unknown), 0);
         assert_eq!(offset_of!(AudioRenderClientVtable, unknown), 0);
         assert_eq!(offset_of!(AudioCaptureClientVtable, unknown), 0);
         assert_eq!(offset_of!(NotificationClientVtable, unknown), 0);
@@ -725,6 +820,54 @@ mod tests {
     }
 
     #[test]
+    fn the_audio_client_two_table_is_the_first_one_with_three_more_on_the_end() {
+        assert_eq!(slots::<AudioClient2Vtable>(), 18);
+        // the base interface's whole table, in place and in order: an
+        // `IAudioClient2` handed to any of the calls above has to be the same
+        // object at the same offsets, because it is
+        assert_eq!(offset_of!(AudioClient2Vtable, client), 0);
+        assert_eq!(slots::<AudioClientVtable>(), 15);
+        assert_eq!(slot(offset_of!(AudioClient2Vtable, is_offload_capable)), 15);
+        // the one this crate calls, and the reason the two around it are
+        // declared at all: it has to be in slot sixteen
+        assert_eq!(
+            slot(offset_of!(AudioClient2Vtable, set_client_properties)),
+            16
+        );
+        assert_eq!(
+            slot(offset_of!(AudioClient2Vtable, get_buffer_size_limits)),
+            17
+        );
+    }
+
+    #[test]
+    fn the_client_properties_are_four_words_that_say_their_own_size() {
+        assert_eq!(size_of::<AudioClientProperties>(), 16);
+        assert_eq!(align_of::<AudioClientProperties>(), 4);
+        assert_eq!(offset_of!(AudioClientProperties, size), 0);
+        assert_eq!(offset_of!(AudioClientProperties, is_offload), 4);
+        assert_eq!(offset_of!(AudioClientProperties, category), 8);
+        assert_eq!(offset_of!(AudioClientProperties, options), 12);
+        assert_eq!(
+            usize::try_from(AudioClientProperties::BYTES).unwrap(),
+            size_of::<AudioClientProperties>(),
+            "cbSize is what Windows reads to know the options field is there"
+        );
+
+        // what a call asks to be treated as, spelled out: the communications
+        // category, no offload, and nothing bypassed
+        let asked = AudioClientProperties::COMMUNICATIONS;
+        assert_eq!(asked.size, 16);
+        assert_eq!(asked.is_offload, 0);
+        assert_eq!(asked.category, super::AUDIO_CATEGORY_COMMUNICATIONS);
+        assert_eq!(asked.options, super::STREAMOPTIONS_NONE);
+        assert_ne!(
+            asked.options, 1,
+            "AUDCLNT_STREAMOPTIONS_RAW takes the stream past the processing"
+        );
+    }
+
+    #[test]
     fn the_two_buffer_tables_are_not_each_other() {
         assert_eq!(slots::<AudioRenderClientVtable>(), 5);
         assert_eq!(slot(offset_of!(AudioRenderClientVtable, get_buffer)), 3);
@@ -779,16 +922,21 @@ mod tests {
     #[test]
     fn the_constants_are_the_numbers_their_headers_define() {
         use super::{
-            BUFFERFLAGS_DATA_DISCONTINUITY, BUFFERFLAGS_SILENT, CLSCTX_ALL, COINIT_MULTITHREADED,
-            DATA_FLOW_CAPTURE, DATA_FLOW_RENDER, DEVICE_STATE_ACTIVE, REFERENCE_TIMES_PER_SECOND,
-            ROLE_COMMUNICATIONS, SHARE_MODE_SHARED, SPEAKER_FRONT_CENTER, STGM_READ,
-            STREAMFLAGS_EVENTCALLBACK, VT_EMPTY, VT_LPWSTR, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            AUDIO_CATEGORY_COMMUNICATIONS, BUFFERFLAGS_DATA_DISCONTINUITY, BUFFERFLAGS_SILENT,
+            CLSCTX_ALL, COINIT_MULTITHREADED, DATA_FLOW_CAPTURE, DATA_FLOW_RENDER,
+            DEVICE_STATE_ACTIVE, REFERENCE_TIMES_PER_SECOND, ROLE_COMMUNICATIONS,
+            SHARE_MODE_SHARED, SPEAKER_FRONT_CENTER, STGM_READ, STREAMFLAGS_EVENTCALLBACK,
+            STREAMOPTIONS_NONE, VT_EMPTY, VT_LPWSTR, WAIT_OBJECT_0, WAIT_TIMEOUT,
             WAVE_FORMAT_EXTENSIBLE, WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM,
         };
 
         assert_eq!(DATA_FLOW_RENDER, 0);
         assert_eq!(DATA_FLOW_CAPTURE, 1);
         assert_eq!(ROLE_COMMUNICATIONS, 2);
+        // the fourth AUDIO_STREAM_CATEGORY, and not to be confused with the
+        // third ERole above: two enumerations, two meanings of the same word
+        assert_eq!(AUDIO_CATEGORY_COMMUNICATIONS, 3);
+        assert_eq!(STREAMOPTIONS_NONE, 0);
         assert_eq!(DEVICE_STATE_ACTIVE, 0x0000_0001);
         assert_eq!(SHARE_MODE_SHARED, 0);
         assert_eq!(STREAMFLAGS_EVENTCALLBACK, 0x0004_0000);
@@ -896,6 +1044,15 @@ mod tests {
         assert_eq!(
             AudioClientVtable::IID.to_string(),
             "1cb9ad4c-dbfa-4c32-b178-c2f568a703b2"
+        );
+        assert_eq!(
+            AudioClient2Vtable::IID.to_string(),
+            "726778cd-f60a-4eda-82de-e47610cd78aa"
+        );
+        assert_ne!(
+            AudioClient2Vtable::IID,
+            AudioClientVtable::IID,
+            "the derived interface has its own identifier and has to be asked for by it"
         );
         assert_eq!(
             AudioRenderClientVtable::IID.to_string(),

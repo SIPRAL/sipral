@@ -34,6 +34,7 @@ use crate::device::DeviceChoice;
 use crate::device::{DeviceId, StreamEvent};
 use crate::format::StreamFormat;
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
+use crate::latency::RenderDelay;
 use crate::level::{Channel, Controls, window_samples};
 use crate::ring::Ring;
 use crate::status::{Error, OsStatus};
@@ -446,6 +447,9 @@ pub struct Stream {
     /// is wanted precisely when that has happened. `None` on iOS, where the
     /// route belongs to the audio session rather than to this crate.
     opened_on: Option<DeviceId>,
+    /// What that device said about its own delay, read at the same moment and
+    /// for the same reason.
+    delay: RenderDelay,
     health: Health,
     closed: bool,
     /// Set when teardown could not prove the callbacks were out. Nothing is
@@ -543,13 +547,38 @@ impl Stream {
             microphone,
             speaker,
             opened_on: None,
+            delay: RenderDelay::default(),
             health: Health::Stopped,
             closed: false,
             leak: false,
         };
         configure(unit, &stream.config, &stream.shared)?;
         stream.opened_on = stream.current_device();
+        stream.delay = stream.current_delay();
         Ok(stream)
+    }
+
+    /// What the device the unit landed on says its two directions cost.
+    #[cfg(target_os = "macos")]
+    fn current_delay(&self) -> RenderDelay {
+        // One device for both halves: the voice-processing unit drives one,
+        // and a caller wanting the microphone of one device and the speaker of
+        // another builds an aggregate, which is again one device.
+        self.opened_on.map_or_else(RenderDelay::default, |device| {
+            crate::hal::render_delay(device, device)
+        })
+    }
+
+    /// On iOS the numbers live in `AVAudioSession` — `inputLatency`,
+    /// `outputLatency` and `ioBufferDuration` — which is Objective-C and the
+    /// application's to read, so this crate has nothing to report.
+    #[cfg(target_os = "ios")]
+    #[expect(
+        clippy::unused_self,
+        reason = "as `current_device`: the answer is the platform's, not this stream's"
+    )]
+    fn current_delay(&self) -> RenderDelay {
+        RenderDelay::default()
     }
 
     /// Which device the unit landed on, where a platform has such a thing.
@@ -590,6 +619,39 @@ impl Stream {
     #[must_use]
     pub const fn format(&self) -> StreamFormat {
         self.format
+    }
+
+    /// How long a frame takes to get from [`Playback::write`] out of the
+    /// loudspeaker, across the room, and back in through [`Capture::read`].
+    ///
+    /// This is the number an echo canceller is told to look back by, and the
+    /// one line to write is the same on Windows: what
+    /// `sipral_io_wasapi::CaptureStream::latency` reports for its endpoint,
+    /// this reports for both halves of the device, because the unit here is
+    /// duplex and a WASAPI client is not.
+    ///
+    /// Read once, when the stream opened. Asking the device again later would
+    /// be a property read on hardware that may have gone, and the parts that
+    /// can move — the IO buffer another process resized — move by less than
+    /// the delay of asking. [`Stream::recover`] reads it again for the device
+    /// it lands on.
+    ///
+    /// Zero on iOS, and zero from a device that answered nothing.
+    /// [`Stream::render_delay`] is the same number with the parts still
+    /// separate, and says which of them the device would not give.
+    #[must_use]
+    pub fn latency(&self) -> Duration {
+        self.delay.total()
+    }
+
+    /// The same delay, part by part and direction by direction.
+    ///
+    /// Worth reading when a canceller is not converging: a device that
+    /// answered for three parts out of four gives a delay that is a floor
+    /// rather than the truth, and [`RenderDelay::is_complete`] is what says so.
+    #[must_use]
+    pub const fn render_delay(&self) -> RenderDelay {
+        self.delay
     }
 
     /// Whether the device is running.
@@ -1531,6 +1593,20 @@ mod tests {
         println!("opened at {format}");
         #[cfg(target_os = "macos")]
         println!("landed on {:?}", stream.device());
+        println!("{}", stream.render_delay());
+        assert!(
+            stream.latency() < Duration::from_millis(500),
+            "the device claims a delay no room has: {:?}",
+            stream.latency()
+        );
+        #[cfg(target_os = "macos")]
+        if let Ok(device) = stream.device() {
+            assert_eq!(
+                stream.render_delay(),
+                crate::hal::render_delay(device, device),
+                "the stream is reporting a delay that is not its device's"
+            );
+        }
         stream.start().expect("start the device");
 
         // a quiet sawtooth, so that what goes to the speaker is not silence
@@ -1630,10 +1706,22 @@ mod tests {
             speaker: Arc::clone(&shared.speaker),
             shared,
             opened_on: None,
+            delay: super::RenderDelay::default(),
             health: Health::Stopped,
             closed: false,
             leak: false,
         }
+    }
+
+    #[test]
+    fn a_stream_that_asked_no_device_looks_back_no_further_than_the_last_frame() {
+        let stream = detached();
+        assert_eq!(stream.latency(), Duration::ZERO);
+        assert_eq!(stream.render_delay(), super::RenderDelay::default());
+        assert!(
+            !stream.render_delay().is_complete(),
+            "nothing was asked, so nothing was answered"
+        );
     }
 
     #[test]

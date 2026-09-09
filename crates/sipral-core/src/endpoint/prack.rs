@@ -21,6 +21,7 @@ use super::event::Event;
 use super::outgoing::{OutgoingInDialogRequest, OutgoingResponse};
 use super::reliable::{self, FIRST_RSEQ_CEILING, OPTION_100REL, Reliable, Sent};
 use super::table::Flow;
+use crate::diag::{Direction, Reason};
 use crate::msg::{HeaderName, Method, RawMessage, StatusCode};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteServer, ProvisionalResponseId,
@@ -48,6 +49,7 @@ impl Endpoint {
         response: &OutgoingResponse,
         now: Instant,
     ) -> Result<ProvisionalResponseId, RespondError> {
+        self.mark(now);
         let entry = self
             .transactions
             .invite_server(transaction)
@@ -283,8 +285,14 @@ impl Endpoint {
             return;
         }
 
-        let payload = sent.message.bytes();
-        self.queue(flow.transmit(payload));
+        let repeated = sent.message.clone();
+        self.note_wire(
+            &repeated.as_raw(),
+            Reason::ResponseRetransmitted,
+            Direction::Outbound,
+            flow,
+        );
+        self.queue(flow.transmit(repeated.bytes()));
         if let Some(sent) = self
             .reliable
             .get_mut(raw)

@@ -56,6 +56,19 @@ const CHUNK: usize = 8_192;
 /// [`Handler::on_tick`] still runs on a quiet line.
 const IDLE: Duration = Duration::from_millis(200);
 
+/// How long one turn may sit in a read.
+///
+/// `None` means until a deadline or a packet, and on a stack with no call and
+/// nothing scheduled that is for ever. Separated out so that the arithmetic —
+/// which is all this decision is — can be tested without waiting for any of it.
+fn sleep_for(deadline: Option<Instant>, cap: Option<Duration>, now: Instant) -> Option<Duration> {
+    let until = deadline.map(|at| at.saturating_duration_since(now));
+    match (until, cap) {
+        (Some(until), Some(cap)) => Some(until.min(cap)),
+        (left, right) => left.or(right),
+    }
+}
+
 /// Whether the loop keeps going.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Control {
@@ -116,6 +129,7 @@ pub struct Runtime {
     udp: TransportId,
     local: SocketAddr,
     next: u32,
+    cap: Option<Duration>,
 }
 
 impl Runtime {
@@ -140,6 +154,7 @@ impl Runtime {
             udp,
             local,
             next: 2,
+            cap: Some(IDLE),
         };
         runtime
             .links
@@ -170,6 +185,24 @@ impl Runtime {
     #[must_use]
     pub const fn agent(&mut self) -> &mut UserAgent {
         &mut self.agent
+    }
+
+    /// The longest one turn may wait when nothing has a deadline.
+    ///
+    /// Two hundred milliseconds by default, so that [`Handler::on_tick`] runs
+    /// often enough for an application to do what nothing prompted it to do.
+    /// That is five wake-ups a second on a line where nothing is happening,
+    /// which is the wrong trade on a phone in somebody's pocket: `None`
+    /// removes the cap, and a turn then waits for a deadline or for a packet.
+    /// On a stack with no call and nothing scheduled — which is what
+    /// [`UserAgent::idle`] answers — there is neither, so the turn waits
+    /// indefinitely and the process costs nothing until something arrives.
+    ///
+    /// An application that removes the cap has to make sure something will
+    /// arrive, because [`Runtime::run`] cannot come out of a turn that is
+    /// waiting for ever. See `docs/16-lifecycle.md`.
+    pub const fn idle_cap(&mut self, cap: Option<Duration>) {
+        self.cap = cap;
     }
 
     /// Round the loop until the handler says to stop.
@@ -291,15 +324,15 @@ impl Runtime {
 
     /// Wait for something to arrive, or for the next deadline.
     fn wait(&mut self, now: Instant) {
-        let until = self
-            .agent
-            .poll_timeout()
-            .map_or(IDLE, |at| at.saturating_duration_since(now).min(IDLE));
-        match self.inbox.recv_timeout(until) {
-            Ok(arrival) => self.arrived(arrival),
+        let arrived = match sleep_for(self.agent.poll_timeout(), self.cap, now) {
+            Some(until) => self.inbox.recv_timeout(until).ok(),
+            None => self.inbox.recv().ok(),
+        };
+        match arrived {
+            Some(arrival) => self.arrived(arrival),
             // nothing came, or every reader thread is gone. Either way the
             // timers still have to run: that is how a transaction finds out
-            Err(_) => self.agent.handle_timeout(Instant::now()),
+            None => self.agent.handle_timeout(Instant::now()),
         }
     }
 
@@ -430,13 +463,13 @@ fn look_up(host: &Host, port: Option<u16>, protocol: Option<TransportProtocol>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{Control, Handler, Runtime};
+    use super::{Control, Handler, IDLE, Runtime, sleep_for};
     use crate::UserAgent;
     use crate::event::UaEvent;
     use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest};
     use sipral_core::msg::{HeaderName, Method, Uri};
     use std::net::SocketAddr;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     /// Everything the loop handed up, in order.
     #[derive(Debug, Default)]
@@ -502,5 +535,45 @@ mod tests {
         });
         assert_eq!(sizes.map(|(_, limit)| limit), Some(1_300), "{recorder:?}");
         assert!(sizes.is_some_and(|(size, _)| size > 1_400), "{sizes:?}");
+    }
+
+    #[test]
+    fn a_deadline_is_never_slept_past_however_generous_the_cap_is() {
+        let t0 = Instant::now();
+        let soon = t0 + Duration::from_millis(20);
+        assert_eq!(
+            sleep_for(Some(soon), Some(IDLE), t0),
+            Some(Duration::from_millis(20))
+        );
+        assert_eq!(
+            sleep_for(Some(soon), None, t0),
+            Some(Duration::from_millis(20))
+        );
+        // a deadline already past does not become a wait
+        let overdue = t0.checked_sub(Duration::from_secs(1)).expect("a past time");
+        assert_eq!(
+            sleep_for(Some(overdue), Some(IDLE), t0),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn a_stack_with_nothing_scheduled_and_no_cap_waits_for_a_packet() {
+        // C5: the whole cost of an idle turn, and there is none
+        let t0 = Instant::now();
+        assert_eq!(sleep_for(None, None, t0), None);
+        assert_eq!(sleep_for(None, Some(IDLE), t0), Some(IDLE));
+    }
+
+    #[test]
+    fn the_cap_is_what_the_application_last_said_it_was() {
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [12; 32], local).expect("a loopback socket");
+        assert_eq!(runtime.cap, Some(IDLE));
+        runtime.idle_cap(None);
+        assert_eq!(runtime.cap, None);
+        runtime.idle_cap(Some(Duration::from_secs(5)));
+        assert_eq!(runtime.cap, Some(Duration::from_secs(5)));
     }
 }

@@ -33,6 +33,14 @@
 //!   that quietly resampled would be easier to use and would hide the one
 //!   number a media pipeline has to know.
 //!
+//! Every stream is opened as a communications stream, which is what Windows
+//! applies the endpoint's own echo cancellation, noise suppression and gain
+//! control to. It is one call — `IAudioClient2::SetClientProperties`, after
+//! the client is activated and before it is initialised — and [`Category`] is
+//! where the answer to it goes, because a stream that did not get it has no
+//! system processing and the application above has to know that rather than
+//! assume either way.
+//!
 //! The volume, the mute and the level meter are here too, and they are applied
 //! to the frames rather than to any of the volumes Windows keeps — see
 //! [`Controls`] for why neither of those belongs to a call. They are on a
@@ -42,9 +50,9 @@
 //! On a target that is not Windows the crate still compiles, and still exports
 //! [`StreamFormat`], [`DeviceFormat`], [`SampleFormat`], [`Device`],
 //! [`DeviceChoice`], [`DeviceEvent`], [`StreamEvent`], [`Controls`], [`Gain`],
-//! [`Level`], [`Counters`], [`HResult`] and [`Error`], so that portable code
-//! above can name what it will be handed. What it does not export there is
-//! anything that would need a Windows library to link against.
+//! [`Level`], [`Counters`], [`Category`], [`HResult`] and [`Error`], so that
+//! portable code above can name what it will be handed. What it does not
+//! export there is anything that would need a Windows library to link against.
 //!
 //! Written from Microsoft's published headers and documented ABI; see
 //! `docs/02-clean-room.md` for why that matters.
@@ -90,12 +98,14 @@
     )
 )]
 
+mod category;
 mod counters;
 mod device;
 mod format;
 mod level;
 mod status;
 
+pub use category::Category;
 pub use counters::Counters;
 pub use device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, StreamEvent};
 pub use format::{DeviceFormat, SampleFormat, StreamFormat};
@@ -134,8 +144,8 @@ pub use stream::{CaptureStream, PlaybackStream, StreamConfig};
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Device, DeviceChoice, DeviceEvent, DeviceFormat, DeviceId, Direction, Error,
-        Gain, HResult, Level, SampleFormat, StreamEvent, StreamFormat,
+        Category, Counters, Device, DeviceChoice, DeviceEvent, DeviceFormat, DeviceId, Direction,
+        Error, Gain, HResult, Level, SampleFormat, StreamEvent, StreamFormat,
     };
 
     /// Everything named here has to exist on every target the workspace builds,
@@ -164,6 +174,9 @@ mod tests {
         assert_eq!(Gain::default(), Gain::UNITY);
         assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
+        // the one answer that means the system is doing the cancelling, and
+        // the one a caller has to be able to name to check for it
+        assert!(Category::Communications.is_communications());
         assert_eq!(
             DeviceFormat {
                 sample_rate_hz: 48_000,

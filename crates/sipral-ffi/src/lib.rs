@@ -27,7 +27,10 @@
 //! union ([`event`]). Whether a stack may be used from two threads at once, and
 //! whether the library may be re-entered from inside that callback, are both
 //! answered in [`stack`], because a binding author who cannot find the answer
-//! will assume the wrong one.
+//! will assume the wrong one. Two more answer questions an application asks
+//! about the library rather than about a call: what this build can do at all
+//! ([`capabilities`]), and whether the deployment it is running in is healthy
+//! ([`counters`]).
 //!
 //! ABI stability rules are in `docs/08-ffi.md`.
 
@@ -48,6 +51,8 @@
 
 pub mod account;
 pub mod call;
+pub mod capabilities;
+pub mod counters;
 pub mod error;
 pub mod event;
 pub mod handle;

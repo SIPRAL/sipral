@@ -17,13 +17,16 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::abi::hardware::{
-    ENCODING_UTF8, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT, PROPERTY_DEVICE_IS_ALIVE,
-    PROPERTY_DEVICES, PROPERTY_NAME, PROPERTY_STREAM_CONFIGURATION, PROPERTY_UID, PropertyAddress,
-    SCOPE_GLOBAL, SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
+    ENCODING_UTF8, PROPERTY_BUFFER_FRAME_SIZE, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT,
+    PROPERTY_DEVICE_IS_ALIVE, PROPERTY_DEVICES, PROPERTY_LATENCY, PROPERTY_NAME,
+    PROPERTY_NOMINAL_SAMPLE_RATE, PROPERTY_SAFETY_OFFSET, PROPERTY_STREAM_CONFIGURATION,
+    PROPERTY_STREAM_LATENCY, PROPERTY_STREAMS, PROPERTY_UID, PropertyAddress, SCOPE_GLOBAL,
+    SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
 };
 use crate::abi::{BAD_PROPERTY_SIZE, Buffer, BufferList};
 use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending};
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
+use crate::latency::{Latency, RenderDelay};
 use crate::status::{Error, OsStatus};
 use crate::sys;
 
@@ -121,6 +124,109 @@ pub fn is_alive(device: DeviceId) -> bool {
         "AudioObjectGetPropertyData (DeviceIsAlive)",
     )
     .is_ok_and(|alive| alive != 0)
+}
+
+/// What a device says one direction of it costs, part by part.
+///
+/// Never fails, and that is deliberate. Every part is separately optional in
+/// the hardware layer — a virtual device implements the properties its author
+/// thought of — so a refusal here would mean a caller with three quarters of a
+/// delay was handed nothing at all. What the device did not answer for comes
+/// back as [`None`] and [`Latency::is_complete`] says so.
+///
+/// The stream half is asked of the first stream on that side, which is the one
+/// carrying channel one, and this crate is mono. A device with several streams
+/// a side answers for each of them separately; the first is the one these
+/// samples travel on, so it is the one that counts.
+#[must_use]
+pub fn latency(device: DeviceId, direction: Direction) -> Latency {
+    let object = device.get();
+    let scope = match direction {
+        Direction::Input => SCOPE_INPUT,
+        Direction::Output => SCOPE_OUTPUT,
+    };
+    Latency {
+        device_frames: frames(object, PROPERTY_LATENCY, scope),
+        stream_frames: first_stream(object, scope)
+            .and_then(|stream| frames(stream, PROPERTY_STREAM_LATENCY, SCOPE_GLOBAL)),
+        safety_offset_frames: frames(object, PROPERTY_SAFETY_OFFSET, scope),
+        // the IO buffer is the device's rather than one direction's, so it is
+        // asked for globally and counted once on each side of the loop
+        buffer_frames: frames(object, PROPERTY_BUFFER_FRAME_SIZE, SCOPE_GLOBAL),
+        sample_rate_hz: nominal_rate(object),
+    }
+}
+
+/// The whole loop: out of `playback` and back in through `capture`.
+///
+/// Two devices rather than one, because on a Mac they usually are: the
+/// built-in microphone and a pair of headphones are two device objects with
+/// two rates and two buffer sizes. A stream that has both on one device passes
+/// the same identifier twice, which is what [`Stream::render_delay`] does.
+///
+/// [`Stream::render_delay`]: crate::Stream::render_delay
+#[must_use]
+pub fn render_delay(playback: DeviceId, capture: DeviceId) -> RenderDelay {
+    RenderDelay {
+        playback: latency(playback, Direction::Output),
+        capture: latency(capture, Direction::Input),
+    }
+}
+
+/// A count of frames a device or a stream keeps, or nothing where it does not
+/// keep that one.
+fn frames(object: u32, selector: u32, scope: u32) -> Option<u32> {
+    let address = PropertyAddress::new(selector, scope);
+    property_value::<u32>(object, &address, "AudioObjectGetPropertyData (frames)").ok()
+}
+
+/// The rate the device says it is running at, in whole hertz.
+///
+/// The property is a `Float64` because the hardware layer describes rates as
+/// ranges, not because a device runs at half a hertz.
+fn nominal_rate(device: u32) -> Option<u32> {
+    let address = PropertyAddress::new(PROPERTY_NOMINAL_SAMPLE_RATE, SCOPE_GLOBAL);
+    let hertz: f64 = property_value(
+        device,
+        &address,
+        "AudioObjectGetPropertyData (NominalSampleRate)",
+    )
+    .ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the cast saturates and turns anything that is not a number into zero, and zero is refused on the line after it"
+    )]
+    let rounded = hertz.round() as u32;
+    (rounded > 0).then_some(rounded)
+}
+
+/// The first stream on one side of a device.
+fn first_stream(device: u32, scope: u32) -> Option<u32> {
+    let address = PropertyAddress::new(PROPERTY_STREAMS, scope);
+    let bytes = property_size(device, &address).ok()?;
+    if bytes < size_of::<u32>() {
+        // a device with nothing on this side, which is most of them
+        return None;
+    }
+    let mut ids: Vec<u32> = vec![0; bytes / size_of::<u32>()];
+    let mut size = u32::try_from(bytes).unwrap_or(0);
+    // SAFETY: the buffer holds at least `size` octets, which is the most the
+    // call will write.
+    let status = unsafe {
+        sys::object_property_data(
+            device,
+            ptr::from_ref(&address),
+            0,
+            ptr::null(),
+            &raw mut size,
+            ids.as_mut_ptr().cast::<c_void>(),
+        )
+    };
+    if status != 0 || usize::try_from(size).unwrap_or(0) < size_of::<u32>() {
+        return None;
+    }
+    ids.first().copied()
 }
 
 /// The device a choice names, or `None` for the system route.
@@ -491,11 +597,20 @@ fn property_words(object: u32, address: &PropertyAddress) -> Result<Vec<u64>, Er
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceMonitor, choose, default_device, device_with_uid, devices, is_alive};
+    use super::{
+        DeviceMonitor, choose, default_device, device_with_uid, devices, is_alive, latency,
+        render_delay,
+    };
     use crate::device::{DeviceChoice, DeviceId, Direction};
+    use crate::latency::Latency;
     use crate::status::Error;
     use core::time::Duration;
     use std::sync::Arc;
+
+    /// What the facade refuses to look back by, spelled out here because a
+    /// device crate does not depend on the facade. A delay above this is not a
+    /// long echo path, it is a number that came out wrong.
+    const REFUSED_ABOVE: Duration = Duration::from_millis(500);
 
     #[test]
     fn a_saved_identity_finds_the_device_it_was_saved_from() {
@@ -571,6 +686,89 @@ mod tests {
                     list.iter().any(|device| device.id == id),
                     "the default {direction} device is not in the device list"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_delay_of_the_machines_own_devices_is_one_a_call_could_look_back_by() {
+        let (Ok(Some(speaker)), Ok(Some(microphone))) = (
+            default_device(Direction::Output),
+            default_device(Direction::Input),
+        ) else {
+            // no audio hardware, or a Mac whose microphone the user has turned
+            // off: nothing to ask, and nothing wrong
+            return;
+        };
+        let delay = render_delay(speaker, microphone);
+        println!("{delay}");
+
+        // Every part is a `u32` of frames, so below zero cannot arise; what
+        // can is a device answering something absurd, and the facade would
+        // refuse to hold that much history rather than believe it.
+        assert!(
+            delay.total() < REFUSED_ABOVE,
+            "a delay of {:?} is not a room, it is a wrong answer",
+            delay.total()
+        );
+        for (side, leg) in [("playback", delay.playback), ("capture", delay.capture)] {
+            if let Some(rate) = leg.sample_rate_hz {
+                assert!(rate >= 8_000, "{side} claims to run at {rate} Hz");
+                assert!(
+                    leg.duration() * 2 < Duration::from_secs(1),
+                    "{side} alone is {:?}",
+                    leg.duration()
+                );
+            } else {
+                assert_eq!(
+                    leg.duration(),
+                    Duration::ZERO,
+                    "{side} gave a time without a rate to measure it in"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_the_machine_does_not_have_answers_nothing_rather_than_zero() {
+        // no machine has handed this number out, so every property read
+        // refuses; what must not happen is a refusal arriving as a delay
+        let nothing = latency(DeviceId::new(u32::MAX), Direction::Output);
+        assert_eq!(nothing, Latency::default());
+        assert!(!nothing.is_complete());
+        assert_eq!(nothing.frames(), 0);
+        assert_eq!(nothing.duration(), Duration::ZERO);
+        assert_eq!(
+            render_delay(DeviceId::new(u32::MAX), DeviceId::new(u32::MAX)).total(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn every_device_the_machine_has_answers_for_the_side_it_carries() {
+        let Ok(list) = devices() else {
+            return;
+        };
+        for device in &list {
+            for direction in [Direction::Input, Direction::Output] {
+                let leg = latency(device.id, direction);
+                let carries = match direction {
+                    Direction::Input => device.is_input(),
+                    Direction::Output => device.is_output(),
+                };
+                if carries {
+                    // A device with channels on this side has a stream on it,
+                    // and the buffer size and the rate belong to the device
+                    // rather than to a direction, so those three are answered
+                    // by anything the hardware layer enumerated.
+                    assert!(
+                        leg.stream_frames.is_some(),
+                        "{device} has {direction} channels and no {direction} stream"
+                    );
+                    assert!(leg.buffer_frames.is_some(), "{device} has no IO buffer");
+                    assert!(leg.sample_rate_hz.is_some(), "{device} runs at no rate");
+                }
+                println!("{device} {direction}: {leg}");
             }
         }
     }

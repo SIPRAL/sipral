@@ -26,12 +26,20 @@
 //! canceller rather than write one, and on Apple's platforms the best one is
 //! already in the operating system.
 //!
+//! The render-to-capture delay is reported all the same, as `Stream::latency`
+//! and, for devices this crate did not open, `render_delay`. Apple's canceller
+//! sits below here and does not need to be told the number; what does need it
+//! is anything above that attaches a canceller of its own at the seam
+//! `docs/05-media.md` describes, and anyone counting the mouth-to-ear budget
+//! of a call. CoreAudio has no single property for it — see [`Latency`] for
+//! the four it does have.
+//!
 //! On a target with no CoreAudio the crate still compiles, and still exports
 //! [`StreamFormat`], [`Device`], [`DeviceChoice`], [`DeviceEvent`],
-//! [`StreamEvent`], [`Controls`], [`Gain`], [`Level`], [`Counters`] and
-//! [`Error`], so that portable code above can name what it will be handed.
-//! What it does not export there is anything that would need a framework to
-//! link against.
+//! [`StreamEvent`], [`Controls`], [`Gain`], [`Level`], [`Counters`],
+//! [`Latency`], [`RenderDelay`] and [`Error`], so that portable code above can
+//! name what it will be handed. What it does not export there is anything that
+//! would need a framework to link against.
 //!
 //! Written from Apple's published headers and documented ABI; see
 //! `docs/02-clean-room.md` for why that matters.
@@ -77,12 +85,14 @@
 mod counters;
 mod device;
 mod format;
+mod latency;
 mod level;
 mod status;
 
 pub use counters::Counters;
 pub use device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, StreamEvent};
 pub use format::StreamFormat;
+pub use latency::{Latency, RenderDelay};
 pub use level::{Controls, Gain, Level};
 pub use status::{Error, OsStatus};
 
@@ -110,13 +120,15 @@ pub use stream::{Capture, Playback, Stream, StreamConfig};
 mod hal;
 
 #[cfg(target_os = "macos")]
-pub use hal::{DeviceMonitor, default_device, device_with_uid, devices, is_alive};
+pub use hal::{
+    DeviceMonitor, default_device, device_with_uid, devices, is_alive, latency, render_delay,
+};
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Error, Gain, Level,
-        OsStatus, StreamEvent, StreamFormat,
+        Counters, Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Error, Gain, Latency,
+        Level, OsStatus, RenderDelay, StreamEvent, StreamFormat,
     };
 
     /// Everything named here has to exist on every target the workspace
@@ -147,6 +159,10 @@ mod tests {
         assert_eq!(Gain::default(), Gain::UNITY);
         assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
+        // a delay nobody has asked a device for is no delay, which is what a
+        // session that was never told one already assumes
+        assert_eq!(RenderDelay::default().total(), core::time::Duration::ZERO);
+        assert_eq!(RenderDelay::default().capture, Latency::default());
         assert_eq!(
             Error::Call {
                 call: "AudioUnitInitialize",

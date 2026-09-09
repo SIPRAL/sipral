@@ -12,6 +12,7 @@
 
 use std::time::Duration;
 
+use crate::diag::RecordLimits;
 use crate::msg::{Limits, ParseMode};
 use crate::transaction::TimerConfig;
 
@@ -129,6 +130,13 @@ pub struct EndpointConfig {
     /// this is the one a slow flood reaches: a thousand INVITEs that are all
     /// answered leave a thousand calls standing.
     pub max_dialogs: usize,
+    /// How much of what the endpoint decided it keeps
+    /// ([`crate::diag`]).
+    ///
+    /// Another ceiling on what a peer can make this endpoint spend, and the
+    /// only one whose cost is paid on calls that succeed as well as on the
+    /// ones that do not.
+    pub diagnostics: RecordLimits,
 }
 
 impl EndpointConfig {
@@ -155,6 +163,7 @@ impl EndpointConfig {
         keepalive_interval: Some(Duration::from_secs(25)),
         max_server_transactions: 256,
         max_dialogs: 128,
+        diagnostics: RecordLimits::DEFAULT,
     };
 }
 
@@ -276,5 +285,7 @@ mod tests {
         assert_eq!(config.datagram_limit.path_mtu, None);
         assert_eq!(config.max_server_transactions, 256);
         assert_eq!(config.max_dialogs, 128);
+        assert_eq!(config.diagnostics.max_decisions, 64);
+        assert_eq!(config.diagnostics.max_records, 32);
     }
 }

@@ -5,8 +5,11 @@
 //!
 //! Registration with refresh, outgoing and incoming calls, hold and resume,
 //! blind and attended transfer, the SUBSCRIBE/NOTIFY subscriptions behind
-//! message waiting and busy lamp field, and the policy that decides whether an
-//! INVITE off the internet is ever heard at all.
+//! message waiting and busy lamp field, the policy that decides whether an
+//! INVITE off the internet is ever heard at all, and what all of that stops
+//! being worth when the machine underneath it goes to sleep: a call announced
+//! by a push before there is a transport, a registration that can be written
+//! down and read back, and a lifecycle that says which of the two is which.
 //!
 //! Also sans-I/O: this is policy and sequencing over [`sipral_core`], not
 //! transport. The five calls are the endpoint's five calls, so the same event
@@ -38,11 +41,13 @@
 
 mod account;
 mod agent;
+mod announce;
 mod call;
 mod calls;
 mod dialoginfo;
 mod error;
 mod event;
+mod lifecycle;
 mod options;
 mod registration;
 mod reliable;
@@ -57,8 +62,9 @@ mod tests;
 mod timers;
 mod transfer;
 
-pub use account::{Account, AccountId};
+pub use account::{Account, AccountId, Push};
 pub use agent::UserAgent;
+pub use announce::{Announced, Announcement, AnnouncementId};
 pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
 pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
@@ -66,6 +72,10 @@ pub use dialoginfo::{
 };
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+pub use lifecycle::{
+    Idle, LifecycleState, Link, Network, Recovery, RecoveryFailure, Rung, Suspending,
+};
+pub use registration::{PushEcho, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, Refusals, Screen, Screening};

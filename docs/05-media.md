@@ -239,7 +239,10 @@ project has to do whoever writes the canceller:
 So `MediaSession` keeps the recent past of the loudspeaker and hands back the
 slice that lines up, at a distance the application sets with
 `set_render_delay`. That number is the device's render-to-capture delay, which
-only the platform knows: CoreAudio reports it per device, WASAPI per stream.
+only the platform knows, and neither of them reports it the same way: WASAPI
+answers it per stream in one call, while CoreAudio has four properties per
+direction spread over two kinds of object and a rate to convert them by.
+`sipral-io-coreaudio` assembles it; `sipral-io-wasapi` reads it.
 There is no portable guess worth making, so the stack does not make one — the
 default is zero, which pairs a capture with the frame played immediately
 before it, and a delay above half a second is refused rather than believed,
@@ -268,13 +271,45 @@ dependency either:
 
 | Platform | Where it comes from |
 |---|---|
-| macOS, iOS | The operating system's voice-processing audio unit, below `sipral-io-coreaudio`. Nothing reaches the seam, and nothing needs to |
-| Windows | The operating system's own capture-side processing, below `sipral-io-wasapi`, for a stream opened as communications |
+| macOS, iOS | The voice-processing audio unit `sipral-io-coreaudio` is built on. It is the unit or it is nothing, so it is there whenever a stream is, and nothing reaches the seam |
+| Windows | The endpoint's own capture-side processing, which applies to a stream declared `AudioCategory_Communications` and to no other kind. `sipral-io-wasapi` declares it on every stream it opens, in both directions, and reports whether Windows accepted the declaration — but no further, because no further is reportable |
 | Linux, and any build wanting its own | The seam. A permissively licensed component is attached by the application, and `THIRD-PARTY-NOTICES.md` grows a row for it |
 
 The seam exists for the third row and for anyone who wants a different one
 from what the platform provides. It is not a placeholder for work this project
 owes on the first two.
+
+The first two rows are not the same kind of certainty, and an application that
+treats them as one will ship an echo it cannot explain. On Apple's platforms
+the canceller is the unit the device crate opens. On Windows the processing
+belongs to the endpoint and its driver: the category is set with
+`IAudioClient2::SetClientProperties`, between activating the client and
+initialising it, which is the only window in which it is accepted — and after
+that Windows has no per-stream way of saying whether anything is cancelling. A
+person can switch the enhancements off in the sound settings, and an endpoint
+whose driver ships none reports nothing missing. So `CaptureStream::category`
+says what was asked and what Windows said to the asking, and stops there;
+anything but `Category::Communications` means there is no system processing at
+all, and the application's own is the only kind there will be.
+
+The delay the seam needs comes from the same two crates and is not assembled
+the same way. WASAPI keeps it in one property per stream,
+`IAudioClient::GetStreamLatency`, and a call wants both directions added.
+CoreAudio has no such property at all: the figure is the device's own latency,
+its safety offset, the frames in its IO buffer, and the latency of the stream
+on that side — four properties, asked per direction, with the header explicit
+that the device's and the stream's are summed rather than one standing for the
+other. `sipral_io_coreaudio::Stream::latency` does that arithmetic for both
+directions of the device the unit landed on, and `RenderDelay` keeps the parts,
+so that a device which answered for three of them can be told from one that
+answered for four. A device that answers for none gives zero, which is what a
+session that was never told a delay already assumes.
+
+Measured on a MacBook Air, its own speakers and microphone come to a hundred
+milliseconds of that, most of it the two streams' own processing rather than
+the buffers, and the two devices do not run at the same rate — 44.1 kHz out and
+48 kHz in — so even the arithmetic has to be done per direction. That is the
+case for asking the device rather than assuming a number.
 
 ## What device I/O owns, and does not
 

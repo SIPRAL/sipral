@@ -36,6 +36,7 @@ use super::tokens::Tokens;
 use super::transport::{Input, Transmit, TransportId, TransportProtocol};
 use super::via;
 use crate::auth::AuthCache;
+use crate::diag::{Decision, Direction, Reason, Records};
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
     HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
@@ -99,6 +100,9 @@ pub struct Endpoint {
     /// because the number an operator wants is "how often has this happened",
     /// not "how often since somebody last looked".
     pub(super) refused: u64,
+    /// What this endpoint decided, per call and for itself
+    /// (`docs/14-diagnostics.md`).
+    pub(super) diag: Records,
 }
 
 impl Endpoint {
@@ -131,6 +135,7 @@ impl Endpoint {
             dialogs_of: HashMap::new(),
             carried_auth: HashMap::new(),
             refused: 0,
+            diag: Records::new(config.diagnostics),
         }
     }
 
@@ -143,6 +148,7 @@ impl Endpoint {
     /// carries on. On a byte stream it is fatal to the connection, which the
     /// endpoint has already forgotten by the time the error is returned.
     pub fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
+        self.mark(now);
         match input {
             Input::TransportBound {
                 transport,
@@ -171,6 +177,7 @@ impl Endpoint {
 
     /// Time has passed.
     pub fn handle_timeout(&mut self, now: Instant) {
+        self.mark(now);
         while let Some(deadline) = self.deadlines.fire(now) {
             match deadline {
                 Deadline::Keepalive(transport) => self.send_keepalive(transport, now),
@@ -212,6 +219,10 @@ impl Endpoint {
     /// The one size that is *not* in hand there is the size of a request that
     /// never became a `Transmit` because §18.1.1 refused it, and that one
     /// arrives as [`Event::TransportWanted`] with the limit beside it.
+    ///
+    /// An application that would rather not log at all has both sizes without
+    /// doing anything: they are in the call's record
+    /// ([`Endpoint::call_record`], `docs/14-diagnostics.md`).
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.transmits.pop_front()
@@ -443,6 +454,7 @@ impl Endpoint {
         request: &OutgoingRequest,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.mark(now);
         let (message, flow) = self.build_request(request)?;
         let (id, effects) =
             self.transactions
@@ -460,6 +472,7 @@ impl Endpoint {
         request: &OutgoingRequest,
         now: Instant,
     ) -> Result<TransactionId<InviteClient>, SendError> {
+        self.mark(now);
         let (message, flow) = self.build_request(request)?;
         let secure = flow.protocol.is_secure();
         let set = DialogSet::new(message.clone(), secure);
@@ -487,6 +500,7 @@ impl Endpoint {
         invite: TransactionId<InviteClient>,
         now: Instant,
     ) -> Result<(), CancelError> {
+        self.mark(now);
         let Some(entry) = self.transactions.invite_client_mut(invite) else {
             return Err(CancelError::NoSuchTransaction);
         };
@@ -512,8 +526,9 @@ impl Endpoint {
         &mut self,
         dialog: DialogId,
         answer: Option<&[u8]>,
-        _now: Instant,
+        now: Instant,
     ) -> Result<(), AckError> {
+        self.mark(now);
         let Some(set) = self.dialogs.branch_set(dialog) else {
             return Err(AckError::NotOurCall);
         };
@@ -534,6 +549,12 @@ impl Endpoint {
         if let Some(branches) = self.dialogs.set_mut(set) {
             branches.keep_ack(&key, ack.clone()).ok();
         }
+        self.note_wire(
+            &ack.as_raw(),
+            Reason::RequestSent,
+            Direction::Outbound,
+            flow,
+        );
         self.transmits.push_back(flow.transmit(ack.bytes()));
         Ok(())
     }
@@ -547,6 +568,7 @@ impl Endpoint {
         dialog: DialogId,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.mark(now);
         let id = self.request_in_dialog(dialog, &OutgoingInDialogRequest::new(Method::Bye), now)?;
         // §15.1.1: "The UAC MUST consider the session terminated ... as soon
         // as the BYE request is passed to the client transaction." Whether the
@@ -574,6 +596,7 @@ impl Endpoint {
         request: &OutgoingInDialogRequest,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.mark(now);
         // an INVITE runs on a different machine and owns an ACK of its own;
         // sending one from here would give it a non-INVITE transaction and no
         // way to acknowledge the 2xx
@@ -620,6 +643,7 @@ impl Endpoint {
         request: &OutgoingInDialogRequest,
         now: Instant,
     ) -> Result<TransactionId<InviteClient>, SendError> {
+        self.mark(now);
         if request.contact.is_none() {
             return Err(SendError::MissingField("Contact"));
         }
@@ -660,6 +684,7 @@ impl Endpoint {
         response: &OutgoingResponse,
         now: Instant,
     ) -> Result<(), RespondError> {
+        self.mark(now);
         let entry = self
             .transactions
             .non_invite_server(transaction)
@@ -777,6 +802,7 @@ impl Endpoint {
         response: &OutgoingResponse,
         now: Instant,
     ) -> Result<Option<DialogId>, RespondError> {
+        self.mark(now);
         let entry = self
             .transactions
             .invite_server(transaction)
@@ -891,6 +917,12 @@ impl Endpoint {
         };
 
         let mut message = self.assemble(request, &flow, local, &minted)?;
+        self.note(
+            Some(&call_id),
+            Decision::of(Reason::TransportSelected)
+                .at_address(flow.destination)
+                .over(flow.protocol),
+        );
 
         // 18.1.1: too large for a datagram means it leaves over something
         // congestion controlled, and the Via has to say so
@@ -900,7 +932,8 @@ impl Endpoint {
                 .datagram_limit
                 .too_big_for_a_datagram(message.len())
         {
-            let stream = self.stream_to(request.remote, message.len())?;
+            let overlong = message.len();
+            let stream = self.stream_to(request.remote, overlong, Some(&call_id))?;
             let bound = self
                 .transports
                 .get(stream)
@@ -913,6 +946,7 @@ impl Endpoint {
             };
             local = bound.local;
             message = self.assemble(request, &flow, local, &minted)?;
+            self.note_promotion(Some(&call_id), flow, overlong);
         }
 
         Ok((message, flow))
@@ -934,25 +968,53 @@ impl Endpoint {
         &mut self,
         flow: Flow,
         bytes: usize,
+        call: Option<&[u8]>,
     ) -> Result<Option<(Flow, SocketAddr)>, SendError> {
         if flow.protocol.is_reliable() || !self.config.datagram_limit.too_big_for_a_datagram(bytes)
         {
             return Ok(None);
         }
-        let stream = self.stream_to(flow.destination, bytes)?;
+        let stream = self.stream_to(flow.destination, bytes, call)?;
         let bound = self
             .transports
             .get(stream)
             .ok_or(SendError::UnknownTransport)?;
-        Ok(Some((
-            Flow {
-                transport: stream,
-                destination: flow.destination,
-                source: None,
-                protocol: bound.protocol,
-            },
-            bound.local,
-        )))
+        let promoted = Flow {
+            transport: stream,
+            destination: flow.destination,
+            source: None,
+            protocol: bound.protocol,
+        };
+        let local = bound.local;
+        self.note_promotion(call, promoted, bytes);
+        Ok(Some((promoted, local)))
+    }
+
+    /// §18.1.1 moved a request off the datagram it did not fit in.
+    ///
+    /// The size and the limit go down together, because either on its own is
+    /// the number that made a fragmented request read as "authentication is
+    /// broken" for two days.
+    fn note_promotion(&mut self, call: Option<&[u8]>, flow: Flow, bytes: usize) {
+        let limit = self.datagram_limit_bytes();
+        self.note(
+            call,
+            Decision::of(Reason::TransportPromotedBySize)
+                .at_address(flow.destination)
+                .over(flow.protocol)
+                .measured(bytes, limit),
+        );
+    }
+
+    /// The largest request that would still have gone in a datagram.
+    ///
+    /// Nothing fits at all is reported as nothing fits, which is what a path
+    /// MTU below the §18.1.1 headroom means.
+    pub(super) fn datagram_limit_bytes(&self) -> u32 {
+        self.config
+            .datagram_limit
+            .largest_datagram_request()
+            .unwrap_or(0)
     }
 
     /// The stream transport a request too large for a datagram leaves on,
@@ -968,6 +1030,7 @@ impl Endpoint {
         &mut self,
         destination: SocketAddr,
         request_bytes: usize,
+        call: Option<&[u8]>,
     ) -> Result<TransportId, SendError> {
         let open = self
             .transports
@@ -980,18 +1043,20 @@ impl Endpoint {
         if let Some(stream) = open {
             return Ok(stream);
         }
+        let limit_bytes = self.datagram_limit_bytes();
         self.events.push_back(Event::TransportWanted {
             protocol: TransportProtocol::Tcp,
             destination,
             request_bytes,
-            // nothing fits at all is reported as nothing fits, which is what a
-            // path MTU below the headroom means
-            limit_bytes: self
-                .config
-                .datagram_limit
-                .largest_datagram_request()
-                .unwrap_or(0),
+            limit_bytes,
         });
+        self.note(
+            call,
+            Decision::of(Reason::TransportRefusedBySize)
+                .at_address(destination)
+                .over(TransportProtocol::Udp)
+                .measured(request_bytes, limit_bytes),
+        );
         Err(SendError::NeedsStreamTransport)
     }
 
