@@ -140,6 +140,28 @@ done)
     printf '        SVG drops <metadata> and its namespace. See assets/BRAND.md.\n'
 }
 
+# The guarantee deterministic replay stands on, and the reason it is a check
+# rather than a paragraph: the protocol crates take the time they are given and
+# never ask the machine for it, so a test drives a week of timers in a
+# millisecond and a recorded session replays to the same bytes.
+#
+# Test code may read the clock -- a test that wants a starting point has to get
+# one somewhere -- so everything from the first #[cfg(test)] down is cut, and
+# the modules that are nothing but tests are skipped by name. `runtime.rs` is
+# the one exception in library code and is meant to be: it is the reference
+# loop over real sockets, which is where the clock belongs.
+step "no clock read in the protocol crates"
+clock=$(find crates/sipral-core/src crates/sipral-ua/src crates/sipral-rtp/src \
+    crates/sipral-media/src crates/sipral-nat/src -name '*.rs' \
+    ! -name 'tests.rs' ! -name '*_tests.rs' ! -name 'runtime.rs' 2>/dev/null \
+    | sort | while read -r f; do
+    awk '/^#\[cfg\(test\)\]/ { exit } { print FILENAME ":" FNR ": " $0 }' "$f"
+done | grep 'Instant::now\|SystemTime::now' || true)
+[ -z "$clock" ] && pass "time is given, never read" || {
+    fail "the clock is read outside the reference loop:"
+    printf '%s\n' "$clock" | sed 's/^/        /'
+}
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }
@@ -148,7 +170,8 @@ fi
 
 step "build"
 cargo fmt --all --check >/dev/null 2>&1 && pass "cargo fmt" || fail "cargo fmt --all"
-# --all-features, because the reference loop is behind one and CI lints it
+# --all-features, because the reference loop is behind one and nothing else
+# would ever lint it
 cargo clippy --workspace --all-targets --all-features -- -D warnings >/dev/null 2>&1 \
     && pass "cargo clippy" || fail "cargo clippy --workspace --all-targets --all-features"
 cargo test --workspace --all-features >/dev/null 2>&1 \

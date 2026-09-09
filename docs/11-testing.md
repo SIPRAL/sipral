@@ -8,6 +8,27 @@ Copyright (c) 2026 Tiberiu Balasea
 The sans-I/O core exists so that this document can be short and the tests can be
 boring. Almost everything is deterministic and runs without a network.
 
+## Time is given, never read
+
+A guarantee rather than a habit, because everything else here rests on it:
+**no library code in `sipral-core`, `sipral-ua`, `sipral-rtp`, `sipral-media`
+or `sipral-nat` reads the machine's clock.** Time arrives as a parameter —
+`receive(input, now)`, `handle_timeout(now)` — and leaves as `poll_timeout()`.
+The one exception in library code is `sipral_ua::Runtime`, the reference loop
+over real sockets, which is where a clock belongs and which is behind a feature
+so that nothing links it by accident.
+
+`scripts/check.sh` enforces it. Everything from a file's first `#[cfg(test)]`
+is cut, modules that are nothing but tests are skipped by name, and a single
+`Instant::now()` anywhere else fails the gate with the file and line. Tests may
+read the clock; they have to get a starting point somewhere.
+
+Two things follow, and they are the reason it is worth a check. A test drives a
+week of registration refreshes in a millisecond, so retransmission schedules are
+verified rather than waited for. And a recorded session replays to the same
+bytes, which is what makes a failure caught in the field into a test that stays
+(`docs/13-client-requirements.md`, D2).
+
 ## Layers of testing
 
 **Unit, with a fake clock.** Every transaction and dialog state machine is
