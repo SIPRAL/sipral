@@ -9,14 +9,20 @@
 //! protection domain, and the next request carries credentials before anyone
 //! asks.
 //!
-//! Two things this refuses to do. It never uses one realm's challenge to
+//! Three things this refuses to do. It never uses one realm's challenge to
 //! answer another, because "each such protection domain has its own set of
-//! usernames and passwords". And it never answers the same nonce twice after a
+//! usernames and passwords". It never answers the same nonce twice after a
 //! refusal: §22.1 says "A UAC MUST NOT re-attempt requests with the
 //! credentials that have just been rejected (though the request may be retried
 //! if the nonce was stale)", so a second challenge with the same nonce and no
 //! `stale` means the password is wrong, and trying again would only lock the
-//! account.
+//! account. And it never offers a proxy's credentials to a request that is not
+//! the conversation they were earned in: §22.3 makes the `Call-ID` the limit —
+//! "it should incorporate credentials for that realm in all subsequent
+//! requests that contain the same Call-ID. These credentials MUST NOT be
+//! cached across dialogs" — while §22.2 puts no such limit on a registrar's or
+//! a callee's own challenge, which belongs to the destination rather than to
+//! one conversation with it.
 
 use std::sync::Arc;
 
@@ -51,6 +57,9 @@ struct Entry {
     /// How many times this client nonce has been used with this challenge.
     count: u32,
     refused: bool,
+    /// The `Call-ID` of the request this was learned from, which is how far a
+    /// proxy's challenge may travel (§22.3).
+    call_id: Arc<[u8]>,
 }
 
 impl AuthCache {
@@ -65,17 +74,19 @@ impl AuthCache {
     /// Take in a 401 or a 407.
     ///
     /// `cnonce` is the client nonce to use for whatever is learned here; the
-    /// core draws no random numbers, so it arrives from the caller. Per realm,
-    /// the topmost challenge that can be answered wins — RFC 8760 §2.3 has the
-    /// server list them "in the order in which it would prefer to see them
-    /// used", and §2.4 has the client "use the topmost header field that it
-    /// supports".
-    pub fn learn(&mut self, response: &RawMessage<'_>, cnonce: &str) -> Learned {
+    /// core draws no random numbers, so it arrives from the caller. `call_id`
+    /// is the one the refused request carried, which is how far a proxy's
+    /// challenge may be re-used (§22.3). Per realm, the topmost challenge that
+    /// can be answered wins — RFC 8760 §2.3 has the server list them "in the
+    /// order in which it would prefer to see them used", and §2.4 has the
+    /// client "use the topmost header field that it supports".
+    pub fn learn(&mut self, response: &RawMessage<'_>, cnonce: &str, call_id: &[u8]) -> Learned {
         let www = response.www_authenticate().map(|c| (c, false));
         let proxy = response.proxy_authenticate().map(|c| (c, true));
 
         let mut outcome = Learned::Unusable;
         let mut seen: Vec<(bool, Arc<str>)> = Vec::new();
+        let call_id: Arc<[u8]> = Arc::from(call_id);
         for (challenge, is_proxy) in www.chain(proxy) {
             let Some(challenge) = readable(challenge, is_proxy) else {
                 continue;
@@ -87,7 +98,7 @@ impl AuthCache {
                 continue;
             }
             seen.push(realm);
-            outcome = worst(outcome, self.take(challenge, cnonce));
+            outcome = worst(outcome, self.take(challenge, cnonce, &call_id));
         }
         outcome
     }
@@ -99,15 +110,21 @@ impl AuthCache {
     /// that has to go on the wire: `nc` "MUST" be different for every request
     /// sent with the same nonce, and a skipped number looks to the server like
     /// a replay it should not accept.
+    ///
+    /// `call_id` is the one the request going out carries. A proxy's challenge
+    /// is answered only inside the conversation it was made in (§22.3); a
+    /// registrar's or a callee's own goes on any request to that destination,
+    /// which is what §22.2 asks for and what spares a refresh its refusal.
     pub fn authorize(
         &mut self,
         credentials: &Credentials,
         method: Method<'_>,
         uri: &[u8],
+        call_id: &[u8],
     ) -> Vec<(HeaderName<'static>, String)> {
         let mut out = Vec::new();
         for entry in &mut self.entries {
-            if entry.refused {
+            if entry.refused || (entry.challenge.proxy && *entry.call_id != *call_id) {
                 continue;
             }
             entry.count = entry.count.saturating_add(1);
@@ -140,7 +157,7 @@ impl AuthCache {
         self.entries.clear();
     }
 
-    fn take(&mut self, challenge: Challenge, cnonce: &str) -> Learned {
+    fn take(&mut self, challenge: Challenge, cnonce: &str, call_id: &Arc<[u8]>) -> Learned {
         let existing = self.entries.iter_mut().find(|entry| {
             entry.challenge.proxy == challenge.proxy && entry.challenge.realm == challenge.realm
         });
@@ -150,11 +167,16 @@ impl AuthCache {
                 cnonce: Arc::from(cnonce),
                 count: 0,
                 refused: false,
+                call_id: Arc::clone(call_id),
             });
             return Learned::Retry;
         };
 
-        // "though the request may be retried if the nonce was stale"
+        // "though the request may be retried if the nonce was stale". A nonce
+        // the server has expired comes back with `stale`, and answering the
+        // new one is what it is asking for; the same nonce without it means
+        // the password was wrong, whether it went out after a refusal or
+        // ahead of one.
         if entry.challenge.nonce == challenge.nonce && !challenge.stale {
             entry.refused = true;
             return Learned::Refused;
@@ -163,6 +185,7 @@ impl AuthCache {
         entry.cnonce = Arc::from(cnonce);
         entry.count = 0;
         entry.refused = false;
+        entry.call_id = Arc::clone(call_id);
         Learned::Retry
     }
 }
@@ -207,17 +230,25 @@ CSeq: 1 REGISTER\r\n"
         out.into_bytes()
     }
 
+    /// The `Call-ID` of the request every test here is answering for.
+    const CALL: &[u8] = b"a84b4c76e66710";
+
     fn learn(cache: &mut AuthCache, bytes: &[u8]) -> Learned {
         let mut scratch = ParseScratch::new();
         let response = parse(bytes, &mut scratch, ParseMode::Strict).expect("a response");
-        cache.learn(&response, "0a4f113b")
+        cache.learn(&response, "0a4f113b", CALL)
     }
 
     fn authorize(cache: &mut AuthCache) -> Vec<(HeaderName<'static>, String)> {
+        authorize_for(cache, CALL)
+    }
+
+    fn authorize_for(cache: &mut AuthCache, call_id: &[u8]) -> Vec<(HeaderName<'static>, String)> {
         cache.authorize(
             &Credentials::new("alice", "secret"),
             Method::Register,
             b"sip:example.com",
+            call_id,
         )
     }
 

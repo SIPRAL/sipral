@@ -19,7 +19,8 @@ use super::{
 };
 use crate::msg::{HeaderName, Method, ParseMode, ParseScratch, RawMessage, StatusCode, Uri, parse};
 use crate::transaction::{
-    AnyTransactionId, DialogId, InviteClientState, NonInviteClientState, TransactionId,
+    AnyTransactionId, DialogId, InviteClient, InviteClientState, NonInviteClientState,
+    TransactionId,
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -121,6 +122,18 @@ pub(super) fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
 /// A response to a request the endpoint wrote, echoing the fields §8.2.6.2
 /// requires and nothing else.
 fn respond_to(request: &[u8], status: u16, reason: &str, tag: Option<&str>) -> Vec<u8> {
+    respond_with(request, status, reason, tag, "")
+}
+
+/// The same, with `extra` — already CRLF terminated — after the fields
+/// §8.2.6.2 requires.
+fn respond_with(
+    request: &[u8],
+    status: u16,
+    reason: &str,
+    tag: Option<&str>,
+    extra: &str,
+) -> Vec<u8> {
     let to = {
         let base = String::from_utf8_lossy(&header(request, HeaderName::To)).into_owned();
         match tag {
@@ -144,6 +157,7 @@ fn respond_to(request: &[u8], status: u16, reason: &str, tag: Option<&str>) -> V
     if (100..300).contains(&status) {
         out.extend_from_slice(b"Contact: <sip:bob@192.0.2.9>\r\n");
     }
+    out.extend_from_slice(extra.as_bytes());
     out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
     out
 }
@@ -1371,7 +1385,7 @@ fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
 }
 
 /// Feed bytes in on the stream transport.
-fn stream(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
+pub(super) fn stream(endpoint: &mut Endpoint, bytes: &[u8], now: Instant) {
     endpoint
         .receive(
             Input::StreamData {
@@ -1760,4 +1774,361 @@ fn a_stale_handle_answers_to_nothing() {
     assert_eq!(endpoint.transaction_state(id), None);
     let stale: AnyTransactionId = id.into();
     assert_eq!(stale.kind_name(), "non-INVITE client");
+}
+
+// -- a transport with nothing to absorb --------------------------------------
+//
+// §17.1.1.2 gives timer D a value of zero on a reliable transport, and
+// §17.1.2.2 does the same for timer K: a final response ends the client
+// transaction in the same breath as it arrives. Both sections still make
+// passing that response up a MUST, so what a caller is told about a call must
+// not depend on which transport carried the refusal. These are the same
+// exchanges as above, over TCP.
+
+/// An endpoint whose only transport is a stream to the peer, at `now`.
+pub(super) fn connected(now: Instant) -> Endpoint {
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [13; 32]);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    endpoint
+}
+
+/// The request the datagram tests send, on the stream instead.
+pub(super) fn streamed(method: Method<'_>) -> OutgoingRequest {
+    OutgoingRequest::new(method, uri("sip:bob@example.com"), TCP, peer())
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@example.com>")
+}
+
+/// A REGISTER on the stream, for the handshake tests next door.
+pub(super) fn streamed_register() -> OutgoingRequest {
+    OutgoingRequest::new(Method::Register, uri("sip:example.com"), TCP, peer())
+        .to(b"<sip:alice@example.com>")
+        .from(b"Alice <sip:alice@example.com>")
+        .contact(b"<sip:alice@192.0.2.1>")
+}
+
+/// A call up on the stream, acknowledged, with nothing left to drain.
+pub(super) fn streamed_call(endpoint: &mut Endpoint, now: Instant) -> DialogId {
+    endpoint
+        .invite(&streamed(Method::Invite), now)
+        .expect("the INVITE goes");
+    let bytes = sent(endpoint);
+    stream(endpoint, &respond_to(&bytes, 200, "OK", Some("desk")), now);
+    let dialog = events(endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call");
+    endpoint.ack_2xx(dialog, None, now).expect("the ACK goes");
+    transmits(endpoint);
+    dialog
+}
+
+/// An INVITE on the stream, already refused with `status`.
+fn refused_over_tcp(status: u16, reason: &str) -> (Endpoint, TransactionId<InviteClient>) {
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    let id = endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, status, reason, Some("desk")),
+        t0,
+    );
+    (endpoint, id)
+}
+
+#[test]
+fn a_refusal_on_a_stream_is_reported_exactly_as_it_is_on_a_datagram() {
+    let (mut endpoint, id) = refused_over_tcp(486, "Busy Here");
+
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::Failed { invite, status: Some(status), reason: FailureReason::Refused, .. }
+                if *invite == id && status.get() == 486
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn every_class_of_final_refusal_on_a_stream_reaches_the_caller() {
+    // one class at a time, because a proxy that redirects, a busy phone, a
+    // broken registrar and a whole busy user are four different things to do
+    // next and the caller is the one who decides which
+    for (status, reason) in [
+        (302, "Moved Temporarily"),
+        (404, "Not Found"),
+        (486, "Busy Here"),
+        (500, "Server Internal Error"),
+        (603, "Decline"),
+    ] {
+        let (mut endpoint, id) = refused_over_tcp(status, reason);
+        let seen = events(&mut endpoint);
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                Event::Failed {
+                    invite,
+                    status: Some(code),
+                    reason: FailureReason::Refused,
+                    response: Some(_),
+                } if *invite == id && code.get() == status
+            )),
+            "a {status} said nothing: {seen:?}"
+        );
+    }
+}
+
+#[test]
+fn the_failure_is_reported_before_the_transaction_that_carried_it_ends() {
+    // the other order is the same two events and a caller that has already
+    // forgotten the call by the time it is told why it failed
+    let (mut endpoint, _) = refused_over_tcp(486, "Busy Here");
+
+    let seen = events(&mut endpoint);
+    let failed = seen
+        .iter()
+        .position(|event| matches!(event, Event::Failed { .. }))
+        .expect("the refusal");
+    let ended = seen
+        .iter()
+        .position(|event| matches!(event, Event::TransactionTerminated { .. }))
+        .expect("the transaction ends in the same call on a stream");
+    assert!(failed < ended, "{seen:?}");
+}
+
+#[test]
+fn a_redirect_on_a_stream_still_carries_the_contact_to_try_instead() {
+    // a 3xx reduced to a number is a 3xx nobody can follow
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+
+    stream(
+        &mut endpoint,
+        &respond_with(
+            &bytes,
+            302,
+            "Moved Temporarily",
+            Some("proxy"),
+            "Contact: <sip:bob@192.0.2.8>\r\n",
+        ),
+        t0,
+    );
+    let moved = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Failed {
+                response: Some(response),
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("the redirect");
+    assert_eq!(
+        header(&moved.bytes(), HeaderName::Contact),
+        b"<sip:bob@192.0.2.8>"
+    );
+}
+
+#[test]
+fn an_early_dialog_a_refusal_ends_on_a_stream_says_it_was_refused() {
+    // "abandoned" is what a dialog is when the answer window closes on it;
+    // this one was told no
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, 180, "Ringing", Some("desk")),
+        t0,
+    );
+    events(&mut endpoint);
+
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, 486, "Busy Here", Some("desk")),
+        t0,
+    );
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::DialogTerminated {
+                reason: DialogEndReason::Refused,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_cancelled_call_refused_on_a_stream_is_reported_as_cancelled() {
+    // §9.1: the 487 is the answer to the CANCEL, not a call that failed on
+    // its own, and the difference is what the caller shows the user
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    let id = endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, 180, "Ringing", Some("desk")),
+        t0,
+    );
+    endpoint.cancel(id, t0).expect("the CANCEL goes");
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, 487, "Request Terminated", Some("desk")),
+        t0,
+    );
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, Event::Cancelled { invite } if *invite == id)),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_second_2xx_from_a_fork_that_lost_the_race_is_still_a_call_on_a_stream() {
+    // a 2xx does not end the client transaction — RFC 6026 keeps it in
+    // Accepted for 64*T1 — so both answers have to be reported and both ACKed
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+
+    for tag in ["desk", "mobile"] {
+        stream(&mut endpoint, &respond_to(&bytes, 200, "OK", Some(tag)), t0);
+    }
+    let answered: Vec<_> = events(&mut endpoint)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered.len(), 2, "both answers have to be acknowledged");
+    for dialog in answered {
+        endpoint.ack_2xx(dialog, None, t0).expect("each is ACKed");
+    }
+    assert_eq!(transmits(&mut endpoint).len(), 2);
+}
+
+#[test]
+fn a_reinvite_refused_on_a_stream_leaves_the_call_standing_and_says_so() {
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    endpoint
+        .invite(&streamed(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let bytes = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &respond_to(&bytes, 200, "OK", Some("desk")),
+        t0,
+    );
+    let dialog = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call");
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+
+    let again = endpoint
+        .reinvite(
+            dialog,
+            &OutgoingInDialogRequest::new(Method::Invite).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("the re-INVITE goes");
+    let sent_again = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &respond_to(&sent_again, 488, "Not Acceptable Here", Some("desk")),
+        t0,
+    );
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::ReinviteFailed { invite, status: Some(status), .. }
+                if *invite == again && status.get() == 488
+        )),
+        "{seen:?}"
+    );
+    assert!(
+        endpoint.dialog(dialog).is_some(),
+        "§14.1 leaves the session as it was"
+    );
+}
+
+#[test]
+fn a_non_invite_request_refused_on_a_stream_reports_the_response_first() {
+    // a REGISTER, a SUBSCRIBE and a REFER are one state machine (§17.1.2),
+    // and timer K is zero on all three here
+    for method in [Method::Register, Method::Subscribe, Method::Refer] {
+        let t0 = Instant::now();
+        let mut endpoint = connected(t0);
+        let id = endpoint
+            .request(&streamed(method), t0)
+            .expect("the request goes");
+        let bytes = sent(&mut endpoint);
+
+        stream(
+            &mut endpoint,
+            &respond_to(&bytes, 403, "Forbidden", Some("registrar")),
+            t0,
+        );
+        let seen = events(&mut endpoint);
+        let reported = seen
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    Event::Response { transaction, status, .. }
+                        if *transaction == id && status.get() == 403
+                )
+            })
+            .unwrap_or_else(|| panic!("{method:?} said nothing: {seen:?}"));
+        let ended = seen
+            .iter()
+            .position(|event| matches!(event, Event::TransactionTerminated { .. }))
+            .unwrap_or_else(|| panic!("{method:?} never ended: {seen:?}"));
+        assert!(reported < ended, "{method:?}: {seen:?}");
+    }
 }

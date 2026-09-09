@@ -330,7 +330,18 @@ impl UserAgent {
         };
 
         let request = build_register(config, reg, expires);
-        let id = self.endpoint.request(&request, now)?;
+        // §22.2: a registrar that has challenged this account before gets the
+        // credentials on the way in, rather than a REGISTER it has to refuse
+        // first. Nothing is added unless it has, so the first one of the boot
+        // is unchanged; what this saves is the 401 and the round trip after it
+        // on every refresh for the life of the process
+        let id = match config.credentials.clone() {
+            Some(credentials) => {
+                self.endpoint
+                    .request_with_credentials(&request, &credentials, now)?
+            }
+            None => self.endpoint.request(&request, now)?,
+        };
 
         let Some(reg) = self.registrations.get_mut(&account) else {
             return Err(UaError::NoSuchAccount);

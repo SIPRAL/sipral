@@ -23,6 +23,59 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   exists to prevent. Parameters written with a leading dash are still ignored,
   which is the half that keeps the rule usable.
 
+- **A registration refresh no longer pays for a 401 it has already answered.**
+  Every request this stack sent went out bare and waited to be challenged, the
+  refreshes included: REGISTER, 401, REGISTER with `Authorization`, 200 — and
+  then the same four an hour later, for the life of the process. §22.2 says
+  otherwise ("UAs SHOULD cache the credentials for a given value of the To
+  header field and 'realm' and attempt to re-use these values on the next
+  request for that destination"), and time to ready from cold is a product
+  requirement, not a nicety: it decides how long a call queue rings a sleeping
+  phone before skipping it.
+
+  What the endpoint remembers is now kept per destination rather than per
+  transaction — the nonce, the client nonce and the count, and never the
+  password, which is borrowed for the length of one call. The count keeps one
+  owner whichever way the credentials leave, because `nc` must differ on every
+  request that carries a nonce and two places counting would repeat one. A
+  proxy's challenge travels only as far as §22.3 allows it to, which is the
+  `Call-ID` it was made in; a registrar's or a callee's own goes on any request
+  to that destination. §22.1's guard against a rejected password being offered
+  twice now covers credentials that went out ahead of the refusal as well as
+  ones that answered it, so a refresh with a wrong password still costs the
+  account one attempt and not two, and a nonce the server has aged out is told
+  from a password it has rejected by `stale`, as RFC 7616 §3.3 defines it.
+  `Endpoint::request_with_credentials` and `Endpoint::invite_with_credentials`
+  are how a caller hands the password over for one send.
+
+- **A call refused over TCP or TLS now tells the application why.** The same
+  486 that reported `Failed` over UDP reported only `TransactionTerminated`
+  over a reliable transport, so on the transport most carriers use nothing
+  above the core ever learned that the callee was busy — only that a
+  transaction had ended. Timer D is zero on a reliable transport (§17.1.1.2)
+  and so is timer K (§17.1.2.2), so the final response ends the client
+  transaction in the same call that delivers it, and the endpoint was retiring
+  the transaction before handing the response up: by the time the dialog set
+  was asked what the refusal meant, the entry that names it had been dropped.
+  The response is reported first now and the transaction retired after, which
+  is what §17.1.1.2 and §17.1.2.2 make a MUST in both cases.
+
+  The same ordering had taken four more things with it, all of them only on a
+  reliable transport: an early dialog a refusal ended was reported as abandoned
+  rather than refused; a 487 that answered a CANCEL was not reported as a
+  cancellation; a repeated `nonce` was not recognised as one, so a rejected
+  password could be offered again and again (§22.1 says not to); and a
+  challenged request inside a call took its `CSeq` from the message rather than
+  from the dialog, which then handed the same number out twice.
+
+- **A rate limit that admits nothing is refused where it is set.**
+  `Rate::new` read a `burst` of zero as one and an interval of zero as "no
+  limit" instead of answering. B2 leaves three answers for a setting — applied,
+  rejected with a reason, unsupported — and no fourth for one that took effect
+  as something else. It returns `Result<Rate, RateError>` now, `Rate::unlimited`
+  is how a deployment asks for no floor on purpose, and `Rate::burst`,
+  `Rate::every` and `UserAgent::invite_limit` read back what took effect.
+
 - **A refresh that could not leave no longer kills the account for the life of
   the process.** A scheduled registration refresh whose REGISTER failed to
   reach a transport was treated as a registrar that had refused: the state went
@@ -61,6 +114,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   is refused at the account rather than by the registrar. `sipral_stack_settings`
   reads back what a stack is actually running on, since a zero in the config
   means "the default" and the effective figure is otherwise unknowable.
+
+### Added
+
+- INVITEs refused because the table of watched sources was full are counted
+  apart from those refused for calling too fast (`Refusals::by_crowding`).
+  Both are one 480 from the far end and two different things to do about it:
+  one source over its allowance is a limit set too tight, many addresses at
+  once is a flood that wants a firewall.
 
 ### Fixed
 

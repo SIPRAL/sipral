@@ -247,7 +247,8 @@ impl Endpoint {
         let sent = entry.machine.request().clone();
         let effects = entry.machine.on_response(response, now);
         let notify = effects.notify;
-        self.apply(effects, flow, AnyTransactionId::NonInviteClient(id));
+        let ending =
+            self.apply_deferred(effects, flow, AnyTransactionId::NonInviteClient(id), false);
 
         match notify {
             Some(Notify::Response) => {
@@ -276,6 +277,10 @@ impl Endpoint {
             }
             Some(Notify::Ack) | None => (),
         }
+
+        if let Some(reason) = ending {
+            self.retire(AnyTransactionId::NonInviteClient(id), reason);
+        }
     }
 
     fn on_invite_response(
@@ -298,7 +303,7 @@ impl Endpoint {
         let call = (notify == Some(Notify::TimedOut))
             .then(|| sent.as_raw().call_id().ok().map(CallId::new))
             .flatten();
-        self.apply(effects, flow, AnyTransactionId::InviteClient(id));
+        let ending = self.apply_deferred(effects, flow, AnyTransactionId::InviteClient(id), false);
 
         if notify == Some(Notify::Response) {
             // §14.1: a re-INVITE never forks, so its answer is not one of
@@ -318,6 +323,10 @@ impl Endpoint {
         // the first provisional response is what releases it
         if cancel_due {
             self.send_cancel(id, now).ok();
+        }
+
+        if let Some(reason) = ending {
+            self.retire(AnyTransactionId::InviteClient(id), reason);
         }
     }
 
@@ -977,13 +986,7 @@ impl Endpoint {
 impl Endpoint {
     /// Send what a machine asked to send, and retire it if it is done.
     pub(super) fn apply(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
-        self.send_from(effects.send, flow, id, false);
-        if effects.terminated {
-            let reason = match effects.notify {
-                Some(Notify::TimedOut) => TerminationReason::TimedOut,
-                Some(Notify::TransportFailed) => TerminationReason::TransportFailed,
-                _ => TerminationReason::Completed,
-            };
+        if let Some(reason) = self.apply_deferred(effects, flow, id, false) {
             self.retire(id, reason);
         }
     }
@@ -995,15 +998,38 @@ impl Endpoint {
     /// retransmission is the entry in the record that says a datagram is not
     /// arriving.
     pub(super) fn apply_again(&mut self, effects: Effects, flow: Flow, id: AnyTransactionId) {
-        self.send_from(effects.send, flow, id, true);
-        if effects.terminated {
-            let reason = match effects.notify {
-                Some(Notify::TimedOut) => TerminationReason::TimedOut,
-                Some(Notify::TransportFailed) => TerminationReason::TransportFailed,
-                _ => TerminationReason::Completed,
-            };
+        if let Some(reason) = self.apply_deferred(effects, flow, id, true) {
             self.retire(id, reason);
         }
+    }
+
+    /// Send what a machine asked to send, and hand back why it should be
+    /// retired rather than retiring it.
+    ///
+    /// Timer D is zero on a reliable transport (§17.1.1.2) and so is timer K
+    /// (§17.1.2.2), so a final response that arrives over TCP or TLS ends the
+    /// client transaction in the very call that delivered it. Both sections
+    /// still make passing that response to the TU a MUST, and everything that
+    /// reads it lives in state [`Endpoint::retire`] takes away: the dialogs
+    /// the INVITE forked into, the CANCEL that was racing it, the nonce a
+    /// challenge answered, the dialog an in-dialog request belongs to. A
+    /// caller that reports first and retires afterwards sees the same events
+    /// in the same order whatever the transport was; over UDP the transaction
+    /// stands for another 32 seconds and none of this shows.
+    fn apply_deferred(
+        &mut self,
+        effects: Effects,
+        flow: Flow,
+        id: AnyTransactionId,
+        repeat: bool,
+    ) -> Option<TerminationReason> {
+        let ending = effects.terminated.then_some(match effects.notify {
+            Some(Notify::TimedOut) => TerminationReason::TimedOut,
+            Some(Notify::TransportFailed) => TerminationReason::TransportFailed,
+            _ => TerminationReason::Completed,
+        });
+        self.send_from(effects.send, flow, id, repeat);
+        ending
     }
 
     /// Queue what a machine handed over, and write down that it went.
@@ -1078,7 +1104,6 @@ impl Endpoint {
         }
         self.forget_tag(id);
         self.dialogs_of.remove(&id);
-        self.carried_auth.remove(&id);
         self.push(Event::TransactionTerminated {
             transaction: id,
             reason,

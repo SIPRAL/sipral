@@ -95,27 +95,91 @@ const WATCHED: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rate {
     burst: u32,
-    every: Duration,
+    /// `None` is no limit at all. Zero says the same thing arithmetically — a
+    /// token earned in no time is a token always available — but a deployment
+    /// that wants no limit says so with [`Rate::unlimited`], and an interval
+    /// that came out of a division and rounded to nothing meant no such thing.
+    every: Option<Duration>,
 }
+
+/// Why a [`Rate`] was refused.
+///
+/// Both values are arithmetically meaningful and neither is what anybody
+/// wants, so they are answered here rather than quietly turned into something
+/// else. A setting is applied, rejected with a reason, or unsupported; there is
+/// no fourth answer where the value that took effect is not the value that was
+/// given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RateError {
+    /// A burst of zero admits nothing, ever — not the first call of the day
+    /// and not the one after a week of quiet, because a bucket that holds no
+    /// tokens can never be refilled to one.
+    NoBurst,
+    /// An interval of zero earns a token in no time, which is a limit that
+    /// never limits. [`Rate::unlimited`] is how a deployment asks for that on
+    /// purpose.
+    NoInterval,
+}
+
+impl fmt::Display for RateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match *self {
+            Self::NoBurst => "a burst of zero would refuse every call",
+            Self::NoInterval => "an interval of zero is no limit; say Rate::unlimited",
+        })
+    }
+}
+
+impl std::error::Error for RateError {}
 
 impl Rate {
     /// `burst` calls at once, then one more every `every`.
     ///
-    /// A `burst` of zero would refuse the first call of the day, so it is
-    /// read as one. An `every` of zero is no limit at all, which is how a
-    /// deployment that wants none says so.
-    #[must_use]
-    pub const fn new(burst: u32, every: Duration) -> Self {
-        Self {
-            burst: if burst == 0 { 1 } else { burst },
-            every,
+    /// # Errors
+    /// [`RateError`] for a `burst` or an `every` of zero, each of which means
+    /// something other than what the deployment setting it meant.
+    pub const fn new(burst: u32, every: Duration) -> Result<Self, RateError> {
+        if burst == 0 {
+            return Err(RateError::NoBurst);
         }
+        if every.is_zero() {
+            return Err(RateError::NoInterval);
+        }
+        Ok(Self {
+            burst,
+            every: Some(every),
+        })
+    }
+
+    /// No limit: every INVITE reaches the policy hook, however fast they come.
+    ///
+    /// For a deployment whose one address is genuinely that busy, and which
+    /// has something better than a token bucket to say about it.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            burst: u32::MAX,
+            every: None,
+        }
+    }
+
+    /// How many calls this rate lets arrive at once.
+    #[must_use]
+    pub const fn burst(self) -> u32 {
+        self.burst
+    }
+
+    /// How long one call costs, or `None` for [`Rate::unlimited`].
+    #[must_use]
+    pub const fn every(self) -> Option<Duration> {
+        self.every
     }
 
     /// How many tokens a quiet spell of `elapsed` earned, or `None` when this
     /// rate is no limit.
     fn earned(self, elapsed: Duration) -> Option<u32> {
-        let whole = elapsed.as_nanos().checked_div(self.every.as_nanos())?;
+        let whole = elapsed.as_nanos().checked_div(self.every?.as_nanos())?;
         Some(u32::try_from(whole).unwrap_or(u32::MAX))
     }
 }
@@ -124,9 +188,14 @@ impl Default for Rate {
     /// Ten at once, then one every two seconds.
     ///
     /// Loose on purpose: see the note at the top of this module about the one
-    /// address every legitimate call arrives from.
+    /// address every legitimate call arrives from. Written out rather than
+    /// built through [`Rate::new`], which answers with a `Result` that a
+    /// default has nowhere to put.
     fn default() -> Self {
-        Self::new(10, Duration::from_secs(2))
+        Self {
+            burst: 10,
+            every: Some(Duration::from_secs(2)),
+        }
     }
 }
 
@@ -140,10 +209,17 @@ pub struct Refusals {
     /// INVITEs a [`Screen`] refused.
     pub by_policy: u64,
     /// INVITEs refused because their source was offering them faster than
-    /// [`Rate`] allows — including the ones refused because there was no room
-    /// left to watch the source they came from, which is the same refusal seen
-    /// from the far end.
+    /// [`Rate`] allows.
     pub by_rate: u64,
+    /// INVITEs refused because every seat in the table of watched sources
+    /// belonged to a source still spending, so this one could not be limited
+    /// and was not let in.
+    ///
+    /// Counted apart from [`Refusals::by_rate`] because the two are one
+    /// refusal from the far end and two different things to do about it: one
+    /// source calling too fast is [`UserAgent::limit_invites`], while many
+    /// addresses arriving at once is a flood that wants a firewall.
+    pub by_crowding: u64,
 }
 
 /// An INVITE that has been read and not yet acted on.
@@ -248,7 +324,7 @@ impl Watched {
         self.tokens = self.tokens.saturating_add(earned).min(rate.burst);
         self.since = rate
             .every
-            .checked_mul(earned)
+            .and_then(|every| every.checked_mul(earned))
             .and_then(|counted| self.since.checked_add(counted))
             .unwrap_or(now);
     }
@@ -269,6 +345,17 @@ impl Watched {
     }
 }
 
+/// What the floor made of one INVITE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    /// There was a token, and it has been spent.
+    Take,
+    /// The source has spent its allowance and has not earned it back.
+    TooFast,
+    /// There is no seat left to keep an allowance in.
+    NoRoom,
+}
+
 /// The sources being watched, at most [`WATCHED`] of them.
 #[derive(Debug, Default)]
 struct Sources {
@@ -279,14 +366,18 @@ struct Sources {
 
 impl Sources {
     /// Whether this source may offer one more call, spending a token if so.
-    fn admit(&mut self, source: IpAddr, rate: Rate, now: Instant) -> bool {
+    fn admit(&mut self, source: IpAddr, rate: Rate, now: Instant) -> Admission {
         if let Some(known) = self.watched.iter_mut().find(|seat| seat.source == source) {
             known.refill(rate, now);
-            return known.spend();
+            return if known.spend() {
+                Admission::Take
+            } else {
+                Admission::TooFast
+            };
         }
         if self.watched.len() < WATCHED {
             self.watched.push(Watched::new(source, rate, now));
-            return true;
+            return Admission::Take;
         }
 
         // A source whose bucket has refilled completely says nothing that a
@@ -301,10 +392,10 @@ impl Sources {
             // what cannot be limited is a hole exactly when it matters, and a
             // quiet phone is the better failure at three in the morning. The
             // seats free themselves as their sources go quiet.
-            return false;
+            return Admission::NoRoom;
         };
         *seat = Watched::new(source, rate, now);
-        true
+        Admission::Take
     }
 }
 
@@ -370,11 +461,18 @@ impl Guard {
         // The floor comes first. It is two numbers and a short scan, where the
         // policy is arbitrary application code — and code called once per
         // INVITE by whoever is sending them is the second attack.
-        if let Some(source) = self.source
-            && !self.sources.admit(source.ip(), self.rate, now)
-        {
-            self.refusals.by_rate = self.refusals.by_rate.saturating_add(1);
-            return Some(UNAVAILABLE);
+        if let Some(source) = self.source {
+            match self.sources.admit(source.ip(), self.rate, now) {
+                Admission::Take => (),
+                Admission::TooFast => {
+                    self.refusals.by_rate = self.refusals.by_rate.saturating_add(1);
+                    return Some(UNAVAILABLE);
+                }
+                Admission::NoRoom => {
+                    self.refusals.by_crowding = self.refusals.by_crowding.saturating_add(1);
+                    return Some(UNAVAILABLE);
+                }
+            }
         }
         let invite = Incoming {
             source: self.source,
@@ -411,6 +509,15 @@ impl UserAgent {
         self.guard.rate = rate;
     }
 
+    /// The limit that is in force, which is the one that was set.
+    ///
+    /// Here because a setting nobody can read back is a setting nobody can
+    /// tell apart from one that was quietly changed on the way in.
+    #[must_use]
+    pub const fn invite_limit(&self) -> Rate {
+        self.guard.rate
+    }
+
     /// What has been refused, cumulative.
     #[must_use]
     pub const fn refusals(&self) -> Refusals {
@@ -445,12 +552,17 @@ impl UserAgent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rate, Sources, UNAVAILABLE, WATCHED};
+    use super::{Admission, Rate, RateError, Sources, UNAVAILABLE, WATCHED};
     use std::net::IpAddr;
     use std::time::{Duration, Instant};
 
     fn source(last: u8) -> IpAddr {
         IpAddr::from([192, 0, 2, last])
+    }
+
+    /// A rate that is not one of the two the constructor refuses.
+    fn rate(burst: u32, every: Duration) -> Rate {
+        Rate::new(burst, every).expect("a usable rate")
     }
 
     #[test]
@@ -462,29 +574,38 @@ mod tests {
     #[test]
     fn a_burst_is_admitted_and_the_call_after_it_is_not() {
         let t0 = Instant::now();
-        let rate = Rate::new(3, Duration::from_secs(2));
+        let rate = rate(3, Duration::from_secs(2));
         let mut sources = Sources::default();
         for attempt in 0..3 {
-            assert!(
+            assert_eq!(
                 sources.admit(source(9), rate, t0),
+                Admission::Take,
                 "call {attempt} is inside the burst"
             );
         }
-        assert!(!sources.admit(source(9), rate, t0), "and the fourth is not");
+        assert_eq!(
+            sources.admit(source(9), rate, t0),
+            Admission::TooFast,
+            "and the fourth is not"
+        );
     }
 
     #[test]
     fn a_token_comes_back_when_the_source_goes_quiet() {
         let t0 = Instant::now();
-        let rate = Rate::new(1, Duration::from_secs(2));
+        let rate = rate(1, Duration::from_secs(2));
         let mut sources = Sources::default();
-        assert!(sources.admit(source(9), rate, t0));
-        assert!(!sources.admit(source(9), rate, t0));
-        assert!(
-            !sources.admit(source(9), rate, t0 + Duration::from_secs(1)),
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::Take);
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::TooFast);
+        assert_eq!(
+            sources.admit(source(9), rate, t0 + Duration::from_secs(1)),
+            Admission::TooFast,
             "half an interval earns nothing"
         );
-        assert!(sources.admit(source(9), rate, t0 + Duration::from_secs(2)));
+        assert_eq!(
+            sources.admit(source(9), rate, t0 + Duration::from_secs(2)),
+            Admission::Take
+        );
     }
 
     #[test]
@@ -492,9 +613,9 @@ mod tests {
         // a source calling just under the limit must not be credited with the
         // fraction of a token it has earned, over and over
         let t0 = Instant::now();
-        let rate = Rate::new(1, Duration::from_secs(2));
+        let rate = rate(1, Duration::from_secs(2));
         let mut sources = Sources::default();
-        assert!(sources.admit(source(9), rate, t0));
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::Take);
         let mut at = t0;
         for _ in 0..4 {
             at += Duration::from_millis(1500);
@@ -503,8 +624,9 @@ mod tests {
         // four and a half intervals have passed and five calls were offered,
         // so at most three of them can have been admitted
         at += Duration::from_millis(1500);
-        assert!(
-            !sources.admit(source(9), rate, at),
+        assert_eq!(
+            sources.admit(source(9), rate, at),
+            Admission::TooFast,
             "the leftover time was banked, not repeated"
         );
     }
@@ -512,18 +634,18 @@ mod tests {
     #[test]
     fn one_source_keeps_one_seat_however_often_it_calls() {
         let t0 = Instant::now();
-        let rate = Rate::new(2, Duration::from_secs(2));
+        let rate = rate(2, Duration::from_secs(2));
         let mut sources = Sources::default();
-        assert!(sources.admit(source(9), rate, t0));
-        assert!(sources.admit(source(9), rate, t0));
-        assert!(!sources.admit(source(9), rate, t0));
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::Take);
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::Take);
+        assert_eq!(sources.admit(source(9), rate, t0), Admission::TooFast);
         assert_eq!(sources.watched.len(), 1, "one address, one seat");
     }
 
     #[test]
     fn nobody_can_grow_the_table_by_calling_from_everywhere() {
         let t0 = Instant::now();
-        let rate = Rate::new(2, Duration::from_secs(2));
+        let rate = rate(2, Duration::from_secs(2));
         let mut sources = Sources::default();
         for last in 0..=255u8 {
             sources.admit(IpAddr::from([198, 51, 100, last]), rate, t0);
@@ -534,16 +656,17 @@ mod tests {
     #[test]
     fn a_stranger_arriving_while_everybody_is_spending_is_refused() {
         let t0 = Instant::now();
-        let rate = Rate::new(2, Duration::from_secs(60));
+        let rate = rate(2, Duration::from_secs(60));
         let mut sources = Sources::default();
         for last in 0..WATCHED {
             let filling = IpAddr::from([198, 51, 100, u8::try_from(last).unwrap_or(0)]);
             // twice each, so that no seat has anything left
-            assert!(sources.admit(filling, rate, t0));
-            assert!(sources.admit(filling, rate, t0));
+            assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
+            assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
         }
-        assert!(
-            !sources.admit(source(9), rate, t0),
+        assert_eq!(
+            sources.admit(source(9), rate, t0),
+            Admission::NoRoom,
             "there is no room to watch it, and what cannot be limited is not admitted"
         );
     }
@@ -551,15 +674,16 @@ mod tests {
     #[test]
     fn a_seat_frees_itself_once_its_source_goes_quiet() {
         let t0 = Instant::now();
-        let rate = Rate::new(2, Duration::from_secs(60));
+        let rate = rate(2, Duration::from_secs(60));
         let mut sources = Sources::default();
         for last in 0..WATCHED {
             let filling = IpAddr::from([198, 51, 100, u8::try_from(last).unwrap_or(0)]);
-            assert!(sources.admit(filling, rate, t0));
-            assert!(sources.admit(filling, rate, t0));
+            assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
+            assert_eq!(sources.admit(filling, rate, t0), Admission::Take);
         }
-        assert!(
+        assert_eq!(
             sources.admit(source(9), rate, t0 + Duration::from_secs(120)),
+            Admission::Take,
             "two minutes of quiet refilled every bucket, and a full one holds no news"
         );
         assert_eq!(
@@ -570,21 +694,42 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_with_no_interval_is_no_limit() {
+    fn a_rate_that_says_it_is_no_limit_is_no_limit() {
         let t0 = Instant::now();
-        let rate = Rate::new(1, Duration::ZERO);
         let mut sources = Sources::default();
         for _ in 0..1000 {
-            assert!(sources.admit(source(9), rate, t0));
+            assert_eq!(
+                sources.admit(source(9), Rate::unlimited(), t0),
+                Admission::Take
+            );
         }
     }
 
     #[test]
-    fn a_burst_of_none_still_takes_the_first_call() {
-        let t0 = Instant::now();
-        let rate = Rate::new(0, Duration::from_secs(2));
-        let mut sources = Sources::default();
-        assert!(sources.admit(source(9), rate, t0));
-        assert!(!sources.admit(source(9), rate, t0));
+    fn a_burst_of_none_is_refused_where_it_is_set_and_not_read_as_one() {
+        // B2: a setting is applied, rejected with a reason, or unsupported.
+        // Reading a zero as a one is the fourth answer, which does not exist
+        assert_eq!(
+            Rate::new(0, Duration::from_secs(2)),
+            Err(RateError::NoBurst)
+        );
+    }
+
+    #[test]
+    fn an_interval_of_none_is_refused_rather_than_taken_for_no_limit() {
+        // it does mean no limit arithmetically, which is exactly why it has to
+        // be said on purpose: an interval that came out of a division and
+        // rounded to nothing would otherwise disable the floor without a word
+        assert_eq!(Rate::new(1, Duration::ZERO), Err(RateError::NoInterval));
+        assert_eq!(Rate::unlimited().every(), None);
+    }
+
+    #[test]
+    fn the_rate_that_took_effect_is_the_one_that_reads_back() {
+        let asked = rate(4, Duration::from_secs(7));
+        assert_eq!(asked.burst(), 4);
+        assert_eq!(asked.every(), Some(Duration::from_secs(7)));
+        assert_eq!(Rate::default().burst(), 10);
+        assert_eq!(Rate::default().every(), Some(Duration::from_secs(2)));
     }
 }

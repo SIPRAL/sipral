@@ -260,9 +260,19 @@ fn the_recording_in_the_tree_is_the_session_it_says_it_is() {
         !answered.contains("open sesame"),
         "and the password does not travel: {answered}"
     );
+    // and the refresh fifty-one minutes later carries the answer on the way
+    // out rather than paying for a second 401 (RFC 3261 §22.2). This assertion
+    // used to say the opposite, and the recording is what caught the change:
+    // a fixture that replays a session is a fixture that notices when the
+    // session stops being the one it recorded
+    let refreshed = String::from_utf8_lossy(sent.get(2).map_or(b"".as_slice(), Vec::as_slice));
     assert!(
-        sent.get(2).is_some_and(Vec::is_empty),
-        "the refresh fifty-one minutes later is a fresh REGISTER, and asks again"
+        refreshed.contains("nonce=\"abc123\""),
+        "the refresh asks to be challenged all over again: {refreshed:?}"
+    );
+    assert!(
+        !refreshed.contains("open sesame"),
+        "and the password still does not travel: {refreshed}"
     );
     for (_, bytes) in &trace.out {
         assert!(bytes.starts_with(b"REGISTER sip:example.com SIP/2.0\r\n"));

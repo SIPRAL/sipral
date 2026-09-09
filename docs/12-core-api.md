@@ -818,6 +818,17 @@ impl Endpoint {
     pub fn retry_with_credentials(&mut self, failed: AnyTransactionId, credentials: &Credentials, now: Instant)
         -> Result<AnyTransactionId, AuthRetryError>;
 
+    /// The same as `request` and `invite`, carrying credentials for a
+    /// challenge this destination has already made (§22.2). Nothing goes on
+    /// the request unless it has, so these are safe for the first request as
+    /// well as the tenth; what they save is the 401 and the round trip after
+    /// it. The password is borrowed and not kept — the nonce, the cnonce and
+    /// the count are the endpoint's, and have to have one owner.
+    pub fn request_with_credentials(&mut self, request: &OutgoingRequest, credentials: &Credentials, now: Instant)
+        -> Result<TransactionId<NonInviteClient>, SendError>;
+    pub fn invite_with_credentials(&mut self, request: &OutgoingRequest, credentials: &Credentials, now: Instant)
+        -> Result<TransactionId<InviteClient>, SendError>;
+
     /// Point a dialog's requests at an address resolved outside. No `now`:
     /// every other mutating call takes the time because something it does is
     /// timed, and this one only writes down an address.
@@ -995,6 +1006,18 @@ pub enum DialogEndReason { LocalBye, RemoteBye, Refused, Abandoned, Failed, Gone
 no answer at all. No BYE goes out for it — the far end has just said there is
 no such dialog, and a BYE would earn the same 481.
 
+**What a response says is reported before the transaction that carried it
+ends.** `Failed`, `Cancelled`, `Response`, `Challenged`, `ReinviteFailed` and
+the `DialogTerminated` that goes with a refusal all come out ahead of
+`TransactionTerminated`, and the transport makes no difference to that. It
+matters because the two coincide on TCP and TLS and do not on UDP: §17.1.1.2
+gives timer D a value of zero on a reliable transport and §17.1.2.2 does the
+same for timer K, so a 486 over TCP ends the client transaction in the same
+call that delivered it, while over UDP the transaction stands for another
+32 seconds. An application may therefore forget everything it holds against a
+transaction when it sees `TransactionTerminated`, and will not lose the reason
+the call failed by doing so.
+
 `TerminationReason::TimedOut` on an INVITE server transaction means one of two
 things, told apart by what was answered. After a non-2xx it is §17.2.1's timer
 H: the ACK the transaction was owed never came, and nothing follows. After a
@@ -1094,6 +1117,21 @@ or already-final transaction.
 2. 401 arrives → `Event::Challenged { transaction, realm, proxy: false, .. }`. The transaction terminates normally.
 3. `retry_with_credentials(transaction, &creds, now)` → a new transaction; `poll_transmit` yields the REGISTER with `Authorization`.
 4. 200 arrives → `Event::Response { status: 200, response }`. `sipral-ua` reads `Contact`/`Expires` from `response` and schedules the refresh; the core has no opinion about expiry.
+5. The refresh goes through `request_with_credentials`, and carries the
+   `Authorization` from step 3 with the next `nc`. §22.2: "UAs SHOULD cache the
+   credentials for a given value of the To header field and 'realm' and attempt
+   to re-use these values on the next request for that destination." Steps 2
+   and 3 happen once per boot rather than once per refresh.
+
+**What the endpoint remembers, and for how long.** The nonce, the client nonce
+and the count, per destination — the To URI — and inside that, per protection
+domain. Never the password: it is borrowed for the length of one call. A
+registrar's or a callee's own challenge (401) is re-used on any request to that
+destination; a proxy's (407) only inside the `Call-ID` it was made in, which is
+what §22.3 allows and no more. Both are dropped when a nonce comes back a
+second time without `stale`, because §22.1 makes that a rejected password
+rather than a fresh challenge, and the request that follows goes out bare
+rather than repeating it. The table of destinations is capped at thirty-two.
 
 ## Walkthrough: call, race, fork
 

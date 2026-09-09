@@ -7,10 +7,16 @@
 //! own example prints, because a realm that looks like an address is a realm
 //! `scripts/check.sh` refuses to let into the tree.
 
-use super::tests::{deliver, endpoint, events, header, register_request, sent, transmits, with};
-use super::{AuthRetryError, Endpoint, Event};
+use super::tests::{
+    connected, deliver, endpoint, events, header, peer, register_request, sent, stream,
+    streamed_call, streamed_register, transmits, with,
+};
+use super::{
+    AuthRetryError, Endpoint, Event, OutgoingInDialogRequest, OutgoingRequest, TransportId,
+};
 use crate::auth::{Credentials, DigestAlgorithm};
-use crate::msg::{HeaderName, StatusCode};
+use crate::dialog::CallId;
+use crate::msg::{HeaderName, Method, StatusCode, Uri};
 use crate::transaction::AnyTransactionId;
 use std::time::Instant;
 
@@ -470,4 +476,383 @@ fn a_refusal_that_is_not_a_challenge_is_just_a_refusal() {
     );
     let _ = transmits(&mut endpoint);
     assert_eq!(StatusCode::UNAUTHORIZED.get(), 401);
+}
+
+// -- credentials that go out ahead of the challenge --------------------------
+//
+// §22.2: "UAs SHOULD cache the credentials for a given value of the To header
+// field and 'realm' and attempt to re-use these values on the next request for
+// that destination." Without it every request to a registrar that authenticates
+// costs two round trips instead of one, for ever.
+
+/// The `Authorization` on the last message written, as text.
+fn authorization(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&header(bytes, HeaderName::Authorization)).into_owned()
+}
+
+/// The `nc` out of an `Authorization`.
+fn count(bytes: &[u8]) -> String {
+    authorization(bytes)
+        .split("nc=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
+/// A registrar that has challenged once and been answered, with the endpoint
+/// ready to send the next REGISTER.
+fn registered(endpoint: &mut Endpoint, now: Instant) {
+    let (_, id) = refused(endpoint, now);
+    events(endpoint);
+    endpoint
+        .retry_with_credentials(id, &credentials(), now)
+        .expect("the retry goes");
+    transmits(endpoint);
+}
+
+#[test]
+fn the_next_request_to_a_registrar_that_challenged_once_carries_the_answer() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("the refresh goes");
+    let refresh = sent(&mut endpoint);
+
+    let sent = authorization(&refresh);
+    assert!(sent.starts_with("Digest "), "{sent}");
+    assert!(sent.contains(&format!("nonce=\"{NONCE}\"")), "{sent}");
+    assert!(sent.contains(&format!("realm=\"{REALM}\"")), "{sent}");
+    assert!(sent.contains("response=\""), "{sent}");
+}
+
+#[test]
+fn the_nonce_count_moves_on_when_the_credentials_go_out_ahead_of_the_challenge() {
+    // §22.4 rule 8: `nc` "MUST" differ on every request sent with one nonce,
+    // and the count has one owner however the credentials leave
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+
+    let mut counts = Vec::new();
+    for _ in 0..3 {
+        endpoint
+            .request_with_credentials(&register_request(), &credentials(), t0)
+            .expect("the refresh goes");
+        counts.push(count(&sent(&mut endpoint)));
+    }
+    assert_eq!(counts, ["00000002", "00000003", "00000004"]);
+}
+
+#[test]
+fn a_destination_that_has_never_challenged_is_sent_nothing_to_answer_with() {
+    // credentials offered where none were asked for are a password hash given
+    // to whoever happened to be listening
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("the REGISTER goes");
+    let first = sent(&mut endpoint);
+    assert_eq!(header(&first, HeaderName::Authorization), b"");
+    assert_eq!(header(&first, HeaderName::ProxyAuthorization), b"");
+}
+
+#[test]
+fn a_nonce_the_server_has_expired_is_answered_once_with_the_one_it_sent_instead() {
+    // RFC 7616 §3.3: `stale` TRUE means the nonce is old and the credentials
+    // were not the problem, so the request goes again rather than stopping
+    const FRESH: &str = "b2fa1e0d9c8347a6f5310e2d4b7c9081";
+
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("the refresh goes");
+    let refresh = sent(&mut endpoint);
+
+    deliver(
+        &mut endpoint,
+        &challenge(
+            &refresh,
+            401,
+            "WWW-Authenticate",
+            &format!("{}, stale=true", digest(FRESH, None)),
+        ),
+        t0,
+    );
+    let again = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Challenged {
+                transaction, stale, ..
+            } => Some((transaction, stale)),
+            _ => None,
+        })
+        .expect("a stale nonce is worth answering");
+    assert!(again.1, "the challenge said so");
+
+    endpoint
+        .retry_with_credentials(again.0, &credentials(), t0)
+        .expect("the answer to the new nonce goes");
+    let answered = sent(&mut endpoint);
+    let sent = authorization(&answered);
+    assert!(sent.contains(&format!("nonce=\"{FRESH}\"")), "{sent}");
+    assert_eq!(count(&answered), "00000001", "a fresh nonce starts again");
+}
+
+#[test]
+fn a_password_the_server_refuses_ahead_of_a_challenge_is_not_offered_twice() {
+    // §22.1: "A UAC MUST NOT re-attempt requests with the credentials that
+    // have just been rejected". The guard has to hold for credentials that
+    // went out before the refusal as well as after it, or a refresh that
+    // carries a wrong password locks the account instead of failing once
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("the refresh goes");
+    let refresh = sent(&mut endpoint);
+
+    deliver(
+        &mut endpoint,
+        &challenge(&refresh, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    let reported = events(&mut endpoint);
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event, Event::Challenged { .. })),
+        "the same nonce came back: the password is wrong, not missing: {reported:?}"
+    );
+
+    // and the one after it goes out bare rather than repeating what was just
+    // rejected
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("the next one goes");
+    let after = sent(&mut endpoint);
+    assert_eq!(header(&after, HeaderName::Authorization), b"");
+}
+
+#[test]
+fn a_proxy_that_challenged_one_call_is_not_answered_on_another() {
+    // §22.3: "it should incorporate credentials for that realm in all
+    // subsequent requests that contain the same Call-ID. These credentials
+    // MUST NOT be cached across dialogs"
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let id = endpoint
+        .request(&register_request(), t0)
+        .expect("the REGISTER goes");
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&bytes, 407, "Proxy-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    events(&mut endpoint);
+    endpoint
+        .retry_with_credentials(AnyTransactionId::NonInviteClient(id), &credentials(), t0)
+        .expect("the retry goes");
+    let retried = sent(&mut endpoint);
+    assert!(
+        !header(&retried, HeaderName::ProxyAuthorization).is_empty(),
+        "the retry is the conversation the proxy challenged"
+    );
+
+    // the same destination, a different Call-ID: §10.2 gives a registration
+    // one, and this is a request that is not it
+    endpoint
+        .request_with_credentials(&register_request(), &credentials(), t0)
+        .expect("another request goes");
+    let elsewhere = sent(&mut endpoint);
+    assert_eq!(
+        header(&elsewhere, HeaderName::ProxyAuthorization),
+        b"",
+        "a proxy's credentials do not travel to another conversation"
+    );
+}
+
+#[test]
+fn the_endpoints_own_answer_replaces_one_the_caller_wrote_by_hand() {
+    // two sets of credentials for one realm is one of them ignored, and which
+    // one is the server's guess
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+
+    let request = register_request().header(HeaderName::Authorization, b"Digest realm=\"mine\"");
+    endpoint
+        .request_with_credentials(&request, &credentials(), t0)
+        .expect("the refresh goes");
+    let refresh = sent(&mut endpoint);
+    let written = String::from_utf8_lossy(&refresh).into_owned();
+    assert_eq!(written.matches("Authorization:").count(), 1, "{written}");
+    assert!(!written.contains("realm=\"mine\""), "{written}");
+}
+
+#[test]
+fn a_proxy_that_challenged_a_registration_is_answered_on_its_refreshes() {
+    // §10.2.4 keeps one Call-ID for every registration of a boot cycle, which
+    // is exactly the span §22.3 lets a proxy's credentials travel
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let booked = || register_request().call_id(CallId::new(b"one-boot-cycle"));
+    let id = endpoint.request(&booked(), t0).expect("the REGISTER goes");
+    let bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&bytes, 407, "Proxy-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    events(&mut endpoint);
+    endpoint
+        .retry_with_credentials(AnyTransactionId::NonInviteClient(id), &credentials(), t0)
+        .expect("the retry goes");
+    transmits(&mut endpoint);
+
+    endpoint
+        .request_with_credentials(&booked(), &credentials(), t0)
+        .expect("the refresh goes");
+    let refresh = sent(&mut endpoint);
+    let carried =
+        String::from_utf8_lossy(&header(&refresh, HeaderName::ProxyAuthorization)).into_owned();
+    assert!(carried.contains(&format!("nonce=\"{NONCE}\"")), "{carried}");
+    assert!(carried.contains("nc=00000002"), "{carried}");
+}
+
+#[test]
+fn a_challenge_from_one_destination_is_not_answered_to_another() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    registered(&mut endpoint, t0);
+
+    let elsewhere = OutgoingRequest::new(
+        Method::Register,
+        Uri::parse_str("sip:elsewhere.example").expect("a URI"),
+        TransportId(1),
+        peer(),
+    )
+    .to(b"<sip:alice@elsewhere.example>")
+    .from(b"Alice <sip:alice@example.com>")
+    .contact(b"<sip:alice@192.0.2.1>");
+    endpoint
+        .request_with_credentials(&elsewhere, &credentials(), t0)
+        .expect("the REGISTER goes");
+    let stranger = sent(&mut endpoint);
+    assert_eq!(header(&stranger, HeaderName::Authorization), b"");
+}
+
+// -- the same handshake on a stream ------------------------------------------
+//
+// Timer K is zero on a reliable transport (§17.1.2.2), so the 401 that starts
+// the handshake also ends the transaction that earned it. What the endpoint
+// learned from it has to survive that, or the handshake is only a handshake
+// over UDP.
+
+/// Send a REGISTER on the stream and have it refused with a 401.
+fn refused_over_tcp(endpoint: &mut Endpoint, now: Instant) -> AnyTransactionId {
+    let id = endpoint
+        .request(&streamed_register(), now)
+        .expect("the REGISTER goes");
+    let bytes = sent(endpoint);
+    stream(
+        endpoint,
+        &challenge(&bytes, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        now,
+    );
+    AnyTransactionId::NonInviteClient(id)
+}
+
+#[test]
+fn a_challenge_on_a_stream_is_reported_before_the_transaction_it_refused_ends() {
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    let id = refused_over_tcp(&mut endpoint, t0);
+
+    let reported = events(&mut endpoint);
+    let challenged = reported
+        .iter()
+        .position(
+            |event| matches!(event, Event::Challenged { transaction, .. } if *transaction == id),
+        )
+        .unwrap_or_else(|| panic!("{reported:?}"));
+    let ended = reported
+        .iter()
+        .position(|event| matches!(event, Event::TransactionTerminated { .. }))
+        .unwrap_or_else(|| panic!("{reported:?}"));
+    assert!(challenged < ended, "{reported:?}");
+    endpoint
+        .retry_with_credentials(id, &credentials(), t0)
+        .expect("the retry goes");
+}
+
+#[test]
+fn the_same_nonce_without_stale_is_not_answered_again_on_a_stream_either() {
+    // §22.1 again: what stops the second attempt is knowing which nonce the
+    // first one answered, and that is remembered against a transaction the
+    // stream has already ended
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    let id = refused_over_tcp(&mut endpoint, t0);
+    events(&mut endpoint);
+    endpoint
+        .retry_with_credentials(id, &credentials(), t0)
+        .expect("the retry goes");
+    let retried = sent(&mut endpoint);
+
+    stream(
+        &mut endpoint,
+        &challenge(&retried, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    let reported = events(&mut endpoint);
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event, Event::Challenged { .. })),
+        "the same nonce was offered for a second attempt: {reported:?}"
+    );
+}
+
+#[test]
+fn a_challenged_request_inside_a_call_on_a_stream_takes_its_sequence_from_the_dialog() {
+    // §22.2's "increment the CSeq as it would normally" means asking the
+    // dialog, which is what hands out the next number to everything else in
+    // the call
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    let dialog = streamed_call(&mut endpoint, t0);
+
+    let info = endpoint
+        .request_in_dialog(dialog, &OutgoingInDialogRequest::new(Method::Info), t0)
+        .expect("the INFO goes");
+    let bytes = sent(&mut endpoint);
+    stream(
+        &mut endpoint,
+        &challenge(&bytes, 407, "Proxy-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    events(&mut endpoint);
+    endpoint
+        .retry_with_credentials(AnyTransactionId::NonInviteClient(info), &credentials(), t0)
+        .expect("the retry goes");
+    let retry = sent(&mut endpoint);
+
+    endpoint
+        .request_in_dialog(dialog, &OutgoingInDialogRequest::new(Method::Info), t0)
+        .expect("a second INFO goes");
+    let next = sent(&mut endpoint);
+    assert_ne!(
+        header(&retry, HeaderName::CSeq),
+        header(&next, HeaderName::CSeq),
+        "the dialog handed the retry's number out twice"
+    );
 }

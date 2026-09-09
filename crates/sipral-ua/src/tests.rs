@@ -23,7 +23,7 @@ use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::session::Hold;
 use crate::subscription::{Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 use crate::{
-    Credentials, EndpointConfig, Incoming, Input, Rate, Refusals, Screening, StatusCode,
+    Credentials, EndpointConfig, Incoming, Input, Rate, RateError, Refusals, Screening, StatusCode,
     TransportId, TransportProtocol, UaError, Uri,
 };
 
@@ -485,6 +485,145 @@ fn a_password_that_is_refused_twice_stops_rather_than_locking_the_account() {
         agent.registration_state(id),
         Some(RegistrationState::Failed)
     );
+}
+
+/// An account registered after one challenge, and the REGISTER that answered
+/// it.
+fn challenged_and_granted(agent: &mut UserAgent, id: AccountId, now: Instant) -> Vec<u8> {
+    agent.register(id, now).expect("the REGISTER goes");
+    let first = sent(agent);
+    deliver(
+        agent,
+        &reply(&first, 401, "Unauthorized", REGISTRAR_CHALLENGE),
+        now,
+    );
+    let retry = sent(agent);
+    deliver(agent, &granted(&retry, 3_600), now);
+    events(agent);
+    retry
+}
+
+/// The one the registrar in these tests makes.
+const REGISTRAR_CHALLENGE: &str =
+    "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc123\", qop=\"auth\"\r\n";
+
+#[test]
+fn a_refresh_carries_the_credentials_instead_of_paying_for_a_second_refusal() {
+    // §22.2: "UAs SHOULD cache the credentials for a given value of the To
+    // header field and 'realm' and attempt to re-use these values on the next
+    // request for that destination." An hourly refresh that does not is an
+    // hourly round trip nobody needed, and C3 counts round trips
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "open sesame")));
+    challenged_and_granted(&mut agent, id, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = sent(&mut agent);
+    let carried =
+        String::from_utf8_lossy(&header(&refresh, HeaderName::Authorization)).into_owned();
+    assert!(carried.starts_with("Digest "), "{carried}");
+    assert!(carried.contains("nonce=\"abc123\""), "{carried}");
+    assert!(carried.contains("nc=00000002"), "{carried}");
+    assert_eq!(header(&refresh, HeaderName::CSeq), b"2 REGISTER");
+
+    // and the registrar believes it the first time, so there is no second
+    // round trip to pay for
+    deliver(
+        &mut agent,
+        &granted(&refresh, 3_600),
+        t0 + Duration::from_secs(3_060),
+    );
+    assert!(transmits(&mut agent).is_empty(), "nothing had to go again");
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Registered)
+    );
+}
+
+#[test]
+fn a_refresh_whose_nonce_has_expired_answers_the_new_one_and_stops_there() {
+    // RFC 7616 §3.3: `stale` says the nonce aged out and the credentials did
+    // not. One more attempt is what the registrar is asking for
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "open sesame")));
+    challenged_and_granted(&mut agent, id, t0);
+
+    let at = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(at);
+    let refresh = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(
+            &refresh,
+            401,
+            "Unauthorized",
+            "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"def456\", \
+qop=\"auth\", stale=true\r\n",
+        ),
+        at,
+    );
+
+    let answered = sent(&mut agent);
+    let carried =
+        String::from_utf8_lossy(&header(&answered, HeaderName::Authorization)).into_owned();
+    assert!(carried.contains("nonce=\"def456\""), "{carried}");
+    assert!(carried.contains("nc=00000001"), "a fresh nonce: {carried}");
+
+    deliver(&mut agent, &granted(&answered, 3_600), at);
+    assert!(transmits(&mut agent).is_empty(), "and it stopped there");
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Registered)
+    );
+}
+
+#[test]
+fn a_refresh_with_a_password_the_registrar_refuses_still_stops_after_one_attempt() {
+    // the lock-out guard has to hold for credentials that went out ahead of
+    // the challenge as well as for ones that answered it: the registrar sees
+    // one wrong password per refresh, not two
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "open sesame")));
+    challenged_and_granted(&mut agent, id, t0);
+
+    let at = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(at);
+    let refresh = sent(&mut agent);
+    // the same nonce, and no `stale`: §22.1's "credentials that have just been
+    // rejected"
+    deliver(
+        &mut agent,
+        &reply(&refresh, 401, "Unauthorized", REGISTRAR_CHALLENGE),
+        at,
+    );
+
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "nothing goes out a second time"
+    );
+    let failed = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::RegistrationFailed { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .expect("the refusal is reported");
+    assert_eq!(failed, RegistrationFailure::BadCredentials);
+}
+
+#[test]
+fn an_account_with_no_password_is_no_worse_off_than_before() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    registered(&mut agent, id, 3_600, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = sent(&mut agent);
+    assert!(header(&refresh, HeaderName::Authorization).is_empty());
 }
 
 #[test]
@@ -3129,7 +3268,7 @@ fn a_source_dialling_faster_than_the_limit_stops_being_heard() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
-    agent.limit_invites(Rate::new(2, Duration::from_secs(30)));
+    agent.limit_invites(Rate::new(2, Duration::from_secs(30)).expect("a usable rate"));
 
     for attempt in 0..2 {
         let invite = incoming_invite(&format!("burst{attempt}"), Some(OFFER));
@@ -3168,7 +3307,7 @@ fn a_new_source_port_is_not_a_new_caller() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
-    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)).expect("a usable rate"));
 
     deliver_from(
         &mut agent,
@@ -3193,7 +3332,7 @@ fn the_limit_is_one_sources_and_not_everybodys() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
-    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)).expect("a usable rate"));
 
     deliver_from(
         &mut agent,
@@ -3225,7 +3364,7 @@ fn the_limit_answers_before_the_policy_is_troubled_with_a_flood() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
-    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)).expect("a usable rate"));
     agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::BUSY_HERE));
 
     deliver_from(
@@ -3294,6 +3433,100 @@ fn a_refusal_is_decided_before_anything_else_looks_at_the_invite() {
 
     assert!(last(&mut agent).starts_with(b"SIP/2.0 480 "));
     assert_eq!(agent.refusals().by_policy, 1);
+}
+
+#[test]
+fn a_screened_invite_never_tells_the_far_end_that_the_number_rings() {
+    // A8's "before any user-visible effect" is also what the caller sees. The
+    // 100 §17.2.1 lets a server transaction send says the request is being
+    // worked on and nothing about who is behind it; a 180 or a 183 would say
+    // that a telephone is ringing, which is the whole of what a scanner dials
+    // to find out
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::new(480).expect("a status")));
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("quiet", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+
+    let written = transmits(&mut agent);
+    let heads: Vec<_> = written
+        .iter()
+        .map(|message| String::from_utf8_lossy(&message[..15]).into_owned())
+        .collect();
+    assert_eq!(heads, ["SIP/2.0 100 Try", "SIP/2.0 480 Tem"], "{heads:?}");
+}
+
+#[test]
+fn a_flood_from_many_addresses_is_counted_apart_from_one_source_calling_too_fast() {
+    // the same 480 from the far end, and two different things to do about it:
+    // one is the limit set too tight, the other is a table with no seat left
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(1, Duration::from_secs(600)).expect("a usable rate"));
+
+    // one call each from more addresses than there are seats
+    for last in 0..=200u8 {
+        let invite = incoming_invite(&format!("flood{last}"), Some(OFFER));
+        deliver_from(&mut agent, &invite, scanner(last), t0);
+        transmits(&mut agent);
+        events(&mut agent);
+    }
+
+    let refused = agent.refusals();
+    assert!(refused.by_crowding > 0, "{refused:?}");
+    assert_eq!(refused.by_rate, 0, "nobody called twice: {refused:?}");
+    assert_eq!(refused.by_policy, 0);
+}
+
+#[test]
+fn the_limit_that_took_effect_is_the_one_that_reads_back() {
+    // B2: applied, and the effective value reads back
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    assert_eq!(agent.invite_limit(), Rate::default());
+
+    let asked = Rate::new(3, Duration::from_secs(11)).expect("a usable rate");
+    agent.limit_invites(asked);
+    assert_eq!(agent.invite_limit(), asked);
+    assert_eq!(agent.invite_limit().burst(), 3);
+    assert_eq!(
+        agent.invite_limit().every(),
+        Some(Duration::from_secs(11)),
+        "the interval was not rounded, capped or read as something else"
+    );
+}
+
+#[test]
+fn a_limit_that_would_admit_nothing_is_refused_where_it_is_set() {
+    // and refused there rather than at the door, so that the deployment which
+    // wrote it hears about it instead of a caller who never gets through
+    assert_eq!(
+        Rate::new(0, Duration::from_secs(2)),
+        Err(RateError::NoBurst)
+    );
+    assert_eq!(Rate::new(4, Duration::ZERO), Err(RateError::NoInterval));
+
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::unlimited());
+    for attempt in 0..50 {
+        let invite = incoming_invite(&format!("open{attempt}"), Some(OFFER));
+        deliver_from(&mut agent, &invite, scanner(1), t0);
+        transmits(&mut agent);
+    }
+    assert_eq!(
+        agent.refusals(),
+        Refusals::default(),
+        "asking for no limit is how a deployment gets none"
+    );
 }
 
 // -- transfer ----------------------------------------------------------------

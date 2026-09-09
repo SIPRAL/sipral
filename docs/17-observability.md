@@ -183,16 +183,14 @@ about a value that was never checked for being sensible on its own — so
 nothing here is a B2 violation, but a future validating constructor for either
 type would have a starting list.
 
-**One coercion rather than a rejection, on the boundary of B2's rule**:
-`sipral_ua::screening::Rate::new` reads `burst: 0` as `1` rather than
-refusing it (documented: *"A `burst` of zero would refuse the first call of
-the day, so it is read as one"*), and reads `every: Duration::ZERO` as "no
-limit" rather than refusing it. Both are documented, both are deliberate, and
-neither is silent — but B2's own three-way split (applied / rejected / not
-supported) has no fourth answer for "the value you gave is not the value that
-took effect, and nobody told you", which is what a silent coercion is one
-step short of. Outside the files this task owns (`sipral-ua`), and left here
-rather than changed.
+**One coercion rather than a rejection, since fixed**: `sipral_ua::screening::
+Rate::new` used to read `burst: 0` as `1` and `every: Duration::ZERO` as "no
+limit". Both were documented and deliberate, but B2's three-way split
+(applied / rejected / not supported) has no fourth answer for "the value you
+gave is not the value that took effect", which is what a coercion is one step
+short of. `Rate::new` now answers `Result<Rate, RateError>` and refuses both;
+`Rate::unlimited` is how a deployment asks for no floor on purpose, and
+`UserAgent::invite_limit` reads back what took effect.
 
 No entry point in `crates/sipral/` or `crates/sipral-ffi/` was found to accept
 a setting and then ignore it while reporting success — the specific failure

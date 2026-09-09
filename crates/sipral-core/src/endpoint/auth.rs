@@ -28,6 +28,7 @@ use std::time::Instant;
 use super::driver::Endpoint;
 use super::error::AuthRetryError;
 use super::event::Event;
+use super::outgoing::OutgoingRequest;
 use super::table::Flow;
 use crate::auth::{AuthCache, Credentials, Learned};
 use crate::diag::{Direction, Reason};
@@ -52,8 +53,6 @@ pub(super) struct Challenged {
     /// CSeq" has to come from the dialog there, or the next request in it
     /// reuses the number.
     pub(super) dialog: Option<DialogId>,
-    /// What was learned from the refusal.
-    pub(super) cache: AuthCache,
 }
 
 /// The challenges waiting for an answer.
@@ -95,6 +94,97 @@ impl Challenges {
     }
 }
 
+/// How many destinations are remembered at once.
+///
+/// A phone registers with one registrar and calls a handful of people, so this
+/// is far past what an honest deployment reaches. It is a ceiling rather than
+/// a growing table because the destination is whatever the caller last sent
+/// to, and a peer that challenges everything must not be able to make this a
+/// place to put memory.
+const DESTINATIONS: usize = 32;
+
+/// What each destination has already challenged with.
+///
+/// §22.2: "UAs SHOULD cache the credentials for a given value of the To header
+/// field and 'realm' and attempt to re-use these values on the next request
+/// for that destination." The realm half of that is inside [`AuthCache`],
+/// which keeps one entry per protection domain; what is left to key by is the
+/// destination, and this is where it is kept.
+///
+/// Per destination rather than per transaction, which is the whole point: a
+/// registration that refreshes every hour was paying for a 401 and a second
+/// round trip every hour, for the life of the process, because the challenge
+/// it had already answered died with the transaction that earned it.
+#[derive(Debug, Default)]
+pub(super) struct Known {
+    /// In the order they were first challenged, so the oldest goes when the
+    /// cap is reached. A scan of at most [`DESTINATIONS`] is cheaper than a
+    /// map plus the queue that orders it, and the scan is what the eviction
+    /// needs anyway.
+    entries: Vec<(Box<[u8]>, AuthCache)>,
+}
+
+impl Known {
+    pub(super) const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// What this destination has challenged with, opening an empty one for a
+    /// destination not seen before.
+    ///
+    /// `None` only if the entry just pushed cannot be read back, which cannot
+    /// happen; this crate says so by carrying on without a cache rather than
+    /// by panicking, and the cost of that is one round trip.
+    fn at(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
+        let known = self
+            .entries
+            .iter()
+            .position(|(known, _)| **known == *destination);
+        let at = if let Some(at) = known {
+            at
+        } else {
+            if self.entries.len() >= DESTINATIONS {
+                self.entries.remove(0);
+            }
+            self.entries
+                .push((Box::from(destination), AuthCache::new()));
+            self.entries.len().saturating_sub(1)
+        };
+        self.entries.get_mut(at).map(|(_, cache)| cache)
+    }
+
+    /// What this destination has challenged with, if it ever has.
+    fn get(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
+        self.entries
+            .iter_mut()
+            .find(|(known, _)| **known == *destination)
+            .map(|(_, cache)| cache)
+    }
+
+    /// How many destinations are remembered.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// The destination a challenge belongs to (§22.2's "value of the To header
+/// field").
+///
+/// The URI out of it rather than the whole value: a display name is
+/// decoration, and a tag names one end of a dialog rather than a different
+/// registrar. Getting this wrong in the forgiving direction costs a round
+/// trip; getting it wrong in the other would answer one destination with
+/// another's challenge, which the realm check inside [`AuthCache`] would then
+/// have to catch.
+fn destination(to: &[u8]) -> Option<Box<[u8]>> {
+    crate::msg::NameAddrRef::parse(to)
+        .ok()
+        .map(|addr| Box::from(addr.uri_bytes()))
+}
+
 impl Endpoint {
     /// Send a challenged request again, with credentials.
     ///
@@ -117,18 +207,17 @@ impl Endpoint {
         now: Instant,
     ) -> Result<AnyTransactionId, AuthRetryError> {
         self.mark(now);
-        let mut held = self
+        let held = self
             .challenges
             .take(failed)
             .ok_or(AuthRetryError::NoChallenge)?;
 
-        let raw = held.request.as_raw();
-        let method = raw.method().ok_or(AuthRetryError::NoChallenge)?;
-        let uri = raw
-            .request_uri_bytes()
-            .ok_or(AuthRetryError::NoChallenge)?
-            .to_vec();
-        let answers = held.cache.authorize(credentials, method, &uri);
+        let method = held
+            .request
+            .as_raw()
+            .method()
+            .ok_or(AuthRetryError::NoChallenge)?;
+        let answers = self.answers_for(&held.request, credentials);
         if answers.is_empty() {
             return Err(AuthRetryError::NothingToAnswer);
         }
@@ -148,7 +237,9 @@ impl Endpoint {
             // end keeps a call this end has hung up. Both want the number
             // after the one that was refused, and in the second case nothing
             // will ever ask this dialog for another.
-            None => raw
+            None => held
+                .request
+                .as_raw()
                 .cseq()
                 .map_err(|_| AuthRetryError::NoChallenge)?
                 .seq
@@ -231,9 +322,6 @@ impl Endpoint {
         if let Some(dialog) = dialog {
             self.remember_dialog(retried, dialog);
         }
-        // the retry carries what it answered, so that the same nonce coming
-        // back a second time is read as a refusal rather than a new challenge
-        self.carried_auth.insert(retried, held.cache);
         Ok(retried)
     }
 
@@ -255,15 +343,40 @@ impl Endpoint {
             return;
         }
 
-        let mut cache = self.carried_auth.remove(&id).unwrap_or_default();
+        // both are read before the cache is borrowed, which the borrow
+        // checker insists on and which also keeps the token draw in one place
         let cnonce = String::from_utf8_lossy(&self.tokens.token()).into_owned();
-        if cache.learn(response, &cnonce) != Learned::Retry {
+        let raw = request.as_raw();
+        let (Some(to), Ok(call_id)) = (
+            raw.header(HeaderName::To).and_then(destination),
+            raw.call_id(),
+        ) else {
+            return;
+        };
+        let call_id = call_id.to_vec();
+        let Some(cache) = self.known.at(&to) else {
+            return;
+        };
+        if cache.learn(response, &cnonce, &call_id) != Learned::Retry {
             // either nothing here can be answered (RFC 8760 §2.4: "The client
             // MUST ignore any challenge it does not understand"), or the same
             // nonce came back without `stale`, which §22.1 says not to answer
             // twice
             return;
         }
+        // collected while the cache is borrowed and reported after, because
+        // reporting takes the whole endpoint
+        let answering: Vec<_> = cache
+            .challenges()
+            .map(|challenge| {
+                (
+                    challenge.realm.clone(),
+                    challenge.proxy,
+                    challenge.algorithm,
+                    challenge.stale,
+                )
+            })
+            .collect();
 
         self.note_wire(
             response,
@@ -271,13 +384,13 @@ impl Endpoint {
             Direction::Inbound,
             flow,
         );
-        for challenge in cache.challenges() {
+        for (realm, proxy, algorithm, stale) in answering {
             self.events.push_back(Event::Challenged {
                 transaction: id,
-                realm: challenge.realm.clone(),
-                proxy: challenge.proxy,
-                algorithm: challenge.algorithm,
-                stale: challenge.stale,
+                realm,
+                proxy,
+                algorithm,
+                stale,
             });
         }
         let dialog = self.dialog_of(id);
@@ -287,9 +400,61 @@ impl Endpoint {
                 request,
                 flow,
                 dialog,
-                cache,
             },
         );
+    }
+
+    /// The credential header fields for a request that has not been challenged
+    /// yet, when this destination has challenged before (§22.2).
+    ///
+    /// Empty when nothing is remembered, when what is remembered was refused,
+    /// or when it belongs to a proxy and this is a different conversation
+    /// (§22.3). A caller that asks has to send what it gets back: the nonce
+    /// count is spent here, and `nc` "MUST" differ on every request that
+    /// carries the same nonce.
+    pub(super) fn answer_ahead(
+        &mut self,
+        request: &OutgoingRequest,
+        credentials: &Credentials,
+        call_id: &[u8],
+    ) -> Vec<(HeaderName<'static>, String)> {
+        let Some(to) = request.to.as_deref().and_then(destination) else {
+            return Vec::new();
+        };
+        let Some(method) = Method::from_bytes(&request.method) else {
+            return Vec::new();
+        };
+        let uri = request.request_uri.as_bytes().to_vec();
+        self.known
+            .get(&to)
+            .map(|cache| cache.authorize(credentials, method, &uri, call_id))
+            .unwrap_or_default()
+    }
+
+    /// The same, for a request that has already been refused once: what the
+    /// destination's cache says to answer with, drawn from the one place the
+    /// nonce count lives.
+    fn answers_for(
+        &mut self,
+        request: &OwnedMessage,
+        credentials: &Credentials,
+    ) -> Vec<(HeaderName<'static>, String)> {
+        let raw = request.as_raw();
+        let (Some(method), Some(uri)) = (raw.method(), raw.request_uri_bytes()) else {
+            return Vec::new();
+        };
+        let uri = uri.to_vec();
+        let (Some(to), Ok(call_id)) = (
+            raw.header(HeaderName::To).and_then(destination),
+            raw.call_id(),
+        ) else {
+            return Vec::new();
+        };
+        let call_id = call_id.to_vec();
+        self.known
+            .get(&to)
+            .map(|cache| cache.authorize(credentials, method, &uri, &call_id))
+            .unwrap_or_default()
     }
 }
 
@@ -373,8 +538,7 @@ fn rebuild(
 
 #[cfg(test)]
 mod tests {
-    use super::{Challenged, Challenges, REMEMBERED};
-    use crate::auth::AuthCache;
+    use super::{Challenged, Challenges, DESTINATIONS, Known, REMEMBERED, destination};
     use crate::endpoint::table::Flow;
     use crate::endpoint::{TransportId, TransportProtocol};
     use crate::msg::{OwnedMessage, ParseMode, ParseScratch, parse};
@@ -405,7 +569,6 @@ Content-Length: 0\r\n\
                 protocol: TransportProtocol::Udp,
             },
             dialog: None,
-            cache: AuthCache::new(),
         }
     }
 
@@ -454,5 +617,32 @@ Content-Length: 0\r\n\
         challenges.remember(id(0), held());
         assert_eq!(challenges.len(), 1);
         assert!(challenges.take(id(0)).is_some());
+    }
+
+    #[test]
+    fn a_destination_is_named_by_its_uri_and_not_by_how_it_was_written() {
+        // the same registrar, spelled three ways a caller might spell it
+        let plain = destination(b"sip:alice@example.com");
+        assert_eq!(destination(b"<sip:alice@example.com>"), plain);
+        assert_eq!(destination(b"Alice <sip:alice@example.com>"), plain);
+        assert_eq!(
+            destination(b"<sip:alice@example.com>;tag=registrar"),
+            plain,
+            "a tag names one end of a dialog, not another registrar"
+        );
+        assert_ne!(destination(b"<sip:alice@elsewhere.example>"), plain);
+    }
+
+    #[test]
+    fn nobody_can_grow_the_table_of_destinations_by_being_challenged_from_everywhere() {
+        let mut known = Known::new();
+        for last in 0..200u32 {
+            let to = format!("<sip:alice@{last}.example>").into_bytes();
+            assert!(known.at(&to).is_some());
+        }
+        assert_eq!(known.len(), DESTINATIONS);
+        // the oldest went first
+        assert!(known.get(b"<sip:alice@0.example>").is_none());
+        assert!(known.get(b"<sip:alice@199.example>").is_some());
     }
 }

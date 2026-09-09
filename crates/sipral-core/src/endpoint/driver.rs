@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::auth::Challenges;
+use super::auth::{Challenges, Known};
 use super::config::EndpointConfig;
 use super::dialogs::Dialogs;
 use super::error::{AckError, CancelError, ReceiveError, RespondError, SendError};
@@ -35,7 +35,7 @@ use super::table::{Flow, Transports};
 use super::tokens::Tokens;
 use super::transport::{Input, Transmit, TransportId, TransportProtocol};
 use super::via;
-use crate::auth::AuthCache;
+use crate::auth::Credentials;
 use crate::diag::{Decision, Direction, Reason, Records};
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
@@ -92,10 +92,11 @@ pub struct Endpoint {
     /// Which dialog a client transaction is inside, when it is inside one.
     /// A retry after a challenge has to take its `CSeq` from there.
     pub(super) dialogs_of: HashMap<AnyTransactionId, DialogId>,
-    /// What a retry already answered, carried onto it so that a second
-    /// refusal with the same nonce can be told from a fresh challenge.
-    /// §22.1 does not answer the first twice.
-    pub(super) carried_auth: HashMap<AnyTransactionId, AuthCache>,
+    /// What each destination has already challenged with, so that the next
+    /// request to it can carry credentials instead of paying for a refusal
+    /// (§22.2), and so that a second refusal with the same nonce can be told
+    /// from a fresh challenge. §22.1 does not answer the first twice.
+    pub(super) known: Known,
     /// How many requests have been refused for want of room. Only ever grows,
     /// because the number an operator wants is "how often has this happened",
     /// not "how often since somebody last looked".
@@ -133,7 +134,7 @@ impl Endpoint {
             reinvites: Reinvites::new(),
             challenges: Challenges::new(),
             dialogs_of: HashMap::new(),
-            carried_auth: HashMap::new(),
+            known: Known::new(),
             refused: 0,
             diag: Records::new(config.diagnostics),
         }
@@ -454,8 +455,45 @@ impl Endpoint {
         request: &OutgoingRequest,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.send_request(request, None, now)
+    }
+
+    /// The same, carrying credentials for a challenge this destination has
+    /// already made (§22.2).
+    ///
+    /// "UAs SHOULD cache the credentials for a given value of the To header
+    /// field and 'realm' and attempt to re-use these values on the next
+    /// request for that destination." Nothing goes on the request unless this
+    /// endpoint has been challenged by that destination and the challenge is
+    /// still worth answering, so this is safe to use for the first request as
+    /// well as for the tenth; what it saves is the 401 and the round trip
+    /// after it, which a registration that refreshes every hour was otherwise
+    /// paying for every hour.
+    ///
+    /// The password is borrowed for the length of the call and not kept. What
+    /// the endpoint keeps is the nonce, the client nonce and the count, which
+    /// have to have one owner: `nc` "MUST" differ on every request carrying
+    /// the same nonce, and two places counting would repeat one.
+    ///
+    /// # Errors
+    /// As [`Endpoint::request`].
+    pub fn request_with_credentials(
+        &mut self,
+        request: &OutgoingRequest,
+        credentials: &Credentials,
+        now: Instant,
+    ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.send_request(request, Some(credentials), now)
+    }
+
+    fn send_request(
+        &mut self,
+        request: &OutgoingRequest,
+        credentials: Option<&Credentials>,
+        now: Instant,
+    ) -> Result<TransactionId<NonInviteClient>, SendError> {
         self.mark(now);
-        let (message, flow) = self.build_request(request)?;
+        let (message, flow) = self.build_request(request, credentials)?;
         let (id, effects) =
             self.transactions
                 .start_non_invite_client(message, flow, self.config.timers, now)?;
@@ -472,8 +510,31 @@ impl Endpoint {
         request: &OutgoingRequest,
         now: Instant,
     ) -> Result<TransactionId<InviteClient>, SendError> {
+        self.send_invite(request, None, now)
+    }
+
+    /// Place a call carrying credentials for a challenge this destination has
+    /// already made, as [`Endpoint::request_with_credentials`].
+    ///
+    /// # Errors
+    /// As [`Endpoint::request`].
+    pub fn invite_with_credentials(
+        &mut self,
+        request: &OutgoingRequest,
+        credentials: &Credentials,
+        now: Instant,
+    ) -> Result<TransactionId<InviteClient>, SendError> {
+        self.send_invite(request, Some(credentials), now)
+    }
+
+    fn send_invite(
+        &mut self,
+        request: &OutgoingRequest,
+        credentials: Option<&Credentials>,
+        now: Instant,
+    ) -> Result<TransactionId<InviteClient>, SendError> {
         self.mark(now);
-        let (message, flow) = self.build_request(request)?;
+        let (message, flow) = self.build_request(request, credentials)?;
         let secure = flow.protocol.is_secure();
         let set = DialogSet::new(message.clone(), secure);
         let (id, effects) =
@@ -869,6 +930,7 @@ impl Endpoint {
     fn build_request(
         &mut self,
         request: &OutgoingRequest,
+        credentials: Option<&Credentials>,
     ) -> Result<(OwnedMessage, Flow), SendError> {
         let to = request.to.as_deref().ok_or(SendError::MissingField("To"))?;
         let from = request
@@ -902,6 +964,15 @@ impl Endpoint {
             None => self.tokens.token(),
         };
         let branch = self.tokens.branch();
+        // §22.2's re-use, when the caller handed over a password and this
+        // destination has challenged before. Drawn here rather than in
+        // `assemble` because it spends a step of the nonce count, and a step
+        // spent twice on one request is a replay as far as the server is
+        // concerned
+        let answers = match credentials {
+            Some(credentials) => self.answer_ahead(request, credentials, &call_id),
+            None => Vec::new(),
+        };
         // RFC 3262 §4: "The UAC SHOULD include this in all INVITE requests."
         // Without it the far end may not answer reliably, and an offer in a
         // 1xx has no recovery from a lost datagram
@@ -914,6 +985,7 @@ impl Endpoint {
             call_id: &call_id,
             cseq: request.cseq.unwrap_or(1),
             supported: supported.as_deref(),
+            credentials: &answers,
         };
 
         let mut message = self.assemble(request, &flow, local, &minted)?;
@@ -1091,7 +1163,15 @@ impl Endpoint {
         if let Some(ref contact) = request.contact {
             builder = builder.contact(contact);
         }
-        builder = add_extra(builder, &request.extra, minted.supported.is_some());
+        for (name, value) in minted.credentials {
+            builder = builder.header(*name, value.as_bytes());
+        }
+        builder = add_extra(
+            builder,
+            &request.extra,
+            minted.supported.is_some(),
+            minted.credentials,
+        );
         if let (Some(kind), Some(body)) = (request.content_type.as_deref(), request.body.as_deref())
         {
             builder = builder.body(kind, body);
@@ -1128,7 +1208,7 @@ impl Endpoint {
             if let Some(ref contact) = extra.contact {
                 builder = builder.contact(contact);
             }
-            builder = add_extra(builder, &extra.extra, false);
+            builder = add_extra(builder, &extra.extra, false, &[]);
             if let (Some(kind), Some(body)) = (extra.content_type.as_deref(), body) {
                 builder = builder.body(kind, body);
             }
@@ -1183,10 +1263,18 @@ fn add_extra<'a>(
     mut builder: RequestBuilder<'a>,
     extra: &'a [Extra],
     supported_written: bool,
+    credentials: &[(HeaderName<'static>, String)],
 ) -> RequestBuilder<'a> {
     for one in extra {
         if let Some((name, value)) = one.parts() {
             if supported_written && name == HeaderName::Supported {
+                continue;
+            }
+            // the endpoint's own answer wins over one the caller wrote by
+            // hand, for the same reason a retry replaces rather than stacks:
+            // two sets of credentials for one realm is one of them ignored,
+            // and which one is the server's guess
+            if credentials.iter().any(|(written, _)| *written == name) {
                 continue;
             }
             builder = builder.header(name, value);
@@ -1232,6 +1320,9 @@ struct Minted<'a> {
     cseq: u32,
     /// `Supported`, when the endpoint has something of its own to add to it.
     supported: Option<&'a [u8]>,
+    /// `Authorization` and `Proxy-Authorization`, when a challenge from this
+    /// destination is remembered and the caller handed over a password.
+    credentials: &'a [(HeaderName<'static>, String)],
 }
 
 /// Whether a `From` or `To` value already carries a tag.
