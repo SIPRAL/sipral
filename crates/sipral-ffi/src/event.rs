@@ -24,6 +24,7 @@
 use std::ffi::{c_char, c_void};
 use std::time::Duration;
 
+use sipral::MediaEvent;
 use sipral_ua::{
     CallEndReason, CallHandle, CallState, RegistrationFailure, RegistrationState, UaEvent,
     UserAgent,
@@ -31,6 +32,7 @@ use sipral_ua::{
 
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
 
 /// Declare the event number space, once.
@@ -48,6 +50,13 @@ use crate::names::Names;
 /// line is that hole filled in advance — the number belongs to a named feature
 /// before the feature is written, so taking it is reading rather than choosing.
 ///
+/// Live and reserved lines interleave, in one run, in number order. That is
+/// what makes "taking a reserved number in place" the literal truth: the line
+/// stays where its number is and turns into a kind, and the features on either
+/// side of it keep the numbers they were promised. A list that made every live
+/// kind come first would force a feature to take five numbers it has nothing to
+/// put behind in order to reach the sixth.
+///
 /// Removing or reordering a line is what `docs/08-ffi.md` forbids outright, and
 /// what the assertion turns from a released mistake into a build failure.
 macro_rules! event_kinds {
@@ -55,9 +64,9 @@ macro_rules! event_kinds {
         $(
             $(#[$about:meta])*
             $number:literal = $variant:ident, $name:literal;
-        )*
-        $(
-            reserved $held:literal = $feature:literal;
+            $(
+                reserved $held:literal = $feature:literal;
+            )*
         )*
     ) => {
         /// What an event is about.
@@ -69,7 +78,7 @@ macro_rules! event_kinds {
         /// Numbers already spent on features this build does not have, so that
         /// two of them cannot arrive holding the same one:
         ///
-        $(#[doc = concat!(" - `", stringify!($held), "` — ", $feature)])*
+        $($(#[doc = concat!(" - `", stringify!($held), "` — ", $feature)])*)*
         #[repr(u32)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum SipralEventKind {
@@ -119,14 +128,15 @@ macro_rules! event_kinds {
                      has spent run 1, 2, 3, … and nothing may repeat, move or leave a hole"
                 );
                 next += 1;
-            )*
-            $(
-                assert!(
-                    $held == next,
-                    "a reserved event number is not the one after the last: reservations continue \
-                     the same run, so that the number a feature takes is already written down"
-                );
-                next += 1;
+                $(
+                    assert!(
+                        $held == next,
+                        "a reserved event number is not the one after the last: reservations sit \
+                         in the same run as the kinds, so that the number a feature takes is \
+                         already written down"
+                    );
+                    next += 1;
+                )*
             )*
         };
     };
@@ -174,14 +184,49 @@ event_kinds! {
     14 = CallEnded, c"call ended";
 
     // Held for what `docs/13-client-requirements.md` already commits to, so
-    // that six features written in six branches cannot arrive holding the same
-    // number. Taking one means turning its line into a kind above, in place.
+    // that features written in separate branches cannot arrive holding the same
+    // number. Taking one means turning its line into a kind, in place.
     reserved 15 = "a subscription's state changed (A1)";
     reserved 16 = "the set of audio devices changed (A2)";
-    reserved 17 = "stream statistics (A6)";
+
+    /// What one call's media cost, delivered once, after
+    /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
+    ///
+    /// A6's second consumer. `payload.media.statistics` points at the
+    /// completed record; it is the library's and lives as long as the callback
+    /// does. The stream is gone by the time this arrives, which is why the
+    /// numbers travel in the event rather than behind a lookup that would now
+    /// fail.
+    17 = MediaStatistics, c"media statistics";
     reserved 18 = "a request was promoted to a stream transport (B1)";
-    reserved 19 = "media stopped arriving (B5)";
+    /// Nothing has arrived on the media path for longer than the configured
+    /// threshold, while signalling is perfectly happy.
+    ///
+    /// B5. `payload.media.silent_for_ms` says how long. The call is untouched:
+    /// whether to hang up over silence is a decision with a person on the other
+    /// end of it.
+    19 = MediaStalled, c"media stalled";
     reserved 20 = "a call was announced and never arrived (C2)";
+    /// Audio is running: the negotiation settled and an RTP session is open.
+    ///
+    /// A4's reporting half and the first half of D5: `payload.media.codec` is
+    /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
+    21 = MediaStarted, c"media started";
+    /// The session changed under a live call: a hold, a resume, a peer that
+    /// moved its media address, or a re-negotiation onto another codec.
+    22 = MediaChanged, c"media changed";
+    /// Packets are arriving again. `payload.media.silent_for_ms` says how long
+    /// the gap turned out to be.
+    23 = MediaResumed, c"media resumed";
+    /// Media could not be started or could not be kept. The call itself is
+    /// untouched; `payload.media.fault` and `payload.media.reason` say why.
+    24 = MediaFailed, c"media failed";
+    /// A recording stopped on its own, part-way through: the disk filled, the
+    /// file went away, the volume was unmounted.
+    ///
+    /// Never an abort. `payload.media.recorded_ms` says how much audio reached
+    /// the file before it stopped, and the call carries on without it.
+    25 = RecordingStopped, c"recording stopped";
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -340,6 +385,37 @@ pub struct SipralTransferEvent {
     pub target_len: usize,
 }
 
+/// What a media event carries.
+///
+/// As with a call event, not every member means something in every kind, and
+/// the ones that do not are zero or null.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SipralMediaEvent {
+    /// A [`SipralCodec`](crate::media::SipralCodec): what the negotiation
+    /// settled on, zero where the event is not about a codec.
+    pub codec: u32,
+    /// A [`SipralDirection`](crate::media::SipralDirection): which way audio
+    /// may flow, as seen from here.
+    pub direction: u32,
+    /// How long the stream has been silent, for a stall and for its recovery.
+    pub silent_for_ms: u64,
+    /// How much audio reached the file, for a recording that stopped by
+    /// itself.
+    pub recorded_ms: u64,
+    /// A [`SipralMediaFault`](crate::media::SipralMediaFault), zero when
+    /// nothing failed.
+    pub fault: u32,
+    /// The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
+    /// when nothing failed.
+    pub reason: *const c_char,
+    /// How many bytes of it.
+    pub reason_len: usize,
+    /// What the stream cost, for the kind that carries it, and null for every
+    /// other. It belongs to the library and lives as long as the callback.
+    pub statistics: *const SipralStreamStats,
+}
+
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -354,6 +430,9 @@ pub union SipralEventPayload {
     /// [`SipralEventKind::TransferProgress`] and
     /// [`SipralEventKind::TransferDone`].
     pub transfer: SipralTransferEvent,
+    /// For every media kind: started, changed, stalled, resumed, failed, the
+    /// end-of-call statistics, and a recording that stopped by itself.
+    pub media: SipralMediaEvent,
 }
 
 /// Something the library has to tell the application.
@@ -412,6 +491,22 @@ impl SipralEvent {
             message: std::ptr::null(),
             message_len: 0,
             payload,
+        }
+    }
+}
+
+impl SipralMediaEvent {
+    /// Nothing said about anything, for a kind to fill in.
+    const fn empty() -> Self {
+        Self {
+            codec: 0,
+            direction: 0,
+            silent_for_ms: 0,
+            recorded_ms: 0,
+            fault: 0,
+            reason: std::ptr::null(),
+            reason_len: 0,
+            statistics: std::ptr::null(),
         }
     }
 }
@@ -688,6 +783,87 @@ fn about_a_transfer(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipra
         // this ABI has not caught up with. The number space above is where the
         // guarantee lives instead, because that is where a mistake would be
         // permanent.
+        _ => None,
+    }
+}
+
+/// Say a media event the way C says it.
+///
+/// `None` for one this ABI has no word for, as with a signalling event: the
+/// layer below is free to grow a vocabulary faster than this one, and a number
+/// is counted rather than invented.
+///
+/// `reason` and `statistics` are the caller's, because both are built for the
+/// duration of one delivery and neither can be borrowed from the event itself:
+/// a `MediaError` is a Rust value with no C shape, and the statistics have to
+/// be converted before they have one.
+pub(crate) fn media(
+    known: &mut Vocabulary<'_>,
+    call: CallHandle,
+    event: &MediaEvent,
+    reason: Option<&str>,
+    statistics: Option<&SipralStreamStats>,
+) -> Option<SipralEvent> {
+    let mut payload = SipralMediaEvent::empty();
+    let kind = match *event {
+        MediaEvent::Started { codec, direction } => {
+            payload.codec = named_codec(codec) as u32;
+            payload.direction = direction_of(direction) as u32;
+            SipralEventKind::MediaStarted
+        }
+        MediaEvent::Changed { codec, direction } => {
+            payload.codec = named_codec(codec) as u32;
+            payload.direction = direction_of(direction) as u32;
+            SipralEventKind::MediaChanged
+        }
+        MediaEvent::Stalled { silent_for } => {
+            payload.silent_for_ms = millis(silent_for);
+            SipralEventKind::MediaStalled
+        }
+        MediaEvent::Resumed { silent_for } => {
+            payload.silent_for_ms = millis(silent_for);
+            SipralEventKind::MediaResumed
+        }
+        MediaEvent::Ended(record) => {
+            payload.codec = named_codec(record.codec) as u32;
+            SipralEventKind::MediaStatistics
+        }
+        MediaEvent::Failed(ref error) => {
+            payload.fault = fault_of(error) as u32;
+            SipralEventKind::MediaFailed
+        }
+        MediaEvent::RecordingStopped {
+            ref reason,
+            written,
+            ..
+        } => {
+            payload.fault = fault_of(reason) as u32;
+            payload.recorded_ms = millis(written);
+            SipralEventKind::RecordingStopped
+        }
+        _ => return None,
+    };
+    if let Some(sentence) = reason {
+        payload.reason = sentence.as_ptr().cast::<c_char>();
+        payload.reason_len = sentence.len();
+    }
+    if let Some(record) = statistics {
+        payload.statistics = std::ptr::from_ref(record);
+    }
+    let mut out = SipralEvent::of(known.stack, kind, SipralEventPayload { media: payload });
+    out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+    Some(out)
+}
+
+/// The sentence a media event carries, for the kinds that have one to say.
+///
+/// Built here rather than in the translation because it has to outlive the
+/// borrow the event holds, and a `String` handed to C has to belong to
+/// something that is still alive when the callback reads it.
+pub(crate) fn media_reason(event: &MediaEvent) -> Option<String> {
+    match *event {
+        MediaEvent::Failed(ref error) => Some(error.to_string()),
+        MediaEvent::RecordingStopped { ref reason, .. } => Some(reason.to_string()),
         _ => None,
     }
 }
@@ -998,7 +1174,32 @@ mod tests {
         assert_eq!(SipralEventKind::TransferDone as u32, 12);
         assert_eq!(SipralEventKind::CallReplaced as u32, 13);
         assert_eq!(SipralEventKind::CallEnded as u32, 14);
-        assert_eq!(SipralEventKind::ALL.len(), 14, "and there are no others");
+        assert_eq!(SipralEventKind::MediaStatistics as u32, 17);
+        assert_eq!(SipralEventKind::MediaStalled as u32, 19);
+        assert_eq!(SipralEventKind::MediaStarted as u32, 21);
+        assert_eq!(SipralEventKind::MediaChanged as u32, 22);
+        assert_eq!(SipralEventKind::MediaResumed as u32, 23);
+        assert_eq!(SipralEventKind::MediaFailed as u32, 24);
+        assert_eq!(SipralEventKind::RecordingStopped as u32, 25);
+        assert_eq!(SipralEventKind::ALL.len(), 21, "and there are no others");
+    }
+
+    /// The two numbers this media surface took were spoken for before it was
+    /// written, and it took them where they were rather than appending. A
+    /// feature that had chosen the next free number instead would have renamed
+    /// one of the four still reserved.
+    #[test]
+    fn the_numbers_that_were_reserved_for_this_are_the_ones_it_took() {
+        assert_eq!(
+            SipralEventKind::MediaStatistics as u32,
+            17,
+            "17 was held for stream statistics (A6)"
+        );
+        assert_eq!(
+            SipralEventKind::MediaStalled as u32,
+            19,
+            "19 was held for media that stopped arriving (B5)"
+        );
     }
 
     #[test]
@@ -1019,10 +1220,10 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in 15..=20_u32 {
+        for held in [15, 16, 18, 20_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
-        assert_eq!(name(21), None, "past the last reservation");
+        assert_eq!(name(26), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

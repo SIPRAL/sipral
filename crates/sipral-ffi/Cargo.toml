@@ -13,6 +13,11 @@ categories.workspace = true
 publish.workspace = true
 
 [dependencies]
+# the facade, which is what carries media across this boundary. The two below
+# it stay because this crate drives the endpoint directly in places the facade
+# has no opinion about -- transport binding, timers, an in-dialog INFO -- and
+# they are the same crates the facade re-exports, so no type is duplicated.
+sipral = { path = "../sipral", version = "0.0.1" }
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 

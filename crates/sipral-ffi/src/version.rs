@@ -22,7 +22,7 @@ use crate::versioned::{Versioned, write_versioned};
 pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 0;
 
 /// The ABI's minor version, raised by every function or struct member added.
-pub const SIPRAL_ABI_VERSION_MINOR: u32 = 3;
+pub const SIPRAL_ABI_VERSION_MINOR: u32 = 4;
 
 /// The ABI's patch version, raised by a fix that changes no declaration.
 pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;

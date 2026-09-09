@@ -31,6 +31,7 @@ use sipral_ua::{ForkPolicy, OutgoingCall, UaError};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralCallState, call_state};
 use crate::handle::SipralHandle;
+use crate::media::{address, media_failed};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -60,7 +61,12 @@ pub struct SipralCallConfig {
     pub target: *const c_char,
     /// How many bytes of it.
     pub target_len: usize,
-    /// The session description to offer. Required.
+    /// The session description to offer, for a call this stack manages no
+    /// audio for.
+    ///
+    /// Exactly one of this and `media_address` is set. Two descriptions of one
+    /// session is one too many, and neither is a call whose answer would have
+    /// to be written into the ACK.
     pub sdp: *const u8,
     /// How many bytes of it.
     pub sdp_len: usize,
@@ -74,6 +80,17 @@ pub struct SipralCallConfig {
     /// the first that answers and hangs up the rest, which is what a telephone
     /// does.
     pub keep_all_forks: u32,
+    /// Where this end will receive media, as `host:port`, for a call this
+    /// stack describes and runs the audio of.
+    ///
+    /// The application owns the socket, so it is the only one that can say. Set
+    /// it and the offer is written from this stack's codec order, the answer is
+    /// read, and the call gets a media session that `crate::media` and
+    /// `crate::record` reach. Leave it null and set `sdp` instead for a call
+    /// where the application describes its own session and runs its own RTP.
+    pub media_address: *const c_char,
+    /// How many bytes of it.
+    pub media_address_len: usize,
 }
 
 // Safety: the trait's contract. Plain data with no invariant between the
@@ -138,7 +155,45 @@ unsafe fn description(sdp: *const u8, len: usize) -> Result<Option<Arc<[u8]>>, F
     Ok(unsafe { bytes(sdp, len, "sdp") }?.map(Arc::from))
 }
 
+/// Where this end will receive media, when the call is one this stack
+/// describes.
+///
+/// # Safety
+///
+/// The two members it reads must be a pointer readable for the length beside
+/// it.
+unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>, Fail> {
+    let Some(local) = (unsafe {
+        text(
+            config.media_address,
+            config.media_address_len,
+            "media_address",
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    if config.sdp_len != 0 || !config.sdp.is_null() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "media_address and sdp are both set, and a call has one description of its session: \
+             media_address writes it from this stack's codec order, sdp is one the application \
+             wrote",
+        ));
+    }
+    let Ok(address) = local.parse::<SocketAddr>() else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("media_address is {local:?}, which is not an address and a port"),
+        ));
+    };
+    Ok(Some(address))
+}
+
 /// Turn what crossed the boundary into a call to place.
+///
+/// `managed` says the description is this stack's to write, so the one in the
+/// config is neither wanted nor required.
 ///
 /// # Safety
 ///
@@ -146,16 +201,21 @@ unsafe fn description(sdp: *const u8, len: usize) -> Result<Option<Arc<[u8]>>, F
 unsafe fn outgoing_from(
     state: &StackState,
     config: &SipralCallConfig,
+    managed: bool,
 ) -> Result<OutgoingCall, Fail> {
     let target = unsafe { required_text(config.target, config.target_len, "target") }?;
-    let Some(offer) = (unsafe { description(config.sdp, config.sdp_len) })? else {
-        return Err(fail(
-            SipralStatus::InvalidArgument,
-            "a call placed from here carries an offer, because the answer to one that does not \
-             has to be written into the ACK",
-        ));
-    };
-    let mut outgoing = OutgoingCall::new(call_uri(target)?).offer(offer);
+    let mut outgoing = OutgoingCall::new(call_uri(target)?);
+    if !managed {
+        let Some(offer) = (unsafe { description(config.sdp, config.sdp_len) })? else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "a call placed from here carries an offer, because the answer to one that does \
+                 not has to be written into the ACK. Set sdp for a session the application \
+                 describes, or media_address for one this stack describes",
+            ));
+        };
+        outgoing = outgoing.offer(offer);
+    }
     if let Some(elsewhere) =
         unsafe { text(config.destination, config.destination_len, "destination") }?
     {
@@ -184,6 +244,10 @@ entry! {
     /// flight. A proxy that forks the INVITE gives the branches handles of
     /// their own, reported as `SIPRAL_EVENT_KIND_CALL_FORKED`.
     ///
+    /// With `media_address` set, the offer is this stack's to write and the
+    /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
+    /// and `crate::media` carries the packets from then on.
+    ///
     /// # Safety
     ///
     /// `config` must point at a `sipral_call_config_t` whose `size` member
@@ -200,13 +264,24 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
         }
         let config = unsafe { read_versioned(config) }?;
+        let media = unsafe { managed_media(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
-            let outgoing = unsafe { outgoing_from(state, &config) }?;
-            let placed = state
-                .agent
-                .call(id, &outgoing, now)
-                .map_err(|error| ua_failed(&error))?;
+            let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
+            let placed = match media {
+                Some(local) => {
+                    let placed = state
+                        .engine
+                        .place(&mut state.agent, id, outgoing, local, now)
+                        .map_err(|error| media_failed(&error))?;
+                    state.manage(placed);
+                    placed
+                }
+                None => state
+                    .agent
+                    .call(id, &outgoing, now)
+                    .map_err(|error| ua_failed(&error))?,
+            };
             state
                 .calls
                 .name_of(placed)
@@ -274,6 +349,41 @@ entry! {
                 .agent
                 .answer(id, Some(answer), now)
                 .map_err(|error| ua_failed(&error))
+        })
+    }
+}
+
+entry! {
+    /// Answer a call that came in, and let this stack run its audio.
+    ///
+    /// The answer to the offer the INVITE carried is written from this stack's
+    /// codec order, against `media_address` — where this end will receive
+    /// media, which only the application can say because it owns the socket.
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows once the stream is open.
+    ///
+    /// The other half of `sipral_call_place` with `media_address` set, and the
+    /// alternative to `sipral_call_answer`, which answers with a description
+    /// the application wrote and leaves the audio to it.
+    ///
+    /// # Safety
+    ///
+    /// `media_address` must be readable for `media_address_len` bytes.
+    fn sipral_call_answer_media(
+        stack: SipralHandle,
+        call: SipralHandle,
+        media_address: *const c_char,
+        media_address_len: usize,
+        now_ms: u64,
+    ) {
+        let local = unsafe { address(media_address, media_address_len, "media_address") }?;
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            state
+                .engine
+                .answer(&mut state.agent, id, local, now)
+                .map_err(|error| media_failed(&error))?;
+            state.manage(id);
+            Ok(())
         })
     }
 }
@@ -373,6 +483,11 @@ entry! {
     /// and then ends the call, so this or [`sipral_call_reject_session`] has
     /// to follow that event.
     ///
+    /// Only for a call the application describes. One this stack describes
+    /// answers its own re-offers, from the same codec order, before the poll
+    /// that saw the request returns — so the event never arrives and this is
+    /// `SIPRAL_STATUS_WRONG_STATE`.
+    ///
     /// # Safety
     ///
     /// `sdp` must be null or readable for `sdp_len` bytes.
@@ -385,6 +500,7 @@ entry! {
     ) {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            describes_its_own(state, id)?;
             let answer = unsafe { bytes(sdp, sdp_len, "sdp") }?;
             state
                 .agent
@@ -400,6 +516,9 @@ entry! {
     /// 488 Not Acceptable Here is the status that says the description was the
     /// problem rather than the request.
     ///
+    /// As with [`sipral_call_accept_session`], only for a call the application
+    /// describes.
+    ///
     /// # Safety
     ///
     /// Safe to call with any handle values.
@@ -411,6 +530,7 @@ entry! {
     ) {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            describes_its_own(state, id)?;
             let status = status_code(status)?;
             state
                 .agent
@@ -461,6 +581,21 @@ entry! {
             Ok(())
         })
     }
+}
+
+/// Refuse a session change on a call whose descriptions are this stack's.
+///
+/// Not a guess about what the application meant: the engine has already
+/// answered the re-offer, so a second answer would be a second one on the wire.
+fn describes_its_own(state: &StackState, call: sipral_ua::CallHandle) -> Result<(), Fail> {
+    if state.manages(call) {
+        return Err(fail(
+            SipralStatus::WrongState,
+            "this stack writes the descriptions for this call and has already answered the change \
+             the far end offered",
+        ));
+    }
+    Ok(())
 }
 
 /// The digits, upper-cased, or which one was not a key.
@@ -549,6 +684,12 @@ entry! {
     /// `call` on hold first is the application's: it is a session change, and
     /// this stack does not make those uninvited.
     ///
+    /// `media_address` is `SIPRAL_STATUS_NOT_SUPPORTED` here. The media engine
+    /// places and answers calls; it does not consult, and a consultation leg
+    /// registered with it by hand would be one it has described nothing for.
+    /// A consultation with audio is placed with `sdp` and run by the
+    /// application, as every call was before this stack carried media.
+    ///
     /// # Safety
     ///
     /// As [`sipral_call_place`].
@@ -563,9 +704,16 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
         }
         let config = unsafe { read_versioned(config) }?;
+        if unsafe { managed_media(&config) }?.is_some() {
+            return Err(fail(
+                SipralStatus::NotSupported,
+                "media_address is set and this build cannot manage the media of a consultation \
+                 leg; place it with sdp and run its audio in the application",
+            ));
+        }
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let outgoing = unsafe { outgoing_from(state, &config) }?;
+            let outgoing = unsafe { outgoing_from(state, &config, false) }?;
             let placed = state
                 .agent
                 .consult(id, &outgoing, now)
@@ -726,19 +874,19 @@ entry! {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         SipralCallConfig, dtmf_body, keypad, sipral_call_accept_session, sipral_call_answer,
-        sipral_call_consult, sipral_call_hangup, sipral_call_hold, sipral_call_hold_state,
-        sipral_call_place, sipral_call_reject, sipral_call_reject_session, sipral_call_resume,
-        sipral_call_ring, sipral_call_send_dtmf, sipral_call_state, sipral_call_transfer,
-        sipral_call_transfer_to, tone_length,
+        sipral_call_answer_media, sipral_call_consult, sipral_call_hangup, sipral_call_hold,
+        sipral_call_hold_state, sipral_call_place, sipral_call_reject, sipral_call_reject_session,
+        sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf, sipral_call_state,
+        sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add};
     use crate::error::last_error_text;
     use crate::event::{SipralCallState, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
-    use crate::stack::tests::{Observed, poll, stack};
+    use crate::stack::tests::{Observed, config, create, poll, record, stack};
     use crate::stack::{sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
     use sipral_core::endpoint::Input;
@@ -752,6 +900,17 @@ mod tests {
     const CONTACT: &str = "sip:alice@192.0.2.10:5060";
     const PEER: &str = "203.0.113.5:5060";
     const TARGET: &str = "sip:bob@example.com";
+
+    /// Where a managed call receives its media, which is the application's
+    /// socket and therefore the application's to name.
+    pub(crate) const MEDIA: &str = "192.0.2.10:40000";
+
+    /// Where the far end receives its own, as the answers below say.
+    pub(crate) const PEER_MEDIA: &str = "203.0.113.5:41000";
+
+    /// What a media test offers, so that the answer it writes has one format to
+    /// agree with.
+    const ONE_CODEC: &str = "PCMU";
 
     const OFFER: &[u8] = b"v=0\r\n\
 o=alice 1 1 IN IP4 192.0.2.10\r\n\
@@ -769,6 +928,30 @@ c=IN IP4 203.0.113.5\r\n\
 t=0 0\r\n\
 m=audio 41000 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+
+    /// A re-offer that changes the format list, which is what the user agent
+    /// has no policy of its own for: a change that keeps the same media is one
+    /// it answers itself, and only a different one reaches the layer above.
+    pub(crate) const REOFFERED: &[u8] = b"v=0\r\n\
+o=bob 1 2 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 0 8\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=sendrecv\r\n";
+
+    /// An answer naming a format nobody offered, which happens and is better
+    /// said than played as noise.
+    pub(crate) const ALAW_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 8\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
 a=sendrecv\r\n";
 
     /// What the far end answers a hold with: it will receive, and not send
@@ -823,7 +1006,7 @@ a=recvonly\r\n";
         }
     }
 
-    fn call_config() -> SipralCallConfig {
+    pub(crate) fn call_config() -> SipralCallConfig {
         let (target, target_len) = as_text(TARGET);
         SipralCallConfig {
             size: size_of::<SipralCallConfig>(),
@@ -834,18 +1017,53 @@ a=recvonly\r\n";
             destination: ptr::null(),
             destination_len: 0,
             keep_all_forks: 0,
+            media_address: ptr::null(),
+            media_address_len: 0,
         }
     }
 
-    /// A stack with one account, ready to place a call.
-    fn line(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
-        let handle = stack(observed);
+    /// The same, for a call whose session this stack describes.
+    pub(crate) fn managed_config() -> SipralCallConfig {
+        let (media_address, media_address_len) = as_text(MEDIA);
+        SipralCallConfig {
+            sdp: ptr::null(),
+            sdp_len: 0,
+            media_address,
+            media_address_len,
+            ..call_config()
+        }
+    }
+
+    /// Name an account on a stack that already exists.
+    fn account_on(handle: SipralHandle) -> SipralHandle {
         let config = account_config();
         let mut account = SIPRAL_HANDLE_NONE;
         let status =
             unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        (handle, account)
+        account
+    }
+
+    /// A stack with one account, ready to place a call.
+    fn line(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
+        let handle = stack(observed);
+        (handle, account_on(handle))
+    }
+
+    /// The same, offering one codec, so that a test writes an answer of one
+    /// line rather than conducting a negotiation of its own.
+    pub(crate) fn media_line(
+        observed: &mut Observed,
+        tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
+    ) -> (SipralHandle, SipralHandle) {
+        let (codecs, codecs_len) = as_text(ONE_CODEC);
+        let mut config = config(record, observed);
+        config.codecs = codecs;
+        config.codecs_len = codecs_len;
+        tune(&mut config);
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        (handle, account_on(handle))
     }
 
     fn place(
@@ -869,7 +1087,7 @@ a=recvonly\r\n";
     }
 
     /// What the stack wanted written, taken before a poll drops it.
-    fn sent(stack: SipralHandle) -> Vec<Vec<u8>> {
+    pub(crate) fn sent(stack: SipralHandle) -> Vec<Vec<u8>> {
         with_stack(stack, |state| {
             let mut all = Vec::new();
             while let Some(transmit) = state.agent.poll_transmit() {
@@ -881,7 +1099,7 @@ a=recvonly\r\n";
     }
 
     /// The one message the stack wanted written.
-    fn one(stack: SipralHandle) -> Vec<u8> {
+    pub(crate) fn one(stack: SipralHandle) -> Vec<u8> {
         let mut all = sent(stack);
         assert_eq!(all.len(), 1, "expected exactly one message out");
         all.pop().unwrap_or_default()
@@ -909,7 +1127,7 @@ a=recvonly\r\n";
     /// The tag is added only to the first one. A re-INVITE goes out inside a
     /// dialog whose `To` already carries it, and a second tag would name a
     /// dialog nobody is in.
-    fn accepted(request: &[u8], body: &[u8], first: bool) -> Vec<u8> {
+    pub(crate) fn accepted(request: &[u8], body: &[u8], first: bool) -> Vec<u8> {
         let mut out = b"SIP/2.0 200 OK\r\n".to_vec();
         for (name, value) in [
             ("Via", field(request, HeaderName::Via)),
@@ -936,7 +1154,7 @@ a=recvonly\r\n";
         out
     }
 
-    fn deliver(stack: SipralHandle, message: &[u8], now_ms: u64) {
+    pub(crate) fn deliver(stack: SipralHandle, message: &[u8], now_ms: u64) {
         with_stack(stack, |state| {
             let now = state.instant(now_ms)?;
             let transport = state.transport;
@@ -957,8 +1175,9 @@ a=recvonly\r\n";
         .expect("the stack is live");
     }
 
-    /// A call this end placed and the far end answered.
-    fn connected(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
+    /// A call this end placed and the far end answered, described by the
+    /// application and carrying no audio this stack knows about.
+    pub(crate) fn connected(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let (handle, account) = line(observed);
         let (status, call) = place(handle, account, &call_config(), 1_000);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -973,6 +1192,118 @@ a=recvonly\r\n";
             "the call did not come up"
         );
         (handle, call)
+    }
+
+    /// The same, with the session described by this stack and audio running on
+    /// it: what every media test starts from.
+    pub(crate) fn media_call(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
+        media_call_tuned(observed, |_| {})
+    }
+
+    /// The same, on a stack configured to taste.
+    pub(crate) fn media_call_tuned(
+        observed: &mut Observed,
+        tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
+    ) -> (SipralHandle, SipralHandle) {
+        let (handle, account) = media_line(observed, tune);
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        assert_eq!(
+            state_of(handle, call),
+            SipralCallState::Confirmed as u32,
+            "the call did not come up"
+        );
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaStarted),
+            "the call came up without audio: {:?}",
+            observed.kinds()
+        );
+        (handle, call)
+    }
+
+    /// A managed call whose far end answered with a format nobody offered, so
+    /// that the negotiation fails while the call stands.
+    pub(crate) fn media_call_refused(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
+        let (handle, account) = media_line(observed, |_| {});
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ALAW_ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        (handle, call)
+    }
+
+    /// The ACK the far end sends for a 200 it was answered with, which is what
+    /// finally confirms a call that came in.
+    pub(crate) fn acknowledged(response: &[u8]) -> Vec<u8> {
+        let mut out = format!("ACK {CONTACT} SIP/2.0\r\n").into_bytes();
+        for (name, value) in [
+            (
+                "Via",
+                b"SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-an-ack".to_vec(),
+            ),
+            ("Max-Forwards", b"70".to_vec()),
+            ("From", field(response, HeaderName::From)),
+            ("To", field(response, HeaderName::To)),
+            ("Call-ID", field(response, HeaderName::CallId)),
+            ("CSeq", b"1 ACK".to_vec()),
+            ("Content-Length", b"0".to_vec()),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    /// A re-INVITE from the far end, inside the dialog the INVITE opened.
+    ///
+    /// The dialog seen from over there: what we put in `From` is its `To`, and
+    /// the tag it answered with is its own.
+    pub(crate) fn reoffer(invite: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut from = field(invite, HeaderName::To);
+        from.extend_from_slice(b";tag=farend");
+        let mut out = format!("INVITE {CONTACT} SIP/2.0\r\n").into_bytes();
+        for (name, value) in [
+            (
+                "Via",
+                b"SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-reoffer".to_vec(),
+            ),
+            ("Max-Forwards", b"70".to_vec()),
+            ("From", from),
+            ("To", field(invite, HeaderName::From)),
+            ("Call-ID", field(invite, HeaderName::CallId)),
+            ("CSeq", b"2 INVITE".to_vec()),
+            ("Contact", b"<sip:bob@203.0.113.5:5060>".to_vec()),
+            ("Content-Type", b"application/sdp".to_vec()),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Hang up and let the far end answer, so that the call really ends.
+    pub(crate) fn hangup(stack: SipralHandle, call: SipralHandle, now_ms: u64) {
+        assert_eq!(
+            unsafe { sipral_call_hangup(stack, call, now_ms) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let bye = one(stack);
+        assert!(start_line(&bye).starts_with("BYE"));
+        deliver(stack, &accepted(&bye, b"", false), now_ms + 1);
+        poll(stack, now_ms + 1);
     }
 
     /// An INVITE from somebody else, addressed here.
@@ -1641,6 +1972,142 @@ Content-Length: 0\r\n\r\n";
             unsafe { sipral_call_state(handle, call, ptr::null_mut()) },
             SipralStatus::InvalidArgument
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A call has one description of its session. Two ways of saying what it
+    /// is are one too many, and the answer says which two.
+    #[test]
+    fn a_call_described_twice_is_refused_rather_than_one_of_them_winning() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let mut config = call_config();
+        config.media_address = media_address;
+        config.media_address_len = media_address_len;
+        let (status, call) = place(handle, account, &config, 1_000);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(call, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(
+            message.contains("media_address") && message.contains("sdp"),
+            "the message names neither: {message}"
+        );
+
+        let mut neither = call_config();
+        neither.sdp = ptr::null();
+        neither.sdp_len = 0;
+        assert_eq!(
+            place(handle, account, &neither, 1_000).0,
+            SipralStatus::InvalidArgument,
+            "and a call described neither way is refused too"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The other half of a managed call: one that came in, answered with a
+    /// description this stack writes.
+    #[test]
+    fn a_call_that_comes_in_can_be_answered_with_media_of_this_stacks_own() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let status = unsafe {
+            sipral_call_answer_media(handle, call, media_address, media_address_len, 1_100)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let answered = one(handle);
+        assert!(start_line(&answered).starts_with("SIP/2.0 200"));
+        let body = String::from_utf8_lossy(&answered).into_owned();
+        assert!(
+            body.contains("m=audio 40000 RTP/AVP 0"),
+            "the answer is not this stack's own: {body}"
+        );
+        deliver(handle, &acknowledged(&answered), 1_200);
+        poll(handle, 1_200);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaStarted),
+            "the call was answered without audio: {:?}",
+            observed.kinds()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A change the far end offers on a managed call is answered by the stack,
+    /// from the same codec order, before the poll that saw it returns. So it is
+    /// not handed to the application, and the two entry points that would
+    /// answer it a second time say so.
+    #[test]
+    fn a_stack_that_describes_a_call_answers_its_own_re_offers() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+
+        deliver(handle, &reoffer(&invite, REOFFERED), 1_200);
+        let result = poll(handle, 1_200);
+        assert!(
+            !observed.kinds().contains(&SipralEventKind::SessionOffered),
+            "the application was asked to answer what the stack already had: {:?}",
+            observed.kinds()
+        );
+        assert!(
+            result.transmits_discarded > 0,
+            "nothing went out in answer to the re-offer"
+        );
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaChanged),
+            "the application was told nothing about the session that changed: {:?}",
+            observed.kinds()
+        );
+        assert_eq!(
+            unsafe {
+                sipral_call_accept_session(handle, call, ANSWER.as_ptr(), ANSWER.len(), 1_300)
+            },
+            SipralStatus::WrongState
+        );
+        assert_eq!(
+            unsafe { sipral_call_reject_session(handle, call, 488, 1_300) },
+            SipralStatus::WrongState
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A half-wired feature behind this ABI is worse than an absent one, so the
+    /// consultation leg says what it cannot do rather than taking a media
+    /// address it would then ignore.
+    #[test]
+    fn a_consultation_with_media_of_this_stacks_own_is_refused_rather_than_ignored() {
+        let mut observed = Observed::default();
+        let (handle, call) = media_call(&mut observed);
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let mut config = call_config();
+        config.sdp = ptr::null();
+        config.sdp_len = 0;
+        config.media_address = media_address;
+        config.media_address_len = media_address_len;
+        let mut consulted = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_call_consult(
+                handle,
+                call,
+                ptr::from_ref(&config),
+                &raw mut consulted,
+                2_000,
+            )
+        };
+        assert_eq!(status, SipralStatus::NotSupported);
+        assert_eq!(consulted, SIPRAL_HANDLE_NONE);
+        assert!(last_error_text().contains("consultation"));
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

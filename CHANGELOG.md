@@ -56,6 +56,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The C ABI carries media.** It depended on signalling and stopped there, so a
+  client on the other side of it parsed its own SDP, ran its own RTP and owned
+  its own audio — which is why most of `docs/13-client-requirements.md` was
+  waiting on one crate. It now drives the facade's engine, and fourteen entry
+  points came with it: the codecs this build contains and the order they are
+  offered in, without needing a stack to ask; what a live call agreed, with its
+  wire payload type, clocks and keying; recording started and stopped mid-call;
+  statistics live and complete at the end; media stopping and coming back; and
+  the audio path itself, without which the rest is decoration.
+
+  A call is described one way or the other and never both: give it a media
+  address and the stack writes the offer and owns the audio, give it raw SDP and
+  it behaves as it always did. Both is refused. A managed call answers its own
+  re-offers, so the application is told the media changed rather than asked what
+  to do about it.
+
+  The recording's ownership is the part that had to be got right: the file
+  belongs to the media session and C never sees a handle, and the WAVE header's
+  lengths are patched on all three exits — an explicit stop, the call ending,
+  and the stack being destroyed, including when it is destroyed from inside the
+  event callback. A file that is never closed is a file that will not play.
+
+  Two of the reserved event numbers were taken in place, which is what they were
+  reserved for. Taking them meant letting live and reserved lines interleave in
+  one run rather than forcing the live ones into a prefix, since otherwise
+  reaching a number meant also spending the ones before it on features that do
+  not exist.
+
+  **What this does not yet do, said plainly: a call still cannot be placed
+  through this ABI.** There is no transport entry point — `sipral_stack_poll`
+  counts what the stack wants to send and discards it — so media I/O is now
+  ahead of signalling I/O. That gap predates this change and is next.
+
 - A default profile for the equipment this stack is actually deployed against —
   a softphone behind consumer NAT talking to an Asterisk-family PBX — with what
   each optional mechanism costs on the wire beside it. **Declaring ICE adds 143

@@ -57,6 +57,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
+use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, TransportId, TransportProtocol};
 use sipral_core::transaction::TimerConfig;
 use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
@@ -64,6 +65,7 @@ use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{HandleTable, SipralHandle};
+use crate::media::{catalog_of, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -173,6 +175,66 @@ pub struct SipralStackConfig {
     /// wait out. Zero on a transport that delivers for us, so it is refused
     /// there the same way T2 is.
     pub timer_t4_ms: u64,
+    /// The codecs to offer, in the order to offer them: their names, separated
+    /// by commas, as UTF-8 and not NUL-terminated. Null for everything this
+    /// build contains, quality first.
+    ///
+    /// A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
+    /// has the peer's preference decide among what both ends list — and it is
+    /// configured per site rather than fixed, because a carrier that bills by
+    /// the minute wants the narrowband codec first and a company on its own
+    /// network wants the wideband one.
+    ///
+    /// A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
+    /// here, with the names it does have in the last error. It is never taken
+    /// and ignored: a setting that is accepted and then quietly dropped is the
+    /// failure neither end can see.
+    pub codecs: *const c_char,
+    /// How many bytes of it.
+    pub codecs_len: usize,
+    /// How long a frame is, in milliseconds, or zero for twenty.
+    ///
+    /// Twenty is what every peer expects and what every codec here cuts
+    /// cleanly. Opus has a fixed set of frame durations and encodes nothing
+    /// else, so an interval it has no size for is refused while Opus is one of
+    /// the codecs offered.
+    pub frame_ms: u32,
+    /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
+    /// default: a phone that cannot send a digit cannot navigate a menu.
+    pub offer_dtmf: u32,
+    /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
+    ///
+    /// Off by default. §5.1.1 only permits it where both ends asked, and the
+    /// equipment this stack is deployed against does not; asking unasked costs
+    /// a line in every offer and buys a port on the calls where nobody answers.
+    pub offer_rtcp_mux: u32,
+    /// Whether to stop sending during silence, as a `SipralToggle`.
+    ///
+    /// Off by default. It halves the bandwidth of a call in which one person is
+    /// listening, and it costs the far end's own stall watchdog a reason to
+    /// fire — this stack sends no comfort noise of its own to say the silence
+    /// is deliberate, so a gap looks the same from there as a stream that died.
+    pub silence_suppression: u32,
+    /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
+    /// default; this is B5.
+    pub media_stall_watchdog: u32,
+    /// How long inbound audio may stop before that is reported, in
+    /// milliseconds, or zero for this build's own figure.
+    ///
+    /// Setting it with the watchdog switched off is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+    pub media_stall_ms: u64,
+    /// What the wall clock read when the stack was created, as seconds since
+    /// 1 January 1970, or zero.
+    ///
+    /// The one number a stack that reads no clock cannot work out: RFC 3550
+    /// §6.4.1 has a sender report carry "the wall clock time when this report
+    /// was sent", and a monotonic instant is not one. Zero means the reports
+    /// count from the Unix epoch, which costs nothing a caller is likely to
+    /// miss — the round trip the far end computes is a difference, not an
+    /// absolute — and costs the correlation of this call's media with anything
+    /// else's.
+    pub media_clock_unix_seconds: u64,
 }
 
 // Safety: the trait's contract. Plain data, no invariant between the members,
@@ -258,6 +320,22 @@ pub struct SipralStackSettings {
     pub timer_t2_ms: u64,
     /// T4 in milliseconds, with the default filled in.
     pub timer_t4_ms: u64,
+    /// How many codecs this stack offers. `sipral_stack_codec_order` says
+    /// which, and in what order.
+    pub codec_count: usize,
+    /// How long a frame is, with the default filled in.
+    pub frame_ms: u32,
+    /// Whether named events are offered, as a `SipralToggle`. Never the
+    /// default value: this says what the setting came to, not what was passed.
+    pub offer_dtmf: u32,
+    /// Whether RTCP multiplexing is asked for, as a `SipralToggle`.
+    pub offer_rtcp_mux: u32,
+    /// Whether sending stops during silence, as a `SipralToggle`.
+    pub silence_suppression: u32,
+    /// How long inbound audio may stop before it is reported, with the default
+    /// filled in. Zero when the watchdog is off, which is the one case where
+    /// there is no figure to give.
+    pub media_stall_ms: u64,
 }
 
 // Safety: integers, and zero is a valid value of each.
@@ -282,6 +360,17 @@ pub(crate) struct StackState {
     callback: unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void),
     user_data: *mut c_void,
     pub(crate) agent: UserAgent,
+    /// Signalling joined to media. It drains the user agent, which is why
+    /// nothing here polls that directly: an event taken from underneath the
+    /// engine is an event the engine needed in order to know a call was
+    /// answered, and the failure looks like a call that rings and is silent.
+    pub(crate) engine: MediaEngine,
+    /// The calls whose media this stack writes the descriptions for.
+    ///
+    /// Kept here rather than asked of the engine because it is this ABI's
+    /// question, not the engine's: it decides which re-offers the application
+    /// is asked to answer and which the stack has already answered for it.
+    managed: Vec<CallHandle>,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
     /// The transport every account and every call uses. There is one.
@@ -291,6 +380,8 @@ pub(crate) struct StackState {
     /// The figures the endpoint was built with, kept for the same reason: the
     /// endpoint holds them and does not hand them out.
     timers: TimerConfig,
+    /// What the media settings came to, for the same reason again.
+    media: MediaConfig,
     /// What goes in `User-Agent`, when the caller wanted one.
     pub(crate) user_agent: Option<Box<[u8]>>,
     /// What `now_ms` of zero means. Read once, from the only clock this
@@ -344,6 +435,44 @@ impl StackState {
         // still holding this stack's lock, which is what turns a call back
         // into it from in here into SIPRAL_STATUS_BUSY
         unsafe { (self.callback)(std::ptr::from_ref(event), self.user_data) };
+    }
+
+    /// Say that this stack writes the descriptions for a call.
+    pub(crate) fn manage(&mut self, call: CallHandle) {
+        if !self.manages(call) {
+            self.managed.push(call);
+        }
+    }
+
+    /// Whether it does.
+    pub(crate) fn manages(&self, call: CallHandle) -> bool {
+        self.managed.contains(&call)
+    }
+
+    fn unmanage(&mut self, call: CallHandle) {
+        self.managed.retain(|managed| *managed != call);
+    }
+}
+
+impl Drop for StackState {
+    /// Close every recording that is still open.
+    ///
+    /// A WAVE header carries two lengths that are only known when the recording
+    /// stops, so a file whose recorder was dropped rather than closed is one a
+    /// player calls corrupt. This is the last moment anything can patch them,
+    /// and it is reached however the stack goes: destroyed from the
+    /// application, destroyed from inside its own event callback — where what
+    /// the poll is holding is dropped after the poll returns — or let go at the
+    /// end of a process that is shutting down tidily.
+    fn drop(&mut self) {
+        let recording: Vec<CallHandle> = self.engine.active().collect();
+        for call in recording {
+            if let Some(session) = self.engine.session(call) {
+                // there is nobody left to tell, and a failure here means the
+                // sink was already refusing the audio it was given
+                let _ = session.stop_recording();
+            }
+        }
     }
 }
 
@@ -475,6 +604,59 @@ fn timers_for(
     Ok(timers)
 }
 
+/// How this stack's media behaves, or which of its settings it was given
+/// nothing to do with.
+///
+/// The watchdog is the same shape as the timers above: an interval set while
+/// the thing that reads it is switched off is a value nothing will ever look
+/// at, and the only honest answers are to say so here or to lie about it later.
+fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
+    let watching = toggled(config.media_stall_watchdog, "media_stall_watchdog", true)?;
+    if !watching && config.media_stall_ms != 0 {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "media_stall_ms is {} and media_stall_watchdog is off, so the threshold it sets \
+                 is one nothing reads",
+                config.media_stall_ms
+            ),
+        ));
+    }
+    let default = MediaConfig::default();
+    let stall_after = match (watching, config.media_stall_ms) {
+        (false, _) => None,
+        (true, 0) => default.stall_after,
+        (true, millis) => Some(Duration::from_millis(millis)),
+    };
+    Ok(MediaConfig {
+        stall_after,
+        silence_suppression: toggled(config.silence_suppression, "silence_suppression", false)?,
+        ..default
+    })
+}
+
+/// The media engine a stack runs with: what it offers, how it behaves, and the
+/// one wall-clock reading its reports need.
+///
+/// # Safety
+///
+/// Every pointer in `config` must be readable for the length beside it.
+unsafe fn engine_for(
+    config: &SipralStackConfig,
+    media: MediaConfig,
+    origin: Instant,
+) -> Result<MediaEngine, Fail> {
+    let named = unsafe { text(config.codecs, config.codecs_len, "codecs") }?;
+    let catalog = catalog_of(
+        named,
+        config.frame_ms,
+        toggled(config.offer_dtmf, "offer_dtmf", true)?,
+        toggled(config.offer_rtcp_mux, "offer_rtcp_mux", false)?,
+    )?;
+    let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
+    Ok(MediaEngine::new(catalog, media, clock))
+}
+
 entry! {
     /// Create a stack, and write its handle to `out_stack`.
     ///
@@ -511,10 +693,12 @@ entry! {
         let seed = seed_from(unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?)?;
 
         let timers = timers_for(speaks.protocol(), &config)?;
+        let media = media_for(&config)?;
         let mut endpoint = EndpointConfig::default();
         endpoint.timers = timers;
 
         let origin = Instant::now();
+        let engine = unsafe { engine_for(&config, media.clone(), origin) }?;
         let mut agent = UserAgent::new(endpoint, seed);
         // the socket is the caller's; what the stack is told is the address
         // the far end will answer to, which is what goes in every Via
@@ -539,11 +723,14 @@ entry! {
                 callback,
                 user_data: config.event_user_data,
                 agent,
+                engine,
+                managed: Vec::new(),
                 accounts: Names::new(),
                 calls: Names::new(),
                 transport: TRANSPORT,
                 speaks,
                 timers,
+                media,
                 user_agent: named.map(|name| Box::from(name.as_bytes())),
                 origin,
                 polled_at_ms: 0,
@@ -589,6 +776,7 @@ entry! {
             // checked before it is filled in, so a caller that got its size
             // wrong is told that and not something about the stack
             unsafe { declared_size(out_settings.cast_const()) }?;
+            let catalog = state.engine.catalog();
             Ok(SipralStackSettings {
                 size: size_of::<SipralStackSettings>(),
                 transport: state.speaks as u32,
@@ -596,6 +784,12 @@ entry! {
                 timer_t1_ms: millis(state.timers.t1),
                 timer_t2_ms: millis(state.timers.t2),
                 timer_t4_ms: millis(state.timers.t4),
+                codec_count: catalog.codecs().len(),
+                frame_ms: catalog.frame_length(),
+                offer_dtmf: toggle_of(catalog.capabilities().dtmf),
+                offer_rtcp_mux: toggle_of(catalog.capabilities().rtcp_mux),
+                silence_suppression: toggle_of(state.media.silence_suppression),
+                media_stall_ms: state.media.stall_after.map_or(0, millis),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
@@ -666,56 +860,151 @@ entry! {
     }
 }
 
+/// What one drain of the engine came to.
+#[derive(Clone, Copy, Default)]
+struct Counted {
+    delivered: usize,
+    unclaimed: usize,
+}
+
+impl Counted {
+    fn delivered(&mut self) {
+        self.delivered = self.delivered.saturating_add(1);
+    }
+
+    fn unclaimed(&mut self) {
+        self.unclaimed = self.unclaimed.saturating_add(1);
+    }
+}
+
 /// One poll: time passes, events go out, output is counted.
 fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollResult {
     state.agent.handle_timeout(now);
+    state.engine.handle_timeout(now);
 
-    let mut delivered = 0_usize;
-    let mut unclaimed = 0_usize;
-
+    let mut counted = Counted::default();
     if !state.started {
         state.started = true;
         let event = crate::event::started(stack);
         state.deliver(&event);
-        delivered = delivered.saturating_add(1);
+        counted.delivered();
     }
-
-    while let Some(raised) = state.agent.poll_event() {
-        let mut known = Vocabulary {
-            stack,
-            agent: &state.agent,
-            accounts: &mut state.accounts,
-            calls: &mut state.calls,
-        };
-        let Some(event) = crate::event::translate(&mut known, &raised) else {
-            unclaimed = unclaimed.saturating_add(1);
-            continue;
-        };
-        state.deliver(&event);
-        delivered = delivered.saturating_add(1);
-        // the handle is retired only after the application has been told, so
-        // that the event that says a call is over can still name it
-        if let UaEvent::CallEnded { call, .. } = raised {
-            state.calls.forget(call);
-        }
-    }
+    drain(stack, state, now, &mut counted);
 
     let mut discarded = 0_usize;
     while state.agent.poll_transmit().is_some() {
         discarded = discarded.saturating_add(1);
     }
 
-    let deadline = state.agent.poll_timeout();
+    let deadline = match (state.agent.poll_timeout(), state.engine.poll_timeout()) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
     SipralPollResult {
         size: size_of::<SipralPollResult>(),
-        events_delivered: delivered,
-        events_unclaimed: unclaimed,
+        events_delivered: counted.delivered,
+        events_unclaimed: counted.unclaimed,
         transmits_discarded: discarded,
         has_deadline: u32::from(deadline.is_some()),
         next_poll_in_ms: deadline.map_or(0, |at| {
             u64::try_from(at.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
         }),
     }
+}
+
+/// Take everything the engine has and hand it to the callback.
+///
+/// Calls that ended are forgotten at the end rather than as their news goes
+/// out: the media of a call is reported after the signalling that ended it, and
+/// a handle retired in between would leave the last word about a call naming
+/// nothing.
+fn drain(stack: SipralHandle, state: &mut StackState, now: Instant, counted: &mut Counted) {
+    let mut ended: Vec<CallHandle> = Vec::new();
+    while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
+        match event {
+            Event::Signalling(raised) => {
+                if let UaEvent::CallEnded { call, .. } = raised {
+                    ended.push(call);
+                }
+                if let UaEvent::CallForked { call, sibling } = raised
+                    && state.manages(call)
+                {
+                    // the branch was offered exactly what its parent was, and
+                    // the engine has already given it a stream of its own
+                    state.manage(sibling);
+                }
+                signalling(stack, state, &raised, counted);
+            }
+            Event::Media { call, event } => media(stack, state, call, &event, counted),
+            // the facade is free to grow a vocabulary faster than this ABI,
+            // and a number counted is more honest than a kind invented
+            _ => counted.unclaimed(),
+        }
+    }
+    for call in ended {
+        state.calls.forget(call);
+        state.unmanage(call);
+    }
+}
+
+fn signalling(
+    stack: SipralHandle,
+    state: &mut StackState,
+    raised: &UaEvent,
+    counted: &mut Counted,
+) {
+    // a re-offer on a call this stack describes has already been answered by
+    // the engine, inside the poll that produced this. Handing it to the
+    // application would be asking for an answer that is already on the wire,
+    // and the application hears the outcome as a media event instead.
+    if let UaEvent::Reoffer { call, .. } = *raised
+        && state.manages(call)
+    {
+        return;
+    }
+    let mut known = Vocabulary {
+        stack,
+        agent: &state.agent,
+        accounts: &mut state.accounts,
+        calls: &mut state.calls,
+    };
+    let Some(event) = crate::event::translate(&mut known, raised) else {
+        counted.unclaimed();
+        return;
+    };
+    state.deliver(&event);
+    counted.delivered();
+}
+
+fn media(
+    stack: SipralHandle,
+    state: &mut StackState,
+    call: CallHandle,
+    raised: &MediaEvent,
+    counted: &mut Counted,
+) {
+    // both of these outlive the delivery and neither can be borrowed from the
+    // event: a sentence has to be formatted and a record has to be converted
+    // before either has a shape C can read
+    let reason = crate::event::media_reason(raised);
+    let record = match *raised {
+        MediaEvent::Ended(ref cost) => Some(stream_stats(cost)),
+        _ => None,
+    };
+    let mut known = Vocabulary {
+        stack,
+        agent: &state.agent,
+        accounts: &mut state.accounts,
+        calls: &mut state.calls,
+    };
+    let Some(event) =
+        crate::event::media(&mut known, call, raised, reason.as_deref(), record.as_ref())
+    else {
+        counted.unclaimed();
+        return;
+    };
+    state.deliver(&event);
+    counted.delivered();
 }
 
 #[cfg(test)]
@@ -727,6 +1016,7 @@ pub(crate) mod tests {
     use crate::error::last_error_text;
     use crate::event::{SipralEvent, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+    use crate::media::SipralToggle;
     use crate::status::SipralStatus;
     use std::ffi::{c_char, c_void};
     use std::ptr;
@@ -738,12 +1028,31 @@ pub(crate) mod tests {
     /// way to put a value in it.
     type Setting = (&'static str, fn(&mut SipralStackConfig));
 
+    /// What a media event said, copied out while the callback is still running.
+    ///
+    /// The pointers in an event are the library's and are valid for exactly
+    /// that long, so this is also what tests that promise.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Heard {
+        pub(crate) kind: SipralEventKind,
+        pub(crate) call: SipralHandle,
+        pub(crate) codec: u32,
+        pub(crate) direction: u32,
+        pub(crate) silent_for_ms: u64,
+        pub(crate) recorded_ms: u64,
+        pub(crate) fault: u32,
+        pub(crate) reason: String,
+        pub(crate) statistics: Option<crate::media::SipralStreamStats>,
+    }
+
     /// What a caller of the C API would keep behind its user pointer.
     #[derive(Default)]
     pub(crate) struct Observed {
         pub(crate) events: Vec<(SipralHandle, SipralEventKind, usize)>,
         /// The handles the events named, in order.
         pub(crate) named: Vec<(SipralHandle, SipralHandle)>,
+        /// What every media event carried.
+        pub(crate) media: Vec<Heard>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -753,6 +1062,57 @@ pub(crate) mod tests {
         pub(crate) fn kinds(&self) -> Vec<SipralEventKind> {
             self.events.iter().map(|event| event.1).collect()
         }
+
+        /// The media events of one kind, in the order they arrived.
+        pub(crate) fn of(&self, kind: SipralEventKind) -> Vec<Heard> {
+            self.media
+                .iter()
+                .filter(|heard| heard.kind == kind)
+                .cloned()
+                .collect()
+        }
+    }
+
+    const fn is_media(kind: SipralEventKind) -> bool {
+        matches!(
+            kind,
+            SipralEventKind::MediaStarted
+                | SipralEventKind::MediaChanged
+                | SipralEventKind::MediaStalled
+                | SipralEventKind::MediaResumed
+                | SipralEventKind::MediaFailed
+                | SipralEventKind::MediaStatistics
+                | SipralEventKind::RecordingStopped
+        )
+    }
+
+    /// What one media event said, read the way a binding would: out of the
+    /// union arm the kind names, before the callback returns.
+    unsafe fn heard(event: &SipralEvent) -> Heard {
+        let payload = unsafe { event.payload.media };
+        let reason = if payload.reason.is_null() {
+            String::new()
+        } else {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(payload.reason.cast::<u8>(), payload.reason_len)
+            };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        Heard {
+            kind: event.kind,
+            call: event.call,
+            codec: payload.codec,
+            direction: payload.direction,
+            silent_for_ms: payload.silent_for_ms,
+            recorded_ms: payload.recorded_ms,
+            fault: payload.fault,
+            reason,
+            statistics: if payload.statistics.is_null() {
+                None
+            } else {
+                Some(unsafe { *payload.statistics })
+            },
+        }
     }
 
     pub(crate) unsafe extern "C" fn record(event: *const SipralEvent, user_data: *mut c_void) {
@@ -760,6 +1120,10 @@ pub(crate) mod tests {
         let event = unsafe { &*event };
         observed.events.push((event.stack, event.kind, event.size));
         observed.named.push((event.account, event.call));
+        if is_media(event.kind) {
+            let heard = unsafe { heard(event) };
+            observed.media.push(heard);
+        }
     }
 
     unsafe extern "C" fn poll_again(event: *const SipralEvent, user_data: *mut c_void) {
@@ -815,6 +1179,15 @@ pub(crate) mod tests {
             timer_t1_ms: 0,
             timer_t2_ms: 0,
             timer_t4_ms: 0,
+            codecs: ptr::null(),
+            codecs_len: 0,
+            frame_ms: 0,
+            offer_dtmf: 0,
+            offer_rtcp_mux: 0,
+            silence_suppression: 0,
+            media_stall_watchdog: 0,
+            media_stall_ms: 0,
+            media_clock_unix_seconds: 0,
         }
     }
 
@@ -936,6 +1309,12 @@ pub(crate) mod tests {
             timer_t1_ms: u64::MAX,
             timer_t2_ms: u64::MAX,
             timer_t4_ms: u64::MAX,
+            codec_count: usize::MAX,
+            frame_ms: u32::MAX,
+            offer_dtmf: u32::MAX,
+            offer_rtcp_mux: u32::MAX,
+            silence_suppression: u32::MAX,
+            media_stall_ms: u64::MAX,
         }
     }
 
@@ -1070,6 +1449,79 @@ pub(crate) mod tests {
         let mut config = config(record, &mut observed);
         config.timer_t1_ms = 5_000;
         assert_eq!(create(&config).0, SipralStatus::InvalidArgument);
+    }
+
+    /// The media half of the same promise: a call that answered
+    /// `SIPRAL_STATUS_OK` applied what it was given, and this is where the
+    /// caller reads what that came to. The three settings that are booleans
+    /// read back as on or off, never as the zero that means "nothing was said".
+    #[test]
+    fn a_stack_reads_back_the_media_settings_it_is_running_on() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let read = read_settings(handle);
+        assert_eq!(read.codec_count, 4, "everything this build contains");
+        assert_eq!(read.frame_ms, 20, "the default, not the zero given");
+        assert_eq!(read.offer_dtmf, SipralToggle::On as u32);
+        assert_eq!(read.offer_rtcp_mux, SipralToggle::Off as u32);
+        assert_eq!(read.silence_suppression, SipralToggle::Off as u32);
+        assert_eq!(read.media_stall_ms, 10_000, "the default watchdog");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_media_setting_that_was_set_reads_back_as_the_one_that_was_set() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        let codecs = "PCMA,PCMU";
+        config.codecs = codecs.as_ptr().cast::<c_char>();
+        config.codecs_len = codecs.len();
+        config.frame_ms = 30;
+        config.offer_dtmf = SipralToggle::Off as u32;
+        config.offer_rtcp_mux = SipralToggle::On as u32;
+        config.silence_suppression = SipralToggle::On as u32;
+        config.media_stall_ms = 2_500;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let read = read_settings(handle);
+        assert_eq!(read.codec_count, 2);
+        assert_eq!(read.frame_ms, 30);
+        assert_eq!(read.offer_dtmf, SipralToggle::Off as u32);
+        assert_eq!(read.offer_rtcp_mux, SipralToggle::On as u32);
+        assert_eq!(read.silence_suppression, SipralToggle::On as u32);
+        assert_eq!(read.media_stall_ms, 2_500);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A4's rule at the boundary a caller actually crosses: a codec this build
+    /// cannot encode is refused at creation, with the status that means the
+    /// build is missing something rather than the one that means try again.
+    #[test]
+    fn a_codec_this_build_cannot_encode_stops_the_stack_from_being_made() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        let absent = "PCMU,G729";
+        config.codecs = absent.as_ptr().cast::<c_char>();
+        config.codecs_len = absent.len();
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::NotSupported);
+        assert_eq!(handle, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(
+            message.contains("G729") && message.contains("PCMA"),
+            "the message names neither what was asked for nor what there is: {message}"
+        );
+    }
+
+    #[test]
+    fn a_watchdog_that_is_switched_off_leaves_no_threshold_to_read_back() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.media_stall_watchdog = SipralToggle::Off as u32;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(read_settings(handle).media_stall_ms, 0);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     #[test]

@@ -58,10 +58,67 @@ Rules for the ABI:
   line into a kind in place: the number is read rather than chosen, and two
   features cannot read the same one.
 
+  Live and reserved lines interleave, in number order, in one run. That is what
+  makes "in place" literal, and it is not cosmetic: a list that made every live
+  kind come first would force a feature that wants the sixth reserved number to
+  also take the five in front of it, and a number taken by a feature that does
+  not exist is exactly the lie the reservation was meant to prevent. The media
+  surface took 17 and 19 this way and left 15, 16, 18 and 20 where they were.
+
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
   value rather than deriving it, so a declaration that moved would disagree with
   a test that did not.
+
+## Media across the boundary
+
+The ABI is built over `crates/sipral`, the facade that joins signalling to
+media, and not over `sipral-ua` alone. Until it was, a client on the other side
+of this boundary had to parse its own descriptions, run its own RTP and own its
+own audio — which is to say it had to bring a second stack in order to use this
+one.
+
+**A call is described one way or the other, never both.** Set `media_address` in
+`sipral_call_config_t` and the offer is written from this stack's codec order,
+the answer is read, and the call gets a media session; answer an incoming one
+with `sipral_call_answer_media` for the same. Set `sdp` instead and the
+application describes its own session and runs its own audio, exactly as before.
+Setting both is `SIPRAL_STATUS_INVALID_ARGUMENT`: two descriptions of one
+session is one too many.
+
+**A managed call answers its own re-offers.** The engine writes the answer, from
+the same codec order, inside the poll that saw the request — so
+`SIPRAL_EVENT_KIND_SESSION_OFFERED` never arrives for one, and
+`sipral_call_accept_session` on it is `SIPRAL_STATUS_WRONG_STATE`. The
+application hears the outcome as `SIPRAL_EVENT_KIND_MEDIA_CHANGED`.
+
+**Four calls carry the packets**, and none of them opens a socket or touches a
+device: `sipral_call_media_receive` for a datagram that arrived,
+`sipral_call_playback` for the frame due for the earpiece, `sipral_call_capture`
+for one from the microphone, and `sipral_stack_poll_rtcp` for the control
+traffic RFC 3550 §6.3 schedules. Samples are 16-bit mono at
+`sipral_media_info_t::sample_rate`, a frame is exactly `frame_samples` of them,
+and outgoing packets are written into buffers the caller brings — checked before
+anything is built, so a frame is never encoded and then dropped for want of
+somewhere to put it.
+
+**Recording is where a path becomes a file**, and the file belongs to the media
+session from then on. C never sees the handle, so it cannot leak it or close it
+underneath the stack. The one thing that had to be arranged rather than
+inherited is the WAVE header: it carries two lengths that are not known until
+the recording stops, so every way a recording can end closes it properly —
+`sipral_call_record_stop`, the call ending, and the stack being destroyed,
+including from inside its own event callback. Destroying a stack mid-recording
+leaves a playable file, not a repair job.
+
+**Configuration is answered, never absorbed.** A codec name this build has no
+encoder for is `SIPRAL_STATUS_NOT_SUPPORTED` where the order is set, with the
+names it does have in the last error; a stall threshold set while the watchdog
+is off is `SIPRAL_STATUS_INVALID_ARGUMENT`, the same shape as a retransmission
+timer set on a transport that retransmits nothing. Every boolean media setting
+is a three-valued `sipral_toggle_t` — default, on, off — because a zeroed struct
+cannot otherwise tell "off" from "nothing was said", and
+`sipral_stack_settings_t` reads back what each of them came to.
 
 **The header is not generated yet, and neither are the bindings.** There is no
 C header in the tree and the .NET package is a name reservation. That is the

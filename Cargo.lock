@@ -139,6 +139,7 @@ version = "0.0.1"
 name = "sipral-ffi"
 version = "0.0.1"
 dependencies = [
+ "sipral",
  "sipral-core",
  "sipral-ua",
 ]
