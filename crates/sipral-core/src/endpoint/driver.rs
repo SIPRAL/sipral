@@ -195,6 +195,23 @@ impl Endpoint {
     }
 
     /// Bytes to put on a transport. Drain to empty.
+    ///
+    /// [`Transmit::payload`] is the message exactly as it goes on the wire, so
+    /// its length **is** the on-wire size of every request and response this
+    /// endpoint sends, and there is no counter or event here that would say it
+    /// any better. An application that wants that size logged has it in hand
+    /// at the point it writes the bytes:
+    ///
+    /// ```ignore
+    /// while let Some(transmit) = endpoint.poll_transmit() {
+    ///     eprintln!("{} bytes to {}", transmit.payload.len(), transmit.destination);
+    ///     socket.send_to(&transmit.payload, transmit.destination)?;
+    /// }
+    /// ```
+    ///
+    /// The one size that is *not* in hand there is the size of a request that
+    /// never became a `Transmit` because §18.1.1 refused it, and that one
+    /// arrives as [`Event::TransportWanted`] with the limit beside it.
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.transmits.pop_front()
@@ -813,20 +830,14 @@ impl Endpoint {
                 .datagram_limit
                 .too_big_for_a_datagram(message.len())
         {
-            let Some(stream) = self.transports.any_speaking(TransportProtocol::Tcp) else {
-                self.events.push_back(Event::TransportWanted {
-                    protocol: TransportProtocol::Tcp,
-                    destination: request.remote,
-                });
-                return Err(SendError::NeedsStreamTransport);
-            };
+            let stream = self.stream_to(request.remote, message.len())?;
             let bound = self
                 .transports
                 .get(stream)
                 .ok_or(SendError::UnknownTransport)?;
             flow = Flow {
                 transport: stream,
-                destination: bound.remote.unwrap_or(request.remote),
+                destination: request.remote,
                 source: None,
                 protocol: bound.protocol,
             };
@@ -835,6 +846,83 @@ impl Endpoint {
         }
 
         Ok((message, flow))
+    }
+
+    /// §18.1.1 for a request assembled somewhere other than `build_request`.
+    ///
+    /// `None` when the datagram carries it. Otherwise the flow to send it on
+    /// instead and the address its `Via` has to name, or
+    /// [`SendError::NeedsStreamTransport`] when there is no connection to use
+    /// and the caller has been asked to open one.
+    ///
+    /// The switch belongs wherever a request is built rather than only on the
+    /// path that happened to have it. The request that fragmented in the field
+    /// and died in silence was the one carrying `Authorization` — three
+    /// hundred bytes larger than the attempt that had fitted, and built by the
+    /// retry rather than by the first send.
+    pub(super) fn promote_if_too_big(
+        &mut self,
+        flow: Flow,
+        bytes: usize,
+    ) -> Result<Option<(Flow, SocketAddr)>, SendError> {
+        if flow.protocol.is_reliable() || !self.config.datagram_limit.too_big_for_a_datagram(bytes)
+        {
+            return Ok(None);
+        }
+        let stream = self.stream_to(flow.destination, bytes)?;
+        let bound = self
+            .transports
+            .get(stream)
+            .ok_or(SendError::UnknownTransport)?;
+        Ok(Some((
+            Flow {
+                transport: stream,
+                destination: flow.destination,
+                source: None,
+                protocol: bound.protocol,
+            },
+            bound.local,
+        )))
+    }
+
+    /// The stream transport a request too large for a datagram leaves on,
+    /// asking the caller for one when there is none.
+    ///
+    /// §18.1.1 recommends reusing a connection already open to "an IP address,
+    /// port, and transport" the request is destined for, and that is also the
+    /// only connection that would deliver it: writing a request to a
+    /// connection open to somebody else sends it to somebody else. A transport
+    /// bound without a far end is taken at its word, since only the caller
+    /// knows what it is attached to.
+    fn stream_to(
+        &mut self,
+        destination: SocketAddr,
+        request_bytes: usize,
+    ) -> Result<TransportId, SendError> {
+        let open = self
+            .transports
+            .any_speaking(TransportProtocol::Tcp)
+            .filter(|id| {
+                self.transports
+                    .get(*id)
+                    .is_some_and(|bound| bound.remote.is_none_or(|remote| remote == destination))
+            });
+        if let Some(stream) = open {
+            return Ok(stream);
+        }
+        self.events.push_back(Event::TransportWanted {
+            protocol: TransportProtocol::Tcp,
+            destination,
+            request_bytes,
+            // nothing fits at all is reported as nothing fits, which is what a
+            // path MTU below the headroom means
+            limit_bytes: self
+                .config
+                .datagram_limit
+                .largest_datagram_request()
+                .unwrap_or(0),
+        });
+        Err(SendError::NeedsStreamTransport)
     }
 
     fn assemble(

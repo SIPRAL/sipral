@@ -159,19 +159,38 @@ impl Endpoint {
             .ok_or(AuthRetryError::Unsendable(
                 super::error::SendError::UnknownTransport,
             ))?;
-        let local = bound.local;
+        let mut local = bound.local;
         let branch = self.tokens.branch();
-        let via = super::via::local_via(
-            held.flow.protocol,
+        let mut flow = held.flow;
+        let mut via = super::via::local_via(
+            flow.protocol,
             local,
             &branch,
             self.config.always_request_rport,
         );
 
-        let message = rebuild(&held.request.as_raw(), &via, cseq, &answers)
+        let mut message = rebuild(&held.request.as_raw(), &via, cseq, &answers)
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
 
-        let flow = held.flow;
+        // The credentials are what made it large. §18.1.1 has to be applied
+        // here as well as on the first send, or the one request in a call that
+        // is certain to have grown is the one request nobody checked.
+        if let Some((stream, stream_local)) = self
+            .promote_if_too_big(flow, message.len())
+            .map_err(AuthRetryError::Unsendable)?
+        {
+            flow = stream;
+            local = stream_local;
+            via = super::via::local_via(
+                flow.protocol,
+                local,
+                &branch,
+                self.config.always_request_rport,
+            );
+            message = rebuild(&held.request.as_raw(), &via, cseq, &answers)
+                .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
+        }
+
         let dialog = held.dialog;
         let timers = self.config.timers;
         let retried = if method == Method::Invite {

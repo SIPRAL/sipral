@@ -72,8 +72,9 @@ pub enum SendError {
     /// The request is too large for a datagram (RFC 3261 §18.1.1) and no
     /// stream transport is open to move it to.
     ///
-    /// An `Event::TransportWanted` says what to open; the request is not
-    /// held, and is sent again by the caller once it is.
+    /// An `Event::TransportWanted` says what to open, and how many bytes the
+    /// request came to against how many it had; the request is not held, and
+    /// is sent again by the caller once the transport is bound.
     NeedsStreamTransport,
     /// The handle names a dialog that has ended, or never existed.
     NoSuchDialog,

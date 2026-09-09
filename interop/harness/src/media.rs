@@ -9,10 +9,19 @@
 //! test passed on the strength of its 200 OK.
 //!
 //! What happens here is deliberately the smallest thing that answers the
-//! question: send a tone the far end can only be echoing back, and measure
-//! what returns. An echo service that is working returns the tone; one that is
-//! not returns silence, or nothing at all, and the two are easy to tell apart
-//! without knowing anything about speech.
+//! question: send audio, and measure what arrives.
+//!
+//! Be exact about what that proves, because it is less than it looks. The lab
+//! does not echo — an echo was tried and does not survive the loopback bridge
+//! FreeSWITCH needs in order to be transferable — so what comes back is the
+//! far end's own cadenced tone. So `audible` says the media path is alive in
+//! the direction that matters: ports negotiated, codec agreed and decoding,
+//! packets arriving and being played. It does **not** say a round trip
+//! happened. A test that needs that needs a peer that echoes.
+//!
+//! What this end sends is cadenced too, and for a different reason: a client
+//! that never stops speaking is not a client, and the buffer at the far end is
+//! entitled to the pauses a real one would give it.
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
@@ -50,11 +59,33 @@ const AMPLITUDE: i16 = 8000;
 /// How often a frame goes out.
 const PACE: Duration = Duration::from_millis(20);
 
+/// How long the tone sounds, and how long it then stops for.
+///
+/// A continuous tone is not a conversation, and the difference is not
+/// cosmetic. A de-jitter buffer that has grown to cover an interruption gives
+/// the growth back only in a pause — dropping a frame during speech is
+/// audible and dropping one in silence is not — so a signal that never stops
+/// speaking can never let it recover, and every measurement taken over an
+/// impaired link is then taken against a buffer stuck where the worst moment
+/// left it. Measured on the lab before this existed: twenty seconds of tone
+/// through an eight-second outage ended at 420 ms of delay where a clean run
+/// of the same length sat at 20 ms, and none of that was the buffer's fault.
+const SPURT: Duration = Duration::from_millis(1_200);
+/// The pause after it. Long enough to contain several shrink steps, which are
+/// deliberately one frame at a time.
+const PAUSE: Duration = Duration::from_millis(600);
+
 /// Mean absolute sample value above which a frame counts as sound rather than
 /// silence. G.711 silence sits within a handful of units of zero; a tone at a
 /// quarter of full scale is thousands. Anything in between is neither, and the
 /// gap is wide enough that the threshold does not need to be argued about.
 const AUDIBLE: i32 = 500;
+
+/// Whether the tone is sounding at this point in the call.
+fn in_spurt(elapsed: Duration) -> bool {
+    let cycle = SPURT.saturating_add(PAUSE).as_millis().max(1);
+    elapsed.as_millis() % cycle < SPURT.as_millis()
+}
 
 /// A tone the far end cannot produce by itself, so hearing it back means it
 /// came from us. Roughly 440 Hz, square rather than sine.
@@ -156,6 +187,9 @@ pub(crate) struct Media {
     payload: [u8; MAX_OCTETS],
     packet: [u8; 1500],
     decoded: [i16; MAX_SAMPLES],
+    /// What the last frame played sounded like, which is what the buffer is
+    /// told about the next one.
+    playing: Activity,
     heard: Heard,
 }
 
@@ -181,6 +215,7 @@ impl Media {
             payload: [0; MAX_OCTETS],
             packet: [0; 1500],
             decoded: [0; MAX_SAMPLES],
+            playing: Activity::Speech,
             heard: Heard::default(),
         })
     }
@@ -241,7 +276,11 @@ impl Media {
             let frame = self.codec.frame_samples().min(MAX_SAMPLES);
             let rate = self.codec.sample_rate();
             let samples = self.samples.get_mut(..frame).unwrap_or_default();
-            tone(samples, &mut self.phase, rate);
+            if in_spurt(elapsed) {
+                tone(samples, &mut self.phase, rate);
+            } else {
+                samples.fill(0);
+            }
             let written = self.codec.encode_into(
                 self.samples.get(..frame).unwrap_or_default(),
                 &mut self.payload,
@@ -277,10 +316,20 @@ impl Media {
             }
         }
 
-        while let Pull::Packet(frame) = session.pull(Activity::Speech) {
+        // What the buffer is told is what the last frame sounded like, which
+        // is what a client knows: it has just decoded one. Saying "speech"
+        // unconditionally is the same as telling the buffer it may never
+        // shorten, and it will believe it.
+        while let Pull::Packet(frame) = session.pull(self.playing) {
             let count = self.codec.decode_into(frame.payload, &mut self.decoded);
             let played = self.decoded.get(..count).unwrap_or_default();
-            if loudness(played) >= AUDIBLE {
+            let loud = loudness(played) >= AUDIBLE;
+            self.playing = if loud {
+                Activity::Speech
+            } else {
+                Activity::Silence
+            };
+            if loud {
                 self.heard.audible = self.heard.audible.saturating_add(1);
             }
         }

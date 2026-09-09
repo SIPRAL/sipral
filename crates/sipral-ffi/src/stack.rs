@@ -48,9 +48,9 @@
 //! event handler is where its object gets disposed does not need a queue of
 //! deferred frees to be correct.
 //!
-//! Everything that names no stack — the last error, the status names, the ABI
-//! version — is callable from anywhere at any time, including from inside the
-//! callback and from any number of threads.
+//! Everything that names no stack — the last error, the status and event-kind
+//! names, the ABI version — is callable from anywhere at any time, including
+//! from inside the callback and from any number of threads.
 
 use std::ffi::{c_char, c_void};
 use std::net::SocketAddr;
@@ -98,6 +98,19 @@ pub enum SipralTransport {
     Wss = 5,
 }
 
+impl SipralTransport {
+    /// What the layers below call it.
+    const fn protocol(self) -> TransportProtocol {
+        match self {
+            Self::Udp => TransportProtocol::Udp,
+            Self::Tcp => TransportProtocol::Tcp,
+            Self::Tls => TransportProtocol::Tls,
+            Self::Ws => TransportProtocol::Ws,
+            Self::Wss => TransportProtocol::Wss,
+        }
+    }
+}
+
 /// What a stack is created with.
 ///
 /// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
@@ -125,7 +138,13 @@ pub struct SipralStackConfig {
     pub bind_address: *const c_char,
     /// How many bytes of it.
     pub bind_address_len: usize,
-    /// What to put in `User-Agent`, or null for none.
+    /// What to put in `User-Agent` on every request this stack originates —
+    /// REGISTER and INVITE — or null for none.
+    ///
+    /// Not on responses, and not on a request sent inside a dialog: those are
+    /// written a layer below this one, which has no opinion about product
+    /// names. The field is optional on every method — §20 Table 3 marks it `o`
+    /// throughout — so a message that goes out without it is still well formed.
     pub user_agent: *const c_char,
     /// How many bytes of it.
     pub user_agent_len: usize,
@@ -138,10 +157,21 @@ pub struct SipralStackConfig {
     /// How many bytes of it. Thirty-two.
     pub entropy_len: usize,
     /// T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
+    ///
+    /// In force on every transport: 64·T1 is how long a transaction has to
+    /// finish, whether or not anything retransmits.
     pub timer_t1_ms: u64,
     /// T2 in milliseconds, or zero for four seconds.
+    ///
+    /// The cap on the doubling that starts at T1, and therefore only a figure
+    /// on a transport that retransmits. Setting it on anything but UDP is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
     pub timer_t2_ms: u64,
     /// T4 in milliseconds, or zero for five seconds.
+    ///
+    /// How long a message lingers in the network, which is what timers I and K
+    /// wait out. Zero on a transport that delivers for us, so it is refused
+    /// there the same way T2 is.
     pub timer_t4_ms: u64,
 }
 
@@ -200,6 +230,46 @@ unsafe impl Versioned for SipralPollResult {
     }
 }
 
+/// What a stack is actually running with.
+///
+/// A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
+/// given, and this is where the caller reads back what that came to. It matters
+/// because a zero in the config means "the default": a caller that left the
+/// timers alone has no other way to learn which figures it is retransmitting
+/// on, and one that set them has no other way to be sure.
+///
+/// Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SipralStackSettings {
+    /// How many bytes of this struct the library filled in.
+    pub size: usize,
+    /// The [`SipralTransport`] this stack speaks.
+    pub transport: u32,
+    /// Whether this stack retransmits anything itself.
+    ///
+    /// Zero on a transport that delivers for us, which is every one but UDP.
+    /// The two timers that only exist to pace a retransmission read as their
+    /// defaults there, and mean nothing.
+    pub retransmits: u32,
+    /// T1 in milliseconds, with the default filled in.
+    pub timer_t1_ms: u64,
+    /// T2 in milliseconds, with the default filled in.
+    pub timer_t2_ms: u64,
+    /// T4 in milliseconds, with the default filled in.
+    pub timer_t4_ms: u64,
+}
+
+// Safety: integers, and zero is a valid value of each.
+unsafe impl Versioned for SipralStackSettings {
+    const NAME: &'static str = "sipral_stack_settings";
+    const MIN_SIZE: usize = size_of::<Self>();
+
+    fn set_declared_size(&mut self, bytes: usize) {
+        self.size = bytes;
+    }
+}
+
 /// One stack. The lock is what makes a call from inside the callback an error
 /// code instead of a deadlock, and a call from a second thread an error code
 /// instead of a wait.
@@ -216,6 +286,11 @@ pub(crate) struct StackState {
     pub(crate) calls: Names<CallHandle>,
     /// The transport every account and every call uses. There is one.
     pub(crate) transport: TransportId,
+    /// What that transport speaks, kept so the settings can be read back.
+    speaks: SipralTransport,
+    /// The figures the endpoint was built with, kept for the same reason: the
+    /// endpoint holds them and does not hand them out.
+    timers: TimerConfig,
     /// What goes in `User-Agent`, when the caller wanted one.
     pub(crate) user_agent: Option<Box<[u8]>>,
     /// What `now_ms` of zero means. Read once, from the only clock this
@@ -320,13 +395,13 @@ fn lock(entry: &Arc<StackEntry>) -> Result<MutexGuard<'_, StackState>, Fail> {
     }
 }
 
-fn transport_of(value: u32) -> Result<TransportProtocol, Fail> {
+fn transport_of(value: u32) -> Result<SipralTransport, Fail> {
     match value {
-        1 => Ok(TransportProtocol::Udp),
-        2 => Ok(TransportProtocol::Tcp),
-        3 => Ok(TransportProtocol::Tls),
-        4 => Ok(TransportProtocol::Ws),
-        5 => Ok(TransportProtocol::Wss),
+        1 => Ok(SipralTransport::Udp),
+        2 => Ok(SipralTransport::Tcp),
+        3 => Ok(SipralTransport::Tls),
+        4 => Ok(SipralTransport::Ws),
+        5 => Ok(SipralTransport::Wss),
         0 => Err(fail(
             SipralStatus::InvalidArgument,
             "a stack has to be told which transport it is speaking",
@@ -345,6 +420,59 @@ fn interval(millis: u64, default: Duration) -> Duration {
     } else {
         Duration::from_millis(millis)
     }
+}
+
+/// The figures this stack runs its timers on, or which of them it was given
+/// nothing to do with.
+///
+/// T2 caps the doubling that starts at T1, and T4 is how long the machines wait
+/// out a message that may still be in flight. RFC 3261 §17 arms neither on a
+/// transport that delivers for us: timers E and G are never set, and I and K
+/// are zero. So a caller that sets one of those on a stream is configuring a
+/// subsystem this stack does not have, and the only honest answers are to say
+/// so here or to lie about it later. A T2 below T1 is the same failure one step
+/// in: the cap is already reached at the first attempt, so T1 is the value that
+/// disappears.
+fn timers_for(
+    protocol: TransportProtocol,
+    config: &SipralStackConfig,
+) -> Result<TimerConfig, Fail> {
+    if protocol.is_reliable() {
+        let idle = [
+            ("timer_t2_ms", config.timer_t2_ms),
+            ("timer_t4_ms", config.timer_t4_ms),
+        ]
+        .into_iter()
+        .find(|(_, millis)| *millis != 0);
+        if let Some((name, millis)) = idle {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!(
+                    "{name} is {millis} and this stack speaks {}, which retransmits nothing, so \
+                     the timer it paces is never armed",
+                    protocol.as_str()
+                ),
+            ));
+        }
+    }
+
+    let timers = TimerConfig {
+        t1: interval(config.timer_t1_ms, TimerConfig::DEFAULT.t1),
+        t2: interval(config.timer_t2_ms, TimerConfig::DEFAULT.t2),
+        t4: interval(config.timer_t4_ms, TimerConfig::DEFAULT.t4),
+    };
+    if timers.t2 < timers.t1 {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "timer_t2_ms is {} and timer_t1_ms is {}, and T2 caps the interval T1 doubles \
+                 from, so a T2 below it is a T1 nothing would ever use",
+                timers.t2.as_millis(),
+                timers.t1.as_millis()
+            ),
+        ));
+    }
+    Ok(timers)
 }
 
 entry! {
@@ -369,7 +497,7 @@ entry! {
                 "a stack needs an event callback",
             ));
         };
-        let protocol = transport_of(config.transport)?;
+        let speaks = transport_of(config.transport)?;
         let bound = unsafe {
             required_text(config.bind_address, config.bind_address_len, "bind_address")
         }?;
@@ -382,10 +510,7 @@ entry! {
         let named = unsafe { text(config.user_agent, config.user_agent_len, "user_agent") }?;
         let seed = seed_from(unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?)?;
 
-        let mut timers = TimerConfig::DEFAULT;
-        timers.t1 = interval(config.timer_t1_ms, TimerConfig::DEFAULT.t1);
-        timers.t2 = interval(config.timer_t2_ms, TimerConfig::DEFAULT.t2);
-        timers.t4 = interval(config.timer_t4_ms, TimerConfig::DEFAULT.t4);
+        let timers = timers_for(speaks.protocol(), &config)?;
         let mut endpoint = EndpointConfig::default();
         endpoint.timers = timers;
 
@@ -396,7 +521,7 @@ entry! {
         let bound = agent.receive(
             Input::TransportBound {
                 transport: TRANSPORT,
-                protocol,
+                protocol: speaks.protocol(),
                 local,
                 remote: None,
             },
@@ -417,6 +542,8 @@ entry! {
                 accounts: Names::new(),
                 calls: Names::new(),
                 transport: TRANSPORT,
+                speaks,
+                timers,
                 user_agent: named.map(|name| Box::from(name.as_bytes())),
                 origin,
                 polled_at_ms: 0,
@@ -443,6 +570,44 @@ fn seed_from(entropy: Option<&[u8]>) -> Result<[u8; SEED_BYTES], Fail> {
             ),
         )
     })
+}
+
+entry! {
+    /// Read back what a stack is running with.
+    ///
+    /// Every value here was either given at creation or defaulted there, and
+    /// none of it changes afterwards. It is the other half of a configuration
+    /// call that answered `SIPRAL_STATUS_OK`: the call says the value was
+    /// taken, this says what it came to.
+    ///
+    /// # Safety
+    ///
+    /// `out_settings` must point at a `sipral_stack_settings_t` whose `size`
+    /// member says how long it is.
+    fn sipral_stack_settings(stack: SipralHandle, out_settings: *mut SipralStackSettings) {
+        let settings = with_stack(stack, |state| {
+            // checked before it is filled in, so a caller that got its size
+            // wrong is told that and not something about the stack
+            unsafe { declared_size(out_settings.cast_const()) }?;
+            Ok(SipralStackSettings {
+                size: size_of::<SipralStackSettings>(),
+                transport: state.speaks as u32,
+                retransmits: u32::from(!state.speaks.protocol().is_reliable()),
+                timer_t1_ms: millis(state.timers.t1),
+                timer_t2_ms: millis(state.timers.t2),
+                timer_t4_ms: millis(state.timers.t4),
+            })
+        })?;
+        unsafe { write_versioned(out_settings, settings) }?;
+        Ok(())
+    }
+}
+
+/// A configured interval as the caller counts one. Saturating rather than
+/// wrapping: an interval too long to count in milliseconds is one no timer of
+/// this stack's was built from.
+fn millis(interval: Duration) -> u64 {
+    u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
 }
 
 entry! {
@@ -556,8 +721,8 @@ fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollR
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SipralPollResult, SipralStackConfig, SipralTransport, sipral_stack_create,
-        sipral_stack_destroy, sipral_stack_poll,
+        SipralPollResult, SipralStackConfig, SipralStackSettings, SipralTransport,
+        sipral_stack_create, sipral_stack_destroy, sipral_stack_poll, sipral_stack_settings,
     };
     use crate::error::last_error_text;
     use crate::event::{SipralEvent, SipralEventKind};
@@ -568,6 +733,10 @@ pub(crate) mod tests {
 
     pub(crate) const BIND: &str = "192.0.2.10:5060";
     pub(crate) const SEED: [u8; 32] = [7; 32];
+
+    /// One member of the config, named as a caller's header names it, and the
+    /// way to put a value in it.
+    type Setting = (&'static str, fn(&mut SipralStackConfig));
 
     /// What a caller of the C API would keep behind its user pointer.
     #[derive(Default)]
@@ -753,9 +922,185 @@ pub(crate) mod tests {
         };
         assert_eq!(
             status,
-            SipralStatus::UnsupportedVersion,
-            "a member this build would ignore is not ignored quietly"
+            SipralStatus::NotSupported,
+            "a member this build would ignore is not ignored quietly, and the answer is about \
+             the member rather than about the size, which is a shape this build works with"
         );
+    }
+
+    fn settings() -> SipralStackSettings {
+        SipralStackSettings {
+            size: size_of::<SipralStackSettings>(),
+            transport: u32::MAX,
+            retransmits: u32::MAX,
+            timer_t1_ms: u64::MAX,
+            timer_t2_ms: u64::MAX,
+            timer_t4_ms: u64::MAX,
+        }
+    }
+
+    fn read_settings(handle: SipralHandle) -> SipralStackSettings {
+        let mut out = settings();
+        let status = unsafe { sipral_stack_settings(handle, &raw mut out) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        out
+    }
+
+    #[test]
+    fn a_stack_reads_back_the_figures_it_is_running_on() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let read = read_settings(handle);
+        assert_eq!(read.size, size_of::<SipralStackSettings>());
+        assert_eq!(read.transport, SipralTransport::Udp as u32);
+        assert_eq!(read.retransmits, 1);
+        assert_eq!(read.timer_t1_ms, 500, "the default, not the zero given");
+        assert_eq!(read.timer_t2_ms, 4_000);
+        assert_eq!(read.timer_t4_ms, 5_000);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_timer_that_was_set_reads_back_as_the_one_that_was_set() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.timer_t1_ms = 1_200;
+        config.timer_t2_ms = 9_000;
+        config.timer_t4_ms = 7_000;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let read = read_settings(handle);
+        assert_eq!(read.timer_t1_ms, 1_200);
+        assert_eq!(read.timer_t2_ms, 9_000);
+        assert_eq!(read.timer_t4_ms, 7_000);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// B2: a setting that a neighbouring value has disabled is refused where it
+    /// is set. T2 caps a retransmission interval and T4 waits one out, and RFC
+    /// 3261 §17 arms neither on a transport that delivers for us — so on
+    /// anything but UDP both would be values nothing ever reads.
+    #[test]
+    fn a_timer_the_transport_never_arms_is_refused_rather_than_taken_and_ignored() {
+        let stream = [
+            SipralTransport::Tcp,
+            SipralTransport::Tls,
+            SipralTransport::Ws,
+            SipralTransport::Wss,
+        ];
+        let idle: [Setting; 2] = [
+            ("timer_t2_ms", |config| config.timer_t2_ms = 6_000),
+            ("timer_t4_ms", |config| config.timer_t4_ms = 6_000),
+        ];
+        for protocol in stream {
+            for (which, set) in idle {
+                let mut observed = Observed::default();
+                let mut config = config(record, &mut observed);
+                config.transport = protocol as u32;
+                set(&mut config);
+                let (status, handle) = create(&config);
+                assert_eq!(
+                    status,
+                    SipralStatus::InvalidArgument,
+                    "{which} on {protocol:?} was taken"
+                );
+                assert_eq!(handle, SIPRAL_HANDLE_NONE);
+                let message = last_error_text();
+                assert!(
+                    message.contains(which) && message.contains(protocol.protocol().as_str()),
+                    "the message names neither the setting nor the transport: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_timers_are_taken_on_the_transport_that_does_arm_them() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.transport = SipralTransport::Udp as u32;
+        config.timer_t2_ms = 6_000;
+        config.timer_t4_ms = 6_000;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_stack_that_retransmits_nothing_says_so_rather_than_leaving_it_to_be_inferred() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.transport = SipralTransport::Tls as u32;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok);
+        let read = read_settings(handle);
+        assert_eq!(read.transport, SipralTransport::Tls as u32);
+        assert_eq!(read.retransmits, 0);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The other half of the same requirement: T1 is the interval T2 caps, so a
+    /// T2 below it is a T1 that is discarded at the first retransmission.
+    #[test]
+    fn a_cap_below_the_interval_it_caps_is_refused() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.timer_t1_ms = 2_000;
+        config.timer_t2_ms = 1_000;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(handle, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(
+            message.contains("2000") && message.contains("1000"),
+            "the message names neither figure: {message}"
+        );
+
+        config.timer_t2_ms = 2_000;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "a cap it just reaches is a cap");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A T1 raised past the default T2 is the same mistake made by leaving the
+    /// other value alone, and it is caught for the same reason.
+    #[test]
+    fn a_t1_raised_past_a_default_t2_is_caught_too() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.timer_t1_ms = 5_000;
+        assert_eq!(create(&config).0, SipralStatus::InvalidArgument);
+    }
+
+    #[test]
+    fn the_settings_of_a_stack_that_is_gone_cannot_be_read() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        let mut out = settings();
+        assert_eq!(
+            unsafe { sipral_stack_settings(handle, &raw mut out) },
+            SipralStatus::StaleHandle
+        );
+        assert_eq!(out.transport, u32::MAX, "nothing was written");
+    }
+
+    #[test]
+    fn a_settings_struct_that_is_null_or_the_wrong_size_is_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        assert_eq!(
+            unsafe { sipral_stack_settings(handle, ptr::null_mut()) },
+            SipralStatus::InvalidArgument
+        );
+        let mut out = settings();
+        out.size = size_of::<SipralStackSettings>() - 1;
+        assert_eq!(
+            unsafe { sipral_stack_settings(handle, &raw mut out) },
+            SipralStatus::UnsupportedVersion
+        );
+        assert_eq!(out.transport, u32::MAX, "nothing was written");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     #[test]

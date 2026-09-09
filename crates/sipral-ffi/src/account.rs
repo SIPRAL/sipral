@@ -78,8 +78,13 @@ pub struct SipralAccountConfig {
     pub instance_id: *const c_char,
     /// How many bytes of it.
     pub instance_id_len: usize,
-    /// How long a binding to ask for, or zero for an hour. What the registrar
-    /// grants wins over it either way.
+    /// How long a binding to ask for, or zero for an hour.
+    ///
+    /// A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
+    /// is refused rather than sent as a number no registrar will read. What the
+    /// registrar grants wins over the request either way, and the granted
+    /// figure is what `sipral_registration_event_t::expires_ms` carries — that
+    /// is where the effective value is read back, not here.
     pub expires_seconds: u64,
 }
 
@@ -104,6 +109,26 @@ fn uri(supplied: &str, name: &'static str) -> Result<Uri, Fail> {
             format!("{name} is {supplied:?}, which is not a URI: {error}"),
         )
     })
+}
+
+/// How long a binding to ask for, inside what an `Expires` can say.
+///
+/// §20.19 makes it a number of seconds "between 0 and (2**32)-1". A larger one
+/// still writes a header field, and every registrar that reads the grammar
+/// refuses the request — which reaches the application as a registration that
+/// will not take, four hundred milliseconds and one wire round trip after the
+/// mistake was made rather than at the call that made it.
+fn expiry(seconds: u64) -> Result<Duration, Fail> {
+    if u32::try_from(seconds).is_err() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "expires_seconds is {seconds}, and an Expires is a number of seconds up to {}",
+                u32::MAX
+            ),
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn address(supplied: &str, name: &'static str) -> Result<SocketAddr, Fail> {
@@ -170,7 +195,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         account = account.instance_id(instance);
     }
     if config.expires_seconds != 0 {
-        account = account.expires(Duration::from_secs(config.expires_seconds));
+        account = account.expires(expiry(config.expires_seconds)?);
     }
     if let Some(ref named) = state.user_agent {
         account = account.header(HeaderName::UserAgent, named);
@@ -488,6 +513,28 @@ mod tests {
         (config.auth_user, config.auth_user_len) = text("alice");
         (config.auth_password, config.auth_password_len) = text("hunter2");
         assert_eq!(add(handle, &config).0, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// §20.19 bounds an `Expires` at 2³²−1 seconds. A larger figure still
+    /// writes a header field, so without this the mistake surfaces as a
+    /// registration the registrar refuses rather than as the call that made it.
+    #[test]
+    fn an_expiry_longer_than_the_header_can_carry_is_refused_where_it_is_set() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let mut config = account_config();
+        config.expires_seconds = u64::from(u32::MAX) + 1;
+        assert_eq!(add(handle, &config).0, SipralStatus::InvalidArgument);
+        let message = last_error_text();
+        assert!(message.contains("expires_seconds"), "{message}");
+
+        config.expires_seconds = u64::from(u32::MAX);
+        assert_eq!(
+            add(handle, &config).0,
+            SipralStatus::Ok,
+            "the largest one an Expires can say is one it can say"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

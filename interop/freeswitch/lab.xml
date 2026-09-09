@@ -18,15 +18,31 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="bridge" data="loopback/9002/public"/>
     </condition>
   </extension>
-  <!-- the far side of that bridge. A generated tone, not local_stream://moh:
-       music on hold needs the sound files and a profile configured to serve
-       them, and when it is missing playback fails and the channel hangs up
-       half a millisecond after the ACK — which still looks like a call that
-       connected, and is how it went unnoticed. -->
+  <!-- the far side of that bridge. A cadenced tone: 1200 ms of sound, 600 ms
+       of silence, repeating.
+
+       The cadence is the point and it was not there. A de-jitter buffer gives
+       back the delay it grew over an interruption only in a pause — dropping a
+       frame during speech is audible and dropping one in silence is not — so a
+       far end that never stops speaking means every measurement over an
+       impaired link is taken against a buffer stuck where the worst moment
+       left it. Measured before this: twenty seconds through an eight-second
+       outage ended at 420 ms of delay where a clean run of the same length sat
+       at 20 ms.
+
+       An echo would be better still, because then "audible" would prove our
+       own audio made the round trip rather than that this end is generating
+       some. It was tried here and does not survive the loopback bridge: eight
+       packets came back out of a hundred and two.
+
+       Not local_stream://moh either: music on hold needs the sound files and a
+       profile configured to serve them, and when it is missing playback fails
+       and the channel hangs up half a millisecond after the ACK — which still
+       looks like a call that connected, and is how it went unnoticed. -->
   <extension name="sipral_lab_media">
     <condition field="destination_number" expression="^9002$">
       <action application="answer"/>
-      <action application="playback" data="tone_stream://%(60000,0,350,440)"/>
+      <action application="playback" data="tone_stream://%(1200,600,350,440);loops=-1"/>
       <action application="hangup"/>
     </condition>
   </extension>

@@ -685,13 +685,22 @@ fn run(
     // rest was, and how much had to be invented
     if let Some(quality) = script.media.quality() {
         use std::fmt::Write as _;
+        // `delay` beside `target` because the pair is what says whether the
+        // buffer is where it means to be; `shrunk` and `stretched` because a
+        // delay that grew over an outage and stayed there differs from one
+        // that grew and is on its way back only in whether frames are being
+        // dropped to bring it down
         let _ = write!(
             said,
-            "; lost {}, late {}, jitter {}ms, delay {}ms",
+            "; lost {}, late {}, jitter {}ms, delay {}ms of {}ms, \
+             shrunk {}, stretched {}",
             quality.lost,
             quality.discarded_late,
             quality.jitter.as_millis(),
-            quality.delay.as_millis()
+            quality.delay.as_millis(),
+            quality.target_delay.as_millis(),
+            quality.shrunk,
+            quality.stretched
         );
     }
     said.push(')');

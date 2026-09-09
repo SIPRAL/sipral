@@ -13,7 +13,7 @@
 //! that writes its own `Via` is a test that passes while the branch is wrong.
 
 use super::{
-    DialogEndReason, Endpoint, EndpointConfig, Event, FailureReason, Input,
+    DatagramLimit, DialogEndReason, Endpoint, EndpointConfig, Event, FailureReason, Input,
     OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse, TerminationReason, Transmit,
     TransportId, TransportProtocol,
 };
@@ -1043,6 +1043,131 @@ fn a_request_too_large_with_nowhere_to_move_it_asks_for_a_transport() {
                 protocol: TransportProtocol::Tcp,
                 ..
             }
+        )),
+        "{events:?}"
+    );
+}
+
+/// The two sizes on the one `TransportWanted` an endpoint produced.
+fn sizes_wanted(endpoint: &mut Endpoint) -> (usize, u32) {
+    events(endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::TransportWanted {
+                request_bytes,
+                limit_bytes,
+                ..
+            } => Some((request_bytes, limit_bytes)),
+            _ => None,
+        })
+        .expect("a transport was asked for")
+}
+
+#[test]
+fn the_request_that_did_not_fit_is_reported_at_its_size_on_the_wire() {
+    // the failure this exists for read as "authentication is broken" for two
+    // days, because nothing anywhere said 1785 and nothing said 1300
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let padding = vec![b'x'; 1_400];
+    let big = request(Method::Options).header(HeaderName::Subject, &padding);
+    assert!(endpoint.request(&big, t0).is_err());
+    let (request_bytes, limit_bytes) = sizes_wanted(&mut endpoint);
+    assert_eq!(limit_bytes, 1_300);
+
+    // and it is the size of the message, not an estimate of it: the same
+    // request, once there is a stream to put it on, is exactly that long
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+    endpoint.request(&big, t0).expect("the request goes");
+    let sent = transmits(&mut endpoint);
+    assert_eq!(
+        sent.first().map(|t| t.payload.len()),
+        Some(request_bytes),
+        "the size reported has to be the size written"
+    );
+}
+
+#[test]
+fn a_known_path_mtu_is_the_limit_that_gets_reported() {
+    // an access network whose real MTU is nowhere near Ethernet's is the case
+    // the figure is configurable for, and a report of 1300 there would send
+    // whoever reads it looking in the wrong place
+    let t0 = Instant::now();
+    let config = EndpointConfig {
+        datagram_limit: DatagramLimit {
+            path_mtu: Some(900),
+            ..DatagramLimit::DEFAULT
+        },
+        ..EndpointConfig::default()
+    };
+    let mut endpoint = Endpoint::new(config, [7; 32]);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+
+    let padding = vec![b'x'; 800];
+    let big = request(Method::Options).header(HeaderName::Subject, &padding);
+    assert!(endpoint.request(&big, t0).is_err());
+    let (request_bytes, limit_bytes) = sizes_wanted(&mut endpoint);
+    assert_eq!(limit_bytes, 699, "900 less the 200 the response needs");
+    assert!(request_bytes > 699, "{request_bytes}");
+}
+
+#[test]
+fn a_connection_to_somebody_else_is_not_the_stream_this_request_wanted() {
+    // 18.1.1 reuses a connection open to where the request is going. One open
+    // somewhere else would deliver the request somewhere else, which is worse
+    // than not sending it
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().expect("another peer");
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(elsewhere),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+
+    let padding = vec![b'x'; 1_400];
+    let big = request(Method::Options).header(HeaderName::Subject, &padding);
+    assert!(endpoint.request(&big, t0).is_err());
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "nothing may go to the wrong peer"
+    );
+    let events = events(&mut endpoint);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::TransportWanted {
+                destination,
+                ..
+            } if *destination == peer()
         )),
         "{events:?}"
     );

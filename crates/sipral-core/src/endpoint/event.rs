@@ -451,11 +451,25 @@ pub enum Event {
     /// RFC 3261 §18.1.1 makes the switch a MUST, so the endpoint cannot send
     /// it as it is; opening a connection is the caller's to do, and once it
     /// is bound the request goes out on it.
+    ///
+    /// Both sizes are here because a request that fragments and is dropped by
+    /// a NAT looks from above like nothing happening at all: six
+    /// retransmissions, thirty-two seconds, no error. The two numbers are what
+    /// turn that into a sentence — "request 1785 bytes, limit 1299" — and
+    /// nothing else in the stack says them.
     TransportWanted {
         /// What to open.
         protocol: TransportProtocol,
         /// Where to.
         destination: std::net::SocketAddr,
+        /// How large the request came out, in bytes as they would have gone on
+        /// the wire.
+        request_bytes: usize,
+        /// The largest it could have been and still fitted: the path MTU less
+        /// the §18.1.1 headroom where the MTU is known, 1300 where it is not,
+        /// and zero where the configured MTU leaves room for nothing
+        /// ([`super::DatagramLimit::largest_datagram_request`]).
+        limit_bytes: u32,
     },
 }
 

@@ -941,8 +941,15 @@ pub enum Event {
     ResolveNeeded { dialog: DialogId, host: Host, port: Option<u16>, protocol: Option<TransportProtocol> },
     /// A request is too large for a datagram (§18.1.1) and no stream transport
     /// is open to move it to. Opening one is the caller's; the request is not
-    /// held, and goes when it is sent again.
-    TransportWanted { protocol: TransportProtocol, destination: SocketAddr },
+    /// held, and goes when it is sent again. Both sizes travel with it,
+    /// because a request that fragments and is dropped by a NAT looks from
+    /// above like nothing happening at all.
+    TransportWanted {
+        protocol: TransportProtocol,
+        destination: SocketAddr,
+        request_bytes: usize,
+        limit_bytes: u32,
+    },
     /// A keep-alive went ten seconds unanswered, so RFC 5626 §4.4.1 calls the
     /// flow dead and the endpoint has taken it down. Everything that was
     /// running on it has already failed. Closing the socket and opening a

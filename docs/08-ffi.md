@@ -41,6 +41,27 @@ Rules for the ABI:
 - **Nothing is added to a released ABI except at the end of a struct**, guarded
   by the `size` field, or as a new function. Nothing is removed or reordered.
   Ever.
+- **A numbered space has one declaration, and disagreeing with it is a build
+  failure.** The event kinds are declared once, by the `event_kinds!` macro in
+  `crates/sipral-ffi/src/event.rs`. The enum, the name a kind prints in a log
+  line, and the number that indexes both are generated from that single list, so
+  a kind cannot be added to one of them and missed in another. A number is spent
+  by appearing in the list, and a generated assertion says the list runs
+  `1, 2, 3, …` with nothing repeated, nothing moved, and no hole.
+
+  The hole is what this exists to close. Two features written in two branches
+  each take the number after the last kind, each builds, and the one that lands
+  second has quietly renumbered an event that a shipped binding already knows —
+  B7's failure, one layer down, and permanent because the number is the ABI. So
+  the numbers of the features already committed to are spent now, as `reserved`
+  lines naming the requirement each belongs to. Taking one means turning that
+  line into a kind in place: the number is read rather than chosen, and two
+  features cannot read the same one.
+
+  Where a number cannot be generated — `SipralStatus`, which C switches on and
+  whose zero is load-bearing — the equivalent is a test that writes out every
+  value rather than deriving it, so a declaration that moved would disagree with
+  a test that did not.
 
 **The header is not generated yet, and neither are the bindings.** There is no
 C header in the tree and the .NET package is a name reservation. That is the

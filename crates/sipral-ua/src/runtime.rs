@@ -252,10 +252,27 @@ impl Runtime {
                         self.agent.endpoint().resolved(dialog, &addresses);
                     }
                 }
+                // opened here, and reported anyway: the two sizes on it are
+                // the only place the application ever sees how large the
+                // request that did not fit was
                 UaEvent::Unclaimed(Event::TransportWanted {
                     protocol,
                     destination,
-                }) => self.open(protocol, destination),
+                    request_bytes,
+                    limit_bytes,
+                }) => {
+                    self.open(protocol, destination);
+                    handler.on_event(
+                        &mut self.agent,
+                        UaEvent::Unclaimed(Event::TransportWanted {
+                            protocol,
+                            destination,
+                            request_bytes,
+                            limit_bytes,
+                        }),
+                        now,
+                    );
+                }
                 // RFC 5626 §4.4.1 called the flow dead. The endpoint has
                 // already forgotten it; the socket is this loop's, and dropping
                 // the last handle to it is what closes it
@@ -409,4 +426,81 @@ fn look_up(host: &Host, port: Option<u16>, protocol: Option<TransportProtocol>) 
         .to_socket_addrs()
         .map(Iterator::collect)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Control, Handler, Runtime};
+    use crate::UserAgent;
+    use crate::event::UaEvent;
+    use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest};
+    use sipral_core::msg::{HeaderName, Method, Uri};
+    use std::net::SocketAddr;
+    use std::time::Instant;
+
+    /// Everything the loop handed up, in order.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        seen: Vec<UaEvent>,
+    }
+
+    impl Handler for Recorder {
+        fn on_event(&mut self, _agent: &mut UserAgent, event: UaEvent, _now: Instant) {
+            self.seen.push(event);
+        }
+
+        fn on_tick(&mut self, _agent: &mut UserAgent, _now: Instant) -> Control {
+            Control::Stop
+        }
+    }
+
+    #[test]
+    fn the_application_hears_the_two_sizes_even_though_the_loop_answers_the_event() {
+        // this loop opens the connection itself, and an event it swallowed
+        // would take the only two numbers that explain the failure with it
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        // discard, and nothing is listening on it here either
+        let peer: SocketAddr = "127.0.0.1:9".parse().expect("a peer address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [11; 32], local).expect("a loopback socket");
+        let transport = runtime.transport();
+
+        let padding = vec![b'x'; 1_400];
+        let big = OutgoingRequest::new(
+            Method::Options,
+            Uri::parse_str("sip:bob@example.com").expect("a URI"),
+            transport,
+            peer,
+        )
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@127.0.0.1>")
+        .header(HeaderName::Subject, &padding);
+        assert!(
+            runtime
+                .agent()
+                .endpoint()
+                .request(&big, Instant::now())
+                .is_err(),
+            "1400 bytes of Subject does not go in a datagram"
+        );
+
+        // the endpoint is asked directly here, so nothing has yet moved its
+        // events up into the user agent's own queue; a turn of the loop would
+        // do it after waiting out an idle read
+        let now = Instant::now();
+        runtime.agent().handle_timeout(now);
+
+        let mut recorder = Recorder::default();
+        runtime.turn(&mut recorder, now).expect("a turn");
+        let sizes = recorder.seen.iter().find_map(|event| match *event {
+            UaEvent::Unclaimed(Event::TransportWanted {
+                request_bytes,
+                limit_bytes,
+                ..
+            }) => Some((request_bytes, limit_bytes)),
+            _ => None,
+        });
+        assert_eq!(sizes.map(|(_, limit)| limit), Some(1_300), "{recorder:?}");
+        assert!(sizes.is_some_and(|(size, _)| size > 1_400), "{sizes:?}");
+    }
 }

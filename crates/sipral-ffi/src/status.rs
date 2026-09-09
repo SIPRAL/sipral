@@ -52,6 +52,22 @@ pub enum SipralStatus {
     /// The request could not be assembled or handed to a transport. Nothing
     /// went out, and nothing about the call changed.
     NotSent = 10,
+    /// The value is one this ABI has a word for and this build has no code
+    /// behind. Nothing was applied, and asking again will not change that.
+    ///
+    /// The third of the three answers a configuration call may give, and the
+    /// one that has to be told apart from the other two by a machine.
+    /// [`SipralStatus::InvalidArgument`] says the value is wrong and a
+    /// corrected one would be taken; this says the value is right and there is
+    /// nothing here to take it. [`SipralStatus::UnsupportedVersion`] is about
+    /// the shape of what crossed the boundary, not about what was set in it.
+    ///
+    /// It exists so that "accepted and ignored" is not a thing this library
+    /// can do. An application that gets it turns the control off, because the
+    /// control is genuinely dead in this build; one that gets a silence
+    /// instead ships a control that does nothing and finds out from a
+    /// customer.
+    NotSupported = 11,
 }
 
 entry! {
@@ -77,6 +93,7 @@ entry! {
             8 => c"panic".as_ptr(),
             9 => c"wrong state".as_ptr(),
             10 => c"not sent".as_ptr(),
+            11 => c"not supported in this build".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -113,6 +130,7 @@ mod tests {
             SipralStatus::Panic,
             SipralStatus::WrongState,
             SipralStatus::NotSent,
+            SipralStatus::NotSupported,
         ];
         for status in all {
             let code = status as i32;
@@ -123,7 +141,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in 0..=10 {
+        for code in 0..=11 {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -134,14 +152,29 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
-        assert!(name(11).is_none());
+        assert!(name(12).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
     }
 
+    /// The numbers are written out rather than walked, because a test that
+    /// derives them from the declaration would move with a declaration that
+    /// moved. Zero is the one with a reason of its own: C tests a status that
+    /// way.
     #[test]
-    fn ok_is_zero_because_c_tests_it_that_way() {
+    fn the_numbers_are_where_they_were_published() {
         assert_eq!(SipralStatus::Ok as i32, 0);
+        assert_eq!(SipralStatus::InvalidArgument as i32, 1);
+        assert_eq!(SipralStatus::InvalidHandle as i32, 2);
+        assert_eq!(SipralStatus::StaleHandle as i32, 3);
+        assert_eq!(SipralStatus::UnsupportedVersion as i32, 4);
+        assert_eq!(SipralStatus::BufferTooSmall as i32, 5);
+        assert_eq!(SipralStatus::Busy as i32, 6);
+        assert_eq!(SipralStatus::Exhausted as i32, 7);
+        assert_eq!(SipralStatus::Panic as i32, 8);
+        assert_eq!(SipralStatus::WrongState as i32, 9);
+        assert_eq!(SipralStatus::NotSent as i32, 10);
+        assert_eq!(SipralStatus::NotSupported as i32, 11);
     }
 }

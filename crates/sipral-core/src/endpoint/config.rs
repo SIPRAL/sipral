@@ -43,6 +43,30 @@ impl DatagramLimit {
         max_datagram_bytes: 1_300,
     };
 
+    /// The largest request that still goes in a datagram, and `None` when the
+    /// configured MTU leaves room for none at all.
+    ///
+    /// A size that did not fit says nothing on its own, so this is the other
+    /// half of what a bug report needs: the number the request was measured
+    /// against. It is carried by [`Event::TransportWanted`], which is where an
+    /// application reads it.
+    ///
+    /// [`Event::TransportWanted`]: super::Event::TransportWanted
+    #[must_use]
+    pub const fn largest_datagram_request(&self) -> Option<u32> {
+        match self.path_mtu {
+            // "within 200 bytes of the path MTU" — at the boundary too, since
+            // a request exactly 200 bytes short of the MTU leaves a response
+            // no room at all, so the last size that fits is one below the
+            // difference
+            Some(mtu) => match mtu.checked_sub(self.headroom_bytes) {
+                Some(room) => room.checked_sub(1),
+                None => None,
+            },
+            None => Some(self.max_datagram_bytes),
+        }
+    }
+
     /// Whether a request of this size has to leave over something congestion
     /// controlled rather than over a datagram.
     #[must_use]
@@ -51,13 +75,8 @@ impl DatagramLimit {
             // larger than four gigabytes is not a datagram by any reading
             return true;
         };
-        match self.path_mtu {
-            // "within 200 bytes of the path MTU" — at the boundary too, since
-            // a request exactly 200 bytes short of the MTU leaves a response
-            // no room at all
-            Some(mtu) => size.saturating_add(self.headroom_bytes) >= mtu,
-            None => size > self.max_datagram_bytes,
-        }
+        self.largest_datagram_request()
+            .is_none_or(|largest| size > largest)
     }
 }
 
@@ -196,6 +215,54 @@ mod tests {
     fn a_size_that_does_not_fit_in_the_arithmetic_is_too_big() {
         let limit = DatagramLimit::DEFAULT;
         assert!(limit.too_big_for_a_datagram(usize::MAX));
+    }
+
+    #[test]
+    fn the_limit_reported_is_the_last_size_that_would_have_gone() {
+        assert_eq!(
+            DatagramLimit::DEFAULT.largest_datagram_request(),
+            Some(1_300)
+        );
+        assert_eq!(
+            DatagramLimit {
+                path_mtu: Some(1_500),
+                ..DatagramLimit::DEFAULT
+            }
+            .largest_datagram_request(),
+            Some(1_299)
+        );
+        // no room for a request of any size, not even an empty one
+        assert_eq!(
+            DatagramLimit {
+                path_mtu: Some(200),
+                ..DatagramLimit::DEFAULT
+            }
+            .largest_datagram_request(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_limit_reported_is_the_one_the_switch_was_decided_on() {
+        // the two are read side by side in a bug report — "1785 bytes, limit
+        // 1299" — so a limit that disagreed with the decision would be worse
+        // than none at all
+        for mtu in [None, Some(200), Some(576), Some(1_500), Some(9_000)] {
+            let limit = DatagramLimit {
+                path_mtu: mtu,
+                ..DatagramLimit::DEFAULT
+            };
+            let largest = limit
+                .largest_datagram_request()
+                .map(|largest| usize::try_from(largest).expect("a size that fits a pointer"));
+            for size in 0..2_000_usize {
+                assert_eq!(
+                    limit.too_big_for_a_datagram(size),
+                    largest.is_none_or(|largest| size > largest),
+                    "{mtu:?} at {size}"
+                );
+            }
+        }
     }
 
     #[test]

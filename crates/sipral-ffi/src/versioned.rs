@@ -13,8 +13,12 @@
 //!
 //! Two rules make the arrangement honest in both directions. On the way in,
 //! bytes past what this build knows are accepted only if they are all zero: a
-//! caller who set a field this library has never heard of is told so, rather
-//! than served by a library that quietly ignored it. On the way out, the
+//! caller who set a field this library has never heard of is answered
+//! `SIPRAL_STATUS_NOT_SUPPORTED`, rather than served by a library that quietly
+//! ignored it. The size is not the complaint — a longer struct is exactly what
+//! a newer header is supposed to hand over — so the answer is not about the
+//! version but about the member, which is the difference an application acts
+//! on. On the way out, the
 //! `size` written back says how far the library actually filled, and anything
 //! past that is zeroed, so a newer caller reading an older library sees
 //! absence rather than whatever was on its stack.
@@ -116,9 +120,10 @@ pub(crate) unsafe fn read_versioned<T: Versioned>(source: *const T) -> Result<T,
         let tail = unsafe { slice::from_raw_parts(source.cast::<u8>().add(known), extra) };
         if tail.iter().any(|byte| *byte != 0) {
             return Err(fail(
-                SipralStatus::UnsupportedVersion,
+                SipralStatus::NotSupported,
                 format!(
-                    "{} carries {extra} bytes this build does not know, and they are not zero",
+                    "{} carries {extra} bytes this build does not know, and they are not zero, so \
+                     something was set that nothing here reads",
                     T::NAME
                 ),
             ));
@@ -330,7 +335,8 @@ mod tests {
         let read = unsafe { read_versioned((&raw const supplied).cast::<Second>()) };
         assert_eq!(
             read.err().map(|failure| failure.status),
-            Some(SipralStatus::UnsupportedVersion)
+            Some(SipralStatus::NotSupported),
+            "the struct is a shape this build works with; the member in it is not"
         );
     }
 

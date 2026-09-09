@@ -10,7 +10,50 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- A request too large for the path now says how large, and the check now covers
+  the request that made the trouble. `Event::TransportWanted` carries the size
+  of the request that did not fit and the size that would have, so
+  "request 1785 bytes, limit 1299" is a line an application can log instead of
+  a packet capture nobody took; the reference loop passes the event up as well
+  as answering it, which it did not. The limit comes from one place, so the
+  number reported and the number the decision was taken on cannot drift.
+
+  Two real faults came out of writing it. The switch to a stream took the first
+  TCP transport in the table whatever it was connected to, so a large request
+  to one server left over an open connection to another; it now takes only a
+  connection to the destination asked for, which is what §18.1.1 recommends and
+  the only one that would deliver it. And the check was on the first send only,
+  while the request that fragmented in the field was the one carrying
+  `Authorization` — three hundred bytes larger than the attempt that had fitted,
+  and built by the retry. The retry checks now too.
+
+- A configuration value cannot be accepted and ignored. `SIPRAL_STATUS_NOT_SUPPORTED`
+  is the third answer a setter may give, distinct from a value that is wrong
+  and from a struct this build cannot read, and the audit that came with it
+  found the failure it was written for: `timer_t2_ms` and `timer_t4_ms` were
+  taken without complaint on TCP, TLS and WebSocket transports, where neither
+  is ever armed — a setting disabled by a neighbouring one, which is the shape
+  the requirement describes. Both are refused where they are set now, naming
+  the setting and the transport, as is a T2 below the T1 it caps, which makes
+  T1 the value that disappears. An expiry too large for the header it goes in
+  is refused at the account rather than by the registrar. `sipral_stack_settings`
+  reads back what a stack is actually running on, since a zero in the config
+  means "the default" and the effective figure is otherwise unknowable.
+
 ### Added
+
+- One declaration for the ABI's event numbers, and disagreeing with it is a
+  build failure. The kinds, their names and their numbers are generated from a
+  single list, with an assertion that the list runs `1, 2, 3, …` with nothing
+  repeated, moved or missing. The hole it closes is the one the requirements
+  describe from the other side: two features written in two branches each take
+  the number after the last kind, both compile, and the one that lands second
+  has silently renumbered an event a shipped binding already knows. The numbers
+  of the six features already committed to are spent now, as reserved lines
+  naming what each belongs to, so taking one means reading a number rather than
+  choosing it.
 
 - The shapes of bad network a call is measured over, as fixtures in
   `interop/impairment/` rather than as arguments somebody types. A threshold
