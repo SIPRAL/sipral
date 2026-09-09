@@ -70,6 +70,77 @@ Rules for the ABI:
   value rather than deriving it, so a declaration that moved would disagree with
   a test that did not.
 
+## Signalling across the boundary
+
+The ABI could describe a call, negotiate its audio, record it and report what it
+cost before it could place one. `sipral_stack_poll` counted the bytes the stack
+wanted written and threw them away, and there was no way to hand back what
+arrived — media I/O was ahead of signalling I/O, so the boundary carried a call's
+audio and not its INVITE. `crates/sipral-ffi/src/transport.rs` is the other half.
+
+**Six calls, and no socket among them.** `sipral_stack_poll_transmit` takes what
+the stack wants written; `sipral_stack_receive_datagram` and
+`sipral_stack_receive_stream` hand bytes back; and
+`sipral_stack_transport_failed`, `sipral_stack_stream_closed` and
+`sipral_stack_transport_bind` are the other three members of `endpoint::Input`,
+which is the whole of what the core will hear. The loop is poll, drain, read,
+repeat, and it is written out in C in that module's documentation.
+
+**What the stack produced waits until it is taken.** A poll no longer empties the
+queue on its way past, because the messages a poll produces are the ones the
+caller is about to write; a queue drained by the thing that fills it cannot be
+read. `sipral_poll_result_t::transmits_discarded` stays where it is and reads
+zero — a released member is never removed, and a build that has to drop a message
+again has somewhere to say so.
+
+**A message that does not fit is kept, not dropped.** Outgoing bytes go into a
+buffer the caller brings, as in the media path, but with one difference that
+matters: a media packet is refused before it is built, and a SIP message has
+already been built by the time it reaches here. So a buffer too small answers
+`SIPRAL_STATUS_BUFFER_TOO_SMALL` with the length needed in `len` and holds the
+message back for the next call — including for a caller that deliberately brings
+no buffer in order to ask the length first, which is the same
+ask-then-fetch sequence `sipral_last_error_message` uses. The two address buffers
+*are* checked up front, because their bound is fixed, so the address side is
+never the reason a message is held.
+
+**Addresses are text**, `host:port`, as they are everywhere else in this ABI:
+`bind_address`, `registrar_address`, `media_address` and the destination of a
+media packet. A `sockaddr` in a `#[repr(C)]` struct would be a second convention
+and a portability problem, and a `getaddrinfo` per message is a rounding error
+next to the message. `sipral_transmit_t` carries the source address as well,
+empty for everything this stack originates: RFC 3581 §4 makes a response go out
+from the address its request arrived on, which a caller on a wildcard socket
+cannot work out for itself.
+
+**One transport, and its number is published.** `SIPRAL_TRANSPORT_MAIN` is the
+transport a stack is created with and the only one this build binds; every other
+number is `SIPRAL_STATUS_INVALID_ARGUMENT`. Every call names it anyway. A second
+transport is not an I/O question — an account carries the transport its REGISTER
+goes out on and a call carries the one its INVITE does — so it is a member of
+`sipral_account_config_t`, and it belongs with the §18.1.1 promotion onto a
+stream that spends event number 18. Naming the transport now makes that growth
+more valid numbers rather than a second set of functions taking an argument the
+first set lacks.
+
+**A transport that failed is retired.** Both the failure and an orderly close
+fail every transaction on the transport and unbind it, which is §17's "inform the
+TU and terminate" arriving where an application can see it. Nothing goes out
+afterwards until `sipral_stack_transport_bind` brings a transport back — which is
+also how a socket re-opened on another address after the network moved says what
+goes in the `Via` from now on, and how a stream names the far end it reached.
+
+**The stream path is carried, and the promotion onto it is not.** TCP and TLS
+work end to end: bytes go in as fragments, the layer below frames them on
+`Content-Length` (§18.3), and a connection that closes retires its transport. A
+WebSocket frame goes in as a datagram, because RFC 7118 §4.2 puts one message in
+each. What is deferred is §18.1.1 — a request that outgrew a datagram going out
+on a stream instead — which needs a second transport and the event number already
+reserved for it. `sipral_transmit_t::protocol` is the seam: it says what the
+message is going out over rather than what the socket is, and it is the member
+that would start disagreeing with `sipral_stack_settings_t::transport` on the day
+that lands.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

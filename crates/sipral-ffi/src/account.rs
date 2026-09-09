@@ -323,7 +323,7 @@ entry! {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         SipralAccountConfig, sipral_account_add, sipral_account_register,
         sipral_account_registration_state, sipral_account_remove, sipral_account_unregister,
@@ -334,6 +334,7 @@ mod tests {
     use crate::stack::sipral_stack_destroy;
     use crate::stack::tests::{Observed, poll, stack};
     use crate::status::SipralStatus;
+    use crate::transport::tests::drain;
     use std::ffi::c_char;
     use std::ptr;
 
@@ -379,7 +380,7 @@ mod tests {
         (status, account)
     }
 
-    fn state_of(stack: SipralHandle, account: SipralHandle) -> u32 {
+    pub(crate) fn state_of(stack: SipralHandle, account: SipralHandle) -> u32 {
         let mut state = u32::MAX;
         let status = unsafe { sipral_account_registration_state(stack, account, &raw mut state) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -567,11 +568,13 @@ mod tests {
 
         let result = poll(handle, 1_000);
         assert_eq!(result.events_delivered, 2, "started, then the registration");
-        assert_eq!(
-            result.transmits_discarded, 1,
-            "the REGISTER this build has nowhere to send"
-        );
         assert_eq!(result.has_deadline, 1, "a retransmission is scheduled");
+        let out = drain(handle);
+        assert_eq!(out.len(), 1, "one REGISTER, ready to be written");
+        assert!(
+            out.first()
+                .is_some_and(|first| first.starts_with(b"REGISTER "))
+        );
         assert_eq!(
             observed.kinds(),
             vec![
@@ -602,7 +605,13 @@ mod tests {
             state_of(handle, account),
             SipralRegistrationState::Unregistered as u32
         );
-        assert_eq!(poll(handle, 0).transmits_discarded, 1);
+        poll(handle, 0);
+        let out = drain(handle);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out.first()
+                .is_some_and(|first| first.starts_with(b"REGISTER "))
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

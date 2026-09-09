@@ -1086,11 +1086,13 @@ a=recvonly\r\n";
         state
     }
 
-    /// What the stack wanted written, taken before a poll drops it.
+    /// What the stack wanted written, drained the way
+    /// `sipral_stack_poll_transmit` drains it: whatever is held back for want of
+    /// a buffer comes first, then the queue behind it.
     pub(crate) fn sent(stack: SipralHandle) -> Vec<Vec<u8>> {
         with_stack(stack, |state| {
             let mut all = Vec::new();
-            while let Some(transmit) = state.agent.poll_transmit() {
+            while let Some(transmit) = state.held.take().or_else(|| state.agent.poll_transmit()) {
                 all.push(transmit.payload.to_vec());
             }
             Ok(all)
@@ -1191,6 +1193,9 @@ a=recvonly\r\n";
             SipralCallState::Confirmed as u32,
             "the call did not come up"
         );
+        // the ACK the answer produced, taken the way a caller takes it; what is
+        // left waiting here would be the next test's "one message out"
+        let _ = sent(handle);
         (handle, call)
     }
 
@@ -1221,6 +1226,7 @@ a=recvonly\r\n";
             "the call came up without audio: {:?}",
             observed.kinds()
         );
+        let _ = sent(handle);
         (handle, call)
     }
 
@@ -2054,14 +2060,14 @@ Content-Length: 0\r\n\r\n";
         let _ = sent(handle);
 
         deliver(handle, &reoffer(&invite, REOFFERED), 1_200);
-        let result = poll(handle, 1_200);
+        poll(handle, 1_200);
         assert!(
             !observed.kinds().contains(&SipralEventKind::SessionOffered),
             "the application was asked to answer what the stack already had: {:?}",
             observed.kinds()
         );
         assert!(
-            result.transmits_discarded > 0,
+            !sent(handle).is_empty(),
             "nothing went out in answer to the re-offer"
         );
         assert!(

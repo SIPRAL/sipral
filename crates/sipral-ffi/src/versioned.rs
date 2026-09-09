@@ -463,6 +463,7 @@ mod tests {
         size_member_comes_first::<Second>();
         size_member_comes_first::<crate::stack::SipralStackConfig>();
         size_member_comes_first::<crate::stack::SipralPollResult>();
+        size_member_comes_first::<crate::transport::SipralTransmit>();
         size_member_comes_first::<crate::version::SipralAbiVersion>();
     }
 }

@@ -21,12 +21,13 @@
 //! On top of those four sit the operations: a stack is configured and polled
 //! ([`stack`]), accounts are registered ([`account`]), calls are placed,
 //! answered, held, handed on and hung up ([`call`]), audio is negotiated,
-//! carried and measured ([`media`]), a conversation is written to a file
-//! ([`record`]), and everything the stack has to say comes back on one callback
-//! as one tagged union ([`event`]). Whether a stack may be used from two
-//! threads at once, and whether the library may be re-entered from inside that
-//! callback, are both answered in [`stack`], because a binding author who
-//! cannot find the answer will assume the wrong one.
+//! carried and measured ([`media`]), signalling goes on and comes off the wire
+//! ([`transport`]), a conversation is written to a file ([`record`]), and
+//! everything the stack has to say comes back on one callback as one tagged
+//! union ([`event`]). Whether a stack may be used from two threads at once, and
+//! whether the library may be re-entered from inside that callback, are both
+//! answered in [`stack`], because a binding author who cannot find the answer
+//! will assume the wrong one.
 //!
 //! ABI stability rules are in `docs/08-ffi.md`.
 
@@ -56,5 +57,6 @@ pub mod record;
 pub mod stack;
 pub mod status;
 mod text;
+pub mod transport;
 pub mod version;
 mod versioned;

@@ -56,6 +56,37 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A call can be placed through the C ABI.** It could not: `sipral_stack_poll`
+  counted what the stack wanted written and threw it away, and nothing could
+  hand it bytes that had arrived. The only thing that ever read an outgoing
+  message was a test helper. So the ABI could carry a call's audio and not its
+  INVITE, which blocked the phase whose exit criterion is a desktop client
+  running on this engine.
+
+  Six entry points now: take the next message out, put a datagram or a run of
+  stream bytes in, and tell the stack that a transport is bound, has failed, or
+  has closed. A message that will not fit the caller's buffer is **kept**, not
+  dropped — the difference between this and the media path is that a media
+  packet is refused before it is built while a SIP message already exists by the
+  time it reaches the boundary, and throwing away something the stack has
+  committed to sending is not a refusal, it is a lost call. The needed length
+  comes back so the caller can ask, then fetch.
+
+  What travels with a message is all of it, including the address it must leave
+  *from*: RFC 3581 §4 makes a response go out from the address its request
+  arrived on, and a caller on a wildcard socket cannot work that out. Addresses
+  cross as `host:port` text, which is the convention every other address in this
+  ABI already uses.
+
+  One transport, its number published rather than hard-coded out of sight, and
+  every other number refused with a message naming the one that exists — so the
+  day a second one arrives it is more valid numbers rather than a second set of
+  functions.
+
+  Two older tests asserted that one message had been discarded, as a stand-in
+  for "something went out". They now take that message through the ABI and
+  assert what it is, which makes their names true for the first time.
+
 - **The C ABI carries media.** It depended on signalling and stopped there, so a
   client on the other side of it parsed its own SDP, ran its own RTP and owned
   its own audio — which is why most of `docs/13-client-requirements.md` was

@@ -58,7 +58,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
-use sipral_core::endpoint::{EndpointConfig, Input, TransportId, TransportProtocol};
+use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
 use sipral_core::transaction::TimerConfig;
 use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
 
@@ -78,6 +78,9 @@ static STACKS: HandleTable<StackEntry> = HandleTable::new();
 const SEED_BYTES: usize = 32;
 
 /// The one transport a stack is bound to. Nothing here opens it.
+///
+/// Published to C as `SIPRAL_TRANSPORT_MAIN`, in [`crate::transport`], which is
+/// also where the reason a stack has exactly one is written down.
 const TRANSPORT: TransportId = TransportId(0);
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -102,13 +105,28 @@ pub enum SipralTransport {
 
 impl SipralTransport {
     /// What the layers below call it.
-    const fn protocol(self) -> TransportProtocol {
+    pub(crate) const fn protocol(self) -> TransportProtocol {
         match self {
             Self::Udp => TransportProtocol::Udp,
             Self::Tcp => TransportProtocol::Tcp,
             Self::Tls => TransportProtocol::Tls,
             Self::Ws => TransportProtocol::Ws,
             Self::Wss => TransportProtocol::Wss,
+        }
+    }
+
+    /// The number this ABI gives a protocol, or zero for one it has no number
+    /// for — which is the same zero a caller who filled nothing in leaves.
+    pub(crate) const fn named(protocol: TransportProtocol) -> u32 {
+        match protocol {
+            TransportProtocol::Udp => Self::Udp as u32,
+            TransportProtocol::Tcp => Self::Tcp as u32,
+            TransportProtocol::Tls => Self::Tls as u32,
+            TransportProtocol::Ws => Self::Ws as u32,
+            TransportProtocol::Wss => Self::Wss as u32,
+            // the layer below has grown a transport this ABI has no number for,
+            // and saying nothing beats picking one that is wrong
+            _ => 0,
         }
     }
 }
@@ -270,9 +288,11 @@ pub struct SipralPollResult {
     pub events_unclaimed: usize,
     /// Bytes the stack produced and this build had nowhere to send.
     ///
-    /// There is no transport entry point yet, so what the stack wrote is
-    /// counted and dropped rather than left to grow. Every non-zero count is a
-    /// message that would have gone out.
+    /// Zero since [`crate::transport`] gave them somewhere to go: what the stack
+    /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
+    /// poll no longer empties the queue on its way past. The member stays
+    /// because a released one always does, and because a build that has to drop
+    /// a message again would have somewhere to say so.
     pub transmits_discarded: usize,
     /// Whether there is a deadline at all. Zero means nothing is scheduled and
     /// the next poll can wait for input.
@@ -375,8 +395,18 @@ pub(crate) struct StackState {
     pub(crate) calls: Names<CallHandle>,
     /// The transport every account and every call uses. There is one.
     pub(crate) transport: TransportId,
-    /// What that transport speaks, kept so the settings can be read back.
-    speaks: SipralTransport,
+    /// What that transport speaks, kept so the settings can be read back and so
+    /// that binding it again cannot change it.
+    pub(crate) speaks: SipralTransport,
+    /// The address it advertises, which is what a datagram fed in without one
+    /// is taken to have arrived on.
+    pub(crate) local: SocketAddr,
+    /// A message taken from the agent that did not fit the caller's buffer.
+    ///
+    /// It is offered again, before anything queued behind it. A message the
+    /// stack has committed to is not this ABI's to drop, and the buffer it did
+    /// not fit is a fact about the caller rather than about the message.
+    pub(crate) held: Option<Transmit>,
     /// The figures the endpoint was built with, kept for the same reason: the
     /// endpoint holds them and does not hand them out.
     timers: TimerConfig,
@@ -729,6 +759,8 @@ entry! {
                 calls: Names::new(),
                 transport: TRANSPORT,
                 speaks,
+                local,
+                held: None,
                 timers,
                 media,
                 user_agent: named.map(|name| Box::from(name.as_bytes())),
@@ -838,6 +870,12 @@ entry! {
     ///
     /// `result` may be null for a caller that does not want the counts.
     ///
+    /// A poll is also where the stack writes: a retransmission falls due, a
+    /// registration is refreshed, a transaction gives up and says so. What it
+    /// wrote is taken with `sipral_stack_poll_transmit`, which is drained after
+    /// every poll and left alone by the next one — see [`crate::transport`] for
+    /// the loop in full.
+    ///
     /// # Safety
     ///
     /// `result` must be null or point at a `sipral_poll_result_t` whose `size`
@@ -891,11 +929,6 @@ fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollR
     }
     drain(stack, state, now, &mut counted);
 
-    let mut discarded = 0_usize;
-    while state.agent.poll_transmit().is_some() {
-        discarded = discarded.saturating_add(1);
-    }
-
     let deadline = match (state.agent.poll_timeout(), state.engine.poll_timeout()) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (left, right) => left.or(right),
@@ -904,7 +937,7 @@ fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollR
         size: size_of::<SipralPollResult>(),
         events_delivered: counted.delivered,
         events_unclaimed: counted.unclaimed,
-        transmits_discarded: discarded,
+        transmits_discarded: 0,
         has_deadline: u32::from(deadline.is_some()),
         next_poll_in_ms: deadline.map_or(0, |at| {
             u64::try_from(at.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
