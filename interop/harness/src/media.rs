@@ -19,19 +19,30 @@ use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 use sipral_core::sdp::MediaPlan;
-use sipral_media::g711::Law;
+use sipral_media::{g711::Law, g722};
 use sipral_rtp::{
     Activity, BufferConfig, PayloadTypes, Pull, Quality, Received, RtpSession, StreamConfig,
 };
 
-/// Twenty milliseconds at eight kilohertz.
-const FRAME: usize = 160;
+/// A packet is twenty milliseconds of audio, whatever the codec.
+const PTIME_MS: u32 = 20;
 
-/// The same, as the timestamp ticks one packet covers.
+/// Timestamp ticks one packet covers. Eight thousand a second for every codec
+/// here, G.722 included: RFC 3551 §4.5.2 fixes its RTP clock at 8000 although
+/// it samples at 16000, so this is not the sample count and must not be
+/// written as if it were.
 const FRAME_TICKS: u32 = 160;
 
-/// Samples in one period of the tone at eight kilohertz.
-const PERIOD: u32 = 18;
+/// The largest frame any of them produces, in samples: G.722's, which hears
+/// twice as fast as it counts.
+const MAX_SAMPLES: usize = 320;
+
+/// The largest frame in octets, which is the same number for all of them.
+const MAX_OCTETS: usize = 160;
+
+/// Roughly 440 Hz, whatever the rate: the period is in samples, so it has to
+/// come from the rate rather than being a constant.
+const TONE_HZ: u32 = 444;
 
 /// How loud it is: a quarter of full scale.
 const AMPLITUDE: i16 = 8000;
@@ -52,14 +63,71 @@ const AUDIBLE: i32 = 500;
 /// G.711 represents, so nothing about the signal can be blamed for what comes
 /// back. Its harmonics alias, and for the question being asked — did sound
 /// return — that does not matter.
-fn tone(samples: &mut [i16], phase: &mut u32) {
+fn tone(samples: &mut [i16], phase: &mut u32, rate: u32) {
+    let period = (rate / TONE_HZ).max(2);
     for slot in samples.iter_mut() {
-        *slot = if *phase % PERIOD < PERIOD / 2 {
+        *slot = if *phase % period < period / 2 {
             AMPLITUDE
         } else {
             -AMPLITUDE
         };
         *phase = phase.wrapping_add(1);
+    }
+}
+
+/// What the two ends settled on, and everything that follows from it.
+///
+/// A single `Law` field used to be enough, and it hid the trap: G.711's sample
+/// rate, its octet count and its timestamp ticks are all 160 for a
+/// twenty-millisecond frame, so one constant served all three. G.722's are
+/// 320, 160 and 160. Anything written against the old shape encodes half a
+/// frame and calls it a packet.
+enum Codec {
+    /// G.711, either law: one octet a sample, eight kilohertz.
+    Companded(Law),
+    /// G.722: one octet per two samples, sixteen kilohertz in and out.
+    Wideband(Box<(g722::Encoder, g722::Decoder)>),
+}
+
+impl Codec {
+    /// What the negotiation's payload type means, falling back to mu-law —
+    /// which is what an unknown type would have been decoded as anyway, and is
+    /// at least visible in the flow's report.
+    fn for_payload(payload_type: u8) -> Self {
+        if payload_type == g722::PAYLOAD_TYPE {
+            return Self::Wideband(Box::new((g722::Encoder::new(), g722::Decoder::default())));
+        }
+        Self::Companded(Law::from_payload_type(payload_type).unwrap_or(Law::Mu))
+    }
+
+    /// The rate the codec hears at, which is not the RTP clock rate.
+    const fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Companded(_) => 8_000,
+            Self::Wideband(_) => g722::SAMPLE_RATE,
+        }
+    }
+
+    /// Samples in one packet.
+    const fn frame_samples(&self) -> usize {
+        match self {
+            Self::Companded(_) => 160,
+            Self::Wideband(_) => g722::frame_samples(PTIME_MS),
+        }
+    }
+
+    fn encode_into(&mut self, samples: &[i16], octets: &mut [u8]) -> usize {
+        match self {
+            Self::Companded(law) => law.encode_into(samples, octets),
+            Self::Wideband(pair) => pair.0.encode_into(samples, octets),
+        }
+    }
+
+    fn decode_into(&mut self, octets: &[u8], samples: &mut [i16]) -> usize {
+        match self {
+            Self::Companded(law) => law.decode_into(octets, samples),
+            Self::Wideband(pair) => pair.1.decode_into(octets, samples),
+        }
     }
 }
 
@@ -80,14 +148,14 @@ pub(crate) struct Heard {
 pub(crate) struct Media {
     socket: UdpSocket,
     session: Option<RtpSession>,
-    law: Law,
+    codec: Codec,
     started: Instant,
     next: Instant,
     phase: u32,
-    samples: [i16; FRAME],
-    payload: [u8; FRAME],
+    samples: [i16; MAX_SAMPLES],
+    payload: [u8; MAX_OCTETS],
     packet: [u8; 1500],
-    decoded: [i16; FRAME],
+    decoded: [i16; MAX_SAMPLES],
     heard: Heard,
 }
 
@@ -105,14 +173,14 @@ impl Media {
         Ok(Self {
             socket,
             session: None,
-            law: Law::Mu,
+            codec: Codec::Companded(Law::Mu),
             started: now,
             next: now,
             phase: 0,
-            samples: [0; FRAME],
-            payload: [0; FRAME],
+            samples: [0; MAX_SAMPLES],
+            payload: [0; MAX_OCTETS],
             packet: [0; 1500],
-            decoded: [0; FRAME],
+            decoded: [0; MAX_SAMPLES],
             heard: Heard::default(),
         })
     }
@@ -130,12 +198,11 @@ impl Media {
 
     /// Start sending, now that the answer has said where and in what.
     ///
-    /// The law comes from the negotiated payload type rather than from what we
-    /// would have preferred: the first real PBX this met allows A-law only.
+    /// The codec comes from the negotiated payload type rather than from what
+    /// we would have preferred: the first real PBX this met allows A-law only.
     pub(crate) fn start(&mut self, plan: &MediaPlan, ssrc: u32, now: Instant) {
         let payload_type = plan.codec.payload();
-        let law = Law::from_payload_type(payload_type).unwrap_or(Law::Mu);
-        self.law = law;
+        self.codec = Codec::for_payload(payload_type);
         self.session = Some(RtpSession::new(
             &StreamConfig {
                 ssrc,
@@ -143,7 +210,12 @@ impl Media {
                 // whatever we agreed, plus the other law: a peer that answers
                 // with one and sends the other is a real thing, and dropping
                 // its audio would look like silence rather than like a fault
-                accepted: PayloadTypes::none().with(0).with(8),
+                accepted: PayloadTypes::none()
+                    .with(0)
+                    .with(8)
+                    .with(g722::PAYLOAD_TYPE),
+                // the RTP clock, which the negotiation carries and which is
+                // 8000 for all three of these
                 clock_rate: plan.codec.clock_rate(),
                 sequence: 0,
                 timestamp: 0,
@@ -166,8 +238,14 @@ impl Media {
         let elapsed = now.saturating_duration_since(self.started);
 
         while now >= self.next {
-            tone(&mut self.samples, &mut self.phase);
-            let written = self.law.encode_into(&self.samples, &mut self.payload);
+            let frame = self.codec.frame_samples().min(MAX_SAMPLES);
+            let rate = self.codec.sample_rate();
+            let samples = self.samples.get_mut(..frame).unwrap_or_default();
+            tone(samples, &mut self.phase, rate);
+            let written = self.codec.encode_into(
+                self.samples.get(..frame).unwrap_or_default(),
+                &mut self.payload,
+            );
             if let Ok(length) = session.send(
                 self.payload.get(..written).unwrap_or_default(),
                 FRAME_TICKS,
@@ -200,7 +278,7 @@ impl Media {
         }
 
         while let Pull::Packet(frame) = session.pull(Activity::Speech) {
-            let count = self.law.decode_into(frame.payload, &mut self.decoded);
+            let count = self.codec.decode_into(frame.payload, &mut self.decoded);
             let played = self.decoded.get(..count).unwrap_or_default();
             if loudness(played) >= AUDIBLE {
                 self.heard.audible = self.heard.audible.saturating_add(1);
@@ -230,4 +308,92 @@ fn loudness(samples: &[i16]) -> i32 {
         .sum();
     let count = i64::try_from(samples.len()).unwrap_or(1).max(1);
     i32::try_from(total / count).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Codec, FRAME_TICKS, MAX_OCTETS, MAX_SAMPLES, PTIME_MS, TONE_HZ, tone};
+    use sipral_media::{g711::Law, g722};
+
+    /// The trap this module used to walk into: for G.711 the samples in a
+    /// frame, the octets in a frame and the timestamp ticks in a frame are all
+    /// the same number, so one constant served all three. For G.722 they are
+    /// 320, 160 and 160.
+    #[test]
+    fn a_frame_is_three_different_numbers_for_g722_and_one_for_g711() {
+        let narrow = Codec::for_payload(0);
+        assert_eq!(narrow.frame_samples(), 160);
+        assert_eq!(narrow.sample_rate(), 8_000);
+
+        let wide = Codec::for_payload(g722::PAYLOAD_TYPE);
+        assert_eq!(wide.frame_samples(), 320);
+        assert_eq!(wide.sample_rate(), 16_000);
+        assert_eq!(g722::frame_octets(PTIME_MS), 160);
+        assert_eq!(g722::frame_ticks(PTIME_MS), FRAME_TICKS);
+
+        // and the buffers are sized for the larger of them
+        assert!(wide.frame_samples() <= MAX_SAMPLES);
+        assert_eq!(g722::frame_octets(PTIME_MS), MAX_OCTETS);
+    }
+
+    #[test]
+    fn the_payload_type_picks_the_codec_the_negotiation_named() {
+        assert!(matches!(Codec::for_payload(0), Codec::Companded(Law::Mu)));
+        assert!(matches!(Codec::for_payload(8), Codec::Companded(Law::A)));
+        assert!(matches!(Codec::for_payload(9), Codec::Wideband(_)));
+        // an unknown type still produces something that can be reported
+        assert!(matches!(Codec::for_payload(97), Codec::Companded(Law::Mu)));
+    }
+
+    /// A frame that goes out and comes straight back has to be the same length
+    /// and the same sound, whichever codec carried it.
+    #[test]
+    fn a_frame_survives_each_codec_at_its_own_rate() {
+        for payload_type in [0_u8, 8, 9] {
+            let mut codec = Codec::for_payload(payload_type);
+            let frame = codec.frame_samples();
+            let rate = codec.sample_rate();
+            let mut phase = 0_u32;
+            let mut samples = [0_i16; MAX_SAMPLES];
+            let mut octets = [0_u8; MAX_OCTETS];
+            let mut back = [0_i16; MAX_SAMPLES];
+
+            // run several frames: G.722 needs its filter and its step size to
+            // settle before the first one means anything
+            let mut written = 0;
+            let mut decoded = 0;
+            for _ in 0..20 {
+                tone(&mut samples[..frame], &mut phase, rate);
+                written = codec.encode_into(&samples[..frame], &mut octets);
+                decoded = codec.decode_into(&octets[..written], &mut back);
+            }
+            assert_eq!(written, 160, "payload type {payload_type} octets");
+            assert_eq!(decoded, frame, "payload type {payload_type} samples");
+            assert!(
+                super::loudness(&back[..decoded]) > super::AUDIBLE,
+                "payload type {payload_type} came back inaudible"
+            );
+        }
+    }
+
+    /// The tone has to stay at the same pitch when the rate doubles, or the
+    /// wideband flow is measuring a different signal from the narrowband one.
+    #[test]
+    fn the_tone_keeps_its_pitch_across_the_rates() {
+        for rate in [8_000_u32, 16_000] {
+            let mut phase = 0_u32;
+            let mut samples = vec![0_i16; usize::try_from(rate).unwrap_or(8_000)];
+            tone(&mut samples, &mut phase, rate);
+            let crossings = samples
+                .windows(2)
+                .filter(|pair| pair[0].signum() != pair[1].signum())
+                .count();
+            // two crossings a period, over one second
+            let hertz = crossings / 2;
+            assert!(
+                hertz.abs_diff(TONE_HZ as usize) < 10,
+                "at {rate} Hz the tone came out at {hertz} Hz"
+            );
+        }
+    }
 }

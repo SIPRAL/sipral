@@ -119,7 +119,8 @@ build, and none of them is linked into anything that ships.
 
 ## Allowed licences
 
-`deny.toml` holds the machine-readable allow-list, enforced in CI. It permits
+`deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`
+enforces. It permits
 MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0 (including the
 `WITH LLVM-exception` variant), ISC, Zlib, Unicode-3.0, CC0-1.0 and BSL-1.0
 (Boost, not Business Source).
@@ -136,14 +137,16 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 | Component | Use | Licence |
 |---|---|---|
 | webrtc-audio-processing | AEC3, AGC, noise suppression | BSD-3-Clause |
-| sippy/libg722 | G.722 | CMU 1993 portion unrestricted; Sippy Software portion BSD-2-Clause with attribution |
 | miniaudio or PortAudio | baseline audio device I/O | MIT-0 / MIT |
 | rustls or OpenSSL | TLS transport | Apache-2.0 + MIT + ISC / Apache-2.0 |
 
-G.711 is written in-tree; it is a couple hundred lines and is public domain as
-an algorithm. G.729 patents expired in January 2017, but the common
+G.711 and G.722 are written in-tree. G.711 is a couple hundred lines and is
+public domain as an algorithm; G.722 is written from the ITU Recommendation,
+because the C implementation everyone links is one the clean-room rules forbid
+and the Rust crate that looks free of it is that implementation with the
+comments intact. G.729 patents expired in January 2017, but the common
 implementation, bcg729, is GPL-3; if G.729 is ever shipped it will be written
-in-tree, not linked.
+in-tree too.
 
 ## Test tooling
 

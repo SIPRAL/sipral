@@ -12,8 +12,19 @@
 //!
 //! Pass and fail are decided before the run, not looked at afterwards. Each
 //! flow states what has to be true; a flow that is partly right is a failure
-//! with the failing condition named, and the process exits non-zero so that CI
-//! does not have to read the log to know.
+//! with the failing condition named, and the process exits non-zero so that
+//! whoever ran `scripts/lab.sh` does not have to read the log to know.
+
+// tests say what they mean; the no-panic discipline is for what ships
+#![cfg_attr(
+    test,
+    allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )
+)]
 
 mod media;
 mod pair;
@@ -53,6 +64,21 @@ const DWELL: Duration = Duration::from_secs(2);
 const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 {ip}\r\ns=-\r\nc=IN IP4 {ip}\r\n\
 t=0 0\r\nm=audio {port} RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n";
+
+/// The same offer with G.722 first, for `SIPRAL_CODEC=g722`.
+///
+/// Not the default, and deliberately: every lab server takes G.722, so adding
+/// it to the ordinary offer would silently change what the ten flows have been
+/// proving for days. Asked for by name, it puts the wideband codec through the
+/// same ten flows against real software, which is the only thing that can say
+/// the codec is right on the wire rather than right against itself.
+///
+/// The clock rate on the `a=rtpmap` line is 8000 and the codec samples at
+/// 16000. That is not a mistake here: RFC 3551 §4.5.2 fixes it, "for
+/// historical reasons", and a peer that sees 16000 refuses the stream.
+const OFFER_WIDEBAND: &str = "v=0\r\no=- 1 1 IN IP4 {ip}\r\ns=-\r\nc=IN IP4 {ip}\r\n\
+t=0 0\r\nm=audio {port} RTP/AVP 9 0 8\r\na=rtpmap:9 G722/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n";
 
 fn main() -> ExitCode {
     let server = env::args().nth(1).unwrap_or_else(|| "kamailio".to_owned());
@@ -432,7 +458,11 @@ impl Script {
 
     /// The offer this flow makes, naming the port the RTP socket really has.
     fn offer(&self) -> String {
-        OFFER
+        let template = match env::var("SIPRAL_CODEC").as_deref() {
+            Ok("g722") => OFFER_WIDEBAND,
+            _ => OFFER,
+        };
+        template
             .replace("{ip}", &self.local.ip().to_string())
             .replace("{port}", &self.media.port().unwrap_or(0).to_string())
     }

@@ -12,6 +12,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- `scripts/lab.sh` and `scripts/fuzz.sh`, and no CI configuration at all.
+  Nothing runs on hardware that is not ours: a runner that builds, signs or
+  publishes needs credentials on somebody else's machine, and for Apple
+  signing there is no way to give it one — a runner has no keychain. So the
+  three jobs that were hosted are three scripts. `scripts/check.sh` was already
+  the gate and is unchanged; `lab.sh` brings the three-container lab up, runs
+  the flows against each server and repeats one over a link made bad with
+  `tc netem`; `fuzz.sh` runs every target for as long as it is given.
+  `.github/workflows/` is gone and gitignored.
+- G.722 wired into the interop harness, and the trap that goes with it closed.
+  What used to be a single `Law` field is a codec, because G.711's samples,
+  octets and timestamp ticks for a twenty-millisecond frame are all 160 and
+  G.722's are 320, 160 and 160 — one constant served all three, and anything
+  written against that shape encodes half a frame and calls it a packet. The
+  session now accepts payload type 9, the tone keeps its pitch when the rate
+  doubles, and `SIPRAL_CODEC=g722` puts the wideband codec first in the offer
+  so the same ten flows run against real software with it. Not the default:
+  every lab server takes G.722, so offering it unasked would quietly change
+  what those flows have been proving.
 - G.722 in `sipral-media`, written from ITU-T Recommendation G.722 (09/2012).
   The twenty-four-tap filter pair that splits sixteen kilohertz into two bands
   of eight and puts them back together, six-bit ADPCM on the lower band and
@@ -323,7 +342,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - Licensing set: AGPL-3.0-only alongside a commercial arm, with `LICENSING.md`,
   `LICENSE-COMMERCIAL.md`, `TRADEMARK.md`, `AUTHORS`, `THIRD-PARTY-NOTICES.md`,
   and SPDX headers on every source file.
-- `deny.toml` with a permissive-only allow-list, enforced in CI.
+- `deny.toml` with a permissive-only allow-list, enforced by the check script.
 - `scripts/check.sh`: licence headers, provenance, published-tree language,
   internal files and captures, build, lints, tests, dependency licences,
   secrets.

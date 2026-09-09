@@ -74,7 +74,7 @@ A public SIP port receives malformed packets as a matter of course, so nothing
 here treats them as exceptional.
 
 - **No panics on input.** `unwrap`, `expect`, `panic` and unchecked indexing are
-  lints across the workspace, and CI runs with `-D warnings`.
+  lints across the workspace, and `scripts/check.sh` runs with `-D warnings`.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
   128 header fields, 4 KiB per header value, all three lower on request.
 - **Fuzzing** since the twenty-sixth commit — four `cargo-fuzz` targets over the
@@ -102,7 +102,8 @@ and app store distribution. [`LICENSING.md`](LICENSING.md) tells you in one page
 which one you need. Full terms in [`LICENSE`](LICENSE) and
 [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
-Dependencies are permissive only, and CI fails the build on anything else.
+Dependencies are permissive only, and `cargo deny` fails the build on
+anything else.
 
 The name is a trademark and is not covered by either licence, see
 [`TRADEMARK.md`](TRADEMARK.md).

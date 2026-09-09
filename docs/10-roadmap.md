@@ -11,7 +11,8 @@ the criterion is demonstrated, in the test suite or against real equipment.
 ## Phase 0 — design
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the
-licensing set, the workspace skeleton, CI, the RFC 4475 corpus, the public API
+licensing set, the workspace skeleton, the check script, the RFC 4475 corpus,
+the public API
 surface of `sipral-core` agreed on paper, and the capture fixtures from the lab
 PBX.
 
@@ -31,8 +32,8 @@ session timers, PRACK, REFER for blind and attended transfer.
 
 **Status: written, and five of the six exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
-`sipral-media` — and five flows run against two servers on every push. What is
-left is one paid carrier account.
+`sipral-media` — and five flows run against two servers whenever
+`scripts/lab.sh` is run. What is left is one paid carrier account.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -43,7 +44,7 @@ unit suite had ever asked.
 
 - **met** — registration and a bidirectional call through the lab Kamailio and
   FreeSWITCH, with hold and resume, judged against conditions written before
-  the run and checked on every push;
+  the run;
 - **met** — the same against Asterisk with `chan_pjsip` at defaults, in a
   container, with no proxy in front of it;
 - the same against at least one real carrier, on a paid account;

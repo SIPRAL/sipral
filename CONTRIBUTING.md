@@ -52,6 +52,7 @@ The rules are spelled out in [`docs/02-clean-room.md`](docs/02-clean-room.md).
 - Identifiers: English, always.
 - Commit subjects: conventional prefix, imperative, lower case after the colon.
   `feat(core): parse Via headers with unknown parameters`
-- Every source file carries the SPDX header. CI rejects files without it.
+- Every source file carries the SPDX header. `scripts/check.sh` rejects files
+  without it.
 - `cargo fmt` and `cargo clippy -- -D warnings` pass before a commit exists.
 - No commit that does not build.

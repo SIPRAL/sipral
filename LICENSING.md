@@ -56,7 +56,8 @@ contract, not a runtime lock.
 Sipral links only permissively licensed dependencies (MIT, BSD, Apache-2.0,
 ISC, Zlib). None of them restricts either arm. Their attributions are in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and must ship with your
-binaries. The dependency allow-list is enforced in CI by `cargo deny`.
+binaries. The dependency allow-list is enforced by `cargo deny`, which
+`scripts/check.sh` runs.
 
 ## The name
 

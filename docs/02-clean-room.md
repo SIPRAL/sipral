@@ -79,6 +79,6 @@ Any pull request that adds a state machine, a parser or a codec gets a
 provenance pass before a correctness pass: where did this come from, and is
 there an RFC section number to hang it on.
 
-Files carry the SPDX header and the copyright line. CI rejects the ones that do
+Files carry the SPDX header and the copyright line. `scripts/check.sh` rejects the ones that do
 not, and also fails on references to the forbidden projects appearing in source
 files.

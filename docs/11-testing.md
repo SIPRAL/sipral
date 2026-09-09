@@ -32,7 +32,7 @@ beside them in the manifest.
 
 `scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
 `crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating
-it. This is the first thing that runs in CI.
+it. This is the first thing `scripts/check.sh` runs.
 
 **Capture replay.** Recorded exchanges from the lab PBX and from carriers,
 replayed against the stack byte for byte. Every interoperability bug found in
@@ -69,9 +69,9 @@ limit and a time limit per run, so a hang is a failure rather than something to
 wait out.
 
 The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
-Until then, `.github/workflows/fuzz.yml` runs each target for five minutes,
-nightly and on demand — not on every push, which would add half an hour to
-every commit to buy very little. Every crashing input is minimised and
+Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
+five minutes each by default — before a release and overnight, not before every
+commit, which would add half an hour to buy very little. Every crashing input is minimised and
 committed under `fixtures/regressions/` with the fix, and the test suite
 replays that directory forever.
 
@@ -141,13 +141,29 @@ SIPp for scripted scenarios, Wireshark for traces, `tc netem` for impairment.
 All of them are things Sipral is tested with. None of them is linked into it or
 shipped with it, and their licences do not reach the product.
 
-## What CI runs
+## Where the checks run
 
-`cargo fmt`, `cargo clippy` with warnings as errors, the test suite and a release
-build, on Linux, macOS and Windows. `cargo deny` for dependency licences.
-`scripts/check.sh --hygiene-only` for SPDX headers, provenance references,
-language, and for internal files or captures having reached the tree. `gitleaks`
-over the history.
+On our own machines, and nowhere else. There is no hosted CI and no
+`.github/workflows/`: a runner that builds, signs or publishes needs
+credentials on hardware that is not ours, and for Apple signing there is no way
+to give it one at all — a runner has no keychain. So the gate is a script.
 
-`scripts/check.sh` with no argument runs everything, locally, and is what runs
-before a commit exists.
+`scripts/check.sh` is it: `cargo fmt`, `cargo clippy` with warnings as errors,
+the test suite, a release build, `cargo deny` for dependency licences,
+`gitleaks` over the history, and the tree checks — SPDX headers, provenance
+references, language, and whether an internal file or a capture has reached the
+tree. It must exit zero before a commit exists. `--hygiene-only` skips the
+build for a fast pass.
+
+`scripts/lab.sh` runs the container lab: the three servers, the flows against
+each, and the same call again over a link made bad with `tc netem`. It needs
+Docker and nothing else, so it runs on any machine of ours that has a Linux
+kernel under it.
+
+`scripts/fuzz.sh` runs every fuzz target for as long as it is given, five
+minutes each by default. Before a release, and overnight.
+
+Two things that a three-runner matrix gave and a single machine does not: the
+suite on an operating system this one is not, and the lab where there is no
+Docker. Both are answered by running the same two scripts on a second machine
+rather than by handing the keys to somebody else's.
