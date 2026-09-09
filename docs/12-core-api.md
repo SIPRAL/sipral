@@ -691,6 +691,11 @@ pub struct EndpointConfig {
     /// 256 and 128 — an order of magnitude past what a softphone reaches.
     pub max_server_transactions: usize,
     pub max_dialogs: usize,
+    /// How much of the diagnostic record to keep: entries per call, and calls
+    /// at once. Both are bounds rather than budgets — past either one the
+    /// record says what it dropped instead of quietly becoming a lie.
+    /// `docs/14-diagnostics.md`.
+    pub diagnostics: RecordLimits,
 }
 
 /// What the caller describes. The endpoint fills in the branch, the sent-by,
@@ -846,6 +851,24 @@ impl Endpoint {
     /// How many requests have been refused with a 503 for want of room, for a
     /// caller that would rather sample a gauge than watch events go by.
     pub fn refused(&self) -> u64;
+
+    // -- the diagnostic record --------------------------------------------------
+    /// What this endpoint decided about one call, in order, with a stable code
+    /// per decision and the size on the wire where there was one. Readable at
+    /// any point during the call, not only when it has gone wrong.
+    pub fn call_record(&self, call: &CallId) -> Option<&Record>;
+    /// And the decisions that belong to no call yet: a request refused before
+    /// it could be placed, a transport chosen for something out of dialog.
+    /// Never evicted, so that a flood of strangers cannot push a live call's
+    /// record out of the set.
+    pub const fn endpoint_record(&self) -> &Record;
+    pub fn recorded_calls(&self) -> impl Iterator<Item = &CallId>;
+    /// Records dropped for want of room. A bound that lies about having been
+    /// reached is worse than no bound.
+    pub const fn records_dropped(&self) -> u64;
+    /// Every record as one JSON document, which is the artefact a bug report
+    /// carries. `docs/14-diagnostics.md` has the shape and the stability rule.
+    pub fn diagnostics_json(&self) -> String;
 }
 
 pub struct DialogSnapshot {
