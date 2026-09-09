@@ -2,12 +2,11 @@
 # Copyright (c) 2026 Tiberiu Balasea
 
 # Not on push: four targets at five minutes each would add half an hour to
-# every commit and buy very little. Nightly, and on demand.
+# every commit and buy very little. The nightly run is off for the same reason
+# `ci.yml` is on demand only, and comes back with it.
 name: fuzz
 
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       seconds:

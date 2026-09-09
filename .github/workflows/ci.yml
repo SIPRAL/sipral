@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Tiberiu Balasea
 
+# On demand only, for now. The repository is private, so its minutes are
+# metered, and this workflow spends them fast: three operating systems plus a
+# lab of three containers. They ran out. When the repository goes public the
+# minutes stop being billed and the push trigger comes back.
 name: ci
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 env:
