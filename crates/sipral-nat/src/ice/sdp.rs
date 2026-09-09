@@ -167,6 +167,59 @@ mod tests {
         assert_eq!(remote.candidates.len(), 1);
     }
 
+    /// What declaring ICE adds to an offer, in bytes on the wire.
+    ///
+    /// Measured rather than estimated, and pinned here rather than written
+    /// into a document that would stop being true. A request that outgrew the
+    /// path and was dropped by a NAT is the most expensive failure this
+    /// project has a record of — silent, and two days to find — and the
+    /// attributes below were four hundred of the bytes that did it, against a
+    /// peer that did not speak ICE at all. `docs/06-nat.md` quotes this test.
+    ///
+    /// One address and one component is the floor. A laptop with Wi-Fi,
+    /// Ethernet and a VPN, offering both components and a reflexive candidate
+    /// for each, multiplies the candidate lines by nine.
+    #[test]
+    fn what_declaring_ice_costs_on_the_wire() {
+        let bare = {
+            let mut description = session();
+            description.media.push(audio_media());
+            description.to_string().len()
+        };
+
+        let mut description = session();
+        write_session(&mut description);
+        let agent = LiteAgent::new(
+            "8hhY".to_owned(),
+            "asd88fgpdd777uzjYhagZg".to_owned(),
+            Role::Controlled,
+            42,
+        );
+        let candidates = gather(&[(
+            ComponentId::RTP,
+            HostAddresses {
+                v4: Some(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 7), 9000)),
+                v6: None,
+            },
+        )]);
+        let mut media = audio_media();
+        write_media(&mut media, &agent, &candidates);
+        description.media.push(media);
+        let declared = description.to_string().len();
+
+        let added = declared - bare;
+        assert_eq!(
+            added, 143,
+            "one candidate, one address: {added} bytes. If this changed, the \
+             figure in docs/06-nat.md changed with it."
+        );
+        assert!(
+            added * 9 > 1_300 - bare,
+            "nine candidates and this offer no longer fit the 1300-byte floor \
+             RFC 3261 §18.1.1 sets for a datagram, which is the whole point"
+        );
+    }
+
     #[test]
     fn a_media_level_credential_overrides_the_session_level_one() {
         let mut description = session();

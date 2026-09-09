@@ -56,6 +56,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- A default profile for the equipment this stack is actually deployed against —
+  a softphone behind consumer NAT talking to an Asterisk-family PBX — with what
+  each optional mechanism costs on the wire beside it. **Declaring ICE adds 143
+  bytes per candidate**, measured and pinned by a test rather than estimated
+  into a document that would stop being true, and that is the floor: a laptop
+  with Wi-Fi, Ethernet and a VPN writes nine such lines, and an offer carrying
+  them no longer fits the 1300-byte datagram floor of RFC 3261 §18.1.1. Which is
+  not hypothetical — NAT attributes were four hundred of the bytes in the
+  request that fragmented in the field and died in silence, sent to a peer that
+  did not speak the protocol at all.
+  The document also says the uncomfortable part plainly: ICE is off today
+  because nothing links `sipral-nat`, which is the right behaviour reached the
+  wrong way. A default that holds only because nobody wired the alternative is
+  one that changes the first time somebody does.
+
 - Gain, mute and a level meter on both device crates, and the device that goes
   away mid-call reported rather than turning into silence.
 

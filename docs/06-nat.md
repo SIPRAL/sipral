@@ -47,6 +47,53 @@ host can read off an interface — a machine with a private address and a 1:1 NA
 in front of it has one, and a machine with a routable address in a filtered
 network does not — so the build says, and the default is off.
 
+## The default profile, and what each option costs on the wire
+
+The deployment this stack is aimed at is a softphone behind consumer NAT
+talking to an Asterisk-family PBX. That is not one deployment among several to
+be catered for evenly — it is the overwhelming majority, and the defaults are
+chosen for it rather than for the general case.
+
+**What is on, and why it is the right default there:**
+
+| Mechanism | Default | On the wire |
+|---|---|---|
+| `rport` on every `Via` (RFC 3581) | **on** | 6 bytes per request |
+| Symmetric RTP with latching | **on**, not configurable | nothing |
+| Double-CRLF keepalive on a stream | on where there is a stream | 4 bytes per 25 s |
+
+**What is off, and why:**
+
+| Mechanism | Default | On the wire if turned on |
+|---|---|---|
+| ICE, in any role | **off** | **143 bytes** per candidate, at a floor of one |
+| STUN | off | its own packets; nothing on a request |
+| TURN | off | a 4-byte channel header per media packet |
+
+The 143 is measured, not estimated, and pinned by
+`what_declaring_ice_costs_on_the_wire` in `crates/sipral-nat/src/ice/sdp.rs` so
+that this table cannot quietly stop being true. It is the floor: one address,
+one component, one candidate. A laptop with Wi-Fi, Ethernet and a VPN, offering
+RTP and RTCP with a reflexive candidate for each, writes nine of those lines,
+and an offer that carried them would no longer fit the 1300-byte datagram floor
+RFC 3261 §18.1.1 sets. That is not hypothetical: a request that outgrew its path
+and was silently dropped by a NAT is the most expensive failure this project has
+a record of, and NAT-traversal attributes were four hundred of the bytes that did
+it — against a peer that did not speak the protocol at all.
+
+Which is the rule the table exists to state: **a mechanism that only helps
+against a peer that supports it is negotiated or detected, never assumed.** ICE
+against a PBX that learns the caller's real address from the media it receives
+buys nothing and costs the call.
+
+**Off has to be a decision, not an accident.** At this commit `sipral-nat` is
+linked by nothing — not by `sipral-ua`, not by the facade, not by the C ABI — so
+ICE is absent because no code path reaches it. That is the right behaviour
+arrived at the wrong way, and it is worth writing down, because a default that
+holds only because nobody wired the alternative is a default that changes the
+first time somebody does. When the facade grows an ICE seam, the switch is
+explicit and this table is what it defaults to.
+
 ## STUN
 
 RFC 8489, and RFC 5389 compatibility for servers that have not moved.
