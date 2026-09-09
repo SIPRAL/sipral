@@ -79,6 +79,38 @@ That is advice given to them, not to this project, and it is recorded here as
 what it is. IETF rules require a disclosure to name actual patent numbers, so a
 licensee who needs more than that can have their own counsel read them.
 
+### AES
+
+`sipral-rtp` links the `aes` crate, and nothing else of SRTP is borrowed:
+SHA-1, HMAC, counter mode, f8, the key derivation, the packet index and the
+replay list are written in-tree from RFC 3711, RFC 3174 and RFC 2104, and
+proved against those documents' own test vectors.
+
+The block cipher is the exception because a table-driven AES leaks its key
+through the CPU cache, and the headless mode is meant to run on machines
+shared with strangers. This crate reaches for the AES-NI and ARMv8 crypto
+instructions and falls back to a bitsliced implementation, so it is
+constant-time on every target Sipral ships to. Writing that by hand would be
+slower and worse.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `aes` 0.9.3 | the block cipher | MIT OR Apache-2.0 |
+| `cipher` 0.5.2 | the traits `aes` implements | MIT OR Apache-2.0 |
+| `crypto-common` 0.2.2 | shared key and block types | MIT OR Apache-2.0 |
+| `hybrid-array` 0.4.15 | const-generic arrays behind those types | MIT OR Apache-2.0 |
+| `typenum` 1.20.1 | type-level integers `hybrid-array` uses | MIT OR Apache-2.0 |
+| `inout` 0.2.2 | in-place buffer views | MIT OR Apache-2.0 |
+| `cpufeatures` 0.3.1 | runtime detection of the AES instructions | MIT OR Apache-2.0 |
+| `cpubits` 0.1.1 | the bit twiddling that detection needs | MIT OR Apache-2.0 |
+| `libc` 0.2.189 | how `cpufeatures` asks the operating system | MIT OR Apache-2.0 |
+| `zeroize` 1.9.0 | wiping keys on drop | Apache-2.0 OR MIT |
+
+All ten are permissive and dual-licensed the same way, so one MIT notice
+covers the set. `zeroize` is named directly as well as through `aes`: keys
+have to be wiped where they are held, and the write that survives the
+optimiser needs `unsafe`, which `sipral-rtp` denies.
+
 #### Build-time only
 
 `cmake` 0.1.58, `cc` 1.4.5, `shlex` 2.0.1 and `find-msvc-tools` 0.1.12 arrive
@@ -103,7 +135,6 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 
 | Component | Use | Licence |
 |---|---|---|
-| libsrtp2 | SRTP | BSD-3-Clause (Cisco) |
 | webrtc-audio-processing | AEC3, AGC, noise suppression | BSD-3-Clause |
 | sippy/libg722 | G.722 | CMU 1993 portion unrestricted; Sippy Software portion BSD-2-Clause with attribution |
 | miniaudio or PortAudio | baseline audio device I/O | MIT-0 / MIT |

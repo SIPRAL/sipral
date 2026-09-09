@@ -13,6 +13,17 @@ categories.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The one primitive that is not written in-tree. A table-driven AES leaks its
+# key through the cache, and the headless mode is meant to run on machines
+# shared with strangers; this crate reaches for AES-NI and the ARMv8 crypto
+# instructions and falls back to a bitsliced implementation, so it is
+# constant-time on every target we ship. SHA-1, HMAC, the counter mode, the
+# key derivation and everything else in `srtp` are ours.
+aes = { version = "=0.9.3", features = ["zeroize"] }
+# wiping master and session keys when they go out of scope needs a write the
+# optimiser is not allowed to remove, and that needs `unsafe`, which this
+# crate denies
+zeroize = "=1.9.0"
 
 [lints]
 workspace = true

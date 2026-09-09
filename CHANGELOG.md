@@ -12,6 +12,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- SRTP and SRTCP in `sipral-rtp`, written from RFC 3711. Counter mode and f8
+  keystreams, HMAC-SHA-1 tags, the key derivation of §4.3 with erratum 3712
+  applied to the SRTCP index, the implicit packet index of §3.3.1 with
+  Appendix A's estimator, and a replay window twice the size §3.3.2 requires.
+  The three suites RFC 4568 defines, the `UNENCRYPTED_*` and
+  `UNAUTHENTICATED_SRTP` session parameters, an optional master key
+  identifier, and the packet counts §9.2 caps at 2^48 and 2^31.
+  Protecting and unprotecting happen in the caller's own buffer, so a
+  protected packet costs no allocation. Every test vector in the RFC's
+  Appendix B is in the suite, as are RFC 3174's for SHA-1 and RFC 2202's for
+  HMAC.
+  The block cipher comes from the `aes` crate, the first thing `sipral-rtp`
+  depends on, because a table-driven AES leaks its key through the cache;
+  everything above it is in-tree. Linking libsrtp2, which the roadmap used to
+  name, was dropped: it is C, and this crate denies `unsafe`.
+
 - Hold and resume in `sipral-ua`, and the offers that come after them. Hold is
   RFC 3264 §8.4's: the description already negotiated, with a stream that was
   `sendrecv` marked `sendonly` and one that was `recvonly` marked `inactive`,

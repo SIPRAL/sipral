@@ -46,6 +46,7 @@ mod rtcp;
 mod rtcp_stats;
 mod rtcp_timer;
 mod source;
+pub mod srtp;
 mod wire;
 
 pub use dtmf::{

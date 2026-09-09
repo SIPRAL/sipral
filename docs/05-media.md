@@ -117,11 +117,27 @@ once.
 
 ### SRTP
 
-Via libsrtp2. SDES key exchange through `a=crypto` in SDP for the common case,
-DTLS-SRTP where the peer requires it. `AES_CM_128_HMAC_SHA1_80` as the baseline
-suite, with the AES-GCM suites where offered. Key material is zeroised on drop.
-Unencrypted RTP arriving on a secured session is dropped, never accepted as a
-fallback.
+Written in-tree from RFC 3711, over one borrowed primitive: the `aes` block
+cipher, for the reason `THIRD-PARTY-NOTICES.md` gives. Counter mode and f8,
+HMAC-SHA-1, the key derivation, the implicit packet index of §3.3.1 and the
+replay window of §3.3.2 are all here, proved against the test vectors in the
+RFC's own Appendix B. Linking libsrtp2 was the earlier plan and was dropped:
+it is C, this crate denies `unsafe`, and a memory-safe stack that hands every
+arriving packet to a C parser is not one.
+
+The three suites RFC 4568 defines — `AES_CM_128_HMAC_SHA1_80`,
+`AES_CM_128_HMAC_SHA1_32` and `F8_128_HMAC_SHA1_80` — with the first as the
+baseline. `UNENCRYPTED_SRTP`, `UNENCRYPTED_SRTCP` and `UNAUTHENTICATED_SRTP`
+are honoured where a peer insists; SRTCP's tag stays at eighty bits whatever
+the suite says about SRTP's, because §5.2 forbids shortening it. Key material
+is zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
+never accepted as a fallback.
+
+SDES key exchange through `a=crypto` in SDP for the common case. DTLS-SRTP is
+deliberately not here yet: it needs a DTLS implementation, `rustls` has none,
+and the alternatives are single-maintainer crates. The cost of the delay is
+that peers who require DTLS-SRTP and refuse SDES — a browser talking WebRTC
+directly, and some carrier session border controllers — cannot be reached.
 
 SDES only over a secured signalling channel. `a=crypto` carries the master key
 in the SDP body, so over plain UDP or TCP it travels in the clear and anyone on
