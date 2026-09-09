@@ -15,14 +15,17 @@
 //! in the ACK, written by an application that has no media layer on this side
 //! of the boundary to write it with.
 //!
-//! DTMF goes out as INFO. RFC 4733's telephone-event lives in the RTP stream,
-//! and there is no RTP on this side of the boundary; `application/dtmf-relay`
-//! is what every switch that takes DTMF over signalling takes, and it is what
-//! a stack with no media path can send.
+//! DTMF goes out three ways and the caller picks one per send, because which
+//! of them a peer accepts is a fact about the peer: RFC 4733's telephone event
+//! in the media, which is the one to reach for, and an INFO carrying either
+//! `application/dtmf-relay` or `application/dtmf` for the switches that take
+//! only signalling. A stack built with no media path can still send the last
+//! two.
 
 use std::ffi::c_char;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sipral_core::endpoint::OutgoingInDialogRequest;
 use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
@@ -540,12 +543,48 @@ entry! {
     }
 }
 
+/// Which way a digit goes to the far end. Names for
+/// [`sipral_call_send_dtmf`]'s `via`.
+///
+/// The choice is per send, not per call, because it is a fact about the peer
+/// rather than about this end, and the way to find out which one a peer takes
+/// is to try. A carrier that ignores one of these ignores it silently.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SipralDtmf {
+    /// In the media, as an RFC 4733 named telephone event. What to reach for:
+    /// it is the only one carried end to end by every gateway on the path, and
+    /// the only one whose timing survives transcoding.
+    Rtp = 0,
+    /// An INFO per digit carrying `application/dtmf-relay`, which states the
+    /// signal and how long it was held.
+    InfoRelay = 1,
+    /// An INFO per digit carrying `application/dtmf`, whose whole body is the
+    /// character. Some switches take only this one.
+    InfoPlain = 2,
+}
+
 entry! {
-    /// Send DTMF on a call that is up, one INFO per digit.
+    /// Send DTMF on a call that is up, in whichever of the three forms the far
+    /// end takes.
     ///
     /// `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-    /// RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how
-    /// long each one is said to have been held, or zero for 160 ms.
+    /// RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how long
+    /// each one lasts, or zero for the default.
+    ///
+    /// `via` is a [`SipralDtmf`], and it is chosen per send rather than per
+    /// call: which form a peer accepts is a fact about the peer, and an
+    /// application that has just learned the answer for this one must not have
+    /// to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
+    /// the media, where they replace the audio for as long as they last and
+    /// queue behind each other; the two INFO forms put one request per digit in
+    /// the dialog.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
+    /// negotiation settled on no telephone event payload type: the key is a
+    /// real key and this call has nowhere in the media to put it. The INFO
+    /// forms need a dialog rather than a negotiation, and answer
+    /// `SIPRAL_STATUS_WRONG_STATE` before there is one.
     ///
     /// # Safety
     ///
@@ -555,23 +594,36 @@ entry! {
         call: SipralHandle,
         digits: *const c_char,
         digits_len: usize,
+        via: u32,
         duration_ms: u32,
         now_ms: u64,
     ) {
+        let form = dtmf_form(via)?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let pressed = unsafe { required_text(digits, digits_len, "digits") }?;
             let keys = keypad(pressed)?;
             let held = tone_length(duration_ms)?;
+            if form == SipralDtmf::Rtp {
+                let length = Duration::from_millis(u64::from(held));
+                return crate::media::dial_in_media(state, id, pressed, length);
+            }
             let Some(dialog) = state.agent.call_dialog(id) else {
                 return Err(fail(
                     SipralStatus::WrongState,
                     "the call has no dialog to send an INFO in, so it is not up yet",
                 ));
             };
+            let kind: &[u8] = match form {
+                SipralDtmf::InfoPlain => b"application/dtmf",
+                _ => b"application/dtmf-relay",
+            };
             for key in keys {
-                let request = OutgoingInDialogRequest::new(Method::Info)
-                    .body(b"application/dtmf-relay", dtmf_body(key, held));
+                let body = match form {
+                    SipralDtmf::InfoPlain => Arc::from(vec![key]),
+                    _ => dtmf_body(key, held),
+                };
+                let request = OutgoingInDialogRequest::new(Method::Info).body(kind, body);
                 state
                     .agent
                     .endpoint()
@@ -580,6 +632,22 @@ entry! {
             }
             Ok(())
         })
+    }
+}
+
+/// The form a number names, or a refusal saying what the three are.
+fn dtmf_form(via: u32) -> Result<SipralDtmf, Fail> {
+    match via {
+        0 => Ok(SipralDtmf::Rtp),
+        1 => Ok(SipralDtmf::InfoRelay),
+        2 => Ok(SipralDtmf::InfoPlain),
+        _ => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "{via} is not a way to send a digit; they are 0 for the media, 1 for INFO with \
+                 application/dtmf-relay and 2 for INFO with application/dtmf"
+            ),
+        )),
     }
 }
 
@@ -876,11 +944,11 @@ entry! {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SipralCallConfig, dtmf_body, keypad, sipral_call_accept_session, sipral_call_answer,
-        sipral_call_answer_media, sipral_call_consult, sipral_call_hangup, sipral_call_hold,
-        sipral_call_hold_state, sipral_call_place, sipral_call_reject, sipral_call_reject_session,
-        sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf, sipral_call_state,
-        sipral_call_transfer, sipral_call_transfer_to, tone_length,
+        SipralCallConfig, SipralDtmf, dtmf_body, dtmf_form, keypad, sipral_call_accept_session,
+        sipral_call_answer, sipral_call_answer_media, sipral_call_consult, sipral_call_hangup,
+        sipral_call_hold, sipral_call_hold_state, sipral_call_place, sipral_call_reject,
+        sipral_call_reject_session, sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf,
+        sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add};
     use crate::error::last_error_text;
@@ -1595,7 +1663,17 @@ Content-Type: application/sdp\r\n"
         let _ = sent(handle);
         let (digits, digits_len) = as_text("1#d");
         assert_eq!(
-            unsafe { sipral_call_send_dtmf(handle, call, digits, digits_len, 0, 2_000) },
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoRelay as u32,
+                    0,
+                    2_000,
+                )
+            },
             SipralStatus::Ok,
             "{}",
             last_error_text()
@@ -1668,6 +1746,55 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// A form this ABI has no number for is refused rather than quietly taken
+    /// as the default: an application that meant the media and passed a
+    /// mistyped constant would otherwise send in the dialog and never know.
+    #[test]
+    fn a_way_of_sending_a_digit_that_does_not_exist_is_refused() {
+        assert_eq!(dtmf_form(0).ok(), Some(SipralDtmf::Rtp));
+        assert_eq!(dtmf_form(1).ok(), Some(SipralDtmf::InfoRelay));
+        assert_eq!(dtmf_form(2).ok(), Some(SipralDtmf::InfoPlain));
+        for wrong in [3, 4, u32::MAX] {
+            assert!(dtmf_form(wrong).is_err(), "{wrong} was taken as a form");
+        }
+    }
+
+    /// The other INFO body: the whole of it is the key. A switch that reads
+    /// this one and not the other is the reason the form is chosen per send.
+    #[test]
+    fn the_plain_info_body_is_the_key_and_nothing_else() {
+        let mut observed = Observed::default();
+        let (handle, call) = connected(&mut observed);
+        let _ = sent(handle);
+        let (digits, digits_len) = as_text("5");
+        assert_eq!(
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoPlain as u32,
+                    0,
+                    2_000,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let written = sent(handle);
+        assert_eq!(written.len(), 1);
+        let message = String::from_utf8_lossy(&written[0]).into_owned();
+        assert!(message.contains("Content-Type: application/dtmf"));
+        assert!(
+            !message.contains("application/dtmf-relay"),
+            "the plain form sent the relay body"
+        );
+        assert!(message.ends_with('5'), "the body is not just the key");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     #[test]
     fn dtmf_on_a_call_that_is_not_up_says_so() {
         let mut observed = Observed::default();
@@ -1675,7 +1802,17 @@ Content-Length: 0\r\n\r\n";
         let (_, call) = place(handle, account, &call_config(), 0);
         let (digits, digits_len) = as_text("1");
         assert_eq!(
-            unsafe { sipral_call_send_dtmf(handle, call, digits, digits_len, 0, 0) },
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoRelay as u32,
+                    0,
+                    0,
+                )
+            },
             SipralStatus::WrongState
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
@@ -2131,7 +2268,9 @@ Content-Length: 0\r\n\r\n";
             unsafe {
                 sipral_call_answer(handle, SIPRAL_HANDLE_NONE, ANSWER.as_ptr(), ANSWER.len(), 0)
             },
-            unsafe { sipral_call_send_dtmf(handle, SIPRAL_HANDLE_NONE, digits, digits_len, 0, 0) },
+            unsafe {
+                sipral_call_send_dtmf(handle, SIPRAL_HANDLE_NONE, digits, digits_len, 0, 0, 0)
+            },
             unsafe { sipral_call_transfer(handle, SIPRAL_HANDLE_NONE, target, target_len, 0) },
             unsafe { sipral_call_transfer_to(handle, SIPRAL_HANDLE_NONE, SIPRAL_HANDLE_NONE, 0) },
         ];

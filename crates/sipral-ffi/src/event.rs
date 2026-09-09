@@ -227,6 +227,15 @@ event_kinds! {
     /// Never an abort. `payload.media.recorded_ms` says how much audio reached
     /// the file before it stopped, and the call carries on without it.
     25 = RecordingStopped, c"recording stopped";
+    /// The far end pressed a key (RFC 4733).
+    ///
+    /// One per keypress, not one per packet: a digit goes out as a run of
+    /// updates and then its closing packet three times, and the layer below
+    /// collapses them on the timestamp that identifies the event.
+    /// `payload.media.digit` is the character, `event_code` the number behind
+    /// it for the events no keypad has a key for, and `held_ms` how long it
+    /// lasted.
+    26 = DigitReceived, c"digit received";
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -414,6 +423,14 @@ pub struct SipralMediaEvent {
     /// What the stream cost, for the kind that carries it, and null for every
     /// other. It belongs to the library and lives as long as the callback.
     pub statistics: *const SipralStreamStats,
+    /// The key the far end pressed, as its character, and zero for an event
+    /// no keypad has a key for.
+    pub digit: u32,
+    /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
+    /// real events that are not keys.
+    pub event_code: u32,
+    /// How long the far end held it.
+    pub held_ms: u64,
 }
 
 /// The arm of an event that its kind names.
@@ -507,6 +524,9 @@ impl SipralMediaEvent {
             reason: std::ptr::null(),
             reason_len: 0,
             statistics: std::ptr::null(),
+            digit: 0,
+            event_code: 0,
+            held_ms: 0,
         }
     }
 }
@@ -831,6 +851,12 @@ pub(crate) fn media(
         MediaEvent::Failed(ref error) => {
             payload.fault = fault_of(error) as u32;
             SipralEventKind::MediaFailed
+        }
+        MediaEvent::DigitReceived { digit, event, held } => {
+            payload.digit = digit.map_or(0, u32::from);
+            payload.event_code = u32::from(event);
+            payload.held_ms = millis(held);
+            SipralEventKind::DigitReceived
         }
         MediaEvent::RecordingStopped {
             ref reason,
@@ -1181,7 +1207,8 @@ mod tests {
         assert_eq!(SipralEventKind::MediaResumed as u32, 23);
         assert_eq!(SipralEventKind::MediaFailed as u32, 24);
         assert_eq!(SipralEventKind::RecordingStopped as u32, 25);
-        assert_eq!(SipralEventKind::ALL.len(), 21, "and there are no others");
+        assert_eq!(SipralEventKind::DigitReceived as u32, 26);
+        assert_eq!(SipralEventKind::ALL.len(), 22, "and there are no others");
     }
 
     /// The two numbers this media surface took were spoken for before it was
@@ -1223,7 +1250,7 @@ mod tests {
         for held in [15, 16, 18, 20_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
-        assert_eq!(name(26), None, "past the last kind");
+        assert_eq!(name(27), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

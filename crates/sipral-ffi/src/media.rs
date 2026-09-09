@@ -491,17 +491,23 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
 pub(crate) fn media_failed(error: &MediaError) -> Fail {
     let status = match *error {
         // the value is right and there is nothing in this build behind it,
-        // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for
-        MediaError::UnsupportedCodec { .. } | MediaError::UnknownPayload { .. } => {
-            SipralStatus::NotSupported
-        }
+        // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for. A call
+        // that negotiated no telephone event type is the same shape: the key
+        // is a real key and this call has nowhere to put it
+        MediaError::UnsupportedCodec { .. }
+        | MediaError::UnknownPayload { .. }
+        | MediaError::NoDtmf => SipralStatus::NotSupported,
         // a value that would be taken if it were corrected, which for a
         // recording means the path the file system refused
         MediaError::NoCodecs
         | MediaError::BadFrameLength { .. }
         | MediaError::Description(_)
         | MediaError::Codec(_)
-        | MediaError::Recording(_) => SipralStatus::InvalidArgument,
+        | MediaError::Recording(_)
+        | MediaError::DigitTooShort { .. }
+        | MediaError::UnknownDigit { .. }
+        | MediaError::RenderDelayTooLong { .. } => SipralStatus::InvalidArgument,
+        MediaError::TooManyDigits => SipralStatus::Exhausted,
         MediaError::NoSuchCall
         | MediaError::NoDescription
         | MediaError::NotRecording
@@ -1169,6 +1175,79 @@ pub(crate) unsafe fn address(
             format!("{name} is {written:?}, which is not an address and a port"),
         )
     })
+}
+
+// -- dialling ----------------------------------------------------------------
+
+/// Put a whole dial string in the media, as named telephone events.
+///
+/// Reached from [`sipral_call_send_dtmf`](crate::call), which chooses between
+/// this and the two INFO bodies.
+pub(crate) fn dial_in_media(
+    state: &mut StackState,
+    call: sipral_ua::CallHandle,
+    keys: &str,
+    length: Duration,
+) -> Result<(), Fail> {
+    let session = state.engine.session(call).ok_or_else(|| {
+        fail(
+            SipralStatus::WrongState,
+            "this call has no media to put a digit in: it was not placed or answered with a media \
+             address of its own, or its negotiation has not settled yet",
+        )
+    })?;
+    session
+        .dial(keys, length)
+        .map(|_| ())
+        .map_err(|error| media_failed(&error))
+}
+
+entry! {
+    /// Whether a digit is going out or waiting to, and how many have not
+    /// started yet.
+    ///
+    /// Either out parameter may be null. A user interface that greys out the
+    /// keypad while a number is being sent wants the first; one that shows how
+    /// much of a pasted number is left wants the second.
+    ///
+    /// # Safety
+    ///
+    /// `out_dialling` must point at one `uint32_t` or be null, and
+    /// `out_waiting` at one `size_t` or be null.
+    fn sipral_call_dialling(
+        stack: SipralHandle,
+        call: SipralHandle,
+        out_dialling: *mut u32,
+        out_waiting: *mut usize,
+    ) {
+        let (busy, waiting) = with_session(stack, call, |session| {
+            Ok((session.is_dialling(), session.digits_waiting()))
+        })?;
+        if !out_dialling.is_null() {
+            unsafe { out_dialling.write(u32::from(busy)) };
+        }
+        if !out_waiting.is_null() {
+            unsafe { out_waiting.write(waiting) };
+        }
+        Ok(())
+    }
+}
+
+entry! {
+    /// Drop everything queued and stop the digit going out.
+    ///
+    /// The digit in flight gets no closing packet, which is right for a call
+    /// whose media is being taken away: there is nowhere left to send one.
+    ///
+    /// # Safety
+    ///
+    /// Reads no memory the caller owns.
+    fn sipral_call_stop_dialling(stack: SipralHandle, call: SipralHandle) {
+        with_session(stack, call, |session| {
+            session.stop_dialling();
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
