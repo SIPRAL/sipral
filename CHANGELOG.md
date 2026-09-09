@@ -56,6 +56,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- Gain, mute and a level meter on both device crates, and the device that goes
+  away mid-call reported rather than turning into silence.
+
+  The gain is applied to the frames here rather than through the platform,
+  because none of the platform's volumes belongs to a call: the device volume
+  is shared with everything on the machine, the process volume is one setting
+  for the whole application, and both outlive the call. Turning a call down
+  must not turn a film down. It is applied at the device end of the ring rather
+  than the caller's, because the ring holds sixteen frames and a mute heard a
+  third of a second after the button is not a mute.
+
+  Both ends of the range are defined: the ratio clamps, the samples saturate
+  instead of wrapping, and every sample that lands at the end is counted — so a
+  gain set too high is a number beside the slider rather than a mystery
+  distortion. A muted direction keeps frames moving, so unmuting does not play
+  a backlog.
+
+  The meter is the loudest sample over a tenth of a second, held between one
+  window and two. Peak-since-last-poll was rejected because it makes the number
+  depend on how often it is read; polling now mutates nothing, so any number of
+  callers at any rate see the same answer. It costs one compare per sample,
+  folded into the pass the gain already makes.
+
+  A device that disappears mid-call is reported — read from the platform rather
+  than inferred from silence — and the stream stops rather than quietly
+  producing nothing, so an application that ignores the event finds a stream
+  that has plainly stopped. Recovery is one call, carrying the gain and the
+  mute across, and is deliberately not automatic: whether to move to the laptop
+  speaker, wait, or end the call is not this layer's decision. A saved
+  selection is held as the identity that survives a replug, and the
+  documentation is explicit that a crate cannot stop the operating system
+  changing the default — reopening is what re-applies it.
+
 - An INVITE nobody asked for can be refused before anything sees it. Scanners
   dial common extension numbers at every hour, and a client on a public port
   either filters them or wakes its user at three in the morning. The policy hook

@@ -33,10 +33,17 @@
 //!   that quietly resampled would be easier to use and would hide the one
 //!   number a media pipeline has to know.
 //!
+//! The volume, the mute and the level meter are here too, and they are applied
+//! to the frames rather than to any of the volumes Windows keeps — see
+//! [`Controls`] for why neither of those belongs to a call. They are on a
+//! handle that can be moved to the thread drawing the window, because that is
+//! where a slider and a meter live.
+//!
 //! On a target that is not Windows the crate still compiles, and still exports
 //! [`StreamFormat`], [`DeviceFormat`], [`SampleFormat`], [`Device`],
-//! [`DeviceEvent`], [`Counters`], [`HResult`] and [`Error`], so that portable
-//! code above can name what it will be handed. What it does not export there is
+//! [`DeviceChoice`], [`DeviceEvent`], [`StreamEvent`], [`Controls`], [`Gain`],
+//! [`Level`], [`Counters`], [`HResult`] and [`Error`], so that portable code
+//! above can name what it will be handed. What it does not export there is
 //! anything that would need a Windows library to link against.
 //!
 //! Written from Microsoft's published headers and documented ABI; see
@@ -86,11 +93,13 @@
 mod counters;
 mod device;
 mod format;
+mod level;
 mod status;
 
 pub use counters::Counters;
-pub use device::{Device, DeviceEvent, DeviceId, Direction};
+pub use device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, StreamEvent};
 pub use format::{DeviceFormat, SampleFormat, StreamFormat};
+pub use level::{Controls, Gain, Level};
 pub use status::{Error, HResult};
 
 // The ring, the gate, the structure layouts and the conversions are only ever
@@ -125,8 +134,8 @@ pub use stream::{CaptureStream, PlaybackStream, StreamConfig};
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Device, DeviceEvent, DeviceFormat, DeviceId, Direction, Error, HResult,
-        SampleFormat, StreamFormat,
+        Counters, Device, DeviceChoice, DeviceEvent, DeviceFormat, DeviceId, Direction, Error,
+        Gain, HResult, Level, SampleFormat, StreamEvent, StreamFormat,
     };
 
     /// Everything named here has to exist on every target the workspace builds,
@@ -147,6 +156,13 @@ mod tests {
             DeviceEvent::DefaultChanged(Direction::Output),
             DeviceEvent::DefaultChanged(Direction::Output)
         );
+        assert_eq!(StreamEvent::DeviceLost, StreamEvent::DeviceLost);
+        assert_eq!(
+            DeviceChoice::Preferred(DeviceId::new("{0.0.1.00000000}.{one}")),
+            DeviceChoice::Preferred(DeviceId::new("{0.0.1.00000000}.{one}"))
+        );
+        assert_eq!(Gain::default(), Gain::UNITY);
+        assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
         assert_eq!(
             DeviceFormat {
@@ -173,14 +189,17 @@ mod tests {
         use super::{CaptureStream, PlaybackStream, StreamConfig};
 
         fn movable<T: Send>() {}
+        fn shareable<T: Send + Sync>() {}
 
         let config = StreamConfig::new(StreamFormat::narrowband());
         assert_eq!(config.format, StreamFormat::narrowband());
-        assert_eq!(config.device, None);
+        assert_eq!(config.device, DeviceChoice::System);
         // a stream has to be able to live on the thread that does the media,
         // which is not the thread that opened it
         movable::<CaptureStream>();
         movable::<PlaybackStream>();
+        // and its controls on the one that draws the window
+        shareable::<super::Controls>();
     }
 
     #[cfg(not(target_os = "windows"))]

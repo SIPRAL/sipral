@@ -31,7 +31,7 @@ use crate::abi::{
     UnknownVtable, VT_LPWSTR,
 };
 use crate::com::{Apartment, Com, TaskMemory, text_from, wide};
-use crate::device::{Device, DeviceEvent, DeviceId, Direction, Pending};
+use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending};
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
 use crate::status::{E_NOINTERFACE, E_NOTFOUND, E_POINTER, Error, HResult};
 use crate::sys;
@@ -69,6 +69,27 @@ pub(crate) fn enumerator() -> Result<Com<DeviceEnumeratorVtable>, Error> {
         call: "CoCreateInstance (MMDeviceEnumerator)",
         status: HResult::new(E_POINTER),
     })
+}
+
+/// The endpoint a choice names, opened.
+///
+/// A preference the machine does not have is not an error. That is the whole
+/// point of one: the headset is in a bag, the call still has to happen.
+pub(crate) fn open_choice(
+    enumerator: &Com<DeviceEnumeratorVtable>,
+    choice: &DeviceChoice,
+    direction: Direction,
+) -> Result<Com<MmDeviceVtable>, Error> {
+    match *choice {
+        DeviceChoice::System => open(enumerator, None, direction),
+        DeviceChoice::Device(ref id) => open(enumerator, Some(id), direction),
+        DeviceChoice::Preferred(ref id) => match open(enumerator, Some(id), direction) {
+            Err(Error::NoDevice) => open(enumerator, None, direction),
+            // A GetDevice that failed for any other reason is not a missing
+            // endpoint, it is a broken one, and falling back would hide it.
+            other => other,
+        },
+    }
 }
 
 /// The endpoint a stream should open: the one named, or the machine's default

@@ -28,11 +28,13 @@ use std::sync::Arc;
 
 use crate::abi;
 use crate::counters::Counters;
-// naming a device is a macOS notion; on iOS the route is the session's
+// choosing a device is a macOS notion; on iOS the route is the session's
 #[cfg(target_os = "macos")]
-use crate::device::DeviceId;
+use crate::device::DeviceChoice;
+use crate::device::{DeviceId, StreamEvent};
 use crate::format::StreamFormat;
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
+use crate::level::{Channel, Controls, window_samples};
 use crate::ring::Ring;
 use crate::status::{Error, OsStatus};
 use crate::sys;
@@ -51,19 +53,18 @@ const MAX_FRAMES_PER_SLICE: u32 = 4096;
 const DEFAULT_DEPTH_FRAMES: usize = 16;
 
 /// What to open, and how much slack to leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamConfig {
     /// Rate and frame length. Both directions use it.
     pub format: StreamFormat,
-    /// Which device, or `None` for whatever the system is routing to now,
-    /// which is what a softphone usually wants.
+    /// Which device, and what to do when it is not there.
     ///
     /// macOS only, because naming a device is: on iOS the route is the audio
     /// session's and the application's, and there is no property to set. The
     /// field is absent there rather than ignored, so the request cannot be
     /// written down at all.
     #[cfg(target_os = "macos")]
-    pub device: Option<DeviceId>,
+    pub device: DeviceChoice,
     /// Frames of buffering between the device and the caller, per direction.
     pub depth_frames: usize,
 }
@@ -75,8 +76,23 @@ impl StreamConfig {
         Self {
             format,
             #[cfg(target_os = "macos")]
-            device: None,
+            device: DeviceChoice::System,
             depth_frames: DEFAULT_DEPTH_FRAMES,
+        }
+    }
+
+    /// A saved selection, at the given format: the device carrying that
+    /// identity when the stream opens, and the system's route when the machine
+    /// does not have it.
+    ///
+    /// The identity is [`Device::uid`](crate::Device::uid), which is the field
+    /// worth writing into a configuration file.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn preferring(uid: impl Into<String>, format: StreamFormat) -> Self {
+        Self {
+            device: DeviceChoice::Preferred(uid.into()),
+            ..Self::new(format)
         }
     }
 }
@@ -134,6 +150,12 @@ struct Shared {
     /// exclusivity given up here is handed straight back by the framework.
     scratch: UnsafeCell<Box<[i16]>>,
     meters: Meters,
+    /// The gain, the mute and the meter for each direction. Held behind an
+    /// `Arc` of their own rather than inline, so that a [`Controls`] handed to
+    /// the thread drawing the window survives the stream being reopened on
+    /// another device.
+    microphone: Arc<Channel>,
+    speaker: Arc<Channel>,
 }
 
 // SAFETY: every field is either an atomic, a ring built out of atomics, or
@@ -146,7 +168,13 @@ unsafe impl Sync for Shared {}
 unsafe impl Send for Shared {}
 
 impl Shared {
-    fn new(unit: sys::Unit, format: StreamFormat, depth_frames: usize) -> Self {
+    fn new(
+        unit: sys::Unit,
+        format: StreamFormat,
+        depth_frames: usize,
+        microphone: Arc<Channel>,
+        speaker: Arc<Channel>,
+    ) -> Self {
         let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap_or(0);
         // never smaller than one slice: a ring that cannot hold what the
         // device hands over in one callback would drop samples every time
@@ -154,6 +182,11 @@ impl Shared {
             .frame_samples()
             .saturating_mul(depth_frames.max(2))
             .max(slice);
+        // the meters count in samples, so a stream reopened at another rate
+        // has to be told what a tenth of a second is now worth
+        let window = window_samples(format.sample_rate_hz());
+        microphone.set_window(window);
+        speaker.set_window(window);
         Self {
             unit,
             gate: Gate::new(),
@@ -161,6 +194,8 @@ impl Shared {
             playback: Ring::new(samples),
             scratch: UnsafeCell::new(vec![0; slice].into_boxed_slice()),
             meters: Meters::default(),
+            microphone,
+            speaker,
         }
     }
 
@@ -195,6 +230,14 @@ impl Shared {
         // the unit hands over memory aligned for the format it was given.
         let out = unsafe { core::slice::from_raw_parts_mut(buffer.data.cast::<i16>(), wanted) };
         let taken = self.playback.read(out);
+        // The volume goes on here rather than where the caller wrote the
+        // frame, so that a mute is silent on this callback instead of on the
+        // one after the ring has drained. `wanted` rather than `taken`,
+        // because the silence a starved callback plays is time the meter's
+        // window has to count.
+        if let Some(played) = out.get_mut(..taken) {
+            self.speaker.apply(played, wanted);
+        }
         if let Some(tail) = out.get_mut(taken..) {
             tail.fill(0);
         }
@@ -252,9 +295,24 @@ impl Shared {
                 usize::try_from(buffer.byte_size).unwrap_or(0) / 2
             })
             .min(wanted);
-        let Some(samples) = scratch.get(..delivered) else {
+        let Some(samples) = scratch.get_mut(..delivered) else {
             return;
         };
+        self.captured(samples);
+    }
+
+    /// The volume, the meter and the ring, for what the microphone delivered.
+    ///
+    /// Split out of the callback above because everything before this point
+    /// needs a live unit to call into and everything in it is arithmetic,
+    /// which is the half that can be shown to be right without a device.
+    fn captured(&self, samples: &mut [i16]) {
+        let delivered = samples.len();
+        // A muted microphone still fills the ring, with silence. Stopping the
+        // frames instead would mean unmuting replayed however much audio had
+        // piled up behind the mute, and would starve whatever above is pacing
+        // itself on frames arriving.
+        self.microphone.apply(samples, delivered);
         let stored = self.capture.write(samples);
         Meters::add(&self.meters.captured, stored);
         Meters::add(&self.meters.capture_dropped, delivered - stored);
@@ -375,11 +433,40 @@ pub struct Stream {
     unit: sys::Unit,
     shared: Arc<Shared>,
     format: StreamFormat,
-    running: bool,
+    /// Kept so that [`Stream::recover`] can ask for the same thing again and
+    /// have the choice resolved against the machine as it is then.
+    config: StreamConfig,
+    /// The two directions' controls, held here as well as in `shared` so that
+    /// a reopen carries the volume and the mute across rather than resetting
+    /// them under a caller who is mid-call.
+    microphone: Arc<Channel>,
+    speaker: Arc<Channel>,
+    /// Which device the unit settled on, read once at open. Reading it later
+    /// would be a call into a unit whose device may have gone, and the answer
+    /// is wanted precisely when that has happened. `None` on iOS, where the
+    /// route belongs to the audio session rather than to this crate.
+    opened_on: Option<DeviceId>,
+    health: Health,
     closed: bool,
     /// Set when teardown could not prove the callbacks were out. Nothing is
     /// then freed, ever.
     leak: bool,
+}
+
+/// Where the device under a stream is.
+///
+/// Three states rather than two flags, because the third one is not "stopped
+/// with a bit set": a stream that has lost its device stays here until
+/// [`Stream::recover`] puts another one underneath, and that is what makes the
+/// loss reported once rather than on every poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Health {
+    /// Open, and not started.
+    Stopped,
+    /// Started, and the device is taking and giving frames.
+    Running,
+    /// The device has gone.
+    Lost,
 }
 
 // SAFETY: the unit handle belongs to this `Stream` alone, every method that
@@ -400,6 +487,21 @@ impl Stream {
     /// that is gone, a format it will not take, a microphone the user has not
     /// granted.
     pub fn open(config: StreamConfig) -> Result<Self, Error> {
+        let window = window_samples(config.format.sample_rate_hz());
+        Self::open_with(
+            config,
+            Arc::new(Channel::new(window)),
+            Arc::new(Channel::new(window)),
+        )
+    }
+
+    /// The same, on controls that already exist, which is what makes a reopen
+    /// keep the volume and the mute the caller had set.
+    fn open_with(
+        config: StreamConfig,
+        microphone: Arc<Channel>,
+        speaker: Arc<Channel>,
+    ) -> Result<Self, Error> {
         let wanted = abi::ComponentDescription {
             component_type: abi::UNIT_TYPE_OUTPUT,
             subtype: abi::UNIT_SUBTYPE_VOICE_PROCESSING,
@@ -427,16 +529,61 @@ impl Stream {
         // and only-then-dispose that any other teardown does. Handing it to a
         // `Stream` first is what makes `?` below take that route, and means
         // there is one shutdown sequence in this file rather than two.
-        let stream = Self {
+        let mut stream = Self {
             unit,
-            shared: Arc::new(Shared::new(unit, config.format, config.depth_frames)),
+            shared: Arc::new(Shared::new(
+                unit,
+                config.format,
+                config.depth_frames,
+                Arc::clone(&microphone),
+                Arc::clone(&speaker),
+            )),
             format: config.format,
-            running: false,
+            config,
+            microphone,
+            speaker,
+            opened_on: None,
+            health: Health::Stopped,
             closed: false,
             leak: false,
         };
-        configure(unit, &config, &stream.shared)?;
+        configure(unit, &stream.config, &stream.shared)?;
+        stream.opened_on = stream.current_device();
         Ok(stream)
+    }
+
+    /// Which device the unit landed on, where a platform has such a thing.
+    #[cfg(target_os = "macos")]
+    fn current_device(&self) -> Option<DeviceId> {
+        self.device().ok()
+    }
+
+    /// On iOS the route is the audio session's, and there is no device
+    /// identifier to be had from the unit.
+    #[cfg(target_os = "ios")]
+    #[expect(
+        clippy::unused_self,
+        reason = "it answers for the platform rather than for this stream, and staying a method is what keeps the caller free of a cfg"
+    )]
+    fn current_device(&self) -> Option<DeviceId> {
+        None
+    }
+
+    /// Whether the device the stream opened on is still attached.
+    #[cfg(target_os = "macos")]
+    fn device_present(&self) -> bool {
+        self.opened_on.is_none_or(crate::hal::is_alive)
+    }
+
+    /// On iOS a route change arrives through `AVAudioSession`, which belongs
+    /// to the application, so there is nothing here to ask.
+    #[cfg(target_os = "ios")]
+    #[expect(
+        clippy::unused_self,
+        reason = "as `current_device`: the answer is the platform's, not this stream's"
+    )]
+    fn device_present(&self) -> bool {
+        true
     }
 
     /// What the stream was opened at.
@@ -446,9 +593,12 @@ impl Stream {
     }
 
     /// Whether the device is running.
+    ///
+    /// Goes false on its own when the device is lost; [`Stream::poll`] is what
+    /// says that is why.
     #[must_use]
     pub const fn is_running(&self) -> bool {
-        self.running
+        matches!(self.health, Health::Running)
     }
 
     /// Start the device. Frames begin arriving immediately, so whatever is
@@ -457,14 +607,14 @@ impl Stream {
     /// # Errors
     /// [`Error::Call`] from `AudioOutputUnitStart`.
     pub fn start(&mut self) -> Result<(), Error> {
-        if self.running {
+        if self.is_running() {
             return Ok(());
         }
         // SAFETY: the unit is open and initialised.
         sys::check("AudioOutputUnitStart", unsafe {
             sys::start_unit(self.unit)
         })?;
-        self.running = true;
+        self.health = Health::Running;
         Ok(())
     }
 
@@ -473,12 +623,17 @@ impl Stream {
     /// # Errors
     /// [`Error::Call`] from `AudioOutputUnitStop`.
     pub fn stop(&mut self) -> Result<(), Error> {
-        if !self.running {
+        if !self.is_running() {
             return Ok(());
         }
         // SAFETY: the unit is open and running.
         sys::check("AudioOutputUnitStop", unsafe { sys::stop_unit(self.unit) })?;
-        self.running = false;
+        self.health = Health::Stopped;
+        // The stop is synchronous off the I/O thread, so no callback is left
+        // to move these. A meter left where the last frame put it would read
+        // as a live signal for as long as the stream stayed stopped.
+        self.microphone.quiet();
+        self.speaker.quiet();
         Ok(())
     }
 
@@ -486,6 +641,111 @@ impl Stream {
     #[must_use]
     pub fn counters(&self) -> Counters {
         self.shared.meters.read()
+    }
+
+    /// The microphone's volume, mute and meter.
+    ///
+    /// A handle, not a borrow: the slider and the bar are on the thread that
+    /// draws the window, the frames are on the thread that carries the call,
+    /// and the stream is borrowed by [`Stream::split`] for the length of it.
+    /// It survives [`Stream::recover`] with its settings intact.
+    #[must_use]
+    pub fn capture_controls(&self) -> Controls {
+        Controls::new(&self.microphone)
+    }
+
+    /// The speaker's, as [`Stream::capture_controls`].
+    #[must_use]
+    pub fn playback_controls(&self) -> Controls {
+        Controls::new(&self.speaker)
+    }
+
+    /// Ask whether the device underneath is still there, and say so once when
+    /// it is not.
+    ///
+    /// What it proves differs by platform, and the difference is worth
+    /// knowing. On macOS the hardware layer is asked outright whether the
+    /// device object the stream opened is still alive, so an unplugged headset
+    /// is reported whether or not anything was flowing through it. On iOS it
+    /// always answers `None`: the route belongs to `AVAudioSession`, and
+    /// interruptions and route changes are delivered to the application rather
+    /// than to this crate, so anything said here would be a guess dressed as a
+    /// fact.
+    ///
+    /// A stream that has said [`StreamEvent::DeviceLost`] is stopped. What it
+    /// had already captured can still be read out; nothing further arrives,
+    /// and the speaker ring fills and takes no more. [`Stream::recover`] is
+    /// what puts a device back under it.
+    ///
+    /// The macOS answer costs one property read, so it belongs beside
+    /// [`DeviceMonitor::poll`] a few times a second rather than beside
+    /// [`Controls::level`] on every drawn frame. Once the loss has been
+    /// reported it costs a comparison: every answer after the first is `None`,
+    /// because a device does not go twice.
+    ///
+    /// [`DeviceMonitor::poll`]: crate::DeviceMonitor::poll
+    pub fn poll(&mut self) -> Option<StreamEvent> {
+        if !self.is_running() || self.device_present() {
+            return None;
+        }
+        self.declare_lost();
+        Some(StreamEvent::DeviceLost)
+    }
+
+    /// Stop, on a device that is not there to be stopped.
+    fn declare_lost(&mut self) {
+        // SAFETY: the unit is ours and still open. What it makes of being
+        // stopped on a device that has gone is not news: the device has gone.
+        let _ = unsafe { sys::stop_unit(self.unit) };
+        self.health = Health::Lost;
+        // a meter left where the last frame put it reads as a live signal
+        self.microphone.quiet();
+        self.speaker.quiet();
+    }
+
+    /// Open again, on whatever the stream's [`StreamConfig`] names now.
+    ///
+    /// This is the answer to [`StreamEvent::DeviceLost`], and the reason a
+    /// saved selection is worth storing as
+    /// [`DeviceChoice::Preferred`](crate::DeviceChoice::Preferred): that
+    /// choice resolves to the saved device when it is back and to the system's
+    /// route when it is not, so recovering from an unplugged headset lands on
+    /// the machine's own speaker rather than failing.
+    /// [`DeviceChoice::Device`](crate::DeviceChoice::Device) names one device
+    /// and nothing else, so recovering onto one that has gone fails, and
+    /// says so.
+    ///
+    /// The controls carry over: the gain and the mute a person set are still
+    /// set, and a [`Controls`] handed out earlier keeps working. Whatever was
+    /// in the rings does not — those samples were on their way to a device
+    /// that is not there. A stream that was running is started again.
+    ///
+    /// # Errors
+    /// [`Error::Draining`] when the old stream could not be shut down, in
+    /// which case nothing is reopened: a second voice-processing unit
+    /// alongside one that is wedged is how a process stops answering
+    /// altogether. Otherwise whatever [`Stream::open`] would have said about
+    /// the device it landed on.
+    pub fn recover(mut self) -> Result<Self, Error> {
+        let config = self.config.clone();
+        let microphone = Arc::clone(&self.microphone);
+        let speaker = Arc::clone(&self.speaker);
+        // `Lost` is only ever reached from `Running`, so a stream that was
+        // carrying a call when its device went is one to put back on the air.
+        let running = !matches!(self.health, Health::Stopped);
+        // What the framework says about taking down a unit whose device has
+        // gone is not a reason to stop: that is the situation being recovered
+        // from. Failing to drain is another matter entirely.
+        if let Err(error @ Error::Draining { .. }) = self.teardown() {
+            return Err(error);
+        }
+        drop(self);
+
+        let mut stream = Self::open_with(config, microphone, speaker)?;
+        if running {
+            stream.start()?;
+        }
+        Ok(stream)
     }
 
     /// Which device the stream actually landed on.
@@ -575,7 +835,7 @@ impl Stream {
             return Ok(());
         }
         self.closed = true;
-        self.running = false;
+        self.health = Health::Stopped;
 
         self.shared.gate.close();
         // SAFETY: the unit is ours and still open; this call is not on the
@@ -680,9 +940,10 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
 
     // Global scope, element zero, and before initialising: for this unit the
     // device is one property covering both directions, and it is only settable
-    // while the unit is uninitialised.
+    // while the unit is uninitialised. That last part is why a device cannot
+    // be changed under a running stream and why `Stream::recover` reopens.
     #[cfg(target_os = "macos")]
-    if let Some(device) = config.device {
+    if let Some(device) = crate::hal::choose(&config.device)? {
         let id = device.get();
         set(
             unit,
@@ -836,10 +1097,12 @@ fn set<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DEPTH_FRAMES, MAX_FRAMES_PER_SLICE, Shared, Stream, StreamConfig, play, record,
+        DEFAULT_DEPTH_FRAMES, Health, MAX_FRAMES_PER_SLICE, Shared, Stream, StreamConfig, play,
+        record,
     };
     use crate::abi;
     use crate::format::StreamFormat;
+    use crate::level::{Channel, Controls, Gain, Level, window_samples};
     use crate::status::Error;
     use core::ffi::c_void;
     use core::time::Duration;
@@ -847,15 +1110,26 @@ mod tests {
     use std::sync::Arc;
 
     #[cfg(target_os = "macos")]
-    use crate::device::DeviceId;
+    use crate::device::{DeviceChoice, DeviceId};
+
+    fn channels() -> (Arc<Channel>, Arc<Channel>) {
+        let window = window_samples(StreamFormat::narrowband().sample_rate_hz());
+        (
+            Arc::new(Channel::new(window)),
+            Arc::new(Channel::new(window)),
+        )
+    }
 
     fn shared() -> Arc<Shared> {
         // a null unit is fine as long as nothing calls into the framework,
         // which is true of everything but `record`
+        let (microphone, speaker) = channels();
         Arc::new(Shared::new(
             ptr::null_mut(),
             StreamFormat::narrowband(),
             DEFAULT_DEPTH_FRAMES,
+            microphone,
+            speaker,
         ))
     }
 
@@ -869,15 +1143,61 @@ mod tests {
         assert_eq!(config.format, StreamFormat::narrowband());
         assert_eq!(config.depth_frames, DEFAULT_DEPTH_FRAMES);
         #[cfg(target_os = "macos")]
-        assert_eq!(config.device, None);
+        assert_eq!(config.device, DeviceChoice::System);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_saved_selection_is_a_preference_rather_than_a_demand() {
+        let config = StreamConfig::preferring("AppleUSBAudioEngine:1", StreamFormat::narrowband());
+        assert_eq!(
+            config.device,
+            DeviceChoice::Preferred("AppleUSBAudioEngine:1".to_string())
+        );
+        assert_eq!(config.depth_frames, DEFAULT_DEPTH_FRAMES);
+        // and it resolves to nothing in particular when the machine has no
+        // such device, which is what makes it a preference
+        assert_eq!(crate::hal::choose(&config.device), Ok(None));
     }
 
     #[test]
     fn the_rings_are_never_smaller_than_one_slice() {
-        let shared = Shared::new(ptr::null_mut(), StreamFormat::narrowband(), 1);
+        let (microphone, speaker) = channels();
+        let shared = Shared::new(
+            ptr::null_mut(),
+            StreamFormat::narrowband(),
+            1,
+            microphone,
+            speaker,
+        );
         let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap();
         assert!(shared.capture.free() >= slice);
         assert!(shared.playback.free() >= slice);
+    }
+
+    #[test]
+    fn the_meters_are_told_what_a_window_is_worth_at_the_rate_that_opened() {
+        let (microphone, speaker) = channels();
+        let wideband = StreamFormat::with_frame_millis(48_000, 20).unwrap();
+        let shared = Shared::new(
+            ptr::null_mut(),
+            wideband,
+            DEFAULT_DEPTH_FRAMES,
+            Arc::clone(&microphone),
+            Arc::clone(&speaker),
+        );
+        // a tenth of a second at 48 kHz is 4800 samples, so the window has to
+        // have been moved on from the 800 the narrowband channels were built
+        // with — at 800 the peak below would have fallen off by now
+        let mut loud = [6_000i16; 4_000];
+        let mut quiet = [0i16; 700];
+        shared.microphone.apply(&mut loud, 4_000);
+        for _ in 0..3 {
+            shared.microphone.apply(&mut quiet, 700);
+        }
+        assert_eq!(shared.microphone.level().peak(), 6_000);
+        assert!(Arc::ptr_eq(&shared.speaker, &speaker));
+        assert!(Arc::ptr_eq(&shared.microphone, &microphone));
     }
 
     #[test]
@@ -964,6 +1284,159 @@ mod tests {
         assert_eq!(counters.panics, 0);
     }
 
+    /// Render four samples into a buffer the size of what the device would
+    /// hand over, and say what came out.
+    fn rendered(shared: &Arc<Shared>, samples: &mut [i16; 4]) -> u32 {
+        let mut list = abi::BufferList {
+            count: 1,
+            buffers: [abi::Buffer {
+                channels: 1,
+                byte_size: 8,
+                data: samples.as_mut_ptr().cast::<c_void>(),
+            }],
+        };
+        let mut flags = 0u32;
+        let status = unsafe {
+            play(
+                context(shared),
+                &raw mut flags,
+                ptr::null(),
+                abi::BUS_OUTPUT,
+                4,
+                &raw mut list,
+            )
+        };
+        assert_eq!(status, 0);
+        flags
+    }
+
+    #[test]
+    fn the_speaker_volume_is_applied_where_the_device_takes_the_samples() {
+        let shared = shared();
+        assert!(shared.playback.write_frame(&[10_000, -10_000, 4, -4]));
+        // Set after the frame was queued, which is the whole point: the ring
+        // holds sixteen frames, and a volume applied on the way in would be
+        // heard a third of a second after the slider moved.
+        shared.speaker.set_gain(Gain::from_ratio(0.5));
+
+        let mut samples = [-1i16; 4];
+        let flags = rendered(&shared, &mut samples);
+
+        assert_eq!(samples, [5_000, -5_000, 2, -2]);
+        assert_eq!(flags, 0);
+        // and the meter is what went to the device, not what was queued
+        assert_eq!(shared.speaker.level().peak(), 5_000);
+    }
+
+    #[test]
+    fn a_muted_speaker_plays_silence_and_still_takes_the_frames() {
+        let shared = shared();
+        assert!(shared.playback.write_frame(&[9_000i16; 4]));
+        shared.speaker.set_muted(true);
+
+        let mut samples = [-1i16; 4];
+        rendered(&shared, &mut samples);
+
+        assert_eq!(samples, [0, 0, 0, 0]);
+        // the ring was drained rather than held back: unmuting has to be the
+        // room, not four seconds of what was said while nobody was listening
+        assert_eq!(shared.playback.filled(), 0);
+        assert_eq!(shared.meters.read().played, 4);
+        assert_eq!(shared.speaker.level(), Level::SILENT);
+    }
+
+    #[test]
+    fn the_microphone_volume_is_applied_before_the_samples_reach_the_ring() {
+        let shared = shared();
+        shared.microphone.set_gain(Gain::from_ratio(0.5));
+        let mut heard = [1_000i16, -1_000, 2_000, -2_000];
+        shared.captured(&mut heard);
+
+        let mut frame = [0i16; 4];
+        assert!(shared.capture.read_frame(&mut frame));
+        assert_eq!(frame, [500, -500, 1_000, -1_000]);
+        assert_eq!(shared.meters.read().captured, 4);
+        assert_eq!(shared.microphone.level().peak(), 1_000);
+    }
+
+    #[test]
+    fn a_muted_microphone_sends_silence_and_keeps_the_frames_coming() {
+        let shared = shared();
+        shared.microphone.set_muted(true);
+        let mut heard = [12_000i16; 160];
+        shared.captured(&mut heard);
+
+        let mut frame = [1i16; 160];
+        assert!(
+            shared.capture.read_frame(&mut frame),
+            "a muted microphone still has to deliver frames"
+        );
+        assert_eq!(frame, [0i16; 160]);
+        assert_eq!(shared.meters.read().captured, 160);
+        assert_eq!(shared.microphone.level(), Level::SILENT);
+    }
+
+    #[test]
+    fn the_controls_and_the_callbacks_are_looking_at_the_same_channels() {
+        let stream = detached();
+        stream.capture_controls().set_gain(Gain::from_ratio(0.25));
+        stream.playback_controls().set_muted(true);
+
+        assert_eq!(stream.shared.microphone.gain(), Gain::from_ratio(0.25));
+        assert!(stream.shared.speaker.is_muted());
+        // and the two directions are not one channel wearing two hats
+        assert!(!stream.shared.microphone.is_muted());
+        assert_eq!(stream.shared.speaker.gain(), Gain::UNITY);
+
+        // a handle outlives the stream rather than dangling
+        let controls: Controls = stream.capture_controls();
+        drop(stream);
+        assert_eq!(controls.gain(), Gain::from_ratio(0.25));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_device_that_has_gone_is_reported_once_and_stops_the_stream() {
+        let mut stream = detached();
+        stream.health = Health::Running;
+        // no machine has handed this number out, so the hardware layer will
+        // not say it is alive
+        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        let mut loud = [20_000i16; 100];
+        stream.shared.microphone.apply(&mut loud, 100);
+        assert_ne!(stream.capture_controls().level(), Level::SILENT);
+
+        assert_eq!(stream.poll(), Some(crate::device::StreamEvent::DeviceLost));
+        assert!(!stream.is_running(), "a lost device is not a running one");
+        // a meter left where the last frame put it reads as a live signal
+        assert_eq!(stream.capture_controls().level(), Level::SILENT);
+        assert_eq!(stream.playback_controls().level(), Level::SILENT);
+        // and a device does not go twice
+        assert_eq!(stream.poll(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stream_that_was_running_when_the_device_went_is_one_to_put_back() {
+        let mut stream = detached();
+        stream.health = Health::Running;
+        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        assert_eq!(stream.poll(), Some(crate::device::StreamEvent::DeviceLost));
+        // what `recover` reads to decide whether to start what it opens: a
+        // device that went mid-call has to come back mid-call, and `Lost` is
+        // only ever reached from `Running`
+        assert_ne!(stream.health, Health::Stopped);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stream_nobody_started_has_had_nothing_taken_away() {
+        let mut stream = detached();
+        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        assert_eq!(stream.poll(), None);
+        assert_eq!(stream.health, Health::Stopped);
+    }
+
     #[test]
     fn a_render_asking_for_more_than_the_buffer_holds_stops_at_the_buffer() {
         let shared = shared();
@@ -994,6 +1467,39 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(samples, [1, 1, 1, 1]);
         assert_eq!(shared.meters.read().played, 4);
+    }
+
+    /// What a muted microphone does: go on delivering frames, of silence.
+    ///
+    /// Whatever was captured before the mute is still in the ring and is not
+    /// what is under test, so it is drained first.
+    fn muting_leaves_the_frames_coming(
+        capture: &mut super::Capture<'_>,
+        controls: &Controls,
+        incoming: &mut [i16],
+    ) {
+        use std::thread;
+
+        controls.set_muted(true);
+        thread::sleep(Duration::from_millis(100));
+        while capture.read(incoming) {}
+
+        thread::sleep(Duration::from_millis(200));
+        let mut silent = 0usize;
+        while capture.read(incoming) {
+            silent += 1;
+            assert_eq!(
+                incoming.iter().map(|sample| sample.abs()).max(),
+                Some(0),
+                "a muted microphone sent something"
+            );
+        }
+        println!("{silent} frames of silence while muted");
+        assert!(
+            silent > 0,
+            "muting stopped the frames instead of emptying them"
+        );
+        assert_eq!(controls.level(), Level::SILENT);
     }
 
     /// The only test here that touches hardware, and everything it checks is
@@ -1039,6 +1545,12 @@ mod tests {
         let mut queued = 0usize;
         let mut loudest = 0i16;
 
+        let microphone = stream.capture_controls();
+        let speaker = stream.playback_controls();
+        // half volume out, so that what the speaker is doing is audibly this
+        // crate's doing rather than the machine's
+        speaker.set_gain(Gain::from_db(-6.0));
+
         {
             let (mut capture, mut playback) = stream.split();
             let until = Instant::now() + Duration::from_millis(800);
@@ -1058,6 +1570,20 @@ mod tests {
                 }
                 thread::sleep(Duration::from_millis(5));
             }
+            println!(
+                "microphone {}, speaker {} at {}",
+                microphone.level(),
+                speaker.level(),
+                speaker.gain()
+            );
+            assert!(
+                speaker.level().peak() <= 1_024 + 1,
+                "the sawtooth is half of ±2048 after the gain, and it came \
+                 out at {}",
+                speaker.level().peak()
+            );
+
+            muting_leaves_the_frames_coming(&mut capture, &microphone, &mut incoming);
         }
 
         stream.stop().expect("stop the device");
@@ -1069,6 +1595,22 @@ mod tests {
         assert!(counters.played > 0, "nothing was taken for the speaker");
         assert_eq!(counters.panics, 0);
 
+        // Reopening is what a lost device is answered with, so it is worth
+        // doing here where a device is real: the unit goes back, another one
+        // comes up on the same choice, and the controls the caller is holding
+        // still work and still say what they were set to.
+        let mut stream = stream.recover().expect("reopen on the system route");
+        assert_eq!(stream.format(), format);
+        assert!(!stream.is_running(), "a stopped stream comes back stopped");
+        assert!(
+            stream.capture_controls().is_muted(),
+            "the mute did not survive the reopen"
+        );
+        assert_eq!(microphone.gain(), stream.capture_controls().gain());
+        assert_eq!(speaker.gain(), Gain::from_db(-6.0));
+        stream.start().expect("start the reopened device");
+        stream.stop().expect("stop the reopened device");
+
         stream.close().expect("close the device");
     }
 
@@ -1079,11 +1621,16 @@ mod tests {
     /// the drain testable without a device — the part of teardown that is this
     /// crate's, rather than the part that is CoreAudio's.
     fn detached() -> Stream {
+        let shared = shared();
         Stream {
             unit: ptr::null_mut(),
-            shared: shared(),
             format: StreamFormat::narrowband(),
-            running: false,
+            config: StreamConfig::default(),
+            microphone: Arc::clone(&shared.microphone),
+            speaker: Arc::clone(&shared.speaker),
+            shared,
+            opened_on: None,
+            health: Health::Stopped,
             closed: false,
             leak: false,
         }
@@ -1141,7 +1688,7 @@ mod tests {
         // teardown sequence; what this checks is that taking it neither hangs
         // nor falls over.
         let config = StreamConfig {
-            device: Some(DeviceId::new(u32::MAX)),
+            device: DeviceChoice::Device(DeviceId::new(u32::MAX)),
             ..StreamConfig::default()
         };
         assert!(Stream::open(config).is_err(), "a device that is not there");

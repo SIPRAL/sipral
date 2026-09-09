@@ -46,10 +46,11 @@ use crate::abi::{
 use crate::com::{Apartment, Com, Event, Priority, TaskMemory};
 use crate::convert::{fold, silence, spread};
 use crate::counters::Counters;
-use crate::device::{Device, DeviceId, Direction};
+use crate::device::{Device, DeviceChoice, DeviceId, Direction, StreamEvent};
 use crate::endpoint;
 use crate::format::{DeviceFormat, StreamFormat};
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
+use crate::level::{Channel, Controls, window_samples};
 use crate::mixformat;
 use crate::ring::Ring;
 use crate::status::{AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_UNSUPPORTED_FORMAT, Error, HResult};
@@ -90,9 +91,10 @@ pub struct StreamConfig {
     /// Rate and frame length wanted. What is actually delivered is
     /// [`CaptureStream::format`], which carries the endpoint's rate.
     pub format: StreamFormat,
-    /// Which endpoint, or `None` for whatever Windows is routing calls to,
-    /// which is what a softphone usually wants.
-    pub device: Option<DeviceId>,
+    /// Which endpoint, and what to do when it is not there. The default is
+    /// whatever Windows is routing calls to, which is what a softphone
+    /// usually wants.
+    pub device: DeviceChoice,
     /// Frames of buffering between the endpoint and the caller.
     ///
     /// This sizes the ring in this crate and nothing else. The engine's own
@@ -108,18 +110,33 @@ impl StreamConfig {
     pub const fn new(format: StreamFormat) -> Self {
         Self {
             format,
-            device: None,
+            device: DeviceChoice::System,
             depth_frames: DEFAULT_DEPTH_FRAMES,
         }
     }
 
-    /// A named endpoint, at the given format.
+    /// A named endpoint, at the given format, and nothing else if it is not
+    /// there.
     #[must_use]
     pub fn on(device: DeviceId, format: StreamFormat) -> Self {
         Self {
-            format,
-            device: Some(device),
-            depth_frames: DEFAULT_DEPTH_FRAMES,
+            device: DeviceChoice::Device(device),
+            ..Self::new(format)
+        }
+    }
+
+    /// A saved selection, at the given format: that endpoint when the machine
+    /// has it, and the system's route for calls when it does not.
+    ///
+    /// This is the one to build from a [`DeviceId`] read out of a
+    /// configuration file. A docking station or a headset that reboots itself
+    /// takes its endpoint away and brings it back, and in between a call still
+    /// has to have somewhere to go.
+    #[must_use]
+    pub fn preferring(device: DeviceId, format: StreamFormat) -> Self {
+        Self {
+            device: DeviceChoice::Preferred(device),
+            ..Self::new(format)
         }
     }
 }
@@ -178,6 +195,10 @@ impl Meters {
 /// failing to drain costs a detached thread rather than a hung caller.
 struct Shared {
     gate: Gate,
+    /// The gain, the mute and the meter. Behind an `Arc` of its own rather
+    /// than inline, so that a [`Controls`] handed to the thread drawing the
+    /// window survives the stream being reopened on another endpoint.
+    channel: Arc<Channel>,
     /// Made once the endpoint's rate is known, which is after the client is
     /// open. A caller cannot reach it before then: `open` does not return until
     /// the audio thread has put it here.
@@ -200,12 +221,16 @@ struct Shared {
     ended: AtomicBool,
     /// Whether the multimedia scheduler took the thread on.
     pro_audio: AtomicBool,
+    /// Set by the audio thread when Windows says the endpoint is not coming
+    /// back. Distinguishes a stream that stopped from one that was taken away.
+    lost: AtomicBool,
 }
 
 impl Shared {
-    fn new() -> Result<Self, Error> {
+    fn new(channel: Arc<Channel>) -> Result<Self, Error> {
         Ok(Self {
             gate: Gate::new(),
+            channel,
             ring: OnceLock::new(),
             meters: Meters::default(),
             ready: Event::new()?,
@@ -217,6 +242,7 @@ impl Shared {
             running: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             pro_audio: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
         })
     }
 
@@ -265,22 +291,41 @@ struct Session {
     delivered: StreamFormat,
     latency: Duration,
     buffer_frames: u32,
+    /// Kept so that a reopen can ask for the same thing again and have the
+    /// choice resolved against the machine as it is then.
+    config: StreamConfig,
+    /// The controls, held here as well as in `shared` so that a reopen carries
+    /// the volume and the mute across rather than resetting them under a
+    /// caller who is mid-call.
+    channel: Arc<Channel>,
+    /// Whether the owner has asked for it to be running. Not the same as
+    /// `shared.running`, which goes false on its own when the endpoint is
+    /// taken away — and a stream that was carrying a call when that happened
+    /// is one that should be carrying a call after it is recovered.
+    started: bool,
+    /// Whether the loss has been handed over, so that it is reported once
+    /// rather than on every poll.
+    loss_reported: bool,
     closed: bool,
 }
 
 impl Session {
     /// Open an endpoint and leave it stopped.
-    fn open(config: &StreamConfig, direction: Direction) -> Result<Self, Error> {
-        let shared = Arc::new(Shared::new()?);
+    fn open(
+        config: &StreamConfig,
+        direction: Direction,
+        channel: Arc<Channel>,
+    ) -> Result<Self, Error> {
+        let shared = Arc::new(Shared::new(Arc::clone(&channel))?);
         let (sender, receiver) = mpsc::channel::<Result<Opened, Error>>();
         let worker = {
             let shared = Arc::clone(&shared);
             let wanted = config.format;
-            let device = config.device.clone();
+            let choice = config.device.clone();
             let depth = config.depth_frames.max(2);
             thread::Builder::new()
                 .name("sipral-wasapi".to_string())
-                .spawn(move || run(&shared, device.as_ref(), direction, wanted, depth, &sender))
+                .spawn(move || run(&shared, &choice, direction, wanted, depth, &sender))
                 .map_err(|_| Error::NoThread)?
         };
 
@@ -318,6 +363,10 @@ impl Session {
             delivered: opened.delivered,
             latency: opened.latency,
             buffer_frames: opened.buffer_frames,
+            config: config.clone(),
+            channel,
+            started: false,
+            loss_reported: false,
             closed: false,
         })
     }
@@ -343,14 +392,46 @@ impl Session {
         if self.shared.running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.ask(COMMAND_START, "IAudioClient::Start")
+        self.ask(COMMAND_START, "IAudioClient::Start")?;
+        self.started = true;
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<(), Error> {
+        self.started = false;
         if !self.shared.running.load(Ordering::SeqCst) {
             return Ok(());
         }
         self.ask(COMMAND_STOP, "IAudioClient::Stop")
+    }
+
+    /// Whether Windows has taken the endpoint away, said once.
+    fn poll(&mut self) -> Option<StreamEvent> {
+        if self.loss_reported || !self.shared.lost.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.loss_reported = true;
+        Some(StreamEvent::DeviceLost)
+    }
+
+    /// Shut down and open again on whatever the choice names now.
+    fn recovered(mut self, direction: Direction) -> Result<Self, Error> {
+        let config = self.config.clone();
+        let channel = Arc::clone(&self.channel);
+        let started = self.started;
+        // What Windows says about taking down a client whose endpoint has gone
+        // is not a reason to stop: that is the situation being recovered from.
+        // A thread that would not finish is another matter entirely.
+        if let Err(error @ Error::Draining { .. }) = self.teardown() {
+            return Err(error);
+        }
+        drop(self);
+
+        let mut session = Self::open(&config, direction, channel)?;
+        if started {
+            session.start()?;
+        }
+        Ok(session)
     }
 
     fn ring(&self) -> Option<&Ring> {
@@ -492,11 +573,40 @@ macro_rules! session_methods {
         /// Whether the endpoint is running.
         ///
         /// This goes false on its own when Windows invalidates the endpoint —
-        /// unplugged, or its format changed from the control panel. A
-        /// [`DeviceMonitor`](crate::DeviceMonitor) is how to find out which.
+        /// unplugged, or its format changed from the control panel;
+        /// [`Self::poll`] is what says that is why.
         #[must_use]
         pub fn is_running(&self) -> bool {
             self.session.shared.running.load(Ordering::SeqCst)
+        }
+
+        /// The volume, the mute and the meter for this direction.
+        ///
+        /// A handle, not a borrow: the slider and the bar are on the thread
+        /// that draws the window and the frames are on the thread that carries
+        /// the call. It survives a recover with its settings intact.
+        #[must_use]
+        pub fn controls(&self) -> Controls {
+            Controls::new(&self.session.channel)
+        }
+
+        /// Ask whether Windows has taken the endpoint away, and say so once.
+        ///
+        /// One atomic load and no calls into Windows, so it can be polled
+        /// beside the meter. Every answer after the first is `None`, because
+        /// an endpoint does not go twice.
+        ///
+        /// What it reports is exact rather than inferred: every WASAPI call
+        /// the audio thread makes answers `AUDCLNT_E_DEVICE_INVALIDATED` once
+        /// the endpoint has gone, and nothing else in this crate treats that
+        /// status as survivable.
+        ///
+        /// A stream that has said [`StreamEvent::DeviceLost`] has stopped.
+        /// What it had already captured can still be read out; nothing further
+        /// arrives, and the speaker ring fills and takes no more.
+        /// [`Self::recover`] is what puts an endpoint back under it.
+        pub fn poll(&mut self) -> Option<StreamEvent> {
+            self.session.poll()
         }
 
         /// What the endpoint has been doing since it opened.
@@ -549,8 +659,38 @@ impl CaptureStream {
     /// [`Error::SampleFormat`] when the endpoint runs something this crate will
     /// not read.
     pub fn open(config: &StreamConfig) -> Result<Self, Error> {
+        let window = window_samples(config.format.sample_rate_hz());
         Ok(Self {
-            session: Session::open(config, Direction::Input)?,
+            session: Session::open(config, Direction::Input, Arc::new(Channel::new(window)))?,
+        })
+    }
+
+    /// Open again, on whatever this stream's [`StreamConfig`] names now.
+    ///
+    /// This is the answer to [`StreamEvent::DeviceLost`], and the reason a
+    /// saved selection is worth storing as
+    /// [`StreamConfig::preferring`]: that choice resolves to the saved
+    /// endpoint when it is back and to the system's route when it is not, so
+    /// recovering from an unplugged headset lands on the machine's own
+    /// microphone rather than failing. [`StreamConfig::on`] names one endpoint
+    /// and nothing else, so recovering onto one that has gone fails, and says
+    /// so.
+    ///
+    /// The controls carry over: the gain and the mute a person set are still
+    /// set, and a [`Controls`] handed out earlier keeps working. Whatever was
+    /// in the ring does not — those samples came from an endpoint that is not
+    /// there. A stream that was started is started again.
+    ///
+    /// The format can come back different, because the new endpoint chooses
+    /// its own rate: [`Self::format`] is worth reading again afterwards.
+    ///
+    /// # Errors
+    /// [`Error::Draining`] when the old audio thread could not be shown to
+    /// have finished, in which case nothing is reopened. Otherwise whatever
+    /// [`Self::open`] would have said about the endpoint it landed on.
+    pub fn recover(self) -> Result<Self, Error> {
+        Ok(Self {
+            session: self.session.recovered(Direction::Input)?,
         })
     }
 
@@ -578,8 +718,20 @@ impl PlaybackStream {
     /// # Errors
     /// As [`CaptureStream::open`].
     pub fn open(config: &StreamConfig) -> Result<Self, Error> {
+        let window = window_samples(config.format.sample_rate_hz());
         Ok(Self {
-            session: Session::open(config, Direction::Output)?,
+            session: Session::open(config, Direction::Output, Arc::new(Channel::new(window)))?,
+        })
+    }
+
+    /// Open again, on whatever this stream's [`StreamConfig`] names now. As
+    /// [`CaptureStream::recover`].
+    ///
+    /// # Errors
+    /// As [`CaptureStream::recover`].
+    pub fn recover(self) -> Result<Self, Error> {
+        Ok(Self {
+            session: self.session.recovered(Direction::Output)?,
         })
     }
 
@@ -621,7 +773,7 @@ struct Engine {
 /// caller does afterwards can be too early.
 fn run(
     shared: &Shared,
-    device: Option<&DeviceId>,
+    choice: &DeviceChoice,
     direction: Direction,
     wanted: StreamFormat,
     depth: usize,
@@ -636,7 +788,7 @@ fn run(
         }
     };
 
-    match build(shared, device, direction, wanted, depth) {
+    match build(shared, choice, direction, wanted, depth) {
         Ok((engine, opened)) => {
             let _ = sender.send(Ok(opened));
             serve(shared, engine, direction);
@@ -655,13 +807,13 @@ fn run(
 /// Open the endpoint, settle on a format, and get as far as being able to run.
 fn build(
     shared: &Shared,
-    device: Option<&DeviceId>,
+    choice: &DeviceChoice,
     direction: Direction,
     wanted: StreamFormat,
     depth: usize,
 ) -> Result<(Engine, Opened), Error> {
     let enumerator = endpoint::enumerator()?;
-    let opened = endpoint::open(&enumerator, device, direction)?;
+    let opened = endpoint::open_choice(&enumerator, choice, direction)?;
     let described = endpoint::describe(&enumerator, &opened, direction);
 
     // bound to a local so that what is pointed at outlives the call
@@ -732,6 +884,11 @@ fn build(
             bits: 16,
             floating: false,
         })?;
+    // the endpoint chose the rate, so the meter's window is only now worth
+    // anything: at 48 kHz a tenth of a second is six times what it is at 8
+    shared
+        .channel
+        .set_window(window_samples(delivered.sample_rate_hz()));
     let period = usize::try_from(buffer_frames).unwrap_or(0).max(1);
     // never smaller than two of the engine's buffers: a ring that cannot hold
     // what one period delivers would lose samples every single period
@@ -939,6 +1096,8 @@ fn serve(shared: &Shared, mut engine: Engine, direction: Direction) {
         0
     };
     shared.running.store(false, Ordering::SeqCst);
+    // a meter left where the last pass put it reads as a live signal
+    shared.channel.quiet();
     shared.parting.store(parting, Ordering::SeqCst);
     drop(priority);
 }
@@ -961,6 +1120,7 @@ fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
             // is exactly where this is.
             // SAFETY: a live, stopped client.
             let cleared = unsafe { (engine.client.vtable().reset)(engine.client.as_ptr()) };
+            shared.channel.quiet();
             let first = if HResult::new(stopped).is_ok() {
                 cleared
             } else {
@@ -1029,6 +1189,19 @@ fn survivable(status: i32) -> bool {
     status != AUDCLNT_E_DEVICE_INVALIDATED
 }
 
+/// The same, and it writes down what it found.
+///
+/// The flag is the difference between a stream that stopped and one that was
+/// taken away, and it is the only place that difference is known: by the time
+/// the owner looks, the loop has ended either way.
+fn carry_on(shared: &Shared, status: i32) -> bool {
+    let survived = survivable(status);
+    if !survived {
+        shared.lost.store(true, Ordering::SeqCst);
+    }
+    survived
+}
+
 /// Take what the endpoint captured and put it in the ring.
 fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
     let Some(client) = engine.capture.as_ref() else {
@@ -1041,7 +1214,7 @@ fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
             unsafe { (client.vtable().get_next_packet_size)(client.as_ptr(), &raw mut packet) };
         if !HResult::new(status).is_ok() {
             Meters::add(&shared.meters.buffer_failures, 1);
-            return survivable(status);
+            return carry_on(shared, status);
         }
         if packet == 0 {
             return true;
@@ -1065,7 +1238,7 @@ fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
         };
         if !HResult::new(status).is_ok() {
             Meters::add(&shared.meters.buffer_failures, 1);
-            return survivable(status);
+            return carry_on(shared, status);
         }
 
         if flags & BUFFERFLAGS_DATA_DISCONTINUITY != 0 {
@@ -1087,6 +1260,11 @@ fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
                 // of saying nothing was recorded
                 mono.fill(0);
             }
+            // A muted microphone still fills the ring, with silence. Stopping
+            // the frames instead would mean unmuting replayed however much
+            // audio had piled up behind the mute, and would starve whatever
+            // above is pacing itself on frames arriving.
+            shared.channel.apply(mono, wanted);
             if let Some(ring) = shared.ring.get() {
                 let stored = ring.write(mono);
                 Meters::add(&shared.meters.captured, stored);
@@ -1100,7 +1278,7 @@ fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
         let status = unsafe { (client.vtable().release_buffer)(client.as_ptr(), frames) };
         if !HResult::new(status).is_ok() {
             Meters::add(&shared.meters.buffer_failures, 1);
-            return survivable(status);
+            return carry_on(shared, status);
         }
     }
 }
@@ -1117,7 +1295,7 @@ fn render_pass(shared: &Shared, engine: &mut Engine) -> bool {
     };
     if !HResult::new(status).is_ok() {
         Meters::add(&shared.meters.buffer_failures, 1);
-        return survivable(status);
+        return carry_on(shared, status);
     }
     let room = engine.buffer_frames.saturating_sub(padding);
     if room == 0 {
@@ -1137,7 +1315,7 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
     let status = unsafe { (client.vtable().get_buffer)(client.as_ptr(), room, &raw mut data) };
     if !HResult::new(status).is_ok() {
         Meters::add(&shared.meters.buffer_failures, 1);
-        return survivable(status);
+        return carry_on(shared, status);
     }
 
     let wanted = usize::try_from(room).unwrap_or(0).min(engine.scratch.len());
@@ -1145,6 +1323,13 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
         (Some(ring), Some(mono)) => ring.read(mono),
         _ => 0,
     };
+    // The volume goes on here rather than where the caller wrote the frame,
+    // so that a mute is silent on this period instead of on the one after the
+    // ring has drained. `wanted` rather than `taken`, because the silence a
+    // starved pass leaves behind is time the meter's window has to count.
+    if let Some(played) = engine.scratch.get_mut(..taken) {
+        shared.channel.apply(played, wanted);
+    }
     Meters::add(&shared.meters.played, taken);
     Meters::add(&shared.meters.playback_starved, wanted - taken);
 
@@ -1172,7 +1357,7 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
     let status = unsafe { (client.vtable().release_buffer)(client.as_ptr(), room, released) };
     if !HResult::new(status).is_ok() {
         Meters::add(&shared.meters.buffer_failures, 1);
-        return survivable(status);
+        return carry_on(shared, status);
     }
     true
 }
@@ -1180,13 +1365,18 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptureStream, DEFAULT_DEPTH_FRAMES, PlaybackStream, StreamConfig, read_wave, survivable,
+        CaptureStream, DEFAULT_DEPTH_FRAMES, PlaybackStream, Session, Shared, StreamConfig,
+        carry_on, read_wave, survivable,
     };
     use crate::abi::{WAVE_FORMAT_PCM, WaveFormat, WaveFormatExtensible};
-    use crate::device::{DeviceId, Direction};
+    use crate::device::Device;
+    use crate::device::{DeviceChoice, DeviceId, Direction, StreamEvent};
     use crate::endpoint::devices;
     use crate::format::{SampleFormat, StreamFormat};
+    use crate::level::{Channel, Controls, Gain, Level, window_samples};
     use crate::status::AUDCLNT_E_DEVICE_INVALIDATED;
+    use core::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1194,14 +1384,121 @@ mod tests {
     fn a_configuration_defaults_to_the_system_route() {
         let config = StreamConfig::default();
         assert_eq!(config.format, StreamFormat::narrowband());
-        assert_eq!(config.device, None);
+        assert_eq!(config.device, DeviceChoice::System);
         assert_eq!(config.depth_frames, DEFAULT_DEPTH_FRAMES);
 
-        let named = StreamConfig::on(DeviceId::new("{0.0.1.00000000}.{x}"), config.format);
-        assert_eq!(
-            named.device.as_ref().map(DeviceId::as_str),
-            Some("{0.0.1.00000000}.{x}")
+        let id = DeviceId::new("{0.0.1.00000000}.{x}");
+        let named = StreamConfig::on(id.clone(), config.format);
+        assert_eq!(named.device, DeviceChoice::Device(id.clone()));
+        // the same endpoint, and the other answer to it not being there
+        let saved = StreamConfig::preferring(id.clone(), config.format);
+        assert_eq!(saved.device, DeviceChoice::Preferred(id));
+        assert_eq!(saved.depth_frames, DEFAULT_DEPTH_FRAMES);
+    }
+
+    fn channel() -> Arc<Channel> {
+        Arc::new(Channel::new(window_samples(8_000)))
+    }
+
+    /// A session with no audio thread behind it.
+    ///
+    /// `ended` is set because that is what a thread says on its way out, and
+    /// without it the destructor would sit out the whole teardown deadline
+    /// waiting for a thread that was never started. What is left is the owner
+    /// side, which is the half that can be shown to be right without an
+    /// endpoint.
+    fn detached(channel: &Arc<Channel>) -> Session {
+        let shared = Arc::new(Shared::new(Arc::clone(channel)).expect("three event handles"));
+        shared.ended.store(true, Ordering::SeqCst);
+        Session {
+            shared,
+            worker: None,
+            device: Device {
+                id: DeviceId::new("{0.0.1.00000000}.{gone}"),
+                name: "A headset in a bag".to_string(),
+                direction: Direction::Input,
+                is_default: false,
+            },
+            format: crate::format::DeviceFormat {
+                sample_rate_hz: 48_000,
+                channels: 2,
+                sample: SampleFormat::F32,
+            },
+            delivered: StreamFormat::narrowband(),
+            latency: Duration::ZERO,
+            buffer_frames: 480,
+            config: StreamConfig::default(),
+            channel: Arc::clone(channel),
+            started: false,
+            loss_reported: false,
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn an_invalidated_endpoint_is_written_down_rather_than_only_ending_the_loop() {
+        let channel = channel();
+        let shared = Shared::new(Arc::clone(&channel)).expect("three event handles");
+
+        assert!(carry_on(&shared, 0));
+        // a buffer that could not be got this period may be there the next
+        assert!(carry_on(&shared, 0x8889_0018_u32.cast_signed()));
+        assert!(
+            !shared.lost.load(Ordering::SeqCst),
+            "nothing has been taken away yet"
         );
+
+        assert!(!carry_on(&shared, AUDCLNT_E_DEVICE_INVALIDATED));
+        assert!(shared.lost.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_lost_endpoint_is_reported_once_and_leaves_the_call_to_be_put_back() {
+        let channel = channel();
+        let mut session = detached(&channel);
+        session.started = true;
+        assert_eq!(session.poll(), None, "nothing has happened yet");
+
+        // what the audio thread does on its way out of an invalidated
+        // endpoint: the loop ends, the client is not running, and this is the
+        // only record of why
+        session.shared.lost.store(true, Ordering::SeqCst);
+        session.shared.running.store(false, Ordering::SeqCst);
+
+        assert_eq!(session.poll(), Some(StreamEvent::DeviceLost));
+        // and an endpoint does not go twice
+        assert_eq!(session.poll(), None);
+        assert!(
+            session.started,
+            "a stream that was carrying a call when its endpoint went is one \
+             to put back on the air, whatever the client says about running"
+        );
+    }
+
+    #[test]
+    fn a_stream_the_owner_stopped_is_not_restarted_by_a_recover() {
+        let channel = channel();
+        let mut session = detached(&channel);
+        session.started = true;
+        assert_eq!(session.stop(), Ok(()));
+        assert!(!session.started);
+    }
+
+    #[test]
+    fn the_controls_and_the_audio_thread_are_looking_at_the_same_channel() {
+        let channel = channel();
+        let session = detached(&channel);
+        let controls = Controls::new(&session.channel);
+
+        controls.set_gain(Gain::from_ratio(0.25));
+        controls.set_muted(true);
+        assert_eq!(session.shared.channel.gain(), Gain::from_ratio(0.25));
+        assert!(session.shared.channel.is_muted());
+
+        // and a handle outlives the stream rather than dangling
+        drop(session);
+        assert_eq!(controls.level(), Level::SILENT);
+        assert_eq!(controls.gain(), Gain::from_ratio(0.25));
     }
 
     #[test]
@@ -1363,6 +1660,76 @@ mod tests {
         }
     }
 
+    /// What a muted microphone does: go on delivering frames, of silence.
+    ///
+    /// Whatever was captured before the mute is still in the ring and is not
+    /// what is under test, so it is drained first.
+    fn muting_leaves_the_frames_coming(
+        microphone: &mut CaptureStream,
+        controls: &Controls,
+        incoming: &mut [i16],
+    ) {
+        controls.set_muted(true);
+        thread::sleep(Duration::from_millis(100));
+        while microphone.read(incoming) {}
+
+        thread::sleep(Duration::from_millis(200));
+        let mut silent = 0usize;
+        while microphone.read(incoming) {
+            silent += 1;
+            assert_eq!(
+                incoming.iter().map(|sample| sample.abs()).max(),
+                Some(0),
+                "a muted microphone sent something"
+            );
+        }
+        println!(
+            "{silent} frames of silence while muted, meter {}",
+            controls.level()
+        );
+        assert!(
+            silent > 0,
+            "muting stopped the frames instead of emptying them"
+        );
+        assert_eq!(controls.level(), Level::SILENT);
+    }
+
+    /// The loudest thing that came back out of the cable, having established
+    /// that what came back is the tone that went in rather than noise.
+    fn the_tone_came_back(captured: &[i16], in_rate: u32, sent_peak: i16) -> i16 {
+        /// A kilohertz, the tone the caller renders.
+        const TONE_HZ: f32 = 1_000.0;
+        /// A frequency the tone has nothing at, to compare it against.
+        const OFF_TONE_HZ: f32 = 1_700.0;
+
+        // skip the first quarter second: the cable is silent until the render
+        // side has been running, and that silence is not the thing under test
+        let skip = usize::try_from(in_rate / 4).unwrap_or(0);
+        assert!(
+            captured.len() > skip * 2,
+            "not enough came back out of the cable to look at"
+        );
+        let window = &captured[skip..(skip + 10_000).min(captured.len())];
+        let peak = window
+            .iter()
+            .map(|sample| sample.saturating_abs())
+            .max()
+            .unwrap_or(0);
+        let tone_bin = bin(window, in_rate, TONE_HZ);
+        let off_bin = bin(window, in_rate, OFF_TONE_HZ);
+
+        println!(
+            "sent peak {sent_peak}, heard peak {peak}, {TONE_HZ} Hz {tone_bin:.1} against \
+             {OFF_TONE_HZ} Hz {off_bin:.1}"
+        );
+        assert!(peak > 1_000, "the cable came back silent (peak {peak})");
+        assert!(
+            tone_bin > off_bin * 10.0,
+            "what came back is not the tone that went in ({tone_bin:.1} against {off_bin:.1})"
+        );
+        peak
+    }
+
     /// The reason the virtual cable is installed: what goes into it comes back
     /// out of it, so a tone rendered on one endpoint and captured on the other
     /// proves the whole path — negotiation, the event, the conversion, both
@@ -1374,9 +1741,6 @@ mod tests {
         /// cycles of at any rate — so one frame repeats without a step in the
         /// waveform, and nothing has to remember a phase.
         const CYCLES_PER_FRAME: f32 = 20.0;
-        const TONE_HZ: f32 = 1_000.0;
-        /// A frequency the tone has nothing at, to compare it against.
-        const OFF_TONE_HZ: f32 = 1_700.0;
         /// Loud enough to be unmistakable, quiet enough not to clip anywhere.
         const LEVEL: f32 = 0.37;
 
@@ -1437,6 +1801,13 @@ mod tests {
         }
         let sent_peak = tone.iter().map(|sample| sample.saturating_abs()).max();
 
+        // Half volume out. What comes back through the cable is then a
+        // measurement of the gain rather than of the tone: the cable does not
+        // change what it carries, so anything but half is this crate.
+        let out_volume = speaker.controls();
+        let in_volume = microphone.controls();
+        out_volume.set_gain(Gain::from_db(-6.02));
+
         // fill the ring before the endpoint starts, so the first period is the
         // tone rather than the silence the prefill would otherwise write
         while speaker.write(&tone) {}
@@ -1454,6 +1825,12 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
 
+        // read before the stop, which puts both meters back to silence
+        let (heard, sent) = (in_volume.level(), out_volume.level());
+        println!("meters: render {sent}, capture {heard}");
+
+        muting_leaves_the_frames_coming(&mut microphone, &in_volume, &mut incoming);
+
         speaker.stop().expect("stop the render endpoint");
         microphone.stop().expect("stop the capture endpoint");
 
@@ -1461,31 +1838,25 @@ mod tests {
         println!("render  {}", speaker.counters());
         println!("capture {}", microphone.counters());
 
-        // skip the first quarter second: the cable is silent until the render
-        // side has been running, and that silence is not the thing under test
-        let skip = usize::try_from(in_rate / 4).unwrap_or(0);
-        assert!(
-            captured.len() > skip * 2,
-            "not enough came back out of the cable to look at"
-        );
-        let window = &captured[skip..(skip + 10_000).min(captured.len())];
-        let peak = window
-            .iter()
-            .map(|sample| sample.saturating_abs())
-            .max()
-            .unwrap_or(0);
-        let tone_bin = bin(window, in_rate, TONE_HZ);
-        let off_bin = bin(window, in_rate, OFF_TONE_HZ);
+        let peak = the_tone_came_back(&captured, in_rate, sent_peak.unwrap_or(0));
 
-        println!(
-            "sent peak {sent_peak:?}, heard peak {peak}, {TONE_HZ} Hz {tone_bin:.1} against \
-             {OFF_TONE_HZ} Hz {off_bin:.1}"
-        );
-
-        assert!(peak > 1_000, "the cable came back silent (peak {peak})");
+        // Half of what went in, within the tenth that the meter's window and
+        // the cable's own conversion are worth. This is the whole gain claim:
+        // the cable does not change what it carries, so anything but half
+        // would be this crate.
+        let half = i32::from(sent_peak.unwrap_or(0)) / 2;
+        let margin = half / 10;
         assert!(
-            tone_bin > off_bin * 10.0,
-            "what came back is not the tone that went in ({tone_bin:.1} against {off_bin:.1})"
+            (i32::from(peak) - half).abs() < margin,
+            "the gain did not go on the frames: {peak} came back where {half} was expected"
+        );
+        assert!(
+            (i32::from(heard.peak()) - half).abs() < margin,
+            "the capture meter says {heard} where {half} was expected"
+        );
+        assert!(
+            (i32::from(sent.peak()) - half).abs() < margin,
+            "the render meter says {sent} where {half} was expected"
         );
         assert_eq!(speaker.counters().panics, 0);
         assert_eq!(microphone.counters().panics, 0);

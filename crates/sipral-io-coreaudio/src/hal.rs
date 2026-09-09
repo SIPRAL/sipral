@@ -17,12 +17,12 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::abi::hardware::{
-    ENCODING_UTF8, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT, PROPERTY_DEVICES,
-    PROPERTY_NAME, PROPERTY_STREAM_CONFIGURATION, PROPERTY_UID, PropertyAddress, SCOPE_GLOBAL,
-    SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
+    ENCODING_UTF8, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT, PROPERTY_DEVICE_IS_ALIVE,
+    PROPERTY_DEVICES, PROPERTY_NAME, PROPERTY_STREAM_CONFIGURATION, PROPERTY_UID, PropertyAddress,
+    SCOPE_GLOBAL, SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
 };
 use crate::abi::{BAD_PROPERTY_SIZE, Buffer, BufferList};
-use crate::device::{Device, DeviceEvent, DeviceId, Direction, Pending};
+use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending};
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
 use crate::status::{Error, OsStatus};
 use crate::sys;
@@ -91,6 +91,48 @@ pub fn default_device(direction: Direction) -> Result<Option<DeviceId>, Error> {
     )?;
     // kAudioObjectUnknown, which is what the layer says for "nothing"
     Ok((id != 0).then(|| DeviceId::new(id)))
+}
+
+/// The device carrying a saved identity, if the machine has it right now.
+///
+/// The identity to save is [`Device::uid`], not [`Device::id`]: the number is
+/// handed back out to whatever is plugged in next, and a preference stored as
+/// one would eventually name somebody else's headset.
+///
+/// # Errors
+/// [`Error::Call`] when the hardware layer refuses to enumerate.
+pub fn device_with_uid(uid: &str) -> Result<Option<Device>, Error> {
+    Ok(devices()?
+        .into_iter()
+        .find(|device| device.uid.as_deref() == Some(uid)))
+}
+
+/// Whether the hardware layer still has this device.
+///
+/// A device object outlives the hardware behind it for a moment, which is what
+/// makes the question answerable at all: an object that has gone entirely
+/// refuses to answer, and that is the same answer.
+#[must_use]
+pub fn is_alive(device: DeviceId) -> bool {
+    let address = PropertyAddress::new(PROPERTY_DEVICE_IS_ALIVE, SCOPE_GLOBAL);
+    property_value::<u32>(
+        device.get(),
+        &address,
+        "AudioObjectGetPropertyData (DeviceIsAlive)",
+    )
+    .is_ok_and(|alive| alive != 0)
+}
+
+/// The device a choice names, or `None` for the system route.
+///
+/// A preference the machine does not have is not an error. That is the whole
+/// point of one: the headset is in a bag, the call still has to happen.
+pub(crate) fn choose(choice: &DeviceChoice) -> Result<Option<DeviceId>, Error> {
+    match *choice {
+        DeviceChoice::System => Ok(None),
+        DeviceChoice::Device(id) => Ok(Some(id)),
+        DeviceChoice::Preferred(ref uid) => Ok(device_with_uid(uid)?.map(|device| device.id)),
+    }
 }
 
 /// What the listener is handed a pointer to: the changes it records, behind
@@ -449,11 +491,55 @@ fn property_words(object: u32, address: &PropertyAddress) -> Result<Vec<u64>, Er
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceMonitor, default_device, devices};
-    use crate::device::Direction;
+    use super::{DeviceMonitor, choose, default_device, device_with_uid, devices, is_alive};
+    use crate::device::{DeviceChoice, DeviceId, Direction};
     use crate::status::Error;
     use core::time::Duration;
     use std::sync::Arc;
+
+    #[test]
+    fn a_saved_identity_finds_the_device_it_was_saved_from() {
+        let Ok(list) = devices() else {
+            return;
+        };
+        let Some(saved) = list.iter().find_map(|device| device.uid.clone()) else {
+            return;
+        };
+        let found = device_with_uid(&saved).expect("the enumeration answered a moment ago");
+        assert_eq!(found.and_then(|device| device.uid), Some(saved));
+        assert_eq!(
+            device_with_uid("no device on any machine carries this").expect("as above"),
+            None
+        );
+    }
+
+    #[test]
+    fn what_is_enumerated_is_alive_and_what_was_never_there_is_not() {
+        let Ok(list) = devices() else {
+            return;
+        };
+        for device in &list {
+            assert!(is_alive(device.id), "{device} is in the list but not alive");
+        }
+        // kAudioObjectUnknown, and a number no machine has handed out
+        assert!(!is_alive(DeviceId::new(0)));
+        assert!(!is_alive(DeviceId::new(u32::MAX)));
+    }
+
+    #[test]
+    fn a_preference_nothing_carries_falls_back_rather_than_failing() {
+        assert_eq!(choose(&DeviceChoice::System), Ok(None));
+        assert_eq!(
+            choose(&DeviceChoice::Device(DeviceId::new(7))),
+            Ok(Some(DeviceId::new(7)))
+        );
+        if devices().is_ok() {
+            assert_eq!(
+                choose(&DeviceChoice::Preferred("a headset in a bag".to_string())),
+                Ok(None)
+            );
+        }
+    }
 
     #[test]
     fn enumeration_either_answers_or_says_why() {

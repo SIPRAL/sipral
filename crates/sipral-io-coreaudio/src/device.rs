@@ -122,6 +122,64 @@ impl fmt::Display for DeviceEvent {
     }
 }
 
+/// Which device a stream should open, and what to do when it is not there.
+///
+/// The difference between the last two is the whole of what a saved selection
+/// needs. [`DeviceChoice::Device`] names a device by the number it is carrying
+/// at this instant, which is right for "the one the person just clicked" and
+/// useless the moment it is unplugged. [`DeviceChoice::Preferred`] names it by
+/// the identity that survives a replug and a reboot — [`Device::uid`] — and
+/// falls back to the system route when the machine does not have it, which is
+/// what a preference read out of a configuration file at start-up means.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeviceChoice {
+    /// Whatever the system is routing to at the moment the stream opens.
+    #[default]
+    System,
+    /// This device, by the number it carries now.
+    Device(DeviceId),
+    /// The device carrying this [`Device::uid`] if the machine has it, and the
+    /// system's route otherwise.
+    Preferred(String),
+}
+
+impl fmt::Display for DeviceChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::System => f.write_str("the system route"),
+            Self::Device(id) => write!(f, "{id}"),
+            Self::Preferred(ref uid) => write!(f, "\"{uid}\", or the system route"),
+        }
+    }
+}
+
+/// Something a stream noticed about the device underneath it.
+///
+/// Not an [`Error`](crate::Error): a headset being unplugged during a call is
+/// not a fault in anything, and the caller's answer to it is a decision rather
+/// than a retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum StreamEvent {
+    /// The device the stream was running on is gone — unplugged, switched off,
+    /// or taken away by the operating system.
+    ///
+    /// The stream stops rather than pretending: nothing more arrives from the
+    /// microphone once what it had already captured has been read out, and the
+    /// speaker ring fills up and takes no more. What puts a device back under
+    /// it is `Stream::recover`, and what that lands on is the stream's own
+    /// [`DeviceChoice`] resolved again.
+    DeviceLost,
+}
+
+impl fmt::Display for StreamEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::DeviceLost => f.write_str("the device the stream was on is gone"),
+        }
+    }
+}
+
 /// The changes seen but not yet handed over.
 ///
 /// A set of bits rather than a queue: the events are idempotent, the listener
@@ -187,7 +245,7 @@ impl Pending {
 
 #[cfg(test)]
 mod tests {
-    use super::{Device, DeviceEvent, DeviceId, Direction, Pending};
+    use super::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending, StreamEvent};
 
     fn device() -> Device {
         Device {
@@ -229,6 +287,30 @@ mod tests {
         assert_eq!(
             DeviceEvent::DefaultChanged(Direction::Output).to_string(),
             "the default output device changed"
+        );
+    }
+
+    #[test]
+    fn a_choice_says_what_it_would_open() {
+        assert_eq!(DeviceChoice::default(), DeviceChoice::System);
+        assert_eq!(DeviceChoice::System.to_string(), "the system route");
+        assert_eq!(
+            DeviceChoice::Device(DeviceId::new(51)).to_string(),
+            "device 51"
+        );
+        // the saved one, and what happens when the machine does not have it
+        let saved = device().uid.expect("the fixture has one");
+        assert_eq!(
+            DeviceChoice::Preferred(saved).to_string(),
+            "\"AppleUSBAudioEngine:Apple Inc.:1\", or the system route"
+        );
+    }
+
+    #[test]
+    fn a_lost_device_reads_as_a_sentence() {
+        assert_eq!(
+            StreamEvent::DeviceLost.to_string(),
+            "the device the stream was on is gone"
         );
     }
 

@@ -197,3 +197,80 @@ hands-free transitions, `AVAudioSession` categories and interruptions, WASAPI
 exclusive mode: all of that is platform work, and all of it is where time
 disappears on this kind of project. It is budgeted as such and it is kept out of
 every other crate.
+
+### Volume, mute and the level meter
+
+They live here, and they are applied to the frames rather than to the operating
+system's own volume control. Every platform offers one — CoreAudio's device
+volume, WASAPI's `IAudioEndpointVolume` and `ISimpleAudioVolume` — and none of
+them belongs to a call: the first two are shared with everything else the person
+is listening to, the third is one setting for a whole process however many
+streams it has, and all of them are remembered after the call ends and after the
+process dies. Turning a call down should not turn a film down, and it should not
+still be down tomorrow. What this crate does to the samples belongs to the stream
+and goes when the stream goes.
+
+It is applied at the device end of the ring rather than at the caller's. The
+rings hold sixteen frames, so a gain applied on the way in would be heard a third
+of a second after the slider moved, and a mute has to be silent on the next frame
+the device asks for. The cost is one multiply, one shift and one clamp per sample,
+in the loop that was copying them anyway.
+
+Gain saturates, and says how often. Above unity a loud sample leaves the
+sixteen-bit range; it stops at the end rather than wrapping round it, and the
+samples that landed there are counted, because a gain set too high is otherwise
+a distortion nobody can attribute to the setting that caused it. The range
+itself is clamped rather than refused: below zero is silence, above four is four.
+
+A muted direction keeps running. The microphone still fills the ring, with
+silence, and the speaker still drains it. Stopping the frames instead would make
+unmuting replay everything that had piled up behind the mute, and would starve
+whatever above is pacing itself on frames arriving.
+
+The meter is the loudest sample over a tenth of a second, held for between one
+window and two, and the caller polls it — nothing is pushed. Reporting the peak
+since the last poll would make the number depend on how often the interface
+asks, which is how a bar ends up flickering on one machine and never falling on
+another. Per frame it costs a comparison per sample, in the same pass the gain
+is already making, and four relaxed atomic operations; a poll is two atomic
+loads and changes nothing, so any number of callers at any rate see the same
+answer.
+
+### When the device goes
+
+A stream reports the loss of the device under it as an event the caller polls
+for, and stops. On Windows this is exact: every WASAPI call answers
+`AUDCLNT_E_DEVICE_INVALIDATED` once the endpoint has gone, and the audio thread
+writes that down before it leaves. On macOS the stream asks the hardware layer
+whether the device object it opened is still alive, which is a property read
+rather than an inference from silence. On iOS it reports nothing, because there
+the route belongs to `AVAudioSession` and its changes are delivered to the
+application; anything else would be a guess dressed as a fact.
+
+What follows is defined rather than silent. The stream stops: what the
+microphone had already captured can still be read out, nothing further arrives,
+and the speaker's ring fills up and takes no more — a caller that ignores the
+event finds a stream that has plainly stopped, not one that appears to be
+working. Recovering reopens on the stream's own device choice, resolved against
+the machine as it is then, and carries the volume, the mute and the meter handle
+across. It is a call the application makes rather than something the crate does
+by itself, because whether the audio should move to the laptop speaker, wait for
+the headset to come back, or end the call is the application's decision.
+
+### Saved selections
+
+A device is chosen one of three ways, and what separates them is what happens
+when it is not there. The system's route is whatever the operating system is
+routing calls to. A named device is that device or nothing. A *preference* is a
+saved identity — `Device::uid` on macOS, the endpoint identifier on Windows,
+both of which survive a replug and a reboot where a device number does not — and
+falls back to the system's route when the machine does not have it. A preference
+is what a selection read out of a configuration file should be, and it is what
+makes recovery from an unplugged headset land somewhere instead of failing.
+
+What the crate does not promise: it cannot stop the operating system changing
+the default device behind the application's back, and it cannot move a running
+stream onto another device. CoreAudio accepts a device only on an uninitialised
+unit, and a WASAPI client is bound to the endpoint it was activated on. Both are
+answered the same way — the default-changed event says the machine moved, and
+reopening is what re-applies the selection.

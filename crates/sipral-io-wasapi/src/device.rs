@@ -123,6 +123,67 @@ impl fmt::Display for DeviceEvent {
     }
 }
 
+/// Which endpoint a stream should open, and what to do when it is not there.
+///
+/// The difference between the last two is the whole of what a saved selection
+/// needs. [`DeviceChoice::Device`] opens that endpoint or nothing;
+/// [`DeviceChoice::Preferred`] opens it if the machine has it and falls back
+/// to the system's route for calls when it does not, which is what a
+/// preference read out of a configuration file at start-up means.
+///
+/// Both carry the same string, because on Windows the identity a stream is
+/// opened by is already the one that survives a replug and a reboot. What
+/// differs is only what happens when the machine has no such endpoint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeviceChoice {
+    /// Whatever Windows is routing calls to at the moment the stream opens.
+    #[default]
+    System,
+    /// This endpoint, and no other.
+    Device(DeviceId),
+    /// This endpoint if the machine has it, and the system's route otherwise.
+    Preferred(DeviceId),
+}
+
+impl fmt::Display for DeviceChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::System => f.write_str("the system route"),
+            Self::Device(ref id) => write!(f, "{id}"),
+            Self::Preferred(ref id) => write!(f, "{id}, or the system route"),
+        }
+    }
+}
+
+/// Something a stream noticed about the endpoint underneath it.
+///
+/// Not an [`Error`](crate::Error): a headset being unplugged during a call is
+/// not a fault in anything, and the caller's answer to it is a decision rather
+/// than a retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum StreamEvent {
+    /// The endpoint the stream was running on is gone — unplugged, disabled,
+    /// or reconfigured from the sound control panel, all of which Windows
+    /// reports the same way and none of which it lets a client carry on
+    /// through.
+    ///
+    /// The stream stops rather than pretending: nothing more arrives from the
+    /// microphone once what it had already captured has been read out, and the
+    /// speaker ring fills up and takes no more. What puts an endpoint back
+    /// under it is `CaptureStream::recover` or `PlaybackStream::recover`, and
+    /// what that lands on is the stream's own [`DeviceChoice`] resolved again.
+    DeviceLost,
+}
+
+impl fmt::Display for StreamEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::DeviceLost => f.write_str("the endpoint the stream was on is gone"),
+        }
+    }
+}
+
 /// The changes seen but not yet handed over.
 ///
 /// A set of bits rather than a queue: the events are idempotent, the
@@ -189,7 +250,7 @@ impl Pending {
 
 #[cfg(test)]
 mod tests {
-    use super::{Device, DeviceEvent, DeviceId, Direction, Pending};
+    use super::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending, StreamEvent};
 
     fn cable() -> Device {
         Device {
@@ -233,6 +294,31 @@ mod tests {
         assert_eq!(
             DeviceEvent::DefaultChanged(Direction::Output).to_string(),
             "the default output endpoint changed"
+        );
+    }
+
+    #[test]
+    fn a_choice_says_what_it_would_open() {
+        assert_eq!(DeviceChoice::default(), DeviceChoice::System);
+        assert_eq!(DeviceChoice::System.to_string(), "the system route");
+        let id = cable().id;
+        assert_eq!(DeviceChoice::Device(id.clone()).to_string(), id.to_string());
+        assert_eq!(
+            DeviceChoice::Preferred(id.clone()).to_string(),
+            format!("{id}, or the system route")
+        );
+        // the same endpoint, and two different answers to it being unplugged
+        assert_ne!(
+            DeviceChoice::Device(id.clone()),
+            DeviceChoice::Preferred(id)
+        );
+    }
+
+    #[test]
+    fn a_lost_endpoint_reads_as_a_sentence() {
+        assert_eq!(
+            StreamEvent::DeviceLost.to_string(),
+            "the endpoint the stream was on is gone"
         );
     }
 

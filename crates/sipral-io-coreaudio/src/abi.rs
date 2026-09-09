@@ -271,6 +271,11 @@ pub(crate) mod hardware {
     /// describing how many channels a device has on one side.
     pub(crate) const PROPERTY_STREAM_CONFIGURATION: u32 = code(*b"slay");
 
+    /// `kAudioDevicePropertyDeviceIsAlive`: a `UInt32` that is zero once the
+    /// hardware behind a device object has gone. The object outlives the
+    /// hardware for a while, which is why the question can be asked at all.
+    pub(crate) const PROPERTY_DEVICE_IS_ALIVE: u32 = code(*b"livn");
+
     /// `kCFStringEncodingUTF8`.
     pub(crate) const ENCODING_UTF8: u32 = 0x0800_0100;
 

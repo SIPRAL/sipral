@@ -15,15 +15,23 @@
 //! is not reported as one — it arrives as a [`DeviceEvent`] the caller polls
 //! for, so that nothing above this crate has to know CoreAudio exists.
 //!
+//! The volume, the mute and the level meter are here too, and they are applied
+//! to the frames rather than to the device's own volume control — see
+//! [`Controls`] for why that is the only version of the feature a call can
+//! own. They are on a handle that can be moved to the thread drawing the
+//! window, because that is where a slider and a meter live.
+//!
 //! The unit is `kAudioUnitSubType_VoiceProcessingIO`, which brings the
 //! system's own echo cancellation. `docs/05-media.md` says we attach an echo
 //! canceller rather than write one, and on Apple's platforms the best one is
 //! already in the operating system.
 //!
 //! On a target with no CoreAudio the crate still compiles, and still exports
-//! [`StreamFormat`], [`Device`], [`DeviceEvent`], [`Counters`] and [`Error`],
-//! so that portable code above can name what it will be handed. What it does
-//! not export there is anything that would need a framework to link against.
+//! [`StreamFormat`], [`Device`], [`DeviceChoice`], [`DeviceEvent`],
+//! [`StreamEvent`], [`Controls`], [`Gain`], [`Level`], [`Counters`] and
+//! [`Error`], so that portable code above can name what it will be handed.
+//! What it does not export there is anything that would need a framework to
+//! link against.
 //!
 //! Written from Apple's published headers and documented ABI; see
 //! `docs/02-clean-room.md` for why that matters.
@@ -69,11 +77,13 @@
 mod counters;
 mod device;
 mod format;
+mod level;
 mod status;
 
 pub use counters::Counters;
-pub use device::{Device, DeviceEvent, DeviceId, Direction};
+pub use device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, StreamEvent};
 pub use format::StreamFormat;
+pub use level::{Controls, Gain, Level};
 pub use status::{Error, OsStatus};
 
 // The ring and the gate are only ever instantiated by the platform code, but
@@ -100,12 +110,13 @@ pub use stream::{Capture, Playback, Stream, StreamConfig};
 mod hal;
 
 #[cfg(target_os = "macos")]
-pub use hal::{DeviceMonitor, default_device, devices};
+pub use hal::{DeviceMonitor, default_device, device_with_uid, devices, is_alive};
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Counters, Device, DeviceEvent, DeviceId, Direction, Error, OsStatus, StreamFormat,
+        Counters, Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Error, Gain, Level,
+        OsStatus, StreamEvent, StreamFormat,
     };
 
     /// Everything named here has to exist on every target the workspace
@@ -128,6 +139,13 @@ mod tests {
             DeviceEvent::DefaultChanged(Direction::Output),
             DeviceEvent::DefaultChanged(Direction::Output)
         );
+        assert_eq!(StreamEvent::DeviceLost, StreamEvent::DeviceLost);
+        assert_eq!(
+            DeviceChoice::Preferred("BuiltInSpeakerDevice".to_string()),
+            DeviceChoice::Preferred("BuiltInSpeakerDevice".to_string())
+        );
+        assert_eq!(Gain::default(), Gain::UNITY);
+        assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
         assert_eq!(
             Error::Call {
@@ -145,11 +163,14 @@ mod tests {
         use super::{Stream, StreamConfig};
 
         fn movable<T: Send>() {}
+        fn shareable<T: Send + Sync>() {}
 
         let config = StreamConfig::new(StreamFormat::narrowband());
         assert_eq!(config.format, StreamFormat::narrowband());
         // a stream has to be able to live on the thread that does the media
         movable::<Stream>();
+        // and its controls on the one that draws the window
+        shareable::<super::Controls>();
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
