@@ -77,19 +77,28 @@ and every one of them is something a client is entitled to assume:
 - **B4** — the threading contract documented and tested; a violation is an
   error and never a fault.
 - **B3** — no network failure terminates the process, with the boundary of the
-  guarantee written down rather than implied.
+  guarantee written down rather than implied. *Built*, and the tests that carry
+  it drive the stack through suspend and resume over a dead transport and with
+  name resolution gone, rather than only the path where everything works.
 - **A6, D3** — the statistics the jitter buffer already computes reach the
-  application, and the counters beside them.
+  application, and the counters beside them. *Built*, and the counters split
+  failures by reason, which is the half that is a diagnosis rather than a
+  number.
 - **D8, B2** — a build says what it supports, and no setting can be accepted
-  and ignored.
+  and ignored. *Built*, with the capability answer derived from the build
+  rather than maintained by hand: a list that can drift from the binary is
+  worse than none, because it is believed.
 
 **The things whose cost rises with every week they wait.**
 
 - **B7** — one source of truth for the ABI, with the bindings generated from
-  it and `scripts/check.sh` failing when one is missing. Cheapest before three
-  bindings exist, which is now.
-- **D1** — the call's diagnostic record. Every decision site written before it
-  exists is a site to revisit afterwards.
+  it and `scripts/check.sh` failing when one is missing. It was cheapest before
+  three bindings existed; there are still not three, but the C ABI has roughly
+  doubled since this line was written, so the saving is being spent.
+- **D1** — the call's diagnostic record. *Built.* The argument for doing it
+  early held: every decision site written before it exists is a site to
+  revisit, and the sites written since have carried their reason codes from the
+  start.
 - **D2** — deterministic replay, which the sans-I/O core makes nearly free and
   which turns every later field failure into a permanent test.
 
@@ -138,18 +147,34 @@ P0 for phase 3 and is sized like a phase of its own:
 `sipral-ffi`, the Swift Package, `sipral-io-wasapi`, the NuGet package — and
 the parity surface a desktop client needs on the day it switches engines.
 
-- **A2, A3** — device enumeration with an identity that survives replug,
-  selection per call, gain, mute and a peak level cheap enough for a meter.
+Most of the parity surface is built. What is written below as done is done in
+the tree with tests, not planned; what is left is named as such, because a
+roadmap whose finished items still read as future work is a roadmap nobody
+trusts.
+
+- **A2, A3** — device enumeration with an identity that survives replug, gain,
+  mute and a peak level cheap enough for a meter. *Built.* Selection per call
+  is the part that is not, and it is D6's rather than the device layer's.
 - **A5** — call recording: the mixed conversation to one file, started and
-  stopped mid-call.
-- **A4, D5** — codec enumeration and priority, and the engine explaining what
-  it negotiated and why the other candidates lost.
+  stopped mid-call. *Built.*
+- **A4** — codec enumeration and priority, and what a live call settled on.
+  *Built.* **D5**, the engine explaining why the other candidates lost, is not.
 - **A7, D4** — the network-change entry point and the lifecycle model behind
-  it, with tests that suspend and resume under adverse conditions.
-- **A8, D7** — refusing an unwanted INVITE before any user-visible effect,
-  with rate limiting and counters.
-- **A9, A10** — DTMF over INFO, settable product identity, and the signalling
-  trace that D1 mostly supersedes.
+  it, with tests that suspend and resume under adverse conditions. *Built*, and
+  it brought `RegistrationState::Unverified` with it: a monotonic clock cannot
+  tell a stack that it slept, so a binding granted before a suspend stops being
+  evidence rather than staying valid.
+- **A8** — refusing an unwanted INVITE before any user-visible effect. *Built.*
+  **D7**'s rate limiting and refusal counters ride on it.
+- **A9, A10** — DTMF and settable product identity. *Built*, and A9 in all
+  three forms rather than the one the requirement asked for: RFC 4733 in the
+  media, and INFO with either body, chosen per send because which one a peer
+  accepts is a fact about the peer. The signalling trace A10 asked for is
+  superseded by **D1**, which is built.
+- **B7** — the ABI's single source of truth, with the Swift, Kotlin and .NET
+  bindings generated from it and `scripts/check.sh` failing when one is
+  missing. **This is what phase 3 now turns on**: the C ABI is wide and the
+  bindings are one reserved .NET package.
 - **D6** — device, codec and transport as properties of a call rather than of
   the process.
 
@@ -161,16 +186,26 @@ stack is gone from both binaries.
 `sipral-io-aaudio` and the AAR. `CallKit` and `PushKit` on iOS,
 `ConnectionService` and foreground services on Android.
 
+The signalling half of this phase is already built, because none of it needed a
+phone: it is protocol and state, and it was cheaper to write beside D4 than
+after it. What is left is platform work, and platform work needs the platform.
+
 - **C2** — a call announced out of band: the engine pre-warms, matches the
   INVITE that follows to the announcement, and reports an announced call that
-  never arrived. The three races are part of the requirement.
+  never arrived. *Built*, three races included. A push carries no `Call-ID` and
+  cannot be made to, so the match is on the account plus the caller's user and
+  host; the reasoning is in `docs/15-mobile.md`.
 - **C3** — registration that can be frozen and thawed, time-to-ready measured
-  by the stack, and RFC 8599 push parameters.
-- **C4** — the audio device taken away and given back during a live call,
-  survived unaided, every transition reported.
+  by the stack, and RFC 8599 push parameters. *Built.*
 - **C5** — an idle cost that is explicit, measurable, and reducible to nothing.
-- **C1, D4** — and behind all of them, the lifecycle model, because a phone is
-  where its absence is fatal rather than merely expensive.
+  *Built*: one wake per hour per account, and nothing at all while suspended.
+- **C1, D4** — the lifecycle model behind all of them. *Built*, and the reason
+  the rest of this phase is now within reach.
+- **C4** — the audio device taken away and given back during a live call,
+  survived unaided, every transition reported. **Not built, and not buildable
+  from here**: it is `AVAudioSession` and `AudioManager`, so it needs
+  `sipral-io-*` crates for iOS and Android that do not exist yet, and a device
+  to run them on.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a
