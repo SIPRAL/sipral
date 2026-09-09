@@ -40,7 +40,7 @@ use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::lifecycle::Machine;
 use crate::registration::{
-    Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
+    ANSWERS, Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
@@ -352,6 +352,10 @@ impl UserAgent {
         reg.unanswered = None;
         reg.due = None;
         reg.owed = false;
+        // a fresh attempt gets the whole allowance again: a password can be
+        // corrected while the process runs, and a refresh an hour later is not
+        // the attempt that was refused
+        reg.answered = 0;
         reg.state = if unregistering {
             RegistrationState::Unregistered
         } else if refreshing {
@@ -744,6 +748,17 @@ impl UserAgent {
             // same way every time, so there is no point trying again
             return;
         };
+        // A registrar that draws a fresh nonce for every refusal and never
+        // marks it stale walks straight past the same-nonce guard below, and
+        // the exchange then runs one wrong password per round trip until the
+        // account is locked. Nothing on the wire tells that apart from a
+        // server ageing its nonces honestly, so the count is the defence.
+        if let Some(reg) = self.registrations.get_mut(&account) {
+            if reg.answered >= ANSWERS {
+                return;
+            }
+            reg.answered = reg.answered.saturating_add(1);
+        }
         let Ok(retried) = self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)

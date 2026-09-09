@@ -450,6 +450,52 @@ fn a_challenge_is_answered_from_the_account_without_asking() {
 }
 
 #[test]
+fn a_registrar_that_draws_a_new_nonce_every_time_still_only_gets_three_answers() {
+    // the guard below this one turns on the nonce being the same. A registrar
+    // that draws a fresh one for every refusal and never says `stale` walks
+    // past it, and the exchange then runs one wrong password per round trip
+    // for as long as the process lives -- which is the lock-out §22.1 is
+    // about, arrived at the long way round. Nothing on the wire tells that
+    // apart from a server ageing its nonces honestly, so the count is what
+    // stops it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "wrong")));
+    agent.register(id, t0).expect("the REGISTER goes");
+
+    let mut answers = 0;
+    let mut request = sent(&mut agent);
+    for round in 0..12 {
+        let refusal = format!(
+            "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"n{round}\", qop=\"auth\"\r\n"
+        );
+        deliver(
+            &mut agent,
+            &reply(&request, 401, "Unauthorized", &refusal),
+            t0,
+        );
+        let out = transmits(&mut agent);
+        events(&mut agent);
+        let Some(next) = out.into_iter().next() else {
+            break;
+        };
+        answers += 1;
+        request = next;
+    }
+    assert_eq!(
+        answers, 3,
+        "the account was offered a wrong password {answers} times"
+    );
+    // and it is reported as what it is, rather than left ringing: the same
+    // refusal the same-nonce guard produces, reached the other way
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Failed),
+        "it stopped, but said nothing about why"
+    );
+}
+
+#[test]
 fn a_password_that_is_refused_twice_stops_rather_than_locking_the_account() {
     // 22.1: the same nonce coming back without `stale` means the password was
     // wrong. Sending it again is how an account gets locked out

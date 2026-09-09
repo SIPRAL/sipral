@@ -12,6 +12,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A registrar that draws a new nonce for every refusal can no longer walk a
+  wrong password into a locked account.** §22.1's guard — the same nonce coming
+  back means the password was wrong — turns on the nonce being *the same*, and
+  a registrar that draws a fresh one every time and never says `stale` goes
+  straight past it. Measured before the fix: forty attempts and still going,
+  one per round trip, for as long as the process lives. Nothing on the wire
+  distinguishes that from a server ageing its nonces honestly, so the only
+  defence left is to stop counting: three answers per registration attempt, and
+  then the same refusal the other guard produces. A correct exchange needs one
+  and a nonce that aged out mid-flight needs two; a fresh attempt gets the
+  allowance again, because a password can be corrected while a process runs.
+
 - **An `a=crypto` line carrying a parameter this build does not know is now
   refused rather than accepted without it.** RFC 4568 §6.3.7 inverts the usual
   extension rule — "New SRTP session parameters are by default mandatory ... If
