@@ -2994,6 +2994,58 @@ fn tag_of(bytes: &[u8], name: HeaderName<'_>) -> String {
 }
 
 /// A NOTIFY from the transferee, reporting how the referred call is going.
+#[test]
+fn a_notify_for_another_event_package_is_not_eaten_as_a_transfer_report() {
+    // RFC 6665 §8.2.1 makes the Event header what identifies a notification,
+    // and a dialog carries as many packages as anybody subscribed to. A phone
+    // watching this line sends `dialog`; a mailbox sends `message-summary`.
+    // Claiming those on the method alone answered them 200, dropped the body,
+    // and reported a transfer that nobody asked for.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = only(&transmits(&mut agent), "REFER ");
+    deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+    events(&mut agent);
+
+    let theirs = plus(
+        &reversed(&ack, "NOTIFY", "blf", 1, None),
+        "Event: dialog\r\nSubscription-State: active\r\n",
+    );
+    deliver(&mut agent, &theirs, t0);
+
+    let out = transmits(&mut agent);
+    let answer = only(&out, "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 481 "),
+        "§4.1.3: a notification matching no subscription is refused, not \
+         swallowed: {}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        !events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::TransferDone { .. } | UaEvent::TransferProgress { .. }
+        )),
+        "somebody else's notification is not news about our transfer"
+    );
+
+    // and the transfer's own subscription still works afterwards
+    deliver(&mut agent, &notify(&ack, 2, "200 OK", "terminated"), t0);
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::TransferDone { .. })),
+        "the refer package is still claimed"
+    );
+}
+
 fn notify(ours: &[u8], cseq: u32, status: &str, state: &str) -> Vec<u8> {
     let body = format!("SIP/2.0 {status}\r\n");
     let head = reversed(ours, "NOTIFY", &format!("nfy{cseq}"), cseq, None);

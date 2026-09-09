@@ -385,14 +385,44 @@ impl UserAgent {
                 self.on_refer(call, transaction, &request, now);
                 None
             }
+            // The `Event` decides this, not the method. RFC 6665 §8.2.1 makes
+            // the header mandatory on every NOTIFY, and a dialog carries as
+            // many event packages as anybody subscribed to: a phone with a
+            // busy lamp on this line sends `dialog`, a mailbox sends
+            // `message-summary`, and answering either as though it reported a
+            // transfer swallows it whole -- 200 already sent, body dropped,
+            // and the subscriber none the wiser.
             Event::IncomingInDialog {
                 transaction,
                 dialog,
                 ref request,
-            } if request.as_raw().method() == Some(Method::Notify) => {
+            } if request.as_raw().method() == Some(Method::Notify)
+                && package_is(&request.as_raw(), REFER) =>
+            {
                 let call = self.by_dialog.get(&dialog).copied()?;
                 let request = request.clone();
                 self.on_notify(call, transaction, &request, now);
+                None
+            }
+            // §4.1.3: "if not, it MUST return a 481 (Subscription does not
+            // exist) response". Until there is a subscription machine there is
+            // nothing else it could match, and leaving it unanswered is worse
+            // than refusing it: the notifier retransmits for thirty-two
+            // seconds and then decides this end is gone.
+            Event::IncomingInDialog {
+                transaction,
+                dialog,
+                ref request,
+            } if request.as_raw().method() == Some(Method::Notify)
+                && self.by_dialog.contains_key(&dialog) =>
+            {
+                self.endpoint
+                    .respond(
+                        transaction,
+                        &OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
+                        now,
+                    )
+                    .ok();
                 None
             }
             other => Some(other),
@@ -586,6 +616,19 @@ fn refer_to(request: &RawMessage<'_>) -> Option<ReferTo> {
         target: Uri::parse(uri).ok()?,
         replaces,
     })
+}
+
+/// Whether a NOTIFY reports on the named event package (RFC 6665 §8.2.1).
+///
+/// The value is a package name followed by parameters, and the name is
+/// case-insensitive; `id` in particular rides on it wherever one dialog holds
+/// two subscriptions to the same package. A NOTIFY with no `Event` at all is
+/// not one this layer will claim: §8.2.1 requires it, and guessing on behalf
+/// of a peer that omitted it is how somebody else's notification gets eaten.
+fn package_is(request: &RawMessage<'_>, package: &[u8]) -> bool {
+    request
+        .header(HeaderName::Event)
+        .is_some_and(|value| Params::split(value).0.eq_ignore_ascii_case(package))
 }
 
 /// `<...>`, when the value has them.

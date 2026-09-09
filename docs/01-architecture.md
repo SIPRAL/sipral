@@ -69,9 +69,20 @@ depend on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
 depends on `sipral-ua`.** Signalling and media never call each other. What
 passes between them is a description — `MediaPlan` out of the negotiation and
 `MediaCapabilities` back into it, both in `sipral-core::sdp` and both written
-out in [05-media.md](05-media.md) — and the application carries it across. The
-media crates depend on `sipral-core` for those two types and for nothing else;
-that edge is shared vocabulary, and it is the only one between the two halves.
+out in [05-media.md](05-media.md) — and something carries it across.
+
+**Today nothing does.** `sipral-rtp` and `sipral-media` name no Sipral crate at
+all in their manifests, only `sipral-nat` names `sipral-core`, and `MediaPlan`
+and `MediaCapabilities` are used nowhere outside `sipral-core::sdp` and its own
+tests. The vocabulary is designed and unspoken: the two halves are not loosely
+coupled, they are unconnected, and an application that wants both writes the
+join itself.
+
+The crate that is supposed to write it is [`sipral`](#the-facade), below, and
+the consequence of it being empty is not abstract — it is that the C ABI links
+signalling only, so a client on the other side of it still has to parse SDP,
+run RTP and own its devices. `docs/13-client-requirements.md` is largely a list
+of things that are blocked on this and on nothing else.
 
 The reason is the build in the third column: an agent that puts PCM on a socket
 links no media pipeline at all, and a `sipral-ua` that reached into one could
@@ -138,12 +149,23 @@ on a callback. The expressive API is written once per language, on top.
 
 ### sipral
 
-The facade. An application that just wants a softphone stack depends on this
-one crate and gets `sipral-ua` plus a media pipeline re-exported under one
-name. At this commit it is a name reservation on crates.io that exports a
-version constant and nothing else; it is the only crate with `publish = true`,
-and the only one that ships before the ABI freezes, precisely because it
-promises nothing yet.
+<a id="the-facade"></a>The facade, and the only place the two halves of the
+picture are allowed to meet. An application that just wants a softphone stack
+depends on this one crate and gets `sipral-ua` plus a media pipeline
+re-exported under one name.
+
+At this commit it is a name reservation on crates.io that exports a version
+constant and nothing else; it is the only crate with `publish = true`, and the
+only one that ships before the ABI freezes, precisely because it promises
+nothing yet.
+
+That emptiness is the single largest gap in the tree, and it is load-bearing
+rather than cosmetic. Because nothing joins signalling to media, the C ABI
+carries signalling alone, and a device, a codec list, a recording, a level
+meter and a stream statistic have nowhere to cross. The rule above — that
+`sipral-ua` never reaches into a media crate — stays exactly as it is; this
+crate is where the join was always meant to live, and writing it here is
+keeping the rule rather than bending it.
 
 ## What is not in the tree
 
