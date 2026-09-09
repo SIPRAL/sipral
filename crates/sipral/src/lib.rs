@@ -100,6 +100,7 @@
 
 mod clock;
 mod codec;
+mod dtmf;
 mod echo;
 mod engine;
 mod error;
@@ -113,6 +114,7 @@ mod tests;
 
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, SHORTEST_DIGIT};
 pub use echo::MAX_RENDER_DELAY;
 pub use engine::MediaEngine;
 pub use error::MediaError;

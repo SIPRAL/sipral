@@ -45,12 +45,13 @@ use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFO
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
 use sipral_rtp::{
-    Activity, BufferConfig, Discard, Due, PayloadTypes, Pull, Received, RtcpReceived, RtpSession,
-    StreamConfig, is_rtcp,
+    Activity, BufferConfig, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
+    PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, is_rtcp,
 };
 
 use crate::clock::WallClock;
 use crate::codec::Codec;
+use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, SHORTEST_DIGIT};
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
@@ -236,6 +237,11 @@ pub struct MediaSession {
     /// having one: no history, no copy, no call.
     echo: Option<Echo>,
     render_delay: Duration,
+    /// The digits this end still owes the far end, and the one going out.
+    dialling: Dialling,
+    /// The digits coming the other way, when the call negotiated a type for
+    /// them.
+    heard: Option<EventReceiver>,
     events: VecDeque<MediaEvent>,
 }
 
@@ -308,6 +314,8 @@ impl MediaSession {
             recorder: None,
             echo: None,
             render_delay: config.render_delay,
+            dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
+            heard: plan.dtmf.map(EventReceiver::new),
             events: VecDeque::new(),
         })
     }
@@ -478,7 +486,10 @@ impl MediaSession {
     fn fill(&mut self, room: &mut [i16]) -> Playback {
         let coder = &mut self.coder;
         let noise = &mut self.noise;
+        let heard = &mut self.heard;
+        let events = &mut self.events;
         let payload_type = self.plan.codec.payload();
+        let rate = self.plan.codec.clock_rate();
         match self.rtp.pull(self.activity) {
             Pull::Packet(frame) if frame.payload_type == COMFORT_NOISE => {
                 if let Ok(described) = ComfortNoise::decode(frame.payload) {
@@ -496,8 +507,20 @@ impl MediaSession {
                 }
             }
             // a type that was negotiated but is neither of those is the named
-            // events, which are not audio and leave the earpiece alone
-            Pull::Packet(_) | Pull::Conceal | Pull::Stretch => conceal(coder, room),
+            // events, which are not audio and leave the earpiece alone. The
+            // receiver collapses a digit's updates and its closing packet's
+            // three transmissions into one report, keyed on the timestamp that
+            // identifies the event -- reporting per packet would turn one
+            // keypress into five
+            Pull::Packet(frame) => {
+                if let Some(receiver) = heard.as_mut()
+                    && let Ok(Outcome::Reported(reported)) = receiver.receive(frame)
+                {
+                    events.push_back(digit_heard(&reported, rate));
+                }
+                conceal(coder, room)
+            }
+            Pull::Conceal | Pull::Stretch => conceal(coder, room),
             Pull::Empty => {
                 if noise.is_silent() {
                     room.fill(0);
@@ -572,9 +595,16 @@ impl MediaSession {
         {
             self.recording_stopped(error);
         }
+        if !self.is_sending() {
+            self.rtp.suppress(self.frame_ticks);
+            return Ok(None);
+        }
+        if let Some(length) = self.dial_frame()? {
+            return Ok(Some(length));
+        }
         let silent =
             self.suppressing && self.outbound_voice.process(samples) == vad::Activity::Silence;
-        if !self.is_sending() || silent {
+        if silent {
             self.rtp.suppress(self.frame_ticks);
             return Ok(None);
         }
@@ -594,6 +624,47 @@ impl MediaSession {
         Ok(Some(length))
     }
 
+    /// One packet of a digit that is being dialled, when there is one.
+    ///
+    /// `None` means nothing is being dialled and the frame is the audio's.
+    ///
+    /// # Errors
+    /// [`MediaError::PacketTooLong`], which the four-octet payload of a named
+    /// event cannot really produce.
+    fn dial_frame(&mut self) -> Result<Option<usize>, MediaError> {
+        let Some(payload_type) = self.plan.dtmf else {
+            self.dialling.clear();
+            return Ok(None);
+        };
+        let frame = self.frame_ticks;
+        let rtp = &self.rtp;
+        let due = self
+            .dialling
+            .next(frame, |event| rtp.start_event(event, dtmf::VOLUME));
+        let Due::Event { outgoing, repeat } = due else {
+            return Ok(None);
+        };
+        let length = self
+            .rtp
+            .send_event(outgoing, payload_type, &mut self.rtp_out)
+            .map_err(|_| MediaError::PacketTooLong {
+                need: EVENT_LEN,
+                got: self.rtp_out.len(),
+            })?;
+        // an update carries the duration so far and moves the audio clock with
+        // it; the two repeats of the closing packet report a duration already
+        // reported and move nothing, so the frame of real time they take is
+        // silence like any other and has to be accounted for
+        if repeat {
+            self.rtp.suppress(frame);
+        }
+        self.packets_sent = self.packets_sent.saturating_add(1);
+        self.octets_sent = self
+            .octets_sent
+            .saturating_add(u64::try_from(EVENT_LEN).unwrap_or(0));
+        Ok(Some(length))
+    }
+
     /// The periodic RTCP report, when one is due.
     ///
     /// Call it whenever [`MediaSession::poll_timeout`] says to and whenever a
@@ -603,7 +674,7 @@ impl MediaSession {
     pub fn poll_rtcp(&mut self, now: Instant) -> Option<Datagram<'_>> {
         let destination = self.control_destination()?;
         let elapsed = self.elapsed(now);
-        if !matches!(self.rtp.rtcp_due(elapsed, self.draws.unit()), Due::Send) {
+        if !matches!(self.rtp.rtcp_due(elapsed, self.draws.unit()), RtcpDue::Send) {
             return None;
         }
         let ntp = self.clock.at(now);
@@ -626,6 +697,13 @@ impl MediaSession {
     /// and one that trails off.
     #[must_use]
     pub fn goodbye(&mut self, now: Instant) -> Option<Datagram<'_>> {
+        // a digit whose three closing packets were all lost is still a digit
+        // that was pressed, and this is the last moment it can be reported
+        if let Some(reported) = self.heard.as_mut().and_then(EventReceiver::flush) {
+            let rate = self.plan.codec.clock_rate();
+            self.events.push_back(digit_heard(&reported, rate));
+        }
+        self.dialling.clear();
         let destination = self.control_destination()?;
         let elapsed = self.elapsed(now);
         let draw = self.draws.unit();
@@ -739,6 +817,129 @@ impl MediaSession {
     pub const fn frame_length(&self) -> u32 {
         self.frame_ms
     }
+}
+
+// -- dialling ----------------------------------------------------------------
+
+impl MediaSession {
+    /// Send one key of the keypad to the far end as a named telephone event
+    /// (RFC 4733).
+    ///
+    /// The digit replaces the audio for as long as it lasts — §2.1 has an
+    /// event use the audio stream's own sequence numbers and timestamps, so
+    /// the two cannot both be on the wire — and it goes out over the frames
+    /// that follow rather than all at once. A key pressed while another digit
+    /// is still going waits its turn, because somebody typing an extension
+    /// presses four keys faster than four digits can be sent and all four have
+    /// to arrive.
+    ///
+    /// This is the form that works. The other one, an INFO carrying the digit
+    /// in a body, is signalling rather than media and lives on
+    /// [`UserAgent`](crate::UserAgent); it exists for peers that will not take
+    /// a digit in the media at all.
+    ///
+    /// # Errors
+    /// [`MediaError::NoDtmf`] when the negotiation settled on no telephone
+    /// event payload type, which is the honest answer for a call whose far end
+    /// never offered one; [`MediaError::DigitTooShort`] below the length legacy
+    /// equipment recognises; and [`MediaError::TooManyDigits`] when the queue
+    /// is full.
+    pub fn send_dtmf(&mut self, digit: Digit, length: Duration) -> Result<(), MediaError> {
+        if self.plan.dtmf.is_none() {
+            return Err(MediaError::NoDtmf);
+        }
+        if length < SHORTEST_DIGIT {
+            return Err(MediaError::DigitTooShort {
+                asked: length,
+                least: SHORTEST_DIGIT,
+            });
+        }
+        if self
+            .dialling
+            .push(digit, ticks_of(length, self.plan.codec.clock_rate()))
+        {
+            Ok(())
+        } else {
+            Err(MediaError::TooManyDigits)
+        }
+    }
+
+    /// Send a whole dial string, one key at a time.
+    ///
+    /// Nothing is queued unless every character is a key, so a string with a
+    /// typo in it is refused whole rather than half dialled — half of an
+    /// extension is worse than none, because it reaches somebody.
+    ///
+    /// # Errors
+    /// [`MediaError::UnknownDigit`] for a character no keypad has, plus
+    /// everything [`MediaSession::send_dtmf`] can answer.
+    pub fn dial(&mut self, keys: &str, length: Duration) -> Result<usize, MediaError> {
+        let digits = keys
+            .chars()
+            .map(|key| Digit::from_char(key).ok_or(MediaError::UnknownDigit { key }))
+            .collect::<Result<Vec<_>, _>>()?;
+        if self.plan.dtmf.is_none() {
+            return Err(MediaError::NoDtmf);
+        }
+        if length < SHORTEST_DIGIT {
+            return Err(MediaError::DigitTooShort {
+                asked: length,
+                least: SHORTEST_DIGIT,
+            });
+        }
+        if self.dialling.waiting() + digits.len() > crate::dtmf::WAITING {
+            return Err(MediaError::TooManyDigits);
+        }
+        let ticks = ticks_of(length, self.plan.codec.clock_rate());
+        let sent = digits.len();
+        for digit in digits {
+            if !self.dialling.push(digit, ticks) {
+                return Err(MediaError::TooManyDigits);
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Whether a digit is going out or waiting to.
+    #[must_use]
+    pub fn is_dialling(&self) -> bool {
+        self.dialling.is_busy()
+    }
+
+    /// How many digits have not started yet.
+    #[must_use]
+    pub fn digits_waiting(&self) -> usize {
+        self.dialling.waiting()
+    }
+
+    /// Drop everything queued and stop the digit going out.
+    ///
+    /// What a call being taken away wants: the digit in flight gets no closing
+    /// packet, because there is nowhere left to send one.
+    pub fn stop_dialling(&mut self) {
+        self.dialling.clear();
+    }
+}
+
+/// One reported event, as the application hears about it.
+fn digit_heard(reported: &Reported, rate: u32) -> MediaEvent {
+    MediaEvent::DigitReceived {
+        digit: reported.digit,
+        event: reported.event,
+        held: Duration::from_micros(
+            u64::from(reported.duration)
+                .saturating_mul(1_000_000)
+                .checked_div(u64::from(rate).max(1))
+                .unwrap_or(0),
+        ),
+    }
+}
+
+/// `span` on a stream whose RTP clock runs at `rate`.
+fn ticks_of(span: Duration, rate: u32) -> u32 {
+    let micros = u64::try_from(span.as_micros()).unwrap_or(u64::MAX);
+    let ticks = u64::from(rate).saturating_mul(micros) / 1_000_000;
+    u32::try_from(ticks).unwrap_or(u32::MAX)
 }
 
 // -- echo cancellation, gain control, noise suppression ----------------------

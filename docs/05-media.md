@@ -115,6 +115,30 @@ its two retransmissions (the final packet goes out three times in total, RFC
 collapse into a single reported digit, which is the bug everyone ships at least
 once.
 
+**What the schedule costs, and where it lives.** `sipral-rtp` writes the packet
+and knows what §2.1 does to the sequence number and the timestamp; it never
+sees a frame boundary, so it cannot know when the next one is due. The facade
+does, and drives it one packet per captured frame — which §2.5.1.2 names as the
+natural choice, "the spacing between non-event audio packets". Two consequences
+are properties rather than details:
+
+- **A digit replaces the audio for as long as it lasts.** §2.1 has an event use
+  the audio stream's own sequence numbers and timestamps, so both cannot be on
+  the wire at once. The two repeats of the closing packet report a duration
+  already reported and so move the audio clock by nothing; the frame of real
+  time each takes is accounted for as silence.
+- **Keys queue.** Somebody entering an extension presses four of them faster
+  than four digits can be sent, and all four have to arrive. So a key pressed
+  while another is going out waits its turn, and the pause between them —
+  40 ms is the floor RFC 4733 §2.5.2.1 takes from ITU-T Q.24, and 60 is what is
+  held — needs no timer in the application. The queue is bounded at
+  thirty-two, and a dial string with a character no keypad has queues nothing
+  at all, because half an extension is worse than none: it reaches somebody.
+
+A digit shorter than 40 ms is refused where it is asked for rather than sent
+and not heard, and a call whose negotiation settled on no telephone-event
+payload type says so instead of swallowing the key.
+
 ### SRTP
 
 Written in-tree from RFC 3711, over one borrowed primitive: the `aes` block

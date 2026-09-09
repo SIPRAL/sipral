@@ -56,6 +56,27 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A call can be dialled into, and hears what is dialled at it** (RFC 4733).
+  The packet and everything §2.1 does to the sequence number and the timestamp
+  were already written and had no schedule to run on, because the layer that
+  writes them never sees a frame boundary. The facade does: one packet per
+  captured frame, which §2.5.1.2 calls the natural interval, and the digit
+  replaces the audio for as long as it lasts because §2.1 leaves no way for
+  both to be on the wire at once.
+
+  Keys queue rather than being refused — somebody entering an extension presses
+  four of them faster than four can be sent — and the 40 ms floor RFC 4733
+  §2.5.2.1 takes from ITU-T Q.24 is enforced where the digit is asked for
+  rather than discovered by a far end that heard nothing. A dial string with a
+  character no keypad has queues nothing at all: half an extension is worse
+  than none, because it reaches somebody. A call whose negotiation settled on
+  no telephone-event payload type says so instead of swallowing the key.
+
+  The other direction was missing outright: events arrived, were correctly
+  ignored by the earpiece, and were never reported to anybody. One keypress is
+  now one event, collapsed on the timestamp that identifies it — reporting per
+  packet would have turned one 7 into five.
+
 - **The echo-cancellation seam is reachable from a live call.** `Processor` has
   been in `sipral-media` since the audio pipeline was written and nothing
   called it, which made it a shape rather than a seam. A call now takes one,

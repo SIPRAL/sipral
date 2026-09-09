@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use sipral_core::sdp::{Direction, SessionDescription, parse};
 
 use crate::codec::{Codec, CodecCatalog};
+use crate::dtmf::{DEFAULT_DIGIT, Digit};
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
 use crate::record::tests::Buffer;
@@ -557,6 +558,123 @@ fn a_render_delay_longer_than_any_device_is_refused_rather_than_kept() {
         Duration::from_millis(40),
         "a refused delay was kept anyway"
     );
+}
+
+/// A key pressed on one end reaches the other as exactly one keypress. RFC
+/// 4733 sends a digit as a run of updates and then repeats its closing packet
+/// three times, so the bug this guards against is an application being told
+/// five times that somebody pressed 7.
+#[test]
+fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let frame = {
+        let session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        session
+            .send_dtmf(Digit::from_char('7').expect("a key"), DEFAULT_DIGIT)
+            .expect("the digit is queued");
+        assert!(session.is_dialling());
+        session.frame_samples()
+    };
+
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    for _ in 0..20 {
+        tone(&mut samples, 8_000, &mut phase);
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    pair.callee.drain(pair.now, false);
+
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, held, .. } => Some((*digit, *held)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        heard.len(),
+        1,
+        "one keypress arrived as {} events: {heard:?}",
+        heard.len()
+    );
+    assert_eq!(heard.first().and_then(|(digit, _)| *digit), Some('7'));
+    assert!(
+        heard
+            .first()
+            .is_some_and(|(_, held)| *held >= Duration::from_millis(80)),
+        "the digit was reported as lasting {:?}",
+        heard.first().map(|(_, held)| *held)
+    );
+    assert!(
+        !pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .is_dialling()
+    );
+}
+
+/// A call whose far end offered no telephone event type is told so, rather
+/// than swallowing the digit. B2: applied, rejected with a reason, or not
+/// supported — never accepted and ignored.
+#[test]
+fn a_call_with_no_event_type_refuses_a_digit_instead_of_dropping_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_dtmf(false);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+
+    assert!(matches!(
+        session.send_dtmf(Digit::Hash, DEFAULT_DIGIT),
+        Err(MediaError::NoDtmf)
+    ));
+    assert!(!session.is_dialling());
+}
+
+/// Half an extension is worse than none, because it reaches somebody.
+#[test]
+fn a_dial_string_with_a_bad_character_queues_nothing_at_all() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+
+    assert!(matches!(
+        session.dial("12X4", DEFAULT_DIGIT),
+        Err(MediaError::UnknownDigit { key: 'X' })
+    ));
+    assert_eq!(session.digits_waiting(), 0);
+    assert_eq!(session.dial("1234", DEFAULT_DIGIT).expect("four keys"), 4);
+    assert_eq!(session.digits_waiting(), 4);
+
+    assert!(matches!(
+        session.send_dtmf(Digit::Number(1), Duration::from_millis(20)),
+        Err(MediaError::DigitTooShort { .. })
+    ));
+    session.stop_dialling();
+    assert!(!session.is_dialling());
 }
 
 /// A call that ends gives its media up, and the last word on it is what it

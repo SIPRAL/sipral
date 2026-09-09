@@ -84,6 +84,26 @@ pub enum MediaError {
         /// The longest this build keeps history for.
         most: std::time::Duration,
     },
+    /// A digit was asked for on a call that negotiated no telephone event
+    /// payload type.
+    ///
+    /// The far end never offered one, so there is nowhere in the media to put
+    /// it. The INFO form on the user agent is what is left.
+    NoDtmf,
+    /// A digit shorter than legacy equipment recognises.
+    DigitTooShort {
+        /// What was asked for.
+        asked: std::time::Duration,
+        /// The floor RFC 4733 §2.5.2.1 takes from ITU-T Q.24.
+        least: std::time::Duration,
+    },
+    /// More digits than one call will hold waiting.
+    TooManyDigits,
+    /// A dial string held a character no keypad has.
+    UnknownDigit {
+        /// The character.
+        key: char,
+    },
     /// A recording could not be started, or stopped writing part-way through.
     ///
     /// The kind rather than the error itself, because a call carries on when
@@ -177,6 +197,15 @@ impl fmt::Display for MediaError {
                 asked.as_millis(),
                 most.as_millis()
             ),
+            Self::NoDtmf => f.write_str("this call negotiated no telephone event payload type"),
+            Self::DigitTooShort { asked, least } => write!(
+                f,
+                "a digit of {} ms; equipment recognises {} ms and up",
+                asked.as_millis(),
+                least.as_millis()
+            ),
+            Self::TooManyDigits => f.write_str("too many digits are already waiting to be sent"),
+            Self::UnknownDigit { key } => write!(f, "no keypad has {key:?}"),
             Self::Recording(kind) => write!(f, "recording: {kind}"),
             Self::NotRecording => f.write_str("nothing is being recorded on this call"),
             Self::AlreadyRecording => f.write_str("this call is already being recorded"),

@@ -82,6 +82,23 @@ pub enum MediaEvent {
     /// emitted, so anything an end-of-call record needs is in here rather than
     /// behind a lookup that would now fail.
     Ended(StreamStatistics),
+    /// The far end pressed a key, or sent some other named telephone event
+    /// (RFC 4733).
+    ///
+    /// One per keypress, not one per packet: RFC 4733 sends a digit as a run
+    /// of updates and then repeats the closing packet three times (§2.5.1.4),
+    /// and reporting each of them would turn one key into five. The event is
+    /// identified by the RTP timestamp it carries (§2.2.1), which is what
+    /// makes collapsing them possible at all.
+    DigitReceived {
+        /// The key, where the event names one. Event codes at and above 16
+        /// are real events that no keypad has a key for.
+        digit: Option<char>,
+        /// The event code itself (§3.2).
+        event: u8,
+        /// How long the far end held it.
+        held: Duration,
+    },
     /// Media could not be started or could not be kept: an answer naming a
     /// codec this build has no decoder for, a description that could not be
     /// read.
