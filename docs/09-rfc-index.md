@@ -48,7 +48,7 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 |---|---|---|---|
 | 3550 | RTP and RTCP | sipral-rtp | phase 1 (send/receive), phase 2 (adaptive buffer) |
 | 3551 | RTP profile for audio and video | sipral-rtp | phase 1 |
-| 4733 | RTP payload for DTMF | sipral-rtp | phase 2 |
+| 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one | sipral-rtp, sipral | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |
 | 5764 | DTLS-SRTP | sipral-rtp | phase 2 |
