@@ -116,11 +116,11 @@ mod tests;
 
 pub use capabilities::Capabilities;
 pub use clock::WallClock;
-pub use codec::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
 pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, SHORTEST_DIGIT};
 pub use echo::MAX_RENDER_DELAY;
-pub use engine::MediaEngine;
+pub use engine::{CallMedia, MediaEngine};
 pub use error::MediaError;
 pub use event::{Event, MediaEvent};
 pub use record::RecordingSink;

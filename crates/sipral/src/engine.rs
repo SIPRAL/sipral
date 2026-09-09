@@ -36,6 +36,18 @@
 //! [`MediaEngine::answer`]. A call placed straight on the user agent is one
 //! this engine has never described anything for, and it is left alone rather
 //! than guessed at.
+//!
+//! # One call, its own catalogue
+//!
+//! [`MediaEngine::place`] and [`MediaEngine::answer`] draw the codec
+//! catalogue and the [`MediaConfig`] a call opens with from this engine's own
+//! defaults, but neither is copied into the call as a standing reference to
+//! them — a call keeps what it started with even if the engine's defaults
+//! change under it later. [`MediaEngine::place_with`] and
+//! [`MediaEngine::answer_with`] take a [`CallMedia`] naming both for one call
+//! alone, which is what an attended transfer needs: `UserAgent::consult`
+//! holds two calls at once, and a global codec order or a global render delay
+//! would make the second one a race against whichever call touches it last.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -50,7 +62,7 @@ use sipral_core::sdp::{
 use sipral_ua::{AccountId, CallHandle, OutgoingCall, StatusCode, UaEvent, UserAgent};
 
 use crate::clock::WallClock;
-use crate::codec::{Codec, CodecCatalog};
+use crate::codec::{Codec, CodecCandidate, CodecCatalog};
 use crate::counters::Counters;
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
@@ -84,11 +96,50 @@ struct Managed {
     /// The `o=` version this end is up to. RFC 3264 §8 makes it the way one
     /// end says "this differs from what I said before".
     version: u64,
+    /// D6: what this call offers and in what order — this engine's default
+    /// unless [`MediaEngine::place_with`] or [`MediaEngine::answer_with`] was
+    /// asked for something else, but this call's own from here on regardless
+    /// of what the engine's default becomes afterwards.
+    catalog: CodecCatalog,
+    /// D6: how this call's session is opened — this engine's default unless
+    /// overridden the same way.
+    config: MediaConfig,
+}
+
+/// What one call opens with, when it is not this engine's defaults.
+///
+/// [`MediaEngine::place_with`] and [`MediaEngine::answer_with`] take one of
+/// these rather than a catalogue and a configuration as two loose parameters:
+/// D6's whole point is that the two travel together as one call's own
+/// choice, and a caller overriding one nearly always has something to say
+/// about the other too — a consultation leg to a gateway that only speaks
+/// one codec is also a call whose render delay and device belong to that
+/// gateway's headset, not to whatever the primary call is using.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallMedia {
+    /// What to offer, in what order.
+    pub catalog: CodecCatalog,
+    /// How to open the session.
+    pub config: MediaConfig,
+}
+
+impl CallMedia {
+    /// Bundle a catalogue and a configuration for one call.
+    #[must_use]
+    pub fn new(catalog: CodecCatalog, config: MediaConfig) -> Self {
+        Self { catalog, config }
+    }
 }
 
 /// Signalling joined to media, for as many calls as there are.
 #[derive(Debug)]
 pub struct MediaEngine {
+    /// The site policy: what a call offers and how its session is opened
+    /// unless [`MediaEngine::place_with`] or [`MediaEngine::answer_with`]
+    /// named something else for it. D6: kept here as the default a call is
+    /// drawn from at the moment it starts, never read again on its behalf
+    /// afterwards — a call's own copy lives in [`Managed`], so changing this
+    /// engine's default cannot move a call already in progress.
     catalog: CodecCatalog,
     config: MediaConfig,
     clock: WallClock,
@@ -120,10 +171,25 @@ impl MediaEngine {
         }
     }
 
-    /// What this build offers, in the order it offers it. A4's first half.
+    /// What this engine offers by default, in the order it offers it — A4's
+    /// first half. A call placed or answered with [`MediaEngine::place_with`]
+    /// or [`MediaEngine::answer_with`] may be running a different one; see
+    /// [`MediaEngine::call_catalog`] for what one specific call is actually
+    /// using.
     #[must_use]
     pub const fn catalog(&self) -> &CodecCatalog {
         &self.catalog
+    }
+
+    /// What one call is actually offering, once it exists — this engine's
+    /// default unless [`MediaEngine::place_with`] or
+    /// [`MediaEngine::answer_with`] gave it its own, and that call's own from
+    /// then on regardless of what [`MediaEngine::catalog`] becomes
+    /// afterwards. `None` for a call this engine has never described anything
+    /// for.
+    #[must_use]
+    pub fn call_catalog(&self, call: CallHandle) -> Option<&CodecCatalog> {
+        self.calls.get(&call).map(|managed| &managed.catalog)
     }
 
     /// D3's flat set of health counters, kept since this engine was created.
@@ -151,7 +217,8 @@ impl MediaEngine {
 // -- placing and answering ---------------------------------------------------
 
 impl MediaEngine {
-    /// Place a call with an offer in it.
+    /// Place a call with an offer in it, offered from this engine's default
+    /// catalogue and opened on its default [`MediaConfig`].
     ///
     /// `local` is where this end will receive media: the application owns the
     /// socket, so it is the only one that can say. Any offer already set on
@@ -168,8 +235,33 @@ impl MediaEngine {
         local: SocketAddr,
         now: Instant,
     ) -> Result<CallHandle, MediaError> {
+        let media = CallMedia::new(self.catalog.clone(), self.config.clone());
+        self.place_with(agent, account, outgoing, local, media, now)
+    }
+
+    /// The same as [`MediaEngine::place`], offering and opening the session
+    /// on `media` instead of this engine's defaults.
+    ///
+    /// D6: what an attended transfer needs. `UserAgent::consult` holds a
+    /// second call while the first is still up, and the consultation leg may
+    /// have to reach a different codec, a different render delay or a
+    /// different device than the call it is standing in for — without moving
+    /// what every other call this engine places gets.
+    ///
+    /// # Errors
+    /// [`MediaError::Signalling`] when the user agent refuses the call.
+    pub fn place_with(
+        &mut self,
+        agent: &mut UserAgent,
+        account: AccountId,
+        outgoing: OutgoingCall,
+        local: SocketAddr,
+        media: CallMedia,
+        now: Instant,
+    ) -> Result<CallHandle, MediaError> {
+        let CallMedia { catalog, config } = media;
         let (identity, session_id) = draw(agent);
-        let offer = self.write_offer(local, session_id, 1);
+        let offer = write_offer(&catalog, local, session_id, 1);
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
         self.calls.insert(
@@ -181,12 +273,16 @@ impl MediaEngine {
                 identity,
                 session_id,
                 version: 1,
+                catalog,
+                config,
             },
         );
         Ok(call)
     }
 
-    /// Answer a call that came in, with the answer to the offer it carried.
+    /// Answer a call that came in, with the answer to the offer it carried,
+    /// kept to what this call has already recorded as its catalogue, and
+    /// opened on this engine's default [`MediaConfig`].
     ///
     /// # Errors
     /// [`MediaError::NoSuchCall`] for a call this engine never saw arrive,
@@ -206,11 +302,36 @@ impl MediaEngine {
         local: SocketAddr,
         now: Instant,
     ) -> Result<(), MediaError> {
+        let catalog = self
+            .calls
+            .get(&call)
+            .ok_or(MediaError::NoSuchCall)?
+            .catalog
+            .clone();
+        let media = CallMedia::new(catalog, self.config.clone());
+        self.answer_with(agent, call, local, media, now)
+    }
+
+    /// The same as [`MediaEngine::answer`], keeping `media`'s catalogue for
+    /// this call from here on and opening the session on `media`'s
+    /// configuration instead of this engine's default.
+    ///
+    /// # Errors
+    /// The same as [`MediaEngine::answer`].
+    pub fn answer_with(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        media: CallMedia,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let CallMedia { catalog, config } = media;
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
         let description = match managed.remote.clone() {
-            Some(offer) => self.write_answer(&offer, local, session_id, version)?,
-            None => self.write_offer(local, session_id, version),
+            Some(offer) => write_answer(&catalog, &offer, local, session_id, version)?,
+            None => write_offer(&catalog, local, session_id, version),
         };
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
@@ -218,6 +339,8 @@ impl MediaEngine {
             managed.local = Some(description);
             managed.address = Some(local);
             managed.version = version;
+            managed.catalog = catalog;
+            managed.config = config;
         }
         Ok(())
     }
@@ -321,6 +444,11 @@ impl MediaEngine {
 impl MediaEngine {
     /// A call came in: keep whatever offer it carried, and mint the numbers
     /// its stream will start from.
+    ///
+    /// This engine's default catalogue and configuration are recorded for the
+    /// call now, before the application has had a chance to say anything
+    /// about it — [`MediaEngine::answer_with`] replaces them for this call
+    /// alone when it is asked to.
     fn arrived(&mut self, call: CallHandle, request: &OwnedMessage, agent: &mut UserAgent) {
         let (identity, session_id) = draw(agent);
         self.calls.insert(
@@ -332,13 +460,17 @@ impl MediaEngine {
                 identity,
                 session_id,
                 version: 1,
+                catalog: self.catalog.clone(),
+                config: self.config.clone(),
             },
         );
     }
 
     /// A proxy forked the INVITE: the new branch was offered exactly what the
     /// old one was, so it inherits the description and gets a stream of its
-    /// own to start from.
+    /// own to start from — the catalogue and configuration included, since a
+    /// fork is the same call reaching two destinations, not two calls that
+    /// happen to have started together.
     fn forked(&mut self, call: CallHandle, sibling: CallHandle, agent: &mut UserAgent) {
         let Some(parent) = self.calls.get(&call).cloned() else {
             return;
@@ -413,7 +545,8 @@ impl MediaEngine {
         };
         let version = managed.version.saturating_add(1);
         let session_id = managed.session_id;
-        match self.write_answer(&offer, address, session_id, version) {
+        let catalog = managed.catalog.clone();
+        match write_answer(&catalog, &offer, address, session_id, version) {
             Ok(answer) => {
                 let bytes = answer.to_bytes();
                 if agent.accept_reoffer(call, Some(&bytes), now).is_ok()
@@ -481,11 +614,18 @@ impl MediaEngine {
                 return;
             }
         };
+        // D5: recorded here, at the point the negotiation is worked out, from
+        // the far end's own description and this call's own catalogue —
+        // never reconstructed later from state that may have moved on
+        let candidates = remote
+            .media
+            .first()
+            .map_or_else(Vec::new, |stream| managed.catalog.candidates(stream, codec));
         match self.sessions.get_mut(&call) {
             // the same codec on a session that is already running: a hold, a
             // resume, or a peer that moved its address
             Some(session) if session.codec() == codec => {
-                session.adopt(&plan, now);
+                session.adopt(&plan, candidates, now);
                 self.events.push_back((
                     call,
                     MediaEvent::Changed {
@@ -496,22 +636,30 @@ impl MediaEngine {
             }
             // a different codec needs a different encoder, a different decoder
             // and a different frame length, so it needs a different session
-            _ => self.start(call, &plan, codec, now),
+            _ => self.start(call, &plan, codec, candidates, now),
         }
     }
 
     /// Open the stream for a plan, replacing whatever was there.
-    fn start(&mut self, call: CallHandle, plan: &MediaPlan, codec: Codec, now: Instant) {
+    fn start(
+        &mut self,
+        call: CallHandle,
+        plan: &MediaPlan,
+        codec: Codec,
+        candidates: Vec<CodecCandidate>,
+        now: Instant,
+    ) {
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
         let replacing = self.sessions.contains_key(&call);
         let opened = MediaSession::open(
             plan,
-            self.catalog.frame_length(),
-            &self.config,
+            managed.catalog.frame_length(),
+            &managed.config,
             managed.identity,
             self.clock,
+            candidates,
             now,
         );
         match opened {
@@ -541,120 +689,128 @@ impl MediaEngine {
     }
 }
 
-// -- writing descriptions ----------------------------------------------------
+// -- writing descriptions -----------------------------------------------------
+//
+// Free functions rather than methods, because D6 made the catalogue a
+// property of the call rather than of the engine: what these write depends on
+// which catalogue a caller hands them, and a method on `MediaEngine` would
+// have made `self.catalog` too easy to reach for by habit where a call's own
+// belongs instead.
 
-impl MediaEngine {
-    /// The offer this catalogue makes, for media arriving at `address`.
-    fn write_offer(
-        &self,
-        address: SocketAddr,
-        session_id: u64,
-        version: u64,
-    ) -> SessionDescription {
-        let mut description = SessionDescription::new(
+/// The offer `catalog` makes, for media arriving at `address`.
+fn write_offer(
+    catalog: &CodecCatalog,
+    address: SocketAddr,
+    session_id: u64,
+    version: u64,
+) -> SessionDescription {
+    let mut description = SessionDescription::new(
+        Origin::new(session_id, version, address.ip()),
+        Connection::new(address.ip()),
+    );
+    description.media.push(catalog.capabilities().offer(
+        AUDIO,
+        address.port(),
+        Direction::SendRecv,
+    ));
+    description
+}
+
+/// The answer to an offer that arrived, kept to what `catalog` holds.
+///
+/// One stream is taken and every other is refused, whatever it is. This
+/// end has one media address, and a second audio stream would need a
+/// second one; RFC 3264 §6 wants the refusal written as a port of zero in
+/// the same position rather than a stream left out, which is what
+/// [`StreamAnswer::Reject`] produces.
+fn write_answer(
+    catalog: &CodecCatalog,
+    offer: &SessionDescription,
+    address: SocketAddr,
+    session_id: u64,
+    version: u64,
+) -> Result<SessionDescription, MediaError> {
+    let mut taken = false;
+    let streams: Vec<StreamAnswer> = offer
+        .media
+        .iter()
+        .map(|offered| {
+            if taken {
+                return StreamAnswer::Reject;
+            }
+            let answer = take_stream(catalog, offered, address);
+            taken = matches!(answer, StreamAnswer::Accept(_));
+            answer
+        })
+        .collect();
+    offer
+        .answer(
             Origin::new(session_id, version, address.ip()),
             Connection::new(address.ip()),
-        );
-        description.media.push(self.catalog.capabilities().offer(
-            AUDIO,
-            address.port(),
-            Direction::SendRecv,
-        ));
-        description
-    }
+            &streams,
+        )
+        .map_err(MediaError::from)
+}
 
-    /// The answer to an offer that arrived.
-    ///
-    /// One stream is taken and every other is refused, whatever it is. This
-    /// end has one media address, and a second audio stream would need a
-    /// second one; RFC 3264 §6 wants the refusal written as a port of zero in
-    /// the same position rather than a stream left out, which is what
-    /// [`StreamAnswer::Reject`] produces.
-    fn write_answer(
-        &self,
-        offer: &SessionDescription,
-        address: SocketAddr,
-        session_id: u64,
-        version: u64,
-    ) -> Result<SessionDescription, MediaError> {
-        let mut taken = false;
-        let streams: Vec<StreamAnswer> = offer
-            .media
-            .iter()
-            .map(|offered| {
-                if taken {
-                    return StreamAnswer::Reject;
-                }
-                let answer = self.take_stream(offered, address);
-                taken = matches!(answer, StreamAnswer::Accept(_));
-                answer
-            })
-            .collect();
-        offer
-            .answer(
-                Origin::new(session_id, version, address.ip()),
-                Connection::new(address.ip()),
-                &streams,
-            )
-            .map_err(MediaError::from)
+/// What to do with one offered stream, kept to what `catalog` holds.
+fn take_stream(
+    catalog: &CodecCatalog,
+    offered: &MediaDescription,
+    address: SocketAddr,
+) -> StreamAnswer {
+    if offered.media != AUDIO || offered.is_rejected() {
+        return StreamAnswer::Reject;
     }
-
-    /// What to do with one offered stream.
-    fn take_stream(&self, offered: &MediaDescription, address: SocketAddr) -> StreamAnswer {
-        if offered.media != AUDIO || offered.is_rejected() {
-            return StreamAnswer::Reject;
-        }
-        let (formats, any_codec) = self.keepable(offered);
-        if !any_codec {
-            return StreamAnswer::Reject;
-        }
-        let names: Vec<&str> = formats.iter().map(String::as_str).collect();
-        let mut accepted = AcceptedStream::in_offer_order(address.port(), offered, &names)
-            .with_direction(Direction::SendRecv);
-        // RFC 5761 §5.1.1: multiplexing happens only where both ends asked for
-        // it, so the answer says so only if the offer did and this build wants
-        // it
-        if self.catalog.capabilities().rtcp_mux && offered.has_rtcp_mux() {
-            accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
-        }
-        StreamAnswer::Accept(accepted)
+    let (formats, any_codec) = keepable(catalog, offered);
+    if !any_codec {
+        return StreamAnswer::Reject;
     }
+    let names: Vec<&str> = formats.iter().map(String::as_str).collect();
+    let mut accepted = AcceptedStream::in_offer_order(address.port(), offered, &names)
+        .with_direction(Direction::SendRecv);
+    // RFC 5761 §5.1.1: multiplexing happens only where both ends asked for
+    // it, so the answer says so only if the offer did and this catalogue
+    // wants it
+    if catalog.capabilities().rtcp_mux && offered.has_rtcp_mux() {
+        accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
+    }
+    StreamAnswer::Accept(accepted)
+}
 
-    /// The formats of an offer this build would keep, and whether any of them
-    /// is a codec.
-    ///
-    /// The numbers are the offer's own, which is the whole reason this is not
-    /// a comparison against our own payload types: a dynamic type means
-    /// whatever the offer's `a=rtpmap` called it, and a peer that numbers Opus
-    /// 111 has said the same thing we say with 96.
-    fn keepable(&self, offered: &MediaDescription) -> (Vec<String>, bool) {
-        let mut formats = Vec::with_capacity(offered.formats.len());
-        let mut any_codec = false;
-        for format in &offered.formats {
-            let Ok(payload) = format.parse::<u8>() else {
-                continue;
-            };
-            let Some(rtpmap) = offered.rtpmap(payload).or_else(|| static_rtpmap(payload)) else {
-                continue;
-            };
-            let named = NegotiatedCodec::new(rtpmap);
-            if named.is_encoding(TELEPHONE_EVENT) {
-                if self.catalog.capabilities().dtmf {
-                    formats.push(format.clone());
-                }
-                continue;
-            }
-            if named.is_encoding(COMFORT_NOISE) {
+/// The formats of an offer `catalog` would keep, and whether any of them is a
+/// codec.
+///
+/// The numbers are the offer's own, which is the whole reason this is not
+/// a comparison against our own payload types: a dynamic type means
+/// whatever the offer's `a=rtpmap` called it, and a peer that numbers Opus
+/// 111 has said the same thing we say with 96.
+fn keepable(catalog: &CodecCatalog, offered: &MediaDescription) -> (Vec<String>, bool) {
+    let mut formats = Vec::with_capacity(offered.formats.len());
+    let mut any_codec = false;
+    for format in &offered.formats {
+        let Ok(payload) = format.parse::<u8>() else {
+            continue;
+        };
+        let Some(rtpmap) = offered.rtpmap(payload).or_else(|| static_rtpmap(payload)) else {
+            continue;
+        };
+        let named = NegotiatedCodec::new(rtpmap);
+        if named.is_encoding(TELEPHONE_EVENT) {
+            if catalog.capabilities().dtmf {
                 formats.push(format.clone());
-                continue;
             }
-            if Codec::of(&named).is_some_and(|codec| self.catalog.codecs().contains(&codec)) {
-                formats.push(format.clone());
-                any_codec = true;
-            }
+            continue;
         }
-        (formats, any_codec)
+        if named.is_encoding(COMFORT_NOISE) {
+            formats.push(format.clone());
+            continue;
+        }
+        if Codec::of(&named).is_some_and(|codec| catalog.codecs().contains(&codec)) {
+            formats.push(format.clone());
+            any_codec = true;
+        }
     }
+    (formats, any_codec)
 }
 
 /// The session description in a message body, when it has one this stack can
@@ -825,6 +981,7 @@ mod counter_wiring {
             &config,
             identity,
             WallClock::from_unix(now, 1_700_000_000, 0),
+            Vec::new(),
             now,
         )
         .expect("PCMU is always in this build's catalogue");

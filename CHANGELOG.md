@@ -65,6 +65,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The engine says why the codecs that lost, lost** (D5), and **a call carries
+  its own catalogue** (D6, A2). "PCMU was chosen" is a fact; "Opus was offered
+  and the answer never named it, G.722 was offered and the far end's own order
+  put PCMU first" is a diagnosis, and it is what makes a wrong configuration
+  visible instead of inferred from a capture. Every codec the call's catalogue
+  could have offered now carries exactly one outcome, worked out at the moment
+  the plan is settled rather than reconstructed afterwards — a reconstruction
+  can be wrong in precisely the case somebody is debugging.
+
+  The catalogue, the media configuration and the device are properties of a
+  call now, not of the process. Two calls up is not hypothetical in a stack
+  that has attended transfer, and every global mutable value in an engine is a
+  race waiting for the second call. The process-wide default stays, because one
+  codec order per site is the ordinary case; what is new is that a call can be
+  placed with its own and keep it.
+
+  Two things were checked before being built and turned out to need nothing:
+  the transport half of D5 is already covered by the diagnostic record, and the
+  NAT half has no decision to report because nothing in the tree reaches
+  `sipral-nat` yet — which is `docs/06-nat.md`'s own admission, now confirmed
+  from the other side.
+
 - **Every call carries the story of what the stack decided** (D1). An ordered,
   bounded record per `Call-ID`: a stable reason code, the wire event that caused
   it with its size on the wire, a monotonic offset, and the addresses and limits

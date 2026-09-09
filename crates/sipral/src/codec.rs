@@ -31,7 +31,9 @@
 //! calls it a packet, which is why [`Codec::sample_rate`] and
 //! [`Codec::clock_rate`] are two functions and not one.
 
-use sipral_core::sdp::{MediaCapabilities, MediaPlan, NegotiatedCodec, RtpMap};
+use sipral_core::sdp::{
+    MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, static_rtpmap,
+};
 use sipral_media::{g711, g722, opus};
 
 use crate::error::MediaError;
@@ -216,6 +218,25 @@ impl Codec {
             encoding: plan.codec.rtpmap.encoding.clone(),
         })
     }
+
+    /// Every codec this build recognises among a stream's listed formats.
+    ///
+    /// Membership only, in no particular order: telling one candidate from
+    /// another only needs to know whether the far end named it at all, and
+    /// which one it preferred is already spent deciding the winner a caller
+    /// hands to [`CodecCatalog::candidates`].
+    #[must_use]
+    pub fn named_in(stream: &MediaDescription) -> Vec<Self> {
+        stream
+            .formats
+            .iter()
+            .filter_map(|format| {
+                let payload: u8 = format.parse().ok()?;
+                let rtpmap = stream.rtpmap(payload).or_else(|| static_rtpmap(payload))?;
+                Self::of(&NegotiatedCodec::new(rtpmap))
+            })
+            .collect()
+    }
 }
 
 impl core::fmt::Display for Codec {
@@ -226,9 +247,18 @@ impl core::fmt::Display for Codec {
 
 /// What to offer, in what order, and how a frame is cut.
 ///
-/// One per stack rather than one per call: this is a configuration, and a
-/// stack whose codec order changed between two calls would be a stack nobody
-/// could support.
+/// A stack keeps one as its site policy — what a carrier or a PBX deployment
+/// configures once — and every call takes it unless told otherwise, which is
+/// what keeps two calls on the same engine comparable rather than each one a
+/// surprise. D6 in `docs/13-client-requirements.md` still asks for a way out:
+/// an attended transfer holds two calls at once, and a consultation leg to a
+/// gateway that only speaks one codec needs its own order without changing
+/// what every other call on the same engine offers.
+/// [`place_with`](crate::MediaEngine::place_with) and
+/// [`answer_with`](crate::MediaEngine::answer_with) are that way out — an
+/// explicit catalogue named for one call, not a global anybody could be
+/// mutating underneath a call already in progress, which is the race D6 is
+/// actually about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodecCatalog {
     order: Vec<Codec>,
@@ -361,6 +391,68 @@ impl CodecCatalog {
             .with_dtmf(self.dtmf)
             .with_rtcp_mux(self.rtcp_mux)
     }
+
+    /// What became of every codec in this catalogue, once a call settled on
+    /// `winner` — D5's losers, not only its winner.
+    ///
+    /// `remote` is the far end's own description of the stream: the answer,
+    /// when this build placed the call, and the offer, when it answered one
+    /// — whichever [`SessionDescription::media_plan`](sipral_core::sdp::SessionDescription::media_plan)
+    /// read `winner` off of. Computed once, at the point the negotiation is
+    /// worked out, rather than reconstructed afterwards from the two SDP
+    /// bodies: a reconstruction can disagree with what the negotiation
+    /// actually did in exactly the case somebody is debugging.
+    #[must_use]
+    pub fn candidates(&self, remote: &MediaDescription, winner: Codec) -> Vec<CodecCandidate> {
+        let named = Codec::named_in(remote);
+        self.order
+            .iter()
+            .map(|&codec| {
+                let outcome = if codec == winner {
+                    CodecOutcome::Chosen
+                } else if named.contains(&codec) {
+                    CodecOutcome::Outranked(winner)
+                } else {
+                    CodecOutcome::NotNamed
+                };
+                CodecCandidate { codec, outcome }
+            })
+            .collect()
+    }
+}
+
+/// One codec this build could have used on a call, and what became of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodecCandidate {
+    /// The codec.
+    pub codec: Codec,
+    /// What happened to it.
+    pub outcome: CodecOutcome,
+}
+
+/// Why a candidate did or did not become the codec a call is using.
+///
+/// "PCMU was chosen" is a fact a live call already reports
+/// ([`crate::MediaEvent::Started`]); this is the diagnosis, and it is what
+/// turns a wrong configuration into something visible instead of something
+/// inferred from a packet capture (D5, B6, in
+/// `docs/13-client-requirements.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CodecOutcome {
+    /// This is what the call settled on. Appears exactly once per call, on
+    /// [`MediaSession::codec`](crate::MediaSession::codec)'s own answer.
+    Chosen,
+    /// The far end's own description of the stream never named it, so there
+    /// was nothing on the other side to agree with — "Opus was offered and
+    /// the answer did not name it" is this variant.
+    NotNamed,
+    /// The far end named it too, but the candidate this carries was
+    /// preferred first — "G.722 was offered and this build ranked it below
+    /// PCMU" is this variant, carrying PCMU. RFC 3264 §6.1 is what has the
+    /// far end's own listed order decide between two candidates both sides
+    /// could use.
+    Outranked(Codec),
 }
 
 impl Default for CodecCatalog {
@@ -371,7 +463,7 @@ impl Default for CodecCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+    use super::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
     use crate::error::MediaError;
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtpMap};
 
@@ -550,5 +642,59 @@ mod tests {
             parameters: None,
         });
         assert_eq!(Codec::of(&unknown), None);
+    }
+
+    /// A stream's own formats, read back as codecs regardless of what this
+    /// catalogue offers — membership, not agreement.
+    #[test]
+    fn named_in_reads_every_codec_a_stream_lists_by_encoding_not_by_number() {
+        let stream = CodecCatalog::with_order(&["opus", "PCMU"])
+            .unwrap()
+            .capabilities()
+            .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(Codec::named_in(&stream), [Codec::Opus, Codec::Pcmu]);
+
+        // named events and comfort noise are not codecs, whatever number they
+        // land on
+        let with_events =
+            CodecCatalog::new()
+                .capabilities()
+                .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(
+            Codec::named_in(&with_events),
+            [Codec::Opus, Codec::G722, Codec::Pcmu, Codec::Pcma]
+        );
+    }
+
+    /// D5: the codec chosen and why each other candidate was not — a lost
+    /// candidate is either never named by the far end, or named and beaten by
+    /// whichever candidate its own list preferred first.
+    #[test]
+    fn candidates_says_why_each_codec_that_was_not_chosen_was_not() {
+        let catalog = CodecCatalog::with_order(&["opus", "PCMA", "PCMU"]).unwrap();
+        // the far end's own description names only PCMA and PCMU, PCMA first
+        let remote = CodecCatalog::with_order(&["PCMA", "PCMU"])
+            .unwrap()
+            .capabilities()
+            .offer("audio", 40_002, Direction::SendRecv);
+
+        let outcomes = catalog.candidates(&remote, Codec::Pcma);
+        assert_eq!(
+            outcomes,
+            vec![
+                CodecCandidate {
+                    codec: Codec::Opus,
+                    outcome: CodecOutcome::NotNamed,
+                },
+                CodecCandidate {
+                    codec: Codec::Pcma,
+                    outcome: CodecOutcome::Chosen,
+                },
+                CodecCandidate {
+                    codec: Codec::Pcmu,
+                    outcome: CodecOutcome::Outranked(Codec::Pcma),
+                },
+            ]
+        );
     }
 }

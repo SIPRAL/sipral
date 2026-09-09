@@ -22,15 +22,15 @@ use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{Direction, SessionDescription, parse};
 
-use crate::codec::{Codec, CodecCatalog};
+use crate::codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome};
 use crate::dtmf::{DEFAULT_DIGIT, Digit};
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
 use crate::record::tests::Buffer;
 use crate::session::{Arrival, MediaConfig, MediaSession, Playback, StreamIdentity};
 use crate::{
-    Account, AccountId, CallHandle, EndpointConfig, Input, MediaEngine, OutgoingCall, TransportId,
-    TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
+    Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, MediaEngine, OutgoingCall,
+    TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
 };
 
 const UDP: TransportId = TransportId(1);
@@ -169,6 +169,23 @@ impl Stack {
             _ => None,
         })
     }
+
+    /// Every call this side has heard about, first-seen order. What
+    /// [`Stack::call`] cannot answer once there is more than one — an
+    /// attended transfer's consultation leg among them.
+    fn calls(&self) -> Vec<CallHandle> {
+        let mut found = Vec::new();
+        for event in &self.heard {
+            if let Event::Signalling(
+                UaEvent::IncomingCall { call, .. } | UaEvent::CallConfirmed { call, .. },
+            ) = event
+                && !found.contains(call)
+            {
+                found.push(*call);
+            }
+        }
+        found
+    }
 }
 
 /// The two stacks, wired to each other.
@@ -184,6 +201,18 @@ impl Pair {
         Self {
             caller: Stack::new(11, caller_sip(), caller_media(), catalog.clone(), now),
             callee: Stack::new(22, callee_sip(), callee_media(), catalog, now),
+            now,
+        }
+    }
+
+    /// The same, with a different catalogue on each side — D5's three
+    /// outcomes only all show up when the two ends do not agree on
+    /// everything.
+    fn asymmetric(placing: CodecCatalog, answering: CodecCatalog) -> Self {
+        let now = Instant::now();
+        Self {
+            caller: Stack::new(11, caller_sip(), caller_media(), placing, now),
+            callee: Stack::new(22, callee_sip(), callee_media(), answering, now),
             now,
         }
     }
@@ -398,6 +427,125 @@ fn reordering_the_catalogue_changes_what_the_call_uses() {
     assert_eq!(session.codec(), Codec::Pcma);
     assert_eq!(session.sample_rate(), 8_000);
     assert_eq!(session.frame_samples(), 160);
+}
+
+/// D5: "PCMU was chosen" is a fact; this is the diagnosis. Three candidates,
+/// three different reasons, on a real pair of stacks rather than on the
+/// negotiation code in isolation.
+#[test]
+fn a_live_call_says_why_every_other_candidate_was_not_chosen() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::with_order(&["opus", "PCMA", "PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order"),
+    );
+    let call = pair.connect();
+
+    // the callee cannot do Opus, so the caller's offer of it goes nowhere;
+    // both ends do PCMA and PCMU, and the callee's answer names PCMA first
+    let candidates = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .codec_candidates();
+    assert_eq!(
+        candidates,
+        [
+            CodecCandidate {
+                codec: Codec::Opus,
+                outcome: CodecOutcome::NotNamed,
+            },
+            CodecCandidate {
+                codec: Codec::Pcma,
+                outcome: CodecOutcome::Chosen,
+            },
+            CodecCandidate {
+                codec: Codec::Pcmu,
+                outcome: CodecOutcome::Outranked(Codec::Pcma),
+            },
+        ]
+    );
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcma,
+        "the chosen entry has to agree with what the call actually settled on"
+    );
+}
+
+/// D6: a second call on the same engine, placed with its own catalogue and
+/// its own device, does not move what the first call is using or what the
+/// engine's own default is — the shape an attended transfer needs, since
+/// `UserAgent::consult` is exactly two live calls on one engine.
+#[test]
+fn two_calls_on_one_engine_keep_their_own_catalogue_and_device() {
+    let default_catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(default_catalog.clone());
+    let primary = pair.connect();
+
+    let account = pair.caller.account("alice-consult", callee_sip());
+    let consult_catalog = CodecCatalog::with_order(&["PCMA"]).expect("an order");
+    let consult_config = MediaConfig {
+        device: Some("bluetooth-headset-2".to_owned()),
+        ..MediaConfig::default()
+    };
+    let consult = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            "192.0.2.1:40010".parse().expect("an address"),
+            CallMedia::new(consult_catalog.clone(), consult_config),
+            pair.now,
+        )
+        .expect("the second INVITE goes");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    let consult_remote = *pair
+        .callee
+        .calls()
+        .last()
+        .expect("the callee has heard about two calls by now");
+
+    // the consult leg landed on what it was told to, not on the engine's
+    // default
+    assert_eq!(
+        pair.caller.engine.session(consult).expect("media").codec(),
+        Codec::Pcma
+    );
+    assert_eq!(
+        pair.caller.engine.session(consult).expect("media").device(),
+        Some("bluetooth-headset-2")
+    );
+    assert_eq!(
+        pair.caller.engine.call_catalog(consult),
+        Some(&consult_catalog)
+    );
+
+    // the primary call is untouched: still the engine's default catalogue,
+    // still no device recorded on it, still PCMU
+    assert_eq!(
+        pair.caller.engine.session(primary).expect("media").codec(),
+        Codec::Pcmu
+    );
+    assert_eq!(
+        pair.caller.engine.session(primary).expect("media").device(),
+        None
+    );
+    assert_eq!(
+        pair.caller.engine.call_catalog(primary),
+        Some(&default_catalog)
+    );
+
+    // and the engine's own default was never touched by placing the second
+    // call with a catalogue of its own
+    assert_eq!(pair.caller.engine.catalog(), &default_catalog);
+
+    // both calls really are up, on both ends, at once
+    assert!(pair.callee.engine.session(consult_remote).is_some());
+    assert!(pair.caller.engine.session(primary).is_some());
 }
 
 /// Audio put in one end comes out of the other, at the right length and loud
@@ -1155,6 +1303,7 @@ fn session(local: &SessionDescription, remote: &SessionDescription, now: Instant
             seed: 7,
         },
         WallClock::from_unix(now, 1_700_000_000, 0),
+        Vec::new(),
         now,
     )
     .expect("the session opens")
@@ -1263,6 +1412,7 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
             seed: 7,
         },
         WallClock::from_unix(now, 1_700_000_000, 0),
+        Vec::new(),
         now,
     );
     assert_eq!(

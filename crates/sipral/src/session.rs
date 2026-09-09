@@ -50,7 +50,7 @@ use sipral_rtp::{
 };
 
 use crate::clock::WallClock;
-use crate::codec::Codec;
+use crate::codec::{Codec, CodecCandidate};
 use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, SHORTEST_DIGIT};
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
@@ -172,6 +172,19 @@ pub struct MediaConfig {
     /// [`MAX_RENDER_DELAY`](crate::MAX_RENDER_DELAY), because a delay that
     /// long is a wrong number rather than a slow device.
     pub render_delay: Duration,
+    /// Which physical device this call's audio is on, as an opaque identity
+    /// the application chose.
+    ///
+    /// This crate never opens a device and never reads this string; it only
+    /// carries it, the way it carries [`MediaConfig::render_delay`], so that
+    /// "which headset is call X on" (A2 in `docs/13-client-requirements.md`)
+    /// has an answer on the call itself rather than in a side table an
+    /// application has to keep in step with the call table by hand — which is
+    /// exactly the kind of global D6 is about, because the table only has one
+    /// entry per call until somebody starts a second call on a different
+    /// headset. `None` is a call whose device has not been recorded, not a
+    /// call known to be on the system default.
+    pub device: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -182,6 +195,7 @@ impl Default for MediaConfig {
             stall_after: Some(DEFAULT_STALL),
             silence_suppression: false,
             render_delay: Duration::ZERO,
+            device: None,
         }
     }
 }
@@ -243,10 +257,19 @@ pub struct MediaSession {
     /// them.
     heard: Option<EventReceiver>,
     events: VecDeque<MediaEvent>,
+    /// D5: what became of every codec this call's catalogue could have used.
+    codec_candidates: Vec<CodecCandidate>,
+    /// A2, D6: which device this call's audio is on, carried rather than
+    /// interpreted. See [`MediaConfig::device`].
+    device: Option<String>,
 }
 
 impl MediaSession {
     /// Open the media for a plan the negotiation produced.
+    ///
+    /// `candidates` is D5's record of what became of every codec this call's
+    /// catalogue could have used, already worked out by the caller — a
+    /// negotiation this crate does not repeat and cannot get wrong twice.
     ///
     /// # Errors
     /// [`MediaError::UnknownPayload`] when the answer named a format this
@@ -259,6 +282,7 @@ impl MediaSession {
         config: &MediaConfig,
         identity: StreamIdentity,
         clock: WallClock,
+        candidates: Vec<CodecCandidate>,
         now: Instant,
     ) -> Result<Self, MediaError> {
         let agreed = Codec::of_plan(plan)?;
@@ -317,6 +341,8 @@ impl MediaSession {
             dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
             heard: plan.dtmf.map(EventReceiver::new),
             events: VecDeque::new(),
+            codec_candidates: candidates,
+            device: config.device.clone(),
         })
     }
 
@@ -324,6 +350,31 @@ impl MediaSession {
     #[must_use]
     pub const fn codec(&self) -> Codec {
         self.coder.codec()
+    }
+
+    /// D5: what became of every codec this call's catalogue could have used.
+    /// Exactly one entry carries [`crate::CodecOutcome::Chosen`], and it names
+    /// [`MediaSession::codec`].
+    #[must_use]
+    pub fn codec_candidates(&self) -> &[CodecCandidate] {
+        &self.codec_candidates
+    }
+
+    /// Which device this call's audio is on, as the opaque identity the
+    /// application last gave it — see [`MediaConfig::device`].
+    #[must_use]
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
+
+    /// Say which device this call has moved to, or that it has none.
+    ///
+    /// Matches [`MediaSession::set_render_delay`] in shape and in reason: a
+    /// headset reconnecting over Bluetooth mid-call is exactly when this
+    /// changes, so the application learns it after the call is already up as
+    /// often as before it.
+    pub fn set_device(&mut self, device: Option<String>) {
+        self.device = device;
     }
 
     /// The rate the samples handed to and taken from this session are at,
@@ -789,7 +840,17 @@ impl MediaSession {
     /// the honest way to get those is a new session — so
     /// [`MediaEngine`](crate::MediaEngine) opens one rather than calling this
     /// when the answer names a different one.
-    pub(crate) fn adopt(&mut self, plan: &MediaPlan, now: Instant) {
+    ///
+    /// `candidates` replaces D5's record with what the fresh pair of
+    /// descriptions says now — a hold or a resume still runs a negotiation,
+    /// and the losers it names can differ from the ones that opened the
+    /// session even though the codec itself did not move.
+    pub(crate) fn adopt(
+        &mut self,
+        plan: &MediaPlan,
+        candidates: Vec<CodecCandidate>,
+        now: Instant,
+    ) {
         if plan.remote != self.plan.remote {
             self.rtp.relocate(plan.remote);
             // a far end that moved its media address has almost always
@@ -799,6 +860,7 @@ impl MediaSession {
             self.last_inbound = now;
         }
         self.plan = plan.clone();
+        self.codec_candidates = candidates;
         // a stream that has just been told to stop receiving must not be
         // reported as stalled for having done so
         if !self.is_receiving() {

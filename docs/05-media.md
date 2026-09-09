@@ -396,3 +396,57 @@ stream onto another device. CoreAudio accepts a device only on an uninitialised
 unit, and a WASAPI client is bound to the endpoint it was activated on. Both are
 answered the same way — the default-changed event says the machine moved, and
 reopening is what re-applies the selection.
+
+## Per call, not per process (D6)
+
+`sipral` never opens a device, so it cannot enumerate one or answer "which
+headset is this call on" from a device object. What it *can* do is carry the
+identity the application already has for one — `MediaConfig::device` is an
+opaque string, set once when a call is placed or answered
+(`MediaEngine::place_with`, `MediaEngine::answer_with`) and changeable mid-call
+with `MediaSession::set_device`, the same shape as
+`MediaSession::set_render_delay` and for the same reason: a Bluetooth headset
+reconnects mid-call, not only before one starts. Reading it back is
+`MediaSession::device`, on the call's own session — not a side table an
+application would otherwise have to keep from drifting out of step with the
+call table itself.
+
+The codec catalogue and the rest of `MediaConfig` — the render delay, the
+stall threshold, the RTCP bandwidth share — follow the same rule. An engine
+keeps one of each as its site policy, and every call takes it by default;
+`MediaEngine::place_with` and `MediaEngine::answer_with` name a catalogue and
+a configuration for one call alone. This is what an attended transfer needs:
+`UserAgent::consult` holds two calls on one engine at once, and a global codec
+order or a global device identity would make the second call a race against
+whichever one touches the global last. A call's recording sink
+(`MediaSession::start_recording`) and its stall watchdog were already per-call
+in storage, one instance per session; what device selection needed was
+somewhere to carry an identity that never existed at all.
+
+## The engine explains its negotiations (D5)
+
+A live call already reports what it settled on
+(`MediaEvent::Started`/`MediaEvent::Changed`, and `MediaSession::codec`). What
+it did not say is why every other candidate was not it, and "PCMU was chosen"
+by itself does not distinguish a peer that never offered anything better from
+a site policy that ranked something better below it — which is exactly the
+distinction B6's failure story turns on.
+
+`MediaSession::codec_candidates` answers this per call, from
+`CodecCatalog::candidates`: for every codec the call's own catalogue could
+have offered, whether it is the one chosen, was never named by the far end's
+own description of the stream, or was named but ranked below the codec that
+won (RFC 3264 §6.1's rule on the far end's listed order). It is computed once,
+at the point `MediaEngine` works out the plan, from the two descriptions and
+the catalogue that produced them — not reconstructed afterwards from
+whatever state happens to still be around, which is the one place a
+reconstruction could disagree with what the negotiation actually did.
+
+The transport half of D5 — which flow a request left on, and why a request
+was promoted onto a stream transport or refused — is `sipral-core`'s
+diagnostic record (`docs/14-diagnostics.md`), already answered without this
+crate's help. Which port carries RTCP, muxed or its own, is already on
+`MediaSession::plan().rtcp`. The NAT half has nothing to answer yet:
+`sipral-nat` exists as a crate but nothing in `sipral` or `sipral-core` calls
+into it, so there is no NAT strategy decision anywhere in this tree to
+explain.
