@@ -1,0 +1,28 @@
+sipral-recording 1
+seed 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+note a registrar that challenges, a binding granted for an hour, one refresh
++0.000000000 bound 1 UDP 192.0.2.1:5060 -
++0.000000000 cue register
++0.040000000 datagram 1 192.0.2.9:5060 192.0.2.1:5060
+| SIP/2.0 401 Unauthorized\r\n
+| Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK8ee39ff3ad4bdce497364379bef2d1fe;rport\r\n
+| From: <sip:alice@example.com>;tag=f3f87c38c7910810adc9525948eab095\r\n
+| To: <sip:alice@example.com>\r\n
+| Call-ID: e49c8d74a73c5bdf49b1186b53e0e547\r\n
+| CSeq: 1 REGISTER\r\n
+| WWW-Authenticate: Digest realm="example.com", nonce="abc123", qop="auth"\r\n
+| Content-Length: 0\r\n
+| \r\n
++0.095000000 datagram 1 192.0.2.9:5060 192.0.2.1:5060
+| SIP/2.0 200 OK\r\n
+| Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKc860afce44b8d67c15882bf0633725bc;rport\r\n
+| From: <sip:alice@example.com>;tag=f3f87c38c7910810adc9525948eab095\r\n
+| To: <sip:alice@example.com>\r\n
+| Call-ID: e49c8d74a73c5bdf49b1186b53e0e547\r\n
+| CSeq: 2 REGISTER\r\n
+| Contact: <sip:alice@192.0.2.1>;expires=3600\r\n
+| Content-Length: 0\r\n
+| \r\n
++5.040000000 wake
++5.095000000 wake
++3060.095000000 wake

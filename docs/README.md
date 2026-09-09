@@ -33,6 +33,7 @@ That is why the history is never squashed and never rewritten.
 | [15-mobile.md](15-mobile.md) | a call announced by a push before it arrives, and a registration that freezes and thaws |
 | [16-lifecycle.md](16-lifecycle.md) | suspend, resume, a network that changed, and what the stack costs when idle |
 | [17-observability.md](17-observability.md) | health counters, capability reporting, and the B2 audit of configuration entry points |
+| [18-replay.md](18-replay.md) | the recorded-session format, what it cannot hold, and what a replay reproduces |
 
 ## Conventions
 

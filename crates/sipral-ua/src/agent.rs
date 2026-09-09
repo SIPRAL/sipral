@@ -28,6 +28,7 @@ use sipral_core::endpoint::{
     TransportId,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode};
+use sipral_core::replay::Driven;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
 };
@@ -219,6 +220,20 @@ impl UserAgent {
     #[must_use]
     pub const fn endpoint(&mut self) -> &mut Endpoint {
         &mut self.endpoint
+    }
+}
+
+/// A recorded session is fed back into whichever layer the bug is thought to
+/// be in (`docs/18-replay.md`), and registration, back-off and call policy are
+/// decided here rather than below. So the same two calls again, under the
+/// trait a replay drives.
+impl Driven for UserAgent {
+    fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
+        Self::receive(self, input, now)
+    }
+
+    fn handle_timeout(&mut self, now: Instant) {
+        Self::handle_timeout(self, now);
     }
 }
 

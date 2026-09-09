@@ -52,6 +52,8 @@ mod options;
 mod registration;
 mod reliable;
 mod renegotiate;
+#[cfg(test)]
+mod replay_tests;
 #[cfg(feature = "reference-loop")]
 mod runtime;
 mod screening;
@@ -91,3 +93,6 @@ pub use sipral_core::endpoint::{
     EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
 };
 pub use sipral_core::msg::{StatusCode, Uri};
+/// Recording a session and feeding it back, which a user agent is driven by
+/// exactly as the endpoint under it is (`docs/18-replay.md`).
+pub use sipral_core::replay::{Driven, Played, Recorder, Recording, Replay};

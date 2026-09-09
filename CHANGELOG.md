@@ -65,6 +65,30 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A session can be recorded and replayed deterministically** (D2). The
+  hardest failures happen on one PBX, on one carrier, behind one NAT, and do
+  not reproduce in a lab; they are fixed today by reasoning about a capture,
+  shipping a guess and waiting. A recording holds the inbound messages, their
+  timing and the seed the run was drawn from, and a replay feeds them back — so
+  the bytes out, the events and the whole diagnostic record come back identical,
+  which is asserted rather than claimed. The sans-I/O core is what makes this
+  nearly free: everything enters through one shape and time was already a
+  parameter.
+
+  **It never contains audio, and that is structural rather than careful.** The
+  format has no binary spelling at all — no escape for an arbitrary byte, no
+  base64, no length prefix — and the only constructor for a payload validates
+  against that alphabet. The honest cost is stated with it: a message with a
+  binary body cannot be recorded either, and the recorder spoils the whole
+  recording rather than dropping the body, because a recording holds every byte
+  the stack was fed or it does not exist.
+
+  One limit is worth knowing before relying on it: what the application does on
+  its own — register, place a call, answer — arrives from nowhere, so it cannot
+  be captured. A recording names those moments instead, and a replay hands the
+  names back at the same offsets. There is a test showing that a replay which
+  ignores them drives a stack that sends nothing.
+
 - **The engine says why the codecs that lost, lost** (D5), and **a call carries
   its own catalogue** (D6, A2). "PCMU was chosen" is a fact; "Opus was offered
   and the answer never named it, G.722 was offered and the far end's own order

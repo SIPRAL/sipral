@@ -135,6 +135,16 @@ Loss, burst loss, jitter, reordering, and combinations of them.
 `fixtures/rfc4475/` holds the IETF corpus. It is public material and is
 committed.
 
+`fixtures/replay/` holds recorded sessions in the format `docs/18-replay.md`
+defines: the inbound messages of a session, their timing and the seed the run
+was drawn from. Each one is a test — replayed, and the bytes, events and
+diagnostic record compared against the run that produced it — so a failure
+captured once is a failure that cannot come back unnoticed. The format is text
+with no binary spelling at all, which is what keeps audio structurally out of
+it rather than merely absent; a recording is still a *transcript of what a peer
+sent*, so one made against a live system is reviewed by hand before it is
+committed, exactly as a capture would be.
+
 Captures from live traffic hold real numbers, real IP addresses and real
 Call-IDs. **They are never committed to this repository.** They live in a
 separate, permanently private repository, and only anonymised subsets reach this
