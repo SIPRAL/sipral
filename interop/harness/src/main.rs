@@ -54,6 +54,21 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// line that is merely open.
 const DWELL: Duration = Duration::from_secs(2);
 
+/// How long to wait for the far end to become transferable before asking
+/// anyway.
+///
+/// A REFER sent the instant the dialog confirms reaches Asterisk before it has
+/// put the channel into a bridge, and a transfer of a channel that is in no
+/// bridge is answered `202` and then reported `400` in the sipfrag. Measured
+/// on the lab's own Asterisk: the REFER was processed and the 400 sent 271
+/// microseconds before the channel joined the bridge. Nothing is wrong with
+/// the REFER — no phone sends one that fast, because a person has to press the
+/// key. What proves the far end is bridged is audio arriving from it, so that
+/// is what is waited for; this is only the cap, so that a server which sends
+/// no audio still gets the REFER and the flow reports the transfer's own
+/// outcome rather than a timeout.
+const SETTLE: Duration = Duration::from_secs(1);
+
 /// The offer the harness makes: G.711, both laws, one stream.
 ///
 /// Both, because offering one is not what a client does. The lab's servers
@@ -250,6 +265,8 @@ struct Script {
     offer: Option<String>,
     /// When to hang up a call that is only there to carry audio.
     listen_until: Option<Instant>,
+    /// When to stop waiting for the far end to be worth handing over.
+    settled_by: Option<Instant>,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -259,6 +276,8 @@ enum Step {
     Registering,
     Placing,
     Talking,
+    /// Up, and waiting for the far end to be worth handing over.
+    Settling,
     Holding,
     Resuming,
     Consulting,
@@ -358,6 +377,14 @@ impl Handler for Script {
             self.listen_until = None;
             self.hang_up(agent, now);
         }
+        // audio coming back is the far end saying it has bridged the call to
+        // something, which is what makes it transferable
+        if let Some(due) = self.settled_by
+            && (self.media.heard().received > 0 || now >= due)
+        {
+            self.settled_by = None;
+            self.advance(agent, now);
+        }
         if self.step == Step::Done || now > self.started + PATIENCE {
             return Control::Stop;
         }
@@ -405,7 +432,13 @@ impl Script {
                     self.tried("resume", asked);
                 }
             }
+            // not straight into the REFER: see SETTLE. The attended flow needs
+            // no such wait, because placing the second leg is itself the delay
             Step::Talking if self.flow == Flow::Blind => {
+                self.step = Step::Settling;
+                self.settled_by = Some(now + SETTLE);
+            }
+            Step::Settling => {
                 self.step = Step::Transferring;
                 if let (Some(call), Some(target)) = (self.call, self.target()) {
                     let asked = agent.transfer(call, &target, now);
@@ -579,9 +612,12 @@ fn run(
     user: &str,
     pass: &str,
 ) -> Result<String, String> {
-    let bind: SocketAddr = "0.0.0.0:0"
-        .parse()
-        .map_err(|_| "cannot parse the bind address".to_owned())?;
+    // The address that reaches the lab, not a wildcard. What this is given is
+    // what goes into every `Via`, and RFC 3261 §18.1.1 makes sent-by the place
+    // a response is sent to; `0.0.0.0` names no such place. Asterisk forgave
+    // it because it answers to `rport`, and that is exactly why it went
+    // unnoticed — a carrier that reads the Via instead will not.
+    let bind = SocketAddr::new(route_to(remote), 0);
     let media = Media::bind(Instant::now())?;
     let mut runtime = Runtime::bind(EndpointConfig::default(), seed(flow), bind)
         .map_err(|error| format!("cannot bind: {error}"))?;
@@ -613,6 +649,7 @@ fn run(
         media,
         offer: None,
         listen_until: None,
+        settled_by: None,
     };
     runtime
         .run(&mut script)

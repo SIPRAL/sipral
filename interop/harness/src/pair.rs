@@ -211,9 +211,9 @@ pub(crate) fn run(
     dialling_user: &str,
     dialling_pass: &str,
 ) -> Result<String, String> {
-    let bind: SocketAddr = "0.0.0.0:0"
-        .parse()
-        .map_err(|_| "cannot parse the bind address".to_owned())?;
+    // the address that reaches the server, for the reason given in `run` in
+    // main.rs: a wildcard here becomes a `Via` naming nowhere
+    let bind = SocketAddr::new(crate::route_to(remote), 0);
 
     let mut answering_rt = Runtime::bind(EndpointConfig::default(), [71; 32], bind)
         .map_err(|error| format!("cannot bind the callee: {error}"))?;
