@@ -37,10 +37,21 @@ command -v docker >/dev/null 2>&1 || {
     exit 2
 }
 
+# The machine that runs the lab need not be the machine that built the harness,
+# and on at least one of ours it cannot be: the host is old enough that libopus
+# will not compile on it, while the containers it runs are current. Build it
+# wherever there is a toolchain and point SIPRAL_HARNESS at the result; it has
+# to be a Linux binary, since that is what the container will run it as.
 step "the harness"
-cargo build --release -p sipral-interop >/dev/null 2>&1 \
-    && pass "built" || { fail "cargo build -p sipral-interop"; exit 1; }
-HARNESS="$ROOT/target/release/sipral-interop"
+if [ -n "${SIPRAL_HARNESS:-}" ]; then
+    [ -x "$SIPRAL_HARNESS" ] || { fail "SIPRAL_HARNESS is not an executable file"; exit 1; }
+    HARNESS="$SIPRAL_HARNESS"
+    pass "taken as given: $HARNESS"
+else
+    cargo build --release -p sipral-interop >/dev/null 2>&1 \
+        && pass "built" || { fail "cargo build -p sipral-interop"; exit 1; }
+    HARNESS="$ROOT/target/release/sipral-interop"
+fi
 
 step "the lab"
 mkdir -p interop/pcap
@@ -61,16 +72,20 @@ trap teardown EXIT
 # probe that needs the image's contents is a probe that breaks when the image
 # is rebuilt.
 wait_for() {
-    local service="$1" phrase="$2" tries=0
+    local service="$1" phrase="$2" required="${3:-required}" tries=0
     while [ "$tries" -lt 45 ]; do
         if ( cd interop && docker compose logs --no-color "$service" 2>/dev/null ) \
             | grep -qF "$phrase"; then
-            pass "$service is up"
+            pass "$service: $phrase"
             return 0
         fi
         tries=$((tries + 1))
         sleep 2
     done
+    if [ "$required" = optional ]; then
+        printf '  note  %s never said "%s"; carrying on\n' "$service" "$phrase"
+        return 1
+    fi
     fail "$service never said it was up"
     ( cd interop && docker compose logs --no-color "$service" | tail -40 )
     return 1
@@ -82,8 +97,7 @@ wait_for freeswitch "MSG Thread 0 Started" || exit 1
 # calls are relayed to the lab's own profile, which comes up after the core
 # does. Not fatal on its own: the harness is the verdict, and a readiness probe
 # that guesses at log wording should not be the thing that fails the run
-wait_for freeswitch "Started Profile lab" \
-    || printf '  note  lab profile not seen in the log; running the flows anyway\n'
+wait_for freeswitch "Started Profile lab" optional || true
 wait_for asterisk "Asterisk Ready" || exit 1
 
 # The capture runs inside the harness's own container, on its own interface.
@@ -119,6 +133,12 @@ flows() {
 # echoed. What is being asked is narrow: with a fifth of a talk spurt missing
 # and the rest arriving out of order, does audio still come back, and does the
 # buffer say what it cost.
+# `tc` accepts what the kernel it is talking to does not necessarily apply, and
+# says nothing when it does not: on a 3.10 kernel the delay is dropped in
+# silence while the loss goes through. A run whose impairment never happened
+# reads exactly like a clean one, which is worse than no run at all -- so the
+# qdisc is read back and the flows only count as an impaired run if what was
+# asked for is actually there.
 bad_network() {
     docker run --rm --network sipral-interop_lab \
         --cap-add NET_ADMIN \
@@ -129,7 +149,12 @@ bad_network() {
             link=$(ip route | awk "/^default/{print \$5}")
             tc qdisc add dev "$link" root netem \
               delay 40ms 15ms loss gemodel 4% 40% 60% 2% reorder 1% 30%
-            tc -s qdisc show dev "$link"
+            applied=$(tc qdisc show dev "$link")
+            echo "$applied"
+            case "$applied" in
+              *delay*) ;;
+              *) echo "IMPAIRMENT-NOT-APPLIED"; exit 3 ;;
+            esac
             /harness kamailio 5060 9000'
 }
 
@@ -148,7 +173,14 @@ fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
     step "the same call, over a bad network"
-    bad_network && pass "audio survived the impairment" || fail "the impaired run"
+    bad_network
+    case $? in
+        0) pass "audio survived the impairment" ;;
+        3) printf '  note  this kernel took the loss and dropped the delay, so the\n' 
+           printf '        impairment did not happen and the run proves nothing.\n'
+           printf '        netem needs a kernel newer than 3.10 for this profile.\n' ;;
+        *) fail "the impaired run" ;;
+    esac
 fi
 
 step "the capture"
