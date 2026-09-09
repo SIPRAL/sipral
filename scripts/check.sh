@@ -162,6 +162,21 @@ done | grep 'Instant::now\|SystemTime::now' || true)
     printf '%s\n' "$clock" | sed 's/^/        /'
 }
 
+# A panic that unwinds into C takes the host process with it, and no C caller
+# can defend itself against that. The `entry!` macro is the only way to declare
+# an entry point and every shape of it catches, so the guarantee holds exactly
+# as long as nobody declares one by hand. That is what this looks for: the
+# macro lives in error.rs and no other file in the workspace may export a
+# symbol.
+step "nothing unwinds into C"
+exported=$(tracked '*.rs' | xargs grep -ln 'no_mangle' 2>/dev/null \
+    | grep -v '^crates/sipral-ffi/src/error\.rs$' || true)
+[ -z "$exported" ] && pass "every C entry point goes through the guard" || {
+    fail "an entry point declared outside the entry! macro:"
+    printf '        %s\n' $exported
+    printf '        use entry! in crates/sipral-ffi, or the panic reaches C.\n'
+}
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }

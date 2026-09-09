@@ -25,6 +25,13 @@ Rules for the ABI:
   input for a living. This is why the release profile keeps `panic = "unwind"`:
   with `panic = "abort"` there is nothing to catch, and Cargo does not allow a
   per-crate override of that setting.
+
+  Held up by two things rather than by care. The `entry!` macro is the only way
+  to declare an entry point, and each of its three shapes reaches for a
+  wrapper that catches; a test panics inside one of each shape and asserts the
+  status that comes back instead. And `scripts/check.sh` fails if any file
+  outside the macro's own module exports a symbol, so an entry point written by
+  hand does not reach a release.
 - **Errors are integer codes** plus a thread-local last-error string. No
   errno-style globals shared between handles.
 - **Events arrive on one callback**, registered per stack handle, carrying a
@@ -35,7 +42,14 @@ Rules for the ABI:
   by the `size` field, or as a new function. Nothing is removed or reordered.
   Ever.
 
-The header is generated from the Rust source in the build, so it cannot drift.
+**The header is not generated yet, and neither are the bindings.** There is no
+C header in the tree and the .NET package is a name reservation. That is the
+state, not the intent: `docs/13-client-requirements.md` B7 makes one source of
+truth for this ABI a requirement, with the Swift, Kotlin and .NET bindings
+generated from it and `scripts/check.sh` failing when one of them is missing a
+function. It is scheduled early in phase 2 for a reason that will not improve
+with waiting — it is cheapest to do while there is one binding to bring into
+line rather than three.
 
 ## Swift
 

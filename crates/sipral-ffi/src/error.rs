@@ -438,4 +438,65 @@ mod tests {
         assert_eq!(message(), "no room");
         assert_eq!(message(), "no room");
     }
+
+    // The three tests above prove the wrappers catch. These prove the macro
+    // reaches for them, which is the half that would rot: an entry point
+    // declared any other way would unwind into C and take the host process
+    // with it, and nothing in the type system says otherwise. Every shape the
+    // macro offers is exercised, because a shape that forgot its wrapper would
+    // be the one nobody used until a customer did.
+    //
+    // `scripts/check.sh` covers the other direction, that nothing declares an
+    // entry point without the macro.
+    // the macro makes them `pub`, which is what a real entry point needs and
+    // what nothing outside this module can reach
+    entry! {
+        #[allow(unreachable_pub)]
+        fn sipral_test_entry_panics() {
+            panic!("from inside an entry point")
+        }
+    }
+
+    entry! {
+        #[allow(unreachable_pub)]
+        quiet fn sipral_test_entry_panics_quietly() {
+            panic!("quietly")
+        }
+    }
+
+    entry! {
+        #[allow(unreachable_pub)]
+        fn sipral_test_entry_panics_with_a_value() -> u32, on_panic = 7, {
+            panic!("with a value")
+        }
+    }
+
+    #[test]
+    fn a_panic_inside_an_entry_point_becomes_a_status() {
+        assert_eq!(
+            unsafe { sipral_test_entry_panics() },
+            SipralStatus::Panic,
+            "it returned rather than unwinding"
+        );
+        assert_eq!(message(), "panic: from inside an entry point");
+    }
+
+    #[test]
+    fn the_quiet_shape_catches_too_and_still_says_nothing() {
+        guard(|| Err(fail(SipralStatus::Exhausted, "kept")));
+        assert_eq!(
+            unsafe { sipral_test_entry_panics_quietly() },
+            SipralStatus::Panic
+        );
+        assert_eq!(
+            message(),
+            "kept",
+            "the quiet shape leaves the message alone even when it panics"
+        );
+    }
+
+    #[test]
+    fn the_shape_that_returns_a_value_falls_back_instead_of_unwinding() {
+        assert_eq!(unsafe { sipral_test_entry_panics_with_a_value() }, 7);
+    }
 }
