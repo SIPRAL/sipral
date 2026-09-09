@@ -44,17 +44,33 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
-- The RTP session notices when the media stops. Signalling stays healthy while
-  audio dies — inbound RTP freezes, both ends sit there, and neither hangs up,
-  because to the dialog the call is still up. Nothing in the protocol notices,
-  which is why every client ends up writing this watchdog and why it is here
-  instead. `RtpSession::media_check` reports on the edge, once when the stream
-  goes quiet and once when it comes back, and `media_deadline` says when to ask
-  again so a caller sets a timer rather than guessing a poll interval. A packet
-  refused for its address or its payload type does not count as the media being
-  alive: one is somebody else's and the other is nobody's.
-  Recovery is deliberately not here. What fixes a stalled stream is a
-  renegotiation, and this crate has no signalling and is not going to grow any.
+- **The `sipral` crate is the facade it was always described as.** It was eleven
+  lines — a name held on crates.io — while `docs/01-architecture.md` said it was
+  where signalling and media meet. Nothing joined them, so `MediaPlan` and
+  `MediaCapabilities` were a vocabulary nobody spoke, and an application that
+  wanted a call with audio in it wrote the join itself.
+
+  It now carries: a codec catalogue that says what this build actually contains,
+  in the order it offers them, and what one live call settled on — a name the
+  build has no encoder for is refused where the order is set rather than dropped
+  where it would have been used; a media session that owns one call's audio,
+  taking the negotiated description, driving the codec and the jitter buffer and
+  comfort noise, allocating nothing per packet and reading no clock; the engine
+  that attaches a session when a call confirms, follows it through hold, resume,
+  a peer that moved and a codec change, and releases it with the call's
+  statistics; call recording, both directions mixed into one WAVE file the crate
+  never opens itself; stream statistics that travel, live and at the end; and a
+  watchdog that says when inbound audio stops and when it comes back, silent
+  while this end is not meant to be receiving, because an alarm that cries wolf
+  during hold is an alarm an application learns to ignore.
+
+  The rule it exists to keep is unchanged: `sipral-ua` still reaches into no
+  media crate and no media crate reaches into it. The join lives here because
+  here is the only place the architecture allows it.
+
+  Deliberately not yet: ICE, SRTP keying and DTMF sending, each with its seam
+  named in the code rather than left to be found. And the C ABI still points at
+  signalling alone, which is the next thing to close.
 
 - One declaration for the ABI's event numbers, and disagreeing with it is a
   build failure. The kinds, their names and their numbers are generated from a

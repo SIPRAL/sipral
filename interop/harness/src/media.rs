@@ -258,10 +258,6 @@ impl Media {
                 playout: BufferConfig::new(FRAME_TICKS),
                 cname: format!("sipral-interop@{}", plan.local.ip()),
                 rtcp_bandwidth: 1000.0,
-                // shorter than the ten seconds a client would use: a flow
-                // here lasts seconds, and a watchdog that could never fire
-                // inside one would go untested by every run
-                media_timeout: Some(Duration::from_secs(3)),
             },
             1.0,
         ));

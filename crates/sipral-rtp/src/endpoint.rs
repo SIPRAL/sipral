@@ -57,33 +57,6 @@ pub struct StreamConfig {
     /// second (§6.2). "RECOMMENDED that the fraction of the session
     /// bandwidth added for RTCP be fixed at 5%".
     pub rtcp_bandwidth: f64,
-    /// How long the inbound stream may go quiet before it is called stopped,
-    /// or `None` not to watch it.
-    ///
-    /// Signalling stays healthy while audio dies: inbound RTP freezes, both
-    /// ends sit there, and neither hangs up, because to the dialog the call is
-    /// still up. Nothing in the protocol notices, which is why every client
-    /// ends up writing this and why it is here instead.
-    ///
-    /// Ten seconds is the suggestion, not a rule from anywhere: at fifty
-    /// packets a second nothing legitimate is that quiet, and a threshold
-    /// short enough to be worth arguing about is a threshold that fires on a
-    /// hiccup and teaches the application to ignore it.
-    pub media_timeout: Option<Duration>,
-}
-
-/// What the inbound stream just started or stopped doing.
-///
-/// Reported on the edge rather than as a condition to be polled: an
-/// application that has to notice a boolean changed is an application that
-/// will notice it late, and the whole point is that nobody should have to
-/// discover audio died.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaFlow {
-    /// Nothing has arrived for longer than [`StreamConfig::media_timeout`].
-    Stopped,
-    /// Something arrived after it had stopped.
-    Resumed,
 }
 
 /// What became of a datagram.
@@ -207,16 +180,6 @@ struct Inbound {
     /// Whether the remote side has been heard sending RTP, for the sender
     /// count §6.3.1's interval calculation splits out from members.
     sender_known: bool,
-    /// How long the stream may go quiet before it is called stopped.
-    media_timeout: Option<Duration>,
-    /// When something last arrived and was kept. Absent until the first
-    /// packet: a stream that never started is not a stream that stopped, and
-    /// reporting the two the same way sends somebody looking for a fault where
-    /// there is only a call that has not begun.
-    last_arrival: Option<Duration>,
-    /// Whether [`MediaFlow::Stopped`] has already been reported, so that it is
-    /// reported once rather than on every poll.
-    quiet: bool,
 }
 
 impl RtpSession {
@@ -273,9 +236,6 @@ impl RtpSession {
                 rtcp: ReceptionTracker::new(),
                 member_known: false,
                 sender_known: false,
-                media_timeout: config.media_timeout,
-                last_arrival: None,
-                quiet: false,
             },
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
@@ -447,57 +407,10 @@ impl RtpSession {
             .on_packet(header.timestamp, clock_ticks(self.outbound.clock_rate, now));
 
         match self.inbound.buffer.insert(&packet, now) {
-            Insert::Accepted | Insert::Displaced(_) => {
-                // only a packet that will be played counts as the media being
-                // alive. One refused for its address or its payload type is
-                // somebody else's, or nobody's
-                self.inbound.last_arrival = Some(now);
-                Received::Queued
-            }
+            Insert::Accepted | Insert::Displaced(_) => Received::Queued,
             Insert::Duplicate => Received::Dropped(Discard::Duplicate),
             Insert::Late => Received::Dropped(Discard::Late),
         }
-    }
-
-    /// Whether the inbound stream has just stopped, or just come back.
-    ///
-    /// Polled the way [`RtpSession::rtcp_due`] is, and reported on the edge:
-    /// `None` most of the time, `Some` once when the state changes.
-    /// [`RtpSession::media_deadline`] says when it is worth asking again.
-    ///
-    /// Recovery is deliberately not here. What fixes a stalled stream is a
-    /// renegotiation, and this crate cannot send one — it has no signalling
-    /// and is not going to grow any. The layer that can is the layer that
-    /// decides whether to, and it needs to know first.
-    pub fn media_check(&mut self, now: Duration) -> Option<MediaFlow> {
-        let timeout = self.inbound.media_timeout?;
-        let last = self.inbound.last_arrival?;
-        match (self.inbound.quiet, now.saturating_sub(last) >= timeout) {
-            (false, true) => {
-                self.inbound.quiet = true;
-                Some(MediaFlow::Stopped)
-            }
-            (true, false) => {
-                self.inbound.quiet = false;
-                Some(MediaFlow::Resumed)
-            }
-            _ => None,
-        }
-    }
-
-    /// When [`RtpSession::media_check`] could next have something to say, so
-    /// that a caller with a timer has one to set rather than a poll to guess
-    /// the period of.
-    #[must_use]
-    pub fn media_deadline(&self) -> Option<Duration> {
-        let timeout = self.inbound.media_timeout?;
-        let last = self.inbound.last_arrival?;
-        // once it has been reported quiet the next thing to say is that it
-        // came back, and only an arriving packet can say that
-        if self.inbound.quiet {
-            return None;
-        }
-        Some(last.saturating_add(timeout))
     }
 
     /// Take the next frame due for playout.
@@ -1028,7 +941,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use super::{Discard, MediaFlow, Received, RtcpReceived, RtpSession, StreamConfig};
+    use super::{Discard, Received, RtcpReceived, RtpSession, StreamConfig};
     use crate::dtmf::{EventReceiver, EventReport, Outcome, Outgoing, Reported};
     use crate::playout::{Activity, BufferConfig, Frame, Pull};
     use crate::rtcp::{
@@ -1075,7 +988,6 @@ mod tests {
             },
             cname: "tester@203.0.113.1".to_string(),
             rtcp_bandwidth: 800.0,
-            media_timeout: Some(Duration::from_secs(10)),
         }
     }
 
@@ -2427,109 +2339,5 @@ mod tests {
         let len = session.send(b"eight ok", 160, &mut wire).expect("room");
         assert_eq!(len, 20);
         assert_eq!(wire.get(12..20), Some(&b"eight ok"[..]));
-    }
-
-    // -- the stream going quiet ---------------------------------------------
-
-    #[test]
-    fn a_stream_that_never_started_is_not_a_stream_that_stopped() {
-        // the call has not begun. Reporting it as a fault sends somebody
-        // looking for one where there is only a phone that has not been
-        // answered
-        let mut session = session();
-        assert_eq!(session.media_check(Duration::from_secs(600)), None);
-        assert_eq!(session.media_deadline(), None);
-    }
-
-    #[test]
-    fn a_stream_that_goes_quiet_is_reported_once_and_at_the_threshold() {
-        let mut session = session();
-        let from = addr(SIGNALLED);
-        establish(&mut session, 0x0A0B_0C0D, from);
-
-        assert_eq!(
-            session.media_deadline(),
-            Some(Duration::from_secs(10)),
-            "the deadline is the last arrival plus the timeout"
-        );
-        assert_eq!(session.media_check(Duration::from_secs(9)), None);
-        assert_eq!(
-            session.media_check(Duration::from_secs(10)),
-            Some(MediaFlow::Stopped)
-        );
-        assert_eq!(
-            session.media_check(Duration::from_secs(30)),
-            None,
-            "reported on the edge, not on every poll"
-        );
-        assert_eq!(
-            session.media_deadline(),
-            None,
-            "nothing is due until a packet arrives"
-        );
-    }
-
-    #[test]
-    fn a_stream_that_comes_back_says_so() {
-        let mut session = session();
-        let from = addr(SIGNALLED);
-        let next = establish(&mut session, 0x0A0B_0C0D, from);
-        assert_eq!(
-            session.media_check(Duration::from_secs(10)),
-            Some(MediaFlow::Stopped)
-        );
-
-        session.receive(
-            &mut datagram(0x0A0B_0C0D, next, 8),
-            from,
-            Duration::from_secs(30),
-        );
-        assert_eq!(
-            session.media_check(Duration::from_secs(30)),
-            Some(MediaFlow::Resumed)
-        );
-        assert_eq!(session.media_check(Duration::from_secs(31)), None);
-    }
-
-    #[test]
-    fn a_packet_that_is_refused_does_not_count_as_the_media_being_alive() {
-        // one from the wrong address is somebody else's, and one whose payload
-        // type was never agreed is nobody's. Neither is audio arriving
-        let mut session = session();
-        let from = addr(SIGNALLED);
-        establish(&mut session, 0x0A0B_0C0D, from);
-
-        let stranger = addr("198.51.100.7:5004");
-        session.receive(
-            &mut datagram(0x0A0B_0C0D, 200, 8),
-            stranger,
-            Duration::from_secs(5),
-        );
-        session.receive(
-            &mut datagram(0x0A0B_0C0D, 201, 99),
-            from,
-            Duration::from_secs(6),
-        );
-
-        assert_eq!(
-            session.media_check(Duration::from_secs(10)),
-            Some(MediaFlow::Stopped),
-            "the clock did not restart on either of them"
-        );
-    }
-
-    #[test]
-    fn a_stream_nobody_asked_to_be_watched_is_not_watched() {
-        let mut session = RtpSession::new(
-            &StreamConfig {
-                media_timeout: None,
-                ..config()
-            },
-            0.5,
-        );
-        let from = addr(SIGNALLED);
-        establish(&mut session, 0x0A0B_0C0D, from);
-        assert_eq!(session.media_check(Duration::from_secs(3_600)), None);
-        assert_eq!(session.media_deadline(), None);
     }
 }

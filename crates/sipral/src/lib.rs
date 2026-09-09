@@ -1,11 +1,147 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
+//! A softphone stack in one crate: signalling joined to media.
+//!
+//! Everything below this is deliberately unjoined. `sipral-ua` places and
+//! answers calls and has never heard of a codec; `sipral-rtp` carries payloads
+//! and has never seen a negotiation; `sipral-media` encodes audio and has
+//! never seen a call. `docs/01-architecture.md` makes that a rule rather than
+//! an accident — **signalling and media never call each other** — because the
+//! agent build links no audio pipeline at all and a user agent that reached
+//! into one could not be built without it.
+//!
+//! The rule leaves exactly one place for the two halves to meet, and this is
+//! it. What crosses is a description: [`MediaCapabilities`] on the way into an
+//! offer and [`MediaPlan`] on the way out of the answer, both of them written
+//! down in `sipral-core::sdp` and neither of them naming a socket, a device or
+//! a codec implementation.
+//!
+//! # What is here
+//!
+//! - [`CodecCatalog`] — what this build contains and in what order it is
+//!   offered, and [`Codec`] to report back what a live call agreed.
+//! - [`MediaSession`] — one call's audio: the RTP session, the codec, the
+//!   concealment, the recording tap and the watchdog that notices when the far
+//!   end goes quiet.
+//! - [`MediaEngine`] — the join. It writes the offers, reads the answers,
+//!   attaches a session to a call that is answered and lets it go when the
+//!   call ends.
+//! - Everything `sipral-ua` exports, re-exported, so that an application
+//!   depends on this crate and nothing else.
+//!
+//! # What is deliberately not here
+//!
+//! **No sockets and no audio device.** The application owns both, as it does
+//! everywhere else in this tree: it reads a datagram and hands it over, and it
+//! takes a frame of PCM and gives it to whichever `sipral-io-*` it linked. A
+//! facade that opened a socket would be a facade that could not be embedded in
+//! the runtimes this stack exists to be embedded in.
+//!
+//! **No clock.** `now: Instant` arrives at every entry point that needs one,
+//! which is what makes an hour of a call a test that finishes in a
+//! millisecond. The single number that cannot be derived from a monotonic
+//! instant — the wall clock an RTCP sender report carries — is set once, as a
+//! [`WallClock`].
+//!
+//! # Driving it
+//!
+//! ```no_run
+//! use std::net::SocketAddr;
+//! use std::time::Instant;
+//! use sipral::{CodecCatalog, Event, MediaConfig, MediaEngine, WallClock};
+//! use sipral::{EndpointConfig, OutgoingCall, UserAgent, Uri};
+//!
+//! # fn run(config: EndpointConfig, seed: [u8; 32], account: sipral::AccountId,
+//! #        target: Uri, media: SocketAddr, unix_seconds: u64) {
+//! let now = Instant::now();
+//! let mut agent = UserAgent::new(config, seed);
+//! let mut engine = MediaEngine::new(
+//!     CodecCatalog::new(),
+//!     MediaConfig::default(),
+//!     WallClock::from_unix(now, unix_seconds, 0),
+//! );
+//!
+//! // the offer is written from the catalogue, and names the address the
+//! // application bound its own media socket to
+//! let call = engine
+//!     .place(&mut agent, account, OutgoingCall::new(target), media, now)
+//!     .expect("the user agent took the call");
+//!
+//! // one drain, so that media is attached before the application hears that
+//! // the call was answered
+//! while let Some(event) = engine.poll_event(&mut agent, Instant::now()) {
+//!     match event {
+//!         Event::Signalling(_) => {}
+//!         Event::Media { call, event } => {
+//!             let _ = (call, event);
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//! # let _ = call;
+//! # }
+//! ```
+
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
     html_favicon_url = "https://sipral.org/brand/favicon.svg"
 )]
-#![doc = include_str!("../README.md")]
+// tests say what they mean; the no-panic discipline is for the library
+#![cfg_attr(
+    test,
+    allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )
+)]
+
+mod clock;
+mod codec;
+mod engine;
+mod error;
+mod event;
+mod pipeline;
+mod record;
+mod session;
+mod stats;
+#[cfg(test)]
+mod tests;
+
+pub use clock::WallClock;
+pub use codec::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+pub use engine::MediaEngine;
+pub use error::MediaError;
+pub use event::{Event, MediaEvent};
+pub use record::RecordingSink;
+pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
+pub use stats::StreamStatistics;
+
+/// What the negotiation produces and consumes, from the layer that owns the
+/// offer/answer model. These two are the seam this crate exists to carry, so
+/// an application that reads a plan or builds a capability set does not have
+/// to name `sipral-core` to do it.
+pub use sipral_core::sdp::{
+    Direction, Keying, MediaCapabilities, MediaPlan, NegotiatedCodec, RtcpPlan, SessionDescription,
+    SrtpSupport,
+};
+/// What the de-jitter buffer counted, which is most of what a stream statistic
+/// is.
+pub use sipral_rtp::{Discard, Quality};
+/// Which end placed a call, renamed on the way through: `sipral-ua` and
+/// `sipral-core::sdp` both have a `Direction` and they are about different
+/// things, so the one an application meets less often gets the longer name.
+pub use sipral_ua::Direction as CallDirection;
+/// The whole user agent, so that a softphone depends on this crate and nothing
+/// else: accounts, registration, calls, hold, transfer, and the five calls
+/// that drive them.
+pub use sipral_ua::{
+    Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, EndpointConfig,
+    ForkPolicy, Hold, Input, OutgoingCall, ReceiveError, RegistrationFailure, RegistrationState,
+    StatusCode, Transmit, TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

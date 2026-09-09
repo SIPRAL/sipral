@@ -71,18 +71,19 @@ passes between them is a description — `MediaPlan` out of the negotiation and
 `MediaCapabilities` back into it, both in `sipral-core::sdp` and both written
 out in [05-media.md](05-media.md) — and something carries it across.
 
-**Today nothing does.** `sipral-rtp` and `sipral-media` name no Sipral crate at
-all in their manifests, only `sipral-nat` names `sipral-core`, and `MediaPlan`
-and `MediaCapabilities` are used nowhere outside `sipral-core::sdp` and its own
-tests. The vocabulary is designed and unspoken: the two halves are not loosely
-coupled, they are unconnected, and an application that wants both writes the
-join itself.
+The crate that carries it is [`sipral`](#the-facade), below, and until recently
+it did not: `MediaPlan` and `MediaCapabilities` were used nowhere outside
+`sipral-core::sdp` and its own tests, so the two halves were not loosely
+coupled but unconnected, and an application that wanted both wrote the join
+itself. It is written now. The rule above is unchanged and is the reason the
+join lives there and only there — `sipral-rtp` and `sipral-media` still name no
+Sipral crate in their manifests, and `sipral-ua` still reaches into neither.
 
-The crate that is supposed to write it is [`sipral`](#the-facade), below, and
-the consequence of it being empty is not abstract — it is that the C ABI links
-signalling only, so a client on the other side of it still has to parse SDP,
-run RTP and own its devices. `docs/13-client-requirements.md` is largely a list
-of things that are blocked on this and on nothing else.
+What is still true is the consequence one layer up: `sipral-ffi` depends on
+`sipral-core` and `sipral-ua` and stops, so **the C ABI carries signalling
+alone** and a client on the other side of it parses its own SDP and runs its
+own RTP. Pointing the ABI at this crate is what closes that, and most of
+`docs/13-client-requirements.md` is waiting on it.
 
 The reason is the build in the third column: an agent that puts PCM on a socket
 links no media pipeline at all, and a `sipral-ua` that reached into one could
@@ -154,18 +155,38 @@ picture are allowed to meet. An application that just wants a softphone stack
 depends on this one crate and gets `sipral-ua` plus a media pipeline
 re-exported under one name.
 
-At this commit it is a name reservation on crates.io that exports a version
-constant and nothing else; it is the only crate with `publish = true`, and the
-only one that ships before the ABI freezes, precisely because it promises
-nothing yet.
+It is still the only crate with `publish = true` and the only one that ships
+before the ABI freezes, and it still carries the crates.io name reservation.
+What it now also carries is the join:
 
-That emptiness is the single largest gap in the tree, and it is load-bearing
-rather than cosmetic. Because nothing joins signalling to media, the C ABI
-carries signalling alone, and a device, a codec list, a recording, a level
-meter and a stream statistic have nowhere to cross. The rule above — that
-`sipral-ua` never reaches into a media crate — stays exactly as it is; this
-crate is where the join was always meant to live, and writing it here is
-keeping the rule rather than bending it.
+- **`CodecCatalog` and `Codec`** — what this build actually contains, in the
+  order it is offered, and what one live call settled on. A name the build has
+  no encoder for is refused where the order is set, with the name in the
+  error, rather than dropped where it would have been used.
+- **`MediaSession`** — one call's audio. It takes a `MediaPlan`, opens the
+  `sipral-rtp` session, drives the `sipral-media` codec and its concealment,
+  records both directions to a WAVE file when asked, and reports a stream that
+  has stopped. Sans-I/O throughout: `now` arrives from the caller, no socket
+  and no device are opened, and the datagrams it produces are handed back to
+  the application to send.
+- **`MediaEngine`** — the join proper. It writes the offer, reads the answer,
+  attaches a session to a call the user agent has answered, follows it through
+  hold, resume and a re-negotiated codec, and lets it go when the call ends,
+  with what it cost.
+
+The rule above stays exactly as it is: `sipral-ua` names no media crate in its
+manifest and no media crate names `sipral-ua`. This one names both, which is
+what makes it the seam rather than a hole in the wall. `MediaEngine` therefore
+takes a `&mut UserAgent` on the three operations that genuinely need both
+halves — placing a call, answering one, and draining the events — rather than
+wrapping the user agent, whose twenty-five methods would each be a place to get
+registration or transfer subtly wrong on the way through.
+
+What is still not joined is `sipral-nat`: a call behind a NAT that symmetric
+RTP does not solve is the application's to arrange, and the ICE candidates that
+would go in the offer have no route through this crate yet. And `sipral-ffi`
+still depends on `sipral-core` and `sipral-ua` alone, so the C ABI carries
+signalling only until it is pointed at this crate instead.
 
 ## What is not in the tree
 

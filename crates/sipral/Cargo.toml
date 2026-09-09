@@ -1,6 +1,6 @@
 [package]
 name = "sipral"
-description = "Sipral - Session Initiation Protocol Rust Audio Layer. SIP + RTP client stack in Rust with Swift, .NET and Kotlin bindings. Pre-release name reservation; the first usable release follows."
+description = "Sipral - Session Initiation Protocol Rust Audio Layer. A SIP + RTP client stack in one crate: signalling from sipral-ua joined to a media pipeline, with Swift, .NET and Kotlin bindings. Pre-release; the ABI is not frozen."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -13,6 +13,12 @@ keywords.workspace = true
 categories.workspace = true
 # the one crate that ships before the ABI freezes: a name reservation
 publish = true
+
+[dependencies]
+sipral-core.workspace = true
+sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
+sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
+sipral-media = { path = "../sipral-media", version = "0.0.1" }
 
 [lints]
 workspace = true
