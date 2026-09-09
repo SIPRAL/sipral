@@ -26,6 +26,7 @@
 
 use std::net::SocketAddr;
 
+use super::crypto::CryptoPolicy;
 use super::error::SdpError;
 use super::media::{Direction, MediaDescription, RtpMap};
 use super::session::{Attribute, Connection, SessionDescription};
@@ -135,16 +136,13 @@ pub enum Keying {
     /// transmission keys and sends those keys, in SDP, to the other endpoint":
     /// one protects what we send, the other opens what arrives.
     Sdes {
-        /// The tag both descriptions carry, which is what says the two lines
-        /// are about the same thing.
-        tag: u32,
-        /// The suite, one for both directions: "the same crypto-suite MUST be
-        /// used in the send and receive direction".
-        suite: String,
-        /// Our own `key-params`, for what we transmit.
-        local: String,
-        /// The peer's, for what it transmits.
-        remote: String,
+        /// Our own line, read as values: the keys that protect what we send.
+        /// Its tag and suite are the peer's too — "the same crypto-suite MUST
+        /// be used in the send and receive direction", and the tag is what
+        /// says the two lines are about the same thing.
+        local: CryptoPolicy,
+        /// The peer's, which opens what arrives.
+        remote: CryptoPolicy,
     },
     /// DTLS-SRTP (RFC 5764). The keys come out of a handshake on the media
     /// path, which is not signalling and not this crate's; what the
@@ -714,12 +712,21 @@ fn keying(
 ) -> Result<Option<Keying>, SdpError> {
     let mine = crypto_lines(our_stream);
     let peers = crypto_lines(their_stream);
-    if let Some((mine, peer)) = agreed_crypto(&mine, &peers) {
+    if let Some((local, remote)) = agreed_crypto(&mine, &peers) {
+        // §7.1.2: "the master key(s) included in the answer MUST be different
+        // from those in the offer". A peer that echoes our key back would have
+        // both directions running off one keystream, which §7.1.1 calls
+        // insecure outright
+        if local
+            .keys
+            .iter()
+            .any(|ours| remote.keys.iter().any(|theirs| theirs.keys == ours.keys))
+        {
+            return Err(SdpError::CryptoKeyReused { stream });
+        }
         return Ok(Some(Keying::Sdes {
-            tag: peer.tag,
-            suite: peer.suite.clone(),
-            local: mine.key_params.clone(),
-            remote: peer.key_params.clone(),
+            local: local.clone(),
+            remote: remote.clone(),
         }));
     }
     // "the crypto attribute in the answer MUST contain ... the tag and
@@ -747,24 +754,25 @@ fn keying(
 /// The `a=crypto` lines of a stream. "The crypto attribute MUST only appear at
 /// the SDP media level (not at the session level)", so nowhere else is looked
 /// at, and a line that does not parse is not a line to negotiate with.
-fn crypto_lines(stream: &MediaDescription) -> Vec<Crypto> {
+fn crypto_lines(stream: &MediaDescription) -> Vec<CryptoPolicy> {
     stream
         .attributes
         .iter()
         .filter(|a| a.name == "crypto")
-        .filter_map(|a| Crypto::parse(a.value.as_deref()?))
+        .filter_map(|a| Crypto::parse(a.value.as_deref()?)?.policy())
         .collect()
 }
 
 /// The pair the two descriptions agree on, taken in the peer's order of
 /// preference. The suites have to match as well as the tags: "the same
 /// crypto-suite MUST be used in the send and receive direction".
-fn agreed_crypto<'a>(mine: &'a [Crypto], peers: &'a [Crypto]) -> Option<(&'a Crypto, &'a Crypto)> {
+fn agreed_crypto<'a>(
+    mine: &'a [CryptoPolicy],
+    peers: &'a [CryptoPolicy],
+) -> Option<(&'a CryptoPolicy, &'a CryptoPolicy)> {
     peers.iter().find_map(|peer| {
         let ours = mine.iter().find(|ours| ours.tag == peer.tag)?;
-        ours.suite
-            .eq_ignore_ascii_case(&peer.suite)
-            .then_some((ours, peer))
+        (ours.suite == peer.suite).then_some((ours, peer))
     })
 }
 
@@ -796,8 +804,8 @@ mod tests {
         Crypto, Keying, MediaCapabilities, NegotiatedCodec, RtcpPlan, SrtpSupport, static_rtpmap,
     };
     use crate::sdp::{
-        AcceptedStream, Connection, Direction, Origin, RtpMap, SdpError, SessionDescription,
-        StreamAnswer, parse,
+        AcceptedStream, Connection, CryptoSuite, Direction, Origin, RtpMap, SdpError,
+        SessionDescription, StreamAnswer, parse,
     };
     use std::net::SocketAddr;
 
@@ -1225,14 +1233,76 @@ a=crypto:2 AES_CM_128_HMAC_SHA1_32 {THEIRS}\r\n"
             .media_plan(&remote, 0)
             .expect("a plan")
             .expect("not rejected");
+        let Some(Keying::Sdes { local, remote }) = plan.keying else {
+            panic!("expected SDES, got {:?}", plan.keying);
+        };
+        assert_eq!(local.tag, 2);
+        assert_eq!(remote.tag, 2);
+        assert_eq!(local.suite, CryptoSuite::AesCm32);
+        assert_eq!(remote.suite, CryptoSuite::AesCm32);
+        assert_eq!(local.to_crypto().key_params, MINE);
+        assert_eq!(remote.to_crypto().key_params, THEIRS);
+    }
+
+    // §7.1.2: "the master key(s) included in the answer MUST be different from
+    // those in the offer", because the default transform is insecure when one
+    // key protects two streams
+    #[test]
+    fn a_key_that_comes_back_to_us_is_refused() {
+        const KEY: &str = "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR|2^20|1:32";
+        let local = sdp(&format!(
+            "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 {KEY}\r\n"
+        ));
+        let echo = sdp(&format!(
+            "v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+m=audio 49170 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 {KEY}\r\n"
+        ));
         assert_eq!(
-            plan.keying,
-            Some(Keying::Sdes {
-                tag: 2,
-                suite: "AES_CM_128_HMAC_SHA1_32".to_owned(),
-                local: MINE.to_owned(),
-                remote: THEIRS.to_owned(),
-            })
+            local.media_plan(&echo, 0),
+            Err(SdpError::CryptoKeyReused { stream: 0 })
+        );
+    }
+
+    // §7.1.2: "Only a=crypto lines that are considered valid SRTP security
+    // descriptions ... can be accepted". A line with a key of the wrong length
+    // is not one, so the tag it carries answers nothing
+    #[test]
+    fn an_invalid_crypto_line_is_not_a_line_to_agree_with() {
+        const MINE: &str = "inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR";
+        const SHORT: &str = "inline:d0RmdmcmVCspeEc3QGZiNWpVLFJhQX0=";
+        let local = sdp(&format!(
+            "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 {MINE}\r\n"
+        ));
+        let short = sdp(&format!(
+            "v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+m=audio 49170 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 {SHORT}\r\n"
+        ));
+        assert_eq!(
+            local.media_plan(&short, 0),
+            Err(SdpError::CryptoMissing { stream: 0 }),
+            "a stream on a secure profile with nothing valid on it is refused"
         );
     }
 

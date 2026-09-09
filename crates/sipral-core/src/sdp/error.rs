@@ -124,6 +124,15 @@ pub enum SdpError {
         /// Which stream, counted from zero.
         stream: usize,
     },
+    /// The far end sent back a master key we offered. RFC 4568 §7.1.2: "the
+    /// master key(s) included in the answer MUST be different from those in
+    /// the offer", because the default transform is insecure when one key
+    /// protects two streams — the same keystream would encrypt both
+    /// directions.
+    CryptoKeyReused {
+        /// Which stream, counted from zero.
+        stream: usize,
+    },
 }
 
 impl fmt::Display for SdpError {
@@ -165,6 +174,9 @@ impl fmt::Display for SdpError {
             }
             Self::CryptoMissing { stream } => {
                 write!(f, "stream {stream} is secured and has no keys")
+            }
+            Self::CryptoKeyReused { stream } => {
+                write!(f, "stream {stream} came back with a key we sent")
             }
         }
     }

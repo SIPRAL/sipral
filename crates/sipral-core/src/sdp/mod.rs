@@ -25,6 +25,7 @@
 //! outside: what to write into an offer, and what the answer settled on.
 
 mod answer;
+mod crypto;
 mod error;
 mod media;
 mod parse;
@@ -32,6 +33,10 @@ mod plan;
 mod session;
 
 pub use answer::{AcceptedStream, StreamAnswer};
+pub use crypto::{
+    CryptoPolicy, CryptoSuite, Inline, KeyIdentifier, KeySalt, MASTER_KEY, MASTER_SALT,
+    SessionParams,
+};
 pub use error::SdpError;
 pub use media::{Direction, MediaDescription, RtpMap};
 pub use parse::{Limits, parse, parse_with_limits};
