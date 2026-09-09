@@ -93,6 +93,7 @@ use std::slice;
 
 use sipral_core::endpoint::{Input, ReceiveError, Transmit, TransportErrorKind, TransportId};
 
+use crate::abi::{codes, constants, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::media::{SIPRAL_ADDRESS_BYTES, address};
@@ -100,100 +101,105 @@ use crate::stack::{SipralTransport, StackState, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
 
-/// The transport a stack is created with, and the only one this build binds.
-///
-/// Named rather than assumed, so that the day a stack has two of them is a day
-/// more numbers become valid and not a day this ABI grows a second way to hand
-/// bytes over.
-pub const SIPRAL_TRANSPORT_MAIN: u32 = 0;
+constants! {
+    /// The transport a stack is created with, and the only one this build
+    /// binds.
+    ///
+    /// Named rather than assumed, so that the day a stack has two of them is a
+    /// day more numbers become valid and not a day this ABI grows a second way
+    /// to hand bytes over.
+    pub const SIPRAL_TRANSPORT_MAIN: u32 = 0;
 
-/// The largest message that crosses in either direction.
-///
-/// The bound the layer below parses to, which is what stops a hostile peer from
-/// making the parser do unbounded work. A caller's read buffer wants to be this
-/// big on a stream, where one read can hold the end of one message and the start
-/// of another, and 1500 bytes or so on a datagram socket, where anything larger
-/// was fragmented on the way.
-pub const SIPRAL_MESSAGE_BYTES: usize = 65_535;
-
-/// Why a transport could not deliver. Names for
-/// [`sipral_stack_transport_failed`]'s `error`.
-///
-/// Coarse on purpose, and it is the layer below that is coarse: a client
-/// transaction informs its user and terminates on every one of these (§17), and
-/// the detail belongs in the caller's log, where the real message still is.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralTransportError {
-    /// Anything the caller could not classify. Zero, because a caller that
-    /// knows only that the write failed is telling the truth by saying nothing.
-    Other = 0,
-    /// Nothing is listening at the far end.
-    ConnectionRefused = 1,
-    /// An established connection was reset.
-    ConnectionReset = 2,
-    /// No route, or an ICMP unreachable.
-    Unreachable = 3,
-    /// The connection attempt or the write timed out.
-    TimedOut = 4,
-    /// The connection was closed and cannot be written to again.
-    Closed = 5,
+    /// The largest message that crosses in either direction.
+    ///
+    /// The bound the layer below parses to, which is what stops a hostile peer
+    /// from making the parser do unbounded work. A caller's read buffer wants
+    /// to be this big on a stream, where one read can hold the end of one
+    /// message and the start of another, and 1500 bytes or so on a datagram
+    /// socket, where anything larger was fragmented on the way.
+    pub const SIPRAL_MESSAGE_BYTES: usize = 65_535;
 }
 
-/// One message on its way out, written into the caller's own buffers.
-///
-/// The caller fills in `size`, the three pointers and the three capacities; the
-/// library fills in everything else. A `len` of zero means the stack had nothing
-/// to send, which is how the draining loop ends.
-///
-/// The two address buffers are checked before a message is taken, so the address
-/// side is never the reason one is held. The payload buffer is not: a message
-/// too long for it is kept and offered again, because a message the stack has
-/// already committed to is not one this ABI may drop.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralTransmit {
-    /// `sizeof` this struct, as the caller's header declares it.
-    pub size: usize,
-    /// Which transport to write to. [`SIPRAL_TRANSPORT_MAIN`], for now always.
-    pub transport: u32,
-    /// What that transport speaks, as a `SipralTransport`.
+codes! {
+    /// Why a transport could not deliver. Names for
+    /// [`sipral_stack_transport_failed`]'s `error`.
     ///
-    /// Carried because it is the message's and not the socket's: §18.1.1 lets a
-    /// request that outgrew a datagram go out on a stream instead, and the
-    /// transport it ends up on is the one this says. Zero for a protocol this
-    /// ABI has no number for.
-    pub protocol: u32,
-    /// Where to write the message. Nothing is written unless the whole of it
-    /// fits.
-    pub data: *mut u8,
-    /// How much room `data` has.
-    pub capacity: usize,
-    /// How much was written — or, when the call answered
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much room the message needs.
-    pub len: usize,
-    /// Where to write the destination, as `host:port` with a trailing NUL. Null
-    /// with a capacity of zero for a caller whose socket is connected and
-    /// already knows.
-    pub destination: *mut c_char,
-    /// How much room `destination` has. At least [`SIPRAL_ADDRESS_BYTES`] when
-    /// it is not null.
-    pub destination_capacity: usize,
-    /// How many bytes of it were written, the NUL not counted.
-    pub destination_len: usize,
-    /// Where to write the address to send *from*, in the same shape.
+    /// Coarse on purpose, and it is the layer below that is coarse: a client
+    /// transaction informs its user and terminates on every one of these (§17), and
+    /// the detail belongs in the caller's log, where the real message still is.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralTransportError: u32 {
+        /// Anything the caller could not classify. Zero, because a caller that
+        /// knows only that the write failed is telling the truth by saying nothing.
+        Other = 0,
+        /// Nothing is listening at the far end.
+        ConnectionRefused = 1,
+        /// An established connection was reset.
+        ConnectionReset = 2,
+        /// No route, or an ICMP unreachable.
+        Unreachable = 3,
+        /// The connection attempt or the write timed out.
+        TimedOut = 4,
+        /// The connection was closed and cannot be written to again.
+        Closed = 5,
+    }
+}
+
+record! {
+    /// One message on its way out, written into the caller's own buffers.
     ///
-    /// RFC 3581 §4: "The response MUST be sent from the same address and port
-    /// that the corresponding request was received on", which a caller listening
-    /// on a wildcard address cannot work out for itself. Empty — a `source_len`
-    /// of zero — means the transport's own address, which is the answer for
-    /// every request this stack originates.
-    pub source: *mut c_char,
-    /// How much room `source` has. At least [`SIPRAL_ADDRESS_BYTES`] when it is
-    /// not null.
-    pub source_capacity: usize,
-    /// How many bytes of it were written, the NUL not counted.
-    pub source_len: usize,
+    /// The caller fills in `size`, the three pointers and the three capacities; the
+    /// library fills in everything else. A `len` of zero means the stack had nothing
+    /// to send, which is how the draining loop ends.
+    ///
+    /// The two address buffers are checked before a message is taken, so the address
+    /// side is never the reason one is held. The payload buffer is not: a message
+    /// too long for it is kept and offered again, because a message the stack has
+    /// already committed to is not one this ABI may drop.
+    #[derive(Clone, Copy)]
+    pub struct SipralTransmit {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// Which transport to write to. [`SIPRAL_TRANSPORT_MAIN`], for now always.
+        pub transport: u32,
+        /// What that transport speaks, as a `SipralTransport`.
+        ///
+        /// Carried because it is the message's and not the socket's: §18.1.1 lets a
+        /// request that outgrew a datagram go out on a stream instead, and the
+        /// transport it ends up on is the one this says. Zero for a protocol this
+        /// ABI has no number for.
+        pub protocol: u32,
+        /// Where to write the message. Nothing is written unless the whole of it
+        /// fits.
+        pub data: *mut u8,
+        /// How much room `data` has.
+        pub capacity: usize,
+        /// How much was written — or, when the call answered
+        /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much room the message needs.
+        pub len: usize,
+        /// Where to write the destination, as `host:port` with a trailing NUL. Null
+        /// with a capacity of zero for a caller whose socket is connected and
+        /// already knows.
+        pub destination: *mut c_char,
+        /// How much room `destination` has. At least [`SIPRAL_ADDRESS_BYTES`] when
+        /// it is not null.
+        pub destination_capacity: usize,
+        /// How many bytes of it were written, the NUL not counted.
+        pub destination_len: usize,
+        /// Where to write the address to send *from*, in the same shape.
+        ///
+        /// RFC 3581 §4: "The response MUST be sent from the same address and port
+        /// that the corresponding request was received on", which a caller listening
+        /// on a wildcard address cannot work out for itself. Empty — a `source_len`
+        /// of zero — means the transport's own address, which is the answer for
+        /// every request this stack originates.
+        pub source: *mut c_char,
+        /// How much room `source` has. At least [`SIPRAL_ADDRESS_BYTES`] when it is
+        /// not null.
+        pub source_capacity: usize,
+        /// How many bytes of it were written, the NUL not counted.
+        pub source_len: usize,
+    }
 }
 
 // Safety: plain data with no invariant between the members. The three pointers

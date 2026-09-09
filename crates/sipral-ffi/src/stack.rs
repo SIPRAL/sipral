@@ -62,6 +62,7 @@ use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, Transp
 use sipral_core::transaction::TimerConfig;
 use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
 
+use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{HandleTable, SipralHandle};
@@ -83,24 +84,25 @@ const SEED_BYTES: usize = 32;
 /// also where the reason a stack has exactly one is written down.
 const TRANSPORT: TransportId = TransportId(0);
 
-/// What a stack speaks. Names for `sipral_stack_config_t::transport`.
-///
-/// Zero is not one of them: a stack is told what it is speaking, because
-/// guessing wrong in the direction of the plainest transport is how a caller
-/// that meant TLS ends up on the wire in the clear.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralTransport {
-    /// UDP.
-    Udp = 1,
-    /// TCP.
-    Tcp = 2,
-    /// TLS over TCP.
-    Tls = 3,
-    /// WebSocket.
-    Ws = 4,
-    /// WebSocket over TLS.
-    Wss = 5,
+codes! {
+    /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
+    ///
+    /// Zero is not one of them: a stack is told what it is speaking, because
+    /// guessing wrong in the direction of the plainest transport is how a caller
+    /// that meant TLS ends up on the wire in the clear.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralTransport: u32 {
+        /// UDP.
+        Udp = 1,
+        /// TCP.
+        Tcp = 2,
+        /// TLS over TCP.
+        Tls = 3,
+        /// WebSocket.
+        Ws = 4,
+        /// WebSocket over TLS.
+        Wss = 5,
+    }
 }
 
 impl SipralTransport {
@@ -131,128 +133,129 @@ impl SipralTransport {
     }
 }
 
-/// What a stack is created with.
-///
-/// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
-/// filling anything in. Four members have to be filled: the callback, the
-/// transport, the address this end is reachable at, and the entropy. Nothing
-/// here can be guessed on the caller's behalf.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralStackConfig {
-    /// `sizeof` this struct, as the caller's header declares it.
-    pub size: usize,
-    /// Where events go. Required: a stack with nowhere to report to is a
-    /// stack whose failures are invisible.
-    pub event_callback: SipralEventCallback,
-    /// Handed back to the callback untouched. The library never reads it.
-    pub event_user_data: *mut c_void,
-    /// A [`SipralTransport`].
-    pub transport: u32,
-    /// The address the far end reaches this one at, as `host:port`, UTF-8 and
-    /// not NUL-terminated.
+record! {
+    /// What a stack is created with.
     ///
-    /// It goes in every `Via`, so it is the address a response has to come
-    /// back to rather than whatever a wildcard socket was bound to. Nothing
-    /// here opens a socket or resolves a name.
-    pub bind_address: *const c_char,
-    /// How many bytes of it.
-    pub bind_address_len: usize,
-    /// What to put in `User-Agent` on every request this stack originates —
-    /// REGISTER and INVITE — or null for none.
-    ///
-    /// Not on responses, and not on a request sent inside a dialog: those are
-    /// written a layer below this one, which has no opinion about product
-    /// names. The field is optional on every method — §20 Table 3 marks it `o`
-    /// throughout — so a message that goes out without it is still well formed.
-    pub user_agent: *const c_char,
-    /// How many bytes of it.
-    pub user_agent_len: usize,
-    /// Thirty-two bytes of entropy, from the platform's own generator.
-    ///
-    /// Every branch parameter, tag and `Call-ID` is derived from it, and
-    /// §19.3 wants a tag unguessable — cryptographically random, not a
-    /// counter or a clock. Two stacks must never be given the same bytes.
-    pub entropy: *const u8,
-    /// How many bytes of it. Thirty-two.
-    pub entropy_len: usize,
-    /// T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
-    ///
-    /// In force on every transport: 64·T1 is how long a transaction has to
-    /// finish, whether or not anything retransmits.
-    pub timer_t1_ms: u64,
-    /// T2 in milliseconds, or zero for four seconds.
-    ///
-    /// The cap on the doubling that starts at T1, and therefore only a figure
-    /// on a transport that retransmits. Setting it on anything but UDP is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
-    pub timer_t2_ms: u64,
-    /// T4 in milliseconds, or zero for five seconds.
-    ///
-    /// How long a message lingers in the network, which is what timers I and K
-    /// wait out. Zero on a transport that delivers for us, so it is refused
-    /// there the same way T2 is.
-    pub timer_t4_ms: u64,
-    /// The codecs to offer, in the order to offer them: their names, separated
-    /// by commas, as UTF-8 and not NUL-terminated. Null for everything this
-    /// build contains, quality first.
-    ///
-    /// A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
-    /// has the peer's preference decide among what both ends list — and it is
-    /// configured per site rather than fixed, because a carrier that bills by
-    /// the minute wants the narrowband codec first and a company on its own
-    /// network wants the wideband one.
-    ///
-    /// A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
-    /// here, with the names it does have in the last error. It is never taken
-    /// and ignored: a setting that is accepted and then quietly dropped is the
-    /// failure neither end can see.
-    pub codecs: *const c_char,
-    /// How many bytes of it.
-    pub codecs_len: usize,
-    /// How long a frame is, in milliseconds, or zero for twenty.
-    ///
-    /// Twenty is what every peer expects and what every codec here cuts
-    /// cleanly. Opus has a fixed set of frame durations and encodes nothing
-    /// else, so an interval it has no size for is refused while Opus is one of
-    /// the codecs offered.
-    pub frame_ms: u32,
-    /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
-    /// default: a phone that cannot send a digit cannot navigate a menu.
-    pub offer_dtmf: u32,
-    /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
-    ///
-    /// Off by default. §5.1.1 only permits it where both ends asked, and the
-    /// equipment this stack is deployed against does not; asking unasked costs
-    /// a line in every offer and buys a port on the calls where nobody answers.
-    pub offer_rtcp_mux: u32,
-    /// Whether to stop sending during silence, as a `SipralToggle`.
-    ///
-    /// Off by default. It halves the bandwidth of a call in which one person is
-    /// listening, and it costs the far end's own stall watchdog a reason to
-    /// fire — this stack sends no comfort noise of its own to say the silence
-    /// is deliberate, so a gap looks the same from there as a stream that died.
-    pub silence_suppression: u32,
-    /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
-    /// default; this is B5.
-    pub media_stall_watchdog: u32,
-    /// How long inbound audio may stop before that is reported, in
-    /// milliseconds, or zero for this build's own figure.
-    ///
-    /// Setting it with the watchdog switched off is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
-    pub media_stall_ms: u64,
-    /// What the wall clock read when the stack was created, as seconds since
-    /// 1 January 1970, or zero.
-    ///
-    /// The one number a stack that reads no clock cannot work out: RFC 3550
-    /// §6.4.1 has a sender report carry "the wall clock time when this report
-    /// was sent", and a monotonic instant is not one. Zero means the reports
-    /// count from the Unix epoch, which costs nothing a caller is likely to
-    /// miss — the round trip the far end computes is a difference, not an
-    /// absolute — and costs the correlation of this call's media with anything
-    /// else's.
-    pub media_clock_unix_seconds: u64,
+    /// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
+    /// filling anything in. Four members have to be filled: the callback, the
+    /// transport, the address this end is reachable at, and the entropy. Nothing
+    /// here can be guessed on the caller's behalf.
+    #[derive(Clone, Copy)]
+    pub struct SipralStackConfig {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// Where events go. Required: a stack with nowhere to report to is a
+        /// stack whose failures are invisible.
+        pub event_callback: SipralEventCallback,
+        /// Handed back to the callback untouched. The library never reads it.
+        pub event_user_data: *mut c_void,
+        /// A [`SipralTransport`].
+        pub transport: u32,
+        /// The address the far end reaches this one at, as `host:port`, UTF-8 and
+        /// not NUL-terminated.
+        ///
+        /// It goes in every `Via`, so it is the address a response has to come
+        /// back to rather than whatever a wildcard socket was bound to. Nothing
+        /// here opens a socket or resolves a name.
+        pub bind_address: *const c_char,
+        /// How many bytes of it.
+        pub bind_address_len: usize,
+        /// What to put in `User-Agent` on every request this stack originates —
+        /// REGISTER and INVITE — or null for none.
+        ///
+        /// Not on responses, and not on a request sent inside a dialog: those are
+        /// written a layer below this one, which has no opinion about product
+        /// names. The field is optional on every method — §20 Table 3 marks it `o`
+        /// throughout — so a message that goes out without it is still well formed.
+        pub user_agent: *const c_char,
+        /// How many bytes of it.
+        pub user_agent_len: usize,
+        /// Thirty-two bytes of entropy, from the platform's own generator.
+        ///
+        /// Every branch parameter, tag and `Call-ID` is derived from it, and
+        /// §19.3 wants a tag unguessable — cryptographically random, not a
+        /// counter or a clock. Two stacks must never be given the same bytes.
+        pub entropy: *const u8,
+        /// How many bytes of it. Thirty-two.
+        pub entropy_len: usize,
+        /// T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
+        ///
+        /// In force on every transport: 64·T1 is how long a transaction has to
+        /// finish, whether or not anything retransmits.
+        pub timer_t1_ms: u64,
+        /// T2 in milliseconds, or zero for four seconds.
+        ///
+        /// The cap on the doubling that starts at T1, and therefore only a figure
+        /// on a transport that retransmits. Setting it on anything but UDP is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+        pub timer_t2_ms: u64,
+        /// T4 in milliseconds, or zero for five seconds.
+        ///
+        /// How long a message lingers in the network, which is what timers I and K
+        /// wait out. Zero on a transport that delivers for us, so it is refused
+        /// there the same way T2 is.
+        pub timer_t4_ms: u64,
+        /// The codecs to offer, in the order to offer them: their names, separated
+        /// by commas, as UTF-8 and not NUL-terminated. Null for everything this
+        /// build contains, quality first.
+        ///
+        /// A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
+        /// has the peer's preference decide among what both ends list — and it is
+        /// configured per site rather than fixed, because a carrier that bills by
+        /// the minute wants the narrowband codec first and a company on its own
+        /// network wants the wideband one.
+        ///
+        /// A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
+        /// here, with the names it does have in the last error. It is never taken
+        /// and ignored: a setting that is accepted and then quietly dropped is the
+        /// failure neither end can see.
+        pub codecs: *const c_char,
+        /// How many bytes of it.
+        pub codecs_len: usize,
+        /// How long a frame is, in milliseconds, or zero for twenty.
+        ///
+        /// Twenty is what every peer expects and what every codec here cuts
+        /// cleanly. Opus has a fixed set of frame durations and encodes nothing
+        /// else, so an interval it has no size for is refused while Opus is one of
+        /// the codecs offered.
+        pub frame_ms: u32,
+        /// Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
+        /// default: a phone that cannot send a digit cannot navigate a menu.
+        pub offer_dtmf: u32,
+        /// Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
+        ///
+        /// Off by default. §5.1.1 only permits it where both ends asked, and the
+        /// equipment this stack is deployed against does not; asking unasked costs
+        /// a line in every offer and buys a port on the calls where nobody answers.
+        pub offer_rtcp_mux: u32,
+        /// Whether to stop sending during silence, as a `SipralToggle`.
+        ///
+        /// Off by default. It halves the bandwidth of a call in which one person is
+        /// listening, and it costs the far end's own stall watchdog a reason to
+        /// fire — this stack sends no comfort noise of its own to say the silence
+        /// is deliberate, so a gap looks the same from there as a stream that died.
+        pub silence_suppression: u32,
+        /// Whether inbound audio that stops is reported, as a `SipralToggle`. On by
+        /// default; this is B5.
+        pub media_stall_watchdog: u32,
+        /// How long inbound audio may stop before that is reported, in
+        /// milliseconds, or zero for this build's own figure.
+        ///
+        /// Setting it with the watchdog switched off is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+        pub media_stall_ms: u64,
+        /// What the wall clock read when the stack was created, as seconds since
+        /// 1 January 1970, or zero.
+        ///
+        /// The one number a stack that reads no clock cannot work out: RFC 3550
+        /// §6.4.1 has a sender report carry "the wall clock time when this report
+        /// was sent", and a monotonic instant is not one. Zero means the reports
+        /// count from the Unix epoch, which costs nothing a caller is likely to
+        /// miss — the round trip the far end computes is a difference, not an
+        /// absolute — and costs the correlation of this call's media with anything
+        /// else's.
+        pub media_clock_unix_seconds: u64,
+    }
 }
 
 // Safety: the trait's contract. Plain data, no invariant between the members,
@@ -270,36 +273,37 @@ unsafe impl Versioned for SipralStackConfig {
     }
 }
 
-/// What one call to [`sipral_stack_poll`] did.
-///
-/// Set `size` to `sizeof(sipral_poll_result_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralPollResult {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// Events handed to the callback during this poll.
-    pub events_delivered: usize,
-    /// Events the stack raised that this ABI has no word for yet.
+record! {
+    /// What one call to [`sipral_stack_poll`] did.
     ///
-    /// Counted rather than delivered: an event carrying nothing a binding can
-    /// act on is noise, and a number that is not zero is the honest measure of
-    /// how far this vocabulary is behind the stack's.
-    pub events_unclaimed: usize,
-    /// Bytes the stack produced and this build had nowhere to send.
-    ///
-    /// Zero since [`crate::transport`] gave them somewhere to go: what the stack
-    /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
-    /// poll no longer empties the queue on its way past. The member stays
-    /// because a released one always does, and because a build that has to drop
-    /// a message again would have somewhere to say so.
-    pub transmits_discarded: usize,
-    /// Whether there is a deadline at all. Zero means nothing is scheduled and
-    /// the next poll can wait for input.
-    pub has_deadline: u32,
-    /// How long from `now_ms` until the stack has something to do, when
-    /// `has_deadline` says there is one. Zero means it is already due.
-    pub next_poll_in_ms: u64,
+    /// Set `size` to `sizeof(sipral_poll_result_t)` before the call.
+    #[derive(Clone, Copy)]
+    pub struct SipralPollResult {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// Events handed to the callback during this poll.
+        pub events_delivered: usize,
+        /// Events the stack raised that this ABI has no word for yet.
+        ///
+        /// Counted rather than delivered: an event carrying nothing a binding can
+        /// act on is noise, and a number that is not zero is the honest measure of
+        /// how far this vocabulary is behind the stack's.
+        pub events_unclaimed: usize,
+        /// Bytes the stack produced and this build had nowhere to send.
+        ///
+        /// Zero since [`crate::transport`] gave them somewhere to go: what the stack
+        /// writes waits in it until `sipral_stack_poll_transmit` takes it, and a
+        /// poll no longer empties the queue on its way past. The member stays
+        /// because a released one always does, and because a build that has to drop
+        /// a message again would have somewhere to say so.
+        pub transmits_discarded: usize,
+        /// Whether there is a deadline at all. Zero means nothing is scheduled and
+        /// the next poll can wait for input.
+        pub has_deadline: u32,
+        /// How long from `now_ms` until the stack has something to do, when
+        /// `has_deadline` says there is one. Zero means it is already due.
+        pub next_poll_in_ms: u64,
+    }
 }
 
 // Safety: integers, and zero is a valid value of each.
@@ -312,50 +316,51 @@ unsafe impl Versioned for SipralPollResult {
     }
 }
 
-/// What a stack is actually running with.
-///
-/// A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
-/// given, and this is where the caller reads back what that came to. It matters
-/// because a zero in the config means "the default": a caller that left the
-/// timers alone has no other way to learn which figures it is retransmitting
-/// on, and one that set them has no other way to be sure.
-///
-/// Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralStackSettings {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// The [`SipralTransport`] this stack speaks.
-    pub transport: u32,
-    /// Whether this stack retransmits anything itself.
+record! {
+    /// What a stack is actually running with.
     ///
-    /// Zero on a transport that delivers for us, which is every one but UDP.
-    /// The two timers that only exist to pace a retransmission read as their
-    /// defaults there, and mean nothing.
-    pub retransmits: u32,
-    /// T1 in milliseconds, with the default filled in.
-    pub timer_t1_ms: u64,
-    /// T2 in milliseconds, with the default filled in.
-    pub timer_t2_ms: u64,
-    /// T4 in milliseconds, with the default filled in.
-    pub timer_t4_ms: u64,
-    /// How many codecs this stack offers. `sipral_stack_codec_order` says
-    /// which, and in what order.
-    pub codec_count: usize,
-    /// How long a frame is, with the default filled in.
-    pub frame_ms: u32,
-    /// Whether named events are offered, as a `SipralToggle`. Never the
-    /// default value: this says what the setting came to, not what was passed.
-    pub offer_dtmf: u32,
-    /// Whether RTCP multiplexing is asked for, as a `SipralToggle`.
-    pub offer_rtcp_mux: u32,
-    /// Whether sending stops during silence, as a `SipralToggle`.
-    pub silence_suppression: u32,
-    /// How long inbound audio may stop before it is reported, with the default
-    /// filled in. Zero when the watchdog is off, which is the one case where
-    /// there is no figure to give.
-    pub media_stall_ms: u64,
+    /// A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
+    /// given, and this is where the caller reads back what that came to. It matters
+    /// because a zero in the config means "the default": a caller that left the
+    /// timers alone has no other way to learn which figures it is retransmitting
+    /// on, and one that set them has no other way to be sure.
+    ///
+    /// Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
+    #[derive(Clone, Copy)]
+    pub struct SipralStackSettings {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// The [`SipralTransport`] this stack speaks.
+        pub transport: u32,
+        /// Whether this stack retransmits anything itself.
+        ///
+        /// Zero on a transport that delivers for us, which is every one but UDP.
+        /// The two timers that only exist to pace a retransmission read as their
+        /// defaults there, and mean nothing.
+        pub retransmits: u32,
+        /// T1 in milliseconds, with the default filled in.
+        pub timer_t1_ms: u64,
+        /// T2 in milliseconds, with the default filled in.
+        pub timer_t2_ms: u64,
+        /// T4 in milliseconds, with the default filled in.
+        pub timer_t4_ms: u64,
+        /// How many codecs this stack offers. `sipral_stack_codec_order` says
+        /// which, and in what order.
+        pub codec_count: usize,
+        /// How long a frame is, with the default filled in.
+        pub frame_ms: u32,
+        /// Whether named events are offered, as a `SipralToggle`. Never the
+        /// default value: this says what the setting came to, not what was passed.
+        pub offer_dtmf: u32,
+        /// Whether RTCP multiplexing is asked for, as a `SipralToggle`.
+        pub offer_rtcp_mux: u32,
+        /// Whether sending stops during silence, as a `SipralToggle`.
+        pub silence_suppression: u32,
+        /// How long inbound audio may stop before it is reported, with the default
+        /// filled in. Zero when the watchdog is off, which is the one case where
+        /// there is no figure to give.
+        pub media_stall_ms: u64,
+    }
 }
 
 // Safety: integers, and zero is a valid value of each.

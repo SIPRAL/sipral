@@ -13,34 +13,39 @@
 
 use std::mem::size_of;
 
+use crate::abi::{constants, record};
 use crate::error::{entry, fail};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, write_versioned};
 
-/// The ABI's major version. Nothing published against one major works against
-/// another.
-pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 0;
+constants! {
+    /// The ABI's major version. Nothing published against one major works
+    /// against another.
+    pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 0;
 
-/// The ABI's minor version, raised by every function or struct member added.
-pub const SIPRAL_ABI_VERSION_MINOR: u32 = 5;
+    /// The ABI's minor version, raised by every function or struct member
+    /// added.
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 5;
 
-/// The ABI's patch version, raised by a fix that changes no declaration.
-pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;
+    /// The ABI's patch version, raised by a fix that changes no declaration.
+    pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;
+}
 
-/// The version of the ABI this library provides.
-///
-/// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SipralAbiVersion {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// Nothing built against another major version will work.
-    pub major: u32,
-    /// A build with a higher minor has everything a lower one had.
-    pub minor: u32,
-    /// A fix that changed no declaration.
-    pub patch: u32,
+record! {
+    /// The version of the ABI this library provides.
+    ///
+    /// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SipralAbiVersion {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// Nothing built against another major version will work.
+        pub major: u32,
+        /// A build with a higher minor has everything a lower one had.
+        pub minor: u32,
+        /// A fix that changed no declaration.
+        pub patch: u32,
+    }
 }
 
 // Safety: four integers, and zero is a valid value of each.

@@ -37,14 +37,14 @@ tracked() {
 others() { tracked "$@" | grep -v "^$SELF$"; }
 
 step "licence headers"
-missing=$(tracked '*.rs' '*.sh' | while read -r f; do
+missing=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' | while read -r f; do
     head -3 "$f" | grep -q 'SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial' || echo "$f"
 done)
 if [ -z "$missing" ]; then pass "SPDX header present"; else
     fail "SPDX header missing:"; printf '        %s\n' $missing
 fi
 
-nocopy=$(tracked '*.rs' '*.sh' | while read -r f; do
+nocopy=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' | while read -r f; do
     head -4 "$f" | grep -q 'Copyright (c) 2026 Tiberiu Balasea' || echo "$f"
 done)
 [ -z "$nocopy" ] && pass "copyright line present" || {
@@ -86,6 +86,7 @@ fi
 
 step "no addresses to harvest"
 mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
+    '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
     | grep -v 'users\.noreply\.github\.com' \
     | grep -vE '@([A-Za-z0-9.-]+\.)?(example\.(com|net|org)|[A-Za-z0-9-]+\.(example|invalid|test|localhost))\b' || true)
@@ -104,7 +105,7 @@ if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 step "language of the published tree"
-dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' \
+dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -lI '[ăâîșțĂÂÎȘȚşţŞŢ]' 2>/dev/null || true)
 [ -z "$dia" ] && pass "English only" || {
     fail "Romanian text in published files:"; printf '        %s\n' $dia
@@ -112,12 +113,13 @@ dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' \
 
 step "provenance"
 forbidden='pjsip\|pjproject\|pjmedia\|sofia-sip\|osip2\|eXosip\|linphone\|bcg729\|spandsp\|libnice'
-hits=$(others '*.rs' | xargs grep -ln "$forbidden" 2>/dev/null || true)
+hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
+    | xargs grep -ln "$forbidden" 2>/dev/null || true)
 [ -z "$hits" ] && pass "no forbidden-source references in code" || {
     fail "review provenance in:"; printf '        %s\n' $hits
 }
 
-traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' \
+traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -lin 'co-authored-by: claude\|generated with \[claude\|copilot' 2>/dev/null || true)
 [ -z "$traces" ] && pass "no assistant traces" || {
     fail "assistant traces in:"; printf '        %s\n' $traces
@@ -177,6 +179,62 @@ exported=$(tracked '*.rs' | xargs grep -ln 'no_mangle' 2>/dev/null \
     printf '        use entry! in crates/sipral-ffi, or the panic reaches C.\n'
 }
 
+# B7. The header and the three bindings are printed from the declarations in
+# sipral-ffi, so the one thing a person can forget is the line in abi.rs that
+# names a declaration. These four scans are that line's other half: the first
+# two say that nothing crossing the boundary was declared where the macros
+# cannot see it, and the last two compare what the modules declare against what
+# abi.rs lists. The comparison the generator itself makes -- committed output
+# against printed output -- needs cargo and runs below, with the build.
+step "one declaration of the ABI"
+FFI=$(tracked '*.rs' | grep '^crates/sipral-ffi/src/' || true)
+
+listed() {
+    sed -n '/^pub const SURFACE/,/^};/p' crates/sipral-ffi/src/abi.rs | grep -o "$1" | sort -u
+}
+
+# Everything that crosses is declared through a macro from crate::abi, and a
+# macro invocation puts its contents one level in. So a repr, a published
+# constant or a published alias at the left margin is one written out by hand,
+# where nothing recorded it -- and the reprs a test declares for its own use
+# sit inside their module, indented, so this does not have to cut the tests off
+# first and cannot be slipped past by declaring something below them.
+byhand=$(grep -l '^#\[repr(' $FFI 2>/dev/null || true)
+[ -z "$byhand" ] && pass "no type crosses without record! or codes!" || {
+    fail "a repr written where the ABI cannot see it:"; printf '        %s\n' $byhand
+    printf '        declare it with record! or codes! from crate::abi.\n'
+}
+
+byhand=$(grep -l '^pub const SIPRAL_\|^pub type Sipral' $FFI 2>/dev/null || true)
+[ -z "$byhand" ] && pass "no constant or alias crosses without constants! or alias!" || {
+    fail "a published constant or alias declared where the ABI cannot see it:"
+    printf '        %s\n' $byhand
+    printf '        declare it with constants! or alias! from crate::abi.\n'
+}
+
+# Names, both ways round: declared and unlisted, or listed and gone. The three
+# entry points a test declares to prove the macro catches a panic are the one
+# thing here that is not the ABI's, and they say so in their names.
+missing=$(comm -3 \
+    <(cat $FFI | sed -n 's/^ *\(quiet \)\{0,1\}fn \(sipral_[a-z0-9_]*\)(.*/\2/p' \
+        | grep -v '^sipral_test_' | sort -u) \
+    <(listed 'sipral_[a-z0-9_]*'))
+[ -z "$missing" ] && pass "every entry point is in abi.rs" || {
+    fail "the entry points and abi.rs disagree:"; printf '        %s\n' $missing
+    printf '        the left column is declared and unlisted, the right listed and gone.\n'
+    printf '        add or remove its line in crates/sipral-ffi/src/abi.rs.\n'
+}
+
+missing=$(comm -3 \
+    <(cat $FFI | grep -oE '^ *pub (struct|union|enum|type) Sipral[A-Za-z0-9]*' \
+        | grep -o 'Sipral[A-Za-z0-9]*' | sort -u) \
+    <(listed 'Sipral[A-Za-z0-9]*'))
+[ -z "$missing" ] && pass "every type that crosses is in abi.rs" || {
+    fail "the types that cross and abi.rs disagree:"; printf '        %s\n' $missing
+    printf '        the left column is declared and unlisted, the right listed and gone.\n'
+    printf '        add or remove its line in crates/sipral-ffi/src/abi.rs.\n'
+}
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }
@@ -192,6 +250,17 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings >/dev/null 
 cargo test --workspace --all-features >/dev/null 2>&1 \
     && pass "cargo test" || fail "cargo test --workspace --all-features"
 cargo build --workspace --release >/dev/null 2>&1 && pass "release build" || fail "cargo build --release"
+
+# the other half of B7: what is committed under bindings/ against what the
+# declarations produce right now. The scans above say a declaration is listed;
+# this says the listed declaration reached the header and all three bindings.
+step "the header and the bindings"
+if printed=$(cargo run -q -p sipral-abi-gen -- --check 2>&1); then
+    pass "printed from the declarations"
+else
+    fail "bindings/ is not what the declarations produce:"
+    printf '%s\n' "$printed" | sed 's/^/        /'
+fi
 
 step "dependency licences"
 if command -v cargo-deny >/dev/null 2>&1; then

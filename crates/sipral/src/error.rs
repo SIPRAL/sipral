@@ -62,6 +62,32 @@ pub enum MediaError {
     NoDescription,
     /// The call is not one this engine placed or answered.
     NoSuchCall,
+    /// The negotiation would have keyed the stream from a DTLS handshake, and
+    /// there is no DTLS in this build.
+    ///
+    /// Refused rather than opened in the clear on a secure profile. The whole
+    /// of what this build does about keys is SDES, and
+    /// [`Capabilities`](crate::Capabilities) says so before a call is placed.
+    NoDtlsSrtp,
+    /// The call asked for SRTP and would have carried audio without it: a
+    /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
+    /// plain re-offer inside one.
+    ///
+    /// The refusal is the point. Answering it plainly would be a silent
+    /// downgrade, and there is no way for anyone on either end to notice one.
+    ///
+    /// [`SrtpPolicy::Required`]: crate::SrtpPolicy::Required
+    SrtpRequired,
+    /// The crypto line the negotiation settled on asks for something this
+    /// build will not be held to: more than one master key on the line, one
+    /// of RFC 4568 §6.3's session parameters that turns off encryption or
+    /// authentication, a key derivation rate, or a parameter that has to be
+    /// honoured and cannot be read.
+    ///
+    /// Refused rather than half-honoured: a stream opened on terms only one
+    /// end believes produces packets the far end drops, which looks like a
+    /// network fault for as long as somebody is willing to keep looking.
+    UnusableKeying,
     /// The codec refused a frame. Opus is the only one that can, and it does
     /// so for a frame length it was not built for.
     Codec(CodecError),
@@ -187,6 +213,15 @@ impl fmt::Display for MediaError {
             }
             Self::NoDescription => f.write_str("no session description has been agreed"),
             Self::NoSuchCall => f.write_str("no such call"),
+            Self::NoDtlsSrtp => {
+                f.write_str("the keys were to come from a DTLS handshake, which this build has no")
+            }
+            Self::SrtpRequired => {
+                f.write_str("this call requires SRTP and the far end described none")
+            }
+            Self::UnusableKeying => {
+                f.write_str("the crypto line asks for terms this build will not be held to")
+            }
             Self::Codec(error) => write!(f, "codec: {error}"),
             Self::PacketTooLong { need, got } => {
                 write!(f, "the packet needs {need} octets and there are {got}")

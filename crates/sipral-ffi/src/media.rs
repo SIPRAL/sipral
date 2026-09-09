@@ -54,6 +54,7 @@ use sipral::{
 };
 use sipral_core::sdp::SdpError;
 
+use crate::abi::{codes, constants, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
@@ -61,180 +62,190 @@ use crate::status::SipralStatus;
 use crate::text::required_text;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
 
-/// The buffer a caller has to bring for one outgoing packet.
-///
-/// Not a path MTU — RTP does not discover one — but the bound the session
-/// itself builds against, so a payload larger than this is a payload no codec
-/// in this build produces. It is checked before anything is encoded, because a
-/// frame that was encoded and then had nowhere to go is a frame lost from a
-/// stream whose timestamps have already moved past it.
-pub const SIPRAL_MEDIA_PACKET_BYTES: usize = 1_500;
+constants! {
+    /// The buffer a caller has to bring for one outgoing packet.
+    ///
+    /// Not a path MTU — RTP does not discover one — but the bound the session
+    /// itself builds against, so a payload larger than this is a payload no
+    /// codec in this build produces. It is checked before anything is encoded,
+    /// because a frame that was encoded and then had nowhere to go is a frame
+    /// lost from a stream whose timestamps have already moved past it.
+    pub const SIPRAL_MEDIA_PACKET_BYTES: usize = 1_500;
 
-/// Room enough for any address this ABI writes, the NUL included:
-/// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
-pub const SIPRAL_ADDRESS_BYTES: usize = 64;
-
-/// The three answers a setting can give in a struct that starts out zeroed.
-///
-/// A boolean cannot carry them. Zero is what a caller who filled nothing in
-/// leaves behind, so a plain `0`/`1` setting has no way to say "off" that is
-/// not also "I said nothing", and the difference is the whole of B2: the
-/// library must not turn a control off because the caller never touched it.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralToggle {
-    /// Nothing was said; whatever this build defaults to.
-    Default = 0,
-    /// On.
-    On = 1,
-    /// Off.
-    Off = 2,
+    /// Room enough for any address this ABI writes, the NUL included:
+    /// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
+    pub const SIPRAL_ADDRESS_BYTES: usize = 64;
 }
 
-/// One codec this build contains. Names for every member that says which.
-///
-/// A value here means there is an encoder and a decoder behind it. That is
-/// what makes the enumeration worth reporting to a settings screen at all: a
-/// list of names the build cannot produce is a list of controls that do
-/// nothing.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralCodec {
-    /// No codec: the call has none, or the event is not about one.
-    Unknown = 0,
-    /// G.711 mu-law, payload type 0.
-    Pcmu = 1,
-    /// G.711 A-law, payload type 8.
-    Pcma = 2,
-    /// G.722, wideband at the price of a narrowband stream.
-    G722 = 3,
-    /// Opus.
-    Opus = 4,
+codes! {
+    /// The three answers a setting can give in a struct that starts out zeroed.
+    ///
+    /// A boolean cannot carry them. Zero is what a caller who filled nothing in
+    /// leaves behind, so a plain `0`/`1` setting has no way to say "off" that is
+    /// not also "I said nothing", and the difference is the whole of B2: the
+    /// library must not turn a control off because the caller never touched it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralToggle: u32 {
+        /// Nothing was said; whatever this build defaults to.
+        Default = 0,
+        /// On.
+        On = 1,
+        /// Off.
+        Off = 2,
+    }
 }
 
-/// Which way audio may flow, as seen from here. Names for every `direction`.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralDirection {
-    /// Not negotiated.
-    Unknown = 0,
-    /// Both ways.
-    SendRecv = 1,
-    /// This end sends and does not receive, which is what holding the far end
-    /// looks like from here.
-    SendOnly = 2,
-    /// This end receives and does not send.
-    RecvOnly = 3,
-    /// Neither way, and the stream stays in the session.
-    Inactive = 4,
+codes! {
+    /// One codec this build contains. Names for every member that says which.
+    ///
+    /// A value here means there is an encoder and a decoder behind it. That is
+    /// what makes the enumeration worth reporting to a settings screen at all: a
+    /// list of names the build cannot produce is a list of controls that do
+    /// nothing.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralCodec: u32 {
+        /// No codec: the call has none, or the event is not about one.
+        Unknown = 0,
+        /// G.711 mu-law, payload type 0.
+        Pcmu = 1,
+        /// G.711 A-law, payload type 8.
+        Pcma = 2,
+        /// G.722, wideband at the price of a narrowband stream.
+        G722 = 3,
+        /// Opus.
+        Opus = 4,
+    }
 }
 
-/// Where control traffic goes. Names for [`SipralMediaInfo::rtcp`].
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralRtcp {
-    /// Not negotiated.
-    Unknown = 0,
-    /// One port carries both (RFC 5761), which happens only where both ends
-    /// asked for it.
-    Muxed = 1,
-    /// A port of its own at each end.
-    SeparatePort = 2,
-    /// None at all: the peer said it is not using RTCP.
-    Off = 3,
+codes! {
+    /// Which way audio may flow, as seen from here. Names for every `direction`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralDirection: u32 {
+        /// Not negotiated.
+        Unknown = 0,
+        /// Both ways.
+        SendRecv = 1,
+        /// This end sends and does not receive, which is what holding the far end
+        /// looks like from here.
+        SendOnly = 2,
+        /// This end receives and does not send.
+        RecvOnly = 3,
+        /// Neither way, and the stream stays in the session.
+        Inactive = 4,
+    }
 }
 
-/// Why media failed. Names for `sipral_media_event_t::fault`.
-///
-/// The sentence beside it says which case of the kind it was; this is the part
-/// a machine acts on, and the two are never the same thing.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralMediaFault {
-    /// Nothing failed.
-    None = 0,
-    /// The negotiation settled on something this build cannot encode or
-    /// decode, which means the peer answered with a format that was not in the
-    /// offer.
-    UnsupportedCodec = 1,
-    /// The two descriptions agree on nothing that can carry audio.
-    NoCommonCodec = 2,
-    /// One end refused the stream with a port of zero. The call is up and
-    /// carries no audio, which is a thing a peer is allowed to want.
-    StreamRefused = 3,
-    /// There is no session description to work from.
-    NoDescription = 4,
-    /// A description could not be read.
-    BadDescription = 5,
-    /// The recording stopped writing: the disk filled, the file went away.
-    Recording = 6,
-    /// The codec refused a frame.
-    Codec = 7,
-    /// Something else the layer below reported and this ABI has no word for.
-    Other = 8,
+codes! {
+    /// Where control traffic goes. Names for [`SipralMediaInfo::rtcp`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRtcp: u32 {
+        /// Not negotiated.
+        Unknown = 0,
+        /// One port carries both (RFC 5761), which happens only where both ends
+        /// asked for it.
+        Muxed = 1,
+        /// A port of its own at each end.
+        SeparatePort = 2,
+        /// None at all: the peer said it is not using RTCP.
+        Off = 3,
+    }
 }
 
-/// What a datagram handed to [`sipral_call_media_receive`] turned out to be.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralArrival {
-    /// Something this ABI has no word for.
-    Unknown = 0,
-    /// Audio, held for playout.
-    Queued = 1,
-    /// Audio that was not used: malformed, late, duplicated, from the wrong
-    /// address, or on a payload type nobody negotiated. The counters in
-    /// [`SipralStreamStats`] say which, over the call.
-    Dropped = 2,
-    /// A reception or sender report, folded into the statistics.
-    Control = 3,
-    /// The far end says it is leaving the session (RFC 3550 §6.6). Audio will
-    /// stop; the call has not ended until signalling says so.
-    Goodbye = 4,
-    /// Control traffic that was not believed: from the wrong address, or not a
-    /// well-formed compound packet.
-    ControlRefused = 5,
+codes! {
+    /// Why media failed. Names for `sipral_media_event_t::fault`.
+    ///
+    /// The sentence beside it says which case of the kind it was; this is the part
+    /// a machine acts on, and the two are never the same thing.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralMediaFault: u32 {
+        /// Nothing failed.
+        None = 0,
+        /// The negotiation settled on something this build cannot encode or
+        /// decode, which means the peer answered with a format that was not in the
+        /// offer.
+        UnsupportedCodec = 1,
+        /// The two descriptions agree on nothing that can carry audio.
+        NoCommonCodec = 2,
+        /// One end refused the stream with a port of zero. The call is up and
+        /// carries no audio, which is a thing a peer is allowed to want.
+        StreamRefused = 3,
+        /// There is no session description to work from.
+        NoDescription = 4,
+        /// A description could not be read.
+        BadDescription = 5,
+        /// The recording stopped writing: the disk filled, the file went away.
+        Recording = 6,
+        /// The codec refused a frame.
+        Codec = 7,
+        /// Something else the layer below reported and this ABI has no word for.
+        Other = 8,
+    }
 }
 
-/// Where the frame [`sipral_call_playback`] just produced came from.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralPlayback {
-    /// Something this ABI has no word for.
-    Unknown = 0,
-    /// A packet the far end sent.
-    Packet = 1,
-    /// One it sent and this end did not get, filled in by the concealment.
-    Concealed = 2,
-    /// Comfort noise, from an RFC 3389 payload the far end sent instead of
-    /// audio.
-    ComfortNoise = 3,
-    /// Nothing was due: the buffer is still filling, or the far end has
-    /// stopped.
-    Silence = 4,
+codes! {
+    /// What a datagram handed to [`sipral_call_media_receive`] turned out to be.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralArrival: u32 {
+        /// Something this ABI has no word for.
+        Unknown = 0,
+        /// Audio, held for playout.
+        Queued = 1,
+        /// Audio that was not used: malformed, late, duplicated, from the wrong
+        /// address, or on a payload type nobody negotiated. The counters in
+        /// [`SipralStreamStats`] say which, over the call.
+        Dropped = 2,
+        /// A reception or sender report, folded into the statistics.
+        Control = 3,
+        /// The far end says it is leaving the session (RFC 3550 §6.6). Audio will
+        /// stop; the call has not ended until signalling says so.
+        Goodbye = 4,
+        /// Control traffic that was not believed: from the wrong address, or not a
+        /// well-formed compound packet.
+        ControlRefused = 5,
+    }
 }
 
-/// One codec this build contains.
-///
-/// Set `size` to `sizeof(sipral_codec_info_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SipralCodecInfo {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// A [`SipralCodec`].
-    pub codec: u32,
-    /// The RTP timestamp clock, in hertz, which is what goes on the
-    /// `a=rtpmap` line.
-    pub clock_rate: u32,
-    /// The rate the codec actually hears at, which is what the samples crossing
-    /// this ABI are in. G.722's two differ, and RFC 3551 §4.5.2 says so.
-    pub sample_rate: u32,
-    /// The payload type RFC 3551 table 4 assigns it, when it has one.
-    pub static_payload_type: u32,
-    /// Whether it has one. Opus does not: it is newer than the table and
-    /// always travels as a dynamic type.
-    pub has_static_payload_type: u32,
+codes! {
+    /// Where the frame [`sipral_call_playback`] just produced came from.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralPlayback: u32 {
+        /// Something this ABI has no word for.
+        Unknown = 0,
+        /// A packet the far end sent.
+        Packet = 1,
+        /// One it sent and this end did not get, filled in by the concealment.
+        Concealed = 2,
+        /// Comfort noise, from an RFC 3389 payload the far end sent instead of
+        /// audio.
+        ComfortNoise = 3,
+        /// Nothing was due: the buffer is still filling, or the far end has
+        /// stopped.
+        Silence = 4,
+    }
+}
+
+record! {
+    /// One codec this build contains.
+    ///
+    /// Set `size` to `sizeof(sipral_codec_info_t)` before the call.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralCodecInfo {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// A [`SipralCodec`].
+        pub codec: u32,
+        /// The RTP timestamp clock, in hertz, which is what goes on the
+        /// `a=rtpmap` line.
+        pub clock_rate: u32,
+        /// The rate the codec actually hears at, which is what the samples crossing
+        /// this ABI are in. G.722's two differ, and RFC 3551 §4.5.2 says so.
+        pub sample_rate: u32,
+        /// The payload type RFC 3551 table 4 assigns it, when it has one.
+        pub static_payload_type: u32,
+        /// Whether it has one. Opus does not: it is newer than the table and
+        /// always travels as a dynamic type.
+        pub has_static_payload_type: u32,
+    }
 }
 
 // Safety: integers, no invariant between them, and zero is a valid value of
@@ -248,56 +259,57 @@ unsafe impl Versioned for SipralCodecInfo {
     }
 }
 
-/// What one call's media settled on, and what it is doing now.
-///
-/// A4's reporting half and as much of D5 as this stack knows: the codec that
-/// was agreed, the number it travels under, and the shape of the stream around
-/// it. What is deliberately not here is why each other candidate lost —
-/// RFC 3264 §6.1 leaves that decision with the peer, and a reason invented on
-/// this side would be a reason nobody can act on.
-///
-/// Set `size` to `sizeof(sipral_media_info_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SipralMediaInfo {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// A [`SipralCodec`]: what the two ends agreed on.
-    pub codec: u32,
-    /// The payload type on the wire. It is the offer's own number and not
-    /// necessarily ours: a peer that numbers Opus 111 has said what we say
-    /// with 96.
-    pub payload_type: u32,
-    /// The RTP timestamp clock, in hertz.
-    pub clock_rate: u32,
-    /// The rate the samples crossing this ABI are at.
-    pub sample_rate: u32,
-    /// How long a frame is, in milliseconds.
-    pub frame_ms: u32,
-    /// Samples in one frame: exactly what [`sipral_call_playback`] fills and
-    /// what [`sipral_call_capture`] wants.
-    pub frame_samples: usize,
-    /// A [`SipralDirection`].
-    pub direction: u32,
-    /// Whether this end is meant to be sending. Zero while it holds the far
-    /// end, or while the far end has refused to receive.
-    pub sending: u32,
-    /// Whether this end is meant to be receiving.
-    pub receiving: u32,
-    /// Whether RFC 4733 named events were agreed.
-    pub has_dtmf: u32,
-    /// The payload type they travel under, when they were.
-    pub dtmf_payload_type: u32,
-    /// A [`SipralRtcp`].
-    pub rtcp: u32,
-    /// Whether the stream is keyed.
-    pub secured: u32,
-    /// Whether a recording is running on this call.
-    pub recording: u32,
-    /// How much audio it has taken.
-    pub recorded_ms: u64,
-    /// Whether the watchdog currently considers inbound audio stopped.
-    pub stalled: u32,
+record! {
+    /// What one call's media settled on, and what it is doing now.
+    ///
+    /// A4's reporting half and as much of D5 as this stack knows: the codec that
+    /// was agreed, the number it travels under, and the shape of the stream around
+    /// it. What is deliberately not here is why each other candidate lost —
+    /// RFC 3264 §6.1 leaves that decision with the peer, and a reason invented on
+    /// this side would be a reason nobody can act on.
+    ///
+    /// Set `size` to `sizeof(sipral_media_info_t)` before the call.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralMediaInfo {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// A [`SipralCodec`]: what the two ends agreed on.
+        pub codec: u32,
+        /// The payload type on the wire. It is the offer's own number and not
+        /// necessarily ours: a peer that numbers Opus 111 has said what we say
+        /// with 96.
+        pub payload_type: u32,
+        /// The RTP timestamp clock, in hertz.
+        pub clock_rate: u32,
+        /// The rate the samples crossing this ABI are at.
+        pub sample_rate: u32,
+        /// How long a frame is, in milliseconds.
+        pub frame_ms: u32,
+        /// Samples in one frame: exactly what [`sipral_call_playback`] fills and
+        /// what [`sipral_call_capture`] wants.
+        pub frame_samples: usize,
+        /// A [`SipralDirection`].
+        pub direction: u32,
+        /// Whether this end is meant to be sending. Zero while it holds the far
+        /// end, or while the far end has refused to receive.
+        pub sending: u32,
+        /// Whether this end is meant to be receiving.
+        pub receiving: u32,
+        /// Whether RFC 4733 named events were agreed.
+        pub has_dtmf: u32,
+        /// The payload type they travel under, when they were.
+        pub dtmf_payload_type: u32,
+        /// A [`SipralRtcp`].
+        pub rtcp: u32,
+        /// Whether the stream is keyed.
+        pub secured: u32,
+        /// Whether a recording is running on this call.
+        pub recording: u32,
+        /// How much audio it has taken.
+        pub recorded_ms: u64,
+        /// Whether the watchdog currently considers inbound audio stopped.
+        pub stalled: u32,
+    }
 }
 
 // Safety: integers, no invariant between them, and zero is a valid value of
@@ -311,75 +323,76 @@ unsafe impl Versioned for SipralMediaInfo {
     }
 }
 
-/// What one call's media has cost, and what it is costing now.
-///
-/// A6. Cheap enough to read at the frame rate of a user interface — everything
-/// in it is already counted and nothing walks a history — and complete enough
-/// to keep as the record of a call, which is the same struct delivered with
-/// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends.
-///
-/// The three delays are in microseconds and not milliseconds. Jitter on a
-/// healthy call is a fraction of a millisecond, and a figure that reads zero
-/// whenever things are going well is a figure nobody looks at twice.
-///
-/// Set `size` to `sizeof(sipral_stream_stats_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SipralStreamStats {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// A [`SipralCodec`]: what the call settled on, which is the first thing
-    /// anybody looking at a bad call wants to know.
-    pub codec: u32,
-    /// Whether a round-trip time is known. Zero until a report has come back,
-    /// which on a short call may be never: the first one is deliberately
-    /// delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
-    /// one.
-    pub has_round_trip: u32,
-    /// The round trip, from RTCP.
-    pub round_trip_us: u64,
-    /// Packets this end has put on the wire.
-    pub packets_sent: u64,
-    /// Payload octets in them, not counting headers.
-    pub octets_sent: u64,
-    /// Packets taken in and held for playout.
-    pub packets_received: u64,
-    /// Sequence numbers that came due with nothing in them.
-    pub packets_lost: u64,
-    /// Packets that arrived behind the playout point.
-    pub packets_late: u64,
-    /// Packets thrown out of the window before they could be played.
-    pub packets_overflowed: u64,
-    /// Packets whose sequence number was already held.
-    pub packets_duplicated: u64,
-    /// Packets accepted after a higher sequence number had already arrived.
-    pub packets_reordered: u64,
-    /// Frames dropped in a pause to bring the delay down. Deliberate, and
-    /// inaudible when the pause is real.
-    pub frames_shrunk: u64,
-    /// Frames the concealment was asked to invent in a pause to push the delay
-    /// up.
-    pub frames_stretched: u64,
-    /// How far behind the newest packet the playout point is: the delay the
-    /// far end's voice is actually suffering.
-    pub delay_us: u64,
-    /// What the buffer is aiming at, from the arrival times it has seen.
-    pub target_delay_us: u64,
-    /// Interarrival jitter, the smoothed mean deviation of transit time
-    /// (RFC 3550 §6.4.1).
-    pub jitter_us: u64,
-    /// Frames concealed as a fraction of frames played, over the last ten
-    /// seconds or so. The counters above say what the call has cost; this says
-    /// whether it is bad right now.
-    pub loss_rate: f32,
-    /// One number for a bar on a screen: a hundred for a call with nothing
-    /// wrong with it, zero for one nobody can hold. Not a mean opinion score,
-    /// and deliberately not shaped like one.
-    pub score: f32,
-    /// Whether the numbers say this call is in trouble now.
-    pub suffering: u32,
-    /// How long since a packet last arrived. A live call sits at one frame.
-    pub silent_for_ms: u64,
+record! {
+    /// What one call's media has cost, and what it is costing now.
+    ///
+    /// A6. Cheap enough to read at the frame rate of a user interface — everything
+    /// in it is already counted and nothing walks a history — and complete enough
+    /// to keep as the record of a call, which is the same struct delivered with
+    /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends.
+    ///
+    /// The three delays are in microseconds and not milliseconds. Jitter on a
+    /// healthy call is a fraction of a millisecond, and a figure that reads zero
+    /// whenever things are going well is a figure nobody looks at twice.
+    ///
+    /// Set `size` to `sizeof(sipral_stream_stats_t)` before the call.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralStreamStats {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// A [`SipralCodec`]: what the call settled on, which is the first thing
+        /// anybody looking at a bad call wants to know.
+        pub codec: u32,
+        /// Whether a round-trip time is known. Zero until a report has come back,
+        /// which on a short call may be never: the first one is deliberately
+        /// delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
+        /// one.
+        pub has_round_trip: u32,
+        /// The round trip, from RTCP.
+        pub round_trip_us: u64,
+        /// Packets this end has put on the wire.
+        pub packets_sent: u64,
+        /// Payload octets in them, not counting headers.
+        pub octets_sent: u64,
+        /// Packets taken in and held for playout.
+        pub packets_received: u64,
+        /// Sequence numbers that came due with nothing in them.
+        pub packets_lost: u64,
+        /// Packets that arrived behind the playout point.
+        pub packets_late: u64,
+        /// Packets thrown out of the window before they could be played.
+        pub packets_overflowed: u64,
+        /// Packets whose sequence number was already held.
+        pub packets_duplicated: u64,
+        /// Packets accepted after a higher sequence number had already arrived.
+        pub packets_reordered: u64,
+        /// Frames dropped in a pause to bring the delay down. Deliberate, and
+        /// inaudible when the pause is real.
+        pub frames_shrunk: u64,
+        /// Frames the concealment was asked to invent in a pause to push the delay
+        /// up.
+        pub frames_stretched: u64,
+        /// How far behind the newest packet the playout point is: the delay the
+        /// far end's voice is actually suffering.
+        pub delay_us: u64,
+        /// What the buffer is aiming at, from the arrival times it has seen.
+        pub target_delay_us: u64,
+        /// Interarrival jitter, the smoothed mean deviation of transit time
+        /// (RFC 3550 §6.4.1).
+        pub jitter_us: u64,
+        /// Frames concealed as a fraction of frames played, over the last ten
+        /// seconds or so. The counters above say what the call has cost; this says
+        /// whether it is bad right now.
+        pub loss_rate: f32,
+        /// One number for a bar on a screen: a hundred for a call with nothing
+        /// wrong with it, zero for one nobody can hold. Not a mean opinion score,
+        /// and deliberately not shaped like one.
+        pub score: f32,
+        /// Whether the numbers say this call is in trouble now.
+        pub suffering: u32,
+        /// How long since a packet last arrived. A live call sits at one frame.
+        pub silent_for_ms: u64,
+    }
 }
 
 // Safety: integers and two floats, no invariant between them, and zero is a
@@ -393,35 +406,36 @@ unsafe impl Versioned for SipralStreamStats {
     }
 }
 
-/// One datagram on its way out, written into the caller's own buffers.
-///
-/// The caller fills in `size`, the two pointers and the two capacities; the
-/// library fills in the two lengths and the bytes. A `len` of zero means there
-/// was nothing to send, which on a capture is an ordinary answer: this end may
-/// be holding the far end, or silence suppression may have swallowed the frame.
-///
-/// Both buffers are checked before anything is produced. A packet that was
-/// built and then had nowhere to go would be a packet missing from a stream
-/// whose timestamps had already moved past it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralMediaPacket {
-    /// `sizeof` this struct, as the caller's header declares it.
-    pub size: usize,
-    /// Where to write the packet. At least [`SIPRAL_MEDIA_PACKET_BYTES`].
-    pub data: *mut u8,
-    /// How much room `data` has.
-    pub capacity: usize,
-    /// How much was written. Zero means there was nothing to send.
-    pub len: usize,
-    /// Where to write the destination, as `host:port` with a trailing NUL. Null
-    /// with a capacity of zero for a caller that does not want it.
-    pub destination: *mut c_char,
-    /// How much room `destination` has. At least [`SIPRAL_ADDRESS_BYTES`] when
-    /// it is not null.
-    pub destination_capacity: usize,
-    /// How many bytes of it were written, the NUL not counted.
-    pub destination_len: usize,
+record! {
+    /// One datagram on its way out, written into the caller's own buffers.
+    ///
+    /// The caller fills in `size`, the two pointers and the two capacities; the
+    /// library fills in the two lengths and the bytes. A `len` of zero means there
+    /// was nothing to send, which on a capture is an ordinary answer: this end may
+    /// be holding the far end, or silence suppression may have swallowed the frame.
+    ///
+    /// Both buffers are checked before anything is produced. A packet that was
+    /// built and then had nowhere to go would be a packet missing from a stream
+    /// whose timestamps had already moved past it.
+    #[derive(Clone, Copy)]
+    pub struct SipralMediaPacket {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// Where to write the packet. At least [`SIPRAL_MEDIA_PACKET_BYTES`].
+        pub data: *mut u8,
+        /// How much room `data` has.
+        pub capacity: usize,
+        /// How much was written. Zero means there was nothing to send.
+        pub len: usize,
+        /// Where to write the destination, as `host:port` with a trailing NUL. Null
+        /// with a capacity of zero for a caller that does not want it.
+        pub destination: *mut c_char,
+        /// How much room `destination` has. At least [`SIPRAL_ADDRESS_BYTES`] when
+        /// it is not null.
+        pub destination_capacity: usize,
+        /// How many bytes of it were written, the NUL not counted.
+        pub destination_len: usize,
+    }
 }
 
 // Safety: plain data with no invariant between the members. The two pointers

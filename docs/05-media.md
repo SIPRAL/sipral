@@ -173,12 +173,97 @@ and the alternatives are single-maintainer crates. The cost of the delay is
 that peers who require DTLS-SRTP and refuse SDES — a browser talking WebRTC
 directly, and some carrier session border controllers — cannot be reached.
 
-SDES only over a secured signalling channel. `a=crypto` carries the master key
-in the SDP body, so over plain UDP or TCP it travels in the clear and anyone on
-the path can decrypt the media — RFC 4568 §7 is explicit that the mechanism
-depends on the signalling being protected. The offer is therefore made only on
-a TLS transport; on anything else the choice is DTLS-SRTP or no SRTP, and
-saying so is better than an `a=crypto` that looks like encryption and is not.
+### SRTP through the facade
+
+Everything above is the crate. The `sipral` crate is what joins it to a call:
+`CodecCatalog::with_srtp` says what one call does about keys, and it sits on
+the catalogue rather than on `MediaConfig` because it decides what goes into
+an offer, which is what the rest of the catalogue is. Per call, not per stack,
+for the reason D6 gives: an attended transfer holds two calls at once and the
+consultation leg does not have to agree with the call it stands in for.
+
+| `SrtpPolicy` | The offer this end writes | A plain offer arriving | An offer arriving on `RTP/SAVP` |
+|---|---|---|---|
+| `NotOffered` — **the default** | `RTP/AVP`, no key in the body | answered plainly | answered, with a key of our own |
+| `Offered` | `RTP/SAVP`, one `a=crypto` | answered plainly | answered, with a key of our own |
+| `Required` | `RTP/SAVP`, one `a=crypto` | **not answered at all** | answered, with a key of our own |
+
+**Why the default is off.** `a=crypto` carries the master key in the SDP body,
+so over plain UDP or TCP it travels in the clear and anyone on the path can
+decrypt the media — RFC 4568 §7 makes the mechanism depend on the signalling
+being protected. Whether it is protected, this crate cannot see: `sipral-ua`
+offers no way to ask which protocol a bound transport speaks, and the
+application, which bound it, is the only one that knows. The second half is
+`docs/06-nat.md`'s rule — a mechanism that only helps against a peer that
+supports it is negotiated, never assumed. An offer on `RTP/SAVP` to a PBX that
+does not do SRTP has its stream refused outright, and the PBX this project is
+tested against is such a PBX, so the call that was meant to be encrypted is a
+call with no audio in it. The offer is therefore off until an application
+turns it on, per call.
+
+**Why answering is not off with it.** The default is about what this end
+writes. A peer that has already put `RTP/SAVP` and a key in front of us has
+asked for encryption; refusing there would turn a call that would have worked,
+encrypted, into a silent one, and buys nothing. So every policy answers a
+secure offer with a key, and only `Required` refuses a plain one.
+
+**Why `Offered` and `Required` are two settings.** They write the same offer,
+and a peer that refuses `RTP/SAVP` leaves the call with no audio under both —
+this stack does not follow a refusal with a plain re-offer. They differ in one
+place, and it is the place where a downgrade would otherwise be silent: an
+offer that arrives without keys. Under `Offered` it is answered, and a caller
+who would rather have a plain call than none gets one. Under `Required` it is
+not: `MediaEngine::answer` returns `MediaError::SrtpRequired` without sending
+anything, so the call is still ringing and the application picks the status
+code; and a plain re-offer inside a live call is rejected with 488 rather than
+accepted, which is the case that matters, because the alternative is a call
+that started encrypted, stopped being encrypted, and told nobody.
+
+**Where the key comes from.** The same seeded token stream as the branches,
+the tags and the `Call-ID`s: a token is half a SHA-256 of the thirty-two bytes
+the application handed `UserAgent::new` and a counter that never repeats, so a
+token that goes out in a `Via` says nothing about the next one, and two of them
+are 256 bits of material for the 240 an `inline:` parameter carries. **A poor
+seed costs the whole of the encryption** — an attacker who can guess those
+thirty-two bytes can derive every master key this stack will ever offer — and
+nothing about a call made with one looks wrong. That is the same bargain the
+rest of the tree makes about entropy, and this is the place where losing it is
+silent. The key itself lives in `KeySalt`, which has no `Debug` worth the name
+and zeroises on drop; the engine's own `Debug` prints every `a=crypto` line
+with its keying information replaced, since that is the last place the same
+material is still text.
+
+**What it deliberately does not do.** DTLS-SRTP. `sipral-core` reads an
+`a=fingerprint` and carries it through, and there is no DTLS in this tree at
+all, so an offer arriving on `UDP/TLS/RTP/SAVP` has its stream refused rather
+than answered, and a plan that comes back keyed that way is refused with
+`MediaError::NoDtlsSrtp` rather than opened in the clear on a secure profile.
+`Capabilities::srtp_keying` names SDES and not DTLS-SRTP, so an application
+can grey the control out instead of finding out from a support ticket.
+
+Nor does it half-honour a crypto line. One master key to a line, because one
+context opens one key; and RFC 4568 §6.3's defaults, so `UNENCRYPTED_SRTP`,
+`UNENCRYPTED_SRTCP`, `UNAUTHENTICATED_SRTP` and a key derivation rate are
+refused where they are read rather than ignored where they would matter. `WSH`
+is allowed through and ignored, which §6.3.6 permits in as many words.
+
+**One known gap.** When the far end puts a secured call on hold, `sipral-ua`
+answers that re-INVITE itself — the streams and the formats have not moved, so
+there is nothing for an application to decide — and the answer it writes keeps
+the `RTP/SAVP` profile without the `a=crypto` line §5.1.2 requires on it. The
+negotiation that follows reports `SdpError::CryptoMissing` rather than a hold,
+and the audio carries on under the keys already in use. It is a defect in the
+user agent's own answer writer, not in the facade, and it is not papered over
+here: carrying the key forward locally would make this end believe a
+negotiation the far end saw fail.
+
+**Buffers.** A session holds two 1500-octet scratch buffers. The largest RTP
+packet this build produces is twelve octets of header, 1275 of Opus and ten of
+tag — 1297 — and a protected compound report is thirty-nine octets under the
+same roof, so SRTP fits in what was already there. `RtpSession` subtracts its
+own overhead from whatever buffer it is handed and refuses a short one before
+a sequence number is spent, so a buffer that stopped being big enough would be
+a refused frame with a reason on it rather than a truncated packet.
 
 ## sipral-media
 

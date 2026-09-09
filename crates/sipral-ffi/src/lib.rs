@@ -32,6 +32,12 @@
 //! ([`capabilities`]), and whether the deployment it is running in is healthy
 //! ([`counters`]).
 //!
+//! Every one of those declares itself through a macro from [`abi`], which
+//! emits the declaration and, beside it, what the declaration was made of. The
+//! C header and the Swift, Kotlin and .NET bindings are printed from that and
+//! committed, so a function added here and forgotten in a binding is a build
+//! failure rather than a crash on one platform in the field.
+//!
 //! ABI stability rules are in `docs/08-ffi.md`.
 
 #![doc(
@@ -49,6 +55,7 @@
     )
 )]
 
+pub mod abi;
 pub mod account;
 pub mod call;
 pub mod capabilities;

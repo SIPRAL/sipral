@@ -24,6 +24,7 @@ use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
 use sipral_ua::Account;
 
+use crate::abi::record;
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
 use crate::event::registration_state;
@@ -33,59 +34,60 @@ use crate::status::SipralStatus;
 use crate::text::{required_text, text};
 use crate::versioned::{Versioned, read_versioned};
 
-/// What an account is configured with.
-///
-/// Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
-/// filling anything in.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralAccountConfig {
-    /// `sizeof` this struct, as the caller's header declares it.
-    pub size: usize,
-    /// The address of record, `sip:alice@example.com`. UTF-8, not
-    /// NUL-terminated.
-    pub aor: *const c_char,
-    /// How many bytes of it.
-    pub aor_len: usize,
-    /// Where the REGISTER is addressed, `sip:example.com`, no user part.
-    pub registrar: *const c_char,
-    /// How many bytes of it.
-    pub registrar_len: usize,
-    /// Where this endpoint can be reached, as it goes in `Contact`.
-    pub contact: *const c_char,
-    /// How many bytes of it.
-    pub contact_len: usize,
-    /// Where the REGISTER actually goes, as `host:port`. An address, not a
-    /// name: RFC 3263 resolution is the caller's.
-    pub registrar_address: *const c_char,
-    /// How many bytes of it.
-    pub registrar_address_len: usize,
-    /// The display name that goes in `From`, or null for none.
-    pub display_name: *const c_char,
-    /// How many bytes of it.
-    pub display_name_len: usize,
-    /// The user name to answer a challenge with, or null for an account that
-    /// answers none.
-    pub auth_user: *const c_char,
-    /// How many bytes of it.
-    pub auth_user_len: usize,
-    /// The password that goes with it. Copied out of the caller's memory; what
-    /// happens to the caller's copy is the caller's.
-    pub auth_password: *const c_char,
-    /// How many bytes of it.
-    pub auth_password_len: usize,
-    /// The `+sip.instance` URN of RFC 5626 §4.1, or null for none.
-    pub instance_id: *const c_char,
-    /// How many bytes of it.
-    pub instance_id_len: usize,
-    /// How long a binding to ask for, or zero for an hour.
+record! {
+    /// What an account is configured with.
     ///
-    /// A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
-    /// is refused rather than sent as a number no registrar will read. What the
-    /// registrar grants wins over the request either way, and the granted
-    /// figure is what `sipral_registration_event_t::expires_ms` carries — that
-    /// is where the effective value is read back, not here.
-    pub expires_seconds: u64,
+    /// Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
+    /// filling anything in.
+    #[derive(Clone, Copy)]
+    pub struct SipralAccountConfig {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// The address of record, `sip:alice@example.com`. UTF-8, not
+        /// NUL-terminated.
+        pub aor: *const c_char,
+        /// How many bytes of it.
+        pub aor_len: usize,
+        /// Where the REGISTER is addressed, `sip:example.com`, no user part.
+        pub registrar: *const c_char,
+        /// How many bytes of it.
+        pub registrar_len: usize,
+        /// Where this endpoint can be reached, as it goes in `Contact`.
+        pub contact: *const c_char,
+        /// How many bytes of it.
+        pub contact_len: usize,
+        /// Where the REGISTER actually goes, as `host:port`. An address, not a
+        /// name: RFC 3263 resolution is the caller's.
+        pub registrar_address: *const c_char,
+        /// How many bytes of it.
+        pub registrar_address_len: usize,
+        /// The display name that goes in `From`, or null for none.
+        pub display_name: *const c_char,
+        /// How many bytes of it.
+        pub display_name_len: usize,
+        /// The user name to answer a challenge with, or null for an account that
+        /// answers none.
+        pub auth_user: *const c_char,
+        /// How many bytes of it.
+        pub auth_user_len: usize,
+        /// The password that goes with it. Copied out of the caller's memory; what
+        /// happens to the caller's copy is the caller's.
+        pub auth_password: *const c_char,
+        /// How many bytes of it.
+        pub auth_password_len: usize,
+        /// The `+sip.instance` URN of RFC 5626 §4.1, or null for none.
+        pub instance_id: *const c_char,
+        /// How many bytes of it.
+        pub instance_id_len: usize,
+        /// How long a binding to ask for, or zero for an hour.
+        ///
+        /// A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
+        /// is refused rather than sent as a number no registrar will read. What the
+        /// registrar grants wins over the request either way, and the granted
+        /// figure is what `sipral_registration_event_t::expires_ms` carries — that
+        /// is where the effective value is read back, not here.
+        pub expires_seconds: u64,
+    }
 }
 
 // Safety: the trait's contract. Plain data with no invariant between the

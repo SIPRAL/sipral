@@ -32,11 +32,13 @@
 //! [`Codec::clock_rate`] are two functions and not one.
 
 use sipral_core::sdp::{
-    MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, static_rtpmap,
+    KeySalt, MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, SrtpSupport,
+    static_rtpmap,
 };
 use sipral_media::{g711, g722, opus};
 
 use crate::error::MediaError;
+use crate::keying::{self, SrtpPolicy};
 
 /// The packetisation this stack offers unless told otherwise. Twenty
 /// milliseconds is what every peer expects and what every codec here cuts
@@ -265,17 +267,20 @@ pub struct CodecCatalog {
     frame_ms: u32,
     dtmf: bool,
     rtcp_mux: bool,
+    srtp: SrtpPolicy,
 }
 
 impl CodecCatalog {
     /// Every codec this build contains, quality first, twenty-millisecond
-    /// frames, named events offered and RTCP on its own port.
+    /// frames, named events offered, RTCP on its own port and no SRTP
+    /// offered.
     ///
     /// RTCP multiplexing is off because RFC 5761 §5.1.1 only permits it when
     /// both ends asked, and the equipment this stack is deployed against —
     /// an Asterisk-family PBX behind consumer NAT — does not. Asking for it
     /// unasked costs a line in every offer and buys a port on the calls where
-    /// nobody answers.
+    /// nobody answers. SDES is off for the same shape of reason, which
+    /// [`SrtpPolicy::NotOffered`] states in full.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -283,6 +288,7 @@ impl CodecCatalog {
             frame_ms: DEFAULT_FRAME_MS,
             dtmf: true,
             rtcp_mux: false,
+            srtp: SrtpPolicy::NotOffered,
         }
     }
 
@@ -347,6 +353,22 @@ impl CodecCatalog {
         self
     }
 
+    /// Say what this call does about SRTP.
+    ///
+    /// Per call rather than per engine, and off by default: see
+    /// [`SrtpPolicy`] for both halves of the reason.
+    #[must_use]
+    pub const fn with_srtp(mut self, srtp: SrtpPolicy) -> Self {
+        self.srtp = srtp;
+        self
+    }
+
+    /// What this call does about SRTP.
+    #[must_use]
+    pub const fn srtp(&self) -> SrtpPolicy {
+        self.srtp
+    }
+
     /// What is offered, in the order it is offered.
     #[must_use]
     pub fn codecs(&self) -> &[Codec] {
@@ -368,6 +390,12 @@ impl CodecCatalog {
     /// the dynamic ones are handed out in offer order from 96, so the same
     /// build offering a different order writes different numbers and is right
     /// both times.
+    ///
+    /// No `a=crypto` and no secure profile, whatever [`CodecCatalog::srtp`]
+    /// says. A key cannot be invented here: it comes out of the seeded token
+    /// stream the user agent owns, so
+    /// [`MediaEngine`](crate::MediaEngine) draws one per description and adds
+    /// the line itself. This is the vocabulary; the keys are the engine's.
     #[must_use]
     pub fn capabilities(&self) -> MediaCapabilities {
         let mut next_dynamic = FIRST_DYNAMIC;
@@ -390,6 +418,20 @@ impl CodecCatalog {
         MediaCapabilities::new(codecs)
             .with_dtmf(self.dtmf)
             .with_rtcp_mux(self.rtcp_mux)
+    }
+
+    /// The same, with the `a=crypto` line an offer under this policy carries.
+    ///
+    /// `keys` is the master key and salt this end will use for what it sends,
+    /// drawn once for the description being written. `None`, or a policy that
+    /// does not offer, leaves the offer on `RTP/AVP` with nothing in the body
+    /// that has to be kept secret.
+    pub(crate) fn offering(&self, keys: Option<KeySalt>) -> MediaCapabilities {
+        let capabilities = self.capabilities();
+        match keys.filter(|_| self.srtp.offers()) {
+            Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(vec![keying::offer_line(keys)])),
+            None => capabilities,
+        }
     }
 
     /// What became of every codec in this catalogue, once a call settled on

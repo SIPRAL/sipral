@@ -280,14 +280,29 @@ impl SessionParams {
 
     /// Read the session parameters of a crypto line.
     ///
-    /// A parameter this stack does not know is not an error: §6.3.7 allows
-    /// extensions, and §7.1.2 makes accepting a line a decision about what
-    /// was understood, not about what was present.
+    /// `None` for a line this stack cannot be held to. §6.3.7 is the opposite
+    /// of the usual extension rule and is worth quoting, because reading it
+    /// the usual way produces a stack that silently ignores what a peer
+    /// required: "New SRTP session parameters are by default mandatory. A
+    /// newly defined SRTP session parameter that is prefixed with the dash
+    /// character ('-'), however, is considered optional and MAY be ignored.
+    /// If an SDP crypto attribute is received with an unknown session
+    /// parameter that is not prefixed with a '-' character, that crypto
+    /// attribute MUST be considered invalid."
+    ///
+    /// So an unknown parameter is fatal to the line unless it opted out of
+    /// being. A line that is invalid is one that cannot be accepted, and
+    /// §7.1.2 has an answerer that can accept none refuse the stream rather
+    /// than fall back to something weaker.
     #[must_use]
     pub fn parse(parameters: &[String]) -> Option<Self> {
         let mut params = Self::new();
         for parameter in parameters {
             let text = parameter.as_str();
+            if text.starts_with('-') {
+                // said to be safe to ignore by whoever defined it
+                continue;
+            }
             if text.eq_ignore_ascii_case("UNENCRYPTED_SRTP") {
                 params.unencrypted_rtp = true;
             } else if text.eq_ignore_ascii_case("UNENCRYPTED_SRTCP") {
@@ -306,6 +321,8 @@ impl SessionParams {
                     return None;
                 }
                 params.window = Some(window);
+            } else {
+                return None;
             }
         }
         Some(params)
@@ -769,14 +786,32 @@ mod tests {
         );
     }
 
+    /// §6.3.7 is the opposite of the usual extension rule, and reading it the
+    /// usual way produces a stack that quietly ignores what a peer required.
+    /// A parameter that did not opt out of mattering makes the line invalid.
     #[test]
-    fn a_parameter_we_do_not_know_is_carried_rather_than_refused() {
+    fn a_parameter_we_do_not_know_makes_the_line_one_we_cannot_be_held_to() {
         let keys = base64_encode(&[0x41; 30]);
         let crypto = line(&format!(
             "1 AES_CM_128_HMAC_SHA1_80 inline:{keys} FEC_ORDER=FEC_SRTP"
         ));
-        assert!(crypto.policy().is_some());
-        assert_eq!(crypto.session_params.len(), 1);
+        assert_eq!(crypto.session_params.len(), 1, "the line still parses");
+        assert!(
+            crypto.policy().is_none(),
+            "an unknown mandatory parameter must make the attribute invalid"
+        );
+    }
+
+    /// And the half that keeps the rule usable: whoever defines a parameter
+    /// can say it is safe to ignore, by writing it with a leading dash.
+    #[test]
+    fn a_parameter_written_as_optional_is_ignored_rather_than_refused() {
+        let keys = base64_encode(&[0x41; 30]);
+        let crypto = line(&format!(
+            "1 AES_CM_128_HMAC_SHA1_80 inline:{keys} -SOMETHING_LATER=1"
+        ));
+        let policy = crypto.policy().expect("the dash says it may be ignored");
+        assert_eq!(policy.params, SessionParams::new(), "and it was ignored");
     }
 
     #[test]

@@ -40,7 +40,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral_core::sdp::{Direction, MediaPlan, RtcpPlan};
+use sipral_core::sdp::{Direction, Keying, MediaPlan, RtcpPlan};
 use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFORT_NOISE};
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
@@ -55,6 +55,7 @@ use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, SHORTEST_DIGIT};
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
+use crate::keying;
 use crate::pipeline::Coder;
 use crate::record::{Recorder, RecordingSink};
 use crate::stats::StreamStatistics;
@@ -64,7 +65,13 @@ use crate::stats::StreamStatistics;
 /// Not a path MTU: RTP does not discover one, and a payload that would not fit
 /// here is a payload no codec in this build produces. It is the bound on the
 /// two scratch buffers, and it is generous enough that SRTP's tag and index
-/// still fit behind the largest Opus frame.
+/// still fit behind the largest Opus frame: twelve octets of fixed header,
+/// 1275 of Opus (`opus::MAX_FRAME_BYTES`) and ten of tag come to 1297, and a
+/// protected compound report is thirty-nine octets under the same roof.
+/// `RtpSession` subtracts its own overhead from whatever it is handed and
+/// refuses a buffer that is short before a sequence number is spent, so a
+/// number that stopped being enough would be a refused frame rather than a
+/// truncated one.
 const DATAGRAM: usize = 1_500;
 
 /// How long a stream may be silent before that is news, unless the
@@ -274,8 +281,10 @@ impl MediaSession {
     /// # Errors
     /// [`MediaError::UnknownPayload`] when the answer named a format this
     /// build cannot decode, [`MediaError::Codec`] when the codec refuses the
-    /// frame length, and [`MediaError::RenderDelayTooLong`] for a
-    /// render-to-capture delay no device has.
+    /// frame length, [`MediaError::RenderDelayTooLong`] for a
+    /// render-to-capture delay no device has, and
+    /// [`MediaError::NoDtlsSrtp`] or [`MediaError::UnusableKeying`] for a
+    /// plan whose keys this build cannot open a stream with.
     pub(crate) fn open(
         plan: &MediaPlan,
         frame_ms: u32,
@@ -294,25 +303,30 @@ impl MediaSession {
         }
         let coder = Coder::new(agreed, frame_ms)?;
         let frame_ticks = agreed.frame_ticks(frame_ms);
-        let rtp = RtpSession::new(
-            &StreamConfig {
-                ssrc: identity.ssrc,
-                payload_type: plan.codec.payload(),
-                accepted: accepted(plan),
-                clock_rate: plan.codec.clock_rate(),
-                sequence: identity.sequence,
-                timestamp: identity.timestamp,
-                remote: plan.remote,
-                silence_suppression: config.silence_suppression,
-                playout: BufferConfig::new(frame_ticks),
-                cname: config
-                    .cname
-                    .clone()
-                    .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
-                rtcp_bandwidth: config.rtcp_bandwidth,
-            },
-            0.5,
-        );
+        let stream = StreamConfig {
+            ssrc: identity.ssrc,
+            payload_type: plan.codec.payload(),
+            accepted: accepted(plan),
+            clock_rate: plan.codec.clock_rate(),
+            sequence: identity.sequence,
+            timestamp: identity.timestamp,
+            remote: plan.remote,
+            silence_suppression: config.silence_suppression,
+            playout: BufferConfig::new(frame_ticks),
+            cname: config
+                .cname
+                .clone()
+                .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
+            rtcp_bandwidth: config.rtcp_bandwidth,
+        };
+        // the keys the negotiation produced, if it produced any. Everything
+        // the protected session builds goes out encrypted and everything
+        // arriving is verified before any of it is believed, so this is the
+        // last point at which the two shapes of stream differ
+        let rtp = match keying::security(plan)? {
+            Some(security) => RtpSession::protected(&stream, 0.5, security),
+            None => RtpSession::new(&stream, 0.5),
+        };
         Ok(Self {
             rtp,
             coder,
@@ -375,6 +389,18 @@ impl MediaSession {
     /// often as before it.
     pub fn set_device(&mut self, device: Option<String>) {
         self.device = device;
+    }
+
+    /// Whether this call's audio is encrypted.
+    ///
+    /// True only for a stream whose keys were actually negotiated and are
+    /// actually in use, which is what a padlock on a screen has to mean. A
+    /// call that asked for SDES and got a plain answer never reaches here —
+    /// the stream is refused or the session is not opened — so there is no
+    /// state in which this says yes and the packets say otherwise.
+    #[must_use]
+    pub const fn is_encrypted(&self) -> bool {
+        matches!(self.plan.keying, Some(Keying::Sdes { .. }))
     }
 
     /// The rate the samples handed to and taken from this session are at,

@@ -19,61 +19,63 @@
 
 use sipral::Counters;
 
+use crate::abi::record;
 use crate::error::entry;
 use crate::handle::SipralHandle;
 use crate::stack::with_stack;
 use crate::versioned::{Versioned, declared_size, write_versioned};
 
-/// D3's flat set of health counters for one stack, since it was created.
-///
-/// Every member here is monotonic except `active_calls`, which is a gauge:
-/// it can be read as smaller than an earlier reading, and none of the others
-/// ever will be. Set `size` to `sizeof(sipral_counters_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SipralCounters {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// A REGISTER went out, counted once per attempt including a retry.
-    pub registrations_attempted: u64,
-    /// The registrar granted a binding.
-    pub registrations_succeeded: u64,
-    /// The registrar refused, and will refuse the same request again.
-    pub registrations_failed_rejected: u64,
-    /// The password was wrong, or there was none to answer a challenge with.
-    pub registrations_failed_bad_credentials: u64,
-    /// The registrar did not answer, or said it could not serve this now.
-    pub registrations_failed_unreachable: u64,
-    /// The registrar moved.
-    pub registrations_failed_redirected: u64,
-    /// This end hung up.
-    pub calls_ended_local_hangup: u64,
-    /// The far end hung up.
-    pub calls_ended_remote_hangup: u64,
-    /// The far end refused it: busy, declined, not found.
-    pub calls_ended_refused: u64,
-    /// Given up before it was answered, from either end.
-    pub calls_ended_cancelled: u64,
-    /// Nothing came back, or the transport died.
-    pub calls_ended_unreachable: u64,
-    /// Another branch of the same fork was kept and this one was not.
-    pub calls_ended_fork_lost: u64,
-    /// The branch was still ringing when the answer window closed.
-    pub calls_ended_abandoned: u64,
-    /// The session timer ran out and no refresh arrived.
-    pub calls_ended_expired: u64,
-    /// How many times inbound audio stopped for longer than the configured
-    /// threshold while signalling stayed healthy (B5).
-    pub media_gaps: u64,
-    /// How many times a call's jitter buffer had to shrink or stretch the
-    /// stream to keep its delay where it was aiming.
-    pub jitter_buffer_events: u64,
-    /// How many times this build has had to promote a request onto a stream
-    /// transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
-    pub transport_promotions: u64,
-    /// Calls with media running right now. The one gauge in this struct: it
-    /// moves both ways, and it is what every other member here is not.
-    pub active_calls: u64,
+record! {
+    /// D3's flat set of health counters for one stack, since it was created.
+    ///
+    /// Every member here is monotonic except `active_calls`, which is a gauge:
+    /// it can be read as smaller than an earlier reading, and none of the others
+    /// ever will be. Set `size` to `sizeof(sipral_counters_t)` before the call.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralCounters {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// A REGISTER went out, counted once per attempt including a retry.
+        pub registrations_attempted: u64,
+        /// The registrar granted a binding.
+        pub registrations_succeeded: u64,
+        /// The registrar refused, and will refuse the same request again.
+        pub registrations_failed_rejected: u64,
+        /// The password was wrong, or there was none to answer a challenge with.
+        pub registrations_failed_bad_credentials: u64,
+        /// The registrar did not answer, or said it could not serve this now.
+        pub registrations_failed_unreachable: u64,
+        /// The registrar moved.
+        pub registrations_failed_redirected: u64,
+        /// This end hung up.
+        pub calls_ended_local_hangup: u64,
+        /// The far end hung up.
+        pub calls_ended_remote_hangup: u64,
+        /// The far end refused it: busy, declined, not found.
+        pub calls_ended_refused: u64,
+        /// Given up before it was answered, from either end.
+        pub calls_ended_cancelled: u64,
+        /// Nothing came back, or the transport died.
+        pub calls_ended_unreachable: u64,
+        /// Another branch of the same fork was kept and this one was not.
+        pub calls_ended_fork_lost: u64,
+        /// The branch was still ringing when the answer window closed.
+        pub calls_ended_abandoned: u64,
+        /// The session timer ran out and no refresh arrived.
+        pub calls_ended_expired: u64,
+        /// How many times inbound audio stopped for longer than the configured
+        /// threshold while signalling stayed healthy (B5).
+        pub media_gaps: u64,
+        /// How many times a call's jitter buffer had to shrink or stretch the
+        /// stream to keep its delay where it was aiming.
+        pub jitter_buffer_events: u64,
+        /// How many times this build has had to promote a request onto a stream
+        /// transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
+        pub transport_promotions: u64,
+        /// Calls with media running right now. The one gauge in this struct: it
+        /// moves both ways, and it is what every other member here is not.
+        pub active_calls: u64,
+    }
 }
 
 // Safety: integers, no invariant between them, and zero is a valid value of

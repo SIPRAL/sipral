@@ -20,12 +20,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sipral_core::sdp::{Direction, SessionDescription, parse};
+use sipral_core::sdp::{Crypto, Direction, MediaDescription, SessionDescription, parse};
 
 use crate::codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome};
 use crate::dtmf::{DEFAULT_DIGIT, Digit};
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
+use crate::keying::SrtpPolicy;
 use crate::record::tests::Buffer;
 use crate::session::{Arrival, MediaConfig, MediaSession, Playback, StreamIdentity};
 use crate::{
@@ -151,6 +152,30 @@ impl Stack {
             .expect("a datagram");
     }
 
+    /// The description of the INVITE this side was handed, as it arrived.
+    ///
+    /// Read out of the message rather than off the engine, because what is
+    /// being asserted about is what went on the wire.
+    fn offer_received(&self) -> Option<SessionDescription> {
+        self.heard.iter().rev().find_map(|event| match event {
+            Event::Signalling(UaEvent::IncomingCall { request, .. }) => {
+                parse(request.as_raw().body()).ok()
+            }
+            _ => None,
+        })
+    }
+
+    /// The same for the description in the response that confirmed the call.
+    fn answer_received(&self) -> Option<SessionDescription> {
+        self.heard.iter().rev().find_map(|event| match event {
+            Event::Signalling(UaEvent::CallConfirmed {
+                response: Some(response),
+                ..
+            }) => parse(response.as_raw().body()).ok(),
+            _ => None,
+        })
+    }
+
     fn media_events(&self) -> Vec<&MediaEvent> {
         self.heard
             .iter()
@@ -255,6 +280,58 @@ impl Pair {
         self.caller.drain(self.now, false);
         self.settle();
         placed
+    }
+
+    /// Place a call and take it as far as the callee hearing about it,
+    /// without answering — what a test about the answer itself needs.
+    fn ring(&mut self) -> CallHandle {
+        let account = self.caller.account("alice", callee_sip());
+        let _ = self.callee.account("bob", caller_sip());
+        self.caller
+            .engine
+            .place(
+                &mut self.caller.agent,
+                account,
+                OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+                caller_media(),
+                self.now,
+            )
+            .expect("the INVITE goes");
+        self.caller.drain(self.now, false);
+        for datagram in self.caller.outbound() {
+            self.callee.deliver(&datagram, caller_sip(), self.now);
+        }
+        self.callee.drain(self.now, false);
+        self.callee.call().expect("the callee heard the INVITE")
+    }
+
+    /// One frame from the caller to the callee, keeping the datagram that
+    /// crossed as well as the frame that came out of it.
+    ///
+    /// The copy is not tidiness: an arriving datagram is verified and
+    /// decrypted where it lies, so delivering the buffer that was captured
+    /// would hand a test back the plaintext it is trying to prove is not on
+    /// the wire.
+    fn speak(&mut self, call: CallHandle, remote: CallHandle, tone: &[i16]) -> (Vec<u8>, Vec<i16>) {
+        let sent = self
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .capture(tone)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec())
+            .expect("a frame that is neither held nor suppressed goes out");
+        let session = self
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media");
+        let mut arriving = sent.clone();
+        session.receive(&mut arriving, caller_media(), self.now);
+        let mut played = vec![0_i16; session.frame_samples()];
+        session.playback(&mut played);
+        (sent, played)
     }
 
     /// One frame of audio each way, and the frame the far end played.
@@ -578,6 +655,362 @@ fn a_tone_crosses_the_call() {
         loudness(&heard) > 4_000,
         "the tone came back at {} rather than crossing the call",
         loudness(&heard)
+    );
+}
+
+// -- SDES ---------------------------------------------------------------------
+
+/// One call's worth of a caller talking: the last datagram that crossed, the
+/// frame it turned into at the far end, and what the two descriptions said.
+struct Spoken {
+    offer: MediaDescription,
+    answer: MediaDescription,
+    /// The first datagram of the stream, which is the only one whose sequence
+    /// number is the one the stream started from.
+    first: Vec<u8>,
+    datagram: Vec<u8>,
+    played: Vec<i16>,
+    encrypted: bool,
+}
+
+fn one_stream(description: &SessionDescription) -> MediaDescription {
+    description
+        .media
+        .first()
+        .cloned()
+        .expect("one audio stream")
+}
+
+fn crypto_line(stream: &MediaDescription) -> Option<Crypto> {
+    Crypto::parse(stream.attribute("crypto")?.value.as_deref()?)
+}
+
+/// Place a call from `catalog` on both ends, talk for twenty frames, and keep
+/// everything a test could want to look at.
+fn spoken(catalog: CodecCatalog) -> Spoken {
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let session = pair.caller.engine.session(call).expect("media");
+    let (frame, rate) = (session.frame_samples(), session.sample_rate());
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    let mut first = Vec::new();
+    let mut datagram = Vec::new();
+    let mut played = Vec::new();
+
+    for index in 0..20 {
+        tone(&mut samples, rate, &mut phase);
+        let (sent, heard) = pair.speak(call, remote, &samples);
+        if index == 0 {
+            first.clone_from(&sent);
+        }
+        datagram = sent;
+        played = heard;
+        pair.advance();
+    }
+
+    Spoken {
+        offer: one_stream(
+            &pair
+                .callee
+                .offer_received()
+                .expect("the callee saw an offer"),
+        ),
+        answer: one_stream(
+            &pair
+                .caller
+                .answer_received()
+                .expect("the caller saw an answer"),
+        ),
+        encrypted: pair
+            .caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+            && pair
+                .callee
+                .engine
+                .session(remote)
+                .expect("media")
+                .is_encrypted(),
+        first,
+        datagram,
+        played,
+    }
+}
+
+/// The one that would pass with the encryption never attached is the one that
+/// only reads the SDP, so this reads the octets.
+///
+/// The same call is placed twice, plain and with SDES, from the same seed.
+/// Both draw their stream identity from the same first token — the key comes
+/// out of the tokens after it — so the two runs put the same SSRC, the same
+/// sequence number and the same timestamp on the wire, and every difference
+/// past the header is the transform.
+#[test]
+fn a_call_that_offered_sdes_carries_none_of_the_plaintext_on_the_wire() {
+    let plain = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let secure = plain.clone().with_srtp(SrtpPolicy::Offered);
+    let open = spoken(plain);
+    let closed = spoken(secure);
+
+    // what the descriptions said
+    assert_eq!(open.offer.proto, "RTP/AVP");
+    assert!(
+        crypto_line(&open.offer).is_none(),
+        "the default put keys in an offer nobody asked for"
+    );
+    assert_eq!(closed.offer.proto, "RTP/SAVP");
+    assert_eq!(closed.answer.proto, "RTP/SAVP");
+    let offered = crypto_line(&closed.offer).expect("the offer carries a crypto line");
+    let answered = crypto_line(&closed.answer).expect("the answer carries one too");
+    // RFC 4568 §5.1.2: "the tag and crypto-suite from the accepted crypto
+    // attribute in the offer"
+    assert_eq!(answered.tag, offered.tag);
+    assert_eq!(answered.suite, offered.suite);
+    // §7.1.2: "the master key(s) included in the answer MUST be different
+    // from those in the offer"
+    assert_ne!(answered.key_params, offered.key_params);
+
+    // what the two sessions think they are
+    assert!(closed.encrypted, "neither end reports an encrypted stream");
+    assert!(!open.encrypted);
+
+    // the tone crossed, which is the far end having decrypted it
+    assert!(
+        loudness(&closed.played) > 4_000,
+        "the tone came back at {} through the secured call",
+        loudness(&closed.played)
+    );
+
+    // and the octets: an eighty-bit tag longer, the header still readable
+    // because RFC 3711 §3.1 leaves it in the clear, and nothing of the
+    // payload anywhere in it
+    assert_eq!(
+        closed.datagram.len(),
+        open.datagram.len() + 10,
+        "the packet did not grow by the tag of AES_CM_128_HMAC_SHA1_80"
+    );
+    assert_eq!(
+        &closed.datagram[..12],
+        &open.datagram[..12],
+        "the two runs should have put the same RTP header on the wire"
+    );
+    assert_ne!(
+        &closed.datagram[12..open.datagram.len()],
+        &open.datagram[12..],
+        "the payload went out in the clear"
+    );
+    let plaintext = &open.datagram[12..];
+    assert!(
+        !closed
+            .datagram
+            .windows(plaintext.len())
+            .any(|window| window == plaintext),
+        "the plaintext payload is still somewhere in the protected datagram"
+    );
+
+    // RFC 4568 §6.4: a stream that may be secured starts below 2^15, so that
+    // losses at the very beginning cannot leave the two ends disagreeing
+    // about the rollover counter
+    let started_at = u16::from_be_bytes([closed.first[2], closed.first[3]]);
+    assert!(
+        started_at < 0x8000,
+        "the stream started at sequence number {started_at}"
+    );
+    assert_eq!(
+        started_at,
+        u16::from_be_bytes([open.first[2], open.first[3]]),
+        "the two runs should have drawn the same stream identity"
+    );
+}
+
+/// The default does not offer SDES and does answer it, which are two
+/// different decisions: the first is about a `RTP/SAVP` offer to a PBX that
+/// would refuse the stream, and the second is about a peer that has already
+/// asked for encryption and would get silence instead.
+#[test]
+fn the_default_offers_no_keys_and_still_answers_a_peer_that_asks_for_them() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::new().with_srtp(SrtpPolicy::Offered),
+        CodecCatalog::new(),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    assert_eq!(
+        pair.callee.engine.catalog().srtp(),
+        SrtpPolicy::NotOffered,
+        "the answering side is on the default"
+    );
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted(),
+        "the caller offered SDES and did not get a keyed stream back"
+    );
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .is_encrypted()
+    );
+    // and it is Opus through the protected path, not only the narrowband one
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Opus
+    );
+
+    let frame = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .frame_samples();
+    let rate = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .sample_rate();
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    let mut heard = Vec::new();
+    for _ in 0..20 {
+        tone(&mut samples, rate, &mut phase);
+        heard = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&heard) > 2_000,
+        "the tone came back at {} through a secured Opus call",
+        loudness(&heard)
+    );
+}
+
+/// A call that requires SRTP does not answer a plain INVITE at all. The
+/// refusal comes back where the answer was asked for, so the call is still
+/// ringing and the application chooses the status code.
+#[test]
+fn a_call_that_requires_srtp_refuses_to_answer_a_plain_invite() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_srtp(SrtpPolicy::Required),
+    );
+    let call = pair.ring();
+    // whatever provisional response the user agent sent on its own
+    let _ = pair.callee.outbound();
+
+    let refused = pair
+        .callee
+        .engine
+        .answer(&mut pair.callee.agent, call, callee_media(), pair.now);
+    assert_eq!(refused, Err(MediaError::SrtpRequired));
+    assert!(
+        pair.callee.outbound().is_empty(),
+        "a refused answer must not have gone out anyway"
+    );
+    assert!(
+        pair.callee.engine.session(call).is_none(),
+        "no media was opened for a call that was never answered"
+    );
+}
+
+/// The re-offer is where a silent downgrade would happen: a live encrypted
+/// call, and a far end that asks to carry on in the clear.
+#[test]
+fn a_plain_re_offer_inside_a_call_that_requires_srtp_is_refused() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+    );
+
+    // written by hand rather than offered through the engine, because the
+    // engine will not write this: a plain profile, and a format list that
+    // differs so that the user agent hands the offer up instead of answering
+    // it on the application's behalf
+    let downgrade = "v=0\r\no=- 9 9 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+                     m=audio 40002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    pair.callee
+        .agent
+        .reoffer(remote, downgrade.as_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    pair.settle();
+
+    assert!(
+        pair.caller
+            .media_events()
+            .iter()
+            .any(|event| matches!(event, MediaEvent::Failed(MediaError::SrtpRequired))),
+        "a plain re-offer was taken without a word: {:?}",
+        pair.caller.media_events()
+    );
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted(),
+        "the stream that was already running must not have been re-keyed downwards"
+    );
+}
+
+/// Thirty octets of key and salt as an `inline:` parameter carries them, and
+/// two of them that are not the same — §7.1.2 refuses a stream whose two
+/// directions share a master key.
+const OURS: &str = "inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const THEIRS: &str = "inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+/// Plain RTP arriving on a secured stream is dropped rather than played.
+///
+/// The other half of what makes the encryption worth having: a stream that
+/// accepted an unprotected packet as a fallback would be one an attacker
+/// downgrades by sending one.
+#[test]
+fn an_unprotected_packet_on_a_secured_stream_is_refused_rather_than_played() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        &format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+             m=audio 40000 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+             a=crypto:1 AES_CM_128_HMAC_SHA1_80 {OURS}\r\n"
+        ),
+        &format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+             m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+             a=crypto:1 AES_CM_128_HMAC_SHA1_80 {THEIRS}\r\n"
+        ),
+    );
+    let mut receiver = session(&ours, &theirs, now);
+    assert!(receiver.is_encrypted());
+
+    // a well-formed plain RTP packet carrying the negotiated payload type
+    let mut datagram = vec![0x80, 0, 0, 1, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44];
+    datagram.extend_from_slice(&[0x55; 160]);
+    let arrival = receiver.receive(
+        &mut datagram,
+        "192.0.2.2:40002".parse().expect("an address"),
+        now,
+    );
+    assert!(
+        matches!(arrival, Arrival::Dropped(crate::Discard::Insecure(_))),
+        "an unprotected packet was taken on a secured stream: {arrival:?}"
     );
 }
 

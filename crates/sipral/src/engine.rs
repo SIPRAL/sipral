@@ -49,6 +49,7 @@
 //! holds two calls at once, and a global codec order or a global render delay
 //! would make the second one a race against whichever call touches it last.
 
+use core::fmt;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,8 +57,9 @@ use std::time::Instant;
 
 use sipral_core::msg::OwnedMessage;
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Connection, Direction, MediaDescription, MediaPlan, NegotiatedCodec,
-    Origin, SessionDescription, StreamAnswer, parse, static_rtpmap,
+    AcceptedStream, Attribute, Connection, Direction, KeySalt, Keying, MASTER_KEY, MASTER_SALT,
+    MediaDescription, MediaPlan, NegotiatedCodec, Origin, SessionDescription, StreamAnswer, parse,
+    static_rtpmap,
 };
 use sipral_ua::{AccountId, CallHandle, OutgoingCall, StatusCode, UaEvent, UserAgent};
 
@@ -66,6 +68,7 @@ use crate::codec::{Codec, CodecCandidate, CodecCatalog};
 use crate::counters::Counters;
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
+use crate::keying::{self, SrtpPolicy};
 use crate::session::{Datagram, MediaConfig, MediaSession, StreamIdentity};
 
 /// The media type this stack negotiates. There is no video, deliberately, and
@@ -81,7 +84,7 @@ const TELEPHONE_EVENT: &str = "telephone-event";
 const COMFORT_NOISE: &str = "CN";
 
 /// What this engine knows about one call.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Managed {
     /// What this end has described. Absent for an incoming call between the
     /// INVITE arriving and it being answered.
@@ -104,6 +107,48 @@ struct Managed {
     /// D6: how this call's session is opened — this engine's default unless
     /// overridden the same way.
     config: MediaConfig,
+}
+
+impl fmt::Debug for Managed {
+    /// The two descriptions, with the key parameter of every `a=crypto` line
+    /// taken out.
+    ///
+    /// The line itself is worth seeing when a negotiation has gone wrong; the
+    /// master key on it is the one thing this crate holds that must not reach
+    /// a log, and `{:?}` on a live engine would reach every call's at once.
+    /// `Inline`, `KeySalt` and `Security` redact themselves for the same
+    /// reason, and this is the last place the same material is still text.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Managed")
+            .field("local", &self.local.as_ref().map(redacted))
+            .field("remote", &self.remote.as_ref().map(redacted))
+            .field("address", &self.address)
+            .field("identity", &self.identity)
+            .field("session_id", &self.session_id)
+            .field("version", &self.version)
+            .field("catalog", &self.catalog)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+/// A description with the keying information of every `a=crypto` line
+/// replaced, keeping the tag and the suite that say what was negotiated.
+fn redacted(description: &SessionDescription) -> SessionDescription {
+    let mut copy = description.clone();
+    for attribute in copy
+        .media
+        .iter_mut()
+        .flat_map(|stream| stream.attributes.iter_mut())
+    {
+        if attribute.name == "crypto"
+            && let Some(value) = attribute.value.as_mut()
+        {
+            let named: Vec<&str> = value.split_ascii_whitespace().take(2).collect();
+            *value = format!("{} <redacted>", named.join(" "));
+        }
+    }
+    copy
 }
 
 /// What one call opens with, when it is not this engine's defaults.
@@ -261,7 +306,10 @@ impl MediaEngine {
     ) -> Result<CallHandle, MediaError> {
         let CallMedia { catalog, config } = media;
         let (identity, session_id) = draw(agent);
-        let offer = write_offer(&catalog, local, session_id, 1);
+        // drawn after the identity, so that the same call placed with and
+        // without SDES starts from the same SSRC and the same sequence number
+        let keys = catalog.srtp().offers().then(|| draw_key(agent));
+        let offer = write_offer(&catalog, local, session_id, 1, keys);
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
         self.calls.insert(
@@ -286,7 +334,9 @@ impl MediaEngine {
     ///
     /// # Errors
     /// [`MediaError::NoSuchCall`] for a call this engine never saw arrive,
-    /// [`MediaError::Description`] when the answer cannot be built, and
+    /// [`MediaError::Description`] when the answer cannot be built,
+    /// [`MediaError::SrtpRequired`] when this call requires SRTP and the
+    /// INVITE offered a stream that cannot carry it, and
     /// [`MediaError::Signalling`] when the user agent refuses to send it.
     ///
     /// An INVITE that carried no offer is answered with one of ours instead,
@@ -317,7 +367,11 @@ impl MediaEngine {
     /// configuration instead of this engine's default.
     ///
     /// # Errors
-    /// The same as [`MediaEngine::answer`].
+    /// The same as [`MediaEngine::answer`], plus [`MediaError::SrtpRequired`]
+    /// when the catalogue is set to [`SrtpPolicy::Required`] and the INVITE
+    /// offered a stream that cannot be keyed. Nothing is sent in that case:
+    /// the call is still ringing, and rejecting it with a status code of the
+    /// application's choosing is the next move.
     pub fn answer_with(
         &mut self,
         agent: &mut UserAgent,
@@ -329,9 +383,16 @@ impl MediaEngine {
         let CallMedia { catalog, config } = media;
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
-        let description = match managed.remote.clone() {
-            Some(offer) => write_answer(&catalog, &offer, local, session_id, version)?,
-            None => write_offer(&catalog, local, session_id, version),
+        let offered = managed.remote.clone();
+        if !keying_allows(&catalog, offered.as_ref()) {
+            return Err(MediaError::SrtpRequired);
+        }
+        let keys = will_key(&catalog, offered.as_ref()).then(|| draw_key(agent));
+        let description = match offered {
+            Some(offer) => {
+                write_answer(&catalog, &offer, local, session_id, version, keys.as_ref())?
+            }
+            None => write_offer(&catalog, local, session_id, version, keys),
         };
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
@@ -546,7 +607,24 @@ impl MediaEngine {
         let version = managed.version.saturating_add(1);
         let session_id = managed.session_id;
         let catalog = managed.catalog.clone();
-        match write_answer(&catalog, &offer, address, session_id, version) {
+        // a live call that required SRTP and is re-offered a stream without
+        // it is where a silent downgrade would happen, so it is where the
+        // refusal has to be
+        if !keying_allows(&catalog, Some(&offer)) {
+            self.events
+                .push_back((call, MediaEvent::Failed(MediaError::SrtpRequired)));
+            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            return;
+        }
+        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(agent));
+        match write_answer(
+            &catalog,
+            &offer,
+            address,
+            session_id,
+            version,
+            keys.as_ref(),
+        ) {
             Ok(answer) => {
                 let bytes = answer.to_bytes();
                 if agent.accept_reoffer(call, Some(&bytes), now).is_ok()
@@ -607,6 +685,10 @@ impl MediaEngine {
                 return;
             }
         };
+        if let Err(error) = keying_holds(&managed.catalog, &plan, remote) {
+            self.fail(call, error);
+            return;
+        }
         let codec = match Codec::of_plan(&plan) {
             Ok(codec) => codec,
             Err(error) => {
@@ -697,23 +779,77 @@ impl MediaEngine {
 // have made `self.catalog` too easy to reach for by habit where a call's own
 // belongs instead.
 
-/// The offer `catalog` makes, for media arriving at `address`.
+/// The offer `catalog` makes, for media arriving at `address`, keyed with
+/// `keys` where the catalogue offers SDES.
 fn write_offer(
     catalog: &CodecCatalog,
     address: SocketAddr,
     session_id: u64,
     version: u64,
+    keys: Option<KeySalt>,
 ) -> SessionDescription {
     let mut description = SessionDescription::new(
         Origin::new(session_id, version, address.ip()),
         Connection::new(address.ip()),
     );
-    description.media.push(catalog.capabilities().offer(
+    description.media.push(catalog.offering(keys).offer(
         AUDIO,
         address.port(),
         Direction::SendRecv,
     ));
     description
+}
+
+/// Whether this call will let a stream described like this carry audio.
+///
+/// The one place [`SrtpPolicy::Offered`] and [`SrtpPolicy::Required`] differ:
+/// an offer that named no secure profile is answered plainly under the first
+/// and not answered at all under the second. An INVITE that carried no offer
+/// is answered with one of ours, which carries a key, so it passes either
+/// way.
+fn keying_allows(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
+    catalog.srtp() != SrtpPolicy::Required || offered.is_none_or(any_secure_stream)
+}
+
+/// Whether the description this end is about to write will carry a key: it
+/// offers one, or it answers an offer that asked for one.
+fn will_key(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
+    catalog.srtp().offers() || offered.is_some_and(any_secure_stream)
+}
+
+/// Whether any live stream of a description is on one of the secure profiles.
+fn any_secure_stream(description: &SessionDescription) -> bool {
+    description
+        .media
+        .iter()
+        .any(|stream| !stream.is_rejected() && keying::is_secure(&stream.proto))
+}
+
+/// Whether the keys a plan settled on are ones this call will run with.
+///
+/// Two questions the plan cannot answer on its own. Whether an unkeyed stream
+/// is allowed at all is this call's policy and not the negotiation's, and
+/// whether the peer's line carries a session parameter that has to be
+/// honoured has to be read off the description, because `sipral-core`'s
+/// parser drops a parameter it does not recognise rather than invalidating
+/// the line RFC 4568 §6.3.7 says it must.
+fn keying_holds(
+    catalog: &CodecCatalog,
+    plan: &MediaPlan,
+    remote: &SessionDescription,
+) -> Result<(), MediaError> {
+    match &plan.keying {
+        None if catalog.srtp() == SrtpPolicy::Required => Err(MediaError::SrtpRequired),
+        Some(Keying::Sdes { remote: theirs, .. })
+            if !remote
+                .media
+                .first()
+                .is_some_and(|stream| keying::peer_line_holds(stream, theirs.tag)) =>
+        {
+            Err(MediaError::UnusableKeying)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The answer to an offer that arrived, kept to what `catalog` holds.
@@ -729,6 +865,7 @@ fn write_answer(
     address: SocketAddr,
     session_id: u64,
     version: u64,
+    keys: Option<&KeySalt>,
 ) -> Result<SessionDescription, MediaError> {
     let mut taken = false;
     let streams: Vec<StreamAnswer> = offer
@@ -738,7 +875,7 @@ fn write_answer(
             if taken {
                 return StreamAnswer::Reject;
             }
-            let answer = take_stream(catalog, offered, address);
+            let answer = take_stream(catalog, offered, address, keys);
             taken = matches!(answer, StreamAnswer::Accept(_));
             answer
         })
@@ -757,6 +894,7 @@ fn take_stream(
     catalog: &CodecCatalog,
     offered: &MediaDescription,
     address: SocketAddr,
+    keys: Option<&KeySalt>,
 ) -> StreamAnswer {
     if offered.media != AUDIO || offered.is_rejected() {
         return StreamAnswer::Reject;
@@ -765,6 +903,18 @@ fn take_stream(
     if !any_codec {
         return StreamAnswer::Reject;
     }
+    // RFC 4568 §7.1.2: a stream on the secure profile is answered by
+    // accepting exactly one of its crypto lines, or it is refused. There is
+    // no third answer, and a stream taken without a key would be one both
+    // ends believe is encrypted
+    let crypto = if keying::is_secure(&offered.proto) {
+        match (keying::acceptable(offered), keys) {
+            (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
+            _ => return StreamAnswer::Reject,
+        }
+    } else {
+        None
+    };
     let names: Vec<&str> = formats.iter().map(String::as_str).collect();
     let mut accepted = AcceptedStream::in_offer_order(address.port(), offered, &names)
         .with_direction(Direction::SendRecv);
@@ -773,6 +923,9 @@ fn take_stream(
     // wants it
     if catalog.capabilities().rtcp_mux && offered.has_rtcp_mux() {
         accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
+    }
+    if let Some(line) = crypto {
+        accepted = accepted.with_attribute(line.attribute());
     }
     StreamAnswer::Accept(accepted)
 }
@@ -838,11 +991,49 @@ fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
     let token = agent.endpoint().token();
     let identity = StreamIdentity {
         ssrc: u32::try_from(hex(&token, 0, 8)).unwrap_or(0),
-        sequence: u16::try_from(hex(&token, 16, 4)).unwrap_or(0),
+        // RFC 4568 §6.4 asks a secured stream to start below 2^15, so that a
+        // run of losses at the very start cannot leave the two ends
+        // disagreeing about the rollover counter — "unless all the first 2^15
+        // packets are lost". It costs one bit of a number that only has to be
+        // unpredictable, and it is spent on every stream rather than on the
+        // ones that turn out to be keyed, because this is drawn before
+        // anybody has negotiated anything
+        sequence: u16::try_from(hex(&token, 16, 4)).unwrap_or(0) & 0x7fff,
         timestamp: u32::try_from(hex(&token, 8, 8)).unwrap_or(0),
         seed: hex(&token, 20, 12),
     };
     (identity, hex(&token, 0, 16))
+}
+
+/// The master key and salt for one description, out of the same seeded token
+/// stream the branches, tags and `Call-ID`s come from.
+///
+/// A token is half a SHA-256 of the caller's seed and a counter that never
+/// repeats, so a token that goes out in a `Via` says nothing about the next
+/// one and nothing about the seed; two of them are 256 bits of material for
+/// the 240 an `inline:` parameter carries. **What a poor seed costs is the
+/// whole of the encryption**: an attacker who can guess the thirty-two bytes
+/// handed to [`UserAgent::new`] can derive every master key this stack will
+/// ever offer, and SDES then protects the media against nobody. The seed is
+/// the application's for the reason the clock and the socket are, and this is
+/// the one place where getting it wrong is silent.
+fn draw_key(agent: &mut UserAgent) -> KeySalt {
+    let wanted = (MASTER_KEY + MASTER_SALT) * 2;
+    let mut digits = Vec::with_capacity(wanted);
+    while digits.len() < wanted {
+        digits.extend_from_slice(&agent.endpoint().token());
+    }
+    let octets = digits
+        .iter()
+        .step_by(2)
+        .zip(digits.iter().skip(1).step_by(2))
+        .map(|(high, low)| (nibble(*high) << 4) | nibble(*low));
+    let mut key = [0_u8; MASTER_KEY];
+    let mut salt = [0_u8; MASTER_SALT];
+    for (slot, octet) in key.iter_mut().chain(salt.iter_mut()).zip(octets) {
+        *slot = octet;
+    }
+    KeySalt::new(key, salt)
 }
 
 /// `len` hexadecimal characters of `token`, starting at `at`, as a number.
@@ -866,6 +1057,115 @@ const fn nibble(digit: u8) -> u8 {
         b'a'..=b'f' => digit - b'a' + 10,
         b'A'..=b'F' => digit - b'A' + 10,
         _ => 0,
+    }
+}
+
+// -- the two guards a two-stack harness cannot reach -------------------------
+
+#[cfg(test)]
+mod keying_guards {
+    //! [`keying_allows`] and [`keying_holds`] are both about a description
+    //! this end would never write, so `crates/sipral/src/tests.rs`'s pair of
+    //! real stacks can only get at one of the four branches: the other end of
+    //! that harness is this same engine, and it does not write a `RTP/SAVP`
+    //! line with a session parameter nobody knows, or answer a plain offer to
+    //! a call that required keys. They are exercised here instead, against
+    //! descriptions written by hand the way a peer would write them.
+
+    use sipral_core::sdp::{
+        CryptoPolicy, CryptoSuite, Direction, KeySalt, Keying, MediaPlan, NegotiatedCodec,
+        RtcpPlan, RtpMap, SessionDescription, parse,
+    };
+
+    use super::{keying_allows, keying_holds};
+    use crate::codec::CodecCatalog;
+    use crate::error::MediaError;
+    use crate::keying::SrtpPolicy;
+
+    const KEY: &str = "inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    fn described(stream: &str) -> SessionDescription {
+        let text = format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n{stream}"
+        );
+        parse(text.as_bytes()).expect("the description parses")
+    }
+
+    fn plan(keying: Option<Keying>) -> MediaPlan {
+        MediaPlan {
+            local: "192.0.2.1:40000".parse().expect("an address"),
+            remote: "192.0.2.2:40002".parse().expect("an address"),
+            codec: NegotiatedCodec::new(RtpMap {
+                payload: 0,
+                encoding: "PCMU".to_owned(),
+                clock_rate: 8_000,
+                parameters: None,
+            }),
+            direction: Direction::SendRecv,
+            dtmf: None,
+            rtcp: RtcpPlan::Off,
+            keying,
+        }
+    }
+
+    #[test]
+    fn a_call_that_requires_keys_answers_only_a_description_that_can_carry_them() {
+        let required = CodecCatalog::new().with_srtp(SrtpPolicy::Required);
+        let optional = CodecCatalog::new().with_srtp(SrtpPolicy::Offered);
+        let plain = described("m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n");
+        let secure = described(
+            "m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\r\n",
+        );
+
+        assert!(!keying_allows(&required, Some(&plain)));
+        assert!(keying_allows(&required, Some(&secure)));
+        assert!(
+            keying_allows(&required, None),
+            "an INVITE with no offer is answered with one of ours, which carries a key"
+        );
+        assert!(
+            keying_allows(&optional, Some(&plain)),
+            "offering keys is not the same as demanding them"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_would_run_unkeyed_does_not_open_on_a_call_that_required_keys() {
+        let required = CodecCatalog::new().with_srtp(SrtpPolicy::Required);
+        let plain = described("m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n");
+        assert_eq!(
+            keying_holds(&required, &plan(None), &plain),
+            Err(MediaError::SrtpRequired)
+        );
+        assert!(keying_holds(&CodecCatalog::new(), &plan(None), &plain).is_ok());
+    }
+
+    /// The peer's own line is read a second time because `sipral-core` drops
+    /// a session parameter it does not recognise instead of invalidating the
+    /// line, and §6.3.7 says an unknown one that is not prefixed with a dash
+    /// makes the whole attribute invalid.
+    #[test]
+    fn a_peer_line_carrying_a_parameter_nobody_read_does_not_open_a_stream() {
+        let keyed = Some(Keying::Sdes {
+            local: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new([1; 16], [2; 14])),
+            remote: CryptoPolicy::new(1, CryptoSuite::AesCm80, KeySalt::new([3; 16], [4; 14])),
+        });
+        let catalog = CodecCatalog::new().with_srtp(SrtpPolicy::Offered);
+
+        let honest = described(&format!(
+            "m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+             a=crypto:1 AES_CM_128_HMAC_SHA1_80 {KEY}\r\n"
+        ));
+        assert!(keying_holds(&catalog, &plan(keyed.clone()), &honest).is_ok());
+
+        let unread = described(&format!(
+            "m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+             a=crypto:1 AES_CM_128_HMAC_SHA1_80 {KEY} FEC_ORDER=FEC_SRTP\r\n"
+        ));
+        assert_eq!(
+            keying_holds(&catalog, &plan(keyed), &unread),
+            Err(MediaError::UnusableKeying)
+        );
     }
 }
 

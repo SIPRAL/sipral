@@ -16,17 +16,22 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::abi::{alias, constants};
 use crate::status::SipralStatus;
 
-/// An opaque reference to something this library owns.
-///
-/// It is a number, not a pointer: nothing is to be read from it, and nothing
-/// but this library can make one. Zero is never a live handle, which is what
-/// a caller can zero a variable to.
-pub type SipralHandle = u64;
+alias! {
+    /// An opaque reference to something this library owns.
+    ///
+    /// It is a number, not a pointer: nothing is to be read from it, and
+    /// nothing but this library can make one. Zero is never a live handle,
+    /// which is what a caller can zero a variable to.
+    pub type SipralHandle = u64;
+}
 
-/// The value no live handle ever takes.
-pub const SIPRAL_HANDLE_NONE: SipralHandle = 0;
+constants! {
+    /// The value no live handle ever takes.
+    pub const SIPRAL_HANDLE_NONE: SipralHandle = 0;
+}
 
 /// The generation a slot starts at. Zero is kept out of use so that a handle
 /// of zero, and any handle whose top half a caller left empty, is refused

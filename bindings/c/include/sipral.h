@@ -1,0 +1,2986 @@
+/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+ * Copyright (c) 2026 Tiberiu Balasea
+ *
+ * Printed from the declarations in crates/sipral-ffi by tools/abi-gen.
+ * Do not edit: `cargo run -p sipral-abi-gen` writes it again, and
+ * `scripts/check.sh` fails when what is committed is not what came out.
+ *
+ * Every function here returns a sipral_status_t except where its own
+ * comment says otherwise, sets the calling thread's last error on
+ * failure, and catches any panic rather than letting one reach C. A
+ * stack may be used from any thread but only one at a time, and may not
+ * be re-entered from inside its own event callback; both are
+ * SIPRAL_STATUS_BUSY rather than a deadlock. sipral_stack_destroy is the
+ * one exception, and works from inside the callback.
+ */
+
+#ifndef SIPRAL_H
+#define SIPRAL_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * An opaque reference to something this library owns.
+ *
+ * It is a number, not a pointer: nothing is to be read from it, and
+ * nothing but this library can make one. Zero is never a live handle,
+ * which is what a caller can zero a variable to.
+ */
+typedef uint64_t sipral_handle_t;
+
+/**
+ * The value no live handle ever takes.
+ */
+#define SIPRAL_HANDLE_NONE ((sipral_handle_t)0)
+
+/**
+ * The ABI's major version. Nothing published against one major works
+ * against another.
+ */
+#define SIPRAL_ABI_VERSION_MAJOR ((uint32_t)0)
+
+/**
+ * The ABI's minor version, raised by every function or struct member
+ * added.
+ */
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)5)
+
+/**
+ * The ABI's patch version, raised by a fix that changes no declaration.
+ */
+#define SIPRAL_ABI_VERSION_PATCH ((uint32_t)0)
+
+/**
+ * Bits of sipral_capabilities_t::transports. A caller checks
+ * `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
+ * growing list of booleans, so a transport this ABI has not learned a bit
+ * for yet reads as absent rather than refusing to compile against an
+ * older header.
+ *
+ * Named after sipral_transport_t's own numbers (`1 << (value - 1)`), so
+ * a transport added there in the future gets a bit here without the two
+ * numbering schemes ever being asked to agree by hand.
+ */
+#define SIPRAL_TRANSPORT_BIT_UDP ((uint32_t)1)
+
+/**
+ * See SIPRAL_TRANSPORT_BIT_UDP.
+ */
+#define SIPRAL_TRANSPORT_BIT_TCP ((uint32_t)2)
+
+/**
+ * See SIPRAL_TRANSPORT_BIT_UDP.
+ */
+#define SIPRAL_TRANSPORT_BIT_TLS ((uint32_t)4)
+
+/**
+ * See SIPRAL_TRANSPORT_BIT_UDP.
+ */
+#define SIPRAL_TRANSPORT_BIT_WS ((uint32_t)8)
+
+/**
+ * See SIPRAL_TRANSPORT_BIT_UDP.
+ */
+#define SIPRAL_TRANSPORT_BIT_WSS ((uint32_t)16)
+
+/**
+ * Bits of sipral_capabilities_t::features.
+ */
+#define SIPRAL_FEATURE_DTMF ((uint32_t)1)
+
+/**
+ * See SIPRAL_FEATURE_DTMF.
+ */
+#define SIPRAL_FEATURE_RTCP_MUX ((uint32_t)2)
+
+/**
+ * See SIPRAL_FEATURE_DTMF.
+ */
+#define SIPRAL_FEATURE_RECORDING ((uint32_t)4)
+
+/**
+ * See SIPRAL_FEATURE_DTMF.
+ */
+#define SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG ((uint32_t)8)
+
+/**
+ * See SIPRAL_FEATURE_DTMF.
+ */
+#define SIPRAL_FEATURE_SRTP ((uint32_t)16)
+
+/**
+ * See SIPRAL_FEATURE_DTMF, and the module documentation for why this
+ * build never sets it.
+ */
+#define SIPRAL_FEATURE_SUBSCRIPTIONS ((uint32_t)32)
+
+/**
+ * The buffer a caller has to bring for one outgoing packet.
+ *
+ * Not a path MTU — RTP does not discover one — but the bound the session
+ * itself builds against, so a payload larger than this is a payload no
+ * codec in this build produces. It is checked before anything is encoded,
+ * because a frame that was encoded and then had nowhere to go is a frame
+ * lost from a stream whose timestamps have already moved past it.
+ */
+#define SIPRAL_MEDIA_PACKET_BYTES ((size_t)1500)
+
+/**
+ * Room enough for any address this ABI writes, the NUL included:
+ * `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
+ */
+#define SIPRAL_ADDRESS_BYTES ((size_t)64)
+
+/**
+ * The transport a stack is created with, and the only one this build
+ * binds.
+ *
+ * Named rather than assumed, so that the day a stack has two of them is a
+ * day more numbers become valid and not a day this ABI grows a second way
+ * to hand bytes over.
+ */
+#define SIPRAL_TRANSPORT_MAIN ((uint32_t)0)
+
+/**
+ * The largest message that crosses in either direction.
+ *
+ * The bound the layer below parses to, which is what stops a hostile peer
+ * from making the parser do unbounded work. A caller's read buffer wants
+ * to be this big on a stream, where one read can hold the end of one
+ * message and the start of another, and 1500 bytes or so on a datagram
+ * socket, where anything larger was fragmented on the way.
+ */
+#define SIPRAL_MESSAGE_BYTES ((size_t)65535)
+
+/* Every record, named before any of them is defined, so that a
+ * declaration never has to come before the one it mentions. */
+typedef struct sipral_abi_version sipral_abi_version_t;
+typedef struct sipral_capabilities sipral_capabilities_t;
+typedef struct sipral_counters sipral_counters_t;
+typedef struct sipral_stack_config sipral_stack_config_t;
+typedef struct sipral_poll_result sipral_poll_result_t;
+typedef struct sipral_stack_settings sipral_stack_settings_t;
+typedef struct sipral_account_config sipral_account_config_t;
+typedef struct sipral_call_config sipral_call_config_t;
+typedef struct sipral_codec_info sipral_codec_info_t;
+typedef struct sipral_media_info sipral_media_info_t;
+typedef struct sipral_stream_stats sipral_stream_stats_t;
+typedef struct sipral_media_packet sipral_media_packet_t;
+typedef struct sipral_transmit sipral_transmit_t;
+typedef struct sipral_registration_event sipral_registration_event_t;
+typedef struct sipral_call_event sipral_call_event_t;
+typedef struct sipral_transfer_event sipral_transfer_event_t;
+typedef struct sipral_media_event sipral_media_event_t;
+typedef union sipral_event_payload sipral_event_payload_t;
+typedef struct sipral_event sipral_event_t;
+
+/**
+ * The result of a call across the C ABI.
+ *
+ * The numbers are part of the ABI. A value keeps its meaning for the life of
+ * the ABI's major version, and a new one is only ever added at the end.
+ */
+typedef int32_t sipral_status_t;
+enum {
+    /**
+     * The call did what it was asked to.
+     */
+    SIPRAL_STATUS_OK = 0,
+    /**
+     * A pointer was null where one is required, a length disagreed with what
+     * it describes, or a value was outside what the call accepts.
+     */
+    SIPRAL_STATUS_INVALID_ARGUMENT = 1,
+    /**
+     * The handle never came from this library.
+     */
+    SIPRAL_STATUS_INVALID_HANDLE = 2,
+    /**
+     * The handle came from this library and what it named is gone: a use
+     * after free, or a second free.
+     */
+    SIPRAL_STATUS_STALE_HANDLE = 3,
+    /**
+     * A versioned struct declared a size this build cannot work with, or a
+     * binding asked for an ABI this library does not provide.
+     */
+    SIPRAL_STATUS_UNSUPPORTED_VERSION = 4,
+    /**
+     * The buffer supplied is too small. The length needed has been written to
+     * the out parameter, and nothing was written to the buffer.
+     */
+    SIPRAL_STATUS_BUFFER_TOO_SMALL = 5,
+    /**
+     * The object is already in use by another call, including one further
+     * down the same call stack. Nothing was done, and nothing blocked.
+     */
+    SIPRAL_STATUS_BUSY = 6,
+    /**
+     * The library has no room for another object of this kind.
+     */
+    SIPRAL_STATUS_EXHAUSTED = 7,
+    /**
+     * A panic was caught at the boundary. The call did not finish, and the
+     * last error carries whatever the panic said.
+     */
+    SIPRAL_STATUS_PANIC = 8,
+    /**
+     * What was asked for cannot be done where the object is: answering a call
+     * this end placed, holding one that is not up, sending DTMF before there
+     * is a dialog to send it in. Not an argument that was wrong; a moment
+     * that was.
+     */
+    SIPRAL_STATUS_WRONG_STATE = 9,
+    /**
+     * The request could not be assembled or handed to a transport. Nothing
+     * went out, and nothing about the call changed.
+     */
+    SIPRAL_STATUS_NOT_SENT = 10,
+    /**
+     * The value is one this ABI has a word for and this build has no code
+     * behind. Nothing was applied, and asking again will not change that.
+     *
+     * The third of the three answers a configuration call may give, and the
+     * one that has to be told apart from the other two by a machine.
+     * SIPRAL_STATUS_INVALID_ARGUMENT says the value is wrong and a
+     * corrected one would be taken; this says the value is right and there is
+     * nothing here to take it. SIPRAL_STATUS_UNSUPPORTED_VERSION is about
+     * the shape of what crossed the boundary, not about what was set in it.
+     *
+     * It exists so that "accepted and ignored" is not a thing this library
+     * can do. An application that gets it turns the control off, because the
+     * control is genuinely dead in this build; one that gets a silence
+     * instead ships a control that does nothing and finds out from a
+     * customer.
+     */
+    SIPRAL_STATUS_NOT_SUPPORTED = 11,
+};
+
+/**
+ * What a stack speaks. Names for `sipral_stack_config_t::transport`.
+ *
+ * Zero is not one of them: a stack is told what it is speaking, because
+ * guessing wrong in the direction of the plainest transport is how a caller
+ * that meant TLS ends up on the wire in the clear.
+ */
+typedef uint32_t sipral_transport_t;
+enum {
+    /**
+     * UDP.
+     */
+    SIPRAL_TRANSPORT_UDP = 1,
+    /**
+     * TCP.
+     */
+    SIPRAL_TRANSPORT_TCP = 2,
+    /**
+     * TLS over TCP.
+     */
+    SIPRAL_TRANSPORT_TLS = 3,
+    /**
+     * WebSocket.
+     */
+    SIPRAL_TRANSPORT_WS = 4,
+    /**
+     * WebSocket over TLS.
+     */
+    SIPRAL_TRANSPORT_WSS = 5,
+};
+
+/**
+ * Why a transport could not deliver. Names for
+ * sipral_stack_transport_failed's `error`.
+ *
+ * Coarse on purpose, and it is the layer below that is coarse: a client
+ * transaction informs its user and terminates on every one of these (§17), and
+ * the detail belongs in the caller's log, where the real message still is.
+ */
+typedef uint32_t sipral_transport_error_t;
+enum {
+    /**
+     * Anything the caller could not classify. Zero, because a caller that
+     * knows only that the write failed is telling the truth by saying nothing.
+     */
+    SIPRAL_TRANSPORT_ERROR_OTHER = 0,
+    /**
+     * Nothing is listening at the far end.
+     */
+    SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED = 1,
+    /**
+     * An established connection was reset.
+     */
+    SIPRAL_TRANSPORT_ERROR_CONNECTION_RESET = 2,
+    /**
+     * No route, or an ICMP unreachable.
+     */
+    SIPRAL_TRANSPORT_ERROR_UNREACHABLE = 3,
+    /**
+     * The connection attempt or the write timed out.
+     */
+    SIPRAL_TRANSPORT_ERROR_TIMED_OUT = 4,
+    /**
+     * The connection was closed and cannot be written to again.
+     */
+    SIPRAL_TRANSPORT_ERROR_CLOSED = 5,
+};
+
+/**
+ * The three answers a setting can give in a struct that starts out zeroed.
+ *
+ * A boolean cannot carry them. Zero is what a caller who filled nothing in
+ * leaves behind, so a plain `0`/`1` setting has no way to say "off" that is
+ * not also "I said nothing", and the difference is the whole of B2: the
+ * library must not turn a control off because the caller never touched it.
+ */
+typedef uint32_t sipral_toggle_t;
+enum {
+    /**
+     * Nothing was said; whatever this build defaults to.
+     */
+    SIPRAL_TOGGLE_DEFAULT = 0,
+    /**
+     * On.
+     */
+    SIPRAL_TOGGLE_ON = 1,
+    /**
+     * Off.
+     */
+    SIPRAL_TOGGLE_OFF = 2,
+};
+
+/**
+ * One codec this build contains. Names for every member that says which.
+ *
+ * A value here means there is an encoder and a decoder behind it. That is
+ * what makes the enumeration worth reporting to a settings screen at all: a
+ * list of names the build cannot produce is a list of controls that do
+ * nothing.
+ */
+typedef uint32_t sipral_codec_t;
+enum {
+    /**
+     * No codec: the call has none, or the event is not about one.
+     */
+    SIPRAL_CODEC_UNKNOWN = 0,
+    /**
+     * G.711 mu-law, payload type 0.
+     */
+    SIPRAL_CODEC_PCMU = 1,
+    /**
+     * G.711 A-law, payload type 8.
+     */
+    SIPRAL_CODEC_PCMA = 2,
+    /**
+     * G.722, wideband at the price of a narrowband stream.
+     */
+    SIPRAL_CODEC_G722 = 3,
+    /**
+     * Opus.
+     */
+    SIPRAL_CODEC_OPUS = 4,
+};
+
+/**
+ * Which way audio may flow, as seen from here. Names for every `direction`.
+ */
+typedef uint32_t sipral_direction_t;
+enum {
+    /**
+     * Not negotiated.
+     */
+    SIPRAL_DIRECTION_UNKNOWN = 0,
+    /**
+     * Both ways.
+     */
+    SIPRAL_DIRECTION_SEND_RECV = 1,
+    /**
+     * This end sends and does not receive, which is what holding the far end
+     * looks like from here.
+     */
+    SIPRAL_DIRECTION_SEND_ONLY = 2,
+    /**
+     * This end receives and does not send.
+     */
+    SIPRAL_DIRECTION_RECV_ONLY = 3,
+    /**
+     * Neither way, and the stream stays in the session.
+     */
+    SIPRAL_DIRECTION_INACTIVE = 4,
+};
+
+/**
+ * Where control traffic goes. Names for sipral_media_info_t::rtcp.
+ */
+typedef uint32_t sipral_rtcp_t;
+enum {
+    /**
+     * Not negotiated.
+     */
+    SIPRAL_RTCP_UNKNOWN = 0,
+    /**
+     * One port carries both (RFC 5761), which happens only where both ends
+     * asked for it.
+     */
+    SIPRAL_RTCP_MUXED = 1,
+    /**
+     * A port of its own at each end.
+     */
+    SIPRAL_RTCP_SEPARATE_PORT = 2,
+    /**
+     * None at all: the peer said it is not using RTCP.
+     */
+    SIPRAL_RTCP_OFF = 3,
+};
+
+/**
+ * Why media failed. Names for `sipral_media_event_t::fault`.
+ *
+ * The sentence beside it says which case of the kind it was; this is the part
+ * a machine acts on, and the two are never the same thing.
+ */
+typedef uint32_t sipral_media_fault_t;
+enum {
+    /**
+     * Nothing failed.
+     */
+    SIPRAL_MEDIA_FAULT_NONE = 0,
+    /**
+     * The negotiation settled on something this build cannot encode or
+     * decode, which means the peer answered with a format that was not in the
+     * offer.
+     */
+    SIPRAL_MEDIA_FAULT_UNSUPPORTED_CODEC = 1,
+    /**
+     * The two descriptions agree on nothing that can carry audio.
+     */
+    SIPRAL_MEDIA_FAULT_NO_COMMON_CODEC = 2,
+    /**
+     * One end refused the stream with a port of zero. The call is up and
+     * carries no audio, which is a thing a peer is allowed to want.
+     */
+    SIPRAL_MEDIA_FAULT_STREAM_REFUSED = 3,
+    /**
+     * There is no session description to work from.
+     */
+    SIPRAL_MEDIA_FAULT_NO_DESCRIPTION = 4,
+    /**
+     * A description could not be read.
+     */
+    SIPRAL_MEDIA_FAULT_BAD_DESCRIPTION = 5,
+    /**
+     * The recording stopped writing: the disk filled, the file went away.
+     */
+    SIPRAL_MEDIA_FAULT_RECORDING = 6,
+    /**
+     * The codec refused a frame.
+     */
+    SIPRAL_MEDIA_FAULT_CODEC = 7,
+    /**
+     * Something else the layer below reported and this ABI has no word for.
+     */
+    SIPRAL_MEDIA_FAULT_OTHER = 8,
+};
+
+/**
+ * What a datagram handed to sipral_call_media_receive turned out to be.
+ */
+typedef uint32_t sipral_arrival_t;
+enum {
+    /**
+     * Something this ABI has no word for.
+     */
+    SIPRAL_ARRIVAL_UNKNOWN = 0,
+    /**
+     * Audio, held for playout.
+     */
+    SIPRAL_ARRIVAL_QUEUED = 1,
+    /**
+     * Audio that was not used: malformed, late, duplicated, from the wrong
+     * address, or on a payload type nobody negotiated. The counters in
+     * sipral_stream_stats_t say which, over the call.
+     */
+    SIPRAL_ARRIVAL_DROPPED = 2,
+    /**
+     * A reception or sender report, folded into the statistics.
+     */
+    SIPRAL_ARRIVAL_CONTROL = 3,
+    /**
+     * The far end says it is leaving the session (RFC 3550 §6.6). Audio will
+     * stop; the call has not ended until signalling says so.
+     */
+    SIPRAL_ARRIVAL_GOODBYE = 4,
+    /**
+     * Control traffic that was not believed: from the wrong address, or not a
+     * well-formed compound packet.
+     */
+    SIPRAL_ARRIVAL_CONTROL_REFUSED = 5,
+};
+
+/**
+ * Where the frame sipral_call_playback just produced came from.
+ */
+typedef uint32_t sipral_playback_t;
+enum {
+    /**
+     * Something this ABI has no word for.
+     */
+    SIPRAL_PLAYBACK_UNKNOWN = 0,
+    /**
+     * A packet the far end sent.
+     */
+    SIPRAL_PLAYBACK_PACKET = 1,
+    /**
+     * One it sent and this end did not get, filled in by the concealment.
+     */
+    SIPRAL_PLAYBACK_CONCEALED = 2,
+    /**
+     * Comfort noise, from an RFC 3389 payload the far end sent instead of
+     * audio.
+     */
+    SIPRAL_PLAYBACK_COMFORT_NOISE = 3,
+    /**
+     * Nothing was due: the buffer is still filling, or the far end has
+     * stopped.
+     */
+    SIPRAL_PLAYBACK_SILENCE = 4,
+};
+
+/**
+ * Which way a digit goes to the far end. Names for
+ * sipral_call_send_dtmf's `via`.
+ *
+ * The choice is per send, not per call, because it is a fact about the peer
+ * rather than about this end, and the way to find out which one a peer takes
+ * is to try. A carrier that ignores one of these ignores it silently.
+ */
+typedef uint32_t sipral_dtmf_t;
+enum {
+    /**
+     * In the media, as an RFC 4733 named telephone event. What to reach for:
+     * it is the only one carried end to end by every gateway on the path, and
+     * the only one whose timing survives transcoding.
+     */
+    SIPRAL_DTMF_RTP = 0,
+    /**
+     * An INFO per digit carrying `application/dtmf-relay`, which states the
+     * signal and how long it was held.
+     */
+    SIPRAL_DTMF_INFO_RELAY = 1,
+    /**
+     * An INFO per digit carrying `application/dtmf`, whose whole body is the
+     * character. Some switches take only this one.
+     */
+    SIPRAL_DTMF_INFO_PLAIN = 2,
+};
+
+/**
+ * What an event is about.
+ *
+ * The numbers are part of the ABI and are only ever added to. A binding
+ * that meets a kind it does not know must ignore that event rather than
+ * refuse it, which is what makes adding one safe.
+ *
+ * Numbers already spent on features this build does not have:
+ * - 15: a subscription's state changed (A1)
+ * - 16: the set of audio devices changed (A2)
+ * - 18: a request was promoted to a stream transport (B1)
+ * - 20: a call was announced and never arrived (C2)
+ */
+typedef uint32_t sipral_event_kind_t;
+enum {
+    /**
+     * The stack is running on this thread.
+     *
+     * The first event on every stack, delivered by the first poll and never
+     * again. A binding that has a callback to hand out, a queue to open or a
+     * thread to name has somewhere definite to do it, before anything that
+     * matters can arrive.
+     */
+    SIPRAL_EVENT_KIND_STARTED = 1,
+    /**
+     * A registration moved: it went out, it took, it is being refreshed, it
+     * was given up, or it failed. `payload.registration` says which, and
+     * `account` says whose.
+     */
+    SIPRAL_EVENT_KIND_REGISTRATION_CHANGED = 2,
+    /**
+     * Somebody is calling. Answer, ring, or reject it.
+     */
+    SIPRAL_EVENT_KIND_INCOMING_CALL = 3,
+    /**
+     * A call this end placed is getting somewhere short of an answer.
+     */
+    SIPRAL_EVENT_KIND_CALL_PROGRESS = 4,
+    /**
+     * A proxy forked the INVITE and a second phone is ringing.
+     * `payload.call.other` is the branch that has just appeared.
+     */
+    SIPRAL_EVENT_KIND_CALL_FORKED = 5,
+    /**
+     * The call is up.
+     */
+    SIPRAL_EVENT_KIND_CALL_CONFIRMED = 6,
+    /**
+     * The session inside a live call changed: a hold, a resume, or an offer
+     * either end made and had accepted.
+     */
+    SIPRAL_EVENT_KIND_SESSION_CHANGED = 7,
+    /**
+     * The far end offered a change this stack has no policy for. The
+     * transaction is held open: answer it or refuse it, or the call ends.
+     */
+    SIPRAL_EVENT_KIND_SESSION_OFFERED = 8,
+    /**
+     * A change this end offered was refused. The session stands as it was.
+     */
+    SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED = 9,
+    /**
+     * The far end asked this one to call somebody else.
+     */
+    SIPRAL_EVENT_KIND_TRANSFER_REQUESTED = 10,
+    /**
+     * A transfer this end asked for is under way.
+     */
+    SIPRAL_EVENT_KIND_TRANSFER_PROGRESS = 11,
+    /**
+     * And how it ended.
+     */
+    SIPRAL_EVENT_KIND_TRANSFER_DONE = 12,
+    /**
+     * A call arrived carrying a `Replaces` and took over one already up.
+     * `payload.call.other` is the one being replaced.
+     */
+    SIPRAL_EVENT_KIND_CALL_REPLACED = 13,
+    /**
+     * The call is over, and its handle is stale from here on.
+     */
+    SIPRAL_EVENT_KIND_CALL_ENDED = 14,
+    /**
+     * What one call's media cost, delivered once, after
+     * `SIPRAL_EVENT_KIND_CALL_ENDED`.
+     *
+     * A6's second consumer. `payload.media.statistics` points at the
+     * completed record; it is the library's and lives as long as the callback
+     * does. The stream is gone by the time this arrives, which is why the
+     * numbers travel in the event rather than behind a lookup that would now
+     * fail.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_STATISTICS = 17,
+    /**
+     * Nothing has arrived on the media path for longer than the configured
+     * threshold, while signalling is perfectly happy.
+     *
+     * B5. `payload.media.silent_for_ms` says how long. The call is untouched:
+     * whether to hang up over silence is a decision with a person on the other
+     * end of it.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_STALLED = 19,
+    /**
+     * Audio is running: the negotiation settled and an RTP session is open.
+     *
+     * A4's reporting half and the first half of D5: `payload.media.codec` is
+     * what the two ends agreed on, and `sipral_call_media_info` says the rest.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_STARTED = 21,
+    /**
+     * The session changed under a live call: a hold, a resume, a peer that
+     * moved its media address, or a re-negotiation onto another codec.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_CHANGED = 22,
+    /**
+     * Packets are arriving again. `payload.media.silent_for_ms` says how long
+     * the gap turned out to be.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_RESUMED = 23,
+    /**
+     * Media could not be started or could not be kept. The call itself is
+     * untouched; `payload.media.fault` and `payload.media.reason` say why.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_FAILED = 24,
+    /**
+     * A recording stopped on its own, part-way through: the disk filled, the
+     * file went away, the volume was unmounted.
+     *
+     * Never an abort. `payload.media.recorded_ms` says how much audio reached
+     * the file before it stopped, and the call carries on without it.
+     */
+    SIPRAL_EVENT_KIND_RECORDING_STOPPED = 25,
+    /**
+     * The far end pressed a key (RFC 4733).
+     *
+     * One per keypress, not one per packet: a digit goes out as a run of
+     * updates and then its closing packet three times, and the layer below
+     * collapses them on the timestamp that identifies the event.
+     * `payload.media.digit` is the character, `event_code` the number behind
+     * it for the events no keypad has a key for, and `held_ms` how long it
+     * lasted.
+     */
+    SIPRAL_EVENT_KIND_DIGIT_RECEIVED = 26,
+};
+
+/**
+ * Where a registration is. Names for `sipral_registration_event_t::state`.
+ */
+typedef uint32_t sipral_registration_state_t;
+enum {
+    /**
+     * The account is gone, or has never been asked about.
+     */
+    SIPRAL_REGISTRATION_STATE_UNKNOWN = 0,
+    /**
+     * Configured and not registered. Nothing has been sent.
+     */
+    SIPRAL_REGISTRATION_STATE_IDLE = 1,
+    /**
+     * A REGISTER is in flight and there is no binding yet.
+     */
+    SIPRAL_REGISTRATION_STATE_REGISTERING = 2,
+    /**
+     * The registrar holds a binding.
+     */
+    SIPRAL_REGISTRATION_STATE_REGISTERED = 3,
+    /**
+     * A refresh is in flight. The binding stands until it is answered.
+     */
+    SIPRAL_REGISTRATION_STATE_REFRESHING = 4,
+    /**
+     * Something recoverable went wrong and the next attempt is scheduled.
+     */
+    SIPRAL_REGISTRATION_STATE_RETRYING = 5,
+    /**
+     * The binding was given up on purpose.
+     */
+    SIPRAL_REGISTRATION_STATE_UNREGISTERED = 6,
+    /**
+     * The registrar refused in a way that trying again cannot fix.
+     */
+    SIPRAL_REGISTRATION_STATE_FAILED = 7,
+    /**
+     * A binding a registrar really granted, over a transport that has since
+     * been suspended or lost, which nothing has proved since.
+     *
+     * Not registered, because it is no longer evidence; not failed, because
+     * nothing refused it. A monotonic clock does not advance while a machine
+     * sleeps, so a stack that slept eight hours comes back believing eight
+     * milliseconds passed and every binding still valid — this is the state
+     * that says otherwise, and an application that shows a line as ready on
+     * the strength of it will show it ready when it is not.
+     */
+    SIPRAL_REGISTRATION_STATE_UNVERIFIED = 8,
+    /**
+     * A binding read back from a snapshot rather than granted in this
+     * process. It has not been proved either.
+     */
+    SIPRAL_REGISTRATION_STATE_RESTORED = 9,
+};
+
+/**
+ * Why a registration is not live. Names for
+ * `sipral_registration_event_t::failure`.
+ */
+typedef uint32_t sipral_registration_failure_t;
+enum {
+    /**
+     * Nothing failed.
+     */
+    SIPRAL_REGISTRATION_FAILURE_NONE = 0,
+    /**
+     * The registrar refused, and will refuse the same request again.
+     */
+    SIPRAL_REGISTRATION_FAILURE_REJECTED = 1,
+    /**
+     * The password was wrong, or there was none to answer with.
+     */
+    SIPRAL_REGISTRATION_FAILURE_BAD_CREDENTIALS = 2,
+    /**
+     * The registrar is not answering, or says it cannot serve this now.
+     */
+    SIPRAL_REGISTRATION_FAILURE_UNREACHABLE = 3,
+    /**
+     * The registrar moved. Following it needs an address, which is the
+     * caller's to resolve.
+     */
+    SIPRAL_REGISTRATION_FAILURE_REDIRECTED = 4,
+};
+
+/**
+ * Where a call is. Names for `sipral_call_event_t::state`, and what
+ * `sipral_call_state` writes.
+ */
+typedef uint32_t sipral_call_state_t;
+enum {
+    /**
+     * The call is gone, or has never been asked about.
+     */
+    SIPRAL_CALL_STATE_UNKNOWN = 0,
+    /**
+     * The INVITE has gone and nothing has come back.
+     */
+    SIPRAL_CALL_STATE_CALLING = 1,
+    /**
+     * Somebody is calling and this end has not answered.
+     */
+    SIPRAL_CALL_STATE_INCOMING = 2,
+    /**
+     * The far end is ringing, or this end said it is.
+     */
+    SIPRAL_CALL_STATE_RINGING = 3,
+    /**
+     * There is audio before anybody answered.
+     */
+    SIPRAL_CALL_STATE_EARLY_MEDIA = 4,
+    /**
+     * Up.
+     */
+    SIPRAL_CALL_STATE_CONFIRMED = 5,
+    /**
+     * Up, in order to be transferred: the second leg of an attended transfer.
+     */
+    SIPRAL_CALL_STATE_CONSULTING = 6,
+    /**
+     * A CANCEL or a BYE has gone and is not answered yet.
+     */
+    SIPRAL_CALL_STATE_TERMINATING = 7,
+    /**
+     * Over.
+     */
+    SIPRAL_CALL_STATE_TERMINATED = 8,
+};
+
+/**
+ * Why a call is over. Names for `sipral_call_event_t::end_reason`.
+ */
+typedef uint32_t sipral_call_end_reason_t;
+enum {
+    /**
+     * The call is not over.
+     */
+    SIPRAL_CALL_END_REASON_NONE = 0,
+    /**
+     * This end hung up.
+     */
+    SIPRAL_CALL_END_REASON_LOCAL_HANGUP = 1,
+    /**
+     * The far end hung up.
+     */
+    SIPRAL_CALL_END_REASON_REMOTE_HANGUP = 2,
+    /**
+     * The far end refused it: busy, declined, not found.
+     */
+    SIPRAL_CALL_END_REASON_REFUSED = 3,
+    /**
+     * Given up before it was answered, from either end.
+     */
+    SIPRAL_CALL_END_REASON_CANCELLED = 4,
+    /**
+     * Nothing came back, or the transport died.
+     */
+    SIPRAL_CALL_END_REASON_UNREACHABLE = 5,
+    /**
+     * Another branch of the same fork was kept and this one was not.
+     */
+    SIPRAL_CALL_END_REASON_FORK_LOST = 6,
+    /**
+     * The branch was still ringing when the answer window closed.
+     */
+    SIPRAL_CALL_END_REASON_ABANDONED = 7,
+    /**
+     * The session timer ran out and no refresh arrived.
+     */
+    SIPRAL_CALL_END_REASON_EXPIRED = 8,
+};
+
+/**
+ * The one callback a stack has.
+ *
+ * It is called from inside `sipral_stack_poll`, on the thread that called
+ * it, with the `user_data` the stack was created with. It must not
+ * unwind, and it must not call back into the stack it was given: see
+ * crate::stack.
+ */
+typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_data);
+
+/**
+ * The version of the ABI this library provides.
+ *
+ * Set `size` to `sizeof(sipral_abi_version_t)` before the call.
+ */
+struct sipral_abi_version {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * Nothing built against another major version will work.
+     */
+    uint32_t major;
+    /**
+     * A build with a higher minor has everything a lower one had.
+     */
+    uint32_t minor;
+    /**
+     * A fix that changed no declaration.
+     */
+    uint32_t patch;
+};
+
+/**
+ * What this build of the library can do: codecs compiled in, transports
+ * this ABI carries signalling over, and which optional features are
+ * present.
+ *
+ * Nothing here is configuration — this answers "can this build ever do X",
+ * never "is X turned on for this stack". `sipral_stack_settings` answers
+ * that once a stack exists, and `sipral_codec_count` /
+ * `sipral_stack_codec_order` already enumerate the codecs this reports only
+ * the count of, so this does not repeat what they say.
+ *
+ * Set `size` to `sizeof(sipral_capabilities_t)` before the call.
+ */
+struct sipral_capabilities {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * How many codecs this build contains. `sipral_codec_count` gives the
+     * same number; `sipral_codec_at` says which, and in what order they are
+     * offered by default.
+     */
+    size_t codec_count;
+    /**
+     * Which transports this build carries signalling over, as the bits
+     * named `SIPRAL_TRANSPORT_BIT_*`.
+     */
+    uint32_t transports;
+    /**
+     * Which optional features this build has compiled in, as the bits named
+     * `SIPRAL_FEATURE_*`.
+     */
+    uint32_t features;
+};
+
+/**
+ * D3's flat set of health counters for one stack, since it was created.
+ *
+ * Every member here is monotonic except `active_calls`, which is a gauge:
+ * it can be read as smaller than an earlier reading, and none of the others
+ * ever will be. Set `size` to `sizeof(sipral_counters_t)` before the call.
+ */
+struct sipral_counters {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A REGISTER went out, counted once per attempt including a retry.
+     */
+    uint64_t registrations_attempted;
+    /**
+     * The registrar granted a binding.
+     */
+    uint64_t registrations_succeeded;
+    /**
+     * The registrar refused, and will refuse the same request again.
+     */
+    uint64_t registrations_failed_rejected;
+    /**
+     * The password was wrong, or there was none to answer a challenge with.
+     */
+    uint64_t registrations_failed_bad_credentials;
+    /**
+     * The registrar did not answer, or said it could not serve this now.
+     */
+    uint64_t registrations_failed_unreachable;
+    /**
+     * The registrar moved.
+     */
+    uint64_t registrations_failed_redirected;
+    /**
+     * This end hung up.
+     */
+    uint64_t calls_ended_local_hangup;
+    /**
+     * The far end hung up.
+     */
+    uint64_t calls_ended_remote_hangup;
+    /**
+     * The far end refused it: busy, declined, not found.
+     */
+    uint64_t calls_ended_refused;
+    /**
+     * Given up before it was answered, from either end.
+     */
+    uint64_t calls_ended_cancelled;
+    /**
+     * Nothing came back, or the transport died.
+     */
+    uint64_t calls_ended_unreachable;
+    /**
+     * Another branch of the same fork was kept and this one was not.
+     */
+    uint64_t calls_ended_fork_lost;
+    /**
+     * The branch was still ringing when the answer window closed.
+     */
+    uint64_t calls_ended_abandoned;
+    /**
+     * The session timer ran out and no refresh arrived.
+     */
+    uint64_t calls_ended_expired;
+    /**
+     * How many times inbound audio stopped for longer than the configured
+     * threshold while signalling stayed healthy (B5).
+     */
+    uint64_t media_gaps;
+    /**
+     * How many times a call's jitter buffer had to shrink or stretch the
+     * stream to keep its delay where it was aiming.
+     */
+    uint64_t jitter_buffer_events;
+    /**
+     * How many times this build has had to promote a request onto a stream
+     * transport because it would not fit a datagram (RFC 3261 §18.1.1, B1).
+     */
+    uint64_t transport_promotions;
+    /**
+     * Calls with media running right now. The one gauge in this struct: it
+     * moves both ways, and it is what every other member here is not.
+     */
+    uint64_t active_calls;
+};
+
+/**
+ * What a stack is created with.
+ *
+ * Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
+ * filling anything in. Four members have to be filled: the callback, the
+ * transport, the address this end is reachable at, and the entropy. Nothing
+ * here can be guessed on the caller's behalf.
+ */
+struct sipral_stack_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * Where events go. Required: a stack with nowhere to report to is a
+     * stack whose failures are invisible.
+     */
+    sipral_event_callback_t event_callback;
+    /**
+     * Handed back to the callback untouched. The library never reads it.
+     */
+    void *event_user_data;
+    /**
+     * A sipral_transport_t.
+     */
+    uint32_t transport;
+    /**
+     * The address the far end reaches this one at, as `host:port`, UTF-8 and
+     * not NUL-terminated.
+     *
+     * It goes in every `Via`, so it is the address a response has to come
+     * back to rather than whatever a wildcard socket was bound to. Nothing
+     * here opens a socket or resolves a name.
+     */
+    const char *bind_address;
+    /**
+     * How many bytes of it.
+     */
+    size_t bind_address_len;
+    /**
+     * What to put in `User-Agent` on every request this stack originates —
+     * REGISTER and INVITE — or null for none.
+     *
+     * Not on responses, and not on a request sent inside a dialog: those are
+     * written a layer below this one, which has no opinion about product
+     * names. The field is optional on every method — §20 Table 3 marks it `o`
+     * throughout — so a message that goes out without it is still well formed.
+     */
+    const char *user_agent;
+    /**
+     * How many bytes of it.
+     */
+    size_t user_agent_len;
+    /**
+     * Thirty-two bytes of entropy, from the platform's own generator.
+     *
+     * Every branch parameter, tag and `Call-ID` is derived from it, and
+     * §19.3 wants a tag unguessable — cryptographically random, not a
+     * counter or a clock. Two stacks must never be given the same bytes.
+     */
+    const uint8_t *entropy;
+    /**
+     * How many bytes of it. Thirty-two.
+     */
+    size_t entropy_len;
+    /**
+     * T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
+     *
+     * In force on every transport: 64·T1 is how long a transaction has to
+     * finish, whether or not anything retransmits.
+     */
+    uint64_t timer_t1_ms;
+    /**
+     * T2 in milliseconds, or zero for four seconds.
+     *
+     * The cap on the doubling that starts at T1, and therefore only a figure
+     * on a transport that retransmits. Setting it on anything but UDP is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+     */
+    uint64_t timer_t2_ms;
+    /**
+     * T4 in milliseconds, or zero for five seconds.
+     *
+     * How long a message lingers in the network, which is what timers I and K
+     * wait out. Zero on a transport that delivers for us, so it is refused
+     * there the same way T2 is.
+     */
+    uint64_t timer_t4_ms;
+    /**
+     * The codecs to offer, in the order to offer them: their names, separated
+     * by commas, as UTF-8 and not NUL-terminated. Null for everything this
+     * build contains, quality first.
+     *
+     * A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
+     * has the peer's preference decide among what both ends list — and it is
+     * configured per site rather than fixed, because a carrier that bills by
+     * the minute wants the narrowband codec first and a company on its own
+     * network wants the wideband one.
+     *
+     * A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
+     * here, with the names it does have in the last error. It is never taken
+     * and ignored: a setting that is accepted and then quietly dropped is the
+     * failure neither end can see.
+     */
+    const char *codecs;
+    /**
+     * How many bytes of it.
+     */
+    size_t codecs_len;
+    /**
+     * How long a frame is, in milliseconds, or zero for twenty.
+     *
+     * Twenty is what every peer expects and what every codec here cuts
+     * cleanly. Opus has a fixed set of frame durations and encodes nothing
+     * else, so an interval it has no size for is refused while Opus is one of
+     * the codecs offered.
+     */
+    uint32_t frame_ms;
+    /**
+     * Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
+     * default: a phone that cannot send a digit cannot navigate a menu.
+     */
+    uint32_t offer_dtmf;
+    /**
+     * Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
+     *
+     * Off by default. §5.1.1 only permits it where both ends asked, and the
+     * equipment this stack is deployed against does not; asking unasked costs
+     * a line in every offer and buys a port on the calls where nobody answers.
+     */
+    uint32_t offer_rtcp_mux;
+    /**
+     * Whether to stop sending during silence, as a `SipralToggle`.
+     *
+     * Off by default. It halves the bandwidth of a call in which one person is
+     * listening, and it costs the far end's own stall watchdog a reason to
+     * fire — this stack sends no comfort noise of its own to say the silence
+     * is deliberate, so a gap looks the same from there as a stream that died.
+     */
+    uint32_t silence_suppression;
+    /**
+     * Whether inbound audio that stops is reported, as a `SipralToggle`. On by
+     * default; this is B5.
+     */
+    uint32_t media_stall_watchdog;
+    /**
+     * How long inbound audio may stop before that is reported, in
+     * milliseconds, or zero for this build's own figure.
+     *
+     * Setting it with the watchdog switched off is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+     */
+    uint64_t media_stall_ms;
+    /**
+     * What the wall clock read when the stack was created, as seconds since
+     * 1 January 1970, or zero.
+     *
+     * The one number a stack that reads no clock cannot work out: RFC 3550
+     * §6.4.1 has a sender report carry "the wall clock time when this report
+     * was sent", and a monotonic instant is not one. Zero means the reports
+     * count from the Unix epoch, which costs nothing a caller is likely to
+     * miss — the round trip the far end computes is a difference, not an
+     * absolute — and costs the correlation of this call's media with anything
+     * else's.
+     */
+    uint64_t media_clock_unix_seconds;
+};
+
+/**
+ * What one call to sipral_stack_poll did.
+ *
+ * Set `size` to `sizeof(sipral_poll_result_t)` before the call.
+ */
+struct sipral_poll_result {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * Events handed to the callback during this poll.
+     */
+    size_t events_delivered;
+    /**
+     * Events the stack raised that this ABI has no word for yet.
+     *
+     * Counted rather than delivered: an event carrying nothing a binding can
+     * act on is noise, and a number that is not zero is the honest measure of
+     * how far this vocabulary is behind the stack's.
+     */
+    size_t events_unclaimed;
+    /**
+     * Bytes the stack produced and this build had nowhere to send.
+     *
+     * Zero since crate::transport gave them somewhere to go: what the stack
+     * writes waits in it until `sipral_stack_poll_transmit` takes it, and a
+     * poll no longer empties the queue on its way past. The member stays
+     * because a released one always does, and because a build that has to drop
+     * a message again would have somewhere to say so.
+     */
+    size_t transmits_discarded;
+    /**
+     * Whether there is a deadline at all. Zero means nothing is scheduled and
+     * the next poll can wait for input.
+     */
+    uint32_t has_deadline;
+    /**
+     * How long from `now_ms` until the stack has something to do, when
+     * `has_deadline` says there is one. Zero means it is already due.
+     */
+    uint64_t next_poll_in_ms;
+};
+
+/**
+ * What a stack is actually running with.
+ *
+ * A configuration call that answers `SIPRAL_STATUS_OK` has applied what it was
+ * given, and this is where the caller reads back what that came to. It matters
+ * because a zero in the config means "the default": a caller that left the
+ * timers alone has no other way to learn which figures it is retransmitting
+ * on, and one that set them has no other way to be sure.
+ *
+ * Set `size` to `sizeof(sipral_stack_settings_t)` before the call.
+ */
+struct sipral_stack_settings {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * The sipral_transport_t this stack speaks.
+     */
+    uint32_t transport;
+    /**
+     * Whether this stack retransmits anything itself.
+     *
+     * Zero on a transport that delivers for us, which is every one but UDP.
+     * The two timers that only exist to pace a retransmission read as their
+     * defaults there, and mean nothing.
+     */
+    uint32_t retransmits;
+    /**
+     * T1 in milliseconds, with the default filled in.
+     */
+    uint64_t timer_t1_ms;
+    /**
+     * T2 in milliseconds, with the default filled in.
+     */
+    uint64_t timer_t2_ms;
+    /**
+     * T4 in milliseconds, with the default filled in.
+     */
+    uint64_t timer_t4_ms;
+    /**
+     * How many codecs this stack offers. `sipral_stack_codec_order` says
+     * which, and in what order.
+     */
+    size_t codec_count;
+    /**
+     * How long a frame is, with the default filled in.
+     */
+    uint32_t frame_ms;
+    /**
+     * Whether named events are offered, as a `SipralToggle`. Never the
+     * default value: this says what the setting came to, not what was passed.
+     */
+    uint32_t offer_dtmf;
+    /**
+     * Whether RTCP multiplexing is asked for, as a `SipralToggle`.
+     */
+    uint32_t offer_rtcp_mux;
+    /**
+     * Whether sending stops during silence, as a `SipralToggle`.
+     */
+    uint32_t silence_suppression;
+    /**
+     * How long inbound audio may stop before it is reported, with the default
+     * filled in. Zero when the watchdog is off, which is the one case where
+     * there is no figure to give.
+     */
+    uint64_t media_stall_ms;
+};
+
+/**
+ * What an account is configured with.
+ *
+ * Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
+ * filling anything in.
+ */
+struct sipral_account_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The address of record, `sip:alice@example.com`. UTF-8, not
+     * NUL-terminated.
+     */
+    const char *aor;
+    /**
+     * How many bytes of it.
+     */
+    size_t aor_len;
+    /**
+     * Where the REGISTER is addressed, `sip:example.com`, no user part.
+     */
+    const char *registrar;
+    /**
+     * How many bytes of it.
+     */
+    size_t registrar_len;
+    /**
+     * Where this endpoint can be reached, as it goes in `Contact`.
+     */
+    const char *contact;
+    /**
+     * How many bytes of it.
+     */
+    size_t contact_len;
+    /**
+     * Where the REGISTER actually goes, as `host:port`. An address, not a
+     * name: RFC 3263 resolution is the caller's.
+     */
+    const char *registrar_address;
+    /**
+     * How many bytes of it.
+     */
+    size_t registrar_address_len;
+    /**
+     * The display name that goes in `From`, or null for none.
+     */
+    const char *display_name;
+    /**
+     * How many bytes of it.
+     */
+    size_t display_name_len;
+    /**
+     * The user name to answer a challenge with, or null for an account that
+     * answers none.
+     */
+    const char *auth_user;
+    /**
+     * How many bytes of it.
+     */
+    size_t auth_user_len;
+    /**
+     * The password that goes with it. Copied out of the caller's memory; what
+     * happens to the caller's copy is the caller's.
+     */
+    const char *auth_password;
+    /**
+     * How many bytes of it.
+     */
+    size_t auth_password_len;
+    /**
+     * The `+sip.instance` URN of RFC 5626 §4.1, or null for none.
+     */
+    const char *instance_id;
+    /**
+     * How many bytes of it.
+     */
+    size_t instance_id_len;
+    /**
+     * How long a binding to ask for, or zero for an hour.
+     *
+     * A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
+     * is refused rather than sent as a number no registrar will read. What the
+     * registrar grants wins over the request either way, and the granted
+     * figure is what `sipral_registration_event_t::expires_ms` carries — that
+     * is where the effective value is read back, not here.
+     */
+    uint64_t expires_seconds;
+};
+
+/**
+ * What a call is placed with.
+ *
+ * Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
+ * filling anything in.
+ */
+struct sipral_call_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * Who to call, as a URI. UTF-8, not NUL-terminated.
+     */
+    const char *target;
+    /**
+     * How many bytes of it.
+     */
+    size_t target_len;
+    /**
+     * The session description to offer, for a call this stack manages no
+     * audio for.
+     *
+     * Exactly one of this and `media_address` is set. Two descriptions of one
+     * session is one too many, and neither is a call whose answer would have
+     * to be written into the ACK.
+     */
+    const uint8_t *sdp;
+    /**
+     * How many bytes of it.
+     */
+    size_t sdp_len;
+    /**
+     * Where to send the INVITE, as `host:port`, or null to send it where the
+     * account registers — which is the outbound proxy for a registered line,
+     * and the reason a phone behind a NAT works at all.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * Whether to keep every branch a proxy forks the INVITE into. Zero keeps
+     * the first that answers and hangs up the rest, which is what a telephone
+     * does.
+     */
+    uint32_t keep_all_forks;
+    /**
+     * Where this end will receive media, as `host:port`, for a call this
+     * stack describes and runs the audio of.
+     *
+     * The application owns the socket, so it is the only one that can say. Set
+     * it and the offer is written from this stack's codec order, the answer is
+     * read, and the call gets a media session that `crate::media` and
+     * `crate::record` reach. Leave it null and set `sdp` instead for a call
+     * where the application describes its own session and runs its own RTP.
+     */
+    const char *media_address;
+    /**
+     * How many bytes of it.
+     */
+    size_t media_address_len;
+};
+
+/**
+ * One codec this build contains.
+ *
+ * Set `size` to `sizeof(sipral_codec_info_t)` before the call.
+ */
+struct sipral_codec_info {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_codec_t.
+     */
+    uint32_t codec;
+    /**
+     * The RTP timestamp clock, in hertz, which is what goes on the
+     * `a=rtpmap` line.
+     */
+    uint32_t clock_rate;
+    /**
+     * The rate the codec actually hears at, which is what the samples crossing
+     * this ABI are in. G.722's two differ, and RFC 3551 §4.5.2 says so.
+     */
+    uint32_t sample_rate;
+    /**
+     * The payload type RFC 3551 table 4 assigns it, when it has one.
+     */
+    uint32_t static_payload_type;
+    /**
+     * Whether it has one. Opus does not: it is newer than the table and
+     * always travels as a dynamic type.
+     */
+    uint32_t has_static_payload_type;
+};
+
+/**
+ * What one call's media settled on, and what it is doing now.
+ *
+ * A4's reporting half and as much of D5 as this stack knows: the codec that
+ * was agreed, the number it travels under, and the shape of the stream around
+ * it. What is deliberately not here is why each other candidate lost —
+ * RFC 3264 §6.1 leaves that decision with the peer, and a reason invented on
+ * this side would be a reason nobody can act on.
+ *
+ * Set `size` to `sizeof(sipral_media_info_t)` before the call.
+ */
+struct sipral_media_info {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_codec_t: what the two ends agreed on.
+     */
+    uint32_t codec;
+    /**
+     * The payload type on the wire. It is the offer's own number and not
+     * necessarily ours: a peer that numbers Opus 111 has said what we say
+     * with 96.
+     */
+    uint32_t payload_type;
+    /**
+     * The RTP timestamp clock, in hertz.
+     */
+    uint32_t clock_rate;
+    /**
+     * The rate the samples crossing this ABI are at.
+     */
+    uint32_t sample_rate;
+    /**
+     * How long a frame is, in milliseconds.
+     */
+    uint32_t frame_ms;
+    /**
+     * Samples in one frame: exactly what sipral_call_playback fills and
+     * what sipral_call_capture wants.
+     */
+    size_t frame_samples;
+    /**
+     * A sipral_direction_t.
+     */
+    uint32_t direction;
+    /**
+     * Whether this end is meant to be sending. Zero while it holds the far
+     * end, or while the far end has refused to receive.
+     */
+    uint32_t sending;
+    /**
+     * Whether this end is meant to be receiving.
+     */
+    uint32_t receiving;
+    /**
+     * Whether RFC 4733 named events were agreed.
+     */
+    uint32_t has_dtmf;
+    /**
+     * The payload type they travel under, when they were.
+     */
+    uint32_t dtmf_payload_type;
+    /**
+     * A sipral_rtcp_t.
+     */
+    uint32_t rtcp;
+    /**
+     * Whether the stream is keyed.
+     */
+    uint32_t secured;
+    /**
+     * Whether a recording is running on this call.
+     */
+    uint32_t recording;
+    /**
+     * How much audio it has taken.
+     */
+    uint64_t recorded_ms;
+    /**
+     * Whether the watchdog currently considers inbound audio stopped.
+     */
+    uint32_t stalled;
+};
+
+/**
+ * What one call's media has cost, and what it is costing now.
+ *
+ * A6. Cheap enough to read at the frame rate of a user interface — everything
+ * in it is already counted and nothing walks a history — and complete enough
+ * to keep as the record of a call, which is the same struct delivered with
+ * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` when the call ends.
+ *
+ * The three delays are in microseconds and not milliseconds. Jitter on a
+ * healthy call is a fraction of a millisecond, and a figure that reads zero
+ * whenever things are going well is a figure nobody looks at twice.
+ *
+ * Set `size` to `sizeof(sipral_stream_stats_t)` before the call.
+ */
+struct sipral_stream_stats {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_codec_t: what the call settled on, which is the first thing
+     * anybody looking at a bad call wants to know.
+     */
+    uint32_t codec;
+    /**
+     * Whether a round-trip time is known. Zero until a report has come back,
+     * which on a short call may be never: the first one is deliberately
+     * delayed (RFC 3550 §6.2) and a peer that sends no RTCP never provides
+     * one.
+     */
+    uint32_t has_round_trip;
+    /**
+     * The round trip, from RTCP.
+     */
+    uint64_t round_trip_us;
+    /**
+     * Packets this end has put on the wire.
+     */
+    uint64_t packets_sent;
+    /**
+     * Payload octets in them, not counting headers.
+     */
+    uint64_t octets_sent;
+    /**
+     * Packets taken in and held for playout.
+     */
+    uint64_t packets_received;
+    /**
+     * Sequence numbers that came due with nothing in them.
+     */
+    uint64_t packets_lost;
+    /**
+     * Packets that arrived behind the playout point.
+     */
+    uint64_t packets_late;
+    /**
+     * Packets thrown out of the window before they could be played.
+     */
+    uint64_t packets_overflowed;
+    /**
+     * Packets whose sequence number was already held.
+     */
+    uint64_t packets_duplicated;
+    /**
+     * Packets accepted after a higher sequence number had already arrived.
+     */
+    uint64_t packets_reordered;
+    /**
+     * Frames dropped in a pause to bring the delay down. Deliberate, and
+     * inaudible when the pause is real.
+     */
+    uint64_t frames_shrunk;
+    /**
+     * Frames the concealment was asked to invent in a pause to push the delay
+     * up.
+     */
+    uint64_t frames_stretched;
+    /**
+     * How far behind the newest packet the playout point is: the delay the
+     * far end's voice is actually suffering.
+     */
+    uint64_t delay_us;
+    /**
+     * What the buffer is aiming at, from the arrival times it has seen.
+     */
+    uint64_t target_delay_us;
+    /**
+     * Interarrival jitter, the smoothed mean deviation of transit time
+     * (RFC 3550 §6.4.1).
+     */
+    uint64_t jitter_us;
+    /**
+     * Frames concealed as a fraction of frames played, over the last ten
+     * seconds or so. The counters above say what the call has cost; this says
+     * whether it is bad right now.
+     */
+    float loss_rate;
+    /**
+     * One number for a bar on a screen: a hundred for a call with nothing
+     * wrong with it, zero for one nobody can hold. Not a mean opinion score,
+     * and deliberately not shaped like one.
+     */
+    float score;
+    /**
+     * Whether the numbers say this call is in trouble now.
+     */
+    uint32_t suffering;
+    /**
+     * How long since a packet last arrived. A live call sits at one frame.
+     */
+    uint64_t silent_for_ms;
+};
+
+/**
+ * One datagram on its way out, written into the caller's own buffers.
+ *
+ * The caller fills in `size`, the two pointers and the two capacities; the
+ * library fills in the two lengths and the bytes. A `len` of zero means there
+ * was nothing to send, which on a capture is an ordinary answer: this end may
+ * be holding the far end, or silence suppression may have swallowed the frame.
+ *
+ * Both buffers are checked before anything is produced. A packet that was
+ * built and then had nowhere to go would be a packet missing from a stream
+ * whose timestamps had already moved past it.
+ */
+struct sipral_media_packet {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * Where to write the packet. At least SIPRAL_MEDIA_PACKET_BYTES.
+     */
+    uint8_t *data;
+    /**
+     * How much room `data` has.
+     */
+    size_t capacity;
+    /**
+     * How much was written. Zero means there was nothing to send.
+     */
+    size_t len;
+    /**
+     * Where to write the destination, as `host:port` with a trailing NUL. Null
+     * with a capacity of zero for a caller that does not want it.
+     */
+    char *destination;
+    /**
+     * How much room `destination` has. At least SIPRAL_ADDRESS_BYTES when
+     * it is not null.
+     */
+    size_t destination_capacity;
+    /**
+     * How many bytes of it were written, the NUL not counted.
+     */
+    size_t destination_len;
+};
+
+/**
+ * One message on its way out, written into the caller's own buffers.
+ *
+ * The caller fills in `size`, the three pointers and the three capacities; the
+ * library fills in everything else. A `len` of zero means the stack had nothing
+ * to send, which is how the draining loop ends.
+ *
+ * The two address buffers are checked before a message is taken, so the address
+ * side is never the reason one is held. The payload buffer is not: a message
+ * too long for it is kept and offered again, because a message the stack has
+ * already committed to is not one this ABI may drop.
+ */
+struct sipral_transmit {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * Which transport to write to. SIPRAL_TRANSPORT_MAIN, for now always.
+     */
+    uint32_t transport;
+    /**
+     * What that transport speaks, as a `SipralTransport`.
+     *
+     * Carried because it is the message's and not the socket's: §18.1.1 lets a
+     * request that outgrew a datagram go out on a stream instead, and the
+     * transport it ends up on is the one this says. Zero for a protocol this
+     * ABI has no number for.
+     */
+    uint32_t protocol;
+    /**
+     * Where to write the message. Nothing is written unless the whole of it
+     * fits.
+     */
+    uint8_t *data;
+    /**
+     * How much room `data` has.
+     */
+    size_t capacity;
+    /**
+     * How much was written — or, when the call answered
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL`, how much room the message needs.
+     */
+    size_t len;
+    /**
+     * Where to write the destination, as `host:port` with a trailing NUL. Null
+     * with a capacity of zero for a caller whose socket is connected and
+     * already knows.
+     */
+    char *destination;
+    /**
+     * How much room `destination` has. At least SIPRAL_ADDRESS_BYTES when
+     * it is not null.
+     */
+    size_t destination_capacity;
+    /**
+     * How many bytes of it were written, the NUL not counted.
+     */
+    size_t destination_len;
+    /**
+     * Where to write the address to send *from*, in the same shape.
+     *
+     * RFC 3581 §4: "The response MUST be sent from the same address and port
+     * that the corresponding request was received on", which a caller listening
+     * on a wildcard address cannot work out for itself. Empty — a `source_len`
+     * of zero — means the transport's own address, which is the answer for
+     * every request this stack originates.
+     */
+    char *source;
+    /**
+     * How much room `source` has. At least SIPRAL_ADDRESS_BYTES when it is
+     * not null.
+     */
+    size_t source_capacity;
+    /**
+     * How many bytes of it were written, the NUL not counted.
+     */
+    size_t source_len;
+};
+
+/**
+ * What a SIPRAL_EVENT_KIND_REGISTRATION_CHANGED carries.
+ */
+struct sipral_registration_event {
+    /**
+     * A sipral_registration_state_t.
+     */
+    uint32_t state;
+    /**
+     * A sipral_registration_failure_t, zero when nothing failed.
+     */
+    uint32_t failure;
+    /**
+     * The status the registrar answered with, or zero when none arrived.
+     */
+    uint32_t status_code;
+    /**
+     * The binding's granted lifetime, zero unless it is live.
+     */
+    uint64_t expires_ms;
+    /**
+     * How long until the refresh, zero unless one is scheduled.
+     */
+    uint64_t refresh_in_ms;
+    /**
+     * How long until the next attempt. Only meaningful while the state is
+     * retrying, which is exactly when the stack is going to try again.
+     */
+    uint64_t retry_in_ms;
+};
+
+/**
+ * What every call event carries.
+ *
+ * Not every member means something in every kind, and the ones that do not
+ * are zero. A zero here always reads as absent rather than as a value.
+ */
+struct sipral_call_event {
+    /**
+     * A sipral_call_state_t.
+     */
+    uint32_t state;
+    /**
+     * A sipral_call_end_reason_t, zero while the call is alive.
+     */
+    uint32_t end_reason;
+    /**
+     * The status a response carried, or zero.
+     */
+    uint32_t status_code;
+    /**
+     * The other call this event is also about: the sibling of a fork, or the
+     * call that was replaced. SIPRAL_HANDLE_NONE otherwise.
+     */
+    sipral_handle_t other;
+    /**
+     * Whether this end has asked the far end to stop sending.
+     */
+    uint32_t held_here;
+    /**
+     * Whether the far end has asked this one to.
+     */
+    uint32_t held_there;
+    /**
+     * What this end is describing, and how long it is.
+     */
+    const uint8_t *local_sdp;
+    /**
+     * How many bytes of it.
+     */
+    size_t local_sdp_len;
+    /**
+     * And what the far end is.
+     */
+    const uint8_t *remote_sdp;
+    /**
+     * How many bytes of it.
+     */
+    size_t remote_sdp_len;
+    /**
+     * When a refused session change goes out again by itself, zero when it is
+     * not going to.
+     */
+    uint64_t retry_in_ms;
+};
+
+/**
+ * What a transfer event carries.
+ */
+struct sipral_transfer_event {
+    /**
+     * What the far end's own call is doing, or zero.
+     */
+    uint32_t status_code;
+    /**
+     * Whether the request named a dialog to replace, which is what makes a
+     * transfer attended rather than blind.
+     */
+    uint32_t attended;
+    /**
+     * Who to call, as UTF-8. Not NUL-terminated.
+     */
+    const char *target;
+    /**
+     * How many bytes of it.
+     */
+    size_t target_len;
+};
+
+/**
+ * What a media event carries.
+ *
+ * As with a call event, not every member means something in every kind, and
+ * the ones that do not are zero or null.
+ */
+struct sipral_media_event {
+    /**
+     * A sipral_codec_t: what the negotiation
+     * settled on, zero where the event is not about a codec.
+     */
+    uint32_t codec;
+    /**
+     * A sipral_direction_t: which way audio
+     * may flow, as seen from here.
+     */
+    uint32_t direction;
+    /**
+     * How long the stream has been silent, for a stall and for its recovery.
+     */
+    uint64_t silent_for_ms;
+    /**
+     * How much audio reached the file, for a recording that stopped by
+     * itself.
+     */
+    uint64_t recorded_ms;
+    /**
+     * A sipral_media_fault_t, zero when
+     * nothing failed.
+     */
+    uint32_t fault;
+    /**
+     * The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
+     * when nothing failed.
+     */
+    const char *reason;
+    /**
+     * How many bytes of it.
+     */
+    size_t reason_len;
+    /**
+     * What the stream cost, for the kind that carries it, and null for every
+     * other. It belongs to the library and lives as long as the callback.
+     */
+    const sipral_stream_stats_t *statistics;
+    /**
+     * The key the far end pressed, as its character, and zero for an event
+     * no keypad has a key for.
+     */
+    uint32_t digit;
+    /**
+     * The RFC 4733 event code behind `digit`. Codes at and above sixteen are
+     * real events that are not keys.
+     */
+    uint32_t event_code;
+    /**
+     * How long the far end held it.
+     */
+    uint64_t held_ms;
+};
+
+/**
+ * The arm of an event that its kind names.
+ *
+ * Reading any other arm reads bytes the library did not write for it.
+ */
+union sipral_event_payload {
+    /**
+     * For SIPRAL_EVENT_KIND_REGISTRATION_CHANGED.
+     */
+    sipral_registration_event_t registration;
+    /**
+     * For every call kind.
+     */
+    sipral_call_event_t call;
+    /**
+     * For SIPRAL_EVENT_KIND_TRANSFER_REQUESTED,
+     * SIPRAL_EVENT_KIND_TRANSFER_PROGRESS and
+     * SIPRAL_EVENT_KIND_TRANSFER_DONE.
+     */
+    sipral_transfer_event_t transfer;
+    /**
+     * For every media kind: started, changed, stalled, resumed, failed, the
+     * end-of-call statistics, and a recording that stopped by itself.
+     */
+    sipral_media_event_t media;
+};
+
+/**
+ * Something the library has to tell the application.
+ *
+ * The pointer handed to the callback is the library's, and it is valid for
+ * the duration of that call and no longer. `size` says how much of the
+ * struct this build filled in, and a binding reads no further than that. The
+ * union stays the last member for the same reason: an arm that grows grows
+ * the tail, which is the one place a released struct may change.
+ */
+struct sipral_event {
+    /**
+     * How many bytes of this struct are meaningful.
+     */
+    size_t size;
+    /**
+     * The stack it is about.
+     */
+    sipral_handle_t stack;
+    /**
+     * What it is.
+     */
+    sipral_event_kind_t kind;
+    /**
+     * The account it is about, or SIPRAL_HANDLE_NONE.
+     */
+    sipral_handle_t account;
+    /**
+     * The call it is about, or SIPRAL_HANDLE_NONE.
+     */
+    sipral_handle_t call;
+    /**
+     * The SIP message behind it, whole and unparsed, when there is one.
+     *
+     * A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
+     * caller's display name all live here and none of them is worth a member
+     * of its own. Null when the event came from no single message.
+     */
+    const uint8_t *message;
+    /**
+     * How many bytes of it.
+     */
+    size_t message_len;
+    /**
+     * The arm sipral_event_t::kind names.
+     */
+    sipral_event_payload_t payload;
+};
+
+/**
+ * Copy the calling thread's last error message into `buffer`.
+ *
+ * The message is UTF-8 and is written with a trailing NUL, which is not
+ * counted in the length. `out_len`, when it is not null, always receives
+ * the number of bytes the message needs including that NUL, so a caller
+ * that passes a capacity of zero and a null buffer gets the length back
+ * and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
+ * too small to hold the whole message: a truncated one would cut a
+ * multi-byte character in half.
+ *
+ * The message describes the last call this thread made and nothing else.
+ * The next call on this thread replaces it, a call that succeeds empties
+ * it — including one that succeeded around a nested call that did not —
+ * and this call leaves it alone, so it can be read twice. It is never
+ * shared with another thread.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes or null with a capacity
+ * of zero, and `out_len` must point to one `size_t` or be null.
+ */
+sipral_status_t sipral_last_error_message(char *buffer, size_t capacity, size_t *out_len);
+
+/**
+ * The short name of a status code, as a static NUL-terminated string, or
+ * null for a number that is not a status code.
+ *
+ * The string belongs to the library and lives as long as it is loaded.
+ * It is meant for a log line; the last error is the sentence for a human.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns, and is safe to call from any thread.
+ */
+const char *sipral_status_name(int32_t status);
+
+/**
+ * Report the ABI version this library provides.
+ *
+ * Safety
+ *
+ * `out_version` must point at a `sipral_abi_version_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_abi_version(sipral_abi_version_t *out_version);
+
+/**
+ * Whether this library can serve a binding generated against
+ * `major`.`minor`. Every binding calls this once, at load.
+ *
+ * `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
+ * naming both versions, which is what the binding should put in the
+ * exception it throws. The patch number is not asked for: it never
+ * changes a declaration, so it cannot make two builds disagree.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns, and is safe to call from any thread.
+ */
+sipral_status_t sipral_abi_check(uint32_t major, uint32_t minor);
+
+/**
+ * What this build of the library can do, in one call.
+ *
+ * Names no stack, and answers the same way before any stack is created
+ * as after: a build's capabilities do not change while it runs. Safe to
+ * call from any thread, at any time, including from inside the event
+ * callback.
+ *
+ * Safety
+ *
+ * `out_capabilities` must point at a `sipral_capabilities_t` whose
+ * `size` member says how long it is.
+ */
+sipral_status_t sipral_capabilities(sipral_capabilities_t *out_capabilities);
+
+/**
+ * Create a stack, and write its handle to `out_stack`.
+ *
+ * The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
+ * that is created must be destroyed with sipral_stack_destroy.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_stack_config_t` whose `size` member
+ * says how long it is, with every pointer in it readable for the length
+ * beside it, and `out_stack` at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_stack_create(const sipral_stack_config_t *config, sipral_handle_t *out_stack);
+
+/**
+ * Read back what a stack is running with.
+ *
+ * Every value here was either given at creation or defaulted there, and
+ * none of it changes afterwards. It is the other half of a configuration
+ * call that answered `SIPRAL_STATUS_OK`: the call says the value was
+ * taken, this says what it came to.
+ *
+ * Safety
+ *
+ * `out_settings` must point at a `sipral_stack_settings_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_stack_settings(sipral_handle_t stack, sipral_stack_settings_t *out_settings);
+
+/**
+ * Destroy a stack.
+ *
+ * The handle is dead the moment this returns, and a second destroy is
+ * `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
+ * inside the callback it is still safe: what the poll is holding stays
+ * alive until that poll returns. No account is de-registered and no call
+ * is hung up; a stack that has to leave politely does that first.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value. Reads no memory the caller owns.
+ */
+sipral_status_t sipral_stack_destroy(sipral_handle_t stack);
+
+/**
+ * Let the stack do its work, and deliver what it has to say.
+ *
+ * `now_ms` is the caller's monotonic clock in milliseconds. It must not
+ * go backwards between calls on the same stack; one that does is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
+ *
+ * The event callback is called from inside this function, on this
+ * thread. A call back into the same stack from the callback returns
+ * `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
+ * itself by answering an event with a request.
+ *
+ * `result` may be null for a caller that does not want the counts.
+ *
+ * A poll is also where the stack writes: a retransmission falls due, a
+ * registration is refreshed, a transaction gives up and says so. What it
+ * wrote is taken with `sipral_stack_poll_transmit`, which is drained after
+ * every poll and left alone by the next one — see crate::transport for
+ * the loop in full.
+ *
+ * Safety
+ *
+ * `result` must be null or point at a `sipral_poll_result_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_stack_poll(sipral_handle_t stack, uint64_t now_ms, sipral_poll_result_t *result);
+
+/**
+ * D3's health counters for one stack, since it was created.
+ *
+ * Cheap enough to sample on a timer and ship as telemetry: reading this
+ * is one struct copy on top of the call itself, the same as
+ * `sipral_call_statistics` and for the same reason — nothing here walks
+ * the call table or a session to answer.
+ *
+ * Safety
+ *
+ * `out_counters` must point at a `sipral_counters_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_stack_counters(sipral_handle_t stack, sipral_counters_t *out_counters);
+
+/**
+ * Configure an account, and write its handle to `out_account`.
+ *
+ * Nothing is sent. The account exists until sipral_account_remove or
+ * until the stack is destroyed.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_account_config_t` whose `size` member
+ * says how long it is, with every pointer in it readable for the length
+ * beside it, and `out_account` at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_account_add(sipral_handle_t stack, const sipral_account_config_t *config, sipral_handle_t *out_account);
+
+/**
+ * Forget an account, and everything scheduled for it.
+ *
+ * Nothing is sent: an account being removed may be one whose registrar is
+ * unreachable, and waiting on that is not this call's job. Give the
+ * binding up politely with sipral_account_unregister first when it
+ * matters.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_account_remove(sipral_handle_t stack, sipral_handle_t account);
+
+/**
+ * Register, and keep the binding alive until told otherwise.
+ *
+ * Refreshes, credential retries and the back-off after an outage all
+ * happen without another call. What stops them is
+ * sipral_account_unregister, or a refusal that trying again cannot
+ * fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_account_register(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms);
+
+/**
+ * Give the binding up: a REGISTER with `Expires: 0` (§10.2.2).
+ *
+ * Only this device's binding. A `Contact: *` would remove every binding
+ * the address of record has, including the one belonging to the desk
+ * phone somebody else is holding.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_account_unregister(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms);
+
+/**
+ * Where an account's registration is, as a `SipralRegistrationState`.
+ *
+ * Safety
+ *
+ * `out_state` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_handle_t account, uint32_t *out_state);
+
+/**
+ * Place a call, and write its handle to `out_call`.
+ *
+ * The handle exists from here on, before any dialog does, because there
+ * has to be something to hang up with while the INVITE is still in
+ * flight. A proxy that forks the INVITE gives the branches handles of
+ * their own, reported as `SIPRAL_EVENT_KIND_CALL_FORKED`.
+ *
+ * With `media_address` set, the offer is this stack's to write and the
+ * call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
+ * and `crate::media` carries the packets from then on.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_call_config_t` whose `size` member
+ * says how long it is, with every pointer in it readable for the length
+ * beside it, and `out_call` at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_call_place(sipral_handle_t stack, sipral_handle_t account, const sipral_call_config_t *config, sipral_handle_t *out_call, uint64_t now_ms);
+
+/**
+ * Say a call that came in is ringing.
+ *
+ * A description makes it a 183 Session Progress rather than a 180
+ * Ringing, because 180 with a body is a contradiction the far end has to
+ * guess at. Pass none for the ordinary case.
+ *
+ * Safety
+ *
+ * `sdp` must be null or readable for `sdp_len` bytes.
+ */
+sipral_status_t sipral_call_ring(sipral_handle_t stack, sipral_handle_t call, const uint8_t *sdp, size_t sdp_len, uint64_t now_ms);
+
+/**
+ * Answer a call that came in.
+ *
+ * `sdp` is the answer to the offer the INVITE carried, and is required:
+ * answering with nothing puts the offer on this end and the answer in the
+ * far end's ACK, which this ABI has no way to hand back.
+ *
+ * Safety
+ *
+ * `sdp` must be readable for `sdp_len` bytes.
+ */
+sipral_status_t sipral_call_answer(sipral_handle_t stack, sipral_handle_t call, const uint8_t *sdp, size_t sdp_len, uint64_t now_ms);
+
+/**
+ * Answer a call that came in, and let this stack run its audio.
+ *
+ * The answer to the offer the INVITE carried is written from this stack's
+ * codec order, against `media_address` — where this end will receive
+ * media, which only the application can say because it owns the socket.
+ * `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows once the stream is open.
+ *
+ * The other half of `sipral_call_place` with `media_address` set, and the
+ * alternative to `sipral_call_answer`, which answers with a description
+ * the application wrote and leaves the audio to it.
+ *
+ * Safety
+ *
+ * `media_address` must be readable for `media_address_len` bytes.
+ */
+sipral_status_t sipral_call_answer_media(sipral_handle_t stack, sipral_handle_t call, const char *media_address, size_t media_address_len, uint64_t now_ms);
+
+/**
+ * Refuse a call that came in, with a status of your choosing.
+ *
+ * 486 Busy Here for a line that is in use, 603 Decline for a person who
+ * does not want to talk. The difference is what a proxy does next.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_reject(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+
+/**
+ * Hang up, whatever the call is doing.
+ *
+ * A CANCEL before it is answered, a BYE after, a refusal for one that
+ * came in and has not been answered. A call that is already ending is
+ * left alone rather than refused.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_hangup(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * Put a call on hold (RFC 3264 §8.4).
+ *
+ * The description is the stack's to write: the one already negotiated
+ * with every stream's direction changed. Asking for a hold that is
+ * already in place sends nothing and succeeds.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_hold(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * Take it off hold again.
+ *
+ * Every stream goes back to the direction it had before, which is not
+ * always both ways: one that was offered receive-only is resumed
+ * receive-only.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_resume(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * Accept a change the far end offered, reported as
+ * `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
+ *
+ * `sdp` is the answer to the offer it carried, and is left out only for a
+ * request that carried none. A re-INVITE nobody answers is retransmitted
+ * and then ends the call, so this or sipral_call_reject_session has
+ * to follow that event.
+ *
+ * Only for a call the application describes. One this stack describes
+ * answers its own re-offers, from the same codec order, before the poll
+ * that saw the request returns — so the event never arrives and this is
+ * `SIPRAL_STATUS_WRONG_STATE`.
+ *
+ * Safety
+ *
+ * `sdp` must be null or readable for `sdp_len` bytes.
+ */
+sipral_status_t sipral_call_accept_session(sipral_handle_t stack, sipral_handle_t call, const uint8_t *sdp, size_t sdp_len, uint64_t now_ms);
+
+/**
+ * Refuse one instead. The session stands exactly as it was (§14.1).
+ *
+ * 488 Not Acceptable Here is the status that says the description was the
+ * problem rather than the request.
+ *
+ * As with sipral_call_accept_session, only for a call the application
+ * describes.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_reject_session(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+
+/**
+ * Send DTMF on a call that is up, in whichever of the three forms the far
+ * end takes.
+ *
+ * `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
+ * RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how long
+ * each one lasts, or zero for the default.
+ *
+ * `via` is a sipral_dtmf_t, and it is chosen per send rather than per
+ * call: which form a peer accepts is a fact about the peer, and an
+ * application that has just learned the answer for this one must not have
+ * to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
+ * the media, where they replace the audio for as long as they last and
+ * queue behind each other; the two INFO forms put one request per digit in
+ * the dialog.
+ *
+ * `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
+ * negotiation settled on no telephone event payload type: the key is a
+ * real key and this call has nowhere in the media to put it. The INFO
+ * forms need a dialog rather than a negotiation, and answer
+ * `SIPRAL_STATUS_WRONG_STATE` before there is one.
+ *
+ * Safety
+ *
+ * `digits` must be readable for `digits_len` bytes.
+ */
+sipral_status_t sipral_call_send_dtmf(sipral_handle_t stack, sipral_handle_t call, const char *digits, size_t digits_len, uint32_t via, uint32_t duration_ms, uint64_t now_ms);
+
+/**
+ * Ask the far end to call somebody else, and hang up when it has
+ * (RFC 3515).
+ *
+ * A blind transfer: nobody consults the destination first. This end stays
+ * in the call until the transfer has succeeded, because hanging up first
+ * turns a transfer that failed into a call that vanished. Progress
+ * arrives as `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS` and then
+ * `SIPRAL_EVENT_KIND_TRANSFER_DONE`.
+ *
+ * Safety
+ *
+ * `target` must be readable for `target_len` bytes.
+ */
+sipral_status_t sipral_call_transfer(sipral_handle_t stack, sipral_handle_t call, const char *target, size_t target_len, uint64_t now_ms);
+
+/**
+ * Call the transfer target, so that there is somebody to hand the call
+ * to, and write the new call's handle to `out_call`.
+ *
+ * The consultation leg of an attended transfer. It is answered like any
+ * other call, and sipral_call_transfer_to is what follows. Putting
+ * `call` on hold first is the application's: it is a session change, and
+ * this stack does not make those uninvited.
+ *
+ * `media_address` is `SIPRAL_STATUS_NOT_SUPPORTED` here. The media engine
+ * places and answers calls; it does not consult, and a consultation leg
+ * registered with it by hand would be one it has described nothing for.
+ * A consultation with audio is placed with `sdp` and run by the
+ * application, as every call was before this stack carried media.
+ *
+ * Safety
+ *
+ * As sipral_call_place.
+ */
+sipral_status_t sipral_call_consult(sipral_handle_t stack, sipral_handle_t call, const sipral_call_config_t *config, sipral_handle_t *out_call, uint64_t now_ms);
+
+/**
+ * Hand `call` to the far end of `other` (RFC 3891).
+ *
+ * The attended half of a transfer: `other` is normally the consultation
+ * call, and the party at its far end replaces the call it already has
+ * rather than answering a second one. Any call that is up may be named.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_transfer_to(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t other, uint64_t now_ms);
+
+/**
+ * Take a transfer that was asked for, place the call it names, and write
+ * that call's handle to `out_call`.
+ *
+ * Safety
+ *
+ * `out_call` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_call_accept_transfer(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t *out_call, uint64_t now_ms);
+
+/**
+ * Refuse one instead.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+
+/**
+ * Where a call is, as a `SipralCallState`.
+ *
+ * A call that is over answers `SIPRAL_CALL_STATE_TERMINATED` until the
+ * poll that delivers `SIPRAL_EVENT_KIND_CALL_ENDED` retires its handle, and
+ * `SIPRAL_STATUS_STALE_HANDLE` after that.
+ *
+ * Safety
+ *
+ * `out_state` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_call_state(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_state);
+
+/**
+ * Which way a call is held: `out_here` is set when this end asked the far
+ * end to stop sending, `out_there` when the far end asked this one.
+ * Either may be null.
+ *
+ * Safety
+ *
+ * `out_here` and `out_there` must each be null or point at one
+ * `uint32_t`.
+ */
+sipral_status_t sipral_call_hold_state(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_here, uint32_t *out_there);
+
+/**
+ * The name of a codec, as a static NUL-terminated string, or null for a
+ * number this build has no codec for.
+ *
+ * It is spelled as IANA registered it, which is also how it goes on an
+ * `a=rtpmap` line. The string belongs to the library and lives as long as
+ * it is loaded.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns, and is safe to call from any thread.
+ */
+const char *sipral_codec_name(uint32_t codec);
+
+/**
+ * How many codecs this build contains.
+ *
+ * A compile-time fact, and the reason A4 starts here rather than at a
+ * configuration: no setting can add a codec that was not linked.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_codec_count(size_t *out_count);
+
+/**
+ * One of them, by index, from zero to what `sipral_codec_count` said.
+ *
+ * The order is this build's own preference, quality first, which is what
+ * is offered when nobody has said otherwise.
+ *
+ * Safety
+ *
+ * `out_info` must point at a `sipral_codec_info_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_codec_at(size_t index, sipral_codec_info_t *out_info);
+
+/**
+ * The codecs this stack offers, in the order it offers them.
+ *
+ * The other half of the configuration: `codecs` in
+ * `sipral_stack_config_t` says what to offer, and this says what that came
+ * to. `out_count` always receives the number there are, so a caller that
+ * passes a capacity of zero and a null buffer learns how much room to
+ * bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`.
+ *
+ * Safety
+ *
+ * `out_codecs` must be writable for `capacity` `uint32_t` or null with a
+ * capacity of zero, and `out_count` must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, uint32_t *out_codecs, size_t capacity, size_t *out_count);
+
+/**
+ * What one call's media settled on.
+ *
+ * Safety
+ *
+ * `out_info` must point at a `sipral_media_info_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_call_media_info(sipral_handle_t stack, sipral_handle_t call, sipral_media_info_t *out_info);
+
+/**
+ * What one call's media has cost, and what it is costing now.
+ *
+ * A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
+ * else, because "how long since a packet arrived" is a question about the
+ * present and nothing here reads a clock to answer it. Unlike
+ * `sipral_stack_poll`, this does not move the stack's own clock: it is
+ * read at the frame rate of a user interface, often from the thread that
+ * draws one, and a reading a millisecond behind the last poll is not a
+ * caller bug.
+ *
+ * The end-of-call record arrives instead as
+ * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
+ * gone and there is nothing left here to ask.
+ *
+ * Safety
+ *
+ * `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
+ * says how long it is.
+ */
+sipral_status_t sipral_call_statistics(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms, sipral_stream_stats_t *out_stats);
+
+/**
+ * Take a datagram off the media socket.
+ *
+ * One entry point for both sockets: RTP and RTCP are told apart by
+ * RFC 5761 §4's rule on the payload type field, so a caller that put both
+ * on one socket does not have to sort them, and one that did not can hand
+ * over whichever arrived.
+ *
+ * `data` is written through. A secured stream is opened in place, and a
+ * caller that needs the ciphertext afterwards keeps its own copy.
+ *
+ * `out_arrival` may be null for a caller that does not want to know what
+ * the datagram turned out to be.
+ *
+ * Safety
+ *
+ * `data` must be readable and writable for `len` bytes, `from` readable
+ * for `from_len`, and `out_arrival` must point at one `uint32_t` or be
+ * null.
+ */
+sipral_status_t sipral_call_media_receive(sipral_handle_t stack, sipral_handle_t call, uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, uint32_t *out_arrival);
+
+/**
+ * Take the frame that is due for the earpiece, and say where it came from.
+ *
+ * Exactly `sipral_media_info_t::frame_samples` samples are written, and a
+ * smaller buffer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the number
+ * needed in `out_written`. Every source fills the frame, concealment and
+ * silence included: a device handed nothing for one frame plays whatever
+ * was in its buffer last, and that is a far worse sound than the one being
+ * concealed.
+ *
+ * Safety
+ *
+ * `samples` must be writable for `capacity` `int16_t`, `out_written` must
+ * point at one `size_t` or be null, and `out_source` at one `uint32_t` or
+ * be null.
+ */
+sipral_status_t sipral_call_playback(sipral_handle_t stack, sipral_handle_t call, int16_t *samples, size_t capacity, size_t *out_written, uint32_t *out_source);
+
+/**
+ * Put one frame from the microphone on the wire.
+ *
+ * `sample_count` is `sipral_media_info_t::frame_samples` and nothing else:
+ * a codec cuts one frame at one length, and half a frame encoded as a
+ * whole one is what a peer hears as a stutter.
+ *
+ * A `len` of zero in the packet means the frame was deliberately not sent:
+ * this end is holding the far end, or silence suppression swallowed it.
+ * The RTP timestamp moves by a frame either way, because RFC 3550 §5.1
+ * makes it a measure of time rather than of packets.
+ *
+ * Safety
+ *
+ * `samples` must be readable for `sample_count` `int16_t`, and `packet`
+ * must point at a `sipral_media_packet_t` whose `size` member says how
+ * long it is and whose buffers are writable for the capacities beside
+ * them.
+ */
+sipral_status_t sipral_call_capture(sipral_handle_t stack, sipral_handle_t call, const int16_t *samples, size_t sample_count, sipral_media_packet_t *packet);
+
+/**
+ * The control traffic that is due, for whichever call is due one.
+ *
+ * One at a time, like every other poll here: a caller loops until the
+ * packet comes back with a `len` of zero. `out_call` names the call it
+ * belongs to, and therefore the socket it goes out on.
+ *
+ * RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
+ * reports a deadline and whenever a frame goes out; on a call that
+ * negotiated no RTCP it answers zero for ever.
+ *
+ * Safety
+ *
+ * `out_call` must point at one `sipral_handle_t` or be null, and `packet`
+ * at a `sipral_media_packet_t` as sipral_call_capture describes.
+ */
+sipral_status_t sipral_stack_poll_rtcp(sipral_handle_t stack, uint64_t now_ms, sipral_handle_t *out_call, sipral_media_packet_t *packet);
+
+/**
+ * Whether a digit is going out or waiting to, and how many have not
+ * started yet.
+ *
+ * Either out parameter may be null. A user interface that greys out the
+ * keypad while a number is being sent wants the first; one that shows how
+ * much of a pasted number is left wants the second.
+ *
+ * Safety
+ *
+ * `out_dialling` must point at one `uint32_t` or be null, and
+ * `out_waiting` at one `size_t` or be null.
+ */
+sipral_status_t sipral_call_dialling(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_dialling, size_t *out_waiting);
+
+/**
+ * Drop everything queued and stop the digit going out.
+ *
+ * The digit in flight gets no closing packet, which is right for a call
+ * whose media is being taken away: there is nowhere left to send one.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_call_stop_dialling(sipral_handle_t stack, sipral_handle_t call);
+
+/**
+ * Start recording this call to `path`.
+ *
+ * Both directions, mixed, as WAVE. It can be started and stopped as often
+ * as the person on the phone presses the button, and each recording is a
+ * file of its own: a path written to twice would have two headers in it.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
+ * being recorded — two writers on one stream would interleave frames into
+ * both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
+ * refuses the path, with what it said in the last error.
+ *
+ * Safety
+ *
+ * `path` must be readable for `path_len` bytes.
+ */
+sipral_status_t sipral_call_record_start(sipral_handle_t stack, sipral_handle_t call, const char *path, size_t path_len);
+
+/**
+ * Stop it, and close the file.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` when nothing is being recorded. A failure
+ * here leaves a file with all of the audio in it and zeroes in the two
+ * header fields, which is recoverable and is said rather than hidden.
+ *
+ * Safety
+ *
+ * Safe to call with any handle values.
+ */
+sipral_status_t sipral_call_record_stop(sipral_handle_t stack, sipral_handle_t call);
+
+/**
+ * Whether a recording is running on this call, and how much audio it has
+ * taken. Either out parameter may be null.
+ *
+ * The length is of the audio written, not of the file: the header in front
+ * of it is not a recording of anything.
+ *
+ * Safety
+ *
+ * `out_recording` must point at one `uint32_t` or be null, and
+ * `out_recorded_ms` at one `uint64_t` or be null.
+ */
+sipral_status_t sipral_call_record_state(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_recording, uint64_t *out_recorded_ms);
+
+/**
+ * Take the next message the stack wants written.
+ *
+ * One at a time, like every other poll here: a caller loops until the
+ * message comes back with a `len` of zero. Call it after every
+ * `sipral_stack_poll` and after every call that hands bytes in, since both
+ * are moments the stack writes at.
+ *
+ * A message longer than `capacity` is `SIPRAL_STATUS_BUFFER_TOO_SMALL` with
+ * the length it needs in `len`, and it is *kept*: the next call with room
+ * for it hands over that same message, before anything queued behind it. So
+ * a caller that brought no buffer at all — a null `data` with a capacity of
+ * zero — learns what to bring without losing the message it asked about.
+ *
+ * Safety
+ *
+ * `transmit` must point at a `sipral_transmit_t` whose `size` member says
+ * how long it is and whose buffers are writable for the capacities beside
+ * them.
+ */
+sipral_status_t sipral_stack_poll_transmit(sipral_handle_t stack, sipral_transmit_t *transmit);
+
+/**
+ * Hand over one datagram, whole, and say where it came from.
+ *
+ * `from` is the far end, as `host:port`. `to` is the address the datagram
+ * arrived on, which RFC 3581 §4 makes the address the response has to go
+ * out from; null with a length of zero means the address this stack was
+ * created with, which is the answer for a socket bound to one address.
+ *
+ * A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
+ * in each, so it arrives whole the way a datagram does.
+ *
+ * Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
+ * the parse error in the last error. That is an ordinary morning on a
+ * public SIP port and costs exactly this one packet: log it and carry on.
+ *
+ * Safety
+ *
+ * `data` must be readable for `len` bytes, `from` for `from_len`, and `to`
+ * for `to_len`.
+ */
+sipral_status_t sipral_stack_receive_datagram(sipral_handle_t stack, uint32_t transport, const uint8_t *data, size_t len, const char *from, size_t from_len, const char *to, size_t to_len, uint64_t now_ms);
+
+/**
+ * Hand over bytes off a connection, in whatever sizes the reads came in.
+ *
+ * Not a message: a fragment of a framing the layer below reassembles on
+ * `Content-Length` (§18.3), and one call may hold several messages, half of
+ * one, or none at all. No addresses travel with it, because a connection
+ * has one far end and it was named when the transport was bound.
+ *
+ * Framing that cannot be read is fatal to the connection, and unlike a
+ * datagram it cannot be resynchronised: the transport is already retired by
+ * the time this answers `SIPRAL_STATUS_INVALID_ARGUMENT`, and the socket
+ * should be closed. A read of zero bytes is the far end closing, which is
+ * sipral_stack_stream_closed and not this.
+ *
+ * Safety
+ *
+ * `data` must be readable for `len` bytes.
+ */
+sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t transport, const uint8_t *data, size_t len, uint64_t now_ms);
+
+/**
+ * Say that a transport is open and may be written to.
+ *
+ * The one way back from sipral_stack_transport_failed, and the way a
+ * stream stack names its far end: a connection that has just been made
+ * knows its peer, and a stack created before the connect did not. It is
+ * also how a socket re-opened on another address after the network moved
+ * tells this stack what to put in its `Via` from now on — every message
+ * after this one carries `local`, and the ones already in flight carry what
+ * they were written with.
+ *
+ * `local` is the address the far end reaches this one at, as `host:port`.
+ * `remote` is the far end of a connection, and is refused on a datagram
+ * transport, which has many.
+ *
+ * The protocol is not an argument: a stack retransmits or does not
+ * according to what it was created speaking, and a transport that changed
+ * that underneath the timers would be a stack configured out of RFC 3261
+ * §17 halfway through a call.
+ *
+ * Safety
+ *
+ * `local` must be readable for `local_len` bytes and `remote` for
+ * `remote_len`.
+ */
+sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t transport, const char *local, size_t local_len, const char *remote, size_t remote_len, uint64_t now_ms);
+
+/**
+ * Say that a transport failed, and that whatever was written to it did not
+ * arrive.
+ *
+ * The transport is retired: every transaction waiting on it fails now, and
+ * the calls and registrations behind them are reported on the next
+ * `sipral_stack_poll` — nothing is delivered from inside this call, here as
+ * everywhere else. Nothing can be sent until
+ * sipral_stack_transport_bind brings one back.
+ *
+ * So this is not the call for one `sendto` that was refused. An ICMP
+ * unreachable is one destination saying no, and a stack that retired its
+ * socket over it would drop the calls that were fine. This is for the
+ * socket that is over.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value. Reads no memory the caller owns.
+ */
+sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t transport, uint32_t error, uint64_t now_ms);
+
+/**
+ * Say that a connection closed: the far end went away, or a read returned
+ * zero.
+ *
+ * The same retirement as sipral_stack_transport_failed, and a separate
+ * call because it is a separate thing to have happened. An orderly close is
+ * not an error the caller has to invent a kind for, and a stack that made it
+ * one would have the two indistinguishable in a log for ever after.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value. Reads no memory the caller owns.
+ */
+sipral_status_t sipral_stack_stream_closed(sipral_handle_t stack, uint32_t transport, uint64_t now_ms);
+
+/**
+ * The short name of an event kind, as a static NUL-terminated
+ * string, or null for a number this build has no kind for.
+ *
+ * The string belongs to the library and lives as long as it is
+ * loaded. A number that is reserved for a feature this build does
+ * not have answers null, the same as one that was never spent: a
+ * name for something that cannot arrive would be a name for
+ * nothing.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns, and is safe to call from any
+ * thread.
+ */
+const char *sipral_event_kind_name(uint32_t kind);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* SIPRAL_H */

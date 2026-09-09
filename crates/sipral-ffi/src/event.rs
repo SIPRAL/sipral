@@ -30,6 +30,7 @@ use sipral_ua::{
     UserAgent,
 };
 
+use crate::abi::{alias, codes, record};
 use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
@@ -61,19 +62,18 @@ use crate::names::Names;
 /// what the assertion turns from a released mistake into a build failure.
 macro_rules! event_kinds {
     (
-        $(
-            $(#[$about:meta])*
-            $number:literal = $variant:ident, $name:literal;
+        $(#[doc = $doc:literal])*
+        kinds {
             $(
-                reserved $held:literal = $feature:literal;
+                $(#[doc = $about:literal])*
+                $number:literal = $variant:ident, $name:literal;
+                $(
+                    reserved $held:literal = $feature:literal;
+                )*
             )*
-        )*
+        }
     ) => {
-        /// What an event is about.
-        ///
-        /// The numbers are part of the ABI and are only ever added to. A
-        /// binding that meets a kind it does not know must ignore that event
-        /// rather than refuse it, which is what makes adding one safe.
+        $(#[doc = $doc])*
         ///
         /// Numbers already spent on features this build does not have, so that
         /// two of them cannot arrive holding the same one:
@@ -83,7 +83,7 @@ macro_rules! event_kinds {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum SipralEventKind {
             $(
-                $(#[$about])*
+                $(#[doc = $about])*
                 $variant = $number,
             )*
         }
@@ -92,6 +92,25 @@ macro_rules! event_kinds {
             /// Every kind this build has, in the order their numbers were
             /// spent.
             pub const ALL: &'static [Self] = &[$(Self::$variant),*];
+
+            /// What this enumeration is, for the header and the bindings. The
+            /// reserved numbers travel with it, so that the header says what
+            /// this list says: the number is spent whether or not a kind has
+            /// been written behind it.
+            pub(crate) const ABI: $crate::abi::Enumeration = $crate::abi::Enumeration {
+                name: "SipralEventKind",
+                doc: &[$($doc,)*],
+                width: "u32",
+                codes: &[$($crate::abi::Code {
+                    name: stringify!($variant),
+                    doc: &[$($about,)*],
+                    value: $number,
+                },)*],
+                reserved: &[$($($crate::abi::Held {
+                    value: $held,
+                    feature: $feature,
+                },)*)*],
+            };
         }
 
         entry! {
@@ -143,367 +162,386 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
-    /// The stack is running on this thread.
+    /// What an event is about.
     ///
-    /// The first event on every stack, delivered by the first poll and never
-    /// again. A binding that has a callback to hand out, a queue to open or a
-    /// thread to name has somewhere definite to do it, before anything that
-    /// matters can arrive.
-    1 = Started, c"started";
-    /// A registration moved: it went out, it took, it is being refreshed, it
-    /// was given up, or it failed. `payload.registration` says which, and
-    /// `account` says whose.
-    2 = RegistrationChanged, c"registration changed";
-    /// Somebody is calling. Answer, ring, or reject it.
-    3 = IncomingCall, c"incoming call";
-    /// A call this end placed is getting somewhere short of an answer.
-    4 = CallProgress, c"call progress";
-    /// A proxy forked the INVITE and a second phone is ringing.
-    /// `payload.call.other` is the branch that has just appeared.
-    5 = CallForked, c"call forked";
-    /// The call is up.
-    6 = CallConfirmed, c"call confirmed";
-    /// The session inside a live call changed: a hold, a resume, or an offer
-    /// either end made and had accepted.
-    7 = SessionChanged, c"session changed";
-    /// The far end offered a change this stack has no policy for. The
-    /// transaction is held open: answer it or refuse it, or the call ends.
-    8 = SessionOffered, c"session offered";
-    /// A change this end offered was refused. The session stands as it was.
-    9 = SessionChangeFailed, c"session change failed";
-    /// The far end asked this one to call somebody else.
-    10 = TransferRequested, c"transfer requested";
-    /// A transfer this end asked for is under way.
-    11 = TransferProgress, c"transfer progress";
-    /// And how it ended.
-    12 = TransferDone, c"transfer done";
-    /// A call arrived carrying a `Replaces` and took over one already up.
-    /// `payload.call.other` is the one being replaced.
-    13 = CallReplaced, c"call replaced";
-    /// The call is over, and its handle is stale from here on.
-    14 = CallEnded, c"call ended";
+    /// The numbers are part of the ABI and are only ever added to. A binding
+    /// that meets a kind it does not know must ignore that event rather than
+    /// refuse it, which is what makes adding one safe.
+    kinds {
+        /// The stack is running on this thread.
+        ///
+        /// The first event on every stack, delivered by the first poll and never
+        /// again. A binding that has a callback to hand out, a queue to open or a
+        /// thread to name has somewhere definite to do it, before anything that
+        /// matters can arrive.
+        1 = Started, c"started";
+        /// A registration moved: it went out, it took, it is being refreshed, it
+        /// was given up, or it failed. `payload.registration` says which, and
+        /// `account` says whose.
+        2 = RegistrationChanged, c"registration changed";
+        /// Somebody is calling. Answer, ring, or reject it.
+        3 = IncomingCall, c"incoming call";
+        /// A call this end placed is getting somewhere short of an answer.
+        4 = CallProgress, c"call progress";
+        /// A proxy forked the INVITE and a second phone is ringing.
+        /// `payload.call.other` is the branch that has just appeared.
+        5 = CallForked, c"call forked";
+        /// The call is up.
+        6 = CallConfirmed, c"call confirmed";
+        /// The session inside a live call changed: a hold, a resume, or an offer
+        /// either end made and had accepted.
+        7 = SessionChanged, c"session changed";
+        /// The far end offered a change this stack has no policy for. The
+        /// transaction is held open: answer it or refuse it, or the call ends.
+        8 = SessionOffered, c"session offered";
+        /// A change this end offered was refused. The session stands as it was.
+        9 = SessionChangeFailed, c"session change failed";
+        /// The far end asked this one to call somebody else.
+        10 = TransferRequested, c"transfer requested";
+        /// A transfer this end asked for is under way.
+        11 = TransferProgress, c"transfer progress";
+        /// And how it ended.
+        12 = TransferDone, c"transfer done";
+        /// A call arrived carrying a `Replaces` and took over one already up.
+        /// `payload.call.other` is the one being replaced.
+        13 = CallReplaced, c"call replaced";
+        /// The call is over, and its handle is stale from here on.
+        14 = CallEnded, c"call ended";
 
-    // Held for what `docs/13-client-requirements.md` already commits to, so
-    // that features written in separate branches cannot arrive holding the same
-    // number. Taking one means turning its line into a kind, in place.
-    reserved 15 = "a subscription's state changed (A1)";
-    reserved 16 = "the set of audio devices changed (A2)";
+        // Held for what `docs/13-client-requirements.md` already commits to, so
+        // that features written in separate branches cannot arrive holding the same
+        // number. Taking one means turning its line into a kind, in place.
+        reserved 15 = "a subscription's state changed (A1)";
+        reserved 16 = "the set of audio devices changed (A2)";
 
-    /// What one call's media cost, delivered once, after
-    /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
+        /// What one call's media cost, delivered once, after
+        /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
+        ///
+        /// A6's second consumer. `payload.media.statistics` points at the
+        /// completed record; it is the library's and lives as long as the callback
+        /// does. The stream is gone by the time this arrives, which is why the
+        /// numbers travel in the event rather than behind a lookup that would now
+        /// fail.
+        17 = MediaStatistics, c"media statistics";
+        reserved 18 = "a request was promoted to a stream transport (B1)";
+        /// Nothing has arrived on the media path for longer than the configured
+        /// threshold, while signalling is perfectly happy.
+        ///
+        /// B5. `payload.media.silent_for_ms` says how long. The call is untouched:
+        /// whether to hang up over silence is a decision with a person on the other
+        /// end of it.
+        19 = MediaStalled, c"media stalled";
+        reserved 20 = "a call was announced and never arrived (C2)";
+        /// Audio is running: the negotiation settled and an RTP session is open.
+        ///
+        /// A4's reporting half and the first half of D5: `payload.media.codec` is
+        /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
+        21 = MediaStarted, c"media started";
+        /// The session changed under a live call: a hold, a resume, a peer that
+        /// moved its media address, or a re-negotiation onto another codec.
+        22 = MediaChanged, c"media changed";
+        /// Packets are arriving again. `payload.media.silent_for_ms` says how long
+        /// the gap turned out to be.
+        23 = MediaResumed, c"media resumed";
+        /// Media could not be started or could not be kept. The call itself is
+        /// untouched; `payload.media.fault` and `payload.media.reason` say why.
+        24 = MediaFailed, c"media failed";
+        /// A recording stopped on its own, part-way through: the disk filled, the
+        /// file went away, the volume was unmounted.
+        ///
+        /// Never an abort. `payload.media.recorded_ms` says how much audio reached
+        /// the file before it stopped, and the call carries on without it.
+        25 = RecordingStopped, c"recording stopped";
+        /// The far end pressed a key (RFC 4733).
+        ///
+        /// One per keypress, not one per packet: a digit goes out as a run of
+        /// updates and then its closing packet three times, and the layer below
+        /// collapses them on the timestamp that identifies the event.
+        /// `payload.media.digit` is the character, `event_code` the number behind
+        /// it for the events no keypad has a key for, and `held_ms` how long it
+        /// lasted.
+        26 = DigitReceived, c"digit received";
+    }
+}
+
+codes! {
+    /// Where a registration is. Names for `sipral_registration_event_t::state`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRegistrationState: u32 {
+        /// The account is gone, or has never been asked about.
+        Unknown = 0,
+        /// Configured and not registered. Nothing has been sent.
+        Idle = 1,
+        /// A REGISTER is in flight and there is no binding yet.
+        Registering = 2,
+        /// The registrar holds a binding.
+        Registered = 3,
+        /// A refresh is in flight. The binding stands until it is answered.
+        Refreshing = 4,
+        /// Something recoverable went wrong and the next attempt is scheduled.
+        Retrying = 5,
+        /// The binding was given up on purpose.
+        Unregistered = 6,
+        /// The registrar refused in a way that trying again cannot fix.
+        Failed = 7,
+        /// A binding a registrar really granted, over a transport that has since
+        /// been suspended or lost, which nothing has proved since.
+        ///
+        /// Not registered, because it is no longer evidence; not failed, because
+        /// nothing refused it. A monotonic clock does not advance while a machine
+        /// sleeps, so a stack that slept eight hours comes back believing eight
+        /// milliseconds passed and every binding still valid — this is the state
+        /// that says otherwise, and an application that shows a line as ready on
+        /// the strength of it will show it ready when it is not.
+        Unverified = 8,
+        /// A binding read back from a snapshot rather than granted in this
+        /// process. It has not been proved either.
+        Restored = 9,
+    }
+}
+
+codes! {
+    /// Why a registration is not live. Names for
+    /// `sipral_registration_event_t::failure`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRegistrationFailure: u32 {
+        /// Nothing failed.
+        None = 0,
+        /// The registrar refused, and will refuse the same request again.
+        Rejected = 1,
+        /// The password was wrong, or there was none to answer with.
+        BadCredentials = 2,
+        /// The registrar is not answering, or says it cannot serve this now.
+        Unreachable = 3,
+        /// The registrar moved. Following it needs an address, which is the
+        /// caller's to resolve.
+        Redirected = 4,
+    }
+}
+
+codes! {
+    /// Where a call is. Names for `sipral_call_event_t::state`, and what
+    /// `sipral_call_state` writes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralCallState: u32 {
+        /// The call is gone, or has never been asked about.
+        Unknown = 0,
+        /// The INVITE has gone and nothing has come back.
+        Calling = 1,
+        /// Somebody is calling and this end has not answered.
+        Incoming = 2,
+        /// The far end is ringing, or this end said it is.
+        Ringing = 3,
+        /// There is audio before anybody answered.
+        EarlyMedia = 4,
+        /// Up.
+        Confirmed = 5,
+        /// Up, in order to be transferred: the second leg of an attended transfer.
+        Consulting = 6,
+        /// A CANCEL or a BYE has gone and is not answered yet.
+        Terminating = 7,
+        /// Over.
+        Terminated = 8,
+    }
+}
+
+codes! {
+    /// Why a call is over. Names for `sipral_call_event_t::end_reason`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralCallEndReason: u32 {
+        /// The call is not over.
+        None = 0,
+        /// This end hung up.
+        LocalHangup = 1,
+        /// The far end hung up.
+        RemoteHangup = 2,
+        /// The far end refused it: busy, declined, not found.
+        Refused = 3,
+        /// Given up before it was answered, from either end.
+        Cancelled = 4,
+        /// Nothing came back, or the transport died.
+        Unreachable = 5,
+        /// Another branch of the same fork was kept and this one was not.
+        ForkLost = 6,
+        /// The branch was still ringing when the answer window closed.
+        Abandoned = 7,
+        /// The session timer ran out and no refresh arrived.
+        Expired = 8,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::RegistrationChanged`] carries.
+    #[derive(Clone, Copy)]
+    pub struct SipralRegistrationEvent {
+        /// A [`SipralRegistrationState`].
+        pub state: u32,
+        /// A [`SipralRegistrationFailure`], zero when nothing failed.
+        pub failure: u32,
+        /// The status the registrar answered with, or zero when none arrived.
+        pub status_code: u32,
+        /// The binding's granted lifetime, zero unless it is live.
+        pub expires_ms: u64,
+        /// How long until the refresh, zero unless one is scheduled.
+        pub refresh_in_ms: u64,
+        /// How long until the next attempt. Only meaningful while the state is
+        /// retrying, which is exactly when the stack is going to try again.
+        pub retry_in_ms: u64,
+    }
+}
+
+record! {
+    /// What every call event carries.
     ///
-    /// A6's second consumer. `payload.media.statistics` points at the
-    /// completed record; it is the library's and lives as long as the callback
-    /// does. The stream is gone by the time this arrives, which is why the
-    /// numbers travel in the event rather than behind a lookup that would now
-    /// fail.
-    17 = MediaStatistics, c"media statistics";
-    reserved 18 = "a request was promoted to a stream transport (B1)";
-    /// Nothing has arrived on the media path for longer than the configured
-    /// threshold, while signalling is perfectly happy.
+    /// Not every member means something in every kind, and the ones that do not
+    /// are zero. A zero here always reads as absent rather than as a value.
+    #[derive(Clone, Copy)]
+    pub struct SipralCallEvent {
+        /// A [`SipralCallState`].
+        pub state: u32,
+        /// A [`SipralCallEndReason`], zero while the call is alive.
+        pub end_reason: u32,
+        /// The status a response carried, or zero.
+        pub status_code: u32,
+        /// The other call this event is also about: the sibling of a fork, or the
+        /// call that was replaced. [`SIPRAL_HANDLE_NONE`] otherwise.
+        pub other: SipralHandle,
+        /// Whether this end has asked the far end to stop sending.
+        pub held_here: u32,
+        /// Whether the far end has asked this one to.
+        pub held_there: u32,
+        /// What this end is describing, and how long it is.
+        pub local_sdp: *const u8,
+        /// How many bytes of it.
+        pub local_sdp_len: usize,
+        /// And what the far end is.
+        pub remote_sdp: *const u8,
+        /// How many bytes of it.
+        pub remote_sdp_len: usize,
+        /// When a refused session change goes out again by itself, zero when it is
+        /// not going to.
+        pub retry_in_ms: u64,
+    }
+}
+
+record! {
+    /// What a transfer event carries.
+    #[derive(Clone, Copy)]
+    pub struct SipralTransferEvent {
+        /// What the far end's own call is doing, or zero.
+        pub status_code: u32,
+        /// Whether the request named a dialog to replace, which is what makes a
+        /// transfer attended rather than blind.
+        pub attended: u32,
+        /// Who to call, as UTF-8. Not NUL-terminated.
+        pub target: *const c_char,
+        /// How many bytes of it.
+        pub target_len: usize,
+    }
+}
+
+record! {
+    /// What a media event carries.
     ///
-    /// B5. `payload.media.silent_for_ms` says how long. The call is untouched:
-    /// whether to hang up over silence is a decision with a person on the other
-    /// end of it.
-    19 = MediaStalled, c"media stalled";
-    reserved 20 = "a call was announced and never arrived (C2)";
-    /// Audio is running: the negotiation settled and an RTP session is open.
+    /// As with a call event, not every member means something in every kind, and
+    /// the ones that do not are zero or null.
+    #[derive(Clone, Copy)]
+    pub struct SipralMediaEvent {
+        /// A [`SipralCodec`](crate::media::SipralCodec): what the negotiation
+        /// settled on, zero where the event is not about a codec.
+        pub codec: u32,
+        /// A [`SipralDirection`](crate::media::SipralDirection): which way audio
+        /// may flow, as seen from here.
+        pub direction: u32,
+        /// How long the stream has been silent, for a stall and for its recovery.
+        pub silent_for_ms: u64,
+        /// How much audio reached the file, for a recording that stopped by
+        /// itself.
+        pub recorded_ms: u64,
+        /// A [`SipralMediaFault`](crate::media::SipralMediaFault), zero when
+        /// nothing failed.
+        pub fault: u32,
+        /// The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
+        /// when nothing failed.
+        pub reason: *const c_char,
+        /// How many bytes of it.
+        pub reason_len: usize,
+        /// What the stream cost, for the kind that carries it, and null for every
+        /// other. It belongs to the library and lives as long as the callback.
+        pub statistics: *const SipralStreamStats,
+        /// The key the far end pressed, as its character, and zero for an event
+        /// no keypad has a key for.
+        pub digit: u32,
+        /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
+        /// real events that are not keys.
+        pub event_code: u32,
+        /// How long the far end held it.
+        pub held_ms: u64,
+    }
+}
+
+record! {
+    /// The arm of an event that its kind names.
     ///
-    /// A4's reporting half and the first half of D5: `payload.media.codec` is
-    /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
-    21 = MediaStarted, c"media started";
-    /// The session changed under a live call: a hold, a resume, a peer that
-    /// moved its media address, or a re-negotiation onto another codec.
-    22 = MediaChanged, c"media changed";
-    /// Packets are arriving again. `payload.media.silent_for_ms` says how long
-    /// the gap turned out to be.
-    23 = MediaResumed, c"media resumed";
-    /// Media could not be started or could not be kept. The call itself is
-    /// untouched; `payload.media.fault` and `payload.media.reason` say why.
-    24 = MediaFailed, c"media failed";
-    /// A recording stopped on its own, part-way through: the disk filled, the
-    /// file went away, the volume was unmounted.
+    /// Reading any other arm reads bytes the library did not write for it.
+    #[derive(Clone, Copy)]
+    pub union SipralEventPayload {
+        /// For [`SipralEventKind::RegistrationChanged`].
+        pub registration: SipralRegistrationEvent,
+        /// For every call kind.
+        pub call: SipralCallEvent,
+        /// For [`SipralEventKind::TransferRequested`],
+        /// [`SipralEventKind::TransferProgress`] and
+        /// [`SipralEventKind::TransferDone`].
+        pub transfer: SipralTransferEvent,
+        /// For every media kind: started, changed, stalled, resumed, failed, the
+        /// end-of-call statistics, and a recording that stopped by itself.
+        pub media: SipralMediaEvent,
+    }
+}
+
+record! {
+    /// Something the library has to tell the application.
     ///
-    /// Never an abort. `payload.media.recorded_ms` says how much audio reached
-    /// the file before it stopped, and the call carries on without it.
-    25 = RecordingStopped, c"recording stopped";
-    /// The far end pressed a key (RFC 4733).
+    /// The pointer handed to the callback is the library's, and it is valid for
+    /// the duration of that call and no longer. `size` says how much of the
+    /// struct this build filled in, and a binding reads no further than that. The
+    /// union stays the last member for the same reason: an arm that grows grows
+    /// the tail, which is the one place a released struct may change.
+    #[derive(Clone, Copy)]
+    pub struct SipralEvent {
+        /// How many bytes of this struct are meaningful.
+        pub size: usize,
+        /// The stack it is about.
+        pub stack: SipralHandle,
+        /// What it is.
+        pub kind: SipralEventKind,
+        /// The account it is about, or [`SIPRAL_HANDLE_NONE`].
+        pub account: SipralHandle,
+        /// The call it is about, or [`SIPRAL_HANDLE_NONE`].
+        pub call: SipralHandle,
+        /// The SIP message behind it, whole and unparsed, when there is one.
+        ///
+        /// A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
+        /// caller's display name all live here and none of them is worth a member
+        /// of its own. Null when the event came from no single message.
+        pub message: *const u8,
+        /// How many bytes of it.
+        pub message_len: usize,
+        /// The arm [`SipralEvent::kind`] names.
+        pub payload: SipralEventPayload,
+    }
+}
+
+alias! {
+    /// The one callback a stack has.
     ///
-    /// One per keypress, not one per packet: a digit goes out as a run of
-    /// updates and then its closing packet three times, and the layer below
-    /// collapses them on the timestamp that identifies the event.
-    /// `payload.media.digit` is the character, `event_code` the number behind
-    /// it for the events no keypad has a key for, and `held_ms` how long it
-    /// lasted.
-    26 = DigitReceived, c"digit received";
+    /// It is called from inside `sipral_stack_poll`, on the thread that called
+    /// it, with the `user_data` the stack was created with. It must not
+    /// unwind, and it must not call back into the stack it was given: see
+    /// [`crate::stack`].
+    pub type SipralEventCallback = fn(event: *const SipralEvent, user_data: *mut c_void);
 }
-
-/// Where a registration is. Names for `sipral_registration_event_t::state`.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralRegistrationState {
-    /// The account is gone, or has never been asked about.
-    Unknown = 0,
-    /// Configured and not registered. Nothing has been sent.
-    Idle = 1,
-    /// A REGISTER is in flight and there is no binding yet.
-    Registering = 2,
-    /// The registrar holds a binding.
-    Registered = 3,
-    /// A refresh is in flight. The binding stands until it is answered.
-    Refreshing = 4,
-    /// Something recoverable went wrong and the next attempt is scheduled.
-    Retrying = 5,
-    /// The binding was given up on purpose.
-    Unregistered = 6,
-    /// The registrar refused in a way that trying again cannot fix.
-    Failed = 7,
-    /// A binding a registrar really granted, over a transport that has since
-    /// been suspended or lost, which nothing has proved since.
-    ///
-    /// Not registered, because it is no longer evidence; not failed, because
-    /// nothing refused it. A monotonic clock does not advance while a machine
-    /// sleeps, so a stack that slept eight hours comes back believing eight
-    /// milliseconds passed and every binding still valid — this is the state
-    /// that says otherwise, and an application that shows a line as ready on
-    /// the strength of it will show it ready when it is not.
-    Unverified = 8,
-    /// A binding read back from a snapshot rather than granted in this
-    /// process. It has not been proved either.
-    Restored = 9,
-}
-
-/// Why a registration is not live. Names for
-/// `sipral_registration_event_t::failure`.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralRegistrationFailure {
-    /// Nothing failed.
-    None = 0,
-    /// The registrar refused, and will refuse the same request again.
-    Rejected = 1,
-    /// The password was wrong, or there was none to answer with.
-    BadCredentials = 2,
-    /// The registrar is not answering, or says it cannot serve this now.
-    Unreachable = 3,
-    /// The registrar moved. Following it needs an address, which is the
-    /// caller's to resolve.
-    Redirected = 4,
-}
-
-/// Where a call is. Names for `sipral_call_event_t::state`, and what
-/// `sipral_call_state` writes.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralCallState {
-    /// The call is gone, or has never been asked about.
-    Unknown = 0,
-    /// The INVITE has gone and nothing has come back.
-    Calling = 1,
-    /// Somebody is calling and this end has not answered.
-    Incoming = 2,
-    /// The far end is ringing, or this end said it is.
-    Ringing = 3,
-    /// There is audio before anybody answered.
-    EarlyMedia = 4,
-    /// Up.
-    Confirmed = 5,
-    /// Up, in order to be transferred: the second leg of an attended transfer.
-    Consulting = 6,
-    /// A CANCEL or a BYE has gone and is not answered yet.
-    Terminating = 7,
-    /// Over.
-    Terminated = 8,
-}
-
-/// Why a call is over. Names for `sipral_call_event_t::end_reason`.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralCallEndReason {
-    /// The call is not over.
-    None = 0,
-    /// This end hung up.
-    LocalHangup = 1,
-    /// The far end hung up.
-    RemoteHangup = 2,
-    /// The far end refused it: busy, declined, not found.
-    Refused = 3,
-    /// Given up before it was answered, from either end.
-    Cancelled = 4,
-    /// Nothing came back, or the transport died.
-    Unreachable = 5,
-    /// Another branch of the same fork was kept and this one was not.
-    ForkLost = 6,
-    /// The branch was still ringing when the answer window closed.
-    Abandoned = 7,
-    /// The session timer ran out and no refresh arrived.
-    Expired = 8,
-}
-
-/// What a [`SipralEventKind::RegistrationChanged`] carries.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralRegistrationEvent {
-    /// A [`SipralRegistrationState`].
-    pub state: u32,
-    /// A [`SipralRegistrationFailure`], zero when nothing failed.
-    pub failure: u32,
-    /// The status the registrar answered with, or zero when none arrived.
-    pub status_code: u32,
-    /// The binding's granted lifetime, zero unless it is live.
-    pub expires_ms: u64,
-    /// How long until the refresh, zero unless one is scheduled.
-    pub refresh_in_ms: u64,
-    /// How long until the next attempt. Only meaningful while the state is
-    /// retrying, which is exactly when the stack is going to try again.
-    pub retry_in_ms: u64,
-}
-
-/// What every call event carries.
-///
-/// Not every member means something in every kind, and the ones that do not
-/// are zero. A zero here always reads as absent rather than as a value.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralCallEvent {
-    /// A [`SipralCallState`].
-    pub state: u32,
-    /// A [`SipralCallEndReason`], zero while the call is alive.
-    pub end_reason: u32,
-    /// The status a response carried, or zero.
-    pub status_code: u32,
-    /// The other call this event is also about: the sibling of a fork, or the
-    /// call that was replaced. [`SIPRAL_HANDLE_NONE`] otherwise.
-    pub other: SipralHandle,
-    /// Whether this end has asked the far end to stop sending.
-    pub held_here: u32,
-    /// Whether the far end has asked this one to.
-    pub held_there: u32,
-    /// What this end is describing, and how long it is.
-    pub local_sdp: *const u8,
-    /// How many bytes of it.
-    pub local_sdp_len: usize,
-    /// And what the far end is.
-    pub remote_sdp: *const u8,
-    /// How many bytes of it.
-    pub remote_sdp_len: usize,
-    /// When a refused session change goes out again by itself, zero when it is
-    /// not going to.
-    pub retry_in_ms: u64,
-}
-
-/// What a transfer event carries.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralTransferEvent {
-    /// What the far end's own call is doing, or zero.
-    pub status_code: u32,
-    /// Whether the request named a dialog to replace, which is what makes a
-    /// transfer attended rather than blind.
-    pub attended: u32,
-    /// Who to call, as UTF-8. Not NUL-terminated.
-    pub target: *const c_char,
-    /// How many bytes of it.
-    pub target_len: usize,
-}
-
-/// What a media event carries.
-///
-/// As with a call event, not every member means something in every kind, and
-/// the ones that do not are zero or null.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralMediaEvent {
-    /// A [`SipralCodec`](crate::media::SipralCodec): what the negotiation
-    /// settled on, zero where the event is not about a codec.
-    pub codec: u32,
-    /// A [`SipralDirection`](crate::media::SipralDirection): which way audio
-    /// may flow, as seen from here.
-    pub direction: u32,
-    /// How long the stream has been silent, for a stall and for its recovery.
-    pub silent_for_ms: u64,
-    /// How much audio reached the file, for a recording that stopped by
-    /// itself.
-    pub recorded_ms: u64,
-    /// A [`SipralMediaFault`](crate::media::SipralMediaFault), zero when
-    /// nothing failed.
-    pub fault: u32,
-    /// The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
-    /// when nothing failed.
-    pub reason: *const c_char,
-    /// How many bytes of it.
-    pub reason_len: usize,
-    /// What the stream cost, for the kind that carries it, and null for every
-    /// other. It belongs to the library and lives as long as the callback.
-    pub statistics: *const SipralStreamStats,
-    /// The key the far end pressed, as its character, and zero for an event
-    /// no keypad has a key for.
-    pub digit: u32,
-    /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
-    /// real events that are not keys.
-    pub event_code: u32,
-    /// How long the far end held it.
-    pub held_ms: u64,
-}
-
-/// The arm of an event that its kind names.
-///
-/// Reading any other arm reads bytes the library did not write for it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union SipralEventPayload {
-    /// For [`SipralEventKind::RegistrationChanged`].
-    pub registration: SipralRegistrationEvent,
-    /// For every call kind.
-    pub call: SipralCallEvent,
-    /// For [`SipralEventKind::TransferRequested`],
-    /// [`SipralEventKind::TransferProgress`] and
-    /// [`SipralEventKind::TransferDone`].
-    pub transfer: SipralTransferEvent,
-    /// For every media kind: started, changed, stalled, resumed, failed, the
-    /// end-of-call statistics, and a recording that stopped by itself.
-    pub media: SipralMediaEvent,
-}
-
-/// Something the library has to tell the application.
-///
-/// The pointer handed to the callback is the library's, and it is valid for
-/// the duration of that call and no longer. `size` says how much of the
-/// struct this build filled in, and a binding reads no further than that. The
-/// union stays the last member for the same reason: an arm that grows grows
-/// the tail, which is the one place a released struct may change.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralEvent {
-    /// How many bytes of this struct are meaningful.
-    pub size: usize,
-    /// The stack it is about.
-    pub stack: SipralHandle,
-    /// What it is.
-    pub kind: SipralEventKind,
-    /// The account it is about, or [`SIPRAL_HANDLE_NONE`].
-    pub account: SipralHandle,
-    /// The call it is about, or [`SIPRAL_HANDLE_NONE`].
-    pub call: SipralHandle,
-    /// The SIP message behind it, whole and unparsed, when there is one.
-    ///
-    /// A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
-    /// caller's display name all live here and none of them is worth a member
-    /// of its own. Null when the event came from no single message.
-    pub message: *const u8,
-    /// How many bytes of it.
-    pub message_len: usize,
-    /// The arm [`SipralEvent::kind`] names.
-    pub payload: SipralEventPayload,
-}
-
-/// The one callback a stack has.
-///
-/// It is called from inside `sipral_stack_poll`, on the thread that called it,
-/// with the `user_data` the stack was created with. It must not unwind, and it
-/// must not call back into the stack it was given: see [`crate::stack`].
-pub type SipralEventCallback =
-    Option<unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void)>;
 
 impl SipralEvent {
     /// An event with nothing in it but its kind, for a kind to fill in.
@@ -649,6 +687,7 @@ fn about_a_call(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEve
             call,
             account,
             ref request,
+            ..
         } => {
             let payload = call_payload(known, call);
             let mut out = call_event(known, SipralEventKind::IncomingCall, call, payload);

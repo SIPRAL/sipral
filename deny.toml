@@ -65,6 +65,11 @@ allow = ["AGPL-3.0-only"]
 # the interop harness under interop/, which drives the lab and is never shipped
 name = "sipral-interop"
 allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
+# the generator under tools/, which prints the header and the bindings and is
+# never shipped either
+name = "sipral-abi-gen"
+allow = ["AGPL-3.0-only"]
 
 [bans]
 multiple-versions = "warn"

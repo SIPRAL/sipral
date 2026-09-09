@@ -30,69 +30,73 @@
 use sipral::Capabilities;
 use sipral_ua::TransportProtocol;
 
+use crate::abi::{constants, record};
 use crate::error::entry;
 use crate::stack::SipralTransport;
 use crate::versioned::{Versioned, write_versioned};
 
-/// Bits of [`SipralCapabilities::transports`]. A caller checks
-/// `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
-/// growing list of booleans, so a transport this ABI has not learned a bit
-/// for yet reads as absent rather than refusing to compile against an older
-/// header.
-///
-/// Named after [`SipralTransport`]'s own numbers (`1 << (value - 1)`), so a
-/// transport added there in the future gets a bit here without the two
-/// numbering schemes ever being asked to agree by hand.
-pub const SIPRAL_TRANSPORT_BIT_UDP: u32 = 1 << (SipralTransport::Udp as u32 - 1);
-/// See [`SIPRAL_TRANSPORT_BIT_UDP`].
-pub const SIPRAL_TRANSPORT_BIT_TCP: u32 = 1 << (SipralTransport::Tcp as u32 - 1);
-/// See [`SIPRAL_TRANSPORT_BIT_UDP`].
-pub const SIPRAL_TRANSPORT_BIT_TLS: u32 = 1 << (SipralTransport::Tls as u32 - 1);
-/// See [`SIPRAL_TRANSPORT_BIT_UDP`].
-pub const SIPRAL_TRANSPORT_BIT_WS: u32 = 1 << (SipralTransport::Ws as u32 - 1);
-/// See [`SIPRAL_TRANSPORT_BIT_UDP`].
-pub const SIPRAL_TRANSPORT_BIT_WSS: u32 = 1 << (SipralTransport::Wss as u32 - 1);
+constants! {
+    /// Bits of [`SipralCapabilities::transports`]. A caller checks
+    /// `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
+    /// growing list of booleans, so a transport this ABI has not learned a bit
+    /// for yet reads as absent rather than refusing to compile against an
+    /// older header.
+    ///
+    /// Named after [`SipralTransport`]'s own numbers (`1 << (value - 1)`), so
+    /// a transport added there in the future gets a bit here without the two
+    /// numbering schemes ever being asked to agree by hand.
+    pub const SIPRAL_TRANSPORT_BIT_UDP: u32 = 1 << (SipralTransport::Udp as u32 - 1);
+    /// See [`SIPRAL_TRANSPORT_BIT_UDP`].
+    pub const SIPRAL_TRANSPORT_BIT_TCP: u32 = 1 << (SipralTransport::Tcp as u32 - 1);
+    /// See [`SIPRAL_TRANSPORT_BIT_UDP`].
+    pub const SIPRAL_TRANSPORT_BIT_TLS: u32 = 1 << (SipralTransport::Tls as u32 - 1);
+    /// See [`SIPRAL_TRANSPORT_BIT_UDP`].
+    pub const SIPRAL_TRANSPORT_BIT_WS: u32 = 1 << (SipralTransport::Ws as u32 - 1);
+    /// See [`SIPRAL_TRANSPORT_BIT_UDP`].
+    pub const SIPRAL_TRANSPORT_BIT_WSS: u32 = 1 << (SipralTransport::Wss as u32 - 1);
 
-/// Bits of [`SipralCapabilities::features`].
-pub const SIPRAL_FEATURE_DTMF: u32 = 1 << 0;
-/// See [`SIPRAL_FEATURE_DTMF`].
-pub const SIPRAL_FEATURE_RTCP_MUX: u32 = 1 << 1;
-/// See [`SIPRAL_FEATURE_DTMF`].
-pub const SIPRAL_FEATURE_RECORDING: u32 = 1 << 2;
-/// See [`SIPRAL_FEATURE_DTMF`].
-pub const SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG: u32 = 1 << 3;
-/// See [`SIPRAL_FEATURE_DTMF`].
-pub const SIPRAL_FEATURE_SRTP: u32 = 1 << 4;
-/// See [`SIPRAL_FEATURE_DTMF`], and the module documentation for why this
-/// build never sets it.
-pub const SIPRAL_FEATURE_SUBSCRIPTIONS: u32 = 1 << 5;
+    /// Bits of [`SipralCapabilities::features`].
+    pub const SIPRAL_FEATURE_DTMF: u32 = 1 << 0;
+    /// See [`SIPRAL_FEATURE_DTMF`].
+    pub const SIPRAL_FEATURE_RTCP_MUX: u32 = 1 << 1;
+    /// See [`SIPRAL_FEATURE_DTMF`].
+    pub const SIPRAL_FEATURE_RECORDING: u32 = 1 << 2;
+    /// See [`SIPRAL_FEATURE_DTMF`].
+    pub const SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG: u32 = 1 << 3;
+    /// See [`SIPRAL_FEATURE_DTMF`].
+    pub const SIPRAL_FEATURE_SRTP: u32 = 1 << 4;
+    /// See [`SIPRAL_FEATURE_DTMF`], and the module documentation for why this
+    /// build never sets it.
+    pub const SIPRAL_FEATURE_SUBSCRIPTIONS: u32 = 1 << 5;
+}
 
-/// What this build of the library can do: codecs compiled in, transports
-/// this ABI carries signalling over, and which optional features are
-/// present.
-///
-/// Nothing here is configuration — this answers "can this build ever do X",
-/// never "is X turned on for this stack". `sipral_stack_settings` answers
-/// that once a stack exists, and `sipral_codec_count` /
-/// `sipral_stack_codec_order` already enumerate the codecs this reports only
-/// the count of, so this does not repeat what they say.
-///
-/// Set `size` to `sizeof(sipral_capabilities_t)` before the call.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SipralCapabilities {
-    /// How many bytes of this struct the library filled in.
-    pub size: usize,
-    /// How many codecs this build contains. `sipral_codec_count` gives the
-    /// same number; `sipral_codec_at` says which, and in what order they are
-    /// offered by default.
-    pub codec_count: usize,
-    /// Which transports this build carries signalling over, as the bits
-    /// named `SIPRAL_TRANSPORT_BIT_*`.
-    pub transports: u32,
-    /// Which optional features this build has compiled in, as the bits named
-    /// `SIPRAL_FEATURE_*`.
-    pub features: u32,
+record! {
+    /// What this build of the library can do: codecs compiled in, transports
+    /// this ABI carries signalling over, and which optional features are
+    /// present.
+    ///
+    /// Nothing here is configuration — this answers "can this build ever do X",
+    /// never "is X turned on for this stack". `sipral_stack_settings` answers
+    /// that once a stack exists, and `sipral_codec_count` /
+    /// `sipral_stack_codec_order` already enumerate the codecs this reports only
+    /// the count of, so this does not repeat what they say.
+    ///
+    /// Set `size` to `sizeof(sipral_capabilities_t)` before the call.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralCapabilities {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// How many codecs this build contains. `sipral_codec_count` gives the
+        /// same number; `sipral_codec_at` says which, and in what order they are
+        /// offered by default.
+        pub codec_count: usize,
+        /// Which transports this build carries signalling over, as the bits
+        /// named `SIPRAL_TRANSPORT_BIT_*`.
+        pub transports: u32,
+        /// Which optional features this build has compiled in, as the bits named
+        /// `SIPRAL_FEATURE_*`.
+        pub features: u32,
+    }
 }
 
 // Safety: integers, no invariant between them, and zero is a valid value of

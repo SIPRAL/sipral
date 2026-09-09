@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <!-- the printed binding answers with a string? where C answers with a
+         null pointer, so the nullable annotations have to mean something -->
+    <Nullable>enable</Nullable>
     <PackageId>Sipral</PackageId>
     <Version>0.0.1</Version>
     <Authors>SIPRAL</Authors>

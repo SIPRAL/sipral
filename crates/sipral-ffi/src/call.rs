@@ -31,6 +31,7 @@ use sipral_core::endpoint::OutgoingInDialogRequest;
 use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, OutgoingCall, UaError};
 
+use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralCallState, call_state};
 use crate::handle::SipralHandle;
@@ -51,49 +52,50 @@ const MAX_DTMF_MS: u32 = 10_000;
 /// The sixteen events a keypad has (RFC 4733 §3.2, Table 3).
 const KEYPAD: &[u8] = b"0123456789*#ABCD";
 
-/// What a call is placed with.
-///
-/// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
-/// filling anything in.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SipralCallConfig {
-    /// `sizeof` this struct, as the caller's header declares it.
-    pub size: usize,
-    /// Who to call, as a URI. UTF-8, not NUL-terminated.
-    pub target: *const c_char,
-    /// How many bytes of it.
-    pub target_len: usize,
-    /// The session description to offer, for a call this stack manages no
-    /// audio for.
+record! {
+    /// What a call is placed with.
     ///
-    /// Exactly one of this and `media_address` is set. Two descriptions of one
-    /// session is one too many, and neither is a call whose answer would have
-    /// to be written into the ACK.
-    pub sdp: *const u8,
-    /// How many bytes of it.
-    pub sdp_len: usize,
-    /// Where to send the INVITE, as `host:port`, or null to send it where the
-    /// account registers — which is the outbound proxy for a registered line,
-    /// and the reason a phone behind a NAT works at all.
-    pub destination: *const c_char,
-    /// How many bytes of it.
-    pub destination_len: usize,
-    /// Whether to keep every branch a proxy forks the INVITE into. Zero keeps
-    /// the first that answers and hangs up the rest, which is what a telephone
-    /// does.
-    pub keep_all_forks: u32,
-    /// Where this end will receive media, as `host:port`, for a call this
-    /// stack describes and runs the audio of.
-    ///
-    /// The application owns the socket, so it is the only one that can say. Set
-    /// it and the offer is written from this stack's codec order, the answer is
-    /// read, and the call gets a media session that `crate::media` and
-    /// `crate::record` reach. Leave it null and set `sdp` instead for a call
-    /// where the application describes its own session and runs its own RTP.
-    pub media_address: *const c_char,
-    /// How many bytes of it.
-    pub media_address_len: usize,
+    /// Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
+    /// filling anything in.
+    #[derive(Clone, Copy)]
+    pub struct SipralCallConfig {
+        /// `sizeof` this struct, as the caller's header declares it.
+        pub size: usize,
+        /// Who to call, as a URI. UTF-8, not NUL-terminated.
+        pub target: *const c_char,
+        /// How many bytes of it.
+        pub target_len: usize,
+        /// The session description to offer, for a call this stack manages no
+        /// audio for.
+        ///
+        /// Exactly one of this and `media_address` is set. Two descriptions of one
+        /// session is one too many, and neither is a call whose answer would have
+        /// to be written into the ACK.
+        pub sdp: *const u8,
+        /// How many bytes of it.
+        pub sdp_len: usize,
+        /// Where to send the INVITE, as `host:port`, or null to send it where the
+        /// account registers — which is the outbound proxy for a registered line,
+        /// and the reason a phone behind a NAT works at all.
+        pub destination: *const c_char,
+        /// How many bytes of it.
+        pub destination_len: usize,
+        /// Whether to keep every branch a proxy forks the INVITE into. Zero keeps
+        /// the first that answers and hangs up the rest, which is what a telephone
+        /// does.
+        pub keep_all_forks: u32,
+        /// Where this end will receive media, as `host:port`, for a call this
+        /// stack describes and runs the audio of.
+        ///
+        /// The application owns the socket, so it is the only one that can say. Set
+        /// it and the offer is written from this stack's codec order, the answer is
+        /// read, and the call gets a media session that `crate::media` and
+        /// `crate::record` reach. Leave it null and set `sdp` instead for a call
+        /// where the application describes its own session and runs its own RTP.
+        pub media_address: *const c_char,
+        /// How many bytes of it.
+        pub media_address_len: usize,
+    }
 }
 
 // Safety: the trait's contract. Plain data with no invariant between the
@@ -543,25 +545,26 @@ entry! {
     }
 }
 
-/// Which way a digit goes to the far end. Names for
-/// [`sipral_call_send_dtmf`]'s `via`.
-///
-/// The choice is per send, not per call, because it is a fact about the peer
-/// rather than about this end, and the way to find out which one a peer takes
-/// is to try. A carrier that ignores one of these ignores it silently.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SipralDtmf {
-    /// In the media, as an RFC 4733 named telephone event. What to reach for:
-    /// it is the only one carried end to end by every gateway on the path, and
-    /// the only one whose timing survives transcoding.
-    Rtp = 0,
-    /// An INFO per digit carrying `application/dtmf-relay`, which states the
-    /// signal and how long it was held.
-    InfoRelay = 1,
-    /// An INFO per digit carrying `application/dtmf`, whose whole body is the
-    /// character. Some switches take only this one.
-    InfoPlain = 2,
+codes! {
+    /// Which way a digit goes to the far end. Names for
+    /// [`sipral_call_send_dtmf`]'s `via`.
+    ///
+    /// The choice is per send, not per call, because it is a fact about the peer
+    /// rather than about this end, and the way to find out which one a peer takes
+    /// is to try. A carrier that ignores one of these ignores it silently.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralDtmf: u32 {
+        /// In the media, as an RFC 4733 named telephone event. What to reach for:
+        /// it is the only one carried end to end by every gateway on the path, and
+        /// the only one whose timing survives transcoding.
+        Rtp = 0,
+        /// An INFO per digit carrying `application/dtmf-relay`, which states the
+        /// signal and how long it was held.
+        InfoRelay = 1,
+        /// An INFO per digit carrying `application/dtmf`, whose whole body is the
+        /// character. Some switches take only this one.
+        InfoPlain = 2,
+    }
 }
 
 entry! {
@@ -1835,8 +1838,9 @@ Content-Length: 0\r\n\r\n";
 
     /// RFC 4733's section 3 has only 3.1, 3.2 and 3.3; the sixteen DTMF event
     /// codes are Table 3 in 3.2. A doc comment pointing at a section that
-    /// does not exist is a defect cbindgen would copy into the public header
-    /// verbatim, so it is checked here rather than left to be noticed by eye.
+    /// does not exist is a defect the generator copies into the public
+    /// header verbatim, so it is checked here rather than left to be noticed
+    /// by eye.
     ///
     /// The needles are assembled at runtime, not written as one literal, so
     /// this test inspecting its own file does not just match itself.

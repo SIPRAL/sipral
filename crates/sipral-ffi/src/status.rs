@@ -11,63 +11,65 @@
 use std::ffi::c_char;
 use std::ptr;
 
+use crate::abi::codes;
 use crate::error::entry;
 
-/// The result of a call across the C ABI.
-///
-/// The numbers are part of the ABI. A value keeps its meaning for the life of
-/// the ABI's major version, and a new one is only ever added at the end.
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SipralStatus {
-    /// The call did what it was asked to.
-    Ok = 0,
-    /// A pointer was null where one is required, a length disagreed with what
-    /// it describes, or a value was outside what the call accepts.
-    InvalidArgument = 1,
-    /// The handle never came from this library.
-    InvalidHandle = 2,
-    /// The handle came from this library and what it named is gone: a use
-    /// after free, or a second free.
-    StaleHandle = 3,
-    /// A versioned struct declared a size this build cannot work with, or a
-    /// binding asked for an ABI this library does not provide.
-    UnsupportedVersion = 4,
-    /// The buffer supplied is too small. The length needed has been written to
-    /// the out parameter, and nothing was written to the buffer.
-    BufferTooSmall = 5,
-    /// The object is already in use by another call, including one further
-    /// down the same call stack. Nothing was done, and nothing blocked.
-    Busy = 6,
-    /// The library has no room for another object of this kind.
-    Exhausted = 7,
-    /// A panic was caught at the boundary. The call did not finish, and the
-    /// last error carries whatever the panic said.
-    Panic = 8,
-    /// What was asked for cannot be done where the object is: answering a call
-    /// this end placed, holding one that is not up, sending DTMF before there
-    /// is a dialog to send it in. Not an argument that was wrong; a moment
-    /// that was.
-    WrongState = 9,
-    /// The request could not be assembled or handed to a transport. Nothing
-    /// went out, and nothing about the call changed.
-    NotSent = 10,
-    /// The value is one this ABI has a word for and this build has no code
-    /// behind. Nothing was applied, and asking again will not change that.
+codes! {
+    /// The result of a call across the C ABI.
     ///
-    /// The third of the three answers a configuration call may give, and the
-    /// one that has to be told apart from the other two by a machine.
-    /// [`SipralStatus::InvalidArgument`] says the value is wrong and a
-    /// corrected one would be taken; this says the value is right and there is
-    /// nothing here to take it. [`SipralStatus::UnsupportedVersion`] is about
-    /// the shape of what crossed the boundary, not about what was set in it.
-    ///
-    /// It exists so that "accepted and ignored" is not a thing this library
-    /// can do. An application that gets it turns the control off, because the
-    /// control is genuinely dead in this build; one that gets a silence
-    /// instead ships a control that does nothing and finds out from a
-    /// customer.
-    NotSupported = 11,
+    /// The numbers are part of the ABI. A value keeps its meaning for the life of
+    /// the ABI's major version, and a new one is only ever added at the end.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum SipralStatus: i32 {
+        /// The call did what it was asked to.
+        Ok = 0,
+        /// A pointer was null where one is required, a length disagreed with what
+        /// it describes, or a value was outside what the call accepts.
+        InvalidArgument = 1,
+        /// The handle never came from this library.
+        InvalidHandle = 2,
+        /// The handle came from this library and what it named is gone: a use
+        /// after free, or a second free.
+        StaleHandle = 3,
+        /// A versioned struct declared a size this build cannot work with, or a
+        /// binding asked for an ABI this library does not provide.
+        UnsupportedVersion = 4,
+        /// The buffer supplied is too small. The length needed has been written to
+        /// the out parameter, and nothing was written to the buffer.
+        BufferTooSmall = 5,
+        /// The object is already in use by another call, including one further
+        /// down the same call stack. Nothing was done, and nothing blocked.
+        Busy = 6,
+        /// The library has no room for another object of this kind.
+        Exhausted = 7,
+        /// A panic was caught at the boundary. The call did not finish, and the
+        /// last error carries whatever the panic said.
+        Panic = 8,
+        /// What was asked for cannot be done where the object is: answering a call
+        /// this end placed, holding one that is not up, sending DTMF before there
+        /// is a dialog to send it in. Not an argument that was wrong; a moment
+        /// that was.
+        WrongState = 9,
+        /// The request could not be assembled or handed to a transport. Nothing
+        /// went out, and nothing about the call changed.
+        NotSent = 10,
+        /// The value is one this ABI has a word for and this build has no code
+        /// behind. Nothing was applied, and asking again will not change that.
+        ///
+        /// The third of the three answers a configuration call may give, and the
+        /// one that has to be told apart from the other two by a machine.
+        /// [`SipralStatus::InvalidArgument`] says the value is wrong and a
+        /// corrected one would be taken; this says the value is right and there is
+        /// nothing here to take it. [`SipralStatus::UnsupportedVersion`] is about
+        /// the shape of what crossed the boundary, not about what was set in it.
+        ///
+        /// It exists so that "accepted and ignored" is not a thing this library
+        /// can do. An application that gets it turns the control off, because the
+        /// control is genuinely dead in this build; one that gets a silence
+        /// instead ships a control that does nothing and finds out from a
+        /// customer.
+        NotSupported = 11,
+    }
 }
 
 entry! {

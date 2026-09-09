@@ -191,37 +191,182 @@ is a three-valued `sipral_toggle_t` — default, on, off — because a zeroed st
 cannot otherwise tell "off" from "nothing was said", and
 `sipral_stack_settings_t` reads back what each of them came to.
 
-**The header is not generated yet, and neither are the bindings.** There is no
-C header in the tree and the .NET package is a name reservation. That is the
-state, not the intent: `docs/13-client-requirements.md` B7 makes one source of
-truth for this ABI a requirement, with the Swift, Kotlin and .NET bindings
-generated from it and `scripts/check.sh` failing when one of them is missing a
-function. It is scheduled early in phase 2 for a reason that will not improve
-with waiting — it is cheapest to do while there is one binding to bring into
-line rather than three.
+## One declaration, and four files printed from it
+
+B7's failure is a C seam declared in several places that have to agree: a
+function added to the Rust and forgotten in one binding produced a build that
+compiled and failed at run time, on one platform, in the field. The answer here
+is that the header and the three bindings are not declarations at all. They are
+printed, by `tools/abi-gen`, from what `crates/sipral-ffi` declares, and they
+are committed — a consumer of a released library must not have to run a
+generator — and `scripts/check.sh` prints them again and fails when what is
+committed is not what came out.
+
+```sh
+cargo run -p sipral-abi-gen             # write them
+cargo run -p sipral-abi-gen -- --check  # what the gate runs
+```
+
+**The declaration writes itself down.** Every macro that declares something
+crossing the boundary emits the Rust item exactly as it would have been written
+by hand and, beside it, a `const` saying what it emitted: the name, the members,
+their types and the documentation, all built out of the very tokens the
+declaration is made of. `entry!` already wrapped every entry point, so it gained
+the recording without a single invocation changing; `record!` and `codes!` do
+the same for the structs and the enumerations, `constants!` and `alias!` for
+what is left, and `event_kinds!` hands over its reserved numbers along with its
+kinds. `crates/sipral-ffi/src/abi.rs` is where those macros and the descriptors
+live, and `abi::SURFACE` is what the generator reads. Nothing reads Rust source.
+
+**Two other designs, and why not.** A generator that parses the Rust would be
+a second compiler with a worse front end: the first `cfg`, the first type alias,
+the first macro that declares an item, and it is either wrong or it is rustc.
+This one cannot be wrong about what was declared, because the compiler is what
+read it. Declaring the surface in a data file that the Rust is checked against
+is the other real option, and it fails on documentation rather than on
+correctness — the header's audience is an application developer, the prose is
+most of what they read, and a data file means writing every paragraph twice and
+watching the two drift. Carrying the documentation from the declaration is the
+whole reason the descriptor is built by the macro rather than beside it.
+
+A `cbindgen.toml` used to sit in `crates/sipral-ffi`, configuring a generator
+nothing ever ran and that would have printed the header alone. It is gone. Two
+generators configured for one header is the drift this arrangement exists to
+remove, and the second of them was the one no gate would have noticed going
+stale.
+
+**The failure mode this choice has, because every one has one.** A macro cannot
+enumerate its own invocations, so something has to list them: `abi::SURFACE` is
+one line per item, written by hand, and that line is the thing a person can
+forget. Three things close it and none of them is the list itself. The
+descriptor beside an unlisted item is dead code, and this workspace builds with
+`-D warnings`, so forgetting the line fails the build before it fails anything
+else. `scripts/check.sh` compares the entry points and the types the modules
+declare against the lines in `abi.rs` and names the difference in both
+directions. And the generator refuses to print a surface in which one type is
+reachable from another that is not listed.
+
+The hole left under those is a declaration made where the macros never see it —
+a `#[repr(C)]` or a `pub const SIPRAL_…` written out by hand. That is covered by
+two more scans in `scripts/check.sh`, and they are text scans looking for a
+declaration at the left margin, which is the weakest link in the arrangement: a
+type declared inside a `mod` block, indented, would slip past them. It would
+still have to reach C somehow, and the only way to do that is `entry!`, which
+`scripts/check.sh` already insists is the only thing that may export a symbol.
+
+**What the descriptor records is the spelling, not the layout.** `usize` becomes
+`size_t` by a rule in the generator, `*const c_char` becomes `const char *`, and
+a rule that is wrong is wrong in the header and all three bindings at once — the
+gate would compare wrong output against wrong output and pass. That is the
+price of one source of truth, and it is the right price: a mistake that is
+everywhere is a mistake somebody finds, where a mistake in one binding of three
+is the failure B7 exists for.
+
+**The conventions are load-bearing now.** The generator reads the ABI's own
+shapes off the parameter lists: a pointer followed by a length is one buffer
+going in, a pointer followed by `capacity` is a buffer the library fills, a
+writable pointer named `out_…` is one value coming back, and a pointer to a
+versioned struct is a struct going in, coming back, or both, according to which
+way it points and whether the struct holds buffers of the caller's. So a new
+parameter called `blob` beside `blob_size` rather than `blob_len` is not a
+naming preference: it is a binding that hands over a raw pointer instead of a
+string. `tools/abi-gen/src/model.rs` is where those four rules are written down.
+
+### What the gate catches
+
+A function, a struct, a union, an enumeration, a constant or an alias added,
+removed or renamed on the Rust side and not reaching the header or any of the
+three bindings. A member appended to a struct, a value added to an enumeration,
+a parameter added to a function, a type changed. The number an event kind
+spends, which travels into all four files. Every one of those is a difference
+between what is committed under `bindings/` and what the declarations produce,
+and the gate prints which file and says what to run.
+
+### What it does not catch
+
+**Nothing compiles the output.** There is no Swift, Kotlin or .NET toolchain in
+`scripts/check.sh`, and there will not be one on a machine that has no reason to
+carry three of them, so a generated file that will not compile passes the gate.
+The C header is the exception and only just: `bindings/c/sipral.c` exists so
+that building the Swift package compiles it. The JNI shim is never compiled by
+anything here, which is why it is printed as casts and array handling and
+nothing cleverer.
+
+**It says nothing about meaning.** A member that keeps its name and its type and
+starts meaning something else travels into all four files intact. So does a
+function whose behaviour changed under a signature that did not.
+
+**It is not a check on the built library.** Nothing runs `nm` over the artefact,
+so a symbol the linker dropped is not caught here. `entry!` and the scan that
+insists on it are what stand between a declaration and a missing symbol.
+
+**A Rust-to-Rust coupling is outside it entirely.** `crates/sipral-ffi/src/event.rs`
+destructures `sipral_ua::UaEvent` variant by variant, and a variant destructured
+without a `..` rest pattern makes adding a field to it a build failure over
+here. That is loud rather than silent, so it is not B7's failure — but it is a
+coupling this gate has no view of, and it has already cost one feature its
+shape. The arms use `..`.
+
+**The packaging is written by hand.** `Package.swift`, the `.csproj`, the two
+readmes and `bindings/c/sipral.c` are not printed and not compared. What they
+build is.
 
 ## Swift
 
-A Swift Package wrapping the C target. `async`/`await` over the event callback,
-`Sendable` types, errors as a Swift `Error`, and no exposed pointers.
+A Swift Package whose C target is the generated header, and whose Swift target
+is `SipralAbi.swift`, printed beside it. A status is a thrown `SipralError`
+carrying the last message; a pointer and a length are a `String` or an array
+held alive across the call; a buffer the caller brings is an `inout` array; a
+struct the library fills in whole is what the call returns, with an extension
+per struct that hands over a zeroed one with its `size` already set. Nothing in
+the printed surface is a raw pointer except the two structs a caller part-fills
+with its own buffers, which are `inout` and typed.
 
-The platform work is what the binding actually earns its place for: `CallKit`
-for call UI and audio session priority, `PushKit` for waking on an incoming call,
-and `AVAudioSession` category and interruption handling. An iOS softphone that
-gets these wrong does not work, regardless of how good the stack is.
+What is not printed is the platform work, and it is what the binding will
+actually earn its place for: `CallKit` for call UI and audio session priority,
+`PushKit` for waking on an incoming call, and `AVAudioSession` category and
+interruption handling. An iOS softphone that gets these wrong does not work,
+regardless of how good the stack is. `async`/`await` over the event callback
+belongs there too.
 
 ## .NET
 
-A NuGet package with native assets for `osx-arm64`, `osx-x64`, `win-x64`,
-`win-arm64` and `linux-x64`. `Task`-based API, `IAsyncEnumerable` for event
-streams, `IDisposable` mapped to the handle free functions, and a `SafeHandle`
-so a missed `Dispose` leaks rather than crashes.
+`SipralAbi.cs`, printed, in two layers. `NativeMethods` is the ABI as P/Invoke
+declares it, with every pointer written as an array or as `in`, `ref` or `out`,
+so the package compiles without an unsafe block and the runtime does the
+pinning; `Sipral` is the layer above, where a status becomes a
+`SipralException`, a byte pointer and its length become a `string`, and
+everything written back becomes what the call returns.
+
+What is not printed: the native assets for `osx-arm64`, `osx-x64`, `win-x64`,
+`win-arm64` and `linux-x64`, the `Task`-based surface, `IAsyncEnumerable` for
+event streams, and the `SafeHandle` that makes a missed `Dispose` a leak rather
+than a crash.
 
 ## Kotlin
 
-An AAR over JNI, coroutines and `Flow` for events. `ConnectionService` for
-integration with the system dialer, and a foreground service for the call
-lifetime, because Android will otherwise stop the process mid-call.
+Two printed files, because Android has no way to call C but JNI:
+`SipralAbi.kt`, one `external fun` per entry point plus the enumerations, the
+constants, the exception and a layer that turns a status into a throw; and
+`sipral_jni.c`, the C that implements them. They are printed from the same walk
+over the same declarations, which is the only reason it is safe for them to be
+two files.
+
+Structs are what JNI makes awkward, and the way out is not to let one cross. A
+struct the library fills in whole comes back a member at a time in a `long[]`
+the shim writes, with a float carried as its own bits, so nothing on the Kotlin
+side has to know a field offset — which it could not, since Android builds for
+two pointer widths. What is left over is a struct the caller part-fills, and it
+crosses as an address.
+
+Two things are therefore missing from the Kotlin binding and are not missing
+from the other two: a way to build a `sipral_stack_config_t` without an address,
+and the event callback, which needs a C function that attaches the calling
+thread to the JVM and builds a Java object out of the event struct. Until those
+are printed as well, Kotlin has every declaration and not every ergonomic — the
+gate binds on the first and says nothing about the second. The AAR, coroutines
+and `Flow` for events, `ConnectionService` for the system dialer and the
+foreground service for the call lifetime are all still ahead.
 
 ## Versioning
 

@@ -132,6 +132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-abi-gen"
+version = "0.0.1"
+dependencies = [
+ "sipral-ffi",
+]
+
+[[package]]
 name = "sipral-core"
 version = "0.0.1"
 

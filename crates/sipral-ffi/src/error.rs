@@ -220,41 +220,95 @@ pub(crate) fn last_error_text() -> String {
 /// Three shapes, and no fourth: a call that reports a [`Fail`], the one call
 /// that must not disturb the last error, and a call that returns a value with
 /// a fallback for the panic that must not escape.
+///
+/// Beside the function, each shape emits a module of the same name holding a
+/// [`crate::abi::Function`] built from the very tokens the declaration is made
+/// of. That is what the header and the three bindings are printed from, so
+/// there is no second place a signature is written down and nothing for the
+/// two to drift apart over. A module and a function do not share a namespace,
+/// which is what lets the descriptor take the name of the thing it describes.
 macro_rules! entry {
     (
-        $(#[$attribute:meta])*
+        $(#[doc = $doc:literal])*
         fn $name:ident($($argument:ident: $type:ty),* $(,)?) $body:block
     ) => {
-        $(#[$attribute])*
+        $(#[doc = $doc])*
+        // an exported symbol is reachable through the linker whatever the
+        // module tree says, which is why the lint has nothing to tell us here
+        #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $crate::status::SipralStatus {
             $crate::error::guard(move || $body)
         }
+
+        $crate::error::shape! {
+            $name, "SipralStatus", [$($doc),*], [$($argument: $type),*]
+        }
     };
     (
-        $(#[$attribute:meta])*
+        $(#[doc = $doc:literal])*
         quiet fn $name:ident($($argument:ident: $type:ty),* $(,)?) $body:block
     ) => {
-        $(#[$attribute])*
+        $(#[doc = $doc])*
+        // an exported symbol is reachable through the linker whatever the
+        // module tree says, which is why the lint has nothing to tell us here
+        #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $crate::status::SipralStatus {
             $crate::error::guard_quiet(move || $body)
         }
+
+        $crate::error::shape! {
+            $name, "SipralStatus", [$($doc),*], [$($argument: $type),*]
+        }
     };
     (
-        $(#[$attribute:meta])*
+        $(#[doc = $doc:literal])*
         fn $name:ident($($argument:ident: $type:ty),* $(,)?)
             -> $result:ty, on_panic = $fallback:expr, $body:block
     ) => {
-        $(#[$attribute])*
+        $(#[doc = $doc])*
+        // an exported symbol is reachable through the linker whatever the
+        // module tree says, which is why the lint has nothing to tell us here
+        #[allow(unreachable_pub)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: $type),*) -> $result {
             $crate::error::guard_value($fallback, move || $body)
         }
+
+        $crate::error::shape! {
+            $name, stringify!($result), [$($doc),*], [$($argument: $type),*]
+        }
     };
 }
 
-pub(crate) use entry;
+/// The half of [`entry`] that writes down what it declared.
+///
+/// Its own macro so that all three shapes reach for the same one, the way
+/// they already reach for the same wrapper.
+macro_rules! shape {
+    (
+        $name:ident, $returns:expr, [$($doc:literal),*], [$($argument:ident: $type:ty),*]
+    ) => {
+        /// What the entry point of this name is, for the header and the
+        /// bindings.
+        pub(crate) mod $name {
+            /// The shape the declaration was made of.
+            pub(crate) const ABI: $crate::abi::Function = $crate::abi::Function {
+                name: stringify!($name),
+                doc: &[$($doc),*],
+                parameters: &[$($crate::abi::Member {
+                    name: stringify!($argument),
+                    rust_type: stringify!($type),
+                    doc: &[],
+                }),*],
+                returns: $returns,
+            };
+        }
+    };
+}
+
+pub(crate) use {entry, shape};
 
 #[cfg(test)]
 mod tests {
@@ -451,21 +505,18 @@ mod tests {
     // the macro makes them `pub`, which is what a real entry point needs and
     // what nothing outside this module can reach
     entry! {
-        #[allow(unreachable_pub)]
         fn sipral_test_entry_panics() {
             panic!("from inside an entry point")
         }
     }
 
     entry! {
-        #[allow(unreachable_pub)]
         quiet fn sipral_test_entry_panics_quietly() {
             panic!("quietly")
         }
     }
 
     entry! {
-        #[allow(unreachable_pub)]
         fn sipral_test_entry_panics_with_a_value() -> u32, on_panic = 7, {
             panic!("with a value")
         }
@@ -498,5 +549,50 @@ mod tests {
     #[test]
     fn the_shape_that_returns_a_value_falls_back_instead_of_unwinding() {
         assert_eq!(unsafe { sipral_test_entry_panics_with_a_value() }, 7);
+    }
+
+    // The other half of what the macro is for. The header and the three
+    // bindings are printed from these descriptors, so a shape that declared an
+    // entry point without writing down what it declared would produce a
+    // library with a function no binding has. Every shape is asked, for the
+    // same reason each is asked about catching.
+    #[test]
+    fn every_shape_writes_down_what_it_declared() {
+        assert_eq!(
+            sipral_test_entry_panics::ABI.name,
+            "sipral_test_entry_panics"
+        );
+        assert_eq!(sipral_test_entry_panics::ABI.returns, "SipralStatus");
+        assert!(sipral_test_entry_panics::ABI.parameters.is_empty());
+        assert_eq!(
+            sipral_test_entry_panics_quietly::ABI.returns,
+            "SipralStatus"
+        );
+        assert_eq!(sipral_test_entry_panics_with_a_value::ABI.returns, "u32");
+    }
+
+    entry! {
+        /// A shape with arguments, so that the recording is exercised on one.
+        ///
+        /// # Safety
+        ///
+        /// Reads nothing.
+        fn sipral_test_entry_with_arguments(first: u32, second: *const c_char) {
+            let _ = (first, second);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_recording_carries_the_arguments_and_their_types() {
+        let shape = sipral_test_entry_with_arguments::ABI;
+        let names: Vec<&str> = shape.parameters.iter().map(|p| p.name).collect();
+        let types: Vec<&str> = shape.parameters.iter().map(|p| p.rust_type).collect();
+        assert_eq!(names, ["first", "second"]);
+        assert_eq!(types, ["u32", "*const c_char"]);
+        assert_eq!(
+            shape.doc.first().copied(),
+            Some(" A shape with arguments, so that the recording is exercised on one.")
+        );
     }
 }
