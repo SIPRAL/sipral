@@ -12,6 +12,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **An `a=crypto` line carrying a parameter this build does not know is now
+  refused rather than accepted without it.** RFC 4568 §6.3.7 inverts the usual
+  extension rule — "New SRTP session parameters are by default mandatory ... If
+  an SDP crypto attribute is received with an unknown session parameter that is
+  not prefixed with a '-' character, that crypto attribute MUST be considered
+  invalid" — and the code had been written to the usual rule, with a comment
+  citing that section for the opposite of what it says. A peer that asked for
+  something and was silently not given it is the failure mode the whole section
+  exists to prevent. Parameters written with a leading dash are still ignored,
+  which is the half that keeps the rule usable.
+
 - **A refresh that could not leave no longer kills the account for the life of
   the process.** A scheduled registration refresh whose REGISTER failed to
   reach a transport was treated as a registrar that had refused: the state went
@@ -64,6 +75,53 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   come back in `Unsupported`, which the section asks for by name.
 
 ### Added
+
+- **One declaration of the ABI, with the header and three bindings printed from
+  it** (B7). The failure this exists for is a C seam declared in three places
+  that must agree: add a function, forget one of them, and the build succeeds
+  and the field fails, on one platform. The declarations now record themselves
+  — the same macros that emit the Rust item emit a descriptor beside it, doc
+  comments included — and `tools/abi-gen` prints the C header, the Swift, the
+  Kotlin with its JNI shim, and the C#. No Rust source is parsed anywhere.
+  `scripts/check.sh` regenerates and compares, so a binding that fell behind is
+  a failed gate rather than a surprise.
+
+  What the gate cannot do is stated with it, because a gate believed to catch
+  more than it does is worse than a smaller one: **nothing compiles the
+  generated Swift, Kotlin or C#**, there being no toolchains in the gate, and
+  the JNI shim in particular has never been compiled. The descriptor records
+  the spelling rather than the layout, so a wrong `usize`-to-`size_t` rule
+  would be wrong in all five outputs at once and compare clean.
+
+  It also closed a coupling of exactly the shape B7 describes, found inside the
+  workspace this morning: `UaEvent::IncomingCall` was destructured field by
+  field in the FFI, so adding a field to it broke the build — one agent had
+  already had to redesign a feature around it.
+
+- **SRTP is reachable from a call** (SDES, RFC 4568). It was written in full,
+  proved against RFC 3711's own test vectors, and joined to nothing: no offer
+  named `RTP/SAVP`, no answer was read for keys, and no session was ever opened
+  protected. `Capabilities` said `srtp: true` regardless, which is the D8
+  failure exactly — a capability that cannot drift from the build is the whole
+  point of deriving it, and this one was a constant.
+
+  Offering is off by default and on per call, because the key travels in the
+  body (§7) and this layer cannot tell whether the signalling protects it.
+  **Answering is on by default**, which is a different decision made
+  differently: the peer has already asked for encryption, and refusing there
+  turns a call that would have worked into a silent one. "Offer" and "require"
+  are two settings and they differ in one place — an offer arriving *without*
+  keys, which `Required` refuses before anything goes on the wire, because that
+  is the only place a downgrade would be invisible.
+
+  Proved on the bytes rather than on the SDP: the same call is placed twice
+  from the same seeds, and the protected datagram is ten octets longer, shares
+  its first twelve with the plain one, and does not contain the plaintext
+  payload anywhere in it.
+
+  DTLS-SRTP is reported absent rather than pretended: there is no handshake in
+  this tree, and `Capabilities` now lists which keying a call can actually
+  reach instead of answering a bare yes.
 
 - **A session can be recorded and replayed deterministically** (D2). The
   hardest failures happen on one PBX, on one carrier, behind one NAT, and do
