@@ -4,8 +4,9 @@
 //! User agent layer.
 //!
 //! Registration with refresh, outgoing and incoming calls, hold and resume,
-//! blind and attended transfer, and the SUBSCRIBE/NOTIFY subscriptions behind
-//! message waiting and busy lamp field.
+//! blind and attended transfer, the SUBSCRIBE/NOTIFY subscriptions behind
+//! message waiting and busy lamp field, and the policy that decides whether an
+//! INVITE off the internet is ever heard at all.
 //!
 //! Also sans-I/O: this is policy and sequencing over [`sipral_core`], not
 //! transport. The five calls are the endpoint's five calls, so the same event
@@ -47,6 +48,7 @@ mod reliable;
 mod renegotiate;
 #[cfg(feature = "reference-loop")]
 mod runtime;
+mod screening;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -60,6 +62,7 @@ pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};
+pub use screening::{Incoming, Rate, Refusals, Screen, Screening};
 pub use session::Hold;
 
 /// What a caller needs from the layer below to drive this one, re-exported so

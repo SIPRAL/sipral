@@ -44,6 +44,34 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- An INVITE nobody asked for can be refused before anything sees it. Scanners
+  dial common extension numbers at every hour, and a client on a public port
+  either filters them or wakes its user at three in the morning. The policy hook
+  sits between registration and calls in the event chain, which is the last
+  place before the one site that mints a call handle and pushes
+  `IncomingCall` — "before any user-visible effect" is the requirement's own
+  sentence and it is where the ordering comes from.
+
+  Beneath it, a token bucket per source address — per address rather than per
+  socket, since a port costs an attacker nothing to change — in a table bounded
+  at sixty-four entries. At the bound a source whose bucket has refilled is
+  evicted, holding nothing a new entry would not; if every seat is still
+  spending, a stranger is refused rather than admitted untracked, because
+  admitting what cannot be limited is a hole exactly when it matters. The
+  limiter runs before the hook: calling arbitrary application code at flood rate
+  is the second attack.
+
+  Refusals are counted, cumulatively, and are deliberately not an event. An
+  event queue anybody on the internet can fill is the same attack one layer up.
+
+  The answer is 480 for every reason. §21.4.18 covers a callee "in a state that
+  precludes communication", which is what a screened number is and also what a
+  switched-off phone says, so one answer gives a scanner no way to tell a
+  guarded extension from an unattended one. 404 was rejected as an enumeration
+  oracle, 503 because §21.5.4 has a proxy stop forwarding to this agent
+  altogether, and 6xx because it speaks for the person rather than the device
+  and would silence the desk phone they are also registered on.
+
 - **The `sipral` crate is the facade it was always described as.** It was eleven
   lines — a name held on crates.io — while `docs/01-architecture.md` said it was
   where signalling and media meet. Nothing joined them, so `MediaPlan` and

@@ -40,6 +40,7 @@ use crate::registration::{
     Registration, backoff_delay, granted_expiry, min_expires, refresh_after, retry_after,
 };
 use crate::renegotiate::ParkedOffer;
+use crate::screening::Guard;
 
 /// One user agent: several accounts over one endpoint.
 #[derive(Debug)]
@@ -73,6 +74,9 @@ pub struct UserAgent {
     /// not refused until the drain ends without a retry.
     pub(crate) challenged_offers: HashMap<AnyTransactionId, ParkedOffer>,
     pub(crate) events: VecDeque<UaEvent>,
+    /// What an incoming INVITE meets before anything else here does, and the
+    /// count of what it turned away.
+    pub(crate) guard: Guard,
     next_account: u32,
     pub(crate) next_call: u32,
 }
@@ -100,6 +104,7 @@ impl UserAgent {
             challenged: HashMap::new(),
             challenged_offers: HashMap::new(),
             events: VecDeque::new(),
+            guard: Guard::default(),
             next_account: 0,
             next_call: 0,
         }
@@ -110,6 +115,9 @@ impl UserAgent {
     /// # Errors
     /// As [`Endpoint::receive`].
     pub fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
+        // where the bytes came from is on the input and nowhere else by the
+        // time an event names them, and screening an INVITE needs it
+        self.guard.arrived(&input);
         let outcome = self.endpoint.receive(input, now);
         self.drain(now);
         outcome
@@ -354,9 +362,17 @@ impl UserAgent {
     /// `None` when this layer claimed the event; the event back when nothing
     /// here has a policy for it, in which case it reaches the application
     /// unchanged.
+    ///
+    /// The chain is ordered, and the order is part of what each link means. A
+    /// handler added here goes where its subject is first touched, not at the
+    /// end: screening decides whether an INVITE becomes anything at all, so it
+    /// runs above the call handler that would otherwise mint the call and
+    /// queue the event, and a policy consulted after that has been asked about
+    /// something the application has already seen.
     fn on_core_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let event = self.on_options_event(event, now)?;
         let event = self.on_registration_event(event, now)?;
+        let event = self.on_screening_event(event, now)?;
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;
         let event = self.on_transfer_event(event, now)?;

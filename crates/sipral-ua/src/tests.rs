@@ -21,7 +21,8 @@ use crate::call::{CallEndReason, CallHandle, CallState, ForkPolicy, OutgoingCall
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::session::Hold;
 use crate::{
-    Credentials, EndpointConfig, Input, StatusCode, TransportId, TransportProtocol, UaError, Uri,
+    Credentials, EndpointConfig, Incoming, Input, Rate, Refusals, Screening, StatusCode,
+    TransportId, TransportProtocol, UaError, Uri,
 };
 
 const UDP: TransportId = TransportId(1);
@@ -2979,6 +2980,318 @@ fn a_require_nobody_here_implements_is_refused_with_420() {
             .all(|event| !matches!(*event, UaEvent::IncomingCall { .. })),
         "there is nothing for the application to decide"
     );
+}
+
+// -- calls nobody asked for --------------------------------------------------
+
+/// One of the machines that dial every extension at three in the morning.
+fn scanner(last: u8) -> SocketAddr {
+    format!("198.51.100.{last}:5060")
+        .parse()
+        .expect("a scanner's address")
+}
+
+/// The same as [`deliver`], from an address of the test's choosing.
+fn deliver_from(agent: &mut UserAgent, bytes: &[u8], from: SocketAddr, now: Instant) {
+    agent
+        .receive(
+            Input::Datagram {
+                transport: UDP,
+                remote: from,
+                local: local(),
+                data: bytes,
+            },
+            now,
+        )
+        .expect("a well formed datagram");
+}
+
+/// How many of these are somebody calling.
+fn ringing(agent: &mut UserAgent) -> usize {
+    events(agent)
+        .iter()
+        .filter(|event| matches!(**event, UaEvent::IncomingCall { .. }))
+        .count()
+}
+
+#[test]
+fn a_screened_invite_is_never_heard_and_leaves_nothing_behind() {
+    // A8: the policy runs before any user-visible effect, which means before
+    // the event and before there is a call to have an event about
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::new(480).expect("a status")));
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("scan", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 480 Temporarily Unavailable\r\n"));
+    assert!(
+        agent.calls.is_empty() && agent.by_server.is_empty(),
+        "nothing was written down that a caller could observe"
+    );
+    assert!(
+        events(&mut agent).is_empty(),
+        "and the application was told nothing at all"
+    );
+    assert_eq!(agent.refusals().by_policy, 1);
+}
+
+#[test]
+fn a_policy_that_takes_the_call_changes_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.screen(|_: &Incoming<'_>| Screening::Take);
+
+    deliver(&mut agent, &incoming_invite("in1", Some(OFFER)), t0);
+    transmits(&mut agent);
+
+    let incoming = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall {
+                call,
+                account,
+                request,
+            } => Some((call, account, request)),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    assert_eq!(incoming.1, Some(id));
+    assert_eq!(incoming.2.as_raw().body(), OFFER);
+    assert_eq!(agent.call_state(incoming.0), Some(CallState::Incoming));
+    assert_eq!(agent.refusals(), Refusals::default());
+}
+
+#[test]
+fn the_policy_decides_from_where_it_came_from_and_what_it_says() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.screen(|invite: &Incoming<'_>| {
+        let stranger = invite
+            .source()
+            .is_some_and(|source| source.ip() == scanner(1).ip());
+        let asked_for_alice = invite
+            .request()
+            .as_raw()
+            .header(HeaderName::To)
+            .is_some_and(|to| to.windows(5).any(|part| part == b"alice"));
+        if stranger && asked_for_alice {
+            Screening::Refuse(StatusCode::BUSY_HERE)
+        } else {
+            Screening::Take
+        }
+    });
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("s1", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 486 "));
+    assert_eq!(ringing(&mut agent), 0);
+
+    // the same request from the address the phone is registered with
+    deliver(&mut agent, &incoming_invite("s2", Some(OFFER)), t0);
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1, "not everybody is a scanner");
+}
+
+#[test]
+fn an_invite_on_a_stream_is_screened_by_the_far_end_of_the_connection() {
+    // there is no address on the bytes here: it is the one the application
+    // named when it said the connection was open
+    let t0 = Instant::now();
+    let (mut agent, _) = over_tcp(t0);
+    agent.screen(|invite: &Incoming<'_>| match invite.source() {
+        Some(source) if source == registrar() => Screening::Refuse(StatusCode::BUSY_HERE),
+        _ => Screening::Take,
+    });
+
+    stream(&mut agent, &incoming_invite("tcp1", Some(OFFER)), t0);
+
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 486 "));
+    assert_eq!(ringing(&mut agent), 0);
+}
+
+#[test]
+fn a_source_dialling_faster_than_the_limit_stops_being_heard() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(2, Duration::from_secs(30)));
+
+    for attempt in 0..2 {
+        let invite = incoming_invite(&format!("burst{attempt}"), Some(OFFER));
+        deliver_from(&mut agent, &invite, scanner(1), t0);
+    }
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 2, "the burst is what a phone does");
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("over", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 480 Temporarily Unavailable\r\n"));
+    assert_eq!(ringing(&mut agent), 0);
+    assert_eq!(agent.refusals().by_rate, 1);
+    assert_eq!(agent.calls.len(), 2, "the two that were taken, and no more");
+
+    // and the allowance comes back when the source stops hammering
+    let later = t0 + Duration::from_secs(30);
+    deliver_from(
+        &mut agent,
+        &incoming_invite("after", Some(OFFER)),
+        scanner(1),
+        later,
+    );
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1);
+}
+
+#[test]
+fn a_new_source_port_is_not_a_new_caller() {
+    // changing the port costs a scanner nothing, so the allowance is kept
+    // against the address it would have to own to hear an answer
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("p1", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1);
+
+    let moved = SocketAddr::new(scanner(1).ip(), 41_234);
+    deliver_from(&mut agent, &incoming_invite("p2", Some(OFFER)), moved, t0);
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 480 "));
+    assert_eq!(ringing(&mut agent), 0);
+    assert_eq!(agent.refusals().by_rate, 1);
+}
+
+#[test]
+fn the_limit_is_one_sources_and_not_everybodys() {
+    // a scanner that has used up its own allowance must not be able to spend
+    // the switchboard's with it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("s1", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    deliver_from(
+        &mut agent,
+        &incoming_invite("s2", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(ringing(&mut agent), 1);
+
+    deliver(&mut agent, &incoming_invite("pbx", Some(OFFER)), t0);
+    transmits(&mut agent);
+    assert_eq!(
+        ringing(&mut agent),
+        1,
+        "the call from the proxy still rings"
+    );
+    assert_eq!(agent.refusals().by_rate, 1);
+}
+
+#[test]
+fn the_limit_answers_before_the_policy_is_troubled_with_a_flood() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.limit_invites(Rate::new(1, Duration::from_secs(30)));
+    agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::BUSY_HERE));
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("s1", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    assert!(
+        last(&mut agent).starts_with(b"SIP/2.0 486 "),
+        "the first one reached the policy"
+    );
+
+    deliver_from(
+        &mut agent,
+        &incoming_invite("s2", Some(OFFER)),
+        scanner(1),
+        t0,
+    );
+    assert!(
+        last(&mut agent).starts_with(b"SIP/2.0 480 "),
+        "the second was refused by the limit, which never asked"
+    );
+    assert_eq!(agent.refusals().by_policy, 1);
+    assert_eq!(agent.refusals().by_rate, 1);
+}
+
+#[test]
+fn what_was_refused_is_counted_from_the_beginning_and_not_from_the_last_look() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::BUSY_HERE));
+
+    for attempt in 0..3 {
+        let invite = incoming_invite(&format!("scan{attempt}"), Some(OFFER));
+        deliver_from(&mut agent, &invite, scanner(1), t0);
+        transmits(&mut agent);
+        assert_eq!(
+            agent.refusals().by_policy,
+            attempt + 1,
+            "reading the counter does not empty it"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_is_decided_before_anything_else_looks_at_the_invite() {
+    // §8.2.2.3 has this INVITE refused with a 420, and that refusal is decided
+    // by the call handler further down the chain. A screened INVITE never
+    // reaches it, so the answer is the policy's rather than the protocol's
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    agent.screen(|_: &Incoming<'_>| Screening::Refuse(StatusCode::new(480).expect("a status")));
+
+    deliver_from(
+        &mut agent,
+        &plus(
+            &incoming_invite("odd", Some(OFFER)),
+            "Require: gruu, 100rel\r\n",
+        ),
+        scanner(1),
+        t0,
+    );
+
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 480 "));
+    assert_eq!(agent.refusals().by_policy, 1);
 }
 
 // -- transfer ----------------------------------------------------------------
