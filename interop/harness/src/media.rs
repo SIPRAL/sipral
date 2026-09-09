@@ -184,7 +184,7 @@ impl Media {
         loop {
             match self.socket.recv_from(&mut inbox) {
                 Ok((length, from)) => {
-                    let datagram = inbox.get(..length).unwrap_or_default();
+                    let datagram = inbox.get_mut(..length).unwrap_or_default();
                     match session.receive(datagram, from, elapsed) {
                         Received::Queued => {
                             self.heard.received = self.heard.received.saturating_add(1);

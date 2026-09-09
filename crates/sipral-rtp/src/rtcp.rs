@@ -1119,6 +1119,8 @@ pub enum RtcpBuildError {
     TooManySources(usize),
     /// An SDES item's text longer than the eight-bit length field.
     ItemTooLong(usize),
+    /// The packet was built and then refused by SRTP.
+    Secured(crate::srtp::SrtpError),
     /// A BYE reason longer than the eight-bit length field.
     ReasonTooLong(usize),
     /// The SDES packet being built has no CNAME item in any chunk.
@@ -1139,6 +1141,7 @@ impl fmt::Display for RtcpBuildError {
                 write!(f, "BYE reason of {n} octets, {MAX_TEXT_LEN} is the most")
             }
             Self::MissingCname => write!(f, "no SDES CNAME item in any chunk"),
+            Self::Secured(error) => write!(f, "the packet could not be protected: {error}"),
         }
     }
 }

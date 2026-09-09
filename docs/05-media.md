@@ -133,6 +133,16 @@ the suite says about SRTP's, because §5.2 forbids shortening it. Key material
 is zeroised on drop. Unencrypted RTP arriving on a secured session is dropped,
 never accepted as a fallback.
 
+The session owns it rather than the caller. `RtpSession::protected` takes the
+two master keys the negotiation produced — one for each direction, because RFC
+4568 §7.1.1 forbids using one key for both — and from then on everything built
+goes out protected and everything arriving is verified before any of it is
+believed. The caller's only new obligation is a buffer larger by
+`rtp_overhead()`, and a buffer that is not is refused before a sequence number
+is spent. Leaving protect and unprotect to the caller would have been less
+code here and one more thing for every integrator to get wrong in the same
+way.
+
 SDES key exchange through `a=crypto` in SDP for the common case. DTLS-SRTP is
 deliberately not here yet: it needs a DTLS implementation, `rustls` has none,
 and the alternatives are single-maintainer crates. The cost of the delay is

@@ -27,7 +27,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   depends on, because a table-driven AES leaks its key through the cache;
   everything above it is in-tree. Linking libsrtp2, which the roadmap used to
   name, was dropped: it is C, and this crate denies `unsafe`.
-
+- `RtpSession::protected`, which puts SRTP under an ordinary RTP stream. What
+  it builds goes out protected and what arrives is verified before any of it
+  is believed, so the order RFC 3711 §3.3 sets out is not something an
+  integrator can get wrong. `RtpSession::receive` and `rtcp_receive` now take
+  the caller's buffer mutably, because a receiver decrypts in place.
+- The `a=crypto` line read as values in `sipral-core`: the suite, the master
+  key and salt out of the `inline:` parameter, the lifetime in both forms, the
+  master key identifier, and the session parameters that say whether to
+  encrypt and whether to authenticate. Every rule RFC 4568 states as making
+  the attribute invalid refuses it. A peer that sends back a key we offered is
+  refused too — §7.1.2 requires the keys to differ, and one key protecting
+  both directions is the failure the transform cannot survive.
 - Hold and resume in `sipral-ua`, and the offers that come after them. Hold is
   RFC 3264 §8.4's: the description already negotiated, with a stream that was
   `sendrecv` marked `sendonly` and one that was `recvonly` marked `inactive`,

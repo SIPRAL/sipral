@@ -823,6 +823,96 @@ impl Unprotector {
     }
 }
 
+/// The keys for one call, one direction each way.
+///
+/// RFC 4568 §7.1.1: "The inline parameter conveys the SRTP master key used by
+/// an endpoint to encrypt the SRTP and SRTCP streams transmitted by that
+/// endpoint ... the receiver MUST NOT use that same key for the SRTP or SRTCP
+/// packets that it sends". So there are two master keys and two contexts, and
+/// this is the pair.
+pub struct Security {
+    sending: Protector,
+    receiving: Unprotector,
+}
+
+impl Security {
+    /// The two halves. `sending` protects what this endpoint transmits and
+    /// carries the key this endpoint offered; `receiving` opens what arrives
+    /// and carries the key the peer offered.
+    #[must_use]
+    pub fn new(
+        sending: Policy,
+        sending_key: Master,
+        receiving: Policy,
+        receiving_key: Master,
+    ) -> Self {
+        Self {
+            sending: Protector::new(sending, sending_key),
+            receiving: Unprotector::new(receiving, receiving_key),
+        }
+    }
+
+    /// Octets a protected RTP packet is longer than the packet it came from.
+    #[must_use]
+    pub const fn rtp_overhead(&self) -> usize {
+        self.sending.rtp_overhead()
+    }
+
+    /// Octets a protected RTCP packet is longer than the packet it came from.
+    #[must_use]
+    pub const fn rtcp_overhead(&self) -> usize {
+        self.sending.rtcp_overhead()
+    }
+
+    /// Protect an outgoing RTP packet in place.
+    ///
+    /// # Errors
+    /// As [`Protector::protect_rtp`].
+    pub fn protect_rtp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
+        self.sending.protect_rtp(packet, len)
+    }
+
+    /// Protect an outgoing RTCP packet in place.
+    ///
+    /// # Errors
+    /// As [`Protector::protect_rtcp`].
+    pub fn protect_rtcp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
+        self.sending.protect_rtcp(packet, len)
+    }
+
+    /// Verify and decrypt an arriving RTP packet in place.
+    ///
+    /// # Errors
+    /// As [`Unprotector::unprotect_rtp`].
+    pub fn unprotect_rtp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
+        self.receiving.unprotect_rtp(packet)
+    }
+
+    /// Verify and decrypt an arriving RTCP packet in place.
+    ///
+    /// # Errors
+    /// As [`Unprotector::unprotect_rtcp`].
+    pub fn unprotect_rtcp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
+        self.receiving.unprotect_rtcp(packet)
+    }
+
+    /// The rollover counter of the stream being sent, which a second receiver
+    /// joining late would have to be given (§3.3.1).
+    #[must_use]
+    pub const fn rollover(&self) -> u32 {
+        self.sending.rollover()
+    }
+}
+
+impl core::fmt::Debug for Security {
+    /// Names the type and nothing else. Everything inside is key material or
+    /// derived from it, and a value that cannot be printed cannot be printed
+    /// by accident.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Security { .. }")
+    }
+}
+
 /// Where the RTP payload begins: the fixed header, the CSRC list, and the
 /// header extension if the X bit says there is one (RFC 3550 §5.1, §5.3.1).
 fn rtp_header_len(packet: &[u8]) -> Result<usize, SrtpError> {

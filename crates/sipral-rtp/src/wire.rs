@@ -467,6 +467,8 @@ pub enum BuildError {
     /// An extension that is not a whole number of 32-bit words, or longer than
     /// the length field can count.
     ExtensionLength(usize),
+    /// The packet was built and then refused by SRTP.
+    Secured(crate::srtp::SrtpError),
 }
 
 impl fmt::Display for BuildError {
@@ -477,6 +479,7 @@ impl fmt::Display for BuildError {
             Self::EventVolume(v) => write!(f, "event volume {v} does not fit six bits"),
             Self::TooManyCsrc(n) => write!(f, "{n} contributing sources, {MAX_CSRC} is the most"),
             Self::ExtensionLength(n) => write!(f, "extension of {n} octets is not whole words"),
+            Self::Secured(error) => write!(f, "the packet could not be protected: {error}"),
         }
     }
 }

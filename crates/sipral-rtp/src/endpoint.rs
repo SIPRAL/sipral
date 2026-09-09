@@ -17,7 +17,10 @@ use crate::rtcp::{
 use crate::rtcp_stats::{ReceptionTracker, round_trip_time};
 use crate::rtcp_timer::{Due, IntervalTimer};
 use crate::source::{SeqUpdate, SequenceState};
-use crate::wire::{BuildError, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket};
+use crate::srtp::{Security, SrtpError};
+use crate::wire::{
+    BuildError, FIXED_HEADER_LEN, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket,
+};
 
 /// Everything one stream needs before it can start.
 ///
@@ -92,6 +95,11 @@ pub enum Discard {
     Duplicate,
     /// Behind the playout point.
     Late,
+    /// SRTP refused it: a bad tag, a replay, or a packet too short to be one.
+    /// On a secured stream this is also what a plain RTP packet becomes, and
+    /// deliberately — falling back to the clear is worse than dropping the
+    /// audio.
+    Insecure(SrtpError),
 }
 
 /// What an incoming compound RTCP packet said.
@@ -111,6 +119,8 @@ pub enum RtcpReceived<'a> {
     ForeignAddress,
     /// Not a well-formed compound RTCP packet.
     Malformed(RtcpError),
+    /// SRTCP refused it, so nothing in it was read.
+    Insecure(SrtpError),
 }
 
 /// One RTP stream in each direction, plus the RTCP that goes with it.
@@ -129,6 +139,11 @@ pub struct RtpSession {
     cname: String,
     timer: IntervalTimer,
     round_trip: Option<Duration>,
+    /// The SRTP contexts, when the negotiation produced keys. Held here
+    /// rather than left to the caller so that the order of §3.3 — protect
+    /// after building, verify before believing — is not something a caller
+    /// can get wrong.
+    security: Option<Security>,
 }
 
 #[derive(Debug)]
@@ -225,6 +240,75 @@ impl RtpSession {
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
             round_trip: None,
+            security: None,
+        }
+    }
+
+    /// The same stream, with SRTP over it.
+    ///
+    /// Everything sent is protected on the way out and everything arriving is
+    /// verified before any of it is believed, in the order RFC 3711 §3.3 sets
+    /// out. A packet that fails is dropped as [`Discard::Insecure`]; a plain
+    /// RTP packet arriving here fails too, because it cannot carry a tag.
+    ///
+    /// The keys come from the key management the signalling did — SDES, in
+    /// practice — and never from here: this crate draws no random numbers.
+    #[must_use]
+    pub fn protected(config: &StreamConfig, unit_interval: f64, security: Security) -> Self {
+        Self {
+            security: Some(security),
+            ..Self::new(config, unit_interval)
+        }
+    }
+
+    /// Octets every packet sent on this stream is longer than the packet the
+    /// builders produce, which is what a caller has to add to its buffer.
+    /// Zero when the stream is not secured.
+    #[must_use]
+    pub const fn rtp_overhead(&self) -> usize {
+        match &self.security {
+            Some(security) => security.rtp_overhead(),
+            None => 0,
+        }
+    }
+
+    /// The same for RTCP, whose overhead is larger: the index word travels
+    /// alongside the tag.
+    #[must_use]
+    pub const fn rtcp_overhead(&self) -> usize {
+        match &self.security {
+            Some(security) => security.rtcp_overhead(),
+            None => 0,
+        }
+    }
+
+    /// The room a builder is given: the buffer, less what SRTP will add to
+    /// what it writes. `need` is the whole protected packet, so a buffer that
+    /// is too small is refused in the caller's terms rather than in the
+    /// builder's.
+    fn room(out: &mut [u8], need: usize, overhead: usize) -> Option<&mut [u8]> {
+        if out.len() < need {
+            return None;
+        }
+        let room = out.len().checked_sub(overhead)?;
+        out.get_mut(..room)
+    }
+
+    fn protect_rtp(&mut self, out: &mut [u8], built: usize) -> Result<usize, BuildError> {
+        match &mut self.security {
+            Some(security) => security
+                .protect_rtp(out, built)
+                .map_err(BuildError::Secured),
+            None => Ok(built),
+        }
+    }
+
+    fn protect_rtcp(&mut self, out: &mut [u8], built: usize) -> Result<usize, RtcpBuildError> {
+        match &mut self.security {
+            Some(security) => security
+                .protect_rtcp(out, built)
+                .map_err(RtcpBuildError::Secured),
+            None => Ok(built),
         }
     }
 
@@ -245,8 +329,17 @@ impl RtpSession {
     /// likes, and feeds only the interarrival jitter estimate (§6.4.1): nothing
     /// here reads a clock of its own, so a caller that does not care about
     /// RTCP may pass anything monotonic.
-    pub fn receive(&mut self, datagram: &[u8], from: SocketAddr, now: Duration) -> Received {
-        let packet = match RtpPacket::parse(datagram) {
+    pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Duration) -> Received {
+        // §3.3: verify, then decrypt, then believe. Nothing below this line
+        // sees a packet whose tag did not check out
+        let plain = match &mut self.security {
+            Some(security) => match security.unprotect_rtp(datagram) {
+                Ok(len) => datagram.get(..len).unwrap_or_default(),
+                Err(error) => return Received::Dropped(Discard::Insecure(error)),
+            },
+            None => &*datagram,
+        };
+        let packet = match RtpPacket::parse(plain) {
             Ok(packet) => packet,
             Err(error) => return Received::Dropped(Discard::Malformed(error)),
         };
@@ -356,7 +449,13 @@ impl RtpSession {
             timestamp: self.outbound.timestamp,
             ssrc: self.outbound.ssrc,
         };
-        let written = PacketBuilder::new(header, payload).write(out)?;
+        let overhead = self.rtp_overhead();
+        let need = FIXED_HEADER_LEN + payload.len() + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(BuildError::Short { need, got: offered })?;
+        let built = PacketBuilder::new(header, payload).write(room)?;
+        let written = self.protect_rtp(out, built)?;
         self.outbound.spurt_start = false;
         self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
         self.outbound.timestamp = self.outbound.timestamp.wrapping_add(samples);
@@ -437,7 +536,13 @@ impl RtpSession {
             timestamp: event.timestamp,
             ssrc: self.outbound.ssrc,
         };
-        let written = PacketBuilder::new(header, &payload).write(out)?;
+        let overhead = self.rtp_overhead();
+        let need = FIXED_HEADER_LEN + EVENT_LEN + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(BuildError::Short { need, got: offered })?;
+        let built = PacketBuilder::new(header, &payload).write(room)?;
+        let written = self.protect_rtp(out, built)?;
         self.outbound.sequence = self.outbound.sequence.wrapping_add(1);
 
         let ended = event
@@ -616,8 +721,16 @@ impl RtpSession {
             })
         };
 
-        let written = CompoundBuilder::new(report, sdes).write(out)?;
+        let compound = CompoundBuilder::new(report, sdes);
+        let overhead = self.rtcp_overhead();
+        let need = compound.encoded_len() + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(RtcpBuildError::Short { need, got: offered })?;
+        let built = compound.write(room)?;
+        let written = self.protect_rtcp(out, built)?;
         self.outbound.sent_since_report = false;
+        // §6.3.3 counts what goes on the wire, which is the protected packet
         let next = self.timer.sent(now, written, unit_interval);
         Ok((written, next))
     }
@@ -656,7 +769,13 @@ impl RtpSession {
             reason,
         };
         let compound = CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes).with_bye(bye);
-        let written = compound.write(out)?;
+        let overhead = self.rtcp_overhead();
+        let need = compound.encoded_len() + overhead;
+        let offered = out.len();
+        let room =
+            Self::room(out, need, overhead).ok_or(RtcpBuildError::Short { need, got: offered })?;
+        let built = compound.write(room)?;
+        let written = self.protect_rtcp(out, built)?;
         self.timer.leaving(now, written, unit_interval);
         Ok(written)
     }
@@ -674,11 +793,22 @@ impl RtpSession {
     /// all never decides where RTCP is heard from.
     pub fn rtcp_receive<'a>(
         &mut self,
-        datagram: &'a [u8],
+        datagram: &'a mut [u8],
         from: SocketAddr,
         now: Duration,
         ntp: u64,
     ) -> RtcpReceived<'a> {
+        // what §6.3.3 folds into the report interval is the size on the wire,
+        // which is the protected one
+        let wire = datagram.len();
+        let plain = match &mut self.security {
+            Some(security) => match security.unprotect_rtcp(datagram) {
+                Ok(len) => len,
+                Err(error) => return RtcpReceived::Insecure(error),
+            },
+            None => wire,
+        };
+        let datagram = datagram.get(..plain).unwrap_or_default();
         let compound = match CompoundPacket::parse(datagram) {
             Ok(compound) => compound,
             Err(error) => return RtcpReceived::Malformed(error),
@@ -690,7 +820,7 @@ impl RtpSession {
         // which is this one and not a datagram that failed to be one:
         // avg_rtcp_size is the numerator of §6.3.1's interval, so anything
         // counted here moves this session's own reporting cadence.
-        self.timer.observe(datagram.len());
+        self.timer.observe(wire);
         if !self.inbound.member_known {
             self.inbound.member_known = true;
             self.timer.note_member();
@@ -820,6 +950,7 @@ mod tests {
         SourceDescriptionBuilder,
     };
     use crate::rtcp_timer::Due;
+    use crate::srtp::{Master, Policy, Security, SrtpError, Suite};
     use crate::wire::{BuildError, PacketBuilder, PacketError, RtpHeader, RtpPacket};
 
     const PEER: &str = "198.51.100.7:16384";
@@ -885,11 +1016,11 @@ mod tests {
     /// Two packets in a row, which is what A.1 asks for before a source counts.
     fn establish(session: &mut RtpSession, ssrc: u32, from: SocketAddr) -> u16 {
         assert_eq!(
-            session.receive(&datagram(ssrc, 100, 8), from, Duration::ZERO),
+            session.receive(&mut datagram(ssrc, 100, 8), from, Duration::ZERO),
             Received::Dropped(Discard::Probation)
         );
         assert_eq!(
-            session.receive(&datagram(ssrc, 101, 8), from, Duration::ZERO),
+            session.receive(&mut datagram(ssrc, 101, 8), from, Duration::ZERO),
             Received::Queued
         );
         102
@@ -981,7 +1112,7 @@ mod tests {
             "until a packet arrives, the answer is all there is to go on"
         );
 
-        session.receive(&datagram(7, 100, 8), addr(PEER), Duration::ZERO);
+        session.receive(&mut datagram(7, 100, 8), addr(PEER), Duration::ZERO);
         assert_eq!(session.latched(), Some(addr(PEER)));
         assert_eq!(
             session.destination(),
@@ -996,7 +1127,7 @@ mod tests {
         let next = establish(&mut session, 7, addr(PEER));
 
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(IMPOSTOR), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(IMPOSTOR), Duration::ZERO),
             Received::Dropped(Discard::ForeignAddress)
         );
         assert_eq!(
@@ -1013,7 +1144,7 @@ mod tests {
 
         // and the real peer carries on unaffected
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
     }
@@ -1026,7 +1157,7 @@ mod tests {
 
         // same address, different SSRC: one machine, two streams
         assert_eq!(
-            session.receive(&datagram(9, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(9, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::SecondSource(9))
         );
         assert_eq!(session.remote_ssrc(), Some(7));
@@ -1036,7 +1167,7 @@ mod tests {
         session.follow(9);
         assert_eq!(session.remote_ssrc(), Some(9));
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::SecondSource(7))
         );
         establish(&mut session, 9, addr(PEER));
@@ -1058,7 +1189,7 @@ mod tests {
         // does not understand"
         let mut session = session();
         assert_eq!(
-            session.receive(&datagram(7, 100, 96), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, 100, 96), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::PayloadType(96))
         );
         assert_eq!(
@@ -1072,7 +1203,7 @@ mod tests {
     fn a_datagram_that_is_not_a_packet_never_gets_as_far_as_the_latch() {
         let mut session = session();
         assert_eq!(
-            session.receive(b"not rtp", addr(IMPOSTOR), Duration::ZERO),
+            session.receive(&mut b"not rtp".to_owned(), addr(IMPOSTOR), Duration::ZERO),
             Received::Dropped(Discard::Malformed(PacketError::TooShort { got: 7 }))
         );
         assert_eq!(session.latched(), None);
@@ -1083,12 +1214,12 @@ mod tests {
         // RFC 3550 A.1: two in a row before a source counts
         let mut session = session();
         assert_eq!(
-            session.receive(&datagram(7, 100, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, 100, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Probation)
         );
         assert!(matches!(session.pull(Activity::Speech), Pull::Empty));
         assert_eq!(
-            session.receive(&datagram(7, 101, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, 101, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
     }
@@ -1098,16 +1229,16 @@ mod tests {
         let mut session = session();
         let next = establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.receive(&datagram(7, 40000, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, 40000, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::BadSequence)
         );
         // the second one says the far end restarted, and the stream follows it
         assert_eq!(
-            session.receive(&datagram(7, 40001, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, 40001, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::BadSequence),
             "the old numbering is gone with the stream it belonged to"
         );
@@ -1118,11 +1249,11 @@ mod tests {
         let mut session = session();
         let next = establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Queued
         );
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Duplicate)
         );
 
@@ -1131,7 +1262,7 @@ mod tests {
             Pull::Packet(_) | Pull::Conceal
         ) {}
         assert_eq!(
-            session.receive(&datagram(7, next, 8), addr(PEER), Duration::ZERO),
+            session.receive(&mut datagram(7, next, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::Late)
         );
         assert_eq!(session.quality().duplicates, 1);
@@ -1144,7 +1275,7 @@ mod tests {
         establish(&mut session, 7, addr(PEER));
         for sequence in [104_u16, 102, 103] {
             assert_eq!(
-                session.receive(&datagram(7, sequence, 8), addr(PEER), Duration::ZERO),
+                session.receive(&mut datagram(7, sequence, 8), addr(PEER), Duration::ZERO),
                 Received::Queued
             );
         }
@@ -1527,7 +1658,7 @@ mod tests {
         session.relocate(addr(IMPOSTOR));
         assert_eq!(session.latched(), None);
         assert_eq!(session.destination(), addr(IMPOSTOR));
-        session.receive(&datagram(7, 102, 8), addr(IMPOSTOR), Duration::ZERO);
+        session.receive(&mut datagram(7, 102, 8), addr(IMPOSTOR), Duration::ZERO);
         assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
     }
 
@@ -1606,7 +1737,12 @@ mod tests {
         let n = round_trip_report(&mut incoming, 99);
         let arrival_ntp = 0xb710_8000_u64 << 16;
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::Report
         );
         assert_eq!(
@@ -1638,7 +1774,7 @@ mod tests {
             .expect("room");
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
             RtcpReceived::Goodbye {
                 reason: b"call ended"
             }
@@ -1649,7 +1785,12 @@ mod tests {
     fn a_malformed_rtcp_datagram_is_reported_rather_than_panicking() {
         let mut session = session();
         assert!(matches!(
-            session.rtcp_receive(b"not rtcp", addr(PEER_RTCP), Duration::ZERO, 0),
+            session.rtcp_receive(
+                &mut b"not rtcp".to_owned(),
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                0
+            ),
             RtcpReceived::Malformed(_)
         ));
     }
@@ -1666,7 +1807,12 @@ mod tests {
         let arrival_ntp = 0xb710_8000_u64 << 16;
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(IMPOSTOR),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::ForeignAddress
         );
         assert_eq!(
@@ -1679,7 +1825,12 @@ mod tests {
         // it one above the RTP port, so the port differs and the host does
         // not
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::Report
         );
         assert_eq!(
@@ -1696,14 +1847,14 @@ mod tests {
         let n = round_trip_report(&mut incoming, 99);
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
             RtcpReceived::Report
         );
         // same host, another port: one peer sends its reports from one
         // socket, so this is somebody else
         assert_eq!(
             session.rtcp_receive(
-                &incoming[..n],
+                &mut incoming[..n],
                 addr("198.51.100.7:40001"),
                 Duration::ZERO,
                 0
@@ -1714,7 +1865,7 @@ mod tests {
         // a re-INVITE that moves the far end opens the latch again
         session.relocate(addr(IMPOSTOR));
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, 0),
+            session.rtcp_receive(&mut incoming[..n], addr(IMPOSTOR), Duration::ZERO, 0),
             RtcpReceived::Report
         );
     }
@@ -1731,7 +1882,12 @@ mod tests {
         let arrival_ntp = 0xb710_8000_u64 << 16;
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(IMPOSTOR),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::ForeignAddress
         );
         assert_eq!(
@@ -1745,7 +1901,7 @@ mod tests {
         // the only thing the session knows about the far end
         assert_eq!(
             session.rtcp_receive(
-                &incoming[..n],
+                &mut incoming[..n],
                 addr(SIGNALLED_RTCP),
                 Duration::ZERO,
                 arrival_ntp
@@ -1769,14 +1925,24 @@ mod tests {
         let arrival_ntp = 0xb710_8000_u64 << 16;
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(IMPOSTOR),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::ForeignAddress
         );
         assert_eq!(session.round_trip_time(), None);
 
         establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::Report,
             "and the peer it tried to impersonate is not shut out by it"
         );
@@ -1795,7 +1961,7 @@ mod tests {
 
         // a report arrives from the answer's address before any audio does
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            session.rtcp_receive(&mut incoming[..n], addr(SIGNALLED_RTCP), Duration::ZERO, 0),
             RtcpReceived::Report
         );
 
@@ -1803,7 +1969,12 @@ mod tests {
         // allocated, which is the better of the two
         establish(&mut session, 7, addr(PEER));
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER_RTCP), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::Report
         );
         assert_eq!(
@@ -1814,7 +1985,7 @@ mod tests {
         // the earlier address does not speak for the call any more
         assert_eq!(
             session.rtcp_receive(
-                &incoming[..n],
+                &mut incoming[..n],
                 addr(SIGNALLED_RTCP),
                 Duration::ZERO,
                 arrival_ntp
@@ -1834,7 +2005,7 @@ mod tests {
         let arrival_ntp = 0xb710_8000_u64 << 16;
 
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(PEER), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(&mut incoming[..n], addr(PEER), Duration::ZERO, arrival_ntp),
             RtcpReceived::Report
         );
         assert_eq!(
@@ -1842,7 +2013,12 @@ mod tests {
             Some(Duration::new(6, 125_000_000))
         );
         assert_eq!(
-            session.rtcp_receive(&incoming[..n], addr(IMPOSTOR), Duration::ZERO, arrival_ntp),
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(IMPOSTOR),
+                Duration::ZERO,
+                arrival_ntp
+            ),
             RtcpReceived::ForeignAddress
         );
     }
@@ -1864,7 +2040,7 @@ mod tests {
 
         for _ in 0..8 {
             assert!(matches!(
-                fed.rtcp_receive(&[0_u8; 1200], addr(PEER_RTCP), Duration::ZERO, 0),
+                fed.rtcp_receive(&mut [0_u8; 1200], addr(PEER_RTCP), Duration::ZERO, 0),
                 RtcpReceived::Malformed(_)
             ));
         }
@@ -1934,5 +2110,234 @@ mod tests {
 
         let rtp = datagram(7, 100, 8);
         assert!(!crate::rtcp::is_rtcp(&rtp));
+    }
+
+    /// The two ends of a secured call, each with the key the other will use
+    /// to open what it sends — RFC 4568 §7.1.1's two master keys.
+    fn secured_pair() -> (RtpSession, RtpSession) {
+        let policy = Policy::new(Suite::AesCm80);
+        let ours = || Master::new([0x11; 16], [0x22; 14]);
+        let theirs = || Master::new([0x33; 16], [0x44; 14]);
+
+        let mut caller_config = config();
+        caller_config.remote = addr(PEER);
+        let caller = RtpSession::protected(
+            &caller_config,
+            0.5,
+            Security::new(policy, ours(), policy, theirs()),
+        );
+
+        let mut peer_config = config();
+        peer_config.ssrc = 0x0a0b_0c0d;
+        peer_config.remote = addr(SIGNALLED);
+        peer_config.cname = "peer@198.51.100.7".to_string();
+        let peer = RtpSession::protected(
+            &peer_config,
+            0.5,
+            Security::new(policy, theirs(), policy, ours()),
+        );
+        (caller, peer)
+    }
+
+    #[test]
+    fn a_secured_stream_carries_audio_end_to_end() {
+        let (mut caller, mut peer) = secured_pair();
+        assert_eq!(caller.rtp_overhead(), 10);
+
+        let mut wire = vec![0_u8; 64];
+        for packet in 0..4 {
+            let len = caller
+                .send(b"eight ok", 160, &mut wire)
+                .expect("room for the tag");
+            assert_eq!(len, 12 + 8 + 10);
+            assert_ne!(
+                wire.get(12..20),
+                Some(&b"eight ok"[..]),
+                "the payload went out in the clear"
+            );
+            let mut received = wire.get(..len).unwrap_or_default().to_vec();
+            let outcome = peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO);
+            // A.1's probation: the first packet of a source is decrypted and
+            // authenticated but not yet played
+            let expected = if packet == 0 {
+                Received::Dropped(Discard::Probation)
+            } else {
+                Received::Queued
+            };
+            assert_eq!(outcome, expected, "packet {packet}");
+        }
+        let Pull::Packet(frame) = peer.pull(Activity::Speech) else {
+            panic!("nothing came out of the buffer");
+        };
+        assert_eq!(frame.payload, b"eight ok");
+    }
+
+    // "Unencrypted RTP arriving on a secured session is dropped, never
+    // accepted as a fallback" — a plain packet has no tag, so what it does
+    // have gets read as one and fails
+    #[test]
+    fn a_plain_packet_on_a_secured_stream_is_dropped() {
+        let (_, mut peer) = secured_pair();
+        // too short to hold a tag at all once one is subtracted
+        assert_eq!(
+            peer.receive(&mut datagram(7, 100, 8), addr(SIGNALLED), Duration::ZERO),
+            Received::Dropped(Discard::Insecure(SrtpError::Malformed))
+        );
+        // and long enough that its last ten octets are read as a tag, which
+        // is not one
+        let mut plain = RtpSession::new(&config(), 0.5);
+        let mut wire = vec![0_u8; 64];
+        let len = plain
+            .send(b"sixteen bytes ok", 160, &mut wire)
+            .expect("room");
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO),
+            Received::Dropped(Discard::Insecure(SrtpError::NotAuthentic))
+        );
+    }
+
+    #[test]
+    fn a_packet_from_the_wrong_key_never_reaches_the_buffer() {
+        let (mut caller, _) = secured_pair();
+        let policy = Policy::new(Suite::AesCm80);
+        let mut stranger = RtpSession::protected(
+            &config(),
+            0.5,
+            Security::new(
+                policy,
+                Master::new([0x55; 16], [0x66; 14]),
+                policy,
+                Master::new([0x77; 16], [0x88; 14]),
+            ),
+        );
+
+        let mut wire = vec![0_u8; 64];
+        let len = caller.send(b"eight ok", 160, &mut wire).expect("room");
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            stranger.receive(&mut received, addr(SIGNALLED), Duration::ZERO),
+            Received::Dropped(Discard::Insecure(SrtpError::NotAuthentic))
+        );
+        assert!(matches!(stranger.pull(Activity::Speech), Pull::Empty));
+    }
+
+    #[test]
+    fn a_buffer_with_no_room_for_the_tag_is_refused_before_anything_is_spent() {
+        let (mut caller, _) = secured_pair();
+        // twelve of header and eight of payload fit; the ten of tag do not,
+        // and the refusal is stated in the caller's terms rather than in what
+        // the builder saw after SRTP's share was set aside
+        let mut cramped = vec![0_u8; 20];
+        assert_eq!(
+            caller.send(b"eight ok", 160, &mut cramped),
+            Err(BuildError::Short { need: 30, got: 20 })
+        );
+
+        // the sequence number travels in the clear, so what the refused call
+        // did or did not spend can be read straight off the wire
+        let mut roomy = vec![0_u8; 64];
+        caller.send(b"eight ok", 160, &mut roomy).expect("room");
+        assert_eq!(roomy.get(2..4), Some(&1000_u16.to_be_bytes()[..]));
+        caller.send(b"eight ok", 160, &mut roomy).expect("room");
+        assert_eq!(roomy.get(2..4), Some(&1001_u16.to_be_bytes()[..]));
+    }
+
+    #[test]
+    fn a_secured_report_is_read_at_the_other_end() {
+        let (mut caller, mut peer) = secured_pair();
+        assert_eq!(caller.rtcp_overhead(), 14);
+
+        let mut wire = vec![0_u8; 256];
+        let (len, _) = caller
+            .build_report(&mut wire, Duration::ZERO, 0x1234_5678_9abc_def0, 0.5)
+            .expect("room");
+        assert_ne!(
+            wire.get(8..12),
+            Some(&[0_u8; 4][..]),
+            "the sender info went out in the clear"
+        );
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            peer.rtcp_receive(&mut received, addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+    }
+
+    #[test]
+    fn a_plain_report_on_a_secured_stream_is_refused() {
+        let (_, mut peer) = secured_pair();
+        let mut plain = RtpSession::new(&config(), 0.5);
+        let mut wire = vec![0_u8; 256];
+        let (len, _) = plain
+            .build_report(&mut wire, Duration::ZERO, 0, 0.5)
+            .expect("room");
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        assert!(matches!(
+            peer.rtcp_receive(&mut received, addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Insecure(_)
+        ));
+    }
+
+    /// Pass `packets` of protected audio from one end to the other, which is
+    /// what makes the receiver latch onto the sender's SSRC — without that,
+    /// a BYE names a source it has never heard of.
+    fn flow(caller: &mut RtpSession, peer: &mut RtpSession, packets: usize) {
+        let mut wire = vec![0_u8; 64];
+        for _ in 0..packets {
+            let len = caller.send(b"eight ok", 160, &mut wire).expect("room");
+            let mut received = wire.get(..len).unwrap_or_default().to_vec();
+            peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn a_secured_goodbye_is_read_at_the_other_end() {
+        let (mut caller, mut peer) = secured_pair();
+        flow(&mut caller, &mut peer, 2);
+        let mut wire = vec![0_u8; 256];
+        let len = caller
+            .send_bye(&mut wire, Duration::ZERO, b"done", 0.5)
+            .expect("room");
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            peer.rtcp_receive(&mut received, addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye { reason: b"done" }
+        );
+    }
+
+    #[test]
+    fn a_secured_event_carries_the_digit() {
+        let (mut caller, mut peer) = secured_pair();
+        let mut wire = vec![0_u8; 64];
+        let event = Outgoing {
+            report: EventReport {
+                event: 5,
+                end: false,
+                volume: 10,
+                duration: 160,
+            },
+            timestamp: 500_000,
+            marker: true,
+        };
+        let len = caller.send_event(event, 101, &mut wire).expect("room");
+        assert_eq!(len, 12 + 4 + 10);
+        let mut received = wire.get(..len).unwrap_or_default().to_vec();
+        // the event's payload type has to be one this stream believes
+        assert!(matches!(
+            peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO),
+            Received::Dropped(Discard::PayloadType(101))
+        ));
+    }
+
+    #[test]
+    fn an_unsecured_stream_is_exactly_what_it_was() {
+        let mut session = session();
+        assert_eq!(session.rtp_overhead(), 0);
+        assert_eq!(session.rtcp_overhead(), 0);
+        let mut wire = vec![0_u8; 64];
+        let len = session.send(b"eight ok", 160, &mut wire).expect("room");
+        assert_eq!(len, 20);
+        assert_eq!(wire.get(12..20), Some(&b"eight ok"[..]));
     }
 }
