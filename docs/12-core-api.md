@@ -380,7 +380,7 @@ pub enum HeaderName<'a> {
     ContentEncoding, ContentLength, ContentType, CSeq, Date, Event, Expires,
     From, MaxForwards, MinExpires, MinSe, ProxyAuthenticate,
     ProxyAuthorization, ProxyRequire, RAck, RecordRoute, ReferTo, ReferredBy,
-    Replaces, Require, Route, RSeq, SessionExpires, Subject,
+    Replaces, Require, RetryAfter, Route, RSeq, SessionExpires, Subject,
     SubscriptionState, Supported, To, Unsupported, UserAgent, Via, Warning,
     WwwAuthenticate,
     Extension(&'a str),
@@ -1203,10 +1203,11 @@ Each binding ships the idiomatic version for its runtime.
 ## Layering above
 
 `sipral-ua` wraps one `Endpoint` and exposes the same five-call shape with a
-call vocabulary: `AccountId`, `CallHandle`, `SubscriptionId`, a `Command` enum
-(`Register`, `Call`, `Answer`, `Hangup`, `Hold`, `Transfer`, `Subscribe`, ...)
-and a `UaEvent` enum (`Registration`, `IncomingCall`, `CallProgress`,
-`CallConfirmed`, `CallEnded`, ...). It owns the policy the core refuses to
+call vocabulary: `AccountId`, `CallHandle`, `SubscriptionHandle`, one typed
+method per operation (`register`, `call`, `answer`, `hangup`, `hold`,
+`transfer`, `subscribe`, ...) rather than a command enum, and a `UaEvent` enum
+(`Registered`, `IncomingCall`, `CallProgress`, `CallConfirmed`, `CallEnded`,
+...). It owns the policy the core refuses to
 have: registration refresh, automatic credential retry, `MultipleAnswerPolicy`
 for forks, hold via re-INVITE or UPDATE, transfer sequencing. Every type it
 exposes is fully owned; no lifetime parameter leaves `sipral-core`.

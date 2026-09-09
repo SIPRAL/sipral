@@ -14,8 +14,11 @@ A SIP user agent stack written in Rust: memory-safe, sans-I/O at the core, no
 audio device inside it, one C ABI, and thin bindings for Swift, .NET and Kotlin.
 Small enough to embed in an AI voice agent, complete enough to run a softphone.
 
-> **Status: pre-alpha.** Design and skeleton. Nothing interoperates yet. The
-> roadmap and the exit criteria for each phase are in
+> **Status: pre-alpha, phase 1.** Registration, calls, hold, and blind and
+> attended transfer run against Kamailio, FreeSWITCH and Asterisk in the
+> container lab (`scripts/lab.sh`); registration, a call and hold run against
+> a live FreePBX over the Internet. The C ABI is not frozen and nothing is
+> published. The roadmap and the exit criteria for each phase are in
 > [`docs/10-roadmap.md`](docs/10-roadmap.md).
 
 ## Why this exists
@@ -42,23 +45,25 @@ runtime.
 There is no transport crate, and that is the point: **you** own the sockets. The
 core says what to send and where, names what needs resolving, and asks for a
 stream connection when a message outgrows a datagram (§18.1.1). A reference
-event loop over `std::net` will ship in `sipral-ua` for callers who would rather
-not write one, off by default. Platform audio is the same shape: separate crates
+event loop over `std::net` ships in `sipral-ua` behind the `reference-loop`
+feature, off by default, for callers who would rather not write one. Platform
+audio is the same shape: separate crates
 you pick, or replace, or leave out entirely.
 
 ## Crates
 
 | Crate | Contents |
 |---|---|
-| `sipral-core` | message parser and serializer, transactions, dialogs, SDP, authentication. Sans-I/O, no allocation surprises, no clock of its own |
-| `sipral-ua` | registration, calls, hold, transfer, subscriptions. Built on the core |
+| `sipral-core` | message parser and serializer, transactions, dialogs, SDP, authentication, the diagnostic record, session recording and replay. Sans-I/O, no allocation surprises, no clock of its own |
+| `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
-| `sipral-nat` | STUN client, TURN client, ICE-lite |
-| `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law in-tree, Opus and G.722 linked, G.729 only if a carrier forces it |
-| `sipral-io-coreaudio` | macOS and iOS device I/O. Siblings for WASAPI and AAudio follow |
-| `sipral-headless` | PCM in and out over a local socket or WebSocket. No audio device, for AI agents |
-| `sipral-ffi` | stable C ABI, and the Swift Package, NuGet and AAR built on it |
-| `sipral` | the facade crate. Today a name reservation on crates.io that exports nothing; later the one crate an application depends on, re-exporting the stack |
+| `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
+| `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus); G.729 only if a carrier forces it |
+| `sipral-io-coreaudio` | macOS and iOS device I/O |
+| `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
+| `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Not yet joined to the media pipeline |
+| `sipral-ffi` | the C ABI, printed from one declaration into the header and the Swift, .NET and Kotlin bindings. Not frozen yet |
+| `sipral` | the facade: signalling from `sipral-ua` joined to the media pipeline, with the codec catalogue, SRTP keying, DTMF, call recording and statistics per call. The one crate an application depends on, and what `sipral-ffi` exposes |
 
 ## Standards
 

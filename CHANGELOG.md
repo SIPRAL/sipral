@@ -12,6 +12,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **The README and five design documents say what the tree does.** The status
+  banner said nothing interoperates while the roadmap recorded three servers
+  passing; the crate table called G.722 linked (it is written in-tree), WASAPI
+  future (7 800 lines), the facade empty (it is what the C ABI exposes) and the
+  reference loop unshipped. `docs/04` said DTMF over INFO is received — it is
+  not, and now says so; `docs/08` said the transport is already a member of the
+  account configuration — it is not yet; `docs/12` omitted `RetryAfter` and
+  described a command enum that was never built; `docs/09`'s legend said
+  nothing was done; `docs/14` was a byte off. Two intra-doc links to a private
+  constant made `cargo doc` fail with warnings denied. Found by reading the
+  tree the way a stranger would.
+
+- **The provenance gate matches the policy it enforces.** `scripts/check.sh`
+  looked for eight of the nine projects `docs/02-clean-room.md` forbids, and
+  case-sensitively, so `Janus` and any capitalised spelling of the others went
+  through. Nine now, in any case.
+
 - **A registrar that draws a new nonce for every refusal can no longer walk a
   wrong password into a locked account.** §22.1's guard — the same nonce coming
   back means the password was wrong — turns on the nonce being *the same*, and

@@ -117,9 +117,10 @@ cannot work out for itself.
 transport a stack is created with and the only one this build binds; every other
 number is `SIPRAL_STATUS_INVALID_ARGUMENT`. Every call names it anyway. A second
 transport is not an I/O question — an account carries the transport its REGISTER
-goes out on and a call carries the one its INVITE does — so it is a member of
-`sipral_account_config_t`, and it belongs with the §18.1.1 promotion onto a
-stream that spends event number 18. Naming the transport now makes that growth
+goes out on and a call carries the one its INVITE does — so when it arrives it
+is a member of `sipral_account_config_t` (today that struct has no such member),
+and it belongs with the §18.1.1 promotion onto a stream that spends event
+number 18. Naming the transport now makes that growth
 more valid numbers rather than a second set of functions taking an argument the
 first set lacks.
 

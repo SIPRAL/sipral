@@ -8,8 +8,10 @@ Copyright (c) 2026 Tiberiu Balasea
 Everything Sipral implements comes from this list. Nothing in the tree is
 derived from another implementation; see [02-clean-room.md](02-clean-room.md).
 
-Status: **done** is implemented and covered by tests. **phase N** is scheduled,
-per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
+Status names the phase from [10-roadmap.md](10-roadmap.md) that delivers the
+row. Whether a phase's rows are met is recorded there, not repeated here. A row
+marked *written, not linked* is implemented and tested in its crate and reached
+by no call yet.
 
 ## Signalling
 
@@ -63,11 +65,11 @@ per [10-roadmap.md](10-roadmap.md). Nothing is marked done at this commit.
 
 | RFC | Title | Crate | Status |
 |---|---|---|---|
-| 8489 | STUN | sipral-nat | phase 2 |
-| 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2 |
-| 8656 | TURN | sipral-nat | phase 2 |
-| 8445 | ICE, lite role only | sipral-nat | phase 2 |
-| 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2 |
+| 8489 | STUN | sipral-nat | phase 2; written, not linked |
+| 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
+| 8656 | TURN | sipral-nat | phase 2; written, not linked |
+| 8445 | ICE, lite role only | sipral-nat | phase 2; written, not linked |
+| 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
 | 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`) | sipral-core | phase 2 |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
 

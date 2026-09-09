@@ -112,9 +112,9 @@ dia=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' 
 }
 
 step "provenance"
-forbidden='pjsip\|pjproject\|pjmedia\|sofia-sip\|osip2\|eXosip\|linphone\|bcg729\|spandsp\|libnice'
+forbidden='pjsip\|pjproject\|pjmedia\|sofia-sip\|osip2\|exosip\|linphone\|bcg729\|spandsp\|libnice\|janus'
 hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
-    | xargs grep -ln "$forbidden" 2>/dev/null || true)
+    | xargs grep -lin "$forbidden" 2>/dev/null || true)
 [ -z "$hits" ] && pass "no forbidden-source references in code" || {
     fail "review provenance in:"; printf '        %s\n' $hits
 }

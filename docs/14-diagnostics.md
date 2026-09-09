@@ -124,7 +124,7 @@ Two ceilings, both configurable through `EndpointConfig::diagnostics`:
   recently *written*, not oldest, so that an hour-long call is not thrown away
   by two registrations that happened to start after it.
 
-A decision is under a hundred and twenty bytes and holds no message, so the
+A decision is a hundred and twenty bytes and holds no message, so the
 whole thing is about a quarter of a megabyte at the defaults. A caller on a
 device where that matters turns them down; a media server turns them up.
 

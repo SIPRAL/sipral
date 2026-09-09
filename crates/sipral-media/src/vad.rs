@@ -39,7 +39,7 @@
 //! [`Vad::reset`]: there is nothing yet to compare it against, so its own
 //! level becomes the starting floor outright, whatever that frame's own
 //! verdict turns out to be. Without this, a background any louder than
-//! [`MIN_FLOOR`] allows for — an ordinary room, not a silent one — would
+//! `MIN_FLOOR` allows for — an ordinary room, not a silent one — would
 //! score as speech against the floor's cold-start value forever, because the
 //! comparison that would let the floor learn where it actually sits never
 //! returns a pause to learn from. This is a bounded departure from the
@@ -171,7 +171,7 @@ impl Vad {
     }
 
     /// The current noise floor: the same mean-square energy [`process`]
-    /// compares frames against, never below [`MIN_FLOOR`] once a frame has
+    /// compares frames against, never below `MIN_FLOOR` once a frame has
     /// primed it, and zero before that. For diagnostics; nothing in this
     /// module reads it back from the outside.
     ///
