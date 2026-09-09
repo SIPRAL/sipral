@@ -120,7 +120,11 @@ P0 for phase 3 and is sized like a phase of its own:
 - DTMF recognised by the lab PBX and by a carrier IVR;
 - SRTP interoperating in both SDES and DTLS-SRTP;
 - a call held open for an hour with no drift-induced underrun;
-- echo cancellation good enough for a speakerphone call in a normal room;
+- echo cancellation good enough for a speakerphone call in a normal room —
+  which on Apple and Windows means the platform's own, reached through the
+  device crate, and elsewhere means a component attached at the seam
+  `docs/05-media.md` describes, with the render-to-capture delay reported by
+  the device rather than guessed;
 - a busy-lamp-field subscription to thirty extensions survives a network
   change and reports every state transition, including its own termination
   and the reason;

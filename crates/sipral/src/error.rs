@@ -72,6 +72,18 @@ pub enum MediaError {
         /// What there was.
         got: usize,
     },
+    /// A render-to-capture delay longer than anything between a loudspeaker
+    /// and a microphone in the same room.
+    ///
+    /// Refused where it is set rather than turned into half a second of
+    /// history per call: a number that large is a platform reporting
+    /// something other than what was asked of it.
+    RenderDelayTooLong {
+        /// What was asked for.
+        asked: std::time::Duration,
+        /// The longest this build keeps history for.
+        most: std::time::Duration,
+    },
     /// A recording could not be started, or stopped writing part-way through.
     ///
     /// The kind rather than the error itself, because a call carries on when
@@ -159,6 +171,12 @@ impl fmt::Display for MediaError {
             Self::PacketTooLong { need, got } => {
                 write!(f, "the packet needs {need} octets and there are {got}")
             }
+            Self::RenderDelayTooLong { asked, most } => write!(
+                f,
+                "a render-to-capture delay of {} ms; this build keeps {} ms of history",
+                asked.as_millis(),
+                most.as_millis()
+            ),
             Self::Recording(kind) => write!(f, "recording: {kind}"),
             Self::NotRecording => f.write_str("nothing is being recorded on this call"),
             Self::AlreadyRecording => f.write_str("this call is already being recorded"),

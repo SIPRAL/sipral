@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{Direction, MediaPlan, RtcpPlan};
 use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFORT_NOISE};
+use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
 use sipral_rtp::{
     Activity, BufferConfig, Discard, Due, PayloadTypes, Pull, Received, RtcpReceived, RtpSession,
@@ -50,6 +51,7 @@ use sipral_rtp::{
 
 use crate::clock::WallClock;
 use crate::codec::Codec;
+use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
 use crate::pipeline::Coder;
@@ -157,6 +159,18 @@ pub struct MediaConfig {
     /// silence is deliberate, so a gap looks the same from the far end as a
     /// stream that died.
     pub silence_suppression: bool,
+    /// How long the loudspeaker takes to reach the microphone on this device,
+    /// which is what [`MediaSession::attach_processor`] aligns its reference
+    /// against.
+    ///
+    /// Zero unless the application says otherwise, and it can only say so
+    /// from the platform: CoreAudio reports it per device, WASAPI per stream,
+    /// and no portable guess is worth making. It is kept whether or not a
+    /// processor is ever attached — attaching one later must not need the
+    /// number set a second time — and refused above
+    /// [`MAX_RENDER_DELAY`](crate::MAX_RENDER_DELAY), because a delay that
+    /// long is a wrong number rather than a slow device.
+    pub render_delay: Duration,
 }
 
 impl Default for MediaConfig {
@@ -166,6 +180,7 @@ impl Default for MediaConfig {
             rtcp_bandwidth: RTCP_BANDWIDTH,
             stall_after: Some(DEFAULT_STALL),
             silence_suppression: false,
+            render_delay: Duration::ZERO,
         }
     }
 }
@@ -216,6 +231,11 @@ pub struct MediaSession {
     suppressing: bool,
     noise: Generator,
     recorder: Option<Recorder>,
+    /// Echo cancellation, gain control and noise suppression, when the
+    /// application attached any. `None` is the whole of the cost of not
+    /// having one: no history, no copy, no call.
+    echo: Option<Echo>,
+    render_delay: Duration,
     events: VecDeque<MediaEvent>,
 }
 
@@ -224,8 +244,9 @@ impl MediaSession {
     ///
     /// # Errors
     /// [`MediaError::UnknownPayload`] when the answer named a format this
-    /// build cannot decode, and [`MediaError::Codec`] when the codec refuses
-    /// the frame length.
+    /// build cannot decode, [`MediaError::Codec`] when the codec refuses the
+    /// frame length, and [`MediaError::RenderDelayTooLong`] for a
+    /// render-to-capture delay no device has.
     pub(crate) fn open(
         plan: &MediaPlan,
         frame_ms: u32,
@@ -235,6 +256,12 @@ impl MediaSession {
         now: Instant,
     ) -> Result<Self, MediaError> {
         let agreed = Codec::of_plan(plan)?;
+        if config.render_delay > MAX_RENDER_DELAY {
+            return Err(MediaError::RenderDelayTooLong {
+                asked: config.render_delay,
+                most: MAX_RENDER_DELAY,
+            });
+        }
         let coder = Coder::new(agreed, frame_ms)?;
         let frame_ticks = agreed.frame_ticks(frame_ms);
         let rtp = RtpSession::new(
@@ -279,6 +306,8 @@ impl MediaSession {
             suppressing: config.silence_suppression,
             noise: Generator::new(),
             recorder: None,
+            echo: None,
+            render_delay: config.render_delay,
             events: VecDeque::new(),
         })
     }
@@ -422,6 +451,12 @@ impl MediaSession {
         let frame = self.frame_samples().min(out.len());
         let room = out.get_mut(..frame).unwrap_or_default();
         let played = self.fill(room);
+        // this is the frame the loudspeaker is about to have, so it is the
+        // one a canceller will be looking for in the microphone a device
+        // delay from now
+        if let Some(echo) = self.echo.as_mut() {
+            echo.rendered(room);
+        }
         // the buffer may only move its delay in a pause, and the pause it
         // cares about is the far end's — so the verdict handed to the next
         // pull is the one on the frame that has just been decoded
@@ -503,6 +538,33 @@ impl MediaSession {
     /// [`MediaError::PacketTooLong`] for a payload no buffer here can hold,
     /// which no codec in this build produces.
     pub fn capture(&mut self, samples: &[i16]) -> Result<Option<Datagram<'_>>, MediaError> {
+        // the processor is lifted out for the length of the frame so that the
+        // audio it produces can be borrowed from it while the rest of the
+        // session is still being written to
+        let mut echo = self.echo.take();
+        let sent = self.encode_frame(samples, echo.as_mut());
+        self.echo = echo;
+        Ok(sent?.map(|length| Datagram {
+            destination: self.rtp.destination(),
+            payload: self.rtp_out.get(..length).unwrap_or_default(),
+        }))
+    }
+
+    /// One captured frame as far as the octets in `rtp_out`, or `None` for a
+    /// frame that was deliberately not sent.
+    fn encode_frame(
+        &mut self,
+        samples: &[i16],
+        echo: Option<&mut Echo>,
+    ) -> Result<Option<usize>, MediaError> {
+        // everything below works on what the processor left, not on the raw
+        // microphone: silence suppression measuring uncancelled echo would
+        // hold the stream open through the far end's own talking, and a
+        // recording of the raw capture would not be a recording of the call
+        let samples = match echo {
+            Some(echo) => echo.process(samples),
+            None => samples,
+        };
         if let Some(error) = self
             .recorder
             .as_mut()
@@ -529,10 +591,7 @@ impl MediaSession {
         self.octets_sent = self
             .octets_sent
             .saturating_add(u64::try_from(written).unwrap_or(0));
-        Ok(Some(Datagram {
-            destination: self.rtp.destination(),
-            payload: self.rtp_out.get(..length).unwrap_or_default(),
-        }))
+        Ok(Some(length))
     }
 
     /// The periodic RTCP report, when one is due.
@@ -679,6 +738,94 @@ impl MediaSession {
     #[must_use]
     pub const fn frame_length(&self) -> u32 {
         self.frame_ms
+    }
+}
+
+// -- echo cancellation, gain control, noise suppression ----------------------
+
+impl MediaSession {
+    /// Run `processor` over every captured frame, against the far-end audio
+    /// this session played [`MediaSession::render_delay`] earlier.
+    ///
+    /// The three concerns share one attachment point because a real
+    /// implementation is usually one component — gain control has to run on
+    /// what cancellation left, not on the raw capture — and `sipral-media`'s
+    /// [`Processor`] is that point. Nothing in this tree implements one:
+    /// on Apple platforms the operating system's own voice-processing unit
+    /// does it below the device crate, and elsewhere it is attached from
+    /// outside.
+    ///
+    /// What was attached before is dropped, along with the echo path it had
+    /// learned. Attaching mid-call is allowed and costs the first few hundred
+    /// milliseconds of a fresh adaptation, which is the same price a call
+    /// pays at its start.
+    pub fn attach_processor(&mut self, processor: Box<dyn Processor>) {
+        self.echo = Some(Echo::new(
+            processor,
+            self.sample_rate(),
+            self.frame_samples(),
+            self.render_delay,
+        ));
+    }
+
+    /// Stop running one, and say whether there was one to stop.
+    ///
+    /// The frames the application hands over reach the encoder untouched
+    /// again from the next one, and the loudspeaker history is released.
+    pub fn detach_processor(&mut self) -> bool {
+        self.echo.take().is_some()
+    }
+
+    /// Whether a processor is attached.
+    #[must_use]
+    pub const fn has_processor(&self) -> bool {
+        self.echo.is_some()
+    }
+
+    /// Forget the echo path, the noise floor and the gain this processor has
+    /// learned, keeping the processor itself.
+    ///
+    /// What a device change asks for: the estimate was built for a different
+    /// loudspeaker and a different microphone, and carrying it forward makes
+    /// the processor fight it for a while instead of adapting cleanly.
+    /// Answers whether there was a processor to reset.
+    pub fn reset_processor(&mut self) -> bool {
+        self.echo.as_mut().map(Echo::reset).is_some()
+    }
+
+    /// How long this device takes to get from the loudspeaker to the
+    /// microphone.
+    #[must_use]
+    pub const fn render_delay(&self) -> Duration {
+        self.render_delay
+    }
+
+    /// Say how long it takes, once the platform has measured it.
+    ///
+    /// It changes mid-call whenever the device does — a headset connecting
+    /// over Bluetooth adds tens of milliseconds to a path that had none — and
+    /// a processor already attached picks the new number up on the next
+    /// frame, keeping what it has learned.
+    ///
+    /// # Errors
+    /// [`MediaError::RenderDelayTooLong`] above
+    /// [`MAX_RENDER_DELAY`](crate::MAX_RENDER_DELAY). Nothing between a
+    /// loudspeaker and a microphone in the same room takes half a second, so
+    /// such a number is a platform reporting something else and is refused
+    /// here rather than believed.
+    pub fn set_render_delay(&mut self, delay: Duration) -> Result<(), MediaError> {
+        if delay > MAX_RENDER_DELAY {
+            return Err(MediaError::RenderDelayTooLong {
+                asked: delay,
+                most: MAX_RENDER_DELAY,
+            });
+        }
+        self.render_delay = delay;
+        let rate = self.sample_rate();
+        if let Some(echo) = self.echo.as_mut() {
+            echo.set_delay(rate, delay);
+        }
+        Ok(())
     }
 }
 

@@ -56,6 +56,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The echo-cancellation seam is reachable from a live call.** `Processor` has
+  been in `sipral-media` since the audio pipeline was written and nothing
+  called it, which made it a shape rather than a seam. A call now takes one,
+  and — the part that is actually work — keeps the recent past of its own
+  loudspeaker so the processor is handed the frame that was playing while the
+  microphone was open, at a distance the platform reports with
+  `set_render_delay`. Handing a canceller the wrong frame is not weaker
+  cancellation but none at all: an adaptive filter given an uncorrelated
+  reference diverges, and the call ends up worse than with nothing attached.
+
+  Nothing is allocated until a processor is attached, so a headless build —
+  which has no loudspeaker and therefore no echo — pays nothing. Two decisions
+  that follow are worth knowing about: silence suppression and the recording
+  tap both see the processed audio rather than the raw microphone, and the
+  application's own capture buffer is never written to. A delay above half a
+  second is refused where it is set, because nothing between a loudspeaker and
+  a microphone in one room takes that long and the number would only ever be a
+  platform reporting something else.
+
 - **Subscriptions, and the busy-lamp field on top of them** (RFC 6665, RFC 4235)
   — the largest piece of protocol the stack was missing, and the one a desktop
   client cannot ship without. Establish, refresh, expire, re-subscribe after

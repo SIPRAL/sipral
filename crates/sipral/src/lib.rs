@@ -100,6 +100,7 @@
 
 mod clock;
 mod codec;
+mod echo;
 mod engine;
 mod error;
 mod event;
@@ -112,6 +113,7 @@ mod tests;
 
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCatalog, DEFAULT_FRAME_MS};
+pub use echo::MAX_RENDER_DELAY;
 pub use engine::MediaEngine;
 pub use error::MediaError;
 pub use event::{Event, MediaEvent};
@@ -127,6 +129,12 @@ pub use sipral_core::sdp::{
     Direction, Keying, MediaCapabilities, MediaPlan, NegotiatedCodec, RtcpPlan, SessionDescription,
     SrtpSupport,
 };
+/// Where echo cancellation, gain control and noise suppression attach. None
+/// of the three is implemented in this tree — `docs/05-media.md` says why —
+/// so an application that has one wires it in through this trait, and
+/// [`MediaSession::attach_processor`] runs it against the far-end audio this
+/// crate kept for it.
+pub use sipral_media::processor::{NoProcessor, Processor};
 /// What the de-jitter buffer counted, which is most of what a stream statistic
 /// is.
 pub use sipral_rtp::{Discard, Quality};

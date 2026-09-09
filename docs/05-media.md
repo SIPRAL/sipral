@@ -185,9 +185,72 @@ The pipeline between the codec and whatever produces or consumes samples.
 - **Echo cancellation, gain control, noise suppression** are attached at a seam,
   not implemented here. This is signal processing research, it exists under a
   permissive licence, and rewriting it would buy nothing that a customer pays
-  for.
+  for. What that costs is described below, because a seam nothing can reach is
+  not a seam.
 - **Voice activity detection and comfort noise**, needed by the jitter buffer's
   adjustment schedule and by silence suppression where a carrier expects it.
+
+## The processor seam, and the frame that is hard to produce
+
+`sipral-media`'s `Processor` is one attachment point for all three of echo
+cancellation, gain control and noise suppression, because a real
+implementation is usually one component: gain control has to run on what
+cancellation left behind, not on the raw capture, and noise suppression the
+same.
+
+The trait takes two frames covering the same span of time — the microphone's,
+and the far end's audio as it left the loudspeaker while that microphone was
+open. Only the second is hard to produce, and producing it is the work this
+project has to do whoever writes the canceller:
+
+- The far-end frame was handed out by `MediaSession::playback` some
+  milliseconds ago, through a device ring, a driver and whatever the hardware
+  adds. The echo in the microphone is *that* frame, not the one about to be
+  played next.
+- Handing a canceller the wrong frame is not weaker cancellation, it is none.
+  An adaptive filter given a reference that does not correlate with its input
+  diverges, and the call gets worse than it would have been with nothing
+  attached.
+
+So `MediaSession` keeps the recent past of the loudspeaker and hands back the
+slice that lines up, at a distance the application sets with
+`set_render_delay`. That number is the device's render-to-capture delay, which
+only the platform knows: CoreAudio reports it per device, WASAPI per stream.
+There is no portable guess worth making, so the stack does not make one — the
+default is zero, which pairs a capture with the frame played immediately
+before it, and a delay above half a second is refused rather than believed,
+because nothing between a loudspeaker and a microphone in the same room takes
+that long.
+
+Everything is allocated when a processor is attached and not before. A build
+with nothing attached — which is every headless one, where there is no
+loudspeaker and therefore no echo — keeps no history and copies no frames.
+
+Two consequences worth stating, because they are the kind of thing that is
+discovered from a complaint:
+
+- **Silence suppression and the recording tap both see the processed audio**,
+  not the raw microphone. Suppression measuring uncancelled echo would hold
+  the stream open through the far end's own talking, and a recording of the
+  raw capture would not be a recording of the call.
+- **The application's own capture buffer is never edited.** The processed
+  frame comes back from the session's buffer, so whatever the application
+  metered, drew or kept is what it handed over.
+
+### Where the canceller itself comes from
+
+Not from this tree, and on two of the three desktop platforms not from a
+dependency either:
+
+| Platform | Where it comes from |
+|---|---|
+| macOS, iOS | The operating system's voice-processing audio unit, below `sipral-io-coreaudio`. Nothing reaches the seam, and nothing needs to |
+| Windows | The operating system's own capture-side processing, below `sipral-io-wasapi`, for a stream opened as communications |
+| Linux, and any build wanting its own | The seam. A permissively licensed component is attached by the application, and `THIRD-PARTY-NOTICES.md` grows a row for it |
+
+The seam exists for the third row and for anyone who wants a different one
+from what the platform provides. It is not a placeholder for work this project
+owes on the first two.
 
 ## What device I/O owns, and does not
 

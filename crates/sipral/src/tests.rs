@@ -17,6 +17,7 @@
 //! which stops is reported rather than sat on.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{Direction, SessionDescription, parse};
@@ -428,6 +429,133 @@ fn a_tone_crosses_the_call() {
         loudness(&heard) > 4_000,
         "the tone came back at {} rather than crossing the call",
         loudness(&heard)
+    );
+}
+
+/// Keeps every reference frame it is handed, so a test can assert on what the
+/// seam delivered rather than on a canceller's arithmetic.
+struct Heard(Arc<Mutex<Vec<Vec<i16>>>>);
+
+impl crate::Processor for Heard {
+    fn process(&mut self, near_end: &mut [i16], reference: &[i16]) {
+        if let Ok(mut frames) = self.0.lock() {
+            frames.push(reference.to_vec());
+        }
+        near_end.fill(0);
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// The whole point of the seam: a processor attached to a live call is handed
+/// the far end's audio as this end played it, rather than silence or the frame
+/// that has not been played yet. A canceller given the wrong frame does not
+/// cancel less, it diverges.
+#[test]
+fn a_processor_is_handed_the_audio_the_call_played() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let frame = {
+        let session = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media");
+        session.attach_processor(Box::new(Heard(Arc::clone(&frames))));
+        assert!(session.has_processor());
+        session.frame_samples()
+    };
+
+    let mut samples = vec![0_i16; frame];
+    let silence = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..20 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&silence)
+            .expect("the frame encodes");
+        pair.advance();
+    }
+
+    let seen = frames.lock().expect("the frames").clone();
+    assert_eq!(seen.len(), 20, "the processor did not see every frame");
+    let loudest = seen.iter().map(|frame| loudness(frame)).max().unwrap_or(0);
+    assert!(
+        loudest > 4_000,
+        "the processor was handed audio at {loudest}, not the call's own"
+    );
+    // sample for sample, and in the order it left the loudspeaker: a
+    // reference that is merely the right audio backwards correlates against
+    // nothing
+    assert_eq!(
+        seen.last().map(Vec::as_slice),
+        Some(played.as_slice()),
+        "the reference was not the frame the call had just played"
+    );
+}
+
+/// Attaching and detaching are answers rather than silence: an application
+/// that asks to stop something that was never running has to be able to tell.
+#[test]
+fn detaching_says_whether_there_was_anything_to_detach() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+
+    let session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    assert!(!session.has_processor());
+    assert!(!session.detach_processor());
+    assert!(!session.reset_processor());
+
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    session.attach_processor(Box::new(Heard(frames)));
+    assert!(session.reset_processor());
+    assert!(session.detach_processor());
+    assert!(!session.has_processor());
+}
+
+/// A delay no loudspeaker and microphone in one room can have is refused where
+/// it is set. B2 in `docs/13-client-requirements.md`: a setting is applied,
+/// rejected with a reason, or unsupported — never accepted and ignored.
+#[test]
+fn a_render_delay_longer_than_any_device_is_refused_rather_than_kept() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let session = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+
+    assert_eq!(session.render_delay(), Duration::ZERO);
+    session
+        .set_render_delay(Duration::from_millis(40))
+        .expect("a delay a Bluetooth headset really has");
+    assert_eq!(session.render_delay(), Duration::from_millis(40));
+
+    let refused = session.set_render_delay(crate::MAX_RENDER_DELAY + Duration::from_millis(1));
+    assert!(matches!(
+        refused,
+        Err(MediaError::RenderDelayTooLong { .. })
+    ));
+    assert_eq!(
+        session.render_delay(),
+        Duration::from_millis(40),
+        "a refused delay was kept anyway"
     );
 }
 
