@@ -80,23 +80,37 @@ what it is. IETF rules require a disclosure to name actual patent numbers, so a
 licensee who needs more than that can have their own counsel read them.
 
 Since December 2025 that picture is no longer complete, and a licensee should
-know it before shipping. **Dolby Laboratories and Fraunhofer IIS are asserting
-patents against Opus implementations**, through a licensing vehicle trading as
-Vectis at `opuspool.com`, reading on RFC 6716, 8251 and 8486 and on the
-reference software. The actions on record are Dolby against Acer, filed at the
-Unified Patent Court's local division in The Hague on 10 December 2025 and
-pending; Dolby against Arçelik, pending; and settlements with Optoma and with
-Epson, the latter in September 2025. The programme is aimed at **manufacturers
-of devices** — handsets, tablets, computers, televisions, smart speakers,
-consoles and IP telephones — and its published position excludes open source
-software distributed independently of hardware.
+know it before shipping. **Dolby Laboratories, Fraunhofer IIS and NTT are
+asserting patents against Opus implementations**, through a licensing vehicle
+trading as Vectis at `opuspool.com`, reading on RFC 6716, 8251 and 8486 and on
+the reference software. The pool publishes its patent list: as it stood on
+1 June 2026 it ran to several hundred entries across more than forty
+jurisdictions, Romania among them. The published rate is **0.15 € per unit**.
+The actions on record are Dolby against Acer, filed at the Unified Patent
+Court's local division in The Hague on 10 December 2025 and pending; Dolby
+against Arçelik, pending; and settlements with Optoma and with Epson, the
+latter in September 2025.
 
-What that means for the two arms of this project is not the same thing. A
-library distributed on its own is outside what the programme says it targets.
-**A licensee who puts Sipral into a device is inside it**, and that is their
-exposure rather than ours, which is why it is written here rather than left to
-be discovered. Nothing in this file, and nothing in either licence, is a
-representation that Sipral infringes no patent; see `LICENSE-COMMERCIAL.md`.
+The programme names **manufacturers of devices** as its targets — handsets,
+tablets, computers, televisions, smart speakers, consoles, and **IP telephones
+by name**. It also says it does not aim at open source software distributed
+independently of hardware.
+
+That last sentence is worth reading carefully, because it is easy to mistake
+for something it is not. **It describes who the programme chooses to approach.
+It is not a licence, and it grants nobody anything.** A statement of aim can be
+revised, and it binds no one; a patent licence is an instrument, and this is
+not one. Treat it as useful context and not as cover.
+
+So the two arms of this project are not in the same position, and neither is
+safe by virtue of a policy. A library distributed on its own is outside what
+the programme says it currently pursues. **A licensee who puts Sipral into an
+IP telephone is inside a category it names**, at a rate that turns into real
+money on any volume: a hundred thousand handsets is fifteen thousand euro a
+year. That is their exposure rather than ours, and it is written here so that
+it is a decision they make rather than a thing they discover. Nothing in this
+file, and nothing in either licence, is a representation that Sipral infringes
+no patent; see `LICENSE-COMMERCIAL.md`.
 
 Opus is therefore built behind a feature rather than linked unconditionally, so
 that a product which cannot take that exposure can ship G.711 and G.722 and
@@ -178,6 +192,20 @@ comments intact. G.729 is phase 2, written in-tree the same way: its base
 patents are reported expired since January 2017, which is confirmed in
 writing before the codec ships under the commercial licence; the common
 implementation, bcg729, is GPL-3 and is never opened.
+
+**What is implemented of G.722 is the 1988 base and nothing else**, and that
+boundary is deliberate rather than incidental. The base is clean on a primary
+source: AT&T declared to the ITU in 2001 that it holds no essential patent
+rights in it. The parts added later are a different question — the
+superwideband extension, the two appendices carrying loss concealment, and the
+2012 amendment attracted patent declarations as late as 2014, on applications
+filed between 2009 and 2011, which on the ordinary term would run into the
+2029 to 2031 range. None of that is here: the tree carries the filter pair of
+§5, the two sub-bands of §6 at six bits and two, and the three modes of 64, 56
+and 48 kbit/s, all of which are in the original Recommendation. The loss
+concealment in `sipral-media` is written for linear PCM from G.711 and derives
+from no ITU appendix. Anyone extending this codec should know they would be
+crossing out of the clean part.
 
 ## Test tooling
 
