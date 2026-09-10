@@ -173,6 +173,21 @@ and the alternatives are single-maintainer crates. The cost of the delay is
 that peers who require DTLS-SRTP and refuse SDES — a browser talking WebRTC
 directly, and some carrier session border controllers — cannot be reached.
 
+The way in is a decision, not an assumption, and the three options are these.
+**Written in-house**, from RFC 6347 (DTLS 1.2), RFC 8422 (ECDHE) and RFC 5764,
+with the smallest X.509 reader that can check a fingerprint rather than a
+chain: the clean-room rule allows it, the cost is weeks, and it becomes the
+one piece of the tree that must be reviewed by someone who does cryptography
+for a living. **A permissively licensed DTLS crate**, when one exists with more
+than one maintainer and a release history; none does today, and the licence
+gate decides, not convenience. **DTLS as the application's transport**, the
+way TLS already is: the application runs the handshake on the media socket
+with whatever it trusts, exports the keying material per RFC 5705, and hands
+the SRTP keys to the engine through the same seam SDES uses. The third costs
+the least and fits the architecture best; it costs the application a DTLS
+implementation it may already have. Nothing else in the roadmap waits on the
+choice.
+
 ### SRTP through the facade
 
 Everything above is the crate. The `sipral` crate is what joins it to a call:

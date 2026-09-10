@@ -10,6 +10,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Changed
+
+- **The roadmap carries what the audit of 10 September found, and what was
+  decided about it.** Phase 1 gains two exit criteria: the lab's flows run
+  through the join an application links and then through `sipral.h`, and no
+  request leaves as an oversized datagram inside a dialog either. Phase 2
+  gains re-negotiation that keeps stream identity and never reuses an SRTP
+  index, RTCP-XR with an E-model MOS, SIP MESSAGE and message waiting, a local
+  three-way conference, STUN reached from a call, early media on the answering
+  side, the REGISTER 200 OK kept, and a written decision on DTLS-SRTP. Phase 3
+  now lists what is built in Rust and unreachable from C, and does not freeze
+  the ABI before that list is empty and every printed binding compiles in the
+  gate; it adds the idiomatic Swift, C# and Kotlin layers, the platform
+  artefacts, a Linux device crate over PipeWire and a common device crate.
+  Phase 5 starts by joining the headless crate to the engine, and adds Python,
+  a sixty-second example with no account, measured numbers, a public
+  interoperability matrix and a security model. Video is out of scope by
+  decision.
+
 ### Fixed
 
 - **The README and five design documents say what the tree does.** The status

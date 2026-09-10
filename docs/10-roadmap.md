@@ -36,10 +36,14 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and five of the six exit criteria met.** Every line of the
+**Status: written, and five of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
-`sipral-media` — and five flows run against two servers whenever
-`scripts/lab.sh` is run. What is left is one paid carrier account.
+`sipral-media` — and five flows run against three servers whenever
+`scripts/lab.sh` is run. What is left is one paid carrier account, and the two
+criteria added on 10 September 2026 after an audit of the whole tree: the lab
+drove the stack through a media join written for the lab, not through the one
+an application links, so what it proved was the harness. A phase whose proof
+runs on a path no customer uses has not exited.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -59,7 +63,12 @@ unit suite had ever asked.
 - **met** — the parser survives a continuous fuzzing run without a crash or a
   hang;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
-  Asterisk.
+  Asterisk;
+- the same flows, plus DTMF in both forms, run through `sipral::MediaEngine` —
+  the join an application links — and then through `sipral.h` from a C driver,
+  so that the path a customer ships is the path the lab proves;
+- no request the stack can build leaves as an oversized datagram: the
+  §18.1.1 promotion applies inside a dialog as it does outside one.
 
 ## Phase 2 — media, and the things that get more expensive by waiting
 
@@ -107,27 +116,62 @@ production says is missing from it:
 
 - **B1** — the path size limit as a constraint: promotion to a stream
   transport or a specific refusal, never a silent send, per RFC 3261 §18.1.1,
-  with the on-wire size readable by the application.
+  with the on-wire size readable by the application. *Built* for the first
+  send and the authenticated retry; the in-dialog path skipped it, which the
+  audit of 10 September 2026 found, and it is closed with phase 1's last
+  criterion.
 - **B5** — a media stall detected by the engine and reported, with an optional
-  recovery attempt.
+  recovery attempt. *Built.*
 - **B6** — a documented default profile for the deployment actually shipped
-  against, made the default.
+  against, made the default. *Built.*
 - **D10** — the impairment profiles as fixtures in the repository, including a
-  link that disappears for eight seconds.
+  link that disappears for eight seconds. *Built.*
 
 **And one piece of signalling that does not belong to media at all**, but is
 P0 for phase 3 and is sized like a phase of its own:
 
 - **A1** — the subscription machine (RFC 6665) and `dialog-info+xml`
   (RFC 4235), with bulk operations and with the REFER subscription expressed
-  as the special case it is.
+  as the special case it is. *Built.*
+
+**What the audit of 10 September 2026 added to this phase**, because each is
+signalling or media a carrier or a second kind of customer asks for by name,
+and each is cheaper before the ABI carries it than after:
+
+- **a re-negotiation that keeps what it should** — a codec change no longer
+  restarts the stream on the identity the call opened with, and never reuses
+  an SRTP index under a master key; re-keying reaches the RTP session; a
+  re-offer that drops `a=crypto` under a *required* policy is refused, not
+  answered;
+- **RTCP-XR** (RFC 3611) VoIP metrics, sent and read, with the R factor and
+  MOS from the E-model written from ITU-T G.107, and **quality reports**
+  published per RFC 6035 where an account names a collector;
+- **SIP MESSAGE** (RFC 3428) in both directions and **message waiting**
+  (RFC 3842) parsed to a count, because a softphone has chat and voicemail
+  whether or not the requirements document remembered them;
+- **a local three-way conference**: two calls mixed in `sipral-media`'s mixer,
+  which is written and reached by nothing;
+- **STUN reached from a call** — the softphone profile behind a NAT learns its
+  public address from `sipral-nat`, which is written, tested and linked by
+  nothing; ICE-lite stays where `06-nat.md` puts it, on a public server;
+- **early media on the answering side**, so a stack that answers can speak
+  before 200 OK through its own engine rather than through a second one;
+- **the 200 OK to REGISTER kept**, and with it Service-Route (RFC 3608) in the
+  route set, GRUU (RFC 5627) learned and used, P-Associated-URI reported;
+- **DTLS-SRTP** — decided rather than assumed: `rustls` carries no DTLS, no
+  permissively licensed DTLS crate is mature, and writing one is weeks. The
+  three options are written in `05-media.md` for the owner; nothing else in
+  the roadmap waits on it.
 
 **Exit:**
 
 - mean opinion score at parity with a reference stack, measured on the same
   `tc netem` impairment profiles, committed with the tests;
-- DTMF recognised by the lab PBX and by a carrier IVR;
-- SRTP interoperating in both SDES and DTLS-SRTP;
+- DTMF recognised by the lab PBX and by a carrier IVR, in the RTP form and in
+  both INFO forms, received as well as sent;
+- SRTP interoperating over SDES, re-keyed on re-negotiation, with no index
+  ever repeated under one key; DTLS-SRTP per the decision above;
+- every call reports an R factor and a MOS the lab PBX accepts as RTCP-XR;
 - a call held open for an hour with no drift-induced underrun;
 - echo cancellation good enough for a speakerphone call in a normal room —
   which on Apple and Windows means the platform's own, reached through the
@@ -173,13 +217,68 @@ trusts.
   superseded by **D1**, which is built.
 - **B7** — the ABI's single source of truth, with the Swift, Kotlin and .NET
   bindings generated from it and `scripts/check.sh` failing when one is
-  missing. **This is what phase 3 now turns on**: the C ABI is wide and the
-  bindings are one reserved .NET package.
+  missing. *Built* as declarations; **not yet as platforms**: on 10 September
+  2026 the tree built no C-linkable library at all, three of the four printed
+  bindings did not compile, and the gate could not tell, because it compared
+  the generator's output with itself. The library, a C program that links it,
+  and a compile of every binding are now steps of the gate, and the generator
+  gets a name-uniqueness pass and tests of its own.
 - **D6** — device, codec and transport as properties of a call rather than of
-  the process.
+  the process. *Built* in Rust; the transport half is not yet across the ABI.
+
+**What is built in Rust and cannot be reached through `sipral.h`** — the
+audit's central finding, and the list phase 3 closes before the ABI freezes,
+because each of these is a shape and a shape is permanent once published:
+
+- the real-time media path shares the stack lock that `sipral_stack_poll`
+  holds across the application's callback, so the audio thread is answered
+  `SIPRAL_STATUS_BUSY` at the moments a user listens hardest; events are
+  delivered after the lock is released and a call's media has a lock of its
+  own;
+- handles are minted per stack and carry no stack, so one call's handle names
+  another call on a second stack; the handle carries its stack;
+- one monotonic clock per stack is advanced by every entry point, including
+  the ones the network thread calls; media entry points stop advancing it;
+- A1 subscriptions, A7 and D4 lifecycle (suspend, resume, network change,
+  rebind — the two registration states the header publishes cannot be
+  produced by any C call today), A8 screening before any effect, C2 and C3
+  announce and freeze, D1 the diagnostic record, D2 recording, D5 why each
+  codec lost — each gets its entry points;
+- SRTP cannot be offered or required from C while `sipral_capabilities`
+  reports it; it becomes a member of the stack and call configuration;
+- no event says who is calling; `From`, `To` and `Call-ID` join the call event,
+  from the core's own parse, so no binding writes a SIP parser to show a
+  caller;
+- an application header cannot be put on any request or response; a header
+  list joins the configurations and a call-scoped setter covers responses;
+- a transfer accepted through the ABI places an INVITE with no offer; the
+  entry point takes a call configuration like `sipral_call_place`;
+- one transport per stack, and a registrar that cannot be re-pointed: a
+  transport per account and per call, `sipral_account_retarget`, and the
+  resolve request as an event with its answer;
+- an account without a registrar, for trunks authenticated by address;
+- the size-versioning constants pin the oldest published size rather than the
+  current one, and every binding calls `sipral_abi_check` at load.
+
+**The layers a developer actually adopts**, above the printed bindings:
+
+- an idiomatic Swift module (stack, account and call as classes, events as an
+  async stream, the `CallKit` and `PushKit` sequence from `15-mobile.md`), an
+  idiomatic C# namespace (safe handles, events, tasks, PCM as spans) and an
+  idiomatic Kotlin layer (coroutines, `ConnectionService`), each with a sample
+  application skeleton that makes a call;
+- the artefacts each platform consumes, built locally: an `.xcframework`, an
+  AAR with the shared object for each Android ABI, a NuGet with native runtimes,
+  wheels — with publishing left to a person;
+- `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
+  PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
+  crate holding what the two device crates currently duplicate;
+- the platform echo canceller reached on Windows and Linux through the
+  processor seam, with a reference module attachable as an optional crate.
 
 **Exit:** the existing desktop softphone clients run on Sipral, and the previous
-stack is gone from both binaries.
+stack is gone from both binaries; the lab's flows have run through `sipral.h`;
+and the ABI is frozen only after every item above exists in C.
 
 ## Phase 4 — mobile
 
@@ -215,9 +314,42 @@ call.
 
 `sipral-headless`, packaging, public documentation, published packages.
 
+The audit of 10 September 2026 found that the headless crate — the reason the
+README says the stack is small enough to embed in a voice agent — shares no
+type with the media pipeline it is drawn beside and is linked by nothing. The
+phase therefore starts one layer lower than planned:
+
+- **headless joined to the engine**: socket frames become `MediaSession`
+  capture and playback, the sample rate is negotiated against the media plan
+  rather than chosen blind, voice activity from `sipral-media` becomes a
+  control event so an agent can be interrupted, a received digit becomes the
+  control message that already exists for it, and an in-process session exists
+  for an agent that embeds rather than connects;
+- **hundreds of calls in one process**, measured: one stack, many calls, a lock
+  per media session, four threads driving them, the numbers committed — and if
+  one stack is not enough, the shape with several stacks on one port is
+  designed from the measurement rather than from a guess;
+- **Python**, because that is what voice agents are written in: a package over
+  the C ABI (a fifth generated back end, not a second binding of the Rust API),
+  with an idiomatic asynchronous layer, PCM as bytes, and an eighty-line agent
+  as the example;
+- **a call in sixty seconds with no account**: `cargo run --example call`
+  dials a public test IVR, plays the menu through the device crate or into a
+  file, presses a digit and hears it read back; the other examples register,
+  call, hold, transfer, and run over TLS with the transport the application
+  brings;
+- **numbers** rather than adjectives: library size per platform, memory and CPU
+  per call for G.711 and Opus, end-to-end latency in the lab, in a dated
+  document produced by a script;
+- the interoperability matrix as a public page generated from lab results,
+  with carriers and session border controllers added as access to each is
+  obtained, and marked untested until then;
+- a security model in two pages: the threat model, what is fuzzed and for how
+  long, what is redacted where, what the stack does not cover.
+
 **Exit:** an external developer integrates Sipral from the published
 documentation without asking a question that the documentation should have
-answered.
+answered; `pip install sipral` answers a call from the lab.
 
 ## Where this gets abandoned
 
@@ -240,3 +372,8 @@ later.
   A published crate name is a promise about compatibility. The one exception
   is the `sipral` name reservation, a placeholder that exports a version
   constant and promises nothing.
+- The ABI is not frozen before every entry the desktop client needs exists in
+  C (the phase 3 list), before a C driver has run the lab's flows through
+  `sipral.h`, and before every printed binding compiles in the gate. Flipping
+  the repository public does not wait for the freeze; publishing packages does.
+- Video is out of scope by decision, not by omission.
