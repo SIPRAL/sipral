@@ -194,9 +194,11 @@ writing before the codec ships under the commercial licence; the common
 implementation, bcg729, is GPL-3 and is never opened.
 
 **What is implemented of G.722 is the 1988 base and nothing else**, and that
-boundary is deliberate rather than incidental. The base is clean on a primary
-source: AT&T declared to the ITU in 2001 that it holds no essential patent
-rights in it. The parts added later are a different question — the
+boundary is deliberate rather than incidental. The base is clean on primary
+sources rather than on inference: the declarations filed with the ITU in 1986,
+and AT&T's express waiver of July 2001 of any essential patent right in it.
+It is the one codec here whose patent position can be stated with the documents
+in hand. The parts added later are a different question — the
 superwideband extension, the two appendices carrying loss concealment, and the
 2012 amendment attracted patent declarations as late as 2014, on applications
 filed between 2009 and 2011, which on the ordinary term would run into the

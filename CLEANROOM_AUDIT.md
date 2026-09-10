@@ -65,67 +65,50 @@ disagrees with its design document is a bug in one of the two.
 appearing in source files, in any capitalisation. It is a backstop for the rule
 above, not a substitute for it.
 
-## The exception, and how it is contained
+## The one component a specification might not settle alone
 
-One component is planned that a specification alone may not fully settle: the
-G.729 codec, where an implementation is published by the ITU alongside the
-Recommendation. The procedure below applies to it, and to anything else in the
-same position. It has not yet been used, because the component is not yet
-written; when it is, this file records the outcome.
+G.729 is the codec where this gets tested, because the ITU publishes reference
+code in C alongside the Recommendation and the obvious move is to read it. We
+do not read it, and the reason is not the one most people would guess.
 
-1. The component is written from the **text of the Recommendation** first, and
-   its correctness is judged against the **conformance vectors the ITU
-   publishes**, never against what the reference implementation happens to
-   output. That distinction carries most of the weight here: a codec specified
-   to the bit converges structurally in every conforming implementation,
-   and where the standard dictates the result, the resemblance is evidence of
-   the standard rather than of copying. Validating against the vectors is what
-   makes that provable rather than merely arguable.
-2. The reference implementation is consulted only for passages where the text
-   is genuinely ambiguous, those passages are named in advance, and the list of
-   them is kept short enough to be read. "Consulted where necessary" is not a
-   record; a numbered list of ambiguities is.
-3. Whoever reads the reference implementation **writes no production code for
-   that component, then or later**. They produce a functional specification in
-   prose and mathematics, carrying no identifier, no file layout, no comment and
-   no fragment of the original.
-4. That specification is checked by a third party who has not seen the reference,
-   looking for expression that survived, and is returned for rewriting if any is
-   found.
-5. Whoever implements the component receives only the checked specification and
-   the Recommendation, and **never sees the reference implementation**.
-6. Whoever integrates the result does not open the reference implementation
-   either.
-7. The reference implementation is read on storage that does not persist, and is
-   never placed in this repository or in any working copy of it.
-8. When the component is finished, whoever already has access to the reference
-   runs a **mechanical similarity scan** of the result against it. Discipline
-   catches what someone notices; a scan catches what nobody did. Anything
-   literal above the threshold is rewritten. The narrow places worth looking
-   hardest at are the ones a standard does not dictate: identifier names,
-   comments, the order of operations where the order is free, and constants
-   that appear in no table of the Recommendation.
+**The Recommendation grants no software licence.** Its only statement of rights
+is a complete reservation: no part of the publication may be reproduced by any
+means without the ITU's prior written permission. Its scope clause then says
+that the reference C source and the test vectors are provided as an integral
+part of that publication. So the reference implementation is not public-domain
+material that happens to sit next to a standard. It is the standard, and it is
+reserved.
 
-The three sources are not in the same position and are not treated as though
-they were. The **text of the Recommendation** is the primary and legitimate
-source, and naming it is what explains why any two conforming implementations
-resemble each other at all. The **ITU's reference code** is published by the
-standards body and licensed for implementing the Recommendation, so consulting
-it within the procedure above is a licensed use of public material rather than
-something to be quiet about. **bcg729 remains outside all of it**: it is not
-consulted under any procedure, by anyone, at any stage, and that is the
-statement in this file that carries the most weight, because it is the one
-implementation whose owner both sells the same thing and could be harmed by us.
+That closes the question rather than complicating it. **The reason anyone wants
+the reference code is to settle places where the text is ambiguous, and there is
+an official document that exists to do exactly that**: the Implementers' Guide,
+G.Imp729, which the ITU keeps in force alongside the Recommendation. The
+Recommendation's own revision history shows the kind of thing it carries — the
+2012 edition records the correction of a discrepancy found between one of its
+equations and the C code. A discrepancy of that sort is precisely what would
+otherwise send someone to the implementation, and the Guide answers it in prose.
 
-## What this file does not contain
+So the procedure has four lines and no machinery:
 
-The detailed log of the procedure above — which document was read, by whom, on
-what date, and which component resulted — is kept privately rather than
-published. Publishing a method is a statement about how the work is done;
-publishing a reading log is a different thing, of use mainly to someone building
-a case. The log exists, it is contemporaneous, and it is available to a
-counterparty performing due diligence under the confidentiality such a review
-carries.
+1. Implement from the **text of the Recommendation**.
+2. Settle ambiguities from the **Implementers' Guide**, not from code.
+3. Judge correctness against the **ITU's conformance vectors**.
+4. **Never open the reference implementation**, and never bcg729.
+
+There is no two-team compartmentalisation here, no reading log, no isolation
+procedure, because none of it has anything to act on. Nobody opens anyone's
+implementation, which is the same rule the rest of this repository already
+follows.
+
+**The test vectors do not enter this repository.** They are ITU material under
+the same reservation, so they are used on a machine and not committed:
+reproducing and distributing them here is the thing the reservation forbids.
+What is published instead is ours — the conformance results, and the script that
+produces them. Anyone can obtain the vectors from the ITU and re-run it.
+
+This is why `fixtures/` holds the RFC 4475 corpus and nothing from the ITU. That
+corpus is IETF Trust material, reproduced under the IETF Trust Legal Provisions,
+and `fixtures/rfc4475/README.md` says so.
 
 ## Reporting a concern
 

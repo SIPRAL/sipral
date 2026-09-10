@@ -119,6 +119,19 @@ hits=$(others '*.rs' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     fail "review provenance in:"; printf '        %s\n' $hits
 }
 
+# An ITU Recommendation reserves every part of itself, and its scope clause counts
+# the reference source and the conformance vectors as parts. So they are used on a
+# machine and never committed: what ships is our own result and our own script.
+# A whitelist rather than a pattern, because the mistake this catches is somebody
+# adding a directory of vectors while implementing a codec, and no pattern
+# predicts what they would call it.
+stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|replay' || true)
+[ -z "$stray" ] && pass "no unvetted fixtures" || {
+    fail "fixtures/ holds something nobody vetted for a licence:"
+    printf '        fixtures/%s\n' $stray
+    printf '        ITU material is never committed. Widen this list only alongside a README naming the licence.\n'
+}
+
 traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -lin 'co-authored-by: claude\|generated with \[claude\|copilot' 2>/dev/null || true)
 [ -z "$traces" ] && pass "no assistant traces" || {
