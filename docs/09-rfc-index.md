@@ -32,7 +32,9 @@ by no call yet.
 | 3891 | The Replaces header | sipral-ua | phase 1 |
 | 3892 | The Referred-By mechanism | sipral-ua | phase 1 |
 | 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515), and `Allow-Events` is read but not yet advertised | sipral-ua | phase 1 |
-| 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body reaches the application whole | sipral-ua | phase 2 |
+| 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body reaches the application whole; parsed to a count in phase 2 | sipral-ua | phase 2 |
+| 3428 | The MESSAGE method, pager-mode instant messaging in both directions | sipral-ua | phase 2 |
+| 3608 | Service-Route, learned from the 200 OK to REGISTER and placed on the requests that follow | sipral-ua | phase 2 |
 | 4235 | Dialog event package, and the `application/dialog-info+xml` reader a busy lamp field is built on | sipral-ua | phase 1 |
 | 3856 | Presence event package: the subscription is the framework's, and the PIDF body reaches the application whole | sipral-ua | phase 2 |
 | 6026 | Correct transaction handling for 2xx | sipral-core | phase 1 |
@@ -60,6 +62,9 @@ by no call yet.
 | 3389 | Comfort noise payload | sipral-media | phase 2 |
 | ITU-T G.711 | A-law and µ-law | sipral-media | phase 1 |
 | ITU-T G.722 | 7 kHz at 64 kbit/s | sipral-media | phase 2 |
+| ITU-T G.729 | 8 kbit/s CS-ACELP, base with Annex A and Annex B, written from the Recommendation. The base patents are reported expired since 2017 and that is confirmed before it ships; G.729.1 and the later annexes stay out | sipral-media | phase 2 |
+| 3611 | RTCP-XR, the VoIP metrics block, with the R factor and MOS from ITU-T G.107 | sipral-rtp, sipral-media | phase 2 |
+| 6035 | Quality reports published as `vq-rtcpxr` when an account names a collector | sipral-ua | phase 2 |
 
 ## NAT
 
@@ -68,7 +73,9 @@ by no call yet.
 | 8489 | STUN | sipral-nat | phase 2; written, not linked |
 | 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
 | 8656 | TURN | sipral-nat | phase 2; written, not linked |
-| 8445 | ICE, lite role only | sipral-nat | phase 2; written, not linked |
+| 8445 | ICE, lite role | sipral-nat | phase 2; written, not linked |
+| 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat | phase 4 |
+| 7675 | STUN consent freshness, for a session ICE established | sipral-nat | phase 4 |
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
 | 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`) | sipral-core | phase 2 |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
@@ -77,10 +84,10 @@ by no call yet.
 
 | Area | Why |
 |---|---|
-| Full ICE (aggressive nomination, trickle) | ICE-lite completes sessions against full-ICE peers. The rest earns its place in a browser, not a SIP endpoint |
+| Trickle ICE (RFC 8838, RFC 8840) | Rare between SIP endpoints, which exchange candidates in the offer and the answer. Excluded until a peer needs it |
 | Video and its payload formats | Would make the audio path shallow |
 | SIP server roles: proxy, registrar, B2BUA | Sipral is an endpoint |
-| SIMPLE instant messaging, MSRP | Out of scope |
+| MSRP (RFC 4975), session-mode messaging | Out of scope. Pager-mode messaging, the MESSAGE method, is phase 2 |
 | SIP-T, SIP-I, ISUP encapsulation | Carrier interconnect, not endpoints |
 | IMS: 3GPP registration, `P-Access-Network-Info` | Different product |
 | iLBC (RFC 3951) | Opus covers the same ground — speech over a lossy link — and covers it better. Nothing in the field asks for iLBC and refuses Opus |

@@ -158,6 +158,15 @@ and each is cheaper before the ABI carries it than after:
   before 200 OK through its own engine rather than through a second one;
 - **the 200 OK to REGISTER kept**, and with it Service-Route (RFC 3608) in the
   route set, GRUU (RFC 5627) learned and used, P-Associated-URI reported;
+- **G.729**, base plus Annex A and Annex B, written from the text of the
+  Recommendation the way G.722 was — never from the reference C code, never
+  from the crates that repackage a GPL implementation under another name.
+  Interoperable first, bit-exact against the ITU sequences second if a
+  customer asks. The base patents are reported expired since 2017; that is
+  confirmed in writing before the codec ships under the commercial licence,
+  and G.729.1 and the later annexes stay out. Not in the default offer:
+  narrower and worse than Opus or G.722, it is there for the carrier that
+  insists.
 - **DTLS-SRTP** — decided rather than assumed: `rustls` carries no DTLS, no
   permissively licensed DTLS crate is mature, and writing one is weeks. The
   three options are written in `05-media.md` for the owner; nothing else in
@@ -305,6 +314,13 @@ after it. What is left is platform work, and platform work needs the platform.
   from here**: it is `AVAudioSession` and `AudioManager`, so it needs
   `sipral-io-*` crates for iOS and Android that do not exist yet, and a device
   to run them on.
+- **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
+  ICE-lite already written in `sipral-nat`: gathering, pairing, checks,
+  nomination, role conflicts, restarts, consent freshness (RFC 7675). Off by
+  default for a desktop softphone, where it only adds setup time; on for a
+  phone on a carrier-grade NAT, and lite on a public server. Proven in the lab
+  with a TURN server and two stacks behind two simulated NATs, and against
+  Asterisk with ICE enabled.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a

@@ -26,8 +26,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   artefacts, a Linux device crate over PipeWire and a common device crate.
   Phase 5 starts by joining the headless crate to the engine, and adds Python,
   a sixty-second example with no account, measured numbers, a public
-  interoperability matrix and a security model. Video is out of scope by
-  decision.
+  interoperability matrix and a security model. G.729 joins phase 2, written
+  from the Recommendation with the patent position confirmed before it ships;
+  ICE in the full role joins phase 4, off by default on a desktop. Video is
+  out of scope by decision.
 
 ### Fixed
 

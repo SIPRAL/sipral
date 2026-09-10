@@ -299,8 +299,10 @@ The pipeline between the codec and whatever produces or consumes samples.
   headers and its comments word for word. So it is implemented from the
   Recommendation, which is what a specification is for — a filter pair, two
   ADPCM sub-bands and about a dozen tables. Opus linked, and the codec worth
-  defaulting to where the far end has it. G.729 only if a carrier forces it,
-  and then written in-tree too, because the common implementation is GPL.
+  defaulting to where the far end has it. G.729 follows in phase 2 for the
+  carrier that insists, written in-tree the same way, because the common
+  implementation is GPL and the base patents are reported expired; it is never
+  in the default offer.
 
   G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp

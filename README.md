@@ -58,7 +58,7 @@ you pick, or replace, or leave out entirely.
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
 | `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
-| `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus); G.729 only if a carrier forces it |
+| `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus); G.729 follows in phase 2, written the same way, for the carrier that insists |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
 | `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Not yet joined to the media pipeline |

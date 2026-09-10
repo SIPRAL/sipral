@@ -22,9 +22,12 @@ Most of the NAT problem in SIP telephony is solved before ICE is reached:
 Steps 1 to 3 cover the large majority of carrier and PBX paths, and they are in
 phase 1. Steps 4 and 5 are phase 2.
 
-That is a deliberate narrowing. Full ICE with aggressive nomination is a large
-amount of code that earns its place in a browser, not in a SIP endpoint whose
-peer is a carrier.
+That is a deliberate ordering, not a refusal. Full ICE — gathering, checks,
+nomination, role conflicts, restarts, consent — is phase 4, on top of the
+pieces already written here, because the place it earns its keep is a phone on
+a carrier-grade NAT, or a peer that requires it; on a desktop whose peer is a
+carrier it adds setup time and packets for nothing, and it stays off there by
+default.
 
 ### ICE-lite is for one of the two products, not both
 
@@ -40,7 +43,8 @@ So the switch is not a preference:
 | Deployment | ICE |
 |---|---|
 | Headless agent on a server with a public address | `a=ice-lite`. A full-ICE peer, typically a WebRTC gateway, can then complete a session against it — which is the entire reason the role exists here |
-| Softphone behind a NAT | None. No `a=ice-lite`, no candidate lines. `rport`, symmetric RTP with latching and keepalive are what carry that path, and steps 1 to 3 above are what make them enough |
+| Softphone behind a NAT | None by default. No `a=ice-lite`, no candidate lines. `rport`, symmetric RTP with latching and keepalive are what carry that path, and steps 1 to 3 above are what make them enough |
+| Phone on a carrier-grade NAT, or any endpoint whose peer requires ICE | Full ICE with TURN, phase 4, switched on per stack or per call. Off by default everywhere else |
 
 The endpoint does not guess which it is. A public address is not something a
 host can read off an interface — a machine with a private address and a 1:1 NAT
