@@ -173,20 +173,23 @@ and the alternatives are single-maintainer crates. The cost of the delay is
 that peers who require DTLS-SRTP and refuse SDES — a browser talking WebRTC
 directly, and some carrier session border controllers — cannot be reached.
 
-The way in is a decision, not an assumption, and the three options are these.
-**Written in-house**, from RFC 6347 (DTLS 1.2), RFC 8422 (ECDHE) and RFC 5764,
-with the smallest X.509 reader that can check a fingerprint rather than a
-chain: the clean-room rule allows it, the cost is weeks, and it becomes the
-one piece of the tree that must be reviewed by someone who does cryptography
-for a living. **A permissively licensed DTLS crate**, when one exists with more
-than one maintainer and a release history; none does today, and the licence
-gate decides, not convenience. **DTLS as the application's transport**, the
-way TLS already is: the application runs the handshake on the media socket
-with whatever it trusts, exports the keying material per RFC 5705, and hands
-the SRTP keys to the engine through the same seam SDES uses. The third costs
-the least and fits the architecture best; it costs the application a DTLS
-implementation it may already have. Nothing else in the roadmap waits on the
-choice.
+The way in was decided on 10 September 2026: **written in-tree**, as the last
+item of phase 2. The DTLS 1.2 state machine comes from RFC 6347 — both roles
+per `a=setup` (RFC 4145), the record layer with its epoch and anti-replay
+window, fragmentation and retransmission of the handshake flights, the
+`use_srtp` extension and the key export of RFC 5705, the peer's self-signed
+certificate checked against `a=fingerprint` and against nothing else, no
+renegotiation and no resumption. The primitives it needs — P-256 for ECDHE and
+ECDSA, AES-GCM, SHA-256, HMAC — are not written here: a constant-time
+elliptic curve is the one place a home-grown implementation is a risk rather
+than a virtue, so they come from the permissively licensed crate family that
+already supplies AES, each listed in the notices. The random values a
+handshake needs come from the engine's own seed, which the application draws
+from the operating system's entropy; a seed that is not is a handshake that
+is not. The code is reviewed adversarially before it ships under the
+commercial licence. An application that already runs DTLS of its own can
+still export its keys per RFC 5705 and hand them to the engine through the
+seam SDES uses, which costs one function and keeps the gateway case cheap.
 
 ### SRTP through the facade
 

@@ -28,8 +28,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   a sixty-second example with no account, measured numbers, a public
   interoperability matrix and a security model. G.729 joins phase 2, written
   from the Recommendation with the patent position confirmed before it ships;
-  ICE in the full role joins phase 4, off by default on a desktop. Video is
-  out of scope by decision.
+  ICE in the full role joins phase 4, off by default on a desktop. DTLS-SRTP
+  is written in-tree as the last item of phase 2, the state machine from the
+  RFC and the primitives from the crate family that already supplies AES.
+  Video waits for 1.0 and is phase 6 after it, with its contents named.
 
 ### Fixed
 

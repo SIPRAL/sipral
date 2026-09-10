@@ -136,17 +136,24 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 
 | Component | Use | Licence |
 |---|---|---|
-| webrtc-audio-processing | AEC3, AGC, noise suppression | BSD-3-Clause |
-| miniaudio or PortAudio | baseline audio device I/O | MIT-0 / MIT |
-| rustls or OpenSSL | TLS transport | Apache-2.0 + MIT + ISC / Apache-2.0 |
+| webrtc-audio-processing | AEC3, AGC, noise suppression, as an optional crate attached at the processor seam | BSD-3-Clause |
+| p256, aes-gcm, sha2, hmac (RustCrypto) | the primitives under the in-tree DTLS 1.2, for DTLS-SRTP | MIT OR Apache-2.0 |
+| libpipewire | Linux audio device I/O, through hand-written bindings; the ALSA and PulseAudio client libraries are LGPL and stay out | MIT |
+| libvpx, libaom | video codecs, phase 6, after 1.0 | BSD-3-Clause / BSD-2-Clause |
+| rustls | the TLS example only; the transport, and its TLS, belong to the application | Apache-2.0 OR ISC OR MIT |
+
+Audio device I/O is written in-tree per platform rather than taken from a
+portable library, because the render-to-capture delay and the device-loss
+behaviour the design needs are per platform.
 
 G.711 and G.722 are written in-tree. G.711 is a couple hundred lines and is
 public domain as an algorithm; G.722 is written from the ITU Recommendation,
 because the C implementation everyone links is one the clean-room rules forbid
 and the Rust crate that looks free of it is that implementation with the
-comments intact. G.729 patents expired in January 2017, but the common
-implementation, bcg729, is GPL-3; if G.729 is ever shipped it will be written
-in-tree too.
+comments intact. G.729 is phase 2, written in-tree the same way: its base
+patents are reported expired since January 2017, which is confirmed in
+writing before the codec ships under the commercial licence; the common
+implementation, bcg729, is GPL-3 and is never opened.
 
 ## Test tooling
 

@@ -55,7 +55,12 @@ by no call yet.
 | 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one | sipral-rtp, sipral | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |
-| 5764 | DTLS-SRTP | sipral-rtp | phase 2 |
+| 5764 | DTLS-SRTP: the `use_srtp` extension and the keys it exports | sipral-dtls, sipral-rtp | phase 2 |
+| 6347 | DTLS 1.2, both roles, written in-tree over permissively licensed primitives; no renegotiation, no resumption | sipral-dtls | phase 2 |
+| 4145 | `a=setup`, which end starts the handshake | sipral-core | phase 2 |
+| 5705 | Keying material exporter, for the SRTP keys | sipral-dtls | phase 2 |
+| 8122 | `a=fingerprint`, the only thing a peer's certificate is checked against | sipral-core, sipral-dtls | phase 2 |
+| 7983 | Telling DTLS, STUN and RTP apart on one socket | sipral-nat | phase 2 |
 | 5761 | Multiplexing RTP and RTCP | sipral-rtp | phase 2 |
 | 6716 | Opus | sipral-media | phase 2 |
 | 7587 | RTP payload format for Opus | sipral-media | phase 2 |
@@ -85,7 +90,7 @@ by no call yet.
 | Area | Why |
 |---|---|
 | Trickle ICE (RFC 8838, RFC 8840) | Rare between SIP endpoints, which exchange candidates in the offer and the answer. Excluded until a peer needs it |
-| Video and its payload formats | Would make the audio path shallow |
+| Video and its payload formats | Not before 1.0, so the audio path stays deep; phase 6 after it, per [10-roadmap.md](10-roadmap.md) |
 | SIP server roles: proxy, registrar, B2BUA | Sipral is an endpoint |
 | MSRP (RFC 4975), session-mode messaging | Out of scope. Pager-mode messaging, the MESSAGE method, is phase 2 |
 | SIP-T, SIP-I, ISUP encapsulation | Carrier interconnect, not endpoints |

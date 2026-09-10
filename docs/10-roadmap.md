@@ -167,10 +167,17 @@ and each is cheaper before the ABI carries it than after:
   and G.729.1 and the later annexes stay out. Not in the default offer:
   narrower and worse than Opus or G.722, it is there for the carrier that
   insists.
-- **DTLS-SRTP** — decided rather than assumed: `rustls` carries no DTLS, no
-  permissively licensed DTLS crate is mature, and writing one is weeks. The
-  three options are written in `05-media.md` for the owner; nothing else in
-  the roadmap waits on it.
+- **DTLS-SRTP** (RFC 5764), decided on 10 September 2026: written in-tree.
+  `rustls` carries no DTLS and no permissively licensed DTLS crate is mature,
+  so the DTLS 1.2 state machine — both roles, retransmission, fragmentation,
+  the `use_srtp` extension, key export per RFC 5705, fingerprint verification
+  against `a=fingerprint` and nothing else — is written from RFC 6347, while
+  the primitives it needs (P-256, AES-GCM, SHA-256, HMAC) come from the same
+  permissively licensed crate family that already supplies AES, because a
+  constant-time elliptic curve is the one place a home-grown implementation is
+  a risk rather than a virtue. Reviewed adversarially before it ships under
+  the commercial licence. It is the last item of the phase, and nothing else
+  waits on it.
 
 **Exit:**
 
@@ -178,8 +185,9 @@ and each is cheaper before the ABI carries it than after:
   `tc netem` impairment profiles, committed with the tests;
 - DTMF recognised by the lab PBX and by a carrier IVR, in the RTP form and in
   both INFO forms, received as well as sent;
-- SRTP interoperating over SDES, re-keyed on re-negotiation, with no index
-  ever repeated under one key; DTLS-SRTP per the decision above;
+- SRTP interoperating over SDES and over DTLS-SRTP, against FreeSWITCH and
+  Asterisk with each keying, re-keyed on re-negotiation, with no index ever
+  repeated under one key;
 - every call reports an R factor and a MOS the lab PBX accepts as RTCP-XR;
 - a call held open for an hour with no drift-induced underrun;
 - echo cancellation good enough for a speakerphone call in a normal room —
@@ -367,6 +375,22 @@ phase therefore starts one layer lower than planned:
 documentation without asking a question that the documentation should have
 answered; `pip install sipral` answers a call from the lab.
 
+## Phase 6 — video, after 1.0
+
+Decided on 10 September 2026: not before 1.0, because a video path written
+beside an unfinished audio path makes both shallow; on the roadmap after it,
+because a softphone product line eventually asks. What it contains: capture
+and rendering per platform, in the device crates; VP8, VP9 and AV1 through
+`libvpx` and `libaom` (BSD), H.264 only once its patent position is settled
+in writing; the payload formats (RFC 6184, 7741, 7798); RTCP feedback for
+pictures and loss (RFC 4585, 5104); a frame buffer and bandwidth estimation;
+and hold per stream rather than per call, which the audio-only design
+deliberately does not need.
+
+**Exit:** a video call in both directions against FreeSWITCH and against a
+second Sipral, surviving the impairment profiles, with audio quality
+unchanged from the audio-only build.
+
 ## Where this gets abandoned
 
 Phases 1 and 2. If signalling interoperability or audio quality cannot be
@@ -392,4 +416,4 @@ later.
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping
   the repository public does not wait for the freeze; publishing packages does.
-- Video is out of scope by decision, not by omission.
+- Video waits for 1.0 by decision, not by omission, and is phase 6 after it.
