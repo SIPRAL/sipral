@@ -81,4 +81,13 @@ there an RFC section number to hang it on.
 
 Files carry the SPDX header and the copyright line. `scripts/check.sh` rejects the ones that do
 not, and also fails on references to the forbidden projects appearing in source
-files.
+files, in any capitalisation.
+
+## The record
+
+This document is the rule. [`CLEANROOM_AUDIT.md`](../CLEANROOM_AUDIT.md) at the
+root is the record of how it was kept: what each component was written from,
+which permissively licensed projects were read for architecture and when, and
+the two-team procedure that applies to the one component where a specification
+alone may not settle every detail. Someone deciding whether to buy a licence
+reads that file; this one tells them what it is a record of.

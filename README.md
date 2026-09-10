@@ -108,7 +108,10 @@ which one you need. Full terms in [`LICENSE`](LICENSE) and
 [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
 Dependencies are permissive only, and `cargo deny` fails the build on
-anything else.
+anything else. Every protocol in here is written from its specification rather
+than from anyone's implementation, which is what makes the second arm of that
+licence possible; the record of how, component by component, is in
+[`CLEANROOM_AUDIT.md`](CLEANROOM_AUDIT.md).
 
 The name is a trademark and is not covered by either licence, see
 [`TRADEMARK.md`](TRADEMARK.md).
