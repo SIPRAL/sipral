@@ -5,7 +5,14 @@ readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# not `license.workspace = true`, deliberately. The workspace expression names
+# the commercial arm with a `LicenseRef-`, and neither crates.io nor nuget.org
+# resolves one: crates.io validates the field against the SPDX licence list,
+# and NuGet accepts only expressions approved by the OSI or the FSF. This is
+# the crate that publishes, so it declares the arm that a registry can read.
+# The dual expression is where it belongs and where it is read: the SPDX header
+# of every file, and LICENSING.md.
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true

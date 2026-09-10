@@ -79,6 +79,30 @@ That is advice given to them, not to this project, and it is recorded here as
 what it is. IETF rules require a disclosure to name actual patent numbers, so a
 licensee who needs more than that can have their own counsel read them.
 
+Since December 2025 that picture is no longer complete, and a licensee should
+know it before shipping. **Dolby Laboratories and Fraunhofer IIS are asserting
+patents against Opus implementations**, through a licensing vehicle trading as
+Vectis at `opuspool.com`, reading on RFC 6716, 8251 and 8486 and on the
+reference software. The actions on record are Dolby against Acer, filed at the
+Unified Patent Court's local division in The Hague on 10 December 2025 and
+pending; Dolby against Arçelik, pending; and settlements with Optoma and with
+Epson, the latter in September 2025. The programme is aimed at **manufacturers
+of devices** — handsets, tablets, computers, televisions, smart speakers,
+consoles and IP telephones — and its published position excludes open source
+software distributed independently of hardware.
+
+What that means for the two arms of this project is not the same thing. A
+library distributed on its own is outside what the programme says it targets.
+**A licensee who puts Sipral into a device is inside it**, and that is their
+exposure rather than ours, which is why it is written here rather than left to
+be discovered. Nothing in this file, and nothing in either licence, is a
+representation that Sipral infringes no patent; see `LICENSE-COMMERCIAL.md`.
+
+Opus is therefore built behind a feature rather than linked unconditionally, so
+that a product which cannot take that exposure can ship G.711 and G.722 and
+link nothing. The feature is on by default, because for everyone else Opus is
+the codec worth having.
+
 ### AES
 
 `sipral-rtp` links the `aes` crate, and nothing else of SRTP is borrowed:

@@ -73,25 +73,49 @@ Recommendation. The procedure below applies to it, and to anything else in the
 same position. It has not yet been used, because the component is not yet
 written; when it is, this file records the outcome.
 
-1. The component is written from the **text of the Recommendation** first. The
-   reference implementation is consulted only for passages where the text is
-   genuinely ambiguous, and those passages are identified in advance.
-2. Whoever reads the reference implementation **writes no production code for
+1. The component is written from the **text of the Recommendation** first, and
+   its correctness is judged against the **conformance vectors the ITU
+   publishes**, never against what the reference implementation happens to
+   output. That distinction carries most of the weight here: a codec specified
+   to the bit converges structurally in every conforming implementation,
+   and where the standard dictates the result, the resemblance is evidence of
+   the standard rather than of copying. Validating against the vectors is what
+   makes that provable rather than merely arguable.
+2. The reference implementation is consulted only for passages where the text
+   is genuinely ambiguous, those passages are named in advance, and the list of
+   them is kept short enough to be read. "Consulted where necessary" is not a
+   record; a numbered list of ambiguities is.
+3. Whoever reads the reference implementation **writes no production code for
    that component, then or later**. They produce a functional specification in
    prose and mathematics, carrying no identifier, no file layout, no comment and
    no fragment of the original.
-3. That specification is checked by a third party who has not seen the reference,
+4. That specification is checked by a third party who has not seen the reference,
    looking for expression that survived, and is returned for rewriting if any is
    found.
-4. Whoever implements the component receives only the checked specification and
+5. Whoever implements the component receives only the checked specification and
    the Recommendation, and **never sees the reference implementation**.
-5. Whoever integrates the result does not open the reference implementation
+6. Whoever integrates the result does not open the reference implementation
    either.
-6. The reference implementation is read on storage that does not persist, and is
+7. The reference implementation is read on storage that does not persist, and is
    never placed in this repository or in any working copy of it.
+8. When the component is finished, whoever already has access to the reference
+   runs a **mechanical similarity scan** of the result against it. Discipline
+   catches what someone notices; a scan catches what nobody did. Anything
+   literal above the threshold is rewritten. The narrow places worth looking
+   hardest at are the ones a standard does not dictate: identifier names,
+   comments, the order of operations where the order is free, and constants
+   that appear in no table of the Recommendation.
 
-bcg729 remains outside this exception. It is not consulted under any procedure,
-by anyone, at any stage.
+The three sources are not in the same position and are not treated as though
+they were. The **text of the Recommendation** is the primary and legitimate
+source, and naming it is what explains why any two conforming implementations
+resemble each other at all. The **ITU's reference code** is published by the
+standards body and licensed for implementing the Recommendation, so consulting
+it within the procedure above is a licensed use of public material rather than
+something to be quiet about. **bcg729 remains outside all of it**: it is not
+consulted under any procedure, by anyone, at any stage, and that is the
+statement in this file that carries the most weight, because it is the one
+implementation whose owner both sells the same thing and could be harmed by us.
 
 ## What this file does not contain
 
