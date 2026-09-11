@@ -49,10 +49,12 @@ transaction from dialog, or the sans-I/O boundary, are not copyrightable and are
 free to use.
 
 **4. Provenance is demonstrable.** One repository, from commit zero, complete
-history, never squashed. `main` was rewritten once, on 4 September 2026, when
-the repository held a single commit and no protocol code, to take a private
-address out of that commit's metadata; from the first commit carrying code the
-history is evidence and is not touched again. Design documents dated and
+history, never squashed. Two commit messages have been rewritten, and no
+commit's content ever has: on 4 September 2026, when the repository held a
+single commit and no protocol code, to take a private address out of its
+metadata; and on 11 September 2026, one line of one message. Both times every
+tree and every blob came out byte for byte the same, which is the part that is
+evidence. The code history is not touched. Design documents dated and
 committed before the code they describe. If the question is ever asked, this is
 the answer.
 

@@ -63,10 +63,13 @@ reasoning behind each judgement call is written next to the decision rather than
 kept in someone's head. A file that disagrees with its design document is a bug
 in one of the two.
 
-`main` was rewritten once, on 4 September 2026, when the repository held a
-single commit and no protocol code, to take a private address out of that
-commit's metadata. From the first commit that carries code the history is
-evidence: it is not squashed, not rebased and not force-pushed again.
+`main` has been rewritten twice, both times to change a commit message and
+never a commit's content: on 4 September 2026, when the repository held a
+single commit and no protocol code, to take a private address out of its
+metadata; and on 11 September 2026, one line of one message. Each rewrite is
+checkable for what it claims — every tree object came out identical, so no
+blob moved and the code history is the same history. It is not squashed and
+not rebased, and what is evidence about it has never been altered.
 
 `scripts/check.sh` fails the build when a source file contains pjproject,
 pjsip, pjmedia, sofia-sip, osip2, exosip, linphone, bcg729, spandsp, libnice or

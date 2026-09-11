@@ -13,9 +13,10 @@ They also serve a second purpose. Sipral is written clean-room, and dated design
 documents in the repository history are the evidence that its state machines
 were derived from the specifications rather than from another implementation.
 That is why the history is not squashed and not rewritten. It was rewritten
-once, on 4 September 2026, when the repository held a single commit and no
-protocol code, to take a private address out of that commit's metadata; from
-the first commit carrying code it is evidence and is left alone.
+twice, both times a commit message and never a commit's content: on
+4 September 2026, to take a private address out of the metadata of the only
+commit there was, and on 11 September 2026, one line of one message. Every
+tree object survived both unchanged, so the code history is untouched.
 
 | Document | Covers |
 |---|---|
