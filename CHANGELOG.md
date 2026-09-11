@@ -10,6 +10,64 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A challenge no longer dies when the answer to it outgrows a datagram.**
+  Credentials are the one addition certain to make a request bigger, and a
+  retry that crossed RFC 3261 §18.1.1's line was refused with "open a stream
+  and send it again" — while the endpoint, the only holder of the challenge,
+  had already thrown it away. The caller opened the connection it was asked
+  for and got `NoChallenge`. The challenge now stays put on that one error,
+  and the same handle works once the transport is bound. `SendError::
+  NeedsStreamTransport`'s contract says which side holds the request on which
+  door, because the two differ.
+
+- **A connection to one place no longer hides every connection to another.**
+  Choosing a stream transport for §18.1.1 picked the lowest-numbered one
+  speaking TCP and only then measured it against the destination, so a single
+  connection to a registrar made every promotion to any other address report
+  that nothing spoke TCP — however many connections were open, and however
+  many times the caller opened the one being asked for. The destination is
+  now part of the question rather than a filter on the answer. This was
+  reachable on the ordinary first send, not only on a retry.
+
+- **A nonce count is spent by the request that leaves, not the one that is
+  built.** Working out an answer no longer moves the counter; committing the
+  bytes to a transaction does. A request refused for size took its number
+  into the bin, and whoever asked next either repeated it, which a server
+  reads as a replay, or stepped over it. Both doors are covered: the retry
+  after a challenge and §22.2's pre-emptive answer.
+
+- **A server that rotates its nonce can no longer run one wrong password per
+  round trip.** §22.1's guard — the same nonce back without `stale` means the
+  password was rejected — turns on the nonce being the same, and a registrar
+  that draws a fresh one every refusal walks straight past it. The count that
+  closes that hole existed on the REGISTER path only; it now lives in the
+  endpoint and covers calls, in-dialog requests, re-INVITE and UPDATE, and
+  SUBSCRIBE. One request is answered three times, and the fourth challenge on
+  it is a refusal whatever nonce it carries. The credentials for that
+  protection domain are marked refused with it, so the pre-emptive answer
+  stops offering a password three refusals old on every later request — and
+  only that domain, because one destination can hold a registrar's realm and
+  a proxy's at once with only one of the two passwords wrong.
+
+- **A retry waiting for a connection is no longer reported as a wrong
+  password.** Every path that answers a challenge used to drop the "open a
+  stream" error on the floor, and the pass that decides whether a parked
+  refusal became a retry then ran in the same breath — so the application was
+  told its credentials were bad at the same moment it was asked for a socket
+  nobody had been given time to open. A parked retry is now left where it is
+  and sent when the transport is bound, on all five paths: registration, the
+  INVITE, a request inside a dialog, a re-INVITE or UPDATE, and SUBSCRIBE.
+
+- **A REFER that is never authenticated gives the transfer seat back.** The
+  seat a call holds while a REFER is outstanding was released on every final
+  answer except a challenge, on the grounds that a retry would follow. When
+  no retry can follow, the seat stayed taken for the life of the call and
+  every later transfer on it was refused here before anything was sent. The
+  application is now told the transfer did not happen, and the call can be
+  transferred again.
+
 ### Added
 
 - **Nine more fuzz targets, and the gate builds all thirteen.**

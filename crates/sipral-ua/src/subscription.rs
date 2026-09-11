@@ -404,6 +404,10 @@ pub(crate) struct Subscription {
     /// A challenge came back and it is not yet known whether anything could
     /// read it. The refusal is kept for the event that says so.
     unanswered: Option<OwnedMessage>,
+    /// The challenged SUBSCRIBE whose answer §18.1.1 would not let out over a
+    /// datagram, waiting for the connection the endpoint asked for. While
+    /// this is set the refusal above is not a refusal yet.
+    waiting_for_stream: Option<AnyTransactionId>,
     /// RFC 4235 §4.3's table, for the one package that has one.
     table: DialogInfoTable,
 }
@@ -426,6 +430,7 @@ impl Subscription {
             failures: 0,
             unsubscribing: false,
             unanswered: None,
+            waiting_for_stream: None,
             table: DialogInfoTable::default(),
         }
     }
@@ -453,6 +458,7 @@ impl Subscription {
             failures: 0,
             unsubscribing: false,
             unanswered: None,
+            waiting_for_stream: None,
             table: DialogInfoTable::default(),
         }
     }
@@ -1450,20 +1456,77 @@ impl UserAgent {
             // same way every time
             return;
         };
-        let Ok(retried) = self
+        match self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
-        else {
-            return;
-        };
+        {
+            Ok(retried) => self.subscribe_retry_went(subscription, transaction, retried),
+            // §18.1.1 wants a connection first, and the endpoint is still
+            // holding the challenge. The number is not moved either: nothing
+            // has gone out to move it past
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let Some(held) = self.subscriptions.get_mut(&subscription) {
+                    held.waiting_for_stream = Some(transaction);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The retry is a transaction now, so everything that named the refused
+    /// one names this one.
+    fn subscribe_retry_went(
+        &mut self,
+        subscription: SubscriptionHandle,
+        transaction: AnyTransactionId,
+        retried: AnyTransactionId,
+    ) {
         self.by_subscribe.remove(&transaction);
         self.by_subscribe.insert(retried, subscription);
         if let Some(held) = self.subscriptions.get_mut(&subscription) {
             held.unanswered = None;
+            held.waiting_for_stream = None;
             // §22.2 has the retry carry the next number, and outside a dialog
             // that is one more than the one that was refused. The dialog the
             // NOTIFY opens continues from there, so this has to move with it
             held.cseq = held.cseq.saturating_add(1);
+        }
+    }
+
+    /// Send the subscription retries §18.1.1 held back, now that there is a
+    /// connection.
+    pub(crate) fn resume_parked_subscriptions(&mut self, now: Instant) {
+        let waiting: Vec<(SubscriptionHandle, AnyTransactionId)> = self
+            .subscriptions
+            .iter()
+            .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .collect();
+        for (subscription, failed) in waiting {
+            let credentials = self
+                .subscriptions
+                .get(&subscription)
+                .and_then(|held| self.accounts.get(&held.account))
+                .and_then(|account| account.credentials.clone());
+            let Some(credentials) = credentials else {
+                self.stop_waiting_for_subscribe(subscription);
+                continue;
+            };
+            match self
+                .endpoint
+                .retry_with_credentials(failed, &credentials, now)
+            {
+                Ok(retried) => self.subscribe_retry_went(subscription, failed, retried),
+                Err(error) if crate::agent::wants_a_stream(&error) => {}
+                Err(_) => self.stop_waiting_for_subscribe(subscription),
+            }
+        }
+    }
+
+    /// Stop holding one back, so the next settle reports the refusal it
+    /// still carries.
+    fn stop_waiting_for_subscribe(&mut self, subscription: SubscriptionHandle) {
+        if let Some(held) = self.subscriptions.get_mut(&subscription) {
+            held.waiting_for_stream = None;
         }
     }
 
@@ -1477,6 +1540,9 @@ impl UserAgent {
         let refused: Vec<(SubscriptionHandle, OwnedMessage)> = self
             .subscriptions
             .iter_mut()
+            // except one the endpoint is holding until a connection exists:
+            // its answer has not been sent yet, so there is no silence to read
+            .filter(|(_, held)| held.waiting_for_stream.is_none())
             .filter_map(|(handle, held)| held.unanswered.take().map(|response| (*handle, response)))
             .collect();
         for (subscription, response) in refused {

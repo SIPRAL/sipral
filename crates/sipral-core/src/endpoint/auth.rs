@@ -30,7 +30,7 @@ use super::error::AuthRetryError;
 use super::event::Event;
 use super::outgoing::OutgoingRequest;
 use super::table::Flow;
-use crate::auth::{AuthCache, Credentials, Learned};
+use crate::auth::{Answered, AuthCache, Credentials, Learned};
 use crate::diag::{Direction, Reason};
 use crate::msg::{HeaderName, Method, OwnedMessage, RawMessage, RequestBuilder, StatusCode};
 use crate::transaction::{AnyTransactionId, DialogId};
@@ -41,6 +41,23 @@ use crate::transaction::{AnyTransactionId, DialogId};
 /// The cap is what stops a peer that refuses everything from turning this into
 /// a place to put memory.
 const REMEMBERED: usize = 32;
+
+/// How many times one request goes again with credentials before the stack
+/// calls the password wrong.
+///
+/// §22.1's guard — the same nonce coming back without `stale` means the
+/// credentials were rejected — turns on the nonce being the same. A server
+/// that draws a fresh one for every refusal and never marks it `stale` walks
+/// straight past that guard, and the exchange then runs one wrong password
+/// per round trip for as long as the process lives, which is how an account
+/// gets locked out. Nothing on the wire tells that apart from a server ageing
+/// its nonces honestly, so the count is the defence.
+///
+/// Three, because a correct exchange needs one, a nonce that aged out between
+/// the request and the answer needs two, and a third is already generous. The
+/// allowance is per request, not per destination: a fresh request gets the
+/// whole of it again, since a password can be corrected while a process runs.
+const ANSWERS: u8 = 3;
 
 /// A request that was refused, and the challenge it was refused with.
 #[derive(Debug)]
@@ -53,6 +70,13 @@ pub(super) struct Challenged {
     /// CSeq" has to come from the dialog there, or the next request in it
     /// reuses the number.
     pub(super) dialog: Option<DialogId>,
+    /// How many times this request has already gone again with credentials.
+    ///
+    /// Kept here rather than in a ledger of its own because this record
+    /// outlives the transaction that earned it, and the allowance has to
+    /// outlive it too: a server that draws a fresh nonce every time is
+    /// exactly a server that keeps making new transactions.
+    pub(super) spent: u8,
 }
 
 /// The challenges waiting for an answer.
@@ -62,6 +86,16 @@ pub(super) struct Challenges {
     /// cap is reached. A linear scan of at most [`REMEMBERED`] is cheaper than
     /// a map plus a queue to order it.
     entries: Vec<(AnyTransactionId, Challenged)>,
+    /// How many answers each request still in flight has spent, keyed by the
+    /// transaction its latest retry created.
+    ///
+    /// Keyed by transaction and not by request because a request has no
+    /// identity the endpoint keeps: every retry starts a new transaction, and
+    /// the allowance belongs to the request, so it is handed from the
+    /// transaction that is ending to the one replacing it. Nothing is ever
+    /// reused: a transaction id is a slot and a generation, so a freed slot
+    /// comes back as a different id.
+    spent: Vec<(AnyTransactionId, u8)>,
 }
 
 impl Challenges {
@@ -69,7 +103,46 @@ impl Challenges {
     pub(super) const fn new() -> Self {
         Self {
             entries: Vec::new(),
+            spent: Vec::new(),
         }
+    }
+
+    /// Hand the allowance a request has already spent to the transaction its
+    /// retry just created.
+    ///
+    /// One entry per chain, and only between the retry going out and its
+    /// answer coming back: [`Self::take_answered`] takes it from here the
+    /// moment a challenge arrives, and [`Self::forget`] drops it when the
+    /// transaction ends any other way.
+    pub(super) fn carry(&mut self, retried: AnyTransactionId, spent: u8) {
+        self.spent.retain(|(known, _)| *known != retried);
+        if self.spent.len() >= REMEMBERED {
+            self.spent.remove(0);
+        }
+        self.spent.push((retried, spent));
+    }
+
+    /// The transaction is over, so whatever it was carrying is not coming
+    /// back. Only the allowance is dropped; the challenge itself outlives
+    /// the transaction on purpose.
+    pub(super) fn forget(&mut self, id: AnyTransactionId) {
+        self.spent.retain(|(known, _)| *known != id);
+    }
+
+    /// How many answers the request behind this transaction has spent, taken
+    /// out on the way.
+    ///
+    /// Taken and not read, because the count is moving: whoever asks is
+    /// about to put it somewhere that outlives this ledger. Leaving it here
+    /// would keep an entry per chain that ever ran, successful ones
+    /// included, and thirty-two of those would push a live chain out and let
+    /// its allowance start again — which is the whole defence, failing
+    /// open, under nothing worse than ordinary traffic.
+    pub(super) fn take_answered(&mut self, id: AnyTransactionId) -> u8 {
+        let Some(at) = self.spent.iter().position(|(known, _)| *known == id) else {
+            return 0;
+        };
+        self.spent.remove(at).1
     }
 
     /// Remember one, evicting the oldest if there is no room.
@@ -155,8 +228,17 @@ impl Known {
         self.entries.get_mut(at).map(|(_, cache)| cache)
     }
 
-    /// What this destination has challenged with, if it ever has.
-    fn get(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
+    /// What this destination has challenged with, if it ever has, to read.
+    fn peek(&self, destination: &[u8]) -> Option<&AuthCache> {
+        self.entries
+            .iter()
+            .find(|(known, _)| **known == *destination)
+            .map(|(_, cache)| cache)
+    }
+
+    /// The same, to write: only for spending a count on an answer already
+    /// drawn, which is why it opens nothing that is not already there.
+    fn peek_mut(&mut self, destination: &[u8]) -> Option<&mut AuthCache> {
         self.entries
             .iter_mut()
             .find(|(known, _)| **known == *destination)
@@ -179,7 +261,7 @@ impl Known {
 /// trip; getting it wrong in the other would answer one destination with
 /// another's challenge, which the realm check inside [`AuthCache`] would then
 /// have to catch.
-fn destination(to: &[u8]) -> Option<Box<[u8]>> {
+pub(super) fn destination(to: &[u8]) -> Option<Box<[u8]>> {
     crate::msg::NameAddrRef::parse(to)
         .ok()
         .map(|addr| Box::from(addr.uri_bytes()))
@@ -188,13 +270,26 @@ fn destination(to: &[u8]) -> Option<Box<[u8]>> {
 impl Endpoint {
     /// Send a challenged request again, with credentials.
     ///
-    /// The nonce count and the client nonce are the endpoint's: `nc` "MUST" be
-    /// different for every request sent with the same nonce, and a skipped
-    /// number looks to the server like a replay it should refuse. The `CSeq`
+    /// The nonce count and the client nonce are the endpoint's: `nc` "MUST"
+    /// be different for every request sent with the same nonce. The `CSeq`
     /// moves on too (§22.2).
     ///
-    /// The stored challenge is consumed, so a second call with the same handle
-    /// is refused rather than replaying a nonce count.
+    /// The stored challenge is consumed, so a second call with the same
+    /// handle is refused rather than replaying a nonce count. There is one
+    /// exception, and it is the one error the endpoint raises to ask the
+    /// caller to do something: when §18.1.1 refuses to send the retry over a
+    /// datagram and asks for a stream, the challenge stays where it is and
+    /// the same handle works again once the transport is bound. What the
+    /// refused attempt had drawn is dropped and drawn again then — a number
+    /// the server never saw leaves a gap, which it tolerates, while holding
+    /// one back risks putting it on the wire behind a higher one, which it
+    /// does not.
+    ///
+    /// One request goes again with credentials at most three times. The
+    /// fourth challenge on the same request is reported as a refusal
+    /// whatever nonce it carries, because a server that rotates its nonce
+    /// defeats §22.1's guard and one wrong password per round trip is how an
+    /// account gets locked out.
     ///
     /// # Errors
     /// [`AuthRetryError`] when there is no challenge under this handle, when
@@ -211,7 +306,20 @@ impl Endpoint {
             .challenges
             .take(failed)
             .ok_or(AuthRetryError::NoChallenge)?;
+        self.send_retry(failed, held, credentials, now)
+    }
 
+    /// The retry itself, with the challenge already out of the store.
+    ///
+    /// Split from [`Self::retry_with_credentials`] only so that the one error
+    /// which puts the challenge back has somewhere to put it back from.
+    fn send_retry(
+        &mut self,
+        failed: AnyTransactionId,
+        held: Challenged,
+        credentials: &Credentials,
+        now: Instant,
+    ) -> Result<AnyTransactionId, AuthRetryError> {
         let method = held
             .request
             .as_raw()
@@ -262,17 +370,37 @@ impl Endpoint {
             self.config.always_request_rport,
         );
 
-        let mut message = rebuild(&held.request.as_raw(), &via, cseq, &answers)
+        let mut message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
 
         // The credentials are what made it large. §18.1.1 has to be applied
         // here as well as on the first send, or the one request in a call that
         // is certain to have grown is the one request nobody checked.
-        let call = held.request.as_raw().call_id().ok();
-        if let Some((stream, stream_local)) = self
-            .promote_if_too_big(flow, message.len(), call)
-            .map_err(AuthRetryError::Unsendable)?
-        {
+        let promoted = {
+            let call = held.request.as_raw().call_id().ok();
+            self.promote_if_too_big(flow, message.len(), call)
+        };
+        let promoted = match promoted {
+            Ok(promoted) => promoted,
+            // §18.1.1 refused to send this one and asked the caller for a
+            // stream. That is the one error here the caller is expected to
+            // act on, so the challenge goes back where it was and the same
+            // handle works again once the connection is open. Everything
+            // drawn for the attempt that could not leave — the nonce count,
+            // the branch, and inside a dialog the CSeq — is dropped with it
+            // and drawn again next time: a number the server never saw
+            // leaves a gap, which is allowed, while keeping it would let a
+            // request that goes out meanwhile carry a higher one and put
+            // this one on the wire out of order, which is not.
+            Err(super::error::SendError::NeedsStreamTransport) => {
+                self.challenges.remember(failed, held);
+                return Err(AuthRetryError::Unsendable(
+                    super::error::SendError::NeedsStreamTransport,
+                ));
+            }
+            Err(error) => return Err(AuthRetryError::Unsendable(error)),
+        };
+        if let Some((stream, stream_local)) = promoted {
             flow = stream;
             local = stream_local;
             via = super::via::local_via(
@@ -281,7 +409,7 @@ impl Endpoint {
                 &branch,
                 self.config.always_request_rport,
             );
-            message = rebuild(&held.request.as_raw(), &via, cseq, &answers)
+            message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
                 .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
         }
 
@@ -292,37 +420,69 @@ impl Endpoint {
             flow,
         );
         let dialog = held.dialog;
+        let retried = self.start_retry(method, message, flow, dialog, now)?;
+        if let Some(dialog) = dialog {
+            self.remember_dialog(retried, dialog);
+        }
+        // Both counts move here and nowhere earlier, because the transaction
+        // has now actually started: an attempt §18.1.1 refused to send
+        // returned above without reaching this, and so costs nothing.
+        //
+        // The nonce count is the server's bookkeeping, one per request that
+        // carries a given nonce. The allowance is ours, and travels with the
+        // request rather than with the transaction: every retry gets a new
+        // id, and a server drawing a fresh nonce each time would otherwise
+        // restart the count on every round trip.
+        if let Some(to) = held
+            .request
+            .as_raw()
+            .header(HeaderName::To)
+            .and_then(destination)
+        {
+            self.spend_answer(&to, &answers);
+        }
+        self.challenges.carry(retried, held.spent.saturating_add(1));
+        Ok(retried)
+    }
+
+    /// Put the rebuilt request in a transaction of its own.
+    ///
+    /// A retry is a new transaction, not a continuation: a new branch went
+    /// into the `Via` above, and §17.1.3 matches responses on that.
+    fn start_retry(
+        &mut self,
+        method: Method<'_>,
+        message: OwnedMessage,
+        flow: Flow,
+        dialog: Option<DialogId>,
+        now: Instant,
+    ) -> Result<AnyTransactionId, AuthRetryError> {
         let timers = self.config.timers;
-        let retried = if method == Method::Invite {
-            let secure = flow.protocol.is_secure();
-            let (id, effects) = self
-                .transactions
-                .start_invite_client(message.clone(), flow, timers, now)
-                .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
-            match dialog {
-                // §14.1: an INVITE inside a dialog is a re-INVITE and never
-                // forks, so it gets no dialog set. Watching one here would
-                // open a second, parallel view of a call that already exists
-                Some(dialog) => self.watch_reinvite(id, dialog, message),
-                None => {
-                    self.dialogs
-                        .watch(crate::dialog::DialogSet::new(message, secure), id);
-                }
-            }
-            self.apply_client(effects, flow);
-            AnyTransactionId::InviteClient(id)
-        } else {
+        if method != Method::Invite {
             let (id, effects) = self
                 .transactions
                 .start_non_invite_client(message, flow, timers, now)
                 .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
             self.apply_client(effects, flow);
-            AnyTransactionId::NonInviteClient(id)
-        };
-        if let Some(dialog) = dialog {
-            self.remember_dialog(retried, dialog);
+            return Ok(AnyTransactionId::NonInviteClient(id));
         }
-        Ok(retried)
+        let secure = flow.protocol.is_secure();
+        let (id, effects) = self
+            .transactions
+            .start_invite_client(message.clone(), flow, timers, now)
+            .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
+        match dialog {
+            // §14.1: an INVITE inside a dialog is a re-INVITE and never
+            // forks, so it gets no dialog set. Watching one here would open a
+            // second, parallel view of a call that already exists
+            Some(dialog) => self.watch_reinvite(id, dialog, message),
+            None => {
+                self.dialogs
+                    .watch(crate::dialog::DialogSet::new(message, secure), id);
+            }
+        }
+        self.apply_client(effects, flow);
+        Ok(AnyTransactionId::InviteClient(id))
     }
 
     /// A refusal that carries a challenge worth answering.
@@ -354,9 +514,32 @@ impl Endpoint {
             return;
         };
         let call_id = call_id.to_vec();
+        // taken before the cache is borrowed, for the same reason the cnonce
+        // is read there; and taken rather than read because from here it
+        // travels on the record below, which outlives this ledger
+        let spent = self.challenges.take_answered(id);
         let Some(cache) = self.known.at(&to) else {
             return;
         };
+        if spent >= ANSWERS {
+            // The allowance is gone. §22.1 stops a client answering the same
+            // nonce twice, and a server that draws a new one for every
+            // refusal walks straight past that, so the count is what closes
+            // it: the fourth challenge on one request is a refusal whatever
+            // nonce it carries.
+            //
+            // The credentials are marked refused as well, not just this
+            // request stopped. Otherwise §22.2's pre-emptive answer would go
+            // on offering the same password, now known wrong, on every later
+            // request to this destination — the same lock-out, one round trip
+            // at a time instead of three.
+            cache.refuse(response);
+            // Said by saying nothing: no `Event::Challenged` follows the
+            // response, which is exactly how the same-nonce refusal below
+            // reports itself and what every caller already reads as the end
+            // of the exchange.
+            return;
+        }
         if cache.learn(response, &cnonce, &call_id) != Learned::Retry {
             // either nothing here can be answered (RFC 8760 §2.4: "The client
             // MUST ignore any challenge it does not understand"), or the same
@@ -400,6 +583,7 @@ impl Endpoint {
                 request,
                 flow,
                 dialog,
+                spent,
             },
         );
     }
@@ -409,24 +593,28 @@ impl Endpoint {
     ///
     /// Empty when nothing is remembered, when what is remembered was refused,
     /// or when it belongs to a proxy and this is a different conversation
-    /// (§22.3). A caller that asks has to send what it gets back: the nonce
-    /// count is spent here, and `nc` "MUST" differ on every request that
-    /// carries the same nonce.
+    /// (§22.3).
+    ///
+    /// The nonce count is not spent here. What comes back has to be handed to
+    /// [`Self::spend_answer`] once the request carrying it is on its way, and
+    /// dropped without that if it never goes: `nc` "MUST" differ on every
+    /// request that carries the same nonce, so the number belongs to the
+    /// request that reaches the wire.
     pub(super) fn answer_ahead(
-        &mut self,
+        &self,
         request: &OutgoingRequest,
         credentials: &Credentials,
         call_id: &[u8],
-    ) -> Vec<(HeaderName<'static>, String)> {
+    ) -> Answered {
         let Some(to) = request.to.as_deref().and_then(destination) else {
-            return Vec::new();
+            return Answered::default();
         };
         let Some(method) = Method::from_bytes(&request.method) else {
-            return Vec::new();
+            return Answered::default();
         };
         let uri = request.request_uri.as_bytes().to_vec();
         self.known
-            .get(&to)
+            .peek(&to)
             .map(|cache| cache.authorize(credentials, method, &uri, call_id))
             .unwrap_or_default()
     }
@@ -434,27 +622,35 @@ impl Endpoint {
     /// The same, for a request that has already been refused once: what the
     /// destination's cache says to answer with, drawn from the one place the
     /// nonce count lives.
-    fn answers_for(
-        &mut self,
-        request: &OwnedMessage,
-        credentials: &Credentials,
-    ) -> Vec<(HeaderName<'static>, String)> {
+    fn answers_for(&self, request: &OwnedMessage, credentials: &Credentials) -> Answered {
         let raw = request.as_raw();
         let (Some(method), Some(uri)) = (raw.method(), raw.request_uri_bytes()) else {
-            return Vec::new();
+            return Answered::default();
         };
         let uri = uri.to_vec();
         let (Some(to), Ok(call_id)) = (
             raw.header(HeaderName::To).and_then(destination),
             raw.call_id(),
         ) else {
-            return Vec::new();
+            return Answered::default();
         };
         let call_id = call_id.to_vec();
         self.known
-            .get(&to)
+            .peek(&to)
             .map(|cache| cache.authorize(credentials, method, &uri, &call_id))
             .unwrap_or_default()
+    }
+
+    /// Move the nonce count on, now that the request carrying the answer is
+    /// committed.
+    ///
+    /// Takes the destination again rather than holding a borrow across the
+    /// build: the answer was drawn from one cache and goes back to the same
+    /// one, and between the two the whole endpoint has to be free.
+    pub(super) fn spend_answer(&mut self, to: &[u8], answered: &Answered) {
+        if let Some(cache) = self.known.peek_mut(to) {
+            cache.spend(answered);
+        }
     }
 }
 
@@ -569,6 +765,7 @@ Content-Length: 0\r\n\
                 protocol: TransportProtocol::Udp,
             },
             dialog: None,
+            spent: 0,
         }
     }
 
@@ -595,6 +792,45 @@ Content-Length: 0\r\n\
         challenges.remember(id(0), held());
         challenges.remember(id(0), held());
         assert_eq!(challenges.len(), 1);
+    }
+
+    #[test]
+    fn a_chain_that_is_over_gives_its_slot_back() {
+        // The ledger that bridges a retry and the next challenge has as many
+        // slots as the set above. If an entry outlived its chain, ordinary
+        // traffic would push a live one out and the allowance would start
+        // again — the whole defence failing open. So there are exactly two
+        // ways in and both take the entry with them.
+        let mut challenges = Challenges::new();
+
+        challenges.carry(id(1), 2);
+        assert_eq!(challenges.take_answered(id(1)), 2, "the count is handed on");
+        assert_eq!(
+            challenges.take_answered(id(1)),
+            0,
+            "and is gone: from here it travels on the challenge itself"
+        );
+
+        challenges.carry(id(2), 3);
+        challenges.forget(id(2));
+        assert_eq!(
+            challenges.take_answered(id(2)),
+            0,
+            "a transaction that ended without being challenged keeps no slot"
+        );
+
+        // so a live chain is still there after more traffic than the ledger
+        // holds, because none of that traffic left anything behind
+        challenges.carry(id(3), 2);
+        for slot in 100..200 {
+            challenges.carry(id(slot), 1);
+            challenges.forget(id(slot));
+        }
+        assert_eq!(
+            challenges.take_answered(id(3)),
+            2,
+            "a hundred finished conversations did not cost the live one its count"
+        );
     }
 
     #[test]
@@ -642,7 +878,7 @@ Content-Length: 0\r\n\
         }
         assert_eq!(known.len(), DESTINATIONS);
         // the oldest went first
-        assert!(known.get(b"<sip:alice@0.example>").is_none());
-        assert!(known.get(b"<sip:alice@199.example>").is_some());
+        assert!(known.peek(b"<sip:alice@0.example>").is_none());
+        assert!(known.peek(b"<sip:alice@199.example>").is_some());
     }
 }

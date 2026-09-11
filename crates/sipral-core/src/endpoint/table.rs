@@ -133,15 +133,31 @@ impl Transports {
         self.open.get_mut(&transport)
     }
 
-    /// A transport speaking `protocol`, if the caller has opened one.
+    /// A transport speaking `protocol` that can carry a message to
+    /// `destination`, if the caller has opened one.
     ///
     /// Used for the §18.1.1 switch away from a datagram: a request that has
     /// grown too large has to leave over something congestion controlled, and
     /// this is where the endpoint finds out whether it can.
-    pub(crate) fn any_speaking(&self, protocol: TransportProtocol) -> Option<TransportId> {
+    ///
+    /// The destination is part of the question, not a filter applied to the
+    /// answer. A byte stream is connected, so one bound to a different far
+    /// end cannot carry this; picking a transport first and rejecting it
+    /// afterwards would report that nothing speaks the protocol whenever some
+    /// other connection happened to be opened earlier, and a caller that
+    /// opens what is asked for would then be asked for it again, forever. An
+    /// unconnected stream transport (`remote` is `None`) can reach anywhere.
+    pub(crate) fn speaking_to(
+        &self,
+        protocol: TransportProtocol,
+        destination: SocketAddr,
+    ) -> Option<TransportId> {
         self.open
             .iter()
-            .find(|(_, bound)| bound.protocol == protocol)
+            .find(|(_, bound)| {
+                bound.protocol == protocol
+                    && bound.remote.is_none_or(|remote| remote == destination)
+            })
             .map(|(id, _)| *id)
     }
 
@@ -254,18 +270,71 @@ mod tests {
     #[test]
     fn the_switch_to_a_stream_asks_for_a_transport_that_speaks_one() {
         let mut table = Transports::new();
+        let anywhere = addr("198.51.100.9:5060");
         bind(&mut table, 3, TransportProtocol::Udp);
-        assert_eq!(table.any_speaking(TransportProtocol::Tcp), None);
+        assert_eq!(table.speaking_to(TransportProtocol::Tcp, anywhere), None);
         bind(&mut table, 5, TransportProtocol::Tcp);
         bind(&mut table, 7, TransportProtocol::Tcp);
-        // the same one twice running, so a test can assert on it
+        // neither is connected, so either would carry this; the same one
+        // twice running, so a test can assert on it
         assert_eq!(
-            table.any_speaking(TransportProtocol::Tcp),
+            table.speaking_to(TransportProtocol::Tcp, anywhere),
             Some(TransportId(5))
         );
         assert_eq!(
-            table.any_speaking(TransportProtocol::Tcp),
+            table.speaking_to(TransportProtocol::Tcp, anywhere),
             Some(TransportId(5))
+        );
+    }
+
+    #[test]
+    fn a_stream_connected_somewhere_else_is_not_the_one_to_use() {
+        // The failure this guards against is not theoretical: one connected
+        // stream to a registrar used to hide every other stream, because the
+        // lowest id was picked first and only then measured against the
+        // destination. A request to anyone else then reported that nothing
+        // speaks TCP, however many connections were open, and a caller that
+        // opened what was asked for was asked for it again.
+        let mut table = Transports::new();
+        let registrar = addr("198.51.100.9:5060");
+        let far_end = addr("203.0.113.4:5060");
+        assert!(
+            table
+                .bind(
+                    TransportId(1),
+                    TransportProtocol::Tcp,
+                    addr("192.0.2.1:5060"),
+                    Some(registrar),
+                    Limits::DEFAULT,
+                )
+                .is_none(),
+            "nothing was bound under this id yet"
+        );
+        assert_eq!(
+            table.speaking_to(TransportProtocol::Tcp, registrar),
+            Some(TransportId(1))
+        );
+        assert_eq!(table.speaking_to(TransportProtocol::Tcp, far_end), None);
+
+        assert!(
+            table
+                .bind(
+                    TransportId(2),
+                    TransportProtocol::Tcp,
+                    addr("192.0.2.1:5060"),
+                    Some(far_end),
+                    Limits::DEFAULT,
+                )
+                .is_none(),
+            "nor under this one"
+        );
+        assert_eq!(
+            table.speaking_to(TransportProtocol::Tcp, far_end),
+            Some(TransportId(2))
+        );
+        assert_eq!(
+            table.speaking_to(TransportProtocol::Tcp, registrar),
+            Some(TransportId(1))
         );
     }
 

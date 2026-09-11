@@ -822,6 +822,17 @@ impl Endpoint {
     /// The challenge outlives the transaction that earned it — a refusal is
     /// final, and the password comes from a person. The set of them is capped,
     /// so a peer that refuses everything cannot grow it.
+    ///
+    /// One exception to "consumes the stored challenge", and it is the one
+    /// error the endpoint raises to ask the caller to act: when §18.1.1
+    /// refuses to send the retry over a datagram and asks for a stream, the
+    /// challenge stays and the same handle works again once the transport is
+    /// bound.
+    ///
+    /// One request goes again with credentials at most three times. The
+    /// fourth challenge on the same request is a refusal whatever nonce it
+    /// carries, and is reported the way the same-nonce refusal is: by no
+    /// `Event::Challenged` following the response.
     pub fn retry_with_credentials(&mut self, failed: AnyTransactionId, credentials: &Credentials, now: Instant)
         -> Result<AnyTransactionId, AuthRetryError>;
 
@@ -1150,6 +1161,25 @@ what §22.3 allows and no more. Both are dropped when a nonce comes back a
 second time without `stale`, because §22.1 makes that a rejected password
 rather than a fresh challenge, and the request that follows goes out bare
 rather than repeating it. The table of destinations is capped at thirty-two.
+
+**When the same nonce never comes back.** §22.1's guard turns on the nonce
+being the same, and a server that draws a fresh one for every refusal and
+never marks it `stale` walks straight past it — one wrong password per round
+trip, for as long as the process lives, which is how an account gets locked
+out. Nothing on the wire tells that apart from a server ageing its nonces
+honestly, so the count is the defence: one request is answered at most three
+times, and the fourth challenge on it is a refusal whatever nonce it carries.
+The credentials are then marked refused as well, so §22.2's pre-emptive answer
+stops offering a password three refusals old on every later request to that
+destination. It is not permanent — a challenge carrying a nonce this cache has
+not answered starts the entry again, which is what lets a password corrected
+while the process runs take effect.
+
+**The nonce count belongs to the request that leaves.** Working out an answer
+does not move the count; sending it does. A request that is built and then
+refused — §18.1.1 asking for a stream is the one that happens — takes no
+number with it, so the next one does not step over a value the server never
+saw.
 
 ## Walkthrough: call, race, fork
 

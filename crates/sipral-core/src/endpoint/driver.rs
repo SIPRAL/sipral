@@ -35,7 +35,7 @@ use super::table::{Flow, Transports};
 use super::tokens::Tokens;
 use super::transport::{Input, Transmit, TransportId, TransportProtocol};
 use super::via;
-use crate::auth::Credentials;
+use crate::auth::{Answered, Credentials};
 use crate::diag::{Decision, Direction, Reason, Records};
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
@@ -981,12 +981,13 @@ impl Endpoint {
         let branch = self.tokens.branch();
         // §22.2's re-use, when the caller handed over a password and this
         // destination has challenged before. Drawn here rather than in
-        // `assemble` because it spends a step of the nonce count, and a step
-        // spent twice on one request is a replay as far as the server is
-        // concerned
+        // `assemble` because a step of the nonce count spent twice on one
+        // request is a replay as far as the server is concerned. Drawing it
+        // does not spend it: the size rule below can still refuse to send
+        // this, and a number that never reaches the wire must not be gone.
         let answers = match credentials {
             Some(credentials) => self.answer_ahead(request, credentials, &call_id),
-            None => Vec::new(),
+            None => Answered::default(),
         };
         // RFC 3262 §4: "The UAC SHOULD include this in all INVITE requests."
         // Without it the far end may not answer reliably, and an offer in a
@@ -1000,7 +1001,7 @@ impl Endpoint {
             call_id: &call_id,
             cseq: request.cseq.unwrap_or(1),
             supported: supported.as_deref(),
-            credentials: &answers,
+            credentials: answers.fields(),
         };
 
         let mut message = self.assemble(request, &flow, local, &minted)?;
@@ -1034,6 +1035,15 @@ impl Endpoint {
             local = bound.local;
             message = self.assemble(request, &flow, local, &minted)?;
             self.note_promotion(Some(&call_id), flow, overlong);
+        }
+
+        // The bytes are settled, so the count the answer used is now a count
+        // that has gone out. Above this line every path out is an error, and
+        // an answer drawn on one of those is dropped with its number unspent.
+        if !answers.is_empty()
+            && let Some(to) = request.to.as_deref().and_then(super::auth::destination)
+        {
+            self.spend_answer(&to, &answers);
         }
 
         Ok((message, flow))
@@ -1121,12 +1131,7 @@ impl Endpoint {
     ) -> Result<TransportId, SendError> {
         let open = self
             .transports
-            .any_speaking(TransportProtocol::Tcp)
-            .filter(|id| {
-                self.transports
-                    .get(*id)
-                    .is_some_and(|bound| bound.remote.is_none_or(|remote| remote == destination))
-            });
+            .speaking_to(TransportProtocol::Tcp, destination);
         if let Some(stream) = open {
             return Ok(stream);
         }

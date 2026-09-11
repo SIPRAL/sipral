@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::TransportId;
-use sipral_core::msg::{HeaderName, OwnedMessage, StatusCode, Uri};
+use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
 use sipral_core::sdp::SessionDescription;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, ProvisionalResponseId, TransactionId,
@@ -172,6 +172,26 @@ pub(crate) struct Refusal {
     pub(crate) reason: CallEndReason,
     pub(crate) status: Option<StatusCode>,
     pub(crate) response: Option<OwnedMessage>,
+    /// The retry is built and the endpoint is holding it until there is a
+    /// connection to send it over (RFC 3261 §18.1.1). Until then this is not
+    /// a refusal, and the settle pass leaves it alone.
+    pub(crate) waiting_for_stream: bool,
+}
+
+/// The same, for a request sent inside a call rather than the INVITE that
+/// opened it.
+///
+/// A separate record because what it has to know is different: which call,
+/// and which method — a BYE that never goes and a REFER that never goes
+/// leave different things behind. Both are kept here rather than looked up
+/// when the time comes, because the maps that hold them are swept when the
+/// transaction retires and that happens first.
+#[derive(Debug)]
+pub(crate) struct RequestRefusal {
+    pub(crate) call: CallHandle,
+    pub(crate) method: Method<'static>,
+    pub(crate) status: Option<StatusCode>,
+    pub(crate) waiting_for_stream: bool,
 }
 
 impl core::fmt::Display for CallEndReason {

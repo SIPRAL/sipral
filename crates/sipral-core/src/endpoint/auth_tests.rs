@@ -8,11 +8,12 @@
 //! `scripts/check.sh` refuses to let into the tree.
 
 use super::tests::{
-    connected, deliver, endpoint, events, header, peer, register_request, sent, stream,
+    connected, deliver, endpoint, events, header, local, peer, register_request, sent, stream,
     streamed_call, streamed_register, transmits, with,
 };
 use super::{
-    AuthRetryError, Endpoint, Event, OutgoingInDialogRequest, OutgoingRequest, TransportId,
+    AuthRetryError, DatagramLimit, Endpoint, EndpointConfig, Event, Input, OutgoingInDialogRequest,
+    OutgoingRequest, SendError, TransportId, TransportProtocol,
 };
 use crate::auth::{Credentials, DigestAlgorithm};
 use crate::dialog::CallId;
@@ -854,5 +855,196 @@ fn a_challenged_request_inside_a_call_on_a_stream_takes_its_sequence_from_the_di
         header(&retry, HeaderName::CSeq),
         header(&next, HeaderName::CSeq),
         "the dialog handed the retry's number out twice"
+    );
+}
+
+// -- the allowance, and the attempt §18.1.1 would not send ------------------
+
+/// UDP bound, and a datagram limit the plain REGISTER fits under but the same
+/// request carrying credentials does not.
+fn cramped(now: Instant) -> Endpoint {
+    let config = EndpointConfig {
+        datagram_limit: DatagramLimit {
+            path_mtu: None,
+            headroom_bytes: 200,
+            max_datagram_bytes: 450,
+        },
+        ..EndpointConfig::default()
+    };
+    let mut endpoint = Endpoint::new(config, [7; 32]);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TransportId(1),
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            now,
+        )
+        .expect("binding UDP");
+    endpoint
+}
+
+/// The stream the endpoint asked for, opened.
+fn open_the_stream(endpoint: &mut Endpoint, now: Instant) {
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TransportId(2),
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+}
+
+#[test]
+fn a_challenged_request_that_outgrew_a_datagram_goes_once_a_stream_is_open() {
+    let t0 = Instant::now();
+    let mut endpoint = cramped(t0);
+    let id = endpoint
+        .request(&register_request(), t0)
+        .expect("the REGISTER goes");
+    let first = sent(&mut endpoint);
+    assert!(
+        first.len() <= 450,
+        "the first send has to fit, or this is not a test about the retry: {}",
+        first.len()
+    );
+    deliver(
+        &mut endpoint,
+        &challenge(&first, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        t0,
+    );
+    events(&mut endpoint);
+
+    let id = AnyTransactionId::NonInviteClient(id);
+    let refused = endpoint.retry_with_credentials(id, &credentials(), t0);
+    assert!(
+        matches!(
+            refused,
+            Err(AuthRetryError::Unsendable(SendError::NeedsStreamTransport))
+        ),
+        "the credentials should push it over §18.1.1's line: {refused:?}"
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::TransportWanted { .. })),
+        "the endpoint asked for a stream"
+    );
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "nothing should have gone out"
+    );
+
+    // the caller does what it was asked, and asks again with the same handle
+    open_the_stream(&mut endpoint, t0);
+    endpoint
+        .retry_with_credentials(id, &credentials(), t0)
+        .expect("the retry the endpoint itself asked for");
+    let over_the_stream = sent(&mut endpoint);
+    assert!(
+        !authorization(&over_the_stream).is_empty(),
+        "the second attempt carries the credentials"
+    );
+    assert_eq!(
+        count(&over_the_stream),
+        "00000001",
+        "the attempt that never left spent nothing, so this is the first"
+    );
+}
+
+#[test]
+fn a_server_drawing_a_new_nonce_every_time_is_answered_three_times_and_no_more() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let mut handle = AnyTransactionId::NonInviteClient(
+        endpoint
+            .request(&register_request(), t0)
+            .expect("the REGISTER goes"),
+    );
+    let mut bytes = sent(&mut endpoint);
+    let mut answered = 0_u32;
+
+    // a registrar that never repeats a nonce and never says `stale`, which is
+    // what walks past §22.1's guard
+    for round in 0..8_u32 {
+        deliver(
+            &mut endpoint,
+            &challenge(
+                &bytes,
+                401,
+                "WWW-Authenticate",
+                &digest(&format!("nonce-{round}"), None),
+            ),
+            t0,
+        );
+        let challenged = events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::Challenged { .. }));
+        if !challenged {
+            break;
+        }
+        handle = endpoint
+            .retry_with_credentials(handle, &credentials(), t0)
+            .expect("the retry goes");
+        answered += 1;
+        bytes = sent(&mut endpoint);
+    }
+
+    assert_eq!(
+        answered, 3,
+        "one wrong password per round trip is how an account gets locked out"
+    );
+}
+
+#[test]
+fn the_password_the_allowance_ran_out_on_is_not_offered_ahead_of_the_next_request() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let mut handle = AnyTransactionId::NonInviteClient(
+        endpoint
+            .request(&register_request(), t0)
+            .expect("the REGISTER goes"),
+    );
+    let mut bytes = sent(&mut endpoint);
+    for round in 0..4_u32 {
+        deliver(
+            &mut endpoint,
+            &challenge(
+                &bytes,
+                401,
+                "WWW-Authenticate",
+                &digest(&format!("nonce-{round}"), None),
+            ),
+            t0,
+        );
+        if !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::Challenged { .. }))
+        {
+            break;
+        }
+        handle = endpoint
+            .retry_with_credentials(handle, &credentials(), t0)
+            .expect("the retry goes");
+        bytes = sent(&mut endpoint);
+    }
+
+    // §22.2 would put the answer on the next request to this destination
+    // without waiting to be asked. A password three refusals old is not one
+    // to keep offering: that is the same lock-out, one round trip at a time.
+    endpoint
+        .request(&register_request(), t0)
+        .expect("a fresh REGISTER goes");
+    let fresh = sent(&mut endpoint);
+    assert!(
+        authorization(&fresh).is_empty(),
+        "the credentials the allowance ran out on went out again: {}",
+        authorization(&fresh)
     );
 }

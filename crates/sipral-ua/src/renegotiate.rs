@@ -61,6 +61,10 @@ pub(crate) struct ParkedOffer {
     pub(crate) call: CallHandle,
     pub(crate) status: Option<StatusCode>,
     pub(crate) response: Option<OwnedMessage>,
+    /// The retry is built and the endpoint is holding it until there is a
+    /// connection to send it over (§18.1.1). Until then this is not a refusal
+    /// and `settle_offer_challenges` leaves it alone.
+    pub(crate) waiting_for_stream: bool,
 }
 
 /// What this agent will answer, advertised so that the far end knows an UPDATE
@@ -573,6 +577,7 @@ impl UserAgent {
                     call,
                     status,
                     response,
+                    waiting_for_stream: false,
                 },
             );
             return;
@@ -595,9 +600,28 @@ impl UserAgent {
         let Some(credentials) = credentials else {
             return;
         };
-        let Ok(retried) = self.endpoint.retry_with_credentials(id, &credentials, now) else {
-            return;
-        };
+        match self.endpoint.retry_with_credentials(id, &credentials, now) {
+            Ok(retried) => self.offer_retry_went(id, call, retried),
+            // §18.1.1 wants a connection first. The endpoint keeps the
+            // challenge, so this waits rather than being reported as a
+            // session change that failed
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let Some(parked) = self.challenged_offers.get_mut(&id) {
+                    parked.waiting_for_stream = true;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The retry is a transaction now, so everything that named the refused
+    /// one names this one.
+    fn offer_retry_went(
+        &mut self,
+        id: AnyTransactionId,
+        call: CallHandle,
+        retried: AnyTransactionId,
+    ) {
         self.by_offer.remove(&id);
         // the refusal that came with the challenge was the first half of this
         self.challenged_offers.remove(&id);
@@ -608,6 +632,42 @@ impl UserAgent {
             .and_then(|held| held.offering.as_mut())
         {
             offer.transaction = Some(retried);
+        }
+    }
+
+    /// Send the offer retries §18.1.1 held back, now that there is a
+    /// connection.
+    pub(crate) fn resume_parked_offers(&mut self, now: Instant) {
+        let waiting: Vec<(AnyTransactionId, CallHandle)> = self
+            .challenged_offers
+            .iter()
+            .filter(|(_, parked)| parked.waiting_for_stream)
+            .map(|(id, parked)| (*id, parked.call))
+            .collect();
+        for (id, call) in waiting {
+            let credentials = self
+                .calls
+                .get(&call)
+                .and_then(|held| held.account)
+                .and_then(|account| self.accounts.get(&account))
+                .and_then(|config| config.credentials.clone());
+            let Some(credentials) = credentials else {
+                self.stop_waiting_for_offer(id);
+                continue;
+            };
+            match self.endpoint.retry_with_credentials(id, &credentials, now) {
+                Ok(retried) => self.offer_retry_went(id, call, retried),
+                Err(error) if crate::agent::wants_a_stream(&error) => {}
+                Err(_) => self.stop_waiting_for_offer(id),
+            }
+        }
+    }
+
+    /// Stop holding one back, so the next settle reports the refusal it
+    /// still carries.
+    fn stop_waiting_for_offer(&mut self, id: AnyTransactionId) {
+        if let Some(parked) = self.challenged_offers.get_mut(&id) {
+            parked.waiting_for_stream = false;
         }
     }
 

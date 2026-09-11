@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
-    Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest, ReceiveError, Transmit,
-    TransportId,
+    AuthRetryError, Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest,
+    ReceiveError, SendError, Transmit, TransportId,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode};
 use sipral_core::replay::Driven;
@@ -35,16 +35,31 @@ use sipral_core::transaction::{
 
 use crate::account::{Account, AccountId};
 use crate::announce::{Announcement, Arrival, WINDOW};
-use crate::call::{Call, CallHandle, Refusal};
+use crate::call::{Call, CallHandle, Refusal, RequestRefusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::lifecycle::Machine;
 use crate::registration::{
-    ANSWERS, Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
+    Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
 use crate::subscription::{Subscription, SubscriptionHandle};
+
+/// Whether a retry failed because RFC 3261 §18.1.1 wants a connection.
+///
+/// The one error out of `retry_with_credentials` that is a request rather
+/// than a verdict: the endpoint is still holding the challenge, and the same
+/// handle works again once the application binds a stream transport. Every
+/// path that answers a challenge has to tell it apart from a real failure, or
+/// it reports a password as wrong in the same breath as asking for a socket
+/// nobody has been given time to open.
+pub(crate) fn wants_a_stream(error: &AuthRetryError) -> bool {
+    matches!(
+        error,
+        AuthRetryError::Unsendable(SendError::NeedsStreamTransport)
+    )
+}
 
 /// One user agent: several accounts over one endpoint.
 #[derive(Debug)]
@@ -63,7 +78,11 @@ pub struct UserAgent {
     pub(crate) by_dialog: HashMap<DialogId, CallHandle>,
     /// The BYEs, CANCELs, PRACKs, REFERs and NOTIFYs a call has in flight, so
     /// that their answers are this layer's news rather than the application's.
-    pub(crate) by_request: HashMap<AnyTransactionId, CallHandle>,
+    ///
+    /// The method is kept beside the call because what a request leaves
+    /// behind when it never goes depends on which one it was, and by the time
+    /// that has to be decided the bytes are long gone.
+    pub(crate) by_request: HashMap<AnyTransactionId, (CallHandle, Method<'static>)>,
     /// The account behind each of those, kept beside rather than inside the
     /// call: a BYE outlives the call it ended, and a challenge to it can only
     /// be answered by whoever still knows the password.
@@ -74,6 +93,12 @@ pub struct UserAgent {
     /// ends. Whether one was a refusal or the first half of a retry is decided
     /// by whether a challenge follows it.
     pub(crate) challenged: HashMap<TransactionId<InviteClient>, Refusal>,
+    /// The same, for the BYEs, REFERs and the rest a call sends inside its
+    /// dialog. These used to be reported nowhere at all: a BYE whose retry
+    /// never went left the call in `Terminating` for ever with nothing said,
+    /// and a REFER left the transfer seat taken so no later transfer could
+    /// be asked for.
+    pub(crate) challenged_requests: HashMap<AnyTransactionId, RequestRefusal>,
     /// The same, for a session change: an offer refused with a challenge is
     /// not refused until the drain ends without a retry.
     pub(crate) challenged_offers: HashMap<AnyTransactionId, ParkedOffer>,
@@ -134,6 +159,7 @@ impl UserAgent {
             account_of: HashMap::new(),
             by_offer: HashMap::new(),
             challenged: HashMap::new(),
+            challenged_requests: HashMap::new(),
             challenged_offers: HashMap::new(),
             subscriptions: HashMap::new(),
             by_subscribe: HashMap::new(),
@@ -352,10 +378,6 @@ impl UserAgent {
         reg.unanswered = None;
         reg.due = None;
         reg.owed = false;
-        // a fresh attempt gets the whole allowance again: a password can be
-        // corrected while the process runs, and a refresh an hour later is not
-        // the attempt that was refused
-        reg.answered = 0;
         reg.state = if unregistering {
             RegistrationState::Unregistered
         } else if refreshing {
@@ -446,6 +468,7 @@ impl UserAgent {
         }
         self.settle_challenges();
         self.settle_call_challenges(now);
+        self.settle_request_challenges();
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
         self.settle_announcements(now);
@@ -748,30 +771,92 @@ impl UserAgent {
             // same way every time, so there is no point trying again
             return;
         };
-        // A registrar that draws a fresh nonce for every refusal and never
-        // marks it stale walks straight past the same-nonce guard below, and
-        // the exchange then runs one wrong password per round trip until the
-        // account is locked. Nothing on the wire tells that apart from a
-        // server ageing its nonces honestly, so the count is the defence.
-        if let Some(reg) = self.registrations.get_mut(&account) {
-            if reg.answered >= ANSWERS {
-                return;
-            }
-            reg.answered = reg.answered.saturating_add(1);
-        }
-        let Ok(retried) = self
+        // The count that stops a registrar which draws a fresh nonce for every
+        // refusal is the endpoint's now, not this layer's: it has to cover
+        // every path that answers a challenge, and only the endpoint sees all
+        // of them. Past the allowance no challenge is reported at all, so this
+        // is never reached and the refusal settles below.
+        match self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
-        else {
-            return;
-        };
-        self.owners.remove(&transaction);
-        self.owners.insert(retried, account);
-        if let (Some(reg), AnyTransactionId::NonInviteClient(id)) =
-            (self.registrations.get_mut(&account), retried)
         {
-            reg.transaction = Some(id);
-            reg.unanswered = None;
+            Ok(retried) => {
+                self.owners.remove(&transaction);
+                self.owners.insert(retried, account);
+                if let (Some(reg), AnyTransactionId::NonInviteClient(id)) =
+                    (self.registrations.get_mut(&account), retried)
+                {
+                    reg.transaction = Some(id);
+                    reg.unanswered = None;
+                    reg.waiting_for_stream = None;
+                }
+            }
+            // §18.1.1: the credentials made it too big for a datagram and the
+            // endpoint has asked for a connection. It is still holding the
+            // challenge, so this is not a refusal yet — it is a retry waiting
+            // for something the application has not had a chance to open.
+            // Reporting it now, which is what dropping the error did, told
+            // the application its password was wrong in the same breath as
+            // asking it for a socket.
+            Err(error) if wants_a_stream(&error) => {
+                if let Some(reg) = self.registrations.get_mut(&account) {
+                    reg.waiting_for_stream = Some(transaction);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Send the registration retries §18.1.1 held back, now that there is a
+    /// connection to send them over.
+    ///
+    /// The failed transaction id is kept on the registration rather than read
+    /// back out of `owners`, because `send_register` clears that account's
+    /// entries on every new attempt and a refresh can fall between the park
+    /// and the bind.
+    pub(crate) fn resume_parked_registrations(&mut self, now: Instant) {
+        let waiting: Vec<(AccountId, AnyTransactionId)> = self
+            .registrations
+            .iter()
+            .filter_map(|(account, reg)| reg.waiting_for_stream.map(|failed| (*account, failed)))
+            .collect();
+        for (account, failed) in waiting {
+            let credentials = self
+                .accounts
+                .get(&account)
+                .and_then(|config| config.credentials.clone());
+            let Some(credentials) = credentials else {
+                self.stop_waiting(account);
+                continue;
+            };
+            match self
+                .endpoint
+                .retry_with_credentials(failed, &credentials, now)
+            {
+                Ok(retried) => {
+                    self.owners.remove(&failed);
+                    self.owners.insert(retried, account);
+                    if let (Some(reg), AnyTransactionId::NonInviteClient(id)) =
+                        (self.registrations.get_mut(&account), retried)
+                    {
+                        reg.transaction = Some(id);
+                        reg.unanswered = None;
+                        reg.waiting_for_stream = None;
+                    }
+                }
+                // the connection that was opened is not one this can go over;
+                // it stays parked for the next
+                Err(error) if wants_a_stream(&error) => {}
+                Err(_) => self.stop_waiting(account),
+            }
+        }
+    }
+
+    /// Stop holding a registration's retry back, so the next settle reports
+    /// the refusal it is still carrying.
+    fn stop_waiting(&mut self, account: AccountId) {
+        if let Some(reg) = self.registrations.get_mut(&account) {
+            reg.waiting_for_stream = None;
         }
     }
 
@@ -782,10 +867,14 @@ impl UserAgent {
     /// reporting it rather than let a client lock the account by repeating it.
     /// Nothing follows the refusal in that case, and that silence is the
     /// answer.
+    /// One thing is not that silence: a retry the endpoint is holding until a
+    /// connection exists. That one is left where it is, because the answer to
+    /// it has not been sent yet.
     fn settle_challenges(&mut self) {
         let refused: Vec<(AccountId, Option<OwnedMessage>)> = self
             .registrations
             .iter_mut()
+            .filter(|(_, reg)| reg.waiting_for_stream.is_none())
             .filter_map(|(id, reg)| reg.unanswered.take().map(|response| (*id, Some(response))))
             .collect();
         for (account, response) in refused {

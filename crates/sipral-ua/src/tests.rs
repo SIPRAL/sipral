@@ -6543,3 +6543,156 @@ fn a_dead_flow_stops_the_lamp_saying_anything() {
         "and nothing may be read out of what it last held"
     );
 }
+
+// -- the allowance, on every path that answers a challenge -------------------
+
+/// A challenge with a nonce nobody has seen before, and no `stale`.
+///
+/// The shape §22.1's guard cannot see: the nonce is never the same twice, so
+/// "the same nonce means the password was wrong" never fires.
+fn fresh_challenge(request: &[u8], round: u32) -> Vec<u8> {
+    let field = format!(
+        "WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"n{round}\", qop=\"auth\"\r\n"
+    );
+    challenge(request, 401, "Unauthorized", &field)
+}
+
+#[test]
+fn a_pbx_that_draws_a_new_nonce_every_time_gets_at_most_three_answers_for_a_call() {
+    // one wrong password per round trip, for as long as the process lives, is
+    // how an account gets locked out
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+
+    let mut last = sent(&mut agent);
+    let mut credentialled_invites = 0;
+    for round in 0..8 {
+        deliver(&mut agent, &fresh_challenge(&last, round), t0);
+        let out = transmits(&mut agent);
+        // the ACK for the 401 always goes; the retry may not
+        let Some(retry) = out.iter().find(|bytes| bytes.starts_with(b"INVITE ")) else {
+            break;
+        };
+        assert!(
+            !header(retry, HeaderName::Authorization).is_empty(),
+            "a retry without credentials is not an answer"
+        );
+        credentialled_invites += 1;
+        last = retry.clone();
+    }
+
+    assert_eq!(
+        credentialled_invites, 3,
+        "the PBX rotates its nonce, so only the count stops this"
+    );
+    assert!(
+        matches!(ended(&mut agent), Some((_, CallEndReason::Refused))),
+        "and the application is told, rather than left waiting"
+    );
+}
+
+#[test]
+fn a_notifier_that_draws_a_new_nonce_every_time_gets_at_most_three_answers() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:bob@example.com"), "presence"),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+
+    let mut last = sent(&mut agent);
+    let mut credentialled_subscribes = 0;
+    for round in 0..8 {
+        deliver(&mut agent, &fresh_challenge(&last, round), t0);
+        let out = transmits(&mut agent);
+        let Some(retry) = out.iter().find(|bytes| bytes.starts_with(b"SUBSCRIBE ")) else {
+            break;
+        };
+        assert!(!header(retry, HeaderName::Authorization).is_empty());
+        credentialled_subscribes += 1;
+        last = retry.clone();
+    }
+
+    assert_eq!(credentialled_subscribes, 3);
+    let ended = events(&mut agent).into_iter().any(|event| {
+        matches!(
+            event,
+            UaEvent::SubscriptionEnded {
+                reason: SubscriptionEnd::Refused,
+                ..
+            }
+        )
+    });
+    assert!(ended, "the subscription is over and the application knows");
+}
+
+#[test]
+fn a_bye_a_pbx_keeps_challenging_still_ends_the_call() {
+    // §15.1.1: the BYE is what ends the call, so one that can never be
+    // authenticated leaves the far end holding a call this end hung up. That
+    // half cannot be fixed from here. What can be, and is, is this end: the
+    // dialog ends when the BYE transaction gets a final answer whatever the
+    // answer is, so the application is told once and the call does not sit
+    // in Terminating waiting for a retry the allowance has stopped.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent.hangup(call, t0).expect("the BYE goes");
+    let mut last = only(&transmits(&mut agent), "BYE ");
+    for round in 0..8 {
+        deliver(&mut agent, &fresh_challenge(&last, round), t0);
+        let out = transmits(&mut agent);
+        let Some(retry) = out.iter().find(|bytes| bytes.starts_with(b"BYE ")) else {
+            break;
+        };
+        last = retry.clone();
+    }
+
+    assert_eq!(
+        ended(&mut agent),
+        Some((call, CallEndReason::LocalHangup)),
+        "this end decided to hang up, and the call is over whatever the PBX says"
+    );
+}
+
+#[test]
+fn a_refer_a_pbx_keeps_challenging_gives_the_transfer_seat_back() {
+    // the seat taken when the REFER went out used to be kept for the life of
+    // the call, so every later transfer was refused here before anything was
+    // sent
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let mut last = only(&transmits(&mut agent), "REFER ");
+    for round in 0..8 {
+        deliver(&mut agent, &fresh_challenge(&last, round), t0);
+        let out = transmits(&mut agent);
+        let Some(retry) = out.iter().find(|bytes| bytes.starts_with(b"REFER ")) else {
+            break;
+        };
+        last = retry.clone();
+    }
+
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferDone { .. })),
+        "the transfer did not happen, and that is news"
+    );
+    agent
+        .transfer(call, &uri("sip:dave@example.com"), t0)
+        .expect("the call is free to be transferred again");
+}

@@ -1103,6 +1103,9 @@ impl Endpoint {
             }
         }
         self.forget_tag(id);
+        // the allowance a challenged request was carrying, when this
+        // transaction ended any way other than by being challenged again
+        self.challenges.forget(id);
         self.dialogs_of.remove(&id);
         self.push(Event::TransactionTerminated {
             transaction: id,

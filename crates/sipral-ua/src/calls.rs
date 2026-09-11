@@ -26,6 +26,7 @@
 //! because an application that has to know which is an application that will
 //! get it wrong during the second it matters.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,13 +37,14 @@ use sipral_core::endpoint::{
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp;
 use sipral_core::transaction::{
-    AnyTransactionId, DialogId, InviteClient, InviteServer, TransactionId,
+    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
 };
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
 use crate::call::{
     Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall, Refusal,
+    RequestRefusal,
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
@@ -54,6 +56,26 @@ use crate::timers::FLOOR;
 /// §21.4.6: "the callee's end system was contacted successfully but the callee
 /// is currently not willing or able to take additional calls".
 const NOT_NOW: StatusCode = StatusCode::BUSY_HERE;
+
+/// Take out the parked refusals that have settled, leaving behind the ones
+/// whose retry the endpoint is still holding for want of a connection.
+///
+/// Draining the lot, which is what these used to do, turns a retry waiting on
+/// a socket into a refusal reported in the same breath as the request for the
+/// socket.
+fn settled<K, V>(parked: &mut HashMap<K, V>, waiting: impl Fn(&V) -> bool) -> Vec<(K, V)>
+where
+    K: Copy + Eq + std::hash::Hash,
+{
+    let done: Vec<K> = parked
+        .iter()
+        .filter(|(_, value)| !waiting(value))
+        .map(|(key, _)| *key)
+        .collect();
+    done.into_iter()
+        .filter_map(|key| parked.remove_entry(&key))
+        .collect()
+}
 
 // -- what the application asks for -------------------------------------------
 
@@ -323,7 +345,11 @@ impl UserAgent {
             .endpoint
             .prack(provisional, Some(Arc::from(sdp.to_vec())), now)
             .map_err(|_| UaError::WrongState(state))?;
-        self.remember_request(call, AnyTransactionId::NonInviteClient(prack));
+        self.remember_request(
+            call,
+            AnyTransactionId::NonInviteClient(prack),
+            Method::Prack,
+        );
         if let Some(held) = self.calls.get_mut(&call) {
             held.session.set_local(described);
         }
@@ -394,7 +420,7 @@ impl UserAgent {
             CallState::Confirmed | CallState::Consulting => {
                 let dialog = dialog.ok_or(UaError::WrongState(state))?;
                 let bye = self.endpoint.bye(dialog, now)?;
-                self.remember_request(call, AnyTransactionId::NonInviteClient(bye));
+                self.remember_request(call, AnyTransactionId::NonInviteClient(bye), Method::Bye);
                 self.mark(call, CallState::Terminating);
                 self.drain(now);
                 Ok(())
@@ -613,7 +639,11 @@ impl UserAgent {
             }
             Event::CancelSent { invite, cancel } => {
                 let call = self.by_invite.get(&invite).copied()?;
-                self.remember_request(call, AnyTransactionId::NonInviteClient(cancel));
+                self.remember_request(
+                    call,
+                    AnyTransactionId::NonInviteClient(cancel),
+                    Method::Cancel,
+                );
                 self.mark(call, CallState::Terminating);
                 None
             }
@@ -637,22 +667,7 @@ impl UserAgent {
                 transaction,
                 status,
                 ..
-            } => {
-                // a request this layer sent inside a call. Its answer changes
-                // nothing the application has not already been told, save that
-                // a REFER which was refused frees the call to try again.
-                // Anything else is not ours, and goes on
-                let id = AnyTransactionId::NonInviteClient(transaction);
-                if !self.by_request.contains_key(&id) {
-                    return Some(event);
-                }
-                // not on a challenge: that is not a refusal yet, and the
-                // retry which follows keeps the seat it is holding
-                if status.is_final() && !matches!(status.get(), 401 | 407) {
-                    self.release_refer(id, status.is_success());
-                }
-                None
-            }
+            } => self.on_request_answered(transaction, status, event),
             Event::RequestFailed { transaction, .. } => {
                 let id = AnyTransactionId::NonInviteClient(transaction);
                 if !self.by_request.contains_key(&id) {
@@ -720,7 +735,11 @@ impl UserAgent {
                 held.owed_prack = Some(provisional);
             }
         } else if let Ok(prack) = self.endpoint.prack(provisional, None, now) {
-            self.remember_request(call, AnyTransactionId::NonInviteClient(prack));
+            self.remember_request(
+                call,
+                AnyTransactionId::NonInviteClient(prack),
+                Method::Prack,
+            );
         }
     }
 
@@ -956,6 +975,7 @@ impl UserAgent {
                     reason: ended,
                     status,
                     response: response.cloned(),
+                    waiting_for_stream: false,
                 },
             );
             return None;
@@ -971,7 +991,7 @@ impl UserAgent {
     /// that case, and the silence is the answer.
     pub(crate) fn settle_call_challenges(&mut self, now: Instant) {
         let refused: Vec<(TransactionId<InviteClient>, Refusal)> =
-            self.challenged.drain().collect();
+            settled(&mut self.challenged, |refusal| refusal.waiting_for_stream);
         for (invite, refusal) in refused {
             self.end_branches(
                 invite,
@@ -980,6 +1000,53 @@ impl UserAgent {
                 refusal.response.as_ref(),
                 now,
             );
+        }
+    }
+
+    /// The same, for the requests a call sends inside its dialog.
+    ///
+    /// This is the half that did not exist. A BYE whose retry never went left
+    /// the call in `Terminating` with nothing said to anybody, and a REFER
+    /// left the seat taken so `refer` refused every later transfer on that
+    /// call for the life of the call.
+    pub(crate) fn settle_request_challenges(&mut self) {
+        let refused: Vec<(AnyTransactionId, RequestRefusal)> =
+            settled(&mut self.challenged_requests, |refusal| {
+                refusal.waiting_for_stream
+            });
+        for (id, refusal) in refused {
+            // whatever the method, the seat goes back: nothing more is coming
+            // on this transaction. A no-op unless the call was holding it
+            self.release_refer(id, false);
+            self.by_request.remove(&id);
+            self.account_of.remove(&id);
+            // Only the REFER needs an event of its own. RFC 3515 §2.4.2 has
+            // only a 2xx oblige the far end to open the subscription that
+            // would have reported how the transfer went, so a REFER that was
+            // never authenticated leaves nothing that will ever report it:
+            // without this the application waits for news that cannot come,
+            // on a transfer that did not happen.
+            //
+            // The other four are already covered, each by something that was
+            // going to happen anyway, and saying it twice here would be a
+            // second event for one outcome. A BYE: the dialog ends when its
+            // transaction gets a final answer, whatever the answer was, and
+            // `on_dialog_over` reports the call ended — checked, not assumed.
+            // A CANCEL: the INVITE it was trying to stop resolves through its
+            // own path, and `hangup_wanted` sends a BYE if the call is
+            // answered anyway. A PRACK: the provisional goes unacknowledged
+            // and the INVITE's own Timer B reports that. A NOTIFY: it is this
+            // end telling a referrer how a transfer went, and the local
+            // bookkeeping was final before it was sent — the referrer is left
+            // uninformed, and nothing at this end can reach them.
+            if refusal.method == Method::Refer
+                && let Some(status) = refusal.status
+            {
+                self.events.push_back(UaEvent::TransferDone {
+                    call: refusal.call,
+                    status,
+                });
+            }
         }
     }
 
@@ -1104,8 +1171,16 @@ impl UserAgent {
     /// The account goes into a map of its own rather than being read back off
     /// the call, because the BYE that ends a call outlives it and a challenge
     /// to that BYE still has to be answered.
-    pub(crate) fn remember_request(&mut self, call: CallHandle, id: AnyTransactionId) {
-        self.by_request.insert(id, call);
+    /// The method travels with it, because what a request leaves behind when
+    /// its answer never arrives depends on which one it was, and the bytes
+    /// are not kept.
+    pub(crate) fn remember_request(
+        &mut self,
+        call: CallHandle,
+        id: AnyTransactionId,
+        method: Method<'static>,
+    ) {
+        self.by_request.insert(id, (call, method));
         if let Some(account) = self.calls.get(&call).and_then(|held| held.account) {
             self.account_of.insert(id, account);
         }
@@ -1138,17 +1213,17 @@ impl UserAgent {
     /// Everything that is not the INVITE opening the call arrives here: BYE,
     /// CANCEL, PRACK, REFER, and the NOTIFY that says how a transfer is going.
     fn on_request_challenged(&mut self, transaction: AnyTransactionId, now: Instant) {
-        let Some(call) = self.by_request.get(&transaction).copied() else {
+        let Some((call, method)) = self.by_request.get(&transaction).copied() else {
             return;
         };
         let account = self.account_of.get(&transaction).copied();
         let credentials = account
             .and_then(|account| self.accounts.get(&account))
             .and_then(|config| config.credentials.clone());
-        // Both ways out of here leave the request unsent for good, so a REFER
-        // that took the call's seat has to give it back on the way past. RFC
-        // 3515 §2.4.2 obliges the far end to open a subscription on a 2xx and
-        // on nothing else, so a REFER refused for want of a password opened
+        // With no password the request is unsent for good, so a REFER that
+        // took the call's seat has to give it back on the way past. RFC 3515
+        // §2.4.2 obliges the far end to open a subscription on a 2xx and on
+        // nothing else, so a REFER refused for want of a password opened
         // none, and a record of one left standing would accept notifications
         // nobody promised. `release_refer` reads the seat itself, so it is a
         // no-op for the BYE, CANCEL, PRACK and NOTIFY that also arrive here.
@@ -1156,16 +1231,43 @@ impl UserAgent {
             self.release_refer(transaction, false);
             return;
         };
-        let Ok(retried) = self
+        let retried = match self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
-        else {
-            self.release_refer(transaction, false);
-            return;
+        {
+            Ok(retried) => retried,
+            // §18.1.1 wants a connection first and the endpoint still holds
+            // the challenge, so the seat is not given back: the retry that
+            // will keep it has not been sent, not refused
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let Some(parked) = self.challenged_requests.get_mut(&transaction) {
+                    parked.waiting_for_stream = true;
+                }
+                return;
+            }
+            Err(_) => {
+                self.release_refer(transaction, false);
+                return;
+            }
         };
+        self.request_retry_went(call, method, transaction, retried, account);
+    }
+
+    /// The in-dialog retry is a transaction now, so everything that named the
+    /// refused one names this one.
+    fn request_retry_went(
+        &mut self,
+        call: CallHandle,
+        method: Method<'static>,
+        transaction: AnyTransactionId,
+        retried: AnyTransactionId,
+        account: Option<AccountId>,
+    ) {
+        // the refusal that came with the challenge was the first half of this
+        self.challenged_requests.remove(&transaction);
         self.by_request.remove(&transaction);
         self.account_of.remove(&transaction);
-        self.by_request.insert(retried, call);
+        self.by_request.insert(retried, (call, method));
         if let Some(account) = account {
             self.account_of.insert(retried, account);
         }
@@ -1210,7 +1312,7 @@ impl UserAgent {
     /// subscription, so a NOTIFY reporting on one afterwards is reporting on
     /// nothing.
     fn release_refer(&mut self, id: AnyTransactionId, accepted: bool) {
-        let Some(call) = self.by_request.get(&id).copied() else {
+        let Some(call) = self.by_request.get(&id).map(|(call, _)| *call) else {
             return;
         };
         if let Some(held) = self.calls.get_mut(&call)
@@ -1239,12 +1341,37 @@ impl UserAgent {
         let Some(credentials) = credentials else {
             return;
         };
-        let Ok(AnyTransactionId::InviteClient(retried)) =
-            self.endpoint
-                .retry_with_credentials(transaction, &credentials, now)
-        else {
-            return;
-        };
+        match self
+            .endpoint
+            .retry_with_credentials(transaction, &credentials, now)
+        {
+            Ok(AnyTransactionId::InviteClient(retried)) => {
+                self.call_retry_went(call, transaction, retried);
+            }
+            // §18.1.1 wants a connection first. The endpoint keeps the
+            // challenge, so this is a call still being placed rather than one
+            // that was refused
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let AnyTransactionId::InviteClient(old) = transaction
+                    && let Some(parked) = self.challenged.get_mut(&old)
+                {
+                    parked.waiting_for_stream = true;
+                }
+            }
+            // an INVITE retried is an INVITE, so the first cannot happen; any
+            // other failure is the refusal the settle pass already holds
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    /// The retry is a transaction now, so everything that named the refused
+    /// one names this one.
+    fn call_retry_went(
+        &mut self,
+        call: CallHandle,
+        transaction: AnyTransactionId,
+        retried: TransactionId<InviteClient>,
+    ) {
         if let AnyTransactionId::InviteClient(old) = transaction {
             self.by_invite.remove(&old);
             // the refusal that came with the challenge was the first half of
@@ -1256,6 +1383,119 @@ impl UserAgent {
             held.invite = Some(retried);
             held.state = CallState::Calling;
         }
+    }
+
+    /// Send the INVITE retries §18.1.1 held back, now that there is a
+    /// connection.
+    pub(crate) fn resume_parked_calls(&mut self, now: Instant) {
+        let waiting: Vec<TransactionId<InviteClient>> = self
+            .challenged
+            .iter()
+            .filter(|(_, refusal)| refusal.waiting_for_stream)
+            .map(|(invite, _)| *invite)
+            .collect();
+        for invite in waiting {
+            let old = AnyTransactionId::InviteClient(invite);
+            let Some(call) = self.by_invite.get(&invite).copied() else {
+                self.stop_waiting_for_call(invite);
+                continue;
+            };
+            let credentials = self
+                .calls
+                .get(&call)
+                .and_then(|held| held.account)
+                .and_then(|id| self.accounts.get(&id))
+                .and_then(|config| config.credentials.clone());
+            let Some(credentials) = credentials else {
+                self.stop_waiting_for_call(invite);
+                continue;
+            };
+            match self.endpoint.retry_with_credentials(old, &credentials, now) {
+                Ok(AnyTransactionId::InviteClient(retried)) => {
+                    self.call_retry_went(call, old, retried);
+                }
+                Err(error) if crate::agent::wants_a_stream(&error) => {}
+                // anything else leaves it for the settle pass to report
+                Ok(_) | Err(_) => self.stop_waiting_for_call(invite),
+            }
+        }
+    }
+
+    /// The same for the requests inside a dialog.
+    pub(crate) fn resume_parked_requests(&mut self, now: Instant) {
+        let waiting: Vec<(AnyTransactionId, CallHandle, Method<'static>)> = self
+            .challenged_requests
+            .iter()
+            .filter(|(_, parked)| parked.waiting_for_stream)
+            .map(|(id, parked)| (*id, parked.call, parked.method))
+            .collect();
+        for (id, call, method) in waiting {
+            let account = self.account_of.get(&id).copied();
+            let credentials = account
+                .and_then(|account| self.accounts.get(&account))
+                .and_then(|config| config.credentials.clone());
+            let Some(credentials) = credentials else {
+                self.stop_waiting_for_request(id);
+                continue;
+            };
+            match self.endpoint.retry_with_credentials(id, &credentials, now) {
+                Ok(retried) => self.request_retry_went(call, method, id, retried, account),
+                Err(error) if crate::agent::wants_a_stream(&error) => {}
+                Err(_) => self.stop_waiting_for_request(id),
+            }
+        }
+    }
+
+    /// Stop holding one back, so the next settle reports the refusal it still
+    /// carries.
+    fn stop_waiting_for_call(&mut self, invite: TransactionId<InviteClient>) {
+        if let Some(parked) = self.challenged.get_mut(&invite) {
+            parked.waiting_for_stream = false;
+        }
+    }
+
+    /// The same, for a request inside a dialog.
+    fn stop_waiting_for_request(&mut self, id: AnyTransactionId) {
+        if let Some(parked) = self.challenged_requests.get_mut(&id) {
+            parked.waiting_for_stream = false;
+        }
+    }
+
+    /// A request this layer sent inside a call was answered.
+    ///
+    /// Its answer changes nothing the application has not already been told,
+    /// save that a REFER which was refused frees the call to try again.
+    /// Anything that is not ours goes back to the caller untouched.
+    fn on_request_answered(
+        &mut self,
+        transaction: TransactionId<NonInviteClient>,
+        status: StatusCode,
+        event: Event,
+    ) -> Option<Event> {
+        let id = AnyTransactionId::NonInviteClient(transaction);
+        let Some(&(call, method)) = self.by_request.get(&id) else {
+            return Some(event);
+        };
+        // A challenge is not a refusal yet, and the retry which follows keeps
+        // the seat it is holding. But it is only not a refusal while a retry
+        // is still possible, so it is parked here: a drain that ends without
+        // one then has something to report, which used to be nothing at all.
+        if matches!(status.get(), 401 | 407) {
+            self.challenged_requests.insert(
+                id,
+                RequestRefusal {
+                    call,
+                    method,
+                    status: Some(status),
+                    waiting_for_stream: false,
+                },
+            );
+            return None;
+        }
+        if status.is_final() {
+            self.release_refer(id, status.is_success());
+        }
+        None
     }
 
     /// A transaction has ended. Most of that is plumbing; one case is not.

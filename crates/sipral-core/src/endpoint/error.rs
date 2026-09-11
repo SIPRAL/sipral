@@ -73,8 +73,14 @@ pub enum SendError {
     /// stream transport is open to move it to.
     ///
     /// An `Event::TransportWanted` says what to open, and how many bytes the
-    /// request came to against how many it had; the request is not held, and
-    /// is sent again by the caller once the transport is bound.
+    /// request came to against how many it had.
+    ///
+    /// Who holds the request until then depends on which door it came out
+    /// of. From `request` or `invite` the caller still owns it and sends it
+    /// again itself once the transport is bound. From
+    /// `retry_with_credentials` the endpoint is the one holding it: the
+    /// challenge stays in the store, and the caller asks again with the same
+    /// handle.
     NeedsStreamTransport,
     /// The handle names a dialog that has ended, or never existed.
     NoSuchDialog,

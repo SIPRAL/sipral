@@ -410,7 +410,11 @@ impl UserAgent {
             held.referring = Some(AnyTransactionId::NonInviteClient(transaction));
             held.refer_subscription = Some(ReferSubscription { id });
         }
-        self.remember_request(call, AnyTransactionId::NonInviteClient(transaction));
+        self.remember_request(
+            call,
+            AnyTransactionId::NonInviteClient(transaction),
+            Method::Refer,
+        );
         self.drain(now);
         Ok(())
     }
@@ -429,7 +433,7 @@ impl UserAgent {
             .header(HeaderName::SubscriptionState, state)
             .body(b"message/sipfrag;version=2.0", Arc::from(sipfrag.to_vec()));
         if let Ok(id) = self.endpoint.request_in_dialog(dialog, &request, now) {
-            self.remember_request(call, AnyTransactionId::NonInviteClient(id));
+            self.remember_request(call, AnyTransactionId::NonInviteClient(id), Method::Notify);
         }
     }
 

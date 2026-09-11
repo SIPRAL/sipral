@@ -50,6 +50,34 @@ pub struct AuthCache {
     entries: Vec<Entry>,
 }
 
+/// An answer to the challenges a destination has made, and which of them it
+/// covers.
+///
+/// Two halves because the nonce count may not move until the bytes do. The
+/// fields go on the request; the rest is what [`AuthCache::spend`] needs to
+/// move the counter on afterwards, and names the nonce each answer was made
+/// to so that a challenge relearned in between is left alone.
+#[derive(Debug, Default)]
+#[must_use = "the fields have to go on a request, and the count spent once they have"]
+pub struct Answered {
+    fields: Vec<(HeaderName<'static>, String)>,
+    answered: Vec<(bool, Arc<str>, Arc<str>)>,
+}
+
+impl Answered {
+    /// The header fields, to put on the request.
+    #[must_use]
+    pub fn fields(&self) -> &[(HeaderName<'static>, String)] {
+        &self.fields
+    }
+
+    /// Whether there is anything to send.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
 #[derive(Debug)]
 struct Entry {
     challenge: Challenge,
@@ -106,36 +134,66 @@ impl AuthCache {
     /// The header fields to put on the request going out, one per challenge
     /// still worth answering.
     ///
-    /// Each one spends a step of the counter, so a value taken here is a value
-    /// that has to go on the wire: `nc` "MUST" be different for every request
-    /// sent with the same nonce, and a skipped number looks to the server like
-    /// a replay it should not accept.
+    /// Working out the answer does not move the counter. `nc` "MUST" be
+    /// different for every request sent with the same nonce, so the number
+    /// belongs to the request that actually leaves: a request that is built
+    /// and then refused — §18.1.1 asking for a stream is the one that
+    /// happens — would otherwise take a number with it into the bin, and
+    /// whoever is asked next either repeats it, which the server reads as a
+    /// replay, or steps over it. [`Self::spend`] is what moves the counter,
+    /// and belongs immediately after the bytes are committed to a
+    /// transaction.
     ///
     /// `call_id` is the one the request going out carries. A proxy's challenge
     /// is answered only inside the conversation it was made in (§22.3); a
     /// registrar's or a callee's own goes on any request to that destination,
     /// which is what §22.2 asks for and what spares a refresh its refusal.
     pub fn authorize(
-        &mut self,
+        &self,
         credentials: &Credentials,
         method: Method<'_>,
         uri: &[u8],
         call_id: &[u8],
-    ) -> Vec<(HeaderName<'static>, String)> {
-        let mut out = Vec::new();
-        for entry in &mut self.entries {
+    ) -> Answered {
+        let mut answered = Answered::default();
+        for entry in &self.entries {
             if entry.refused || (entry.challenge.proxy && *entry.call_id != *call_id) {
                 continue;
             }
-            entry.count = entry.count.saturating_add(1);
-            out.push((
+            let count = entry.count.saturating_add(1);
+            answered.fields.push((
                 entry.challenge.header(),
                 entry
                     .challenge
-                    .respond(credentials, method, uri, entry.count, &entry.cnonce),
+                    .respond(credentials, method, uri, count, &entry.cnonce),
+            ));
+            answered.answered.push((
+                entry.challenge.proxy,
+                Arc::clone(&entry.challenge.realm),
+                entry.challenge.nonce.clone(),
             ));
         }
-        out
+        answered
+    }
+
+    /// Move the counter on for every challenge the answer covered, now that
+    /// the request carrying it is on its way.
+    ///
+    /// An entry that has changed since the answer was drawn — a new challenge
+    /// learned in between, which resets the count — is left alone: the answer
+    /// was to a nonce this cache no longer holds, and moving a count that
+    /// belongs to a different nonce is worse than leaving it where it is.
+    pub fn spend(&mut self, answered: &Answered) {
+        for (proxy, realm, nonce) in &answered.answered {
+            let Some(entry) = self.entries.iter_mut().find(|entry| {
+                entry.challenge.proxy == *proxy
+                    && entry.challenge.realm == *realm
+                    && entry.challenge.nonce == *nonce
+            }) else {
+                continue;
+            };
+            entry.count = entry.count.saturating_add(1);
+        }
     }
 
     /// The challenges being answered, in the order they were learned.
@@ -155,6 +213,43 @@ impl AuthCache {
     /// Forget everything, for a change of account.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Stop answering these challenges, and stop offering the credentials
+    /// ahead of one.
+    ///
+    /// For when an answer has been given as many times as it is going to be.
+    /// §22.1's guard — the same nonce back without `stale` means the password
+    /// was wrong — turns on the nonce being the same, and a server that draws
+    /// a fresh one for every refusal walks straight past it. Stopping the
+    /// retries alone would not be enough: [`Self::authorize`] would go on
+    /// putting the same wrong password on every later request to this
+    /// destination, which is the same lock-out at a slower rate.
+    ///
+    /// It is not permanent. A later challenge carrying a nonce this cache has
+    /// not answered starts the entry again, which is what lets a password
+    /// corrected while the process runs take effect.
+    ///
+    /// Only the protection domains `response` is challenging are closed. One
+    /// destination can hold a registrar's realm and a proxy's at once, with
+    /// different passwords and only one of them wrong; refusing the lot
+    /// because one ran out of answers would stop sending credentials that
+    /// were working and had never been refused by anybody.
+    pub fn refuse(&mut self, response: &RawMessage<'_>) {
+        let www = response.www_authenticate().map(|c| (c, false));
+        let proxy = response.proxy_authenticate().map(|c| (c, true));
+        for (challenge, is_proxy) in www.chain(proxy) {
+            let Some(challenge) = readable(challenge, is_proxy) else {
+                continue;
+            };
+            for entry in &mut self.entries {
+                if entry.challenge.proxy == challenge.proxy
+                    && entry.challenge.realm == challenge.realm
+                {
+                    entry.refused = true;
+                }
+            }
+        }
     }
 
     fn take(&mut self, challenge: Challenge, cnonce: &str, call_id: &Arc<[u8]>) -> Learned {
@@ -243,17 +338,71 @@ CSeq: 1 REGISTER\r\n"
         authorize_for(cache, CALL)
     }
 
+    /// Draw and spend in one go, which is what a caller that sends does.
     fn authorize_for(cache: &mut AuthCache, call_id: &[u8]) -> Vec<(HeaderName<'static>, String)> {
-        cache.authorize(
+        let answered = cache.authorize(
             &Credentials::new("alice", "secret"),
             Method::Register,
             b"sip:example.com",
             call_id,
-        )
+        );
+        cache.spend(&answered);
+        answered.fields().to_vec()
     }
 
     fn challenge(realm: &str, nonce: &str, extra: &str) -> String {
         format!("Digest realm=\"{realm}\", nonce=\"{nonce}\", qop=\"auth\"{extra}")
+    }
+
+    #[test]
+    fn running_out_of_answers_in_one_realm_leaves_the_other_alone() {
+        // A destination can hold a registrar's realm and a proxy's at once,
+        // with different passwords and only one of them wrong. Closing the
+        // lot because one ran out of answers would stop sending credentials
+        // that were working and that nobody had refused.
+        let mut cache = AuthCache::new();
+        assert_eq!(
+            learn(
+                &mut cache,
+                &refusal(
+                    401,
+                    &[
+                        ("WWW-Authenticate", &challenge("example.com", "n1", "")),
+                        (
+                            "Proxy-Authenticate",
+                            &challenge("proxy.example.net", "p1", "")
+                        ),
+                    ]
+                )
+            ),
+            Learned::Retry
+        );
+        assert_eq!(cache.challenges().count(), 2, "both realms are live");
+
+        // the registrar's allowance runs out, so its realm is closed
+        let spent = refusal(
+            401,
+            &[("WWW-Authenticate", &challenge("example.com", "n2", ""))],
+        );
+        let mut scratch = ParseScratch::new();
+        let spent = parse(&spent, &mut scratch, ParseMode::Strict).expect("a response");
+        cache.refuse(&spent);
+
+        let left: Vec<_> = cache
+            .challenges()
+            .map(|challenge| (challenge.proxy, challenge.realm.to_string()))
+            .collect();
+        assert_eq!(
+            left,
+            vec![(true, "proxy.example.net".to_owned())],
+            "the proxy's credentials were never refused by anybody"
+        );
+        let still_offered = authorize(&mut cache);
+        assert_eq!(still_offered.len(), 1);
+        assert_eq!(
+            still_offered.first().expect("one").0,
+            HeaderName::ProxyAuthorization
+        );
     }
 
     #[test]

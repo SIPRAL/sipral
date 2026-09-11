@@ -43,7 +43,7 @@ use sipral_core::dialog::CallId;
 use sipral_core::msg::{
     Contacts, HeaderError, HeaderName, OwnedMessage, Params, RawMessage, Uri, digits,
 };
-use sipral_core::transaction::{NonInviteClient, TransactionId};
+use sipral_core::transaction::{AnyTransactionId, NonInviteClient, TransactionId};
 
 use crate::account::{Account, AccountId};
 use crate::agent::UserAgent;
@@ -107,28 +107,16 @@ pub(crate) struct Registration {
     /// A push asked for a refresh that could not be sent, because there was no
     /// transport yet. It goes the moment the application hands one over.
     pub(crate) owed: bool,
-    /// How many challenges this attempt has answered without getting a
-    /// binding. See [`ANSWERS`].
-    pub(crate) answered: u8,
+    /// The challenged REGISTER whose answer §18.1.1 would not let out over a
+    /// datagram, waiting for the connection the endpoint asked for.
+    ///
+    /// The transaction is kept here rather than read back out of the agent's
+    /// map of owners, because a refresh clears that account's entries there
+    /// on every new attempt and one can fall between the park and the bind.
+    /// While this is set the refusal held in `unanswered` is not a refusal
+    /// yet, so nothing settles it.
+    pub(crate) waiting_for_stream: Option<AnyTransactionId>,
 }
-
-/// How many challenges one registration attempt will answer before it stops
-/// and calls the password wrong.
-///
-/// The guard below it — the same nonce coming back means §22.1's "the password
-/// was wrong" — only fires when the nonce is the same. A registrar that draws
-/// a fresh one for every refusal and never marks it `stale` defeats it
-/// completely, and there are such registrars: the exchange then runs one
-/// attempt per round trip for as long as the process lives, which is precisely
-/// how an account gets locked out. Nothing on the wire distinguishes that from
-/// a server legitimately ageing its nonces, so the only defence is to stop
-/// counting.
-///
-/// Three, because a correct exchange needs one, a nonce that aged out between
-/// the request and the answer needs two, and a third is already generous. The
-/// count is per attempt: a refresh an hour later starts again, since a
-/// password can be corrected while the process runs.
-pub(crate) const ANSWERS: u8 = 3;
 
 impl Registration {
     pub(crate) fn new(call_id: CallId, asking: Duration) -> Self {
@@ -147,7 +135,7 @@ impl Registration {
             lapses_at: None,
             ready: None,
             owed: false,
-            answered: 0,
+            waiting_for_stream: None,
         }
     }
 

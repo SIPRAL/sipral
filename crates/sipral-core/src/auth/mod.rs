@@ -24,6 +24,6 @@ mod md5;
 mod secret;
 pub(crate) mod sha2;
 
-pub use cache::{AuthCache, Learned};
+pub use cache::{Answered, AuthCache, Learned};
 pub use digest::{Challenge, DigestAlgorithm};
 pub use secret::{Credentials, Secret};

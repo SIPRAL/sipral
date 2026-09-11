@@ -449,6 +449,20 @@ impl UserAgent {
         for account in owed {
             self.refresh_binding(account, now).ok();
         }
+        // And the retries RFC 3261 §18.1.1 would not let out over a datagram.
+        // This runs before the drain that follows it, which is what keeps a
+        // parked retry from being settled as a refusal in the same round: by
+        // the time the settle passes look, the answer is already in flight.
+        //
+        // None of them filters on `transport`. At the moment a retry parks
+        // there is no bound stream — that is why it parked — so which one
+        // will carry it is not known until one exists. Anything the endpoint
+        // still will not send simply parks again.
+        self.resume_parked_registrations(now);
+        self.resume_parked_calls(now);
+        self.resume_parked_requests(now);
+        self.resume_parked_offers(now);
+        self.resume_parked_subscriptions(now);
     }
 }
 
