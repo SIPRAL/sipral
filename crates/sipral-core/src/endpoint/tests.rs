@@ -1473,6 +1473,78 @@ fn a_message_is_not_a_pong() {
     );
 }
 
+/// Bind the stream transport again under the name it already has, the way an
+/// application that reconnected does.
+fn rebind_tcp(endpoint: &mut Endpoint, now: Instant) {
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP again");
+}
+
+#[test]
+fn rebinding_a_transport_does_not_leave_the_old_flows_pong_timer_armed() {
+    // §4.4.1 is about a flow, not about a name: the ping went out on a
+    // connection that is gone, and the ten seconds it armed are not a verdict
+    // on the connection that took its place.
+    let t0 = Instant::now();
+    let (mut endpoint, pinged_at) = pinged(13, t0);
+
+    // the application noticed the connection was broken on a write of its
+    // own, reconnected, and reused the name — which `Transports::bind`
+    // documents as replacing what was there
+    let rebound_at = pinged_at + Duration::from_secs(1);
+    rebind_tcp(&mut endpoint, rebound_at);
+
+    // and the new connection answers every ping it is asked
+    let mut now = rebound_at;
+    for step in 0..8 {
+        now += Duration::from_secs(2);
+        endpoint.handle_timeout(now);
+        let seen = events(&mut endpoint);
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::FlowFailed { .. })),
+            "step {step}, {:?} after the rebind: the flow that was rebound is \
+             alive and has been given no reason to fail: {seen:?}",
+            now.saturating_duration_since(pinged_at)
+        );
+        stream(&mut endpoint, b"\r\n", now);
+    }
+
+    // and one keep-alive is left on the name rather than two. The one the
+    // rebind armed is eighty to a hundred per cent of the twenty-five seconds
+    // away from it, and the one the old connection was carrying would have
+    // fired before that.
+    transmits(&mut endpoint);
+    let next = endpoint.poll_timeout().expect("a keepalive is due");
+    assert!(
+        next >= rebound_at + Duration::from_secs(20),
+        "a keepalive from the connection that is gone is still armed"
+    );
+    assert!(
+        next <= rebound_at + Duration::from_secs(25),
+        "the keepalive the rebind armed is the one that is due"
+    );
+    endpoint.handle_timeout(next);
+    assert_eq!(
+        transmits(&mut endpoint)
+            .iter()
+            .filter(|transmit| &*transmit.payload == b"\r\n\r\n")
+            .count(),
+        1,
+        "one flow, one ping"
+    );
+}
+
 #[test]
 fn a_flow_that_failed_takes_what_was_running_on_it_down_too() {
     let t0 = Instant::now();

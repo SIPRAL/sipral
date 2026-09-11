@@ -157,8 +157,22 @@ impl Endpoint {
                 local,
                 remote,
             } => {
-                self.transports
-                    .bind(transport, protocol, local, remote, self.config.limits);
+                // RFC 5626 §4.4.1 is about a flow, not about a name. The
+                // caller reused the identifier, so the deadlines of the
+                // connection that is gone are still on the schedule, and the
+                // pong one would call the replacement dead ten seconds
+                // later. A timer handle carries the sequence number it was
+                // issued with and those are never reused, so cancelling a
+                // stale one cannot reach a deadline belonging to the
+                // replacement.
+                let replaced =
+                    self.transports
+                        .bind(transport, protocol, local, remote, self.config.limits);
+                if let Some(old) = replaced {
+                    for handle in [old.keepalive, old.pong].into_iter().flatten() {
+                        self.deadlines.cancel(handle);
+                    }
+                }
                 self.arm_keepalives(now);
                 Ok(())
             }

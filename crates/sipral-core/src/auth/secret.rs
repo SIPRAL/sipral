@@ -27,6 +27,36 @@ impl Secret {
         Self(Box::from(password.as_bytes()))
     }
 
+    /// The parts joined with colons, in a buffer that is wiped on drop.
+    ///
+    /// One exact allocation, on purpose. A `Vec` grown part by part
+    /// reallocates as it goes and leaves every intermediate copy in freed
+    /// memory, which is the thing this type exists to prevent, so the length
+    /// is worked out first and the buffer is never grown. The `join` in
+    /// `super::digest` cannot be used for it: its capacity is deliberately
+    /// one byte longer than the result, so `into_boxed_slice` on what it
+    /// returns would reallocate and leave a copy behind.
+    pub(super) fn joined(parts: &[&[u8]]) -> Self {
+        let total =
+            parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1);
+        let mut bytes = vec![0_u8; total].into_boxed_slice();
+        let mut at = 0_usize;
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                if let Some(colon) = bytes.get_mut(at) {
+                    *colon = b':';
+                }
+                at = at.saturating_add(1);
+            }
+            let end = at.saturating_add(part.len());
+            if let Some(slot) = bytes.get_mut(at..end) {
+                slot.copy_from_slice(part);
+            }
+            at = end;
+        }
+        Self(bytes)
+    }
+
     pub(super) fn expose(&self) -> &[u8] {
         &self.0
     }
@@ -85,6 +115,19 @@ mod tests {
     fn a_secret_is_the_bytes_it_was_given() {
         let secret = Secret::new("Circle Of Life");
         assert_eq!(secret.expose(), b"Circle Of Life");
+    }
+
+    #[test]
+    fn a_joined_secret_is_the_colon_separated_parts() {
+        // the A1 of RFC 3261 §22.4, in a buffer that wipes itself rather than
+        // in one grown a part at a time
+        assert_eq!(
+            Secret::joined(&[b"alice", b"example.com", b"hunter2"]).expose(),
+            b"alice:example.com:hunter2"
+        );
+        assert_eq!(Secret::joined(&[b"alone"]).expose(), b"alone");
+        assert_eq!(Secret::joined(&[]).expose(), b"");
+        assert_eq!(Secret::joined(&[b"", b""]).expose(), b":");
     }
 
     #[test]

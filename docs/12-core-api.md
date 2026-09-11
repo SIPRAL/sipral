@@ -616,6 +616,13 @@ pub enum Input<'a> {
     /// transport, so a caller bound to a wildcard address says here which
     /// address the far end can reach it at. `remote` is the far end of a
     /// connection and `None` for a datagram socket, which has many.
+    ///
+    /// Binding an identifier that is already bound replaces what was there,
+    /// which is what a caller that reconnected wants. RFC 5626 §4.4.1 is
+    /// about a flow rather than about a name, so the keep-alive and the
+    /// pong deadline of the connection that is gone are cancelled with it:
+    /// the replacement is not called dead ten seconds later for a ping it
+    /// was never sent.
     TransportBound { transport: TransportId, protocol: TransportProtocol, local: SocketAddr, remote: Option<SocketAddr> },
     TransportFailed { transport: TransportId, error: TransportErrorKind },
 }

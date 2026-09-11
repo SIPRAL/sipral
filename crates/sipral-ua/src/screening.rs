@@ -220,6 +220,14 @@ pub struct Refusals {
     /// source calling too fast is [`UserAgent::limit_invites`], while many
     /// addresses arriving at once is a flood that wants a firewall.
     pub by_crowding: u64,
+    /// INVITEs whose `Replaces` named one of this end's live calls but
+    /// arrived from somewhere other than that call's own peer, and were
+    /// refused 403 (RFC 3891 §3).
+    ///
+    /// An attempt at taking over a call, or a transfer arriving by a route
+    /// this end cannot recognise. Either way it is a number an operator
+    /// wants, and one a stranger cannot turn into an event queue.
+    pub by_replaces: u64,
 }
 
 /// An INVITE that has been read and not yet acted on.
@@ -453,6 +461,19 @@ impl Guard {
             // this one cannot read is one it will not pretend to know
             _ => None,
         };
+    }
+
+    /// Where the bytes being worked through came from, as far as the
+    /// transport said. `None` on a byte stream the application bound without
+    /// naming its far end.
+    pub(crate) const fn source(&self) -> Option<SocketAddr> {
+        self.source
+    }
+
+    /// One more INVITE refused because its `Replaces` named a call the sender
+    /// was not the peer of (RFC 3891 §3).
+    pub(crate) const fn refused_replaces(&mut self) {
+        self.refusals.by_replaces = self.refusals.by_replaces.saturating_add(1);
     }
 
     /// What happens to this INVITE: `None` to let it through, or the status to

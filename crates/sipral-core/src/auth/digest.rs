@@ -23,7 +23,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use super::md5::md5;
-use super::secret::Credentials;
+use super::secret::{Credentials, Secret};
 use super::sha2::{sha256, sha512_256};
 use crate::msg::{ChallengeRef, HeaderName, Method};
 
@@ -186,21 +186,28 @@ impl Challenge {
         let nc = format!("{count:08x}");
 
         // A1 = username:realm:password, and for -sess that hashed again with
-        // both nonces, which is what binds it to this exchange
-        let mut a1 = Vec::new();
-        a1.extend_from_slice(credentials.username.as_bytes());
-        a1.push(b':');
-        a1.extend_from_slice(self.realm.as_bytes());
-        a1.push(b':');
-        a1.extend_from_slice(credentials.password());
+        // both nonces, which is what binds it to this exchange. It holds the
+        // password, so it lives in the buffer that wipes itself on drop
+        // rather than in a `Vec` that leaves the last copy of it in freed
+        // memory — and on an unwind as well, which a wipe written at the
+        // tail of this function would not give.
+        let a1 = Secret::joined(&[
+            credentials.username.as_bytes(),
+            self.realm.as_bytes(),
+            credentials.password(),
+        ]);
+        // HA1 below is password-equivalent for answering a challenge and is a
+        // `String` that is not wiped. That is a scope decision rather than an
+        // oversight: wiping it needs `hash` to hand back raw bytes with the
+        // hexadecimal done at the edge, which is every caller of `hash`.
         let ha1 = if algorithm.is_session() {
             algorithm.hash(&join(&[
-                algorithm.hash(&a1).as_bytes(),
+                algorithm.hash(a1.expose()).as_bytes(),
                 self.nonce.as_bytes(),
                 cnonce.as_bytes(),
             ]))
         } else {
-            algorithm.hash(&a1)
+            algorithm.hash(a1.expose())
         };
 
         // A2 = method:digest-uri. The other form, with the body hashed in, is
@@ -322,6 +329,42 @@ mod tests {
         parsed
             .param(name)
             .map(|value| String::from_utf8_lossy(&value).into_owned())
+    }
+
+    /// The A1 buffer holds the password, so it has to be the type that wipes
+    /// itself on drop rather than one that leaves its last copy in freed
+    /// memory. A wipe is not observable from safe Rust and Miri cannot be
+    /// pointed at this, so what is asserted is the one thing that is visible:
+    /// which type the path uses. The needles are assembled at runtime, so the
+    /// test cannot pass by matching its own assertion.
+    #[test]
+    fn the_password_is_never_built_in_a_buffer_that_is_not_wiped() {
+        let source = include_str!("digest.rs").replace("\r\n", "\n");
+        let opens = "    pub fn respond(";
+        let from = source.find(opens).expect("respond is in this file");
+        let rest = source.get(from..).expect("the rest of the file");
+        let to = rest.find("\n    }\n").map_or(rest.len(), |at| at + 1);
+        let body = rest.get(..to).expect("the body of respond");
+        assert!(
+            body.len() > opens.len(),
+            "the slice is the function, not the signature"
+        );
+
+        let wiping = format!("{}::{}", "Secret", "joined");
+        assert!(
+            body.contains(&wiping),
+            "A1 holds the password and is built with {wiping}"
+        );
+        for grown in [
+            format!("{}::{}", "Vec", "new"),
+            format!("{}::{}", "Vec", "with_capacity"),
+            format!("{}{}", "to_", "vec()"),
+        ] {
+            assert!(
+                !body.contains(&grown),
+                "the password must not pass through {grown}"
+            );
+        }
     }
 
     #[test]

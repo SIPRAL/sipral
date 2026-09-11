@@ -140,6 +140,9 @@ impl UserAgent {
         let invite = self.endpoint.invite(&request, now)?;
         if let Some(held) = self.calls.get_mut(&call) {
             held.invite = Some(invite);
+            // where this call's signalling goes, which is what a `Replaces`
+            // naming it is measured against (RFC 3891 §3)
+            held.peer = Some(remote);
         }
         self.by_invite.insert(invite, call);
         Ok(())
@@ -781,10 +784,13 @@ impl UserAgent {
                     || Box::from(&b""[..]),
                     crate::account::Account::contact_value,
                 );
+                let source = self.guard.source();
                 let call = self.keep(Call::incoming(account, transaction, contact));
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.invited = Some(request.clone());
                     held.replaces = replaced;
+                    // and where this one's signalling came from
+                    held.peer = source;
                 }
                 self.by_server.insert(transaction, call);
                 self.note_allow(call, &request.as_raw());

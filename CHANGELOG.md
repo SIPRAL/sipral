@@ -146,6 +146,48 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **The password spent a moment in a buffer that was never wiped.** `A1` -
+  `username:realm:password` — was built in a plain `Vec` inside
+  `Challenge::respond` and freed as it was, so the whole of it, password
+  included, was left in freed memory on every answered challenge. It is built
+  now in the existing `Secret`, which overwrites itself on drop, and in one
+  exact allocation rather than a buffer grown a part at a time: growing it
+  leaves every intermediate copy behind, which is the thing the type exists
+  to prevent. The response bytes are unchanged — the three RFC vectors in the
+  module are the guard — and `sipral-core` gains no dependency, which its own
+  no-dependency rule and the record in `docs/12-core-api.md` both require.
+  `HA1` itself is still a `String` that is not wiped; that is a scope
+  decision and the code says so where it is made.
+
+- **A `Replaces` could take over a live call from any address that could reach
+  the port.** An INVITE naming one of this end's calls by `Call-ID` and both
+  tags was matched on those three strings and on nothing else, then handed to
+  the application as an ordinary incoming call: answering it hung up the call
+  it named. The three strings are on every packet of the call they name, so
+  knowing them is not being the far end. A matched `Replaces` is now honoured
+  only when the INVITE carrying it arrived from the same place the named
+  call's own signalling does, and anything else is 403 with the named call
+  left exactly as it was (RFC 3891 §3 and §8). `From` and `Referred-By` are
+  deliberately not consulted: both are written by whoever sent the INVITE, and
+  RFC 3892's signed token is not implemented here. Two `Replaces` fields on
+  one request are 400, which §3 always asked for and which keeps the field the
+  check reads the same one the far end acted on. `refusals()` gains
+  `by_replaces`. Two limits are written out in `docs/04-ua.md`: behind an
+  outbound proxy every caller shares one source address, and a byte stream
+  bound without naming its far end has no source address to compare at all.
+
+- **Rebinding a transport left the old connection's deadlines armed.** Binding
+  a `TransportId` that was already bound replaced the entry and dropped its
+  keep-alive and pong timer handles without cancelling them, so the ping sent
+  on a connection that no longer existed failed the flow that replaced it ten
+  seconds later — an `Event::FlowFailed` against a healthy connection, and one
+  extra keep-alive on the schedule for every rebind. `Transports::bind` now
+  hands the replaced entry back and the driver cancels its two deadlines
+  before arming the new ones. RFC 5626 §4.4.1 is about a flow, not about a
+  name. The move that trips it is the ordinary one: a caller whose connection
+  broke reconnects and reuses the identifier so that the registration it was
+  carrying stays where it was.
+
 - **Seventeen rustdoc warnings across eight crates.** A public documentation
   comment linking a private item renders as text and sends the reader
   nowhere, and `cargo doc` was the one compiler the gate never ran. They fall

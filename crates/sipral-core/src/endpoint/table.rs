@@ -90,6 +90,11 @@ impl Transports {
     /// Binding an identifier that is already in use replaces what was there:
     /// the caller has reused the name, and the bytes half-read on the old
     /// connection belong to a connection that is gone.
+    ///
+    /// The entry that was replaced is handed back rather than dropped. It
+    /// carries the keep-alive and pong timer handles of the connection that
+    /// is gone, and only the caller holds the schedule they were hung on.
+    #[must_use = "the entry that was replaced owns the keepalive and pong timer handles"]
     pub(crate) fn bind(
         &mut self,
         transport: TransportId,
@@ -97,7 +102,7 @@ impl Transports {
         local: SocketAddr,
         remote: Option<SocketAddr>,
         limits: Limits,
-    ) {
+    ) -> Option<Bound> {
         self.open.insert(
             transport,
             Bound {
@@ -110,7 +115,7 @@ impl Transports {
                 keepalive: None,
                 pong: None,
             },
-        );
+        )
     }
 
     /// Forget a transport that has closed or failed.
@@ -154,7 +159,7 @@ impl Transports {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransportId, TransportProtocol, Transports};
+    use super::{Bound, TransportId, TransportProtocol, Transports};
     use crate::msg::Limits;
     use crate::transaction::Timers;
     use std::net::SocketAddr;
@@ -164,14 +169,14 @@ mod tests {
         text.parse().unwrap()
     }
 
-    fn bind(table: &mut Transports, id: u32, protocol: TransportProtocol) {
+    fn bind(table: &mut Transports, id: u32, protocol: TransportProtocol) -> Option<Bound> {
         table.bind(
             TransportId(id),
             protocol,
             addr("192.0.2.1:5060"),
             None,
             Limits::DEFAULT,
-        );
+        )
     }
 
     #[test]
@@ -217,7 +222,13 @@ mod tests {
             11
         );
 
-        bind(&mut table, 1, TransportProtocol::Tcp);
+        // and what was there comes back, because it owns the two timer
+        // handles and only the driver holds the schedule they are on
+        let mut timers = Timers::<()>::new();
+        let armed = timers.schedule(Instant::now(), ());
+        table.get_mut(TransportId(1)).unwrap().pong = Some(armed);
+        let replaced = bind(&mut table, 1, TransportProtocol::Tcp).expect("what was there");
+        assert_eq!(replaced.pong, Some(armed));
         assert_eq!(
             table
                 .get(TransportId(1))
@@ -228,6 +239,7 @@ mod tests {
                 .pending(),
             0
         );
+        assert_eq!(table.get(TransportId(1)).unwrap().pong, None);
     }
 
     #[test]

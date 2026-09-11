@@ -281,6 +281,16 @@ pub(crate) struct Call {
     /// `Contact`, kept because every request inside the dialog needs it and a
     /// re-INVITE carries it again to refresh the target.
     pub(crate) contact: Box<[u8]>,
+    /// Where this call's signalling travels: the far end, or the proxy that
+    /// carries the line. It is what an INVITE naming this call in a
+    /// `Replaces` is measured against (RFC 3891 §3).
+    ///
+    /// Written once, when the call is placed or arrives, and not refreshed
+    /// afterwards. A far end that moves leaves it stale, which refuses a
+    /// replacement rather than admitting one. `None` when the transport
+    /// never said where the bytes came from, which is a byte stream bound
+    /// without naming its far end.
+    pub(crate) peer: Option<SocketAddr>,
     /// The branch this one was forked from, for the events that say so.
     pub(crate) forked_from: Option<CallHandle>,
     /// What each end has described, and which way it is held.
@@ -390,6 +400,7 @@ impl Call {
             acknowledged: false,
             hangup_wanted: false,
             contact,
+            peer: None,
             forked_from: None,
             session: Session::default(),
             update_allowed: false,
@@ -431,6 +442,7 @@ impl Call {
             acknowledged: false,
             hangup_wanted: false,
             contact,
+            peer: None,
             forked_from: None,
             session: Session::default(),
             update_allowed: false,
@@ -469,6 +481,8 @@ impl Call {
             acknowledged: false,
             hangup_wanted: false,
             contact: other.contact.clone(),
+            // the branches of one fork all answer the same far end
+            peer: other.peer,
             forked_from: Some(forked_from),
             // the branches of one fork were all offered the same thing
             session: other.session.clone(),

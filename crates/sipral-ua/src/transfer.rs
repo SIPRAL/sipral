@@ -35,6 +35,18 @@
 //! has already ended is 603, an early dialog this end did not originate is
 //! 481, and only a confirmed dialog or an early one of our own is replaced.
 //! Getting that wrong hands somebody else's call to whoever asks.
+//!
+//! **Matching is not permission.** §3 also asks the UA to "verify that the
+//! initiator of the new INVITE is authorized to replace the matched dialog",
+//! and §8 will only have one accepted "if the peer requesting replacement has
+//! been properly authenticated". Three strings out of a dialog are not an
+//! identity: they travel in every packet of the call, and a `From` or a
+//! `Referred-By` naming the far end is written by whoever sent the INVITE.
+//! This stack answers challenges and issues none, so it has no authenticated
+//! peer to compare and compares the one thing the sender did not write:
+//! a `Replaces` is honoured only when the INVITE carrying it arrives from the
+//! same place the named call's own signalling does. Anything else is 403 and
+//! the named call is left exactly as it was.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -57,6 +69,14 @@ const RUNNING: &[u8] = b"active";
 /// §2.4.5: "If a NOTIFY is generated when the subscription state is pending,
 /// its body should consist of a status line containing a response code of 100."
 const TRYING: &[u8] = b"SIP/2.0 100 Trying\r\n";
+/// What an INVITE gets when its `Replaces` names a live call it has no
+/// standing to replace (RFC 3891 §3, RFC 3261 §21.4.4).
+const FORBIDDEN: StatusCode = match StatusCode::new(403) {
+    Ok(status) => status,
+    // 403 is in range, so this arm never runs; it exists because `new` is
+    // fallible and nothing in this crate panics to say otherwise
+    Err(_) => StatusCode::CALL_DOES_NOT_EXIST,
+};
 
 /// One this end received and agreed to act on.
 #[derive(Clone, Copy, Debug)]
@@ -514,6 +534,16 @@ impl UserAgent {
         &self,
         request: &RawMessage<'_>,
     ) -> Result<Option<CallHandle>, StatusCode> {
+        // §6.1: "Only a single Replaces header field value may be present in
+        // a SIP request", and §3 answers more than one with "the UAS MUST
+        // reject the request with a 400 Bad Request response". Which of two
+        // values the check below reads is not the sender's to choose, and an
+        // upstream proxy may well have read the other one.
+        match request.header_count(HeaderName::Replaces) {
+            0 => return Ok(None),
+            1 => (),
+            _ => return Err(StatusCode::new(400).unwrap_or(StatusCode::SERVER_ERROR)),
+        }
         let Some(value) = request.header(HeaderName::Replaces) else {
             return Ok(None);
         };
@@ -548,12 +578,27 @@ impl UserAgent {
             if found.is_some() {
                 return Err(StatusCode::CALL_DOES_NOT_EXIST);
             }
-            found = Some((*handle, held.state, held.direction));
+            found = Some((*handle, held.state, held.direction, held.peer));
         }
 
-        let Some((handle, state, direction)) = found else {
+        let Some((handle, state, direction, peer)) = found else {
             return Err(StatusCode::CALL_DOES_NOT_EXIST);
         };
+        // §3: "the UA MUST verify that the initiator of the new INVITE is
+        // authorized to replace the matched dialog", and §8: "invitations
+        // with the Replaces header MUST only be accepted if the peer
+        // requesting replacement has been properly authenticated". This
+        // stack answers challenges and issues none, so there is no
+        // authenticated identity to compare and `From` or `Referred-By`
+        // would only be comparing strings the sender wrote. What is left is
+        // the one thing the sender did not write: where the bytes came from.
+        //
+        // It runs above the state arms on purpose. What state one of this
+        // end's calls is in is not something a stranger who guessed three
+        // identifiers gets to read off the status code.
+        if self.guard.source() != peer {
+            return Err(FORBIDDEN);
+        }
         match state {
             CallState::Terminating | CallState::Terminated => {
                 // §3: "the UA SHOULD decline the request with a 603 Declined"
@@ -589,13 +634,17 @@ impl UserAgent {
         self.hangup(replaced, now).ok();
     }
 
-    /// Refuse an INVITE whose `Replaces` names nothing this end can give up.
+    /// Refuse an INVITE whose `Replaces` names nothing this end can give up,
+    /// or names a call the sender is not the peer of.
     pub(crate) fn refuse_replaces(
         &mut self,
         transaction: TransactionId<InviteServer>,
         status: StatusCode,
         now: Instant,
     ) {
+        if status == FORBIDDEN {
+            self.guard.refused_replaces();
+        }
         self.endpoint
             .respond_invite(transaction, &OutgoingResponse::new(status), now)
             .ok();

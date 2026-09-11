@@ -4090,6 +4090,128 @@ fn a_replaces_that_names_a_live_call_takes_it_over() {
     )));
 }
 
+/// The victim: a confirmed incoming call, and the three identifiers an
+/// attacker would have to know to name it in a `Replaces`.
+fn call_to_take_over(agent: &mut UserAgent, now: Instant) -> (CallHandle, String) {
+    let first = call_arriving(agent, &incoming_invite("rep4", Some(OFFER)), now);
+    agent
+        .answer(first, Some(Arc::from(ANSWER)), now)
+        .expect("200 goes");
+    let ok = sent(agent);
+    deliver(agent, &in_dialog(&ok, "ACK", "rep4ack", 1), now);
+    events(agent);
+    let ours = tag_of(&ok, HeaderName::To);
+    let theirs = tag_of(&ok, HeaderName::From);
+    let call_id = String::from_utf8_lossy(&header(&ok, HeaderName::CallId)).into_owned();
+    (
+        first,
+        format!("Replaces: {call_id};to-tag={ours};from-tag={theirs}\r\n"),
+    )
+}
+
+#[test]
+fn a_replaces_from_a_stranger_is_forbidden_and_leaves_the_call_it_named_alone() {
+    // RFC 3891 §3: "the UA MUST verify that the initiator of the new INVITE is
+    // authorized to replace the matched dialog", and "MUST leave the matched
+    // dialog unchanged". The three identifiers travel in every packet of the
+    // call, so knowing them is not being the far end.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (first, replaces) = call_to_take_over(&mut agent, t0);
+
+    let replacing = plus(&incoming_invite("rep5", Some(OFFER)), &replaces);
+    deliver_from(&mut agent, &replacing, scanner(7), t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 403 ")),
+        "the stranger is refused: {:?}",
+        written
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !written.iter().any(|bytes| bytes.starts_with(b"BYE ")),
+        "and the call it named is not hung up"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(*event, UaEvent::IncomingCall { .. })),
+        "nothing is offered to the application to answer"
+    );
+    assert_eq!(agent.call_state(first), Some(CallState::Confirmed));
+}
+
+#[test]
+fn naming_the_peer_in_a_header_the_sender_wrote_does_not_authorise_a_replaces() {
+    // §8 wants the peer "properly authenticated using a standard SIP
+    // mechanism". `From` and `Referred-By` are plain fields on the very
+    // INVITE being judged, so a sender that can write one can write both.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (first, replaces) = call_to_take_over(&mut agent, t0);
+
+    // `From` already names the call's own far end, and this adds the
+    // `Referred-By` RFC 3891 §3 treats as authorisation by the replaced party
+    let replacing = plus(
+        &incoming_invite("rep6", Some(OFFER)),
+        &format!("{replaces}Referred-By: <sip:bob@example.com>\r\n"),
+    );
+    deliver_from(&mut agent, &replacing, scanner(7), t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 403 ")),
+        "an unsigned header is not an identity"
+    );
+    assert_eq!(agent.call_state(first), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_replaces_refused_for_want_of_authority_is_counted() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_, replaces) = call_to_take_over(&mut agent, t0);
+    assert_eq!(agent.refusals().by_replaces, 0);
+
+    let replacing = plus(&incoming_invite("rep7", Some(OFFER)), &replaces);
+    deliver_from(&mut agent, &replacing, scanner(7), t0);
+    transmits(&mut agent);
+    assert_eq!(agent.refusals().by_replaces, 1);
+}
+
+#[test]
+fn two_replaces_header_fields_are_a_bad_request() {
+    // §3: "if it appears more than once, the UAS MUST reject the request with
+    // a 400 Bad Request response" — the gate above must not be reading one
+    // value while the far end acted on the other
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (first, replaces) = call_to_take_over(&mut agent, t0);
+
+    let replacing = plus(
+        &incoming_invite("rep8", Some(OFFER)),
+        &format!("{replaces}Replaces: nosuchcall;to-tag=a;from-tag=b\r\n"),
+    );
+    deliver(&mut agent, &replacing, t0);
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 400 ")),
+        "two of them is not one of them"
+    );
+    assert_eq!(agent.call_state(first), Some(CallState::Confirmed));
+}
+
 // -- the consultation call ---------------------------------------------------
 
 #[test]
