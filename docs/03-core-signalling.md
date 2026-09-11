@@ -56,12 +56,20 @@ the transport layer may switch.
 `sipral-core` decides *what* to send over *which* transport; it does not open
 the socket.
 
-- **UDP, TCP and TLS in phase 1; WS and WSS in phase 2** (RFC 7118). The
-  transport is picked from the URI, the `Via`, the NAPTR/SRV result the caller
-  supplied, or configuration. WebSocket is not a byte stream to the SIP layer:
-  RFC 7118 §4.2 puts exactly one SIP message in each WebSocket message, so a
-  frame is handed to the core whole, like a datagram, and never goes through
-  the `Content-Length` framer that TCP and TLS need.
+- **UDP, TCP, TLS, WS and WSS** (RFC 7118 for the last two). All five are
+  transports the endpoint has the protocol logic for — the `Via` token, the
+  framing rule, the timers — and all five are what an application is told this
+  build supports, through `sipral::Capabilities` and through the C ABI's
+  `SIPRAL_TRANSPORT_BIT_*`. The socket is the caller's on every one of them.
+  The transport is picked from the URI, the `Via`, the NAPTR/SRV result the
+  caller supplied, or configuration. WebSocket is not a byte stream to the SIP
+  layer: RFC 7118 §4.2 puts exactly one SIP message in each WebSocket
+  message, so a frame is handed to the core whole, like a datagram, and never
+  goes through the `Content-Length` framer that TCP and TLS need. What is not
+  here is the rest of RFC 7118: the handshake, the `ws` URI scheme and the
+  `transport=ws` parameter on `Contact` and `Route` are phase 2, and
+  `crates/sipral-core/src/endpoint/transport.rs` says so at the declaration.
+  An application that binds a WebSocket today does the handshake itself.
 - **Automatic switch to TCP** when a request is within 200 bytes of a known
   path MTU, or, when the path MTU is unknown, larger than 1300 bytes, per RFC
   3261 §18.1.1. Both figures are configurable, because some carriers perform
@@ -199,13 +207,21 @@ ones the stack acts on.
 
 Typed today: `m=audio` with RTP/AVP and RTP/SAVP, `a=rtpmap`, `a=fmtp`,
 `a=ptime`/`a=maxptime`, `a=sendrecv|sendonly|recvonly|inactive`, `a=rtcp`,
-`a=rtcp-mux`, and `c=` with IPv4 and IPv6.
+`a=rtcp-mux`, `c=` with IPv4 and IPv6, and `a=crypto` for SDES (RFC 4568): the
+suite as a value rather than a token, the master key and salt decoded out of
+the key parameter, and the lifetime and key identifier that travel beside them.
 
-Carried but not yet typed: `a=crypto` for SDES, `a=fingerprint` for DTLS-SRTP,
-and the `a=candidate` lines ICE needs. They survive a parse and a round trip
-like every other attribute, and reading one still means reading a name and a
-value. Typed access arrives with the crate that acts on them, in phase 2 —
-writing it earlier would be an accessor with no caller.
+`a=fingerprint` for DTLS-SRTP is read into the plan and written into an offer,
+both exactly as the value stands. There is no DTLS anywhere in this tree — no
+handshake, no certificate, nothing that could produce a key — so the line is
+carried for whoever does one rather than acted on here.
+
+Carried but not typed here: the `a=candidate` lines ICE needs. They survive a
+parse and a round trip like every other attribute, and reading one still means
+reading a name and a value. The typed reading belongs to the crate that acts on
+them, and that is where it is: `sipral-nat` writes and reads them over this
+model ([06-nat.md](06-nat.md)). Writing a second one here would be an accessor
+with no caller.
 
 Hold is `a=sendonly` with `a=recvonly` in the answer. The `c=0.0.0.0` form is
 accepted on receive because old equipment sends it, and never sent.

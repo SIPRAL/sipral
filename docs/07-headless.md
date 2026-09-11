@@ -16,14 +16,20 @@ room abstraction, or an entire PBX, or a hosted service. Each brings its own
 infrastructure, its own ports, its own operational surface, and its own latency
 budget, in exchange for features the agent does not use.
 
-`sipral-headless` is a SIP endpoint with an audio device shaped like a socket.
-No `CoreAudio`, no WASAPI, no device enumeration, no room, no Redis, no port
-range. One process, one call or many, raw frames both ways.
+An agent build is a SIP endpoint whose audio device is a socket, and
+`sipral-headless` is that socket's end of it: the framing, the control
+vocabulary and the session state, and nothing besides. No `CoreAudio`, no
+WASAPI, no device enumeration, no room, no Redis, no port range. One process,
+one call or many, raw frames both ways.
 
 ## Interface
 
-A local Unix domain socket, a TCP socket, or a WebSocket. The framing is the
-same on all three.
+The transport is the application's: a local Unix domain socket, a TCP socket or
+a WebSocket, opened and accepted by whatever hosts the agent. This crate owns
+the framing and the control vocabulary on top of it, and they are the same on
+all three, so an agent written against one transport moves to another without
+touching the protocol. Nothing here opens a socket, for the reason
+[01-architecture.md](01-architecture.md) gives for the rest of the tree.
 
 **Audio frames**, in both directions:
 

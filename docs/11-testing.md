@@ -81,11 +81,12 @@ beside them in the manifest.
 
 `scripts/check.sh` verifies every file's hash, so the corpus cannot drift, and
 `crates/sipral-core/tests/rfc4475.rs` reads the manifest rather than repeating
-it. This is the first thing `scripts/check.sh` runs.
+it. The hash check runs near the top of the gate, before anything is built.
 
-**Capture replay.** Recorded exchanges from the lab PBX and from carriers,
-replayed against the stack byte for byte. Every interoperability bug found in
-the field becomes a fixture here on the day it is found, and it never regresses
+**Recorded-session replay.** Sessions captured in the lab or in the field,
+replayed against the stack byte for byte in the format `docs/18-replay.md`
+defines. `fixtures/replay/` holds the first of them; an interoperability bug
+found in the field joins it on the day it is found, and does not regress
 again.
 
 **Fuzzing.** `cargo fuzz` (libFuzzer). The fuzz crate lives under `fuzz/`,
@@ -119,10 +120,12 @@ wait out.
 
 The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
-five minutes each by default — before a release and overnight, not before every
-commit, which would add half an hour to buy very little. Every crashing input is minimised and
-committed under `fixtures/regressions/` with the fix, and the test suite
-replays that directory forever.
+five minutes each by default — before a release and overnight, not before
+every commit, which would add half an hour to buy very little. Every crashing
+input will be minimised and committed under `fixtures/regressions/` with the
+fix, and the test suite will replay that directory forever. No input has
+crashed a target yet, so the directory does not exist — and the whitelist in
+the "provenance" step of `scripts/check.sh` widens on the day it does.
 
 **Media measurement.** Impairment profiles built with `tc netem` and committed
 alongside the tests, so a quality claim is reproducible rather than remembered.
@@ -189,10 +192,11 @@ the time:
 | attended transfer | as blind, plus `Replaces` honoured: the replaced dialog terminated by the target | event log, capture |
 
 A flow passes only if every condition holds; a partial run is a failure with
-the failing condition named. The event log and the anonymised capture of each
-passing run are committed as fixtures, so the pass is reproducible and later
-regressions have a reference. SIPp is used separately, as a scripted *peer*
-for regression scenarios; it is not how the live matrix is judged.
+the failing condition named. The event log and the capture of each passing run
+are kept with the run, so the pass is reproducible and later regressions have a
+reference; a session worth replaying afterwards is anonymised, reviewed by hand
+and committed under `fixtures/replay/`. SIPp is used separately, as a scripted
+*peer* for regression scenarios; it is not how the live matrix is judged.
 
 ## Tooling
 

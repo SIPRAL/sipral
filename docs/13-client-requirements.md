@@ -225,10 +225,10 @@ same way: from a complaint.
 ### B6 · Defaults chosen for the equipment actually deployed against · P1
 
 **The failure.** NAT-traversal features that are correct in general were
-harmful against the deployment that matters: they inflated requests past the
-fragmentation threshold (B1) and published an address discovered through a
-third party that a symmetric NAT had already invalidated. Turning them off made
-calls work.
+harmful against the deployment they were enabled for, an Asterisk-family PBX
+behind consumer NAT: they inflated requests past the fragmentation threshold
+(B1) and published an address discovered through a third party that a
+symmetric NAT had already invalidated. Turning them off made calls work.
 
 **The requirement.** A documented default profile for the common case — an
 Asterisk-family PBX behind consumer NAT, which learns the real address from the

@@ -17,10 +17,12 @@ other ([01-architecture.md](01-architecture.md)). Two values pass between them,
 and the application carries both:
 
 ```rust
-/// What the negotiation settled on. Produced by `sipral-ua` from the answer,
-/// consumed by whatever owns the media: `sipral-media` for a device build,
-/// `sipral-headless` for an agent. Emitted again, unchanged but for the fields
-/// that moved, after every re-INVITE or UPDATE that changes the session.
+/// What the negotiation settled on. Built in `sipral-core::sdp` out of the
+/// offer and the answer, and consumed by whatever owns the media — in this
+/// tree that is `MediaSession` in the `sipral` facade, which is what turns a
+/// plan into an RTP session and a codec. Emitted again, unchanged but for the
+/// fields that moved, after every re-INVITE or UPDATE that changes the
+/// session.
 pub struct MediaPlan {
     pub local: SocketAddr,          // where to receive; the caller chose it
     pub remote: SocketAddr,         // where to send, from the answer's c= and m=
@@ -45,8 +47,10 @@ pub struct MediaCapabilities {
 Neither mentions a socket, a device, a thread or a codec implementation, which
 is what lets one `sipral-ua` drive a softphone and an agent that puts PCM on a
 socket. Both live in `sipral-core::sdp`, next to the offer/answer machinery that
-produces them; the media crates depend on `sipral-core` for these two types and
-nothing else, which keeps the seam a shared vocabulary rather than a call.
+produces them. The media crates do not read them: `sipral-media` and
+`sipral-rtp` name no Sipral crate in their manifests at all, and the `sipral`
+facade is what turns a plan into the arguments they take. That is what keeps
+the seam a shared vocabulary rather than a call.
 
 ## sipral-rtp
 
@@ -197,8 +201,11 @@ Everything above is the crate. The `sipral` crate is what joins it to a call:
 `CodecCatalog::with_srtp` says what one call does about keys, and it sits on
 the catalogue rather than on `MediaConfig` because it decides what goes into
 an offer, which is what the rest of the catalogue is. Per call, not per stack,
-for the reason D6 gives: an attended transfer holds two calls at once and the
-consultation leg does not have to agree with the call it stands in for.
+for the reason D6 gives in
+[13-client-requirements.md](13-client-requirements.md), which is where every
+letter-and-number requirement this page cites is written out: an attended
+transfer holds two calls at once and the consultation leg does not have to
+agree with the call it stands in for.
 
 | `SrtpPolicy` | The offer this end writes | A plain offer arriving | An offer arriving on `RTP/SAVP` |
 |---|---|---|---|

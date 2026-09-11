@@ -18,9 +18,7 @@ interesting.
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the
 licensing set, the workspace skeleton, the check script, the RFC 4475 corpus,
-the public API
-surface of `sipral-core` agreed on paper, and the capture fixtures from the lab
-PBX.
+and the public API surface of `sipral-core` agreed on paper.
 
 **Exit:** every state machine in `03-core-signalling.md` can be explained from
 the RFC alone, with no other implementation's source ever having been opened.
@@ -36,14 +34,14 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and five of the eight exit criteria met.** Every line of the
+**Status: written, and four of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
 `sipral-media` — and five flows run against three servers whenever
-`scripts/lab.sh` is run. What is left is one paid carrier account, and the two
-criteria added on 10 September 2026 after an audit of the whole tree: the lab
-drove the stack through a media join written for the lab, not through the one
-an application links, so what it proved was the harness. A phase whose proof
-runs on a path no customer uses has not exited.
+`scripts/lab.sh` is run. What is left is one paid carrier account, the 24-hour
+fuzzing run, and the two criteria added after the tree was read end to end: the
+lab drove the stack through a media join written for the lab, not through the
+one an application links, so what it proved was the harness. A phase whose
+proof runs on a path no customer uses has not exited.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -60,8 +58,8 @@ unit suite had ever asked.
 - the same against at least one real carrier, on a paid account;
 - **met** — the RFC 4475 torture corpus passes: valid messages parsed, invalid
   messages rejected without a panic;
-- **met** — the parser survives a continuous fuzzing run without a crash or a
-  hang;
+- the parser survives 24 hours on each fuzz target with no crash and no
+  timeout, which is the gate `11-testing.md` sets for this criterion;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
   Asterisk;
 - the same flows, plus DTMF in both forms, run through `sipral::MediaEngine` —
@@ -117,9 +115,8 @@ production says is missing from it:
 - **B1** — the path size limit as a constraint: promotion to a stream
   transport or a specific refusal, never a silent send, per RFC 3261 §18.1.1,
   with the on-wire size readable by the application. *Built* for the first
-  send and the authenticated retry; the in-dialog path skipped it, which the
-  audit of 10 September 2026 found, and it is closed with phase 1's last
-  criterion.
+  send and the authenticated retry; the in-dialog path skipped it, and it is
+  closed with phase 1's last criterion.
 - **B5** — a media stall detected by the engine and reported, with an optional
   recovery attempt. *Built.*
 - **B6** — a documented default profile for the deployment actually shipped
@@ -134,7 +131,7 @@ P0 for phase 3 and is sized like a phase of its own:
   (RFC 4235), with bulk operations and with the REFER subscription expressed
   as the special case it is. *Built.*
 
-**What the audit of 10 September 2026 added to this phase**, because each is
+**Added to this phase after the tree was read end to end**, because each is
 signalling or media a carrier or a second kind of customer asks for by name,
 and each is cheaper before the ABI carries it than after:
 
@@ -237,15 +234,16 @@ trusts.
   missing. *Built* as declarations; **not yet as platforms**: on 10 September
   2026 the tree built no C-linkable library at all, three of the four printed
   bindings did not compile, and the gate could not tell, because it compared
-  the generator's output with itself. The library, a C program that links it,
-  and a compile of every binding are now steps of the gate, and the generator
-  gets a name-uniqueness pass and tests of its own.
+  the generator's output with itself. The library and a C program that links
+  it are now steps of the gate. Compiling the Swift, Kotlin and .NET bindings,
+  a name-uniqueness pass in the generator and tests of its own are still to be
+  added, and the ABI does not freeze before they are.
 - **D6** — device, codec and transport as properties of a call rather than of
   the process. *Built* in Rust; the transport half is not yet across the ABI.
 
-**What is built in Rust and cannot be reached through `sipral.h`** — the
-audit's central finding, and the list phase 3 closes before the ABI freezes,
-because each of these is a shape and a shape is permanent once published:
+**What is built in Rust and cannot be reached through `sipral.h`** — the list
+phase 3 closes before the ABI freezes, because each of these is a shape and a
+shape is permanent once published:
 
 - the real-time media path shares the stack lock that `sipral_stack_poll`
   holds across the application's callback, so the audio thread is answered
@@ -297,9 +295,9 @@ because each of these is a shape and a shape is permanent once published:
 - the platform echo canceller reached on Windows and Linux through the
   processor seam, with a reference module attachable as an optional crate.
 
-**Exit:** the existing desktop softphone clients run on Sipral, and the previous
-stack is gone from both binaries; the lab's flows have run through `sipral.h`;
-and the ABI is frozen only after every item above exists in C.
+**Exit:** a desktop softphone ships on Sipral with no other SIP stack linked
+into its binary; the lab's flows have run through `sipral.h`; and the ABI is
+frozen only after every item above exists in C.
 
 ## Phase 4 — mobile
 
@@ -342,10 +340,10 @@ call.
 
 `sipral-headless`, packaging, public documentation, published packages.
 
-The audit of 10 September 2026 found that the headless crate — the reason the
-README says the stack is small enough to embed in a voice agent — shares no
-type with the media pipeline it is drawn beside and is linked by nothing. The
-phase therefore starts one layer lower than planned:
+The headless crate — the reason the README says the stack is small enough to
+embed in a voice agent — shares no type with the media pipeline it is drawn
+beside and is linked by nothing. The phase therefore starts one layer lower
+than planned:
 
 - **headless joined to the engine**: socket frames become `MediaSession`
   capture and playback, the sample rate is negotiated against the media plan
@@ -395,14 +393,12 @@ deliberately does not need.
 second Sipral, surviving the impairment profiles, with audio quality
 unchanged from the audio-only build.
 
-## Where this gets abandoned
+## What the phases are risked against
 
-Phases 1 and 2. If signalling interoperability or audio quality cannot be
-reached, the sunk cost is a few months and the answer is to stop.
-
-After phase 3 the project has already paid for itself, because the licensing
-exposure it removes is the reason it exists, independently of anything sold
-later.
+Phases 1 and 2 carry the technical risk: signalling interoperability and audio
+quality are demonstrated against real equipment, or they are not. From phase 3
+onward the work is platform integration, where the risk is schedule rather than
+feasibility.
 
 ## Ordering constraints
 

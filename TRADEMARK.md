@@ -15,7 +15,7 @@ grants rights in the name.
 - Using the name in documentation, articles, talks and comparisons.
 - Keeping the crate, package and module names intact when you depend on Sipral
   unmodified.
-- Linking to this repository and to the Sipral site.
+- Linking to this repository and to the project site, <https://sipral.org>.
 
 ## Requires written permission
 
@@ -35,7 +35,8 @@ say plainly that it is a fork of Sipral, and do not present it as Sipral.
 ## The expanded name
 
 Sipral stands for **Session Initiation Protocol Rust Audio Layer**. The expanded
-form appears next to the name in the README, on the site and in every package
-description, and it is part of how the mark is filed.
+form appears next to the name at the top of the README and in the package
+descriptions of `sipral` and `Sipral`. It explains what the name is short for;
+the mark is the short name.
 
 Questions about this policy go through the contact route in `LICENSING.md`.

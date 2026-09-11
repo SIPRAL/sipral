@@ -16,10 +16,10 @@ and `crates/sipral/src/capabilities.rs`, carried across the C ABI by
 
 ## D3: health counters
 
-[`sipral::MediaEngine::counters`] returns a [`sipral::Counters`] — a struct
+`sipral::MediaEngine::counters` returns a `sipral::Counters` — a struct
 copy, cheap enough to sample on a timer and ship as telemetry, because nothing
 behind it walks the call table or a session to answer. It is fed from exactly
-the events [`sipral::MediaEngine::poll_event`] already drains, at the two
+the events `sipral::MediaEngine::poll_event` already drains, at the two
 places it hands one out: nothing here opens a second path to the layers below
 to learn something the event stream does not already say.
 
@@ -55,7 +55,7 @@ spend regrouping them.
 
 ### Counters are monotonic, gauges are not — in the type, not only here
 
-[`sipral::Counter`] only grows; [`sipral::Gauge`] moves both ways. The
+`sipral::Counter` only grows; `sipral::Gauge` moves both ways. The
 distinction is not decoration. `Counters` implements `Sub`, so a later reading
 minus an earlier one turns every counter into how much it grew across the
 interval — saturating at zero rather than panicking if the two readings are
@@ -72,8 +72,8 @@ registrar" or "wait, the account is genuinely rejected and retrying will not
 help" — three different pages to three different people, collapsed into one
 number nobody can act on without a packet capture. The reason vocabularies
 are not invented for this: `registrations_failed` reuses
-[`sipral_ua::RegistrationFailure`] and `calls_ended` reuses
-[`sipral_ua::CallEndReason`], the same enums the event stream already carries,
+`sipral_ua::RegistrationFailure` and `calls_ended` reuses
+`sipral_ua::CallEndReason`, the same enums the event stream already carries,
 so a counter and a live event about the same failure are never able to
 disagree about its name.
 
@@ -95,7 +95,7 @@ counter at all — a number that looks measured and is not.
 
 ## D8: capability reporting
 
-[`sipral::Capabilities::of_this_build`] answers "what can this build do" with
+`sipral::Capabilities::of_this_build` answers "what can this build do" with
 one struct: which codecs this build contains, which transports its signalling
 can carry, and which optional features are compiled in. It takes no `&self`
 and reads no running stack, because a build's capabilities do not change
@@ -159,8 +159,9 @@ believed by whichever side turns out to be wrong.
 
 B2 requires that every configuration entry point answer `applied`, `rejected`
 or `not supported in this build`, and never a fourth thing that looks like
-success and silently does nothing. Auditing `MediaConfig`, `EndpointConfig`
-and the FFI setters while building this document found the following.
+success and silently does nothing. `MediaConfig`, `EndpointConfig` and the FFI
+setters were read against that rule, one entry point at a time. What that
+found:
 
 **Compliant already**, and worth naming because the pattern is the one to
 copy: `CodecCatalog::with_order` and `CodecCatalog::with_frame_length`

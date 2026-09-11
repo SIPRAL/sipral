@@ -17,9 +17,11 @@ Small enough to embed in an AI voice agent, complete enough to run a softphone.
 > **Status: pre-alpha, phase 1.** Registration, calls, hold, and blind and
 > attended transfer run against Kamailio, FreeSWITCH and Asterisk in the
 > container lab (`scripts/lab.sh`); registration, a call and hold run against
-> a live FreePBX over the Internet. The C ABI is not frozen and nothing is
-> published. The roadmap and the exit criteria for each phase are in
-> [`docs/10-roadmap.md`](docs/10-roadmap.md).
+> a live FreePBX over the Internet. The C ABI is not frozen, and the only thing
+> on a registry is a name reservation: `Sipral` 0.0.1 on NuGet, which holds the
+> name and carries a stub assembly that implements nothing. Nothing is on
+> crates.io yet. The roadmap and the exit criteria for each phase
+> are in [`docs/10-roadmap.md`](docs/10-roadmap.md).
 
 ## Why this exists
 
@@ -30,8 +32,10 @@ bindings. Meanwhile every AI voice agent that needs to answer a phone call is
 made to run a whole media server or a whole PBX to get at the audio.
 
 Sipral is the narrow answer to both: a stack you can link into a closed product
-under a clear commercial licence, and a headless mode that hands you raw PCM on
-a socket with no audio device and no room abstraction anywhere near it.
+under a clear commercial licence, and a headless mode that will hand you raw PCM
+on a socket with no audio device and no room abstraction anywhere near it. The
+framing and control protocol for that mode is written and tested; joining it to
+the media pipeline is phase 5, and until then no audio reaches it.
 
 ## Design in one paragraph
 
@@ -70,8 +74,9 @@ you pick, or replace, or leave out entirely.
 Implemented from the RFCs, not from anyone's source tree. The full list, and
 which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
 Core set: RFC 3261, 3262, 3263, 3264, 3311, 3515, 3581, 4028, 6026, 6665, 8760
-for signalling; 3550, 3551, 4733, 6716 and 7587 for media; 3711 with 4568 and
-5764 for SRTP and its keying; 8445, 8489 and 8656 for NAT.
+for signalling; 3550, 3551, 4733, 6716 and 7587 for media; 3711 with 4568 for
+SRTP and its SDES keying; 8445, 8489 and 8656 for NAT. DTLS-SRTP (5764) is
+phase 2: the SDP plumbing is there, the handshake is not.
 
 ## Not trusting the input
 
@@ -83,8 +88,10 @@ here treats them as exceptional.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
   128 header fields, 4 KiB per header value, all three lower on request.
 - **Fuzzing** since the twenty-sixth commit — four `cargo-fuzz` targets over the
-  parser, the builder, the stream framer and SDP, seeded with the RFC 4475
-  corpus.
+  parser, the builder, the stream framer and SDP, run by `scripts/fuzz.sh`. The
+  corpus is not committed: seed it from the torture messages before the first
+  run, `mkdir -p fuzz/corpus/parse && cp fixtures/rfc4475/*/*.dat
+  fuzz/corpus/parse/`.
 - **The RFC 4475 torture corpus** is in the tree bit-exact, 49 messages with a
   SHA-256 per file, and a test asserts on the outcome the RFC specifies for each
   one rather than on "it did not crash".
@@ -99,6 +106,15 @@ cargo test --workspace
 
 Rust 1.95 or newer, edition 2024. The toolchain is pinned in
 `rust-toolchain.toml`.
+
+## Where to start reading
+
+An application depends on the `sipral` crate and nothing else. The design
+documents are indexed in [`docs/README.md`](docs/README.md); the ones to read
+first are [`docs/01-architecture.md`](docs/01-architecture.md) for the shape of
+the stack, [`docs/12-core-api.md`](docs/12-core-api.md) for the sans-I/O core
+and [`docs/08-ffi.md`](docs/08-ffi.md) for the C ABI and what each binding
+covers.
 
 ## Licence
 

@@ -151,9 +151,9 @@ ASCII in every message anybody has sent, but the parser is lenient by
 configuration and a diagnostic that will not parse is no diagnostic.
 
 `Endpoint::diagnostics_json()` is the whole endpoint as one document;
-`Record::to_json()` is one call. Below is a real one, from the B1 story: a
-REGISTER that fitted, a challenge, and the retry with credentials that did not
-fit and was therefore never emitted.
+`Record::to_json()` is one call. Below is the shape of the B1 story, with
+numbers of its own: a REGISTER that fitted, a challenge, and the retry with
+credentials that did not fit and was therefore never emitted.
 
 ```json
 {"records_dropped":0,"records":[
@@ -166,9 +166,10 @@ fit and was therefore never emitted.
 ```
 
 Whitespace added here for the page; the output is one line. The last two
-entries are the incident: 1478 bytes against a limit of 1300, and the 262 bytes
+entries are the refusal: 1478 bytes against a limit of 1300, and the 262 bytes
 between the first REGISTER and the retry are the credentials. Reading that
-takes seconds. Inferring it from a log took two days.
+takes seconds. In the incident B1 records, inferring the same thing from a log
+took two days.
 
 `at_us` is microseconds from the record's first entry. `dropped` and
 `records_dropped` are always present, whatever their value. A field that does

@@ -7,6 +7,8 @@ makes the dual licence in LICENSING.md possible: only the holder of all rights
 can offer the same code under a commercial arm.
 
 External code contributions are not accepted before 1.0. After that they are
-accepted only under the contributor agreement in CONTRIBUTING.md, which assigns
-the same rights to the holder above. Issues, test captures and interoperability
-reports are welcome at any time and are not code contributions.
+accepted only under a contributor licence agreement that assigns the same rights
+to the holder above. That agreement is not written yet; it will be published in
+CONTRIBUTING.md before the first patch is taken. Issues, test captures and
+interoperability reports are welcome at any time and are not code
+contributions.

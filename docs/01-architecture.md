@@ -40,29 +40,39 @@ Consequences, in the order they matter:
    the headless build simply does not link them.
 
 The cost is honest: the caller writes the event loop. `sipral-ua` ships a
-reference loop for people who do not want to, and the bindings ship the
-idiomatic one for their language.
+reference loop for people who do not want to, off by default and described
+below. The bindings do not: they are printed declarations of the C ABI and no
+more, and the idiomatic loop for each language — `async`/`await`, a `Task`,
+coroutines and a `Flow` — is named per binding in [08-ffi.md](08-ffi.md) and is
+still ahead.
 
 ## Layers
 
 ```
                     sipral-ffi          C ABI, Swift / .NET / Kotlin
                         │
+                     sipral             the facade, and the one crate an
+                        │               application depends on
         ┌───────────────┼───────────────┐
         │               │               │
-   sipral-ua      sipral-headless   sipral-io-*     device or socket
-        │               │               │
-        ├───────────────┴───────────────┤
-        │                               │
-   sipral-core                     sipral-media     pipeline, codecs, AEC
-   parser, transactions,                 │
-   dialogs, SDP, auth              sipral-rtp       RTP/RTCP, jitter, SRTP
-                                         │
-                                    sipral-nat      STUN, TURN, ICE-lite
+   sipral-ua      sipral-media     sipral-rtp        sipral-nat
+   registration,  pipeline,        RTP/RTCP,         STUN, TURN,
+   calls, hold    codecs, AEC      jitter, SRTP      ICE-lite
+        │                                                 │
+        └────────────────────────┬────────────────────────┘
+                                 │
+                            sipral-core     parser, transactions,
+                                            dialogs, SDP, auth
+
+   sipral-headless   PCM on a socket, no audio device
+   sipral-io-*       CoreAudio, WASAPI, the device itself
 ```
 
-Dependencies point down only. `sipral-core` depends on nothing outside the
-standard library. Nothing depends on `sipral-io-*` except the application.
+Dependencies point down only, and most of these crates have none. `sipral-core`
+depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`,
+`sipral-headless` and `sipral-io-*` name no Sipral crate at all. The last two
+stand outside the picture because nothing in it depends on them: an application
+links one of them, or neither, and never both.
 
 One edge the picture allows and the design forbids: **`sipral-ua` does not
 depend on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
@@ -71,23 +81,27 @@ passes between them is a description — `MediaPlan` out of the negotiation and
 `MediaCapabilities` back into it, both in `sipral-core::sdp` and both written
 out in [05-media.md](05-media.md) — and something carries it across.
 
-The crate that carries it is [`sipral`](#the-facade), below, and until recently
-it did not: `MediaPlan` and `MediaCapabilities` were used nowhere outside
-`sipral-core::sdp` and its own tests, so the two halves were not loosely
-coupled but unconnected, and an application that wanted both wrote the join
-itself. It is written now. The rule above is unchanged and is the reason the
-join lives there and only there — `sipral-rtp` and `sipral-media` still name no
-Sipral crate in their manifests, and `sipral-ua` still reaches into neither.
+The crate that carries it is [`sipral`](#the-facade), below, and until 9
+September 2026 it did not: `MediaPlan` and `MediaCapabilities` were used
+nowhere outside `sipral-core::sdp` and its own tests, so the two halves were
+not loosely coupled but unconnected, and an application that wanted both wrote
+the join itself. It is written now. The rule above is unchanged and is the
+reason the join lives there and only there — `sipral-rtp` and `sipral-media`
+still name no Sipral crate in their manifests, and `sipral-ua` still reaches
+into neither.
 
-What is still true is the consequence one layer up: `sipral-ffi` depends on
-`sipral-core` and `sipral-ua` and stops, so **the C ABI carries signalling
-alone** and a client on the other side of it parses its own SDP and runs its
-own RTP. Pointing the ABI at this crate is what closes that, and most of
-`docs/13-client-requirements.md` is waiting on it.
+The consequence one layer up is the same shape: `sipral-ffi` names `sipral`
+first in its manifest, with `sipral-core` and `sipral-ua` beside it for the
+places the facade has no opinion about — binding a transport, a timer, an
+in-dialog INFO. So **the C ABI carries media as well as signalling**: a client
+on the other side of it hands a datagram in and gets PCM back, rather than
+bringing a second stack to parse its own SDP and run its own RTP. That half of
+the boundary is `crates/sipral-ffi/src/media.rs`, and it is written out in
+[08-ffi.md](08-ffi.md).
 
-The reason is the build in the third column: an agent that puts PCM on a socket
-links no media pipeline at all, and a `sipral-ua` that reached into one could
-not be built without it.
+The reason for the rule is the build standing outside the picture: an agent
+that puts PCM on a socket links no media pipeline at all, and a `sipral-ua`
+that reached into one could not be built without it.
 
 ### Who owns the sockets, the resolver and TLS
 
@@ -157,7 +171,8 @@ depends on this one crate and gets `sipral-ua` plus a media pipeline
 re-exported under one name.
 
 It is still the only crate with `publish = true` and the only one that ships
-before the ABI freezes, and it still carries the crates.io name reservation.
+before the ABI freezes. The crates.io name is not held yet: the upload has not
+happened.
 What it now also carries is the join:
 
 - **`CodecCatalog` and `Codec`** — what this build actually contains, in the
@@ -180,14 +195,14 @@ manifest and no media crate names `sipral-ua`. This one names both, which is
 what makes it the seam rather than a hole in the wall. `MediaEngine` therefore
 takes a `&mut UserAgent` on the three operations that genuinely need both
 halves — placing a call, answering one, and draining the events — rather than
-wrapping the user agent, whose twenty-five methods would each be a place to get
+wrapping the user agent, whose sixty-odd methods would each be a place to get
 registration or transfer subtly wrong on the way through.
 
 What is still not joined is `sipral-nat`: a call behind a NAT that symmetric
 RTP does not solve is the application's to arrange, and the ICE candidates that
-would go in the offer have no route through this crate yet. And `sipral-ffi`
-still depends on `sipral-core` and `sipral-ua` alone, so the C ABI carries
-signalling only until it is pointed at this crate instead.
+would go in the offer have no route through this crate yet. The C ABI is
+already pointed here — `sipral-ffi` names `sipral` in its manifest — so what
+the boundary does not carry is what this crate does not.
 
 ## What is not in the tree
 

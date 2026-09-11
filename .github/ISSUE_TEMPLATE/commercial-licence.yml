@@ -9,8 +9,9 @@ body:
     attributes:
       value: |
         **This issue will be public.** If you would rather not say in the open
-        that your product is closed source, use the contact form on the Sipral
-        site instead. It reaches the same place and nobody else sees it.
+        that your product is closed source, use the contact form at
+        <https://sipral.org> instead. It reaches the same place and nobody else
+        sees it.
 
         Read [LICENSING.md](../blob/main/LICENSING.md) first: if your own
         application is AGPL-3.0, you need no licence and no enquiry.

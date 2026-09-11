@@ -21,8 +21,10 @@ Protocol code is written from the specification: the RFC text, or the ITU
 Recommendation, read from the document rather than recalled. No source of
 pjproject, sofia-sip, oSIP, eXosip, Linphone, belle-sip, bcg729, spandsp,
 libnice, Janus or libsrtp is opened by anyone working on this tree, at any time,
-for any reason. Those are copyleft implementations of the same protocols, and
-several of their owners sell commercial licences of their own.
+for any reason. Most of them are copyleft implementations of the same protocols
+and several of their owners sell commercial licences of their own; libsrtp is
+permissive and is on the list anyway, because it is an implementation of RFC
+3711 rather than an architecture to learn from.
 
 Permissively licensed projects may be read for architecture and never copied.
 Where that happened it is recorded below.
@@ -55,15 +57,21 @@ directories were not opened.
 
 ## The evidence
 
-The history of this repository has never been rewritten and never will be. It is
-the record: the design document for a component is committed before the code
-that implements it, dated, and the reasoning behind each judgement call is
-written next to the decision rather than kept in someone's head. A file that
-disagrees with its design document is a bug in one of the two.
+The history of this repository is the record: the design document for a
+component is committed before the code that implements it, dated, and the
+reasoning behind each judgement call is written next to the decision rather than
+kept in someone's head. A file that disagrees with its design document is a bug
+in one of the two.
 
-`scripts/check.sh` fails the build on any reference to a forbidden project
-appearing in source files, in any capitalisation. It is a backstop for the rule
-above, not a substitute for it.
+`main` was rewritten once, on 4 September 2026, when the repository held a
+single commit and no protocol code, to take a private address out of that
+commit's metadata. From the first commit that carries code the history is
+evidence: it is not squashed, not rebased and not force-pushed again.
+
+`scripts/check.sh` fails the build when a source file contains pjproject,
+pjsip, pjmedia, sofia-sip, osip2, exosip, linphone, bcg729, spandsp, libnice or
+janus, in any capitalisation. It matches those strings and nothing cleverer, so
+it is a backstop for the rule above and not a substitute for it.
 
 ## The one component a specification might not settle alone
 
@@ -112,7 +120,10 @@ and `fixtures/rfc4475/README.md` says so.
 
 ## Reporting a concern
 
-If you believe you recognise code in this repository, please say so through the
-security contact in [`SECURITY.md`](SECURITY.md) rather than in a public issue,
-and name the file and the lines. It will be examined, and if the concern is
-sound the code will be rewritten and the fact recorded here.
+If you believe you recognise code in this repository, please say so privately
+rather than in a public issue, and name the file and the lines: use GitHub's
+private vulnerability reporting on this repository — the Security tab, then
+"Report a vulnerability" — which is the route [`SECURITY.md`](SECURITY.md)
+describes and is private between you and the maintainer. It will be examined,
+and if the concern is sound the code will be rewritten and the fact recorded
+here.

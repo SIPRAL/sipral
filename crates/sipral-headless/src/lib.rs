@@ -3,10 +3,14 @@
 
 //! Headless media endpoint.
 //!
-//! Bidirectional PCM over a local socket or a WebSocket, with no audio device
-//! and no media server in the path. This is what an AI voice agent binds to in
-//! order to answer a phone call: raw frames in, raw frames out, and barge-in
-//! that does not wait on a room abstraction.
+//! Bidirectional PCM with no audio device and no media server in the path:
+//! raw frames in, raw frames out, and barge-in that does not wait on a room
+//! abstraction. This is what an AI voice agent answers a phone call through.
+//!
+//! The socket is the caller's, as everywhere else in this workspace. This
+//! crate has no dependencies and opens nothing; it frames and parses, and the
+//! bytes are carried by whatever the application binds — a local socket, a
+//! WebSocket, a pipe.
 //!
 //! Protocol in `docs/07-headless.md`.
 

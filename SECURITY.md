@@ -41,5 +41,6 @@ network is in scope, and the parser especially:
 
 ## Supported versions
 
-Before 1.0, only the latest release. After 1.0, the current minor and the one
-before it.
+There are no releases yet, so the supported version is the current `main`. Once
+releases start: before 1.0, only the latest; after 1.0, the current minor and
+the one before it.

@@ -95,7 +95,7 @@ before calling something "Sipral".
 
 ## Getting a commercial licence
 
-Through the contact form on the Sipral site. It is private, and it is the route
+Through the contact form at <https://sipral.org>. It is private, and it is the route
 we prefer: you should not have to announce in public that your product is closed
 source in order to ask a question about licensing it.
 

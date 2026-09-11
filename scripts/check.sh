@@ -33,7 +33,9 @@ tracked() {
     fi
 }
 
-# the script names the things it looks for, so it never scans itself
+# Every pattern below appears in this file as a literal string, so the file is
+# left out of the scans it runs. Anything put here that is not a pattern belongs
+# in a file the scans can see.
 others() { tracked "$@" | grep -v "^$SELF$"; }
 
 step "licence headers"
@@ -132,19 +134,24 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
     printf '        ITU material is never committed. Widen this list only alongside a README naming the licence.\n'
 }
 
+# No code enters this tree from outside it before 1.0, so an attribution
+# trailer or a tool fingerprint left in a file is a mistake rather than a
+# credit. The patterns are literal on purpose: a looser one fails the gate on
+# ordinary prose.
 traces=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -lin 'co-authored-by: claude\|generated with \[claude\|copilot' 2>/dev/null || true)
 [ -z "$traces" ] && pass "no assistant traces" || {
     fail "assistant traces in:"; printf '        %s\n' $traces
 }
 
-# Artwork arrives with a signed C2PA manifest naming the tool that made it, in
-# a PNG chunk or an SVG <metadata> element. Base64 inside a binary, so the text
-# scan above never sees it -- and this repository is public.
+# Artwork can carry a signed provenance manifest naming the tool that produced
+# it, in a PNG chunk or an SVG <metadata> element. Base64 inside a binary, so
+# the text scan above never sees it, and an image ships byte for byte to
+# everyone who clones. assets/BRAND.md puts it plainly: this project publishes
+# what it wrote and nothing about how.
 #
-# Only asset files are scanned. Prose that documents this check -- BRAND.md,
-# the changelog -- names the very strings it looks for, the same way the
-# script itself does; the list grows when a new kind of asset arrives.
+# Only asset files are scanned; the list of extensions grows when a new kind of
+# asset arrives.
 stamped=$(others '*.png' '*.jpg' '*.jpeg' '*.gif' '*.webp' '*.ico' '*.svg' \
     '*.pdf' '*.woff' '*.woff2' '*.ttf' '*.otf' '*.mp4' '*.mov' | while read -r f; do
     LC_ALL=C grep -laq 'c2pa\|caBX\|Anthropic\|Content Credentials' "$f" 2>/dev/null && echo "$f"

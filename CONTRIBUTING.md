@@ -13,8 +13,9 @@ agreement takes that away and cannot be undone without rewriting the code.
 Before 1.0 the cost of getting that wrong is higher than the value of the
 patches, so the answer is a flat no rather than a case-by-case one.
 
-After 1.0, code is accepted under a contributor licence agreement, checked
-automatically on every pull request.
+After 1.0, code is accepted under a contributor licence agreement. That
+agreement is not written yet; it will be published in this file before the first
+patch is taken, and a signature is confirmed before a merge.
 
 ## What is welcome right now
 

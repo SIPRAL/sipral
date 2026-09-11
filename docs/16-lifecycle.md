@@ -11,8 +11,8 @@ is not "implement the RFC": no specification says what a user agent should
 believe after eight hours of being switched off, and every one that answers it
 badly answers it the same way — by believing what it believed before.
 
-The failure being designed against, in the words of the person who kept getting
-the crash report: *the worst recurring crash of a production softphone fires
+The failure being designed against, as `docs/13-client-requirements.md` B3
+records it: *the worst recurring crash of a production softphone fires
 during wake-from-sleep or a network change, on a background timer, while
 subscriptions are being refreshed over a transport that is no longer alive. In
 one shape the machine had lost name resolution while asleep and a cached
@@ -83,9 +83,10 @@ fix for the sentence at the top of this document: after a wake, "are we
 registered?" answers *unverified*, and an application that renders a green dot
 from it is making a decision rather than being misled by one.
 
-The FFI enum does not have a case for it yet and maps it to
-`SipralRegistrationState::Unknown`, which is honest but coarse. Adding the case
-belongs with whoever owns `crates/sipral-ffi`.
+The FFI enum carries it as `SIPRAL_REGISTRATION_STATE_UNVERIFIED`, beside
+`SIPRAL_REGISTRATION_STATE_RESTORED`. What is missing is a C entry point that
+can produce either: `suspending`, `resumed` and `network_changed` have no
+counterpart in `sipral.h` yet, and phase 3 closes that.
 
 ## suspending — a hard deadline, and what fits inside it
 
@@ -312,8 +313,7 @@ this is a limit rather than a bug. An application that wants its lamps back at
 the instant of the wake calls `unsubscribe` and `subscribe` for the handles it
 cares about, which is two calls and no round trips on the way out. Making the
 lifecycle do it would need `crates/sipral-ua/src/subscription.rs` to expose a
-re-arm of its own schedule, which is where it belongs and where it should be
-added.
+re-arm of its own schedule. That is where it belongs if it is ever wanted.
 
 ## C5 — cheap when idle
 
