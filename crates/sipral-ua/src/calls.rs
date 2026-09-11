@@ -649,7 +649,7 @@ impl UserAgent {
                 // not on a challenge: that is not a refusal yet, and the
                 // retry which follows keeps the seat it is holding
                 if status.is_final() && !matches!(status.get(), 401 | 407) {
-                    self.release_refer(id);
+                    self.release_refer(id, status.is_success());
                 }
                 None
             }
@@ -658,7 +658,7 @@ impl UserAgent {
                 if !self.by_request.contains_key(&id) {
                     return Some(event);
                 }
-                self.release_refer(id);
+                self.release_refer(id, false);
                 None
             }
             Event::TransactionTerminated {
@@ -764,7 +764,7 @@ impl UserAgent {
                 }
                 // RFC 3891 §3: a Replaces names one of this end's own calls,
                 // and every way it can fail to is a different status code
-                let replaced = match self.replaced_by(&request.as_raw()) {
+                let replaced = match self.replaced_by(request) {
                     Ok(replaced) => replaced,
                     Err(status) => {
                         self.refuse_replaces(transaction, status, now);
@@ -1145,13 +1145,22 @@ impl UserAgent {
         let credentials = account
             .and_then(|account| self.accounts.get(&account))
             .and_then(|config| config.credentials.clone());
+        // Both ways out of here leave the request unsent for good, so a REFER
+        // that took the call's seat has to give it back on the way past. RFC
+        // 3515 §2.4.2 obliges the far end to open a subscription on a 2xx and
+        // on nothing else, so a REFER refused for want of a password opened
+        // none, and a record of one left standing would accept notifications
+        // nobody promised. `release_refer` reads the seat itself, so it is a
+        // no-op for the BYE, CANCEL, PRACK and NOTIFY that also arrive here.
         let Some(credentials) = credentials else {
+            self.release_refer(transaction, false);
             return;
         };
         let Ok(retried) = self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
         else {
+            self.release_refer(transaction, false);
             return;
         };
         self.by_request.remove(&transaction);
@@ -1162,19 +1171,45 @@ impl UserAgent {
         }
         // the REFER is the one of these the call holds a seat for, and the
         // seat has to follow it or a transfer can never be asked for again
-        if let Some(held) = self.calls.get_mut(&call)
-            && held.referring == Some(transaction)
+        if !self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.referring == Some(transaction))
         {
+            return;
+        }
+        // §22.2 makes the retry a new request with a new number, and the
+        // subscription that REFER opened is named by whichever number
+        // actually went out: RFC 3515 §2.4.6's `id` is the `CSeq` of the
+        // REFER, so a record still holding the refused one would refuse the
+        // notifications that follow the accepted one.
+        let id = self
+            .calls
+            .get(&call)
+            .and_then(|held| held.dialog)
+            .and_then(|dialog| self.endpoint.dialog(dialog))
+            .and_then(|snapshot| snapshot.local_seq);
+        if let Some(held) = self.calls.get_mut(&call) {
             held.referring = Some(retried);
+            if let Some(subscription) = held.refer_subscription.as_mut() {
+                subscription.id = id;
+            }
         }
     }
 
-    /// A REFER that was refused leaves the call free to ask again.
+    /// A REFER has been answered, so the call is free to ask again.
     ///
     /// Without this the seat taken when the REFER went out is never given
     /// back, and every later transfer on that call is refused by this end
     /// before anything is sent.
-    fn release_refer(&mut self, id: AnyTransactionId) {
+    ///
+    /// `accepted` says whether the answer was a 2xx, which is the one that
+    /// leaves something behind: RFC 3515 §2.4.2 has a 2xx oblige the far end
+    /// to "create a subscription and send notifications of the status of the
+    /// refer", and nothing else does. A REFER that was refused opened no
+    /// subscription, so a NOTIFY reporting on one afterwards is reporting on
+    /// nothing.
+    fn release_refer(&mut self, id: AnyTransactionId, accepted: bool) {
         let Some(call) = self.by_request.get(&id).copied() else {
             return;
         };
@@ -1182,6 +1217,9 @@ impl UserAgent {
             && held.referring == Some(id)
         {
             held.referring = None;
+            if !accepted {
+                held.refer_subscription = None;
+            }
         }
     }
 

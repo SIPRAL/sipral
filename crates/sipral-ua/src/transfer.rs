@@ -47,18 +47,37 @@
 //! a `Replaces` is honoured only when the INVITE carrying it arrives from the
 //! same place the named call's own signalling does. Anything else is 403 and
 //! the named call is left exactly as it was.
+//!
+//! **And that is the default, not the whole rule.** It refuses a legitimate
+//! attended transfer whose transferee reaches this end directly rather than
+//! through the line's proxy, which is a deployment rather than a corner case,
+//! so the application has the last word:
+//! [`Screen::on_replaces`](crate::Screen::on_replaces) is handed the INVITE
+//! and which call it names, and can widen the rule or tighten it. Its default
+//! body is the paragraph above, so nothing that does not override it changes.
+//!
+//! **A notification is not a transfer either.** §2.4.4 makes REFER the only
+//! thing that can open a subscription to this package, so a NOTIFY of it is
+//! acted on only where a REFER of this end's opened one, and anything else is
+//! left for the subscription machine to answer 481. And §2.2 of RFC 3892 has
+//! the INVITE this end places for a REFER carry that REFER's `Referred-By`
+//! onward — because the RFC requires it, not because an incoming one proves
+//! anything here.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
-use sipral_core::msg::{HeaderName, Method, OwnedMessage, Params, RawMessage, StatusCode, Uri};
+use sipral_core::msg::{
+    HeaderName, Method, OwnedMessage, Params, RawMessage, StatusCode, Uri, unfold,
+};
 use sipral_core::transaction::{AnyTransactionId, InviteServer, TransactionId};
 
 use crate::agent::UserAgent;
 use crate::call::{CallHandle, CallState, Direction, OutgoingCall};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::screening::{Replacing, Screening};
 
 /// The event package a REFER subscribes to (§3.1).
 const REFER: &[u8] = b"refer";
@@ -71,7 +90,7 @@ const RUNNING: &[u8] = b"active";
 const TRYING: &[u8] = b"SIP/2.0 100 Trying\r\n";
 /// What an INVITE gets when its `Replaces` names a live call it has no
 /// standing to replace (RFC 3891 §3, RFC 3261 §21.4.4).
-const FORBIDDEN: StatusCode = match StatusCode::new(403) {
+pub(crate) const FORBIDDEN: StatusCode = match StatusCode::new(403) {
     Ok(status) => status,
     // 403 is in range, so this arm never runs; it exists because `new` is
     // fallible and nothing in this crate panics to say otherwise
@@ -89,6 +108,40 @@ pub(crate) struct Referred {
     pub(crate) finished: bool,
 }
 
+/// The implicit subscription a REFER of this end's opened (RFC 3515 §2:
+/// "A REFER request implicitly establishes a subscription to the refer
+/// event").
+///
+/// It exists from the moment the REFER is written — §2.4.4 warns that "the
+/// agent that issued the REFER MUST be prepared to receive a NOTIFY before
+/// the REFER transaction completes", so waiting for the 202 would leave a
+/// legitimate first notification matching nothing — until the last NOTIFY
+/// says the subscription is over, or until the REFER is refused, which is the
+/// one answer that creates no subscription at all (§2.4.2).
+///
+/// Without it there is nothing to check a NOTIFY against. The seat in
+/// [`Call::referring`](crate::call::Call) cannot be that thing: it is given
+/// back when the REFER is answered, which is before any notification can
+/// arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReferSubscription {
+    /// The `CSeq` of the REFER that created it.
+    ///
+    /// §2.4.6 makes this the `id` of the event: from the second REFER in a
+    /// dialog on, every NOTIFY "MUST include an id parameter in the Event
+    /// header field containing the sequence number of the REFER", and the
+    /// first one MAY carry it. So a notification that names an `id` names one
+    /// REFER, and this is what says whether it is ours. `None` when the
+    /// dialog could not say what number went out, in which case an `id` is
+    /// not used to refuse anything.
+    ///
+    /// It is also the number 8.3.5 has to put on the wire — `Event:
+    /// refer;id=<cseq>` on the REFER and on the NOTIFYs this end sends — and
+    /// that work belongs here rather than in a second record of the same
+    /// thing.
+    pub(crate) id: Option<u32>,
+}
+
 /// What a `Refer-To` asks for.
 #[derive(Clone, Debug)]
 pub(crate) struct ReferTo {
@@ -96,6 +149,9 @@ pub(crate) struct ReferTo {
     pub(crate) target: Uri,
     /// The `Replaces` it carried, as it should go on the new INVITE.
     pub(crate) replaces: Option<Box<[u8]>>,
+    /// The `Referred-By` of the REFER that asked for this, to be copied onto
+    /// the INVITE it triggers (RFC 3892 §2.2).
+    pub(crate) referred_by: Option<Box<[u8]>>,
 }
 
 // -- what the application asks for -------------------------------------------
@@ -265,6 +321,15 @@ impl UserAgent {
         if let Some(ref replaces) = wanted.replaces {
             placed = placed.header(HeaderName::Replaces, replaces);
         }
+        // RFC 3892 §2.2: "A UA accepting a REFER request (a referee) to a SIP
+        // URI ... MUST copy any Referred-By header field" onto the request it
+        // triggers. It is not authorisation here and this stack does not read
+        // an incoming one as proof of anything — §3's signed token is not
+        // implemented — but the far end may have a policy that reads it, and
+        // dropping it silently is deciding on its behalf.
+        if let Some(ref referred_by) = wanted.referred_by {
+            placed = placed.header(HeaderName::ReferredBy, referred_by);
+        }
         let new = self.call(account, &placed, now)?;
         if let Some(held) = self.calls.get_mut(&call)
             && let Some(referred) = held.referred.as_mut()
@@ -333,8 +398,17 @@ impl UserAgent {
             .header(HeaderName::ReferTo, refer_to)
             .header(HeaderName::ReferredBy, &contact);
         let transaction = self.endpoint.request_in_dialog(dialog, &request, now)?;
+        // §2: the REFER is what creates the subscription, so it is recorded
+        // now rather than when the 202 comes back — §2.4.4 allows a NOTIFY to
+        // beat that answer, and one that arrives before there is a record of
+        // what asked for it is a notification against nothing
+        let id = self
+            .endpoint
+            .dialog(dialog)
+            .and_then(|snapshot| snapshot.local_seq);
         if let Some(held) = self.calls.get_mut(&call) {
             held.referring = Some(AnyTransactionId::NonInviteClient(transaction));
+            held.refer_subscription = Some(ReferSubscription { id });
         }
         self.remember_request(call, AnyTransactionId::NonInviteClient(transaction));
         self.drain(now);
@@ -431,6 +505,17 @@ impl UserAgent {
                 let Some(call) = self.by_dialog.get(&dialog).copied() else {
                     return Some(event);
                 };
+                // §2.4.4: "REFER is the only mechanism that can create a
+                // subscription to event refer". So one exists here only if a
+                // REFER of this end's made it, and a notification that
+                // matches none of those is not a report on anything — it is
+                // the far end of an ordinary call driving a transfer nobody
+                // asked for, and the last NOTIFY of one hangs the call up.
+                // Left for the subscription machine below, which gives RFC
+                // 6665 §4.1.3's answer to a notification against nothing.
+                if !self.reports_on_our_refer(call, &request.as_raw()) {
+                    return Some(event);
+                }
                 let request = request.clone();
                 self.on_notify(call, transaction, &request, now);
                 None
@@ -483,6 +568,28 @@ impl UserAgent {
         });
     }
 
+    /// Whether this NOTIFY reports on a subscription a REFER of this end's
+    /// opened (§2, §2.4.4).
+    fn reports_on_our_refer(&self, call: CallHandle, request: &RawMessage<'_>) -> bool {
+        let Some(subscription) = self
+            .calls
+            .get(&call)
+            .and_then(|held| held.refer_subscription)
+        else {
+            return false;
+        };
+        // §2.4.6: a NOTIFY that carries an `id` is reporting on the REFER
+        // whose `CSeq` that is, so one naming another REFER is not this
+        // subscription's news. One with no `id` at all is: §2.4.6 makes the
+        // parameter optional for the first REFER in a dialog, and there is
+        // never more than one open here. An `id` is not read as a refusal
+        // when this end does not know its own number to compare.
+        let Some(named) = event_id(request) else {
+            return true;
+        };
+        subscription.id.is_none_or(|ours| ours == named)
+    }
+
     /// One of the NOTIFYs a REFER of ours asked for (§2.4.4).
     fn on_notify(
         &mut self,
@@ -513,6 +620,11 @@ impl UserAgent {
             .push_back(UaEvent::TransferDone { call, status });
         if let Some(held) = self.calls.get_mut(&call) {
             held.referring = None;
+            // §2.4.7 makes the terminated NOTIFY the last word, and RFC 6665
+            // §4.1.3 has everything after one answered rather than acted on
+            if over {
+                held.refer_subscription = None;
+            }
         }
         // the transfer worked, so this end is not in the call any more. A
         // failed one leaves it exactly where it was, which is the point of
@@ -531,15 +643,16 @@ impl UserAgent {
     ///
     /// `Ok(None)` when the request carries no `Replaces` at all.
     pub(crate) fn replaced_by(
-        &self,
-        request: &RawMessage<'_>,
+        &mut self,
+        invite: &OwnedMessage,
     ) -> Result<Option<CallHandle>, StatusCode> {
+        let request = &invite.as_raw();
         // §6.1: "Only a single Replaces header field value may be present in
         // a SIP request", and §3 answers more than one with "the UAS MUST
         // reject the request with a 400 Bad Request response". Which of two
         // values the check below reads is not the sender's to choose, and an
         // upstream proxy may well have read the other one.
-        match request.header_count(HeaderName::Replaces) {
+        match request.field_values(HeaderName::Replaces).count() {
             0 => return Ok(None),
             1 => (),
             _ => return Err(StatusCode::new(400).unwrap_or(StatusCode::SERVER_ERROR)),
@@ -593,11 +706,22 @@ impl UserAgent {
         // would only be comparing strings the sender wrote. What is left is
         // the one thing the sender did not write: where the bytes came from.
         //
+        // That is the default and not the whole rule, because it is wrong in
+        // a deployment that exists: an attended transfer whose transferee
+        // reaches this end directly rather than through the line's proxy
+        // arrives from an address no call here was placed to. `on_replaces`
+        // is where an application that knows its own deployment says so, and
+        // where one that knows the flow is not enough says that instead. With
+        // no policy set, and with one that does not override it, this is
+        // byte-for-byte the comparison above.
+        //
         // It runs above the state arms on purpose. What state one of this
         // end's calls is in is not something a stranger who guessed three
         // identifiers gets to read off the status code.
-        if self.guard.source() != peer {
-            return Err(FORBIDDEN);
+        let named = Replacing::new(handle, self.guard.source() == peer);
+        match self.guard.screen_replaces(invite, named) {
+            Screening::Take => (),
+            Screening::Refuse(status) => return Err(status),
         }
         match state {
             CallState::Terminating | CallState::Terminated => {
@@ -653,7 +777,7 @@ impl UserAgent {
 
 /// The `Refer-To` of a REFER, when it has exactly one that can be read.
 fn refer_to(request: &RawMessage<'_>) -> Option<ReferTo> {
-    if request.header_count(HeaderName::ReferTo) != 1 {
+    if request.field_values(HeaderName::ReferTo).count() != 1 {
         return None;
     }
     let value = request.header(HeaderName::ReferTo)?;
@@ -662,7 +786,30 @@ fn refer_to(request: &RawMessage<'_>) -> Option<ReferTo> {
     Some(ReferTo {
         target: Uri::parse(uri).ok()?,
         replaces,
+        referred_by: referred_by(request),
     })
+}
+
+/// The `Referred-By` to carry on to the INVITE this REFER asks for (RFC 3892
+/// §2.2).
+///
+/// Exactly one or none: §2.1 is "A REFER request MUST NOT contain more than
+/// one Referred-By header field value", and which of two to pass on is not
+/// something to guess at — a second value is how a sender would try to make
+/// the far end read one field while this end acted on the other. The REFER
+/// itself is not refused over it, because the field is not what the transfer
+/// turns on here.
+fn referred_by(request: &RawMessage<'_>) -> Option<Box<[u8]>> {
+    let mut values = request.field_values(HeaderName::ReferredBy);
+    let only = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    // Unfolded here, because the parser keeps a fold's interior CRLF on
+    // purpose and unfolding belongs to whoever consumes the value. This one
+    // is copied onto a request we then send, and a bare CRLF in the middle of
+    // a header value is a second header field to whatever reads it next.
+    Some(Box::from(unfold(only).as_ref()))
 }
 
 /// Whether a NOTIFY reports on the named event package (RFC 6665 §8.2.1).
@@ -676,6 +823,14 @@ fn package_is(request: &RawMessage<'_>, package: &[u8]) -> bool {
     request
         .header(HeaderName::Event)
         .is_some_and(|value| Params::split(value).0.eq_ignore_ascii_case(package))
+}
+
+/// The `id` of the event a NOTIFY reports on (RFC 6665 §8.2.1, RFC 3515
+/// §2.4.6), when it names one this end can read as a number.
+fn event_id(request: &RawMessage<'_>) -> Option<u32> {
+    let value = request.header(HeaderName::Event)?;
+    let named = Params::split(value).1.get("id")?;
+    core::str::from_utf8(&named).ok()?.parse().ok()
 }
 
 /// `<...>`, when the value has them.

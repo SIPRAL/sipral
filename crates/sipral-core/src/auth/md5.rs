@@ -12,40 +12,88 @@
 //! The table is `floor(2^32 * abs(sin(i + 1)))`, which is the definition in
 //! §3.4 rather than a magic list; the known-answer tests are what prove it was
 //! transcribed correctly.
+//!
+//! What goes through here is a password — [`super::digest`] hashes an A1 that
+//! holds one — so the buffers the message is copied into are overwritten
+//! before the digest returns, the same best effort [`super::secret`] makes for
+//! the A1 itself.
+
+use super::secret::wipe;
+
+/// Where one digest writes the message it is reading.
+///
+/// A named buffer rather than two locals, because what passes through here is
+/// the caller's secret: the A1 of RFC 3261 §22.4 is `user:realm:password`,
+/// shorter than one block, so the whole of it ends up in `tail` — and the
+/// words below are that same block read back as numbers. A type is what gives
+/// the overwrite one place to live and a test somewhere to look at it from.
+pub(super) struct Scratch {
+    /// The last part-block, its padding, and the length field.
+    tail: [u8; 128],
+    /// The sixteen words of the block being compressed (§3.4's `X`).
+    words: [u32; 16],
+}
+
+impl Scratch {
+    pub(super) const fn new() -> Self {
+        Self {
+            tail: [0_u8; 128],
+            words: [0_u32; 16],
+        }
+    }
+
+    /// Overwrite everything the message was read into.
+    fn wipe(&mut self) {
+        wipe(&mut self.tail);
+        wipe(&mut self.words);
+    }
+
+    /// Whether nothing of the message is left in it.
+    #[cfg(test)]
+    fn is_clear(&self) -> bool {
+        self.tail.iter().all(|byte| *byte == 0) && self.words.iter().all(|word| *word == 0)
+    }
+}
 
 /// The digest of `data`.
 pub(super) fn md5(data: &[u8]) -> [u8; 16] {
+    md5_in(data, &mut Scratch::new())
+}
+
+/// The same, in a buffer the caller owns and can read back.
+fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
     let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
-    let mut block = [0_u8; 64];
     let mut chunks = data.chunks_exact(64);
     for chunk in &mut chunks {
-        block.copy_from_slice(chunk);
-        compress(&mut state, &block);
+        compress(&mut state, chunk, &mut scratch.words);
     }
 
     // the tail: 0x80, zeros, and the length in bits as 64 little-endian bits
     let rest = chunks.remainder();
-    let mut tail = [0_u8; 128];
     let mut len = rest.len();
-    tail.get_mut(..len)
+    scratch
+        .tail
+        .get_mut(..len)
         .unwrap_or_default()
         .copy_from_slice(rest);
-    if let Some(byte) = tail.get_mut(len) {
+    if let Some(byte) = scratch.tail.get_mut(len) {
         *byte = 0x80;
     }
     len += 1;
     let padded = if len <= 56 { 64 } else { 128 };
     let bits = (data.len() as u64).wrapping_mul(8);
-    if let Some(field) = tail.get_mut(padded - 8..padded) {
+    if let Some(field) = scratch.tail.get_mut(padded - 8..padded) {
         field.copy_from_slice(&bits.to_le_bytes());
     }
     for start in (0..padded).step_by(64) {
-        if let Some(chunk) = tail.get(start..start + 64) {
-            block.copy_from_slice(chunk);
-            compress(&mut state, &block);
+        if let Some(chunk) = scratch.tail.get(start..start + 64) {
+            compress(&mut state, chunk, &mut scratch.words);
         }
     }
+    // the message has been read; what is left of it here is a copy nobody
+    // needs and the digest below does not come from
+    scratch.wipe();
 
     let mut out = [0_u8; 16];
     for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
@@ -58,8 +106,7 @@ pub(super) fn md5(data: &[u8]) -> [u8; 16] {
     clippy::many_single_char_names,
     reason = "a, b, c, d and m are RFC 1321's own names, and this has to be readable against it"
 )]
-fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
-    let mut m = [0_u32; 16];
+fn compress(state: &mut [u32; 4], block: &[u8], m: &mut [u32; 16]) {
     for (word, chunk) in m.iter_mut().zip(block.chunks_exact(4)) {
         *word = u32::from_le_bytes([
             *chunk.first().unwrap_or(&0),
@@ -168,11 +215,36 @@ const K: [u32; 64] = [
 
 #[cfg(test)]
 mod tests {
-    use super::md5;
+    use super::{Scratch, md5, md5_in};
     use crate::auth::digest::hex as to_hex;
 
     fn hex(data: &[u8]) -> String {
         to_hex(&md5(data))
+    }
+
+    #[test]
+    fn the_message_is_not_left_behind_in_the_buffers_it_was_read_into() {
+        // the A1 of RFC 3261 §22.4 is `user:realm:password`, and this is the
+        // level below the buffer that wipes itself: the last block of it is
+        // copied in here in the clear. Both lengths matter -- one that fits
+        // in a single block, and one long enough to go round the loop first.
+        // The digests are asserted against known answers rather than against
+        // this module, so a wipe that broke the hash could not pass
+        for (message, expected) in [
+            (
+                &b"alice:example.com:hunter2"[..],
+                "a5ed97f9d9f2e22345ee316c4f55f475",
+            ),
+            (&[b'p'; 200][..], "6a13d0e6302f0dea7b35b7a71d4bedaa"),
+        ] {
+            let mut scratch = Scratch::new();
+            let digest = md5_in(message, &mut scratch);
+            assert_eq!(to_hex(&digest), expected, "still the digest it was before");
+            assert!(
+                scratch.is_clear(),
+                "the message is still in the digest's own buffers"
+            );
+        }
     }
 
     #[test]

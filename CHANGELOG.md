@@ -12,6 +12,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **`Screen::on_replaces`: the application has the last word on a takeover.**
+  A matched `Replaces` is honoured only when the INVITE carrying it arrived
+  from the same place the named call's own signalling does, which is right as
+  a default and wrong as an absolute — a legitimate attended transfer whose
+  transferee reaches this end directly rather than through the line's proxy is
+  refused by it, and that is a deployment rather than a corner case. The rule
+  is now a defaulted hook on the screening policy: `on_replaces` is handed the
+  INVITE and a `Replacing`, which says which of this end's calls would be hung
+  up and whether it arrived on that call's own flow, and its default body is
+  `Replacing::strict` — the rule as it stands and nothing else. So an agent
+  with no policy, and a policy that implements only `on_invite`, including
+  every closure, behaves exactly as before. An override can widen the rule for
+  the case it recognises and hand the rest back to `Replacing::strict`, and it
+  can tighten it: refusing one that *did* arrive on the call's own flow is a
+  decision it returns. What it cannot do is see a `Replaces` that matches
+  nothing, which is 481 before the hook is reached, or overrule §3 on the
+  state of the matched call afterwards. `Incoming` gains `referred_by`, the
+  field RFC 3892 §2.2 has a transferee copy from the REFER that asked for the
+  transfer, with its rustdoc saying what it is for: it and `From` are plain
+  fields on the INVITE being judged, so they are context for recognising a
+  transfer that was expected and never authority. The C ABI gains nothing
+  here: the screening policy does not cross it yet.
+
 - **Opus is a compile-time feature, and it is on.** `sipral-media` takes
   libopus as an optional dependency behind `opus`, `sipral` and `sipral-ffi`
   carry the feature up, and the default is on so that nothing changes for
@@ -123,8 +146,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
-- **The roadmap carries what the audit of 10 September found, and what was
-  decided about it.** Phase 1 gains two exit criteria: the lab's flows run
+- **The roadmap carries what an outside reading of the tree found, and what
+  was decided about it.** Phase 1 gains two exit criteria: the lab's flows run
   through the join an application links and then through `sipral.h`, and no
   request leaves as an oversized datagram inside a dialog either. Phase 2
   gains re-negotiation that keeps stream identity and never reuses an SRTP
@@ -145,6 +168,56 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Video waits for 1.0 and is phase 6 after it, with its contents named.
 
 ### Fixed
+
+- **A NOTIFY of the `refer` package drove a transfer nobody here asked for.**
+  A notification of that package arriving in any dialog this layer maps to a
+  call was acted on without anything checking that this end had ever sent a
+  REFER: the far end of an ordinary established call could report progress on
+  a transfer that did not exist, and the last one of those — a 2xx marked
+  `terminated` — hung the call up, because that is what a transfer that
+  succeeded means. Nothing could have checked it, either: the seat the call
+  holds while a REFER is in flight is given back when the REFER is answered,
+  which is before any notification can arrive. A call now records the implicit
+  subscription its REFER opened (RFC 3515 §2, §2.4.4) when the REFER is
+  written rather than when the 202 comes back — §2.4.4 warns the agent to be
+  ready for a NOTIFY before the transaction completes — and drops it when the
+  REFER is refused, since §2.4.2 makes a 2xx the answer that obliges the far
+  end to create a subscription at all, or when the last NOTIFY says
+  `terminated` (§2.4.7). A notification matching none of that reaches the
+  subscription machine, which answers it 481 as RFC 6665 §4.1.3 requires, and
+  nothing acts on it. The record carries the `CSeq` of its REFER, which is the
+  `id` §2.4.6 puts on the `Event` of a NOTIFY, so one naming a REFER this end
+  did not send is not this subscription's news either; putting that `id` on
+  the wire is still to come and belongs to the same record rather than to a
+  second one.
+
+- **The INVITE an accepted transfer places carried no `Referred-By`.** RFC
+  3892 §2.2 is a MUST — "A UA accepting a REFER request (a referee) to a SIP
+  URI ... MUST copy any Referred-By header field" — and it was not
+  implemented. Demoting the field from authorisation, which the previous
+  release did on purpose, does not remove the obligation to pass it on: the
+  far end may have a policy that reads it, and dropping it silently decides on
+  that end's behalf. `accept_transfer` now copies it whole, parameters
+  included. It still means nothing on the way *in*: §3's signed token is not
+  implemented here, so an incoming one is context and never authority. A REFER
+  carrying two of them, which §2.1 forbids, has neither copied — which of two
+  to pass on is not ours to guess — and the transfer is not refused over it.
+
+- **The hand-written digests left the password in buffers nobody wiped.** A1
+  lives in a `Secret` that overwrites itself, and then went one level deeper:
+  `md5`, `sha256` and `sha512_256` copy the last part-block of their input
+  into a stack buffer and read that block back as words, and both were left as
+  they were on return — for an A1, which is shorter than one block, that is
+  the whole password. Each digest now works in a named buffer it overwrites
+  before it returns, with the same `fill(0)` plus `compiler_fence` the
+  `Secret` uses and the same honest limit: only a volatile write survives an
+  optimiser for certain, and that needs `unsafe`, which the crate denies. MD5
+  no longer copies whole blocks into a buffer of its own on the way past and
+  SHA-512 no longer rebuilds each word through one, so there are two fewer
+  copies to wipe rather than two more wipes. The known-answer vectors are
+  unchanged and are the guard. HA1 is still a `String` that is not wiped;
+  that is a scope decision, and `docs/12-core-api.md` now says so where the
+  rest of the rule is written down.
 
 - **The password spent a moment in a buffer that was never wiped.** `A1` -
   `username:realm:password` — was built in a plain `Vec` inside
@@ -757,7 +830,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and would silence the desk phone they are also registered on.
 
 - **The `sipral` crate is the facade it was always described as.** It was eleven
-  lines — a name held on crates.io — while `docs/01-architecture.md` said it was
+  lines — a name reserved for crates.io, not yet uploaded — while
+  `docs/01-architecture.md` said it was
   where signalling and media meet. Nothing joined them, so `MediaPlan` and
   `MediaCapabilities` were a vocabulary nobody spoke, and an application that
   wanted a call with audio in it wrote the join itself.
@@ -1477,7 +1551,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   answers INVITE, since the INVITE server transaction absorbs the ACK to a
   non-2xx and an ACK to a 2xx finds nothing under that key and belongs to the
   dialog; a response answers with its `CSeq` method, having none of its own.
-- `crates/sipral`: the facade crate, for now a name reservation on crates.io
+- `crates/sipral`: the facade crate, for now a name reserved for crates.io
   that exports a version constant. The only crate with `publish = true`.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
   published to NuGet as `Sipral` 0.0.1.

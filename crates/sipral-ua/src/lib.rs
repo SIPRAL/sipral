@@ -80,7 +80,7 @@ pub use lifecycle::{
 pub use registration::{PushEcho, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};
-pub use screening::{Incoming, Rate, RateError, Refusals, Screen, Screening};
+pub use screening::{Incoming, Rate, RateError, Refusals, Replacing, Screen, Screening};
 pub use session::Hold;
 pub use subscription::{
     DEFAULT_EXPIRES, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState,

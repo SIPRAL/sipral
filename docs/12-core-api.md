@@ -1088,6 +1088,17 @@ actually happens. Overwriting on drop is best effort and says so — only a
 volatile write is guaranteed to survive an optimiser, and that needs `unsafe`,
 which this crate denies.
 
+The same overwrite runs one level down. `respond` builds A1 —
+`user:realm:password` — in a `Secret`, and then hands it to a digest written in
+this crate, which copies the last part-block of it into a buffer of its own and
+reads that block back as words. MD5, SHA-256 and SHA-512/256 each overwrite
+both before returning, so the password does not outlive the digest of it in a
+stack frame nobody owns any more. What is *not* wiped is HA1, which is
+password-equivalent for answering a challenge and is a `String`: wiping it
+needs `hash` to hand back raw bytes with the hexadecimal done at the edge,
+which is every caller of `hash`. That is a scope decision, written here so it
+is a decision rather than an oversight.
+
 The cache draws no client nonce and reads no clock; both arrive from the
 caller. It answers the topmost challenge it understands per realm (RFC 8760
 §2.4), keeps the 401 and the 407 spaces apart, counts `nc` per challenge, and

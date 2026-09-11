@@ -13,9 +13,54 @@
 //! derives it by running SHA-512 over the string "SHA-512/256" with each word
 //! of the standard state exclusive-ORed with `a5a5a5a5a5a5a5a5` — and the
 //! known-answer tests are what prove it was transcribed correctly.
+//!
+//! What goes through here is a password — [`super::digest`] hashes an A1 that
+//! holds one — so the buffers the message is copied into are overwritten
+//! before the digest returns, the same best effort [`super::secret`] makes for
+//! the A1 itself.
+
+use super::secret::wipe;
+
+/// Where one SHA-256 writes the message it is reading.
+///
+/// Named for the reason [`super::md5::Scratch`] is: the A1 of RFC 3261 §22.4
+/// is `user:realm:password` and ends up in `tail` whole, and the schedule
+/// below starts as that same block read back as sixteen words.
+pub(super) struct Scratch256 {
+    /// The last part-block, its padding, and the length field.
+    tail: [u8; 128],
+    /// FIPS 180-4 §6.2.2's `W`, whose first sixteen words are the message.
+    words: [u32; 64],
+}
+
+impl Scratch256 {
+    pub(super) const fn new() -> Self {
+        Self {
+            tail: [0_u8; 128],
+            words: [0_u32; 64],
+        }
+    }
+
+    /// Overwrite everything the message was read into.
+    fn wipe(&mut self) {
+        wipe(&mut self.tail);
+        wipe(&mut self.words);
+    }
+
+    /// Whether nothing of the message is left in it.
+    #[cfg(test)]
+    fn is_clear(&self) -> bool {
+        self.tail.iter().all(|byte| *byte == 0) && self.words.iter().all(|word| *word == 0)
+    }
+}
 
 /// The SHA-256 digest of `data`.
 pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
+    sha256_in(data, &mut Scratch256::new())
+}
+
+/// The same, in a buffer the caller owns and can read back.
+fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
     let mut state: [u32; 8] = [
         0x6a09_e667,
         0xbb67_ae85,
@@ -29,27 +74,31 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
 
     let mut chunks = data.chunks_exact(64);
     for chunk in &mut chunks {
-        compress256(&mut state, chunk);
+        compress256(&mut state, chunk, &mut scratch.words);
     }
 
     let rest = chunks.remainder();
-    let mut tail = [0_u8; 128];
-    tail.get_mut(..rest.len())
+    scratch
+        .tail
+        .get_mut(..rest.len())
         .unwrap_or_default()
         .copy_from_slice(rest);
-    if let Some(byte) = tail.get_mut(rest.len()) {
+    if let Some(byte) = scratch.tail.get_mut(rest.len()) {
         *byte = 0x80;
     }
     let padded = if rest.len() < 56 { 64 } else { 128 };
     let bits = (data.len() as u64).wrapping_mul(8);
-    if let Some(field) = tail.get_mut(padded - 8..padded) {
+    if let Some(field) = scratch.tail.get_mut(padded - 8..padded) {
         field.copy_from_slice(&bits.to_be_bytes());
     }
     for start in (0..padded).step_by(64) {
-        if let Some(chunk) = tail.get(start..start + 64) {
-            compress256(&mut state, chunk);
+        if let Some(chunk) = scratch.tail.get(start..start + 64) {
+            compress256(&mut state, chunk, &mut scratch.words);
         }
     }
+    // the message has been read; what is left of it here is a copy nobody
+    // needs and the digest below does not come from
+    scratch.wipe();
 
     let mut out = [0_u8; 32];
     for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
@@ -62,8 +111,7 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     clippy::many_single_char_names,
     reason = "a through h and w are FIPS 180-4's own names, and this has to be readable against it"
 )]
-fn compress256(state: &mut [u32; 8], block: &[u8]) {
-    let mut w = [0_u32; 64];
+fn compress256(state: &mut [u32; 8], block: &[u8], w: &mut [u32; 64]) {
     for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
         *word = u32::from_be_bytes([
             *chunk.first().unwrap_or(&0),
@@ -116,8 +164,42 @@ fn compress256(state: &mut [u32; 8], block: &[u8]) {
     }
 }
 
+/// Where one SHA-512/256 writes the message it is reading.
+pub(super) struct Scratch512 {
+    /// The last part-block, its padding, and the length field.
+    tail: [u8; 256],
+    /// FIPS 180-4 §6.4.2's `W`, whose first sixteen words are the message.
+    words: [u64; 80],
+}
+
+impl Scratch512 {
+    pub(super) const fn new() -> Self {
+        Self {
+            tail: [0_u8; 256],
+            words: [0_u64; 80],
+        }
+    }
+
+    /// Overwrite everything the message was read into.
+    fn wipe(&mut self) {
+        wipe(&mut self.tail);
+        wipe(&mut self.words);
+    }
+
+    /// Whether nothing of the message is left in it.
+    #[cfg(test)]
+    fn is_clear(&self) -> bool {
+        self.tail.iter().all(|byte| *byte == 0) && self.words.iter().all(|word| *word == 0)
+    }
+}
+
 /// The SHA-512/256 digest of `data`.
 pub(super) fn sha512_256(data: &[u8]) -> [u8; 32] {
+    sha512_256_in(data, &mut Scratch512::new())
+}
+
+/// The same, in a buffer the caller owns and can read back.
+fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
     let mut state: [u64; 8] = [
         0x2231_2194_fc2b_f72c,
         0x9f55_5fa3_c84c_64c2,
@@ -131,27 +213,31 @@ pub(super) fn sha512_256(data: &[u8]) -> [u8; 32] {
 
     let mut chunks = data.chunks_exact(128);
     for chunk in &mut chunks {
-        compress512(&mut state, chunk);
+        compress512(&mut state, chunk, &mut scratch.words);
     }
 
     let rest = chunks.remainder();
-    let mut tail = [0_u8; 256];
-    tail.get_mut(..rest.len())
+    scratch
+        .tail
+        .get_mut(..rest.len())
         .unwrap_or_default()
         .copy_from_slice(rest);
-    if let Some(byte) = tail.get_mut(rest.len()) {
+    if let Some(byte) = scratch.tail.get_mut(rest.len()) {
         *byte = 0x80;
     }
     let padded = if rest.len() < 112 { 128 } else { 256 };
     let bits = (data.len() as u128).wrapping_mul(8);
-    if let Some(field) = tail.get_mut(padded - 16..padded) {
+    if let Some(field) = scratch.tail.get_mut(padded - 16..padded) {
         field.copy_from_slice(&bits.to_be_bytes());
     }
     for start in (0..padded).step_by(128) {
-        if let Some(chunk) = tail.get(start..start + 128) {
-            compress512(&mut state, chunk);
+        if let Some(chunk) = scratch.tail.get(start..start + 128) {
+            compress512(&mut state, chunk, &mut scratch.words);
         }
     }
+    // the message has been read; what is left of it here is a copy nobody
+    // needs and the digest below does not come from
+    scratch.wipe();
 
     // "the result cut to 32 bytes": the leftmost 256 bits
     let mut out = [0_u8; 32];
@@ -165,12 +251,20 @@ pub(super) fn sha512_256(data: &[u8]) -> [u8; 32] {
     clippy::many_single_char_names,
     reason = "a through h and w are FIPS 180-4's own names, and this has to be readable against it"
 )]
-fn compress512(state: &mut [u64; 8], block: &[u8]) {
-    let mut w = [0_u64; 80];
+fn compress512(state: &mut [u64; 8], block: &[u8], w: &mut [u64; 80]) {
     for (word, chunk) in w.iter_mut().zip(block.chunks_exact(8)) {
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(chunk);
-        *word = u64::from_be_bytes(bytes);
+        // read out a byte at a time, as `compress256` does: a buffer copied
+        // into and left behind is one more place the message lives
+        *word = u64::from_be_bytes([
+            *chunk.first().unwrap_or(&0),
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+            *chunk.get(3).unwrap_or(&0),
+            *chunk.get(4).unwrap_or(&0),
+            *chunk.get(5).unwrap_or(&0),
+            *chunk.get(6).unwrap_or(&0),
+            *chunk.get(7).unwrap_or(&0),
+        ]);
     }
     for i in 16..80 {
         let a = *w.get(i - 15).unwrap_or(&0);
@@ -368,11 +462,47 @@ const K512: [u64; 80] = [
 
 #[cfg(test)]
 mod tests {
-    use super::{sha256, sha512_256};
+    use super::{Scratch256, Scratch512, sha256, sha256_in, sha512_256, sha512_256_in};
     use crate::auth::digest::hex as to_hex;
 
     fn hex(digest: [u8; 32]) -> String {
         to_hex(&digest)
+    }
+
+    #[test]
+    fn the_message_is_not_left_behind_in_the_buffers_it_was_read_into() {
+        // as in `md5`: the level below the buffer that wipes itself, where
+        // the last block of an A1 is copied in the clear. Both lengths, so
+        // that the block loop is walked as well as the tail, and against
+        // known answers so that a wipe which broke the hash could not pass
+        for (message, sha256_expected, sha512_256_expected) in [
+            (
+                &b"alice:example.com:hunter2"[..],
+                "7df05889d19129502fdda853d6b0a23e61e0959ce4b1fef496b80d626a313150",
+                "85b4481926cd9f9ccaa7c06a6a3fc2a117554a908861004b69193fe671eeda60",
+            ),
+            (
+                &[b'p'; 400][..],
+                "c96581d49e6983f4a5810fa681168c6d0ec8a58b65eab40b9063c6ca7b333790",
+                "90624de533b8e7ef05dee022f924ec37d45f07bef94f0140f46aea51f7b778e2",
+            ),
+        ] {
+            let mut scratch = Scratch256::new();
+            let digest = sha256_in(message, &mut scratch);
+            assert_eq!(hex(digest), sha256_expected);
+            assert!(
+                scratch.is_clear(),
+                "SHA-256 left the message in its own buffers"
+            );
+
+            let mut scratch = Scratch512::new();
+            let digest = sha512_256_in(message, &mut scratch);
+            assert_eq!(hex(digest), sha512_256_expected);
+            assert!(
+                scratch.is_clear(),
+                "SHA-512/256 left the message in its own buffers"
+            );
+        }
     }
 
     #[test]

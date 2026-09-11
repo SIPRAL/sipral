@@ -64,11 +64,24 @@ impl Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
-        compiler_fence(Ordering::SeqCst);
+        wipe(&mut self.0);
     }
+}
+
+/// Overwrite a buffer that held secret material.
+///
+/// The same best effort [`Secret`] makes for itself, and said as plainly:
+/// only a volatile write is guaranteed to survive an optimiser, a volatile
+/// write needs `unsafe`, and this crate denies it. What is available without
+/// it is an ordinary overwrite and a fence the compiler may not reorder
+/// across, which is what every other safe implementation does.
+///
+/// It takes any word the digests work in — bytes, and the 32- and 64-bit
+/// words a message schedule is the message read back as — so that one rule
+/// covers every buffer rather than each of them repeating it differently.
+pub(super) fn wipe<T: Copy + Default>(buffer: &mut [T]) {
+    buffer.fill(T::default());
+    compiler_fence(Ordering::SeqCst);
 }
 
 /// A user name and the password that goes with it, for one realm.

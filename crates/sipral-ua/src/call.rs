@@ -32,7 +32,7 @@ use crate::account::{AccountId, Extra};
 use crate::reliable::Unacknowledged;
 use crate::session::Session;
 use crate::timers::SessionTimer;
-use crate::transfer::{ReferTo, Referred};
+use crate::transfer::{ReferSubscription, ReferTo, Referred};
 
 /// One call the application is talking to.
 ///
@@ -315,9 +315,14 @@ pub(crate) struct Call {
     /// One that arrived carrying an offer, whose answer §5 puts in the PRACK
     /// and which only the application has.
     pub(crate) owed_prack: Option<ProvisionalResponseId>,
-    /// The REFER this end sent, while the subscription it opened is live
-    /// (RFC 3515 §2.4.4).
+    /// The REFER this end sent, while its transaction is unanswered: the
+    /// call's one seat for asking, given back when the far end has said yes
+    /// or no.
     pub(crate) referring: Option<AnyTransactionId>,
+    /// The implicit subscription that REFER opened (RFC 3515 §2, §2.4.4),
+    /// which outlives the transaction and is the only thing that makes a
+    /// NOTIFY of the `refer` package in this dialog ours to act on.
+    pub(crate) refer_subscription: Option<ReferSubscription>,
     /// One this end received.
     pub(crate) referred: Option<Referred>,
     /// What that REFER asked for, until the application says yes or no.
@@ -412,6 +417,7 @@ impl Call {
             unacknowledged: None,
             owed_prack: None,
             referring: None,
+            refer_subscription: None,
             referred: None,
             asked_to_refer: None,
             reporting_to: None,
@@ -454,6 +460,7 @@ impl Call {
             unacknowledged: None,
             owed_prack: None,
             referring: None,
+            refer_subscription: None,
             referred: None,
             asked_to_refer: None,
             reporting_to: None,
@@ -495,6 +502,7 @@ impl Call {
             unacknowledged: None,
             owed_prack: None,
             referring: None,
+            refer_subscription: None,
             referred: None,
             asked_to_refer: None,
             reporting_to: None,

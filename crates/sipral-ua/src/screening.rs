@@ -41,9 +41,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{Event, Input, OutgoingResponse, TransportId};
-use sipral_core::msg::{OwnedMessage, StatusCode};
+use sipral_core::msg::{HeaderName, OwnedMessage, StatusCode};
 
 use crate::agent::UserAgent;
+use crate::call::CallHandle;
+use crate::transfer::FORBIDDEN;
 
 /// What this layer answers with when it refuses an INVITE of its own accord.
 ///
@@ -220,13 +222,15 @@ pub struct Refusals {
     /// source calling too fast is [`UserAgent::limit_invites`], while many
     /// addresses arriving at once is a flood that wants a firewall.
     pub by_crowding: u64,
-    /// INVITEs whose `Replaces` named one of this end's live calls but
-    /// arrived from somewhere other than that call's own peer, and were
-    /// refused 403 (RFC 3891 §3).
+    /// INVITEs refused 403 for naming one of this end's live calls in a
+    /// `Replaces` they had no standing to take (RFC 3891 §3).
     ///
     /// An attempt at taking over a call, or a transfer arriving by a route
     /// this end cannot recognise. Either way it is a number an operator
-    /// wants, and one a stranger cannot turn into an event queue.
+    /// wants, and one a stranger cannot turn into an event queue. It counts
+    /// what [`Screen::on_replaces`] refused with 403 as well as what the
+    /// default rule did, because to an operator they are the same event; a
+    /// policy refusing with some other status is that policy's to count.
     pub by_replaces: u64,
 }
 
@@ -254,9 +258,96 @@ impl Incoming<'_> {
     }
 
     /// The request, whole.
+    ///
+    /// Everything else a policy might read is one call away on it:
+    /// `request().as_raw().from()` for who the sender says it is,
+    /// `request().as_raw().header(..)` for anything else.
     #[must_use]
     pub const fn request(&self) -> &OwnedMessage {
         self.request
+    }
+
+    /// `Referred-By`, when the request carries exactly one (RFC 3892 §2.1).
+    ///
+    /// **It is context, never authority.** RFC 3892 §2.2 has a transferee
+    /// copy this field from the REFER that asked for the transfer, so on a
+    /// legitimate attended transfer it names the transferor — which is
+    /// exactly what a policy deciding about an off-path transferee wants to
+    /// see. But it is a plain header field on the request being judged, and
+    /// so is `From`: whoever wrote one wrote the other, and RFC 3892 §3's
+    /// signed token, which is the only thing that would make either of them
+    /// proof, is not implemented here. Read it to recognise a transfer you
+    /// were expecting; do not read it as permission.
+    ///
+    /// `None` for a request with none and for one with more than one, which
+    /// §2.1 forbids and which leaves nothing to read that the sender did not
+    /// choose for us.
+    #[must_use]
+    pub fn referred_by(&self) -> Option<&[u8]> {
+        let request = self.request.as_raw();
+        if request.header_count(HeaderName::ReferredBy) != 1 {
+            return None;
+        }
+        request.header(HeaderName::ReferredBy)
+    }
+}
+
+/// The call an incoming `Replaces` names, and how its INVITE got here.
+///
+/// What [`Screen::on_replaces`] decides about. It is `non_exhaustive` because
+/// what a policy needs in order to judge a takeover is exactly the kind of
+/// thing that grows: an implementation reads the accessors it cares about and
+/// is not broken by the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Replacing {
+    call: CallHandle,
+    same_flow: bool,
+}
+
+impl Replacing {
+    pub(crate) const fn new(call: CallHandle, same_flow: bool) -> Self {
+        Self { call, same_flow }
+    }
+
+    /// The call that would be hung up if this INVITE is answered.
+    ///
+    /// It is one of this end's own, matched on the `Call-ID` and both tags
+    /// (RFC 3891 §3), and the application knows what it is and who it is
+    /// with — which is the other half of deciding whether this takeover is
+    /// the transfer it was expecting.
+    #[must_use]
+    pub const fn call(self) -> CallHandle {
+        self.call
+    }
+
+    /// Whether the INVITE arrived from the same place the named call's own
+    /// signalling does.
+    ///
+    /// The one thing about a `Replaces` the sender did not write. `true` also
+    /// when neither address is known, which is a call received over a byte
+    /// stream the application bound without naming its far end: nothing was
+    /// recorded, so nothing is compared.
+    #[must_use]
+    pub const fn same_flow(self) -> bool {
+        self.same_flow
+    }
+
+    /// What this gets when no policy says otherwise: the call when
+    /// [`Replacing::same_flow`], and 403 when not.
+    ///
+    /// The default body of [`Screen::on_replaces`], and what runs when there
+    /// is no [`Screen`] at all. It is public so that a policy which only
+    /// wants to widen the rule for the one case it recognises can hand
+    /// everything else back to it, rather than writing the strict half again
+    /// and getting it subtly different.
+    #[must_use]
+    pub const fn strict(self) -> Screening {
+        if self.same_flow {
+            Screening::Take
+        } else {
+            Screening::Refuse(FORBIDDEN)
+        }
     }
 }
 
@@ -281,9 +372,48 @@ pub enum Screening {
 /// It is called once per INVITE that survives the rate limit, on the thread
 /// driving the agent, and it must not take long: it is between a packet and
 /// the answer to it.
+///
+/// [`Screen::on_replaces`] is the second question, asked only of an INVITE
+/// that names one of this end's live calls, and it is defaulted: a policy that
+/// implements [`Screen::on_invite`] and nothing else — a closure included —
+/// gets the strict rule RFC 3891 §3 is read as here, unchanged.
 pub trait Screen {
     /// An INVITE has arrived.
     fn on_invite(&mut self, invite: &Incoming<'_>) -> Screening;
+
+    /// And its `Replaces` names one of this end's live calls (RFC 3891 §3).
+    ///
+    /// Answering it hangs that call up, so this is the last word on a
+    /// takeover — and the rule underneath it is deliberately strict: a
+    /// `Replaces` is honoured only when the INVITE carrying it arrived from
+    /// the same place the named call's own signalling does, because the
+    /// `Call-ID` and both tags travel in every packet of the call they name
+    /// and this stack has no authenticated peer to compare instead. That is
+    /// [`Replacing::strict`], it is what this method does by default, and an
+    /// implementation that does not override it behaves exactly as one
+    /// written before this method existed.
+    ///
+    /// **Override it where the strict rule is wrong, and it is wrong in a
+    /// real deployment.** An attended transfer whose transferee reaches this
+    /// end directly rather than through the line's proxy arrives from an
+    /// address no call here was placed to, and the default refuses it. A
+    /// policy that knows the deployment can take it — from the source
+    /// address, from [`Incoming::referred_by`], from what
+    /// [`Replacing::call`] is and who it is with — and the same hook can
+    /// tighten as well as loosen: refusing a `Replaces` that did arrive on
+    /// the call's own flow is a decision this returns, not one it overrides.
+    ///
+    /// It runs after [`Screen::on_invite`] has taken the same INVITE, and
+    /// only once a call has actually been matched — a `Replaces` that names
+    /// nothing is 481 and never reaches here, so guessing identifiers does
+    /// not reach application code. What it returns is answered as it stands,
+    /// except that the state of the matched call still has the last word
+    /// afterwards: §3 declines a dialog that has already ended with 603
+    /// however much anybody wants the takeover.
+    fn on_replaces(&mut self, invite: &Incoming<'_>, named: Replacing) -> Screening {
+        let _ = invite;
+        named.strict()
+    }
 }
 
 impl<F: FnMut(&Incoming<'_>) -> Screening> Screen for F {
@@ -470,6 +600,27 @@ impl Guard {
         self.source
     }
 
+    /// What the application says about an INVITE whose `Replaces` names one
+    /// of this end's live calls (RFC 3891 §3).
+    ///
+    /// The same answer with no policy set as with one that does not override
+    /// [`Screen::on_replaces`], which is the rule written down in
+    /// [`Replacing::strict`] and nowhere else.
+    pub(crate) fn screen_replaces(
+        &mut self,
+        request: &OwnedMessage,
+        named: Replacing,
+    ) -> Screening {
+        let invite = Incoming {
+            source: self.source,
+            request,
+        };
+        self.policy.as_mut().map_or_else(
+            || named.strict(),
+            |policy| policy.on_replaces(&invite, named),
+        )
+    }
+
     /// One more INVITE refused because its `Replaces` named a call the sender
     /// was not the peer of (RFC 3891 §3).
     pub(crate) const fn refused_replaces(&mut self) {
@@ -516,6 +667,11 @@ impl UserAgent {
     /// refuses is answered and forgotten: no call, no handle, nothing to drain
     /// and nothing to clean up. One policy at a time; setting a second
     /// replaces the first.
+    ///
+    /// The same policy is what [`Screen::on_replaces`] is asked of, so an
+    /// application that wants a say in who may take one of its calls over
+    /// sets it here and overrides that method — a closure cannot, which is
+    /// the price of a policy that carries no state.
     pub fn screen(&mut self, policy: impl Screen + Send + 'static) {
         self.guard.policy = Some(Box::new(policy));
     }
