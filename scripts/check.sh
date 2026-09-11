@@ -262,7 +262,160 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings >/dev/null 
     && pass "cargo clippy" || fail "cargo clippy --workspace --all-targets --all-features"
 cargo test --workspace --all-features >/dev/null 2>&1 \
     && pass "cargo test" || fail "cargo test --workspace --all-features"
+# rustdoc is a compiler nothing else here runs, and the mistakes only it sees
+# are the ones a reader hits: a public doc linking something private, a link
+# that resolves to nothing, an RFC quotation whose angle brackets read as
+# HTML. A documentation comment is source, and source compiles clean.
+# --all-features for the reason clippy above takes it: the reference loop is
+# behind one, and rustdoc that never reads a module never reads its links.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features >/dev/null 2>&1 \
+    && pass "cargo doc" \
+    || fail "RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps --all-features"
 cargo build --workspace --release >/dev/null 2>&1 && pass "release build" || fail "cargo build --release"
+
+# The header describes a library, and nothing until now said there was one:
+# a crate that declares no crate-type produces an rlib and nothing a C linker
+# can open. What this step reads is the two artefacts the release build above
+# produced, and the names in them. The tests are -s rather than -f because a
+# run whose build went red still finds yesterday's file here, and a file
+# truncated to nothing would otherwise be reported as built.
+step "the library, and what it exports"
+
+DYLIB="target/release/libsipral_ffi.dylib"
+ARCHIVE="target/release/libsipral_ffi.a"
+
+# Apple's nm is an LLVM 14 tool and refuses to read an object carrying newer
+# bitcode, which under `lto = "thin"` is every Rust object in the archive.
+# nm-classic reads the Mach-O symbol table and never looks at the bitcode; the
+# dylib is plain Mach-O and either would do.
+exported() { xcrun nm-classic -gU "$1" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u; }
+
+# The two artefacts are removed and built here rather than read out of
+# whatever the release build above happened to leave behind. Take `crate-type`
+# out of the manifest and `cargo build --workspace --release` still exits 0,
+# having produced no C library at all -- and a step that only reads the
+# directory finds yesterday's and prints ok five times. That regression is the
+# one this step exists for, so it must not be the one it cannot see.
+rm -f "$DYLIB" "$ARCHIVE"
+
+if ! cargo build -p sipral-ffi --release >/dev/null 2>&1; then
+    fail "cargo build -p sipral-ffi --release"
+elif ! xcrun -f nm-classic >/dev/null 2>&1; then
+    # a step that cannot read the symbols has not checked them
+    fail "nm-classic is not there: xcode-select --install"
+elif [ -s "$DYLIB" ] && [ -s "$ARCHIVE" ]; then
+    pass "the shared library and the static archive are both built"
+
+    # Mach-O writes a leading underscore on every C name, so the entry point
+    # sipral_abi_check is the symbol _sipral_abi_check.
+    #
+    # The declared list is read once and asserted to exist before it is
+    # compared: `comm -23` against an empty left side prints nothing, which
+    # reads as "every entry point is there" when what happened is that SURFACE
+    # was never read at all.
+    declared=$(listed 'sipral_[a-z0-9_]*')
+    if [ -z "$declared" ]; then
+        fail "SURFACE listed no entry point, so the library was compared against nothing"
+    else
+        for artefact in "$DYLIB" "$ARCHIVE"; do
+            absent=$(comm -23 <(printf '%s\n' "$declared" | sed 's/^/_/') \
+                <(exported "$artefact" | grep '^_sipral_'))
+            [ -z "$absent" ] && pass "every entry point is in $(basename "$artefact")" || {
+                fail "abi.rs declares entry points $(basename "$artefact") does not export:"
+                printf '        %s\n' $absent
+            }
+        done
+    fi
+
+    # The two counts below are both answers about one list, so the list is
+    # read once and asserted to exist: an nm that resolves and fails prints
+    # nothing, and a question asked of no symbols answers ok.
+    symbols=$(exported "$DYLIB")
+    if [ -z "$symbols" ]; then
+        fail "nm read no symbol out of $(basename "$DYLIB"), so nothing was counted"
+    else
+        # And not one more. An entry point that was renamed and whose old
+        # symbol is still in the library links for an application built
+        # against a header that no longer mentions it, and stops linking the
+        # day it is noticed.
+        count=$(printf '%s\n' "$symbols" | grep -c '^_sipral_')
+        listed_count=$(printf '%s\n' "$declared" | grep -c . || true)
+        [ "$count" = "$listed_count" ] && pass "$count exported, $listed_count in SURFACE" || {
+            fail "the library exports $count _sipral_ symbols and SURFACE lists $listed_count"
+        }
+
+        # What else leaves. A Rust symbol keeps its mangling and is nobody's
+        # to collide with; a bare C name in a library an application links
+        # beside its own is ours to account for. The archive is not asked,
+        # because an archive carries every dependency's objects -- libopus and
+        # compiler-rt among them -- and those names are theirs, which
+        # `docs/08-ffi.md` says out loud for the consumer who static-links.
+        stray=$(printf '%s\n' "$symbols" | grep -v '^_sipral_' | grep -v '^__Z\|^__R' || true)
+        [ -z "$stray" ] && pass "nothing else leaves the library unmangled" || {
+            fail "the library exports a name that is not the ABI's:"
+            printf '        %s\n' $stray
+        }
+    fi
+else
+    fail "$DYLIB and $ARCHIVE are not both there:"
+    printf '        the crate needs [lib] crate-type in crates/sipral-ffi/Cargo.toml.\n'
+fi
+
+# A header, three generated bindings and a scan that says they agree still
+# prove nothing about a compiler having read any of it. This is the one
+# consumer in the tree that is written the way an integrator writes one:
+# compiled with warnings fatal, linked against the shared library, and run.
+step "linked from C"
+if [ -s "$DYLIB" ]; then
+    work=$(mktemp -d)
+    if cc -std=c11 -Wall -Wextra -Werror -o "$work/smoke" bindings/c/smoke.c \
+        -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
+        >"$work/cc" 2>&1; then
+        pass "cc -std=c11 -Wall -Wextra -Werror"
+        if ran=$("$work/smoke" 2>&1); then
+            pass "bindings/c/smoke.c"
+        else
+            fail "bindings/c/smoke.c did not come back zero:"
+            printf '%s\n' "$ran" | sed 's/^/        /'
+        fi
+    else
+        fail "bindings/c/smoke.c does not compile:"
+        sed 's/^/        /' "$work/cc"
+    fi
+    rm -rf "$work"
+else
+    fail "$DYLIB: nothing to link against"
+fi
+
+# Everything behind cfg(target_os = "windows") in sipral-io-wasapi, and the
+# three iOS bodies in sipral-io-coreaudio, are read by no compiler on this
+# machine, and a crate whose platform half only compiles on the platform is a
+# crate that stops compiling there quietly. Both targets are rustup
+# components rather than machines, so this type-checks and lints without
+# running anything -- which is what rots. Rustdoc goes with clippy for
+# Windows, because the links into the Windows-only types are the ones that
+# resolve on no other target.
+step "the code this machine does not compile"
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc; then
+    cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc --all-targets \
+        -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-io-wasapi for Windows" \
+        || fail "cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc --all-targets"
+    RUSTDOCFLAGS="-D warnings" cargo doc -p sipral-io-wasapi --no-deps \
+        --target x86_64-pc-windows-msvc >/dev/null 2>&1 \
+        && pass "cargo doc -p sipral-io-wasapi for Windows" \
+        || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-wasapi --no-deps --target x86_64-pc-windows-msvc"
+else
+    fail "x86_64-pc-windows-msvc is not installed: rustup target add x86_64-pc-windows-msvc"
+fi
+if rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-ios; then
+    cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets \
+        -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-io-coreaudio for iOS" \
+        || fail "cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets"
+else
+    fail "aarch64-apple-ios is not installed: rustup target add aarch64-apple-ios"
+fi
 
 # The mirror of --all-features. Opus is behind a feature because libopus is
 # licensed rather than written (`docs/05-media.md`), and the customer who
@@ -374,7 +527,8 @@ if command -v gitleaks >/dev/null 2>&1; then
     gitleaks detect --no-banner --redact >/dev/null 2>&1 \
         && pass "gitleaks" || fail "gitleaks detect"
 else
-    printf '  skip  gitleaks not installed: brew install gitleaks\n'
+    # not a skip: a gate that goes green without the scanner has not looked
+    fail "gitleaks not installed: brew install gitleaks"
 fi
 
 printf '\n'

@@ -1465,6 +1465,8 @@ internal object SipralNative {
     external fun sipral_status_name(status: Long): String?
     external fun sipral_abi_version(version: LongArray): Int
     external fun sipral_abi_check(major: Long, minor: Long): Int
+    external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
+    external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
     external fun sipral_stack_create(config: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
@@ -1539,7 +1541,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 7
+    const val ABI_VERSION_MINOR: Long = 8
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -1730,6 +1732,54 @@ object Sipral {
      */
     fun abiCheck(major: Long, minor: Long) {
         check(SipralNative.sipral_abi_check(major, minor))
+    }
+
+    /**
+     * How many bytes this build compiled one of the ABI's structs to.
+     *
+     * `name` is what the header calls the type — `sipral_stack_config_t` —
+     * as bytes and a length, the way every string crosses here. A name this
+     * build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
+     * the answer a caller holding somebody else's header gets.
+     *
+     * Nothing in the library needs asking: the `size` member a struct
+     * carries settles a disagreement in the ordinary course of a call. This
+     * is for finding out there is one before making it. A package built
+     * against one header and loaded over a native library from another
+     * shows up here as a `sizeof` that differs, in one call at load, rather
+     * than in whichever member happened to move.
+     *
+     * Safety
+     *
+     * `name` must be readable for `name_len` bytes, and `out_size` must
+     * point at one `size_t`.
+     */
+    fun abiStructSize(name: String): Long {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val sizeSlot = LongArray(1)
+        check(SipralNative.sipral_abi_struct_size(nameBytes, sizeSlot))
+        return sizeSlot[0]
+    }
+
+    /**
+     * How many of the ABI's structs carry a `size` member.
+     *
+     * The companion to `sipral_abi_struct_size`, and the part of the check a
+     * caller cannot write for itself. A caller that compares lengths holds
+     * a list of the structs it knows about, and the list is what goes
+     * stale: a struct this ABI gained is one nobody thought to ask about,
+     * and a length check that covers all but the newest still passes. Ask
+     * for this number, compare it with the length of that list, and the day
+     * the ABI grows another the caller is told.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t`.
+     */
+    fun abiVersionedCount(): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_abi_versioned_count(countSlot))
+        return countSlot[0]
     }
 
     /**

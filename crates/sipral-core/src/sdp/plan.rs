@@ -84,7 +84,7 @@ impl NegotiatedCodec {
         self.rtpmap.clock_rate
     }
 
-    /// The channel count. "For audio streams, <encoding parameters> indicates
+    /// The channel count. "For audio streams, `<encoding parameters>` indicates
     /// the number of audio channels. This parameter is OPTIONAL and may be
     /// omitted if the number of channels is one" (RFC 4566 §6), so an absent
     /// one means mono.

@@ -128,7 +128,7 @@ pub struct Timing {
 
 impl Timing {
     /// `t=0 0`: "the session is not bounded, though it will not become active
-    /// until after the <start-time>" — which is what a call is.
+    /// until after the `<start-time>`" — which is what a call is.
     #[must_use]
     pub const fn permanent() -> Self {
         Self {

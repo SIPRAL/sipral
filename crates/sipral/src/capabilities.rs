@@ -57,13 +57,13 @@ pub enum SrtpKeying {
     Sdes,
     /// RFC 5764's handshake on the media path.
     ///
-    /// Named here and deliberately absent from [`KEYING`]: `sipral-core`
-    /// reads an `a=fingerprint` and carries it through, and there is no DTLS
-    /// anywhere in this tree — no handshake, no certificate, nothing that
-    /// could produce a key. A plan keyed this way is refused with
-    /// [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) rather than
-    /// opened in the clear, which is the behaviour this absence is derived
-    /// from.
+    /// Named here and deliberately absent from [`Capabilities::srtp_keying`]:
+    /// `sipral-core` reads an `a=fingerprint` and carries it through, and
+    /// there is no DTLS anywhere in this tree — no handshake, no certificate,
+    /// nothing that could produce a key. A plan keyed this way is refused
+    /// with [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) rather
+    /// than opened in the clear, which is the behaviour this absence is
+    /// derived from.
     Dtls,
 }
 

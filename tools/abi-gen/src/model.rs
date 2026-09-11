@@ -11,6 +11,9 @@
 //! a string.
 
 use sipral_ffi::abi::{Function, Member, Record, Surface};
+// the rule for turning `SipralStackConfig` into `sipral_stack_config` is the
+// library's, because the library answers questions about the C names too
+pub(crate) use sipral_ffi::abi::snake;
 
 /// Something the generator will not guess about.
 #[derive(Debug)]
@@ -257,25 +260,6 @@ fn role_of<'a>(surface: &Surface, parameter: &'a Read<'a>) -> Role<'a> {
         return Role::Out(parameter);
     }
     Role::Plain(parameter)
-}
-
-/// `SipralStackConfig` becomes `sipral_stack_config`.
-pub(crate) fn snake(name: &str) -> String {
-    let mut out = String::new();
-    let mut previous_lower = false;
-    for letter in name.chars() {
-        if letter.is_ascii_uppercase() {
-            if previous_lower {
-                out.push('_');
-            }
-            out.push(letter.to_ascii_lowercase());
-            previous_lower = false;
-        } else {
-            out.push(letter);
-            previous_lower = letter.is_ascii_lowercase() || letter.is_ascii_digit();
-        }
-    }
-    out
 }
 
 /// `InvalidArgument` becomes `INVALID_ARGUMENT`.

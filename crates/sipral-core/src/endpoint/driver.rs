@@ -834,7 +834,8 @@ impl Endpoint {
     /// phone watching thirty extensions across a day of re-subscriptions
     /// accumulates a dialog per attempt and never gives one back.
     ///
-    /// A [`Event::DialogTerminated`] with [`DialogEndReason::Closed`] follows,
+    /// A [`Event::DialogTerminated`] with
+    /// [`DialogEndReason::Closed`](super::DialogEndReason::Closed) follows,
     /// so anything above that was holding the handle hears about it the same
     /// way it hears about a BYE. Calling it twice does nothing the second
     /// time.

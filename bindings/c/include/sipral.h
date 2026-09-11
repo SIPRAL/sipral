@@ -53,7 +53,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)7)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)8)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -2187,6 +2187,45 @@ sipral_status_t sipral_abi_version(sipral_abi_version_t *out_version);
  * Reads no memory the caller owns, and is safe to call from any thread.
  */
 sipral_status_t sipral_abi_check(uint32_t major, uint32_t minor);
+
+/**
+ * How many bytes this build compiled one of the ABI's structs to.
+ *
+ * `name` is what the header calls the type — `sipral_stack_config_t` —
+ * as bytes and a length, the way every string crosses here. A name this
+ * build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
+ * the answer a caller holding somebody else's header gets.
+ *
+ * Nothing in the library needs asking: the `size` member a struct
+ * carries settles a disagreement in the ordinary course of a call. This
+ * is for finding out there is one before making it. A package built
+ * against one header and loaded over a native library from another
+ * shows up here as a `sizeof` that differs, in one call at load, rather
+ * than in whichever member happened to move.
+ *
+ * Safety
+ *
+ * `name` must be readable for `name_len` bytes, and `out_size` must
+ * point at one `size_t`.
+ */
+sipral_status_t sipral_abi_struct_size(const char *name, size_t name_len, size_t *out_size);
+
+/**
+ * How many of the ABI's structs carry a `size` member.
+ *
+ * The companion to `sipral_abi_struct_size`, and the part of the check a
+ * caller cannot write for itself. A caller that compares lengths holds
+ * a list of the structs it knows about, and the list is what goes
+ * stale: a struct this ABI gained is one nobody thought to ask about,
+ * and a length check that covers all but the newest still passes. Ask
+ * for this number, compare it with the length of that list, and the day
+ * the ABI grows another the caller is told.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_abi_versioned_count(size_t *out_count);
 
 /**
  * What this build of the library can do, in one call.

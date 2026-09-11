@@ -622,7 +622,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let aBIVERSIONMINOR: UInt32 = 7
+    public static let aBIVERSIONMINOR: UInt32 = 8
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let aBIVERSIONPATCH: UInt32 = 0
@@ -774,6 +774,56 @@ public enum Sipral {
     public static func abiCheck(major: UInt32, minor: UInt32) throws {
         let status = sipral_abi_check(major, minor)
         try check(status)
+    }
+
+    /// How many bytes this build compiled one of the ABI's structs to.
+    ///
+    /// `name` is what the header calls the type — `sipral_stack_config_t` —
+    /// as bytes and a length, the way every string crosses here. A name this
+    /// build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
+    /// the answer a caller holding somebody else's header gets.
+    ///
+    /// Nothing in the library needs asking: the `size` member a struct
+    /// carries settles a disagreement in the ordinary course of a call. This
+    /// is for finding out there is one before making it. A package built
+    /// against one header and loaded over a native library from another
+    /// shows up here as a `sizeof` that differs, in one call at load, rather
+    /// than in whichever member happened to move.
+    ///
+    /// Safety
+    ///
+    /// `name` must be readable for `name_len` bytes, and `out_size` must
+    /// point at one `size_t`.
+    public static func abiStructSize(name: String) throws -> Int {
+        var size = Int()
+        let status =
+            Array(name.utf8).withUnsafeBufferPointer { raw0 in
+                raw0.withMemoryRebound(to: CChar.self) { p0 in
+                    sipral_abi_struct_size(p0.baseAddress, p0.count, &size)
+                }
+            }
+        try check(status)
+        return size
+    }
+
+    /// How many of the ABI's structs carry a `size` member.
+    ///
+    /// The companion to `sipral_abi_struct_size`, and the part of the check a
+    /// caller cannot write for itself. A caller that compares lengths holds
+    /// a list of the structs it knows about, and the list is what goes
+    /// stale: a struct this ABI gained is one nobody thought to ask about,
+    /// and a length check that covers all but the newest still passes. Ask
+    /// for this number, compare it with the length of that list, and the day
+    /// the ABI grows another the caller is told.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func abiVersionedCount() throws -> Int {
+        var count = Int()
+        let status = sipral_abi_versioned_count(&count)
+        try check(status)
+        return count
     }
 
     /// What this build of the library can do, in one call.

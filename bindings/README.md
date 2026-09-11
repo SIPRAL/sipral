@@ -24,8 +24,13 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
 
-Written by hand: `Package.swift`, `c/sipral.c`, `dotnet/Sipral/Sipral.csproj`,
-`dotnet/Sipral/SipralInfo.cs`, and the two readmes. Everything the packages
-build is generated.
+Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
+`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs`, and the two
+readmes. Everything the packages build is generated.
+
+`c/sipral.c` is the Swift package's one translation unit, and exists so that
+a header that will not compile is found by building the package. `c/smoke.c`
+is a program: it links the built library and exercises the ABI the way an
+integrator would, and `scripts/check.sh` compiles and runs it.
 
 What each binding covers, and what it does not, is in `docs/08-ffi.md`.

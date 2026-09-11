@@ -494,8 +494,8 @@ impl ErrorCode {
 /// A caller-defined [`ErrorCode`] outside this crate's own six.
 ///
 /// Cannot equal one of them: on the wire a code is just its string, so a
-/// value that collided would read back through [`ErrorCode::parse`] as the
-/// reserved variant instead of `Other`, changing identity with no error.
+/// value that collided would be read back as the reserved [`ErrorCode`]
+/// instead of `Other`, changing identity with no error.
 /// Refusing the collision here, at construction, is cheaper than teaching
 /// the wire format to tell the two apart.
 #[derive(Clone, Debug, PartialEq, Eq)]

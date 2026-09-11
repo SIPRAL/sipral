@@ -5,9 +5,10 @@
 //!
 //! A panic that reaches C uncaught takes the host process with it, and a SIP
 //! stack reads hostile input for a living, so every entry point in this crate
-//! is written with [`entry`] and nothing else. The macro wraps the body in
-//! [`std::panic::catch_unwind`] and turns whatever comes out into a status
-//! code, which is the only reason the release profile keeps `panic = unwind`.
+//! is written with the `entry!` macro below and nothing else. It wraps the
+//! body in [`std::panic::catch_unwind`] and turns whatever comes out into a
+//! status code, which is the only reason the release profile keeps
+//! `panic = unwind`.
 //!
 //! The sentence that goes with the code is kept per thread rather than per
 //! object or per process: the thread that made the failing call is the one

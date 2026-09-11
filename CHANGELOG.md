@@ -60,6 +60,67 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   package or an unparseable manifest would have made it print ok having read
   nothing.
 
+- **There is a C library now, and a C program in the gate that links it.**
+  `crates/sipral-ffi` declares `crate-type = ["rlib", "cdylib", "staticlib"]`,
+  so a release build produces `libsipral_ffi.dylib` and `libsipral_ffi.a`
+  beside the rlib the tests and the generator use. Until now the 98 KB header
+  described a library nobody could open. `scripts/check.sh` gains the step
+  that reads the symbols back out: every entry point `abi.rs` lists is in the
+  shared library and in the archive, there are exactly as many exported
+  `sipral_` symbols as `SURFACE` has entry points, and nothing else leaves
+  unmangled. It reads them with `nm-classic` rather than `nm`, because Apple's
+  `nm` is an LLVM 14 tool and refuses the newer bitcode a `lto = "thin"`
+  archive carries; it reads the list once and fails when it is empty, because
+  an `nm` that resolves and errors prints nothing and every question asked of
+  no symbols answers ok. What the archive exports beside the ABI is the other
+  690 unmangled C names its dependencies' objects carry — libopus,
+  compiler-rt, the LTO symbols — which is not a defect and is now a paragraph
+  under "What it does not catch" in `docs/08-ffi.md`, because a consumer that
+  static-links has to know before it links.
+
+  And a consumer: `bindings/c/smoke.c`, compiled with `-std=c11 -Wall -Wextra
+  -Werror`, linked against the shared library and **run** by the gate. It
+  checks the ABI version, builds a stack with a callback and a user pointer of
+  its own and proves the pointer arrives, adds an account, places one call and
+  has another refused with a status and the sentence that names what was
+  wrong with it and no handle, retires the transport with
+  `sipral_stack_transport_failed` and has a third call — well formed, over a
+  stack with nowhere to write — come back `SIPRAL_STATUS_NOT_SENT`, polls
+  once, and destroys the stack from inside its own event callback, once, on
+  the first event. That last is the one re-entrant call, which
+  `docs/08-ffi.md` now states in its rules list rather than leaving to the
+  header, and the one nothing proved from C. It also asks the library the
+  length of all fourteen structs that carry their own size and compares each
+  with C's `sizeof`, through a new entry point, `sipral_abi_struct_size`, which
+  answers for any struct of the ABI by the name the header gives it — and
+  asks a second one, `sipral_abi_versioned_count`, how many such structs
+  there are, so that the list of fourteen names in `smoke.c` is compared
+  against the library's own count and a fifteenth cannot arrive unasked
+  about. The ABI minor goes to 0.8 and the four printed files were printed
+  again. The rule that turns `SipralStackConfig` into
+  `sipral_stack_config` moved out of `tools/abi-gen` and into
+  `crates/sipral-ffi/src/abi.rs`, where the declarations are, because the
+  library now answers questions about the C names too and a derivation written
+  twice can disagree with itself; `abi::Record` carries the size the compiler
+  settled on, beside the members it was built from.
+
+- **The gate sees three things nothing compiled.** `RUSTDOCFLAGS="-D
+  warnings" cargo doc --workspace --no-deps --all-features` runs in it, so a
+  documentation comment is source that has to compile clean, and
+  `--all-features` because otherwise the 579 lines of `sipral-ua`'s reference
+  loop, which are behind one, are read by no rustdoc at all. Then
+  `cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc
+  --all-targets -- -D warnings` and, beside it, the same target under
+  `cargo doc`: together they are the only thing in the tree that reads the
+  four modules behind `cfg(target_os = "windows")` — 3221 of that crate's
+  7782 lines, two fifths of it, and compiled by nobody on the machine the
+  gate runs on — and the doc run is what keeps its four links into those
+  types honest. And `cargo clippy -p sipral-io-coreaudio --target
+  aarch64-apple-ios`, for the three bodies in that crate no installed target
+  compiled either. All of them fail rather than skip when the toolchain or
+  the target is missing, and so does `gitleaks` from now on: a gate that goes
+  green without the scanner has not looked.
+
 ### Changed
 
 - **The roadmap carries what the audit of 10 September found, and what was
@@ -84,6 +145,27 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Video waits for 1.0 and is phase 6 after it, with its contents named.
 
 ### Fixed
+
+- **Seventeen rustdoc warnings across eight crates.** A public documentation
+  comment linking a private item renders as text and sends the reader
+  nowhere, and `cargo doc` was the one compiler the gate never ran. They fall
+  in `sipral-rtp` (4), `sipral-io-wasapi` (4), `sipral-core` (3),
+  `sipral-ffi` (2), and one each in `sipral-ua`, `sipral-nat`, `sipral` and
+  `sipral-headless`. Each is fixed at the link: where the private item is a
+  number, the prose names the window and the constants keep the numbers
+  (`sipral-rtp`'s RTCP multiplexing span, `sipral-ua`'s announcement window);
+  where it is a concept, the link goes to the public thing that is it
+  (`sipral-nat`'s `classify`, `sipral`'s `Capabilities::srtp_keying`,
+  `sipral-rtp`'s `RtpSession::rtcp_due` and `build_report`,
+  `sipral-headless`'s `ErrorCode`); and where the item is private and stays
+  private because nothing a caller names is in it, the reference is a code
+  span (`sipral-ffi`'s `versioned` and its `entry!` macro). Two quotations
+  from RFC 4566 lost their angle brackets to an HTML parser and are code
+  spans now, and one link in `sipral-core` never named the module its type
+  lives in. The four in `sipral-io-wasapi` stay links: they point at types
+  that exist only on Windows, which is the target the gate now runs rustdoc
+  against, and off Windows that crate allows the lint rather than pretending
+  in a code span that the reader has nowhere to go.
 
 - **The README and five design documents say what the tree does.** The status
   banner said nothing interoperates while the roadmap recorded three servers

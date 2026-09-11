@@ -15,7 +15,10 @@ let package = Package(
         .library(name: "Sipral", targets: ["Sipral"])
     ],
     targets: [
-        .target(name: "CSipral", path: "c", publicHeadersPath: "include"),
+        // smoke.c is excluded because it is a program with a main, run by
+        // scripts/check.sh against the built library; SwiftPM sweeps every
+        // source under the target's path and this one is not part of it.
+        .target(name: "CSipral", path: "c", exclude: ["smoke.c"], publicHeadersPath: "include"),
         .target(name: "Sipral", dependencies: ["CSipral"], path: "swift/Sources/Sipral")
     ]
 )

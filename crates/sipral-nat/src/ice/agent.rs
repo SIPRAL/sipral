@@ -123,7 +123,7 @@ impl LiteAgent {
     }
 
     /// Take a datagram that arrived on the socket for one component, already
-    /// told apart from media (see [`crate::demux`]).
+    /// told apart from media (see [`crate::classify`]).
     ///
     /// Returns the bytes to send back to `peer`, or `None` when the datagram
     /// is not a Binding request this agent answers — the wrong method or

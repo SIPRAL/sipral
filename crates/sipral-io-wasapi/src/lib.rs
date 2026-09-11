@@ -87,6 +87,15 @@
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
     html_favicon_url = "https://sipral.org/brand/favicon.svg"
 )]
+// The stream types the two rules above link to are behind
+// cfg(target_os = "windows"), so on any other target there is no item for
+// those links to find and rustdoc is right to say so. They are not written as
+// code spans for it: a link is what a reader of this crate's documentation
+// needs, and the documentation a reader reads is built for Windows. It is the
+// gate that keeps them honest -- scripts/check.sh runs rustdoc against
+// x86_64-pc-windows-msvc with warnings fatal, where every one of them
+// resolves or the step goes red.
+#![cfg_attr(not(target_os = "windows"), allow(rustdoc::broken_intra_doc_links))]
 // tests say what they mean; the no-panic discipline is for the library
 #![cfg_attr(
     test,

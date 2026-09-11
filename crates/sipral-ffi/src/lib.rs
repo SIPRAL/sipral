@@ -8,10 +8,12 @@
 //! event callback. Everything expressive lives on the language side.
 //!
 //! Four rules hold the whole thing up, and each has a module. Nothing crosses
-//! but plain data, and a struct that crosses carries its own size, so a caller
-//! and a library built a year apart still agree ([`versioned`]). Nothing the
-//! library owns is named by an address, so a handle used after it was freed is
-//! an error code rather than somebody else's memory ([`handle`]). Nothing
+//! but plain data, and a struct that crosses carries its own size, so a
+//! caller and a library built a year apart still agree (`versioned`, the one
+//! of the four kept private: what it holds is the discipline the other
+//! modules are written to, and nothing a caller names). Nothing the library
+//! owns is named by an address, so a handle used after it was freed is an
+//! error code rather than somebody else's memory ([`handle`]). Nothing
 //! unwinds past the boundary, because a panic that reaches C takes the host
 //! process with it ([`error`]). And the ABI says what version it is, so a
 //! binding that was generated against another one finds out at load rather

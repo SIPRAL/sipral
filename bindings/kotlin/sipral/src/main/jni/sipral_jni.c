@@ -73,6 +73,39 @@ Java_org_sipral_SipralNative_sipral_1abi_1check(JNIEnv *env, jobject self, jlong
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1abi_1struct_1size(JNIEnv *env, jobject self, jbyteArray name, jlongArray size)
+{
+    (void)env;
+    (void)self;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    size_t size_value = 0;
+    sipral_status_t status = sipral_abi_struct_size((const char *)name_data, (size_t)name_size, &size_value);
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)size_value;
+        (*env)->SetLongArrayRegion(env, size, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1abi_1versioned_1count(JNIEnv *env, jobject self, jlongArray count)
+{
+    (void)env;
+    (void)self;
+    size_t count_value = 0;
+    sipral_status_t status = sipral_abi_versioned_count(&count_value);
+    {
+        jlong slot = (jlong)count_value;
+        (*env)->SetLongArrayRegion(env, count, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlongArray capabilities)
 {
     (void)env;

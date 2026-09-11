@@ -12,6 +12,13 @@ keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
 
+[lib]
+# rlib because the tests, `tools/abi-gen` and the interop harness link this
+# crate as a Rust library; cdylib and staticlib because a C ABI nobody can
+# link is a header and not a library, and a crate that says nothing here
+# produces neither. All three come out of one `cargo build --release`.
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 [features]
 # The facade's Opus feature, carried up once more so that an application
 # linking the C ABI and nothing else still decides it here. On by default.

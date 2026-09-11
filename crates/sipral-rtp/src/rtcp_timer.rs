@@ -64,10 +64,12 @@ fn unit(unit_interval: f64) -> f64 {
 /// wait for the deadline it computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Due {
-    /// A report is due; call [`IntervalTimer::sent`] once it has gone out.
+    /// A report is due; build it with
+    /// [`RtpSession::build_report`](crate::RtpSession::build_report), which
+    /// records that it went out and schedules the next one.
     Send,
-    /// Not yet; call [`IntervalTimer::due`] again no earlier than this
-    /// point on the caller's clock.
+    /// Not yet; call [`RtpSession::rtcp_due`](crate::RtpSession::rtcp_due)
+    /// again no earlier than this point on the caller's clock.
     Wait(Duration),
 }
 

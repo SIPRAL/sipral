@@ -75,6 +75,11 @@ pub struct Record {
     /// Its members, in declaration order, which for a struct is also the
     /// order they sit in memory.
     pub fields: &'static [Member],
+    /// How many bytes this build compiled it to, padding and all. Not the
+    /// ABI — a struct of pointers is one length on a 32-bit target and
+    /// another on a 64-bit one — but what this build will read and write,
+    /// which is the number a C caller checks its own `sizeof` against.
+    pub size: usize,
 }
 
 impl Record {
@@ -86,6 +91,38 @@ impl Record {
             .first()
             .is_some_and(|first| first.name == "size")
     }
+
+    /// What C calls it: `SipralStackConfig` is `sipral_stack_config_t`.
+    #[must_use]
+    pub fn c_name(&self) -> String {
+        format!("{}_t", snake(self.name))
+    }
+}
+
+/// The one rule for turning a Rust name into the name the C side spells:
+/// `SipralStackConfig` becomes `sipral_stack_config`.
+///
+/// Here rather than in the generator because the library answers questions
+/// about the C names too — [`crate::version::sipral_abi_struct_size`] is asked one
+/// — and a derivation written twice is a derivation that can disagree with
+/// itself.
+#[must_use]
+pub fn snake(name: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower = false;
+    for letter in name.chars() {
+        if letter.is_ascii_uppercase() {
+            if previous_lower {
+                out.push('_');
+            }
+            out.push(letter.to_ascii_lowercase());
+            previous_lower = false;
+        } else {
+            out.push(letter);
+            previous_lower = letter.is_ascii_lowercase() || letter.is_ascii_digit();
+        }
+    }
+    out
 }
 
 /// One named number inside an enumeration.
@@ -230,6 +267,7 @@ macro_rules! record {
                     rust_type: stringify!($member_type),
                     doc: &[$($member_doc),*],
                 }),*],
+                size: ::std::mem::size_of::<$name>(),
             };
         }
     };
@@ -264,6 +302,7 @@ macro_rules! record {
                     rust_type: stringify!($member_type),
                     doc: &[$($member_doc),*],
                 }),*],
+                size: ::std::mem::size_of::<$name>(),
             };
         }
     };
@@ -461,6 +500,8 @@ pub const SURFACE: Surface = Surface {
         crate::status::sipral_status_name::ABI,
         crate::version::sipral_abi_version::ABI,
         crate::version::sipral_abi_check::ABI,
+        crate::version::sipral_abi_struct_size::ABI,
+        crate::version::sipral_abi_versioned_count::ABI,
         crate::capabilities::sipral_capabilities::ABI,
         crate::stack::sipral_stack_create::ABI,
         crate::stack::sipral_stack_settings::ABI,
@@ -517,7 +558,7 @@ pub const SURFACE: Surface = Surface {
 
 #[cfg(test)]
 mod tests {
-    use super::{SURFACE, Shape, Stands};
+    use super::{SURFACE, Shape, Stands, snake};
     use std::collections::HashSet;
 
     /// Every name a type can be referred to by, so that a member whose type is
@@ -623,6 +664,38 @@ mod tests {
             );
         for name in names {
             assert!(seen.insert(name), "{name} is declared twice");
+        }
+    }
+
+    /// The rule the generator prints four files with and the library answers
+    /// `sipral_abi_struct_size` with. The cases are written out rather than derived,
+    /// because a test that derived them would move with the rule.
+    #[test]
+    fn a_rust_name_becomes_the_name_c_spells() {
+        assert_eq!(snake("SipralStackConfig"), "sipral_stack_config");
+        assert_eq!(snake("SipralAbiVersion"), "sipral_abi_version");
+        assert_eq!(snake("SipralRtcp"), "sipral_rtcp");
+        assert_eq!(snake("bind_address_len"), "bind_address_len");
+    }
+
+    /// The size is the compiler's answer, carried so that the one entry point
+    /// that reports it does not have to name every type.
+    #[test]
+    fn every_record_carries_the_length_it_was_compiled_to() {
+        for record in SURFACE.records {
+            assert!(record.size > 0, "{} is nothing at all", record.name);
+            assert!(
+                record.c_name().starts_with("sipral_") && record.c_name().ends_with("_t"),
+                "{} is not a name C would spell",
+                record.name
+            );
+            if record.is_versioned() {
+                assert!(
+                    record.size >= size_of::<usize>(),
+                    "{} is shorter than the size member it starts with",
+                    record.name
+                );
+            }
         }
     }
 

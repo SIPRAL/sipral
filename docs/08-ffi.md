@@ -38,9 +38,25 @@ Rules for the ABI:
   tagged union. The callback may be invoked from the caller's own polling
   thread only, so the language side never has to reason about which thread it
   is on.
+- **The library is not re-entered from inside that callback, except to destroy
+  the stack.** Every call naming the stack being polled returns
+  `SIPRAL_STATUS_BUSY` while its callback is running, so a binding can neither
+  deadlock itself by answering an event with a request nor see a stack halfway
+  through delivering one; what it does with an event is copy what it needs and
+  act after poll returns. `sipral_stack_destroy` is the exception and always
+  will be — it takes nothing but the handle table, and what the poll is
+  holding stays alive until that poll returns — so a binding whose event
+  handler is where its object gets disposed needs no queue of deferred frees
+  to be correct. The reasoning behind both is the module documentation of
+  `crates/sipral-ffi/src/stack.rs`, and the generated header puts the rule in
+  two sentences at the top, so a binding author meets it wherever they start.
 - **Nothing is added to a released ABI except at the end of a struct**, guarded
   by the `size` field, or as a new function. Nothing is removed or reordered.
-  Ever.
+  Ever. `sipral_abi_struct_size` answers what this build compiled a named struct to,
+  so a caller can find out that its header and the library disagree in one call
+  at load rather than in whichever member happened to move, and
+  `sipral_abi_versioned_count` says how many structs there are to ask about,
+  so the list a caller walks cannot quietly fall behind the ABI.
 - **A numbered space has one declaration, and disagreeing with it is a build
   failure.** The event kinds are declared once, by the `event_kinds!` macro in
   `crates/sipral-ffi/src/event.rs`. The enum, the name a kind prints in a log
@@ -283,23 +299,30 @@ spends, which travels into all four files. Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.
 
+And, because the artefacts exist to be linked rather than read: every entry
+point `abi.rs` lists present in `libsipral_ffi.dylib` and in
+`libsipral_ffi.a`, as many exported `sipral_` symbols as `SURFACE` has entry
+points and no more, and nothing else leaving the shared library under a name a
+C linker could collide with.
+
 ### What it does not catch
 
-**Nothing compiles the output.** There is no Swift, Kotlin or .NET toolchain in
-`scripts/check.sh`, and there will not be one on a machine that has no reason to
-carry three of them, so a generated file that will not compile passes the gate.
-The C header is the exception and only just: `bindings/c/sipral.c` exists so
-that building the Swift package compiles it. The JNI shim is never compiled by
-anything here, which is why it is printed as casts and array handling and
-nothing cleverer.
+**Nothing compiles the output but the C.** There is no Swift, Kotlin or .NET
+toolchain in `scripts/check.sh`, so a generated file in one of those three that
+will not compile passes the gate. The JNI shim is never compiled by anything
+here, which is why it is printed as casts and array handling and nothing
+cleverer. The header is the exception, and no longer only just:
+`bindings/c/smoke.c` includes it, compiles under `-std=c11 -Wall -Wextra
+-Werror`, links the shared library and runs, in the gate; `bindings/c/sipral.c`
+compiles it a second time as the Swift package's own translation unit.
 
 **It says nothing about meaning.** A member that keeps its name and its type and
 starts meaning something else travels into all four files intact. So does a
 function whose behaviour changed under a signature that did not.
 
-**It is not a check on the built library.** Nothing runs `nm` over the artefact,
-so a symbol the linker dropped is not caught here. `entry!` and the scan that
-insists on it are what stand between a declaration and a missing symbol.
+**The built library is checked on this platform and no other.** The gate reads
+the symbols out of the `.dylib` and the `.a` it just built, so a symbol dropped
+on a target nobody here builds is still between `entry!` and that linker.
 
 **A Rust-to-Rust coupling is outside it entirely.** `crates/sipral-ffi/src/event.rs`
 destructures `sipral_ua::UaEvent` variant by variant, and a variant destructured
@@ -308,9 +331,21 @@ here. That is loud rather than silent, so it is not B7's failure — but it is a
 coupling this gate has no view of, and it has already cost one feature its
 shape. The arms use `..`.
 
+**The static archive carries its dependencies, and their names.** An archive
+is the objects that went into it, so `libsipral_ffi.a` holds libopus and
+compiler-rt as well as this library, and exports around seven hundred
+unmangled C names that are not the ABI's — `opus_decode`, `celt_fatal`,
+`alg_quant`, the `__udivti3` family, the LTO symbols. The gate counts the
+names leaving the shared library and not those, because they belong to the
+projects they came from and their number moves with a dependency version. It
+is not a defect and nothing here will remove them: a consumer that links this
+archive into a program that also links libopus of its own has two definitions
+of each of those names for its linker to settle, and has to know that before
+it gets there. Link the `.dylib`, or link the archive knowing what is in it.
+
 **The packaging is written by hand.** `Package.swift`, the `.csproj`, the two
-readmes and `bindings/c/sipral.c` are not printed and not compared. What they
-build is.
+readmes, `bindings/c/sipral.c` and `bindings/c/smoke.c` are not printed and not
+compared. What they build is.
 
 ## Swift
 

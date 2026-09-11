@@ -56,7 +56,7 @@ const MUX_LAST: u8 = 223;
 
 /// Whether `datagram` is RTCP rather than RTP, for a socket carrying both
 /// (RFC 5761 §4). The RTCP packet type sits where the RTP marker bit and
-/// payload type would be, and anything in [`MUX_FIRST`]`..=`[`MUX_LAST`]
+/// payload type would be, and every value in the span §4 reserves for RTCP
 /// reads as RTCP — not only what is assigned today, since a peer sending a
 /// packet type registered after this was written must still not have it
 /// parsed as audio. Keeping payload types out of that window is the other

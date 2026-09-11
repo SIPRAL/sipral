@@ -249,8 +249,9 @@ impl UserAgent {
         self.announcements.len() != before
     }
 
-    /// How long an announced call is waited for. See [`WINDOW`] for the
-    /// default and what it is made of.
+    /// How long an announced call is waited for. Twenty seconds unless this
+    /// says otherwise: inside the 64·T1 the caller's own INVITE transaction
+    /// gives up after, and long enough for the whole cold path.
     ///
     /// Worth changing while a wake-up chain is being tuned, and worth changing
     /// in only one direction afterwards: a long window keeps a call screen up

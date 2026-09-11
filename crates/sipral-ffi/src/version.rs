@@ -11,11 +11,13 @@
 //! disagree, rather than as a crash in the first call that reads a member that
 //! was not there.
 
+use std::ffi::c_char;
 use std::mem::size_of;
 
-use crate::abi::{constants, record};
+use crate::abi::{SURFACE, constants, record};
 use crate::error::{entry, fail};
 use crate::status::SipralStatus;
+use crate::text::text;
 use crate::versioned::{Versioned, write_versioned};
 
 constants! {
@@ -29,7 +31,7 @@ constants! {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 7;
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 8;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;
@@ -119,16 +121,100 @@ entry! {
     }
 }
 
+entry! {
+    /// How many bytes this build compiled one of the ABI's structs to.
+    ///
+    /// `name` is what the header calls the type — `sipral_stack_config_t` —
+    /// as bytes and a length, the way every string crosses here. A name this
+    /// build has no struct for is `SIPRAL_STATUS_INVALID_ARGUMENT`, which is
+    /// the answer a caller holding somebody else's header gets.
+    ///
+    /// Nothing in the library needs asking: the `size` member a struct
+    /// carries settles a disagreement in the ordinary course of a call. This
+    /// is for finding out there is one before making it. A package built
+    /// against one header and loaded over a native library from another
+    /// shows up here as a `sizeof` that differs, in one call at load, rather
+    /// than in whichever member happened to move.
+    ///
+    /// # Safety
+    ///
+    /// `name` must be readable for `name_len` bytes, and `out_size` must
+    /// point at one `size_t`.
+    fn sipral_abi_struct_size(name: *const c_char, name_len: usize, out_size: *mut usize) {
+        let Some(wanted) = (unsafe { text(name, name_len, "name") })? else {
+            return Err(fail(SipralStatus::InvalidArgument, "name is empty"));
+        };
+        let Some(record) = SURFACE
+            .records
+            .iter()
+            .find(|record| record.c_name() == wanted)
+        else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!("this ABI has no struct called {wanted}"),
+            ));
+        };
+        if out_size.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_size is null"));
+        }
+        unsafe { out_size.write(record.size) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// How many of the ABI's structs carry a `size` member.
+    ///
+    /// The companion to `sipral_abi_struct_size`, and the part of the check a
+    /// caller cannot write for itself. A caller that compares lengths holds
+    /// a list of the structs it knows about, and the list is what goes
+    /// stale: a struct this ABI gained is one nobody thought to ask about,
+    /// and a length check that covers all but the newest still passes. Ask
+    /// for this number, compare it with the length of that list, and the day
+    /// the ABI grows another the caller is told.
+    ///
+    /// # Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    fn sipral_abi_versioned_count(out_count: *mut usize) {
+        if out_count.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_count is null"));
+        }
+        let counted = SURFACE
+            .records
+            .iter()
+            .filter(|record| record.is_versioned())
+            .count();
+        unsafe { out_count.write(counted) };
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         SIPRAL_ABI_VERSION_MAJOR, SIPRAL_ABI_VERSION_MINOR, SIPRAL_ABI_VERSION_PATCH,
-        SipralAbiVersion, sipral_abi_check, sipral_abi_version,
+        SipralAbiVersion, sipral_abi_check, sipral_abi_struct_size, sipral_abi_version,
+        sipral_abi_versioned_count,
     };
+    use crate::abi::SURFACE;
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
     use std::mem::size_of;
     use std::ptr;
+
+    /// What C would ask: a NUL-terminated name, passed as bytes and a length
+    /// the way the boundary takes every string.
+    fn size_of_struct(name: &str) -> Result<usize, SipralStatus> {
+        let mut size = usize::MAX;
+        let status =
+            unsafe { sipral_abi_struct_size(name.as_ptr().cast(), name.len(), &raw mut size) };
+        if status == SipralStatus::Ok {
+            Ok(size)
+        } else {
+            Err(status)
+        }
+    }
 
     fn empty_version() -> SipralAbiVersion {
         SipralAbiVersion {
@@ -231,6 +317,119 @@ mod tests {
         assert_eq!(
             unsafe { sipral_abi_check(0, SIPRAL_ABI_VERSION_MINOR.wrapping_sub(1)) },
             SipralStatus::UnsupportedVersion
+        );
+    }
+
+    #[test]
+    fn every_struct_of_the_abi_answers_with_the_size_it_was_compiled_to() {
+        for record in SURFACE.records {
+            assert_eq!(
+                size_of_struct(&record.c_name()),
+                Ok(record.size),
+                "{} does not answer for itself",
+                record.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_size_reported_is_the_size_the_compiler_settled_on() {
+        assert_eq!(
+            size_of_struct("sipral_abi_version_t"),
+            Ok(size_of::<SipralAbiVersion>())
+        );
+    }
+
+    #[test]
+    fn a_struct_this_abi_never_had_is_a_bad_argument_and_says_which() {
+        assert_eq!(
+            size_of_struct("sipral_teleporter_t"),
+            Err(SipralStatus::InvalidArgument)
+        );
+        assert!(
+            last_error_text().contains("sipral_teleporter_t"),
+            "the message does not name what was asked for: {}",
+            last_error_text()
+        );
+    }
+
+    /// The Rust spelling is not a name the C side has, and answering to it
+    /// would make two names for one struct.
+    #[test]
+    fn the_rust_name_is_not_a_name_this_answers_to() {
+        assert_eq!(
+            size_of_struct("SipralAbiVersion"),
+            Err(SipralStatus::InvalidArgument)
+        );
+        assert_eq!(
+            size_of_struct("sipral_abi_version"),
+            Err(SipralStatus::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn an_empty_or_null_name_is_a_bad_argument() {
+        assert_eq!(size_of_struct(""), Err(SipralStatus::InvalidArgument));
+        let mut size = 0_usize;
+        assert_eq!(
+            unsafe { sipral_abi_struct_size(ptr::null(), 4, &raw mut size) },
+            SipralStatus::InvalidArgument
+        );
+    }
+
+    /// What a caller's list of structs is compared against, so that a
+    /// struct added here and not there is caught on the caller's side.
+    #[test]
+    fn the_count_is_every_record_that_carries_a_size() {
+        let mut counted = usize::MAX;
+        assert_eq!(
+            unsafe { sipral_abi_versioned_count(&raw mut counted) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            counted,
+            SURFACE
+                .records
+                .iter()
+                .filter(|record| record.is_versioned())
+                .count()
+        );
+        assert!(counted > 0, "nothing carries a size, which cannot be");
+    }
+
+    /// Every struct the count promises there is answers to `sipral_abi_struct_size`
+    /// by the name the header gives it, since a caller walking the one uses
+    /// the other.
+    #[test]
+    fn every_struct_the_count_covers_answers_for_its_length() {
+        let mut counted = 0_usize;
+        assert_eq!(
+            unsafe { sipral_abi_versioned_count(&raw mut counted) },
+            SipralStatus::Ok
+        );
+        let answered = SURFACE
+            .records
+            .iter()
+            .filter(|record| record.is_versioned())
+            .filter(|record| size_of_struct(&record.c_name()) == Ok(record.size))
+            .count();
+        assert_eq!(answered, counted);
+    }
+
+    #[test]
+    fn nowhere_to_put_the_count_is_a_bad_argument() {
+        assert_eq!(
+            unsafe { sipral_abi_versioned_count(ptr::null_mut()) },
+            SipralStatus::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn nowhere_to_put_the_answer_is_a_bad_argument() {
+        let name = "sipral_abi_version_t";
+        assert_eq!(
+            unsafe { sipral_abi_struct_size(name.as_ptr().cast(), name.len(), ptr::null_mut()) },
+            SipralStatus::InvalidArgument
         );
     }
 

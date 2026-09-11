@@ -208,11 +208,16 @@ credentials on hardware that is not ours, and for Apple signing there is no way
 to give it one at all — a runner has no keychain. So the gate is a script.
 
 `scripts/check.sh` is it: `cargo fmt`, `cargo clippy` with warnings as errors,
-the test suite, a release build, `cargo deny` for dependency licences,
-`gitleaks` over the history, and the tree checks — SPDX headers, provenance
-references, language, and whether an internal file or a capture has reached the
-tree. It must exit zero before a commit exists. `--hygiene-only` skips the
-build for a fast pass.
+the test suite, `rustdoc` with warnings as errors, a release build, the symbols
+in the C library that build produces, `bindings/c/smoke.c` compiled against the
+header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
+and `clippy` over the iOS half of the CoreAudio one, for two targets this
+machine cannot execute, `cargo deny` for dependency licences, `gitleaks`
+over the history, and the tree checks — SPDX headers, provenance references,
+language, and whether an internal file or a capture has reached the tree. A
+tool that is missing fails the step rather than skipping it: a gate that goes
+green without the scanner has not looked. It must exit zero before a commit
+exists. `--hygiene-only` skips the build for a fast pass.
 
 `scripts/lab.sh` runs the container lab: the three servers, the flows against
 each, and the same call again over a link made bad with `tc netem`. It needs
