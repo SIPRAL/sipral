@@ -21,11 +21,30 @@ categories.workspace = true
 # the one crate that ships before the ABI freezes: a name reservation
 publish = true
 
+[features]
+# `sipral-media`'s own feature, carried up so that an application depends on
+# this crate and nothing else to decide it. On by default, off for the build
+# that must not link libopus — the reason is in `crates/sipral-media/Cargo.toml`
+# and in `docs/05-media.md`. With it off, `Codec::ALL` is G.722 and the two
+# G.711 laws, and a peer that offers nothing else is a call with no audio in
+# the ordinary way, not a special kind of failure.
+default = ["opus"]
+opus = ["sipral-media/opus"]
+
+# with `opus` off there is no `Codec::Opus` and the enumeration is three long,
+# so docs.rs is told to build the whole surface rather than whichever half a
+# default would have given it
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
-sipral-media = { path = "../sipral-media", version = "0.0.1" }
+# `default-features = false` is what makes this crate's own feature mean
+# anything: without it, `--no-default-features` on this crate would still link
+# libopus through `sipral-media` and prove nothing.
+sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
 
 [lints]
 workspace = true

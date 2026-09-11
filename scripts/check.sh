@@ -264,6 +264,89 @@ cargo test --workspace --all-features >/dev/null 2>&1 \
     && pass "cargo test" || fail "cargo test --workspace --all-features"
 cargo build --workspace --release >/dev/null 2>&1 && pass "release build" || fail "cargo build --release"
 
+# The mirror of --all-features. Opus is behind a feature because libopus is
+# licensed rather than written (`docs/05-media.md`), and the customer who
+# needs it out is the one shipping hardware -- so the build without it has to
+# be one somebody compiles, or the cfg rots and the promise is worth nothing.
+step "the build without Opus"
+cargo build -p sipral --no-default-features >/dev/null 2>&1 \
+    && pass "cargo build -p sipral" || fail "cargo build -p sipral --no-default-features"
+cargo build -p sipral-ffi --no-default-features >/dev/null 2>&1 \
+    && pass "cargo build -p sipral-ffi" || fail "cargo build -p sipral-ffi --no-default-features"
+cargo test -p sipral-media --no-default-features >/dev/null 2>&1 \
+    && pass "cargo test -p sipral-media" || fail "cargo test -p sipral-media --no-default-features"
+cargo test -p sipral --no-default-features >/dev/null 2>&1 \
+    && pass "cargo test -p sipral" || fail "cargo test -p sipral --no-default-features"
+cargo test -p sipral-ffi --no-default-features >/dev/null 2>&1 \
+    && pass "cargo test -p sipral-ffi" || fail "cargo test -p sipral-ffi --no-default-features"
+
+# A Cargo feature belongs to the crate that declares it and features are
+# additive, so the ABI crate without its own `opus` over a facade that linked
+# the codec is a configuration somebody can really build -- and the one in
+# which an answer copied from the wrong crate's flag lies about a codec the
+# build can negotiate. Every C-side answer about Opus is read from the
+# catalogue so that this passes.
+cargo test -p sipral-ffi --no-default-features --features sipral/opus >/dev/null 2>&1 \
+    && pass "cargo test -p sipral-ffi over sipral/opus" \
+    || fail "cargo test -p sipral-ffi --no-default-features --features sipral/opus"
+
+# The cfg-ed code has lints of its own -- the `Result` that is always `Ok`
+# where no codec refuses anything is one, and it needed an allow -- and
+# nothing above ever lints this configuration.
+cargo clippy -p sipral --no-default-features --all-targets -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy -p sipral" \
+    || fail "cargo clippy -p sipral --no-default-features --all-targets"
+cargo clippy -p sipral-ffi --no-default-features --all-targets -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy -p sipral-ffi" \
+    || fail "cargo clippy -p sipral-ffi --no-default-features --all-targets"
+cargo clippy -p sipral-media --no-default-features --all-targets -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy -p sipral-media" \
+    || fail "cargo clippy -p sipral-media --no-default-features --all-targets"
+cargo clippy -p sipral-ffi --no-default-features --features sipral/opus --all-targets -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy -p sipral-ffi over sipral/opus" \
+    || fail "cargo clippy -p sipral-ffi --no-default-features --features sipral/opus"
+
+# And the thing the feature exists for, which every check above passes
+# without: with it off, libopus is not in the dependency graph at all. A
+# build that compiles and tests and still links it is a build the customer
+# who asked cannot ship. Both crates, because what that customer ships is
+# the C library, which reaches libopus down an edge of its own: two graphs
+# that are clean today and that one edit can make disagree.
+#
+# The tree is captured first and asserted about second, which is the whole
+# point. Written the other way -- `! cargo tree ... | grep -qi opus` -- a
+# cargo that failed for any reason, a renamed package or a manifest that
+# will not parse, makes the pipeline non-zero under `pipefail` and the `!`
+# turns that into success: the one assertion this step exists for prints ok
+# having read nothing.
+for crate in sipral sipral-ffi; do
+    tree=$(cargo tree -p "$crate" --no-default-features 2>/dev/null)
+    listed=$?
+    if [ "$listed" -ne 0 ] || [ -z "$tree" ]; then
+        fail "cargo tree -p $crate --no-default-features listed nothing, so nothing was checked"
+    elif printf '%s\n' "$tree" | grep -qi opus; then
+        fail "libopus is in the dependency graph of $crate, the build meant to be without it"
+    else
+        pass "nothing links libopus ($crate)"
+    fi
+done
+
+# And the other half of the promise, which nothing above can see: the feature
+# is on by default. Every command in this step passes --no-default-features
+# and is therefore indifferent to what `default` contains, and the lints above
+# force the feature on whatever the manifests say. Empty `default` and the
+# whole gate stays green while every build that asked for nothing quietly
+# loses the codec.
+tree=$(cargo tree -p sipral 2>/dev/null)
+listed=$?
+if [ "$listed" -ne 0 ] || [ -z "$tree" ]; then
+    fail "cargo tree -p sipral listed nothing, so the default was not checked"
+elif printf '%s\n' "$tree" | grep -qi opus; then
+    pass "the default still links libopus"
+else
+    fail "the default build does not link libopus: the feature is meant to be on"
+fi
+
 # the other half of B7: what is committed under bindings/ against what the
 # declarations produce right now. The scans above say a declaration is listed;
 # this says the listed declaration reached the header and all three bindings.

@@ -124,12 +124,16 @@ public enum SipralToggle: UInt32, Sendable {
     case off = 2
 }
 
-/// One codec this build contains. Names for every member that says which.
+/// One codec this ABI has a number for. Names for every member that says
+/// which.
 ///
-/// A value here means there is an encoder and a decoder behind it. That is
-/// what makes the enumeration worth reporting to a settings screen at all: a
-/// list of names the build cannot produce is a list of controls that do
-/// nothing.
+/// A value here is permanent, and that is all it is: a number that has left
+/// this header is spent for good, so a binding compiled against one keeps
+/// working whatever a later build contains. Whether *this* build can produce
+/// the codec is a different question, and `SIPRAL_FEATURE_*` together with
+/// `sipral_codec_at` are what answer it. A settings screen that offers this
+/// list unfiltered is a settings screen with controls that do nothing, which
+/// is the mistake `sipral_capabilities` exists to prevent.
 public enum SipralCodec: UInt32, Sendable {
     /// No codec: the call has none, or the event is not about one.
     case unknown = 0
@@ -139,7 +143,10 @@ public enum SipralCodec: UInt32, Sendable {
     case pcma = 2
     /// G.722, wideband at the price of a narrowband stream.
     case g722 = 3
-    /// Opus.
+    /// Opus. Declared in every build, whether or not this one linked
+    /// libopus, for the reason the enumeration above gives. Whether the
+    /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
+    /// `sipral_codec_at` enumerates, never the presence of this name.
     case opus = 4
 }
 
@@ -609,9 +616,13 @@ public enum Sipral {
     /// against another.
     public static let aBIVERSIONMAJOR: UInt32 = 0
 
-    /// The ABI's minor version, raised by every function or struct member
-    /// added.
-    public static let aBIVERSIONMINOR: UInt32 = 6
+    /// The ABI's minor version, raised by anything the header gains —
+    /// everything the generator prints, and not only a function or a struct
+    /// member. `sipral_abi_check` compares the major and this one; the patch it
+    /// does not ask about. The
+    /// rule for all three numbers is the Versioning section of
+    /// `docs/08-ffi.md`, which is where the ABI contract is written down.
+    public static let aBIVERSIONMINOR: UInt32 = 7
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let aBIVERSIONPATCH: UInt32 = 0
@@ -657,6 +668,16 @@ public enum Sipral {
     /// See SIPRAL_FEATURE_DTMF, and the module documentation for why this
     /// build never sets it.
     public static let fEATURESUBSCRIPTIONS: UInt32 = 32
+
+    /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
+    /// because libopus is the one part of the audio path that is licensed
+    /// rather than written, so a build meant for hardware can leave it out.
+    /// The bit is how an application finds out without having to enumerate
+    /// the codecs, and it is set from the catalogue this build offers rather
+    /// than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
+    /// number either way, since a value that has left this header is spent
+    /// for good.
+    public static let fEATUREOPUS: UInt32 = 64
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///

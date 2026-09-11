@@ -198,12 +198,16 @@ enum class SipralToggle(val value: Int) {
 }
 
 /**
- * One codec this build contains. Names for every member that says which.
+ * One codec this ABI has a number for. Names for every member that says
+ * which.
  *
- * A value here means there is an encoder and a decoder behind it. That is
- * what makes the enumeration worth reporting to a settings screen at all: a
- * list of names the build cannot produce is a list of controls that do
- * nothing.
+ * A value here is permanent, and that is all it is: a number that has left
+ * this header is spent for good, so a binding compiled against one keeps
+ * working whatever a later build contains. Whether *this* build can produce
+ * the codec is a different question, and `SIPRAL_FEATURE_*` together with
+ * `sipral_codec_at` are what answer it. A settings screen that offers this
+ * list unfiltered is a settings screen with controls that do nothing, which
+ * is the mistake `sipral_capabilities` exists to prevent.
  */
 enum class SipralCodec(val value: Int) {
     /**
@@ -223,7 +227,10 @@ enum class SipralCodec(val value: Int) {
      */
     G722(3),
     /**
-     * Opus.
+     * Opus. Declared in every build, whether or not this one linked
+     * libopus, for the reason the enumeration above gives. Whether the
+     * codec is here is `SIPRAL_FEATURE_OPUS` and the list
+     * `sipral_codec_at` enumerates, never the presence of this name.
      */
     OPUS(4),
     ;
@@ -1205,8 +1212,9 @@ data class SipralMediaInfo(
     val codec: Long,
     /**
      * The payload type on the wire. It is the offer's own number and not
-     * necessarily ours: a peer that numbers Opus 111 has said what we say
-     * with 96.
+     * necessarily ours: the two ends pick their own numbers for a format
+     * with no static one, so a peer that numbers it 111 has said what we
+     * say with 96.
      */
     val payloadType: Long,
     /**
@@ -1524,10 +1532,14 @@ object Sipral {
     const val ABI_VERSION_MAJOR: Long = 0
 
     /**
-     * The ABI's minor version, raised by every function or struct member
-     * added.
+     * The ABI's minor version, raised by anything the header gains —
+     * everything the generator prints, and not only a function or a struct
+     * member. `sipral_abi_check` compares the major and this one; the patch it
+     * does not ask about. The
+     * rule for all three numbers is the Versioning section of
+     * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 6
+    const val ABI_VERSION_MINOR: Long = 7
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -1597,6 +1609,18 @@ object Sipral {
      * build never sets it.
      */
     const val FEATURE_SUBSCRIPTIONS: Long = 32
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
+     * because libopus is the one part of the audio path that is licensed
+     * rather than written, so a build meant for hardware can leave it out.
+     * The bit is how an application finds out without having to enumerate
+     * the codecs, and it is set from the catalogue this build offers rather
+     * than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
+     * number either way, since a value that has left this header is spent
+     * for good.
+     */
+    const val FEATURE_OPUS: Long = 64
 
     /**
      * The buffer a caller has to bring for one outgoing packet.

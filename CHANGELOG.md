@@ -10,6 +10,56 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- **Opus is a compile-time feature, and it is on.** `sipral-media` takes
+  libopus as an optional dependency behind `opus`, `sipral` and `sipral-ffi`
+  carry the feature up, and the default is on so that nothing changes for
+  anybody who does not choose. A build with it off offers G.722 and the two
+  G.711 laws and does nothing else differently: `Codec::ALL` is three long, a
+  codec order naming `opus` is refused where it is set exactly as one naming
+  G.729 is, and a negotiation with nothing in common fails on the ordinary
+  path. The C ABI gains `SIPRAL_FEATURE_OPUS`, bit 6 of
+  `sipral_capabilities_t`'s `features`, clear in such a build, while
+  `SIPRAL_CODEC_OPUS` stays 4 in every build: a number that has left the
+  header is spent for good. Every C-side answer about the codec — that bit,
+  the name `sipral_codec_name` gives 4, the number `named_codec` puts on a
+  stream — is read from the catalogue the facade hands down and never from a
+  `cfg` in `sipral-ffi`, because a Cargo feature belongs to the crate that
+  declares it and features are additive: `sipral-ffi` with its own `opus` off
+  over a `sipral` built with it is a configuration anybody can compile, and
+  the ABI has to be right in it. `sipral::Capabilities` gains `opus` and
+  `sipral::Codec` gains `is_opus` and `sipral::MediaError` gains `is_codec`,
+  so the Rust layer answers both questions directly too — and `is_codec` is
+  the hinge the C side turns on before either of its tables. The ABI minor goes to 0.7, because the printed surface gained
+  a constant and `sipral_abi_check` compares the minor and nothing else while
+  the major is 0 — a header that grew without the bump is one no load-time
+  check can tell from the one before it. What raises which of the three
+  numbers is now written where the ABI is documented, in `docs/08-ffi.md`'s
+  Versioning section, with the constant's own rustdoc pointing at it:
+  everything the generator prints raises the minor, and not only a function
+  or a struct member, which is a project rule rather than something about
+  codecs. The reason for all of it is licensing and not size —
+  `docs/05-media.md` says which customer needs it out and why, and notes that
+  a build without the feature needs no cmake and no C++ toolchain because
+  nothing compiles libopus from source, and `docs/10-roadmap.md` now carries
+  the half of that decision the packaging owns, so that the pointer lands on
+  something: a precompiled artefact is built without the feature, or
+  published as two variants labelled clearly enough that nobody ships the
+  wrong one without noticing. The `sipral` crate, which is the one that
+  publishes, documents the feature in its own rustdoc — what disappears with
+  it off, and why — and asks docs.rs for all features, because a published
+  crate whose feature removes items from its public API has to say so where
+  the API is read. And `scripts/check.sh` now builds, tests and lints both
+  configurations, tests the mixed one, and asserts that libopus is out of the
+  dependency graph of `sipral` **and** of `sipral-ffi` — the C library a
+  hardware customer ships reaches the codec down an edge of its own, and two
+  graphs that agree today can be made to disagree by one edit. That assertion
+  captures the tree into a variable first and counts a cargo that did not run
+  as a failure: written as a negated pipeline, as it first was, a renamed
+  package or an unparseable manifest would have made it print ok having read
+  nothing.
+
 ### Changed
 
 - **The roadmap carries what the audit of 10 September found, and what was

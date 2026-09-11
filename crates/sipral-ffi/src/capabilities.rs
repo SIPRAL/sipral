@@ -68,6 +68,15 @@ constants! {
     /// See [`SIPRAL_FEATURE_DTMF`], and the module documentation for why this
     /// build never sets it.
     pub const SIPRAL_FEATURE_SUBSCRIPTIONS: u32 = 1 << 5;
+    /// See [`SIPRAL_FEATURE_DTMF`]. Opus is behind a compile-time feature,
+    /// because libopus is the one part of the audio path that is licensed
+    /// rather than written, so a build meant for hardware can leave it out.
+    /// The bit is how an application finds out without having to enumerate
+    /// the codecs, and it is set from the catalogue this build offers rather
+    /// than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
+    /// number either way, since a value that has left this header is spent
+    /// for good.
+    pub const SIPRAL_FEATURE_OPUS: u32 = 1 << 6;
 }
 
 record! {
@@ -144,6 +153,17 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.srtp {
         features |= SIPRAL_FEATURE_SRTP;
     }
+    // opus: read off the value the facade handed down like every other bit
+    // here, and deliberately not off this crate's own `opus` feature. Cargo
+    // features are per-crate and additive, so a build of this crate with the
+    // feature off can sit on a facade that linked the codec -- and a bit
+    // derived from the wrong crate's flag would tell an application to grey
+    // out a control this build can honour. A build genuinely without it
+    // offers G.711 and G.722, `codec_count` is one lower, and this bit is
+    // clear
+    if capabilities.opus {
+        features |= SIPRAL_FEATURE_OPUS;
+    }
     // subscriptions: sipral_ua::UserAgent has them, this ABI has no entry
     // point that reaches one yet (event kind 15 is reserved), so the honest
     // answer here is the ABI's and not the crate underneath it — see the
@@ -180,14 +200,15 @@ entry! {
 #[cfg(test)]
 mod tests {
     use super::{
-        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_RECORDING,
-        SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP, SIPRAL_FEATURE_SUBSCRIPTIONS,
-        SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS, SIPRAL_TRANSPORT_BIT_UDP,
-        SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS, SipralCapabilities, sipral_capabilities,
+        SIPRAL_FEATURE_DTMF, SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG, SIPRAL_FEATURE_OPUS,
+        SIPRAL_FEATURE_RECORDING, SIPRAL_FEATURE_RTCP_MUX, SIPRAL_FEATURE_SRTP,
+        SIPRAL_FEATURE_SUBSCRIPTIONS, SIPRAL_TRANSPORT_BIT_TCP, SIPRAL_TRANSPORT_BIT_TLS,
+        SIPRAL_TRANSPORT_BIT_UDP, SIPRAL_TRANSPORT_BIT_WS, SIPRAL_TRANSPORT_BIT_WSS,
+        SipralCapabilities, sipral_capabilities,
     };
     use crate::error::last_error_text;
     use crate::status::SipralStatus;
-    use sipral::Codec;
+    use sipral::{Capabilities, Codec};
 
     fn zeroed() -> SipralCapabilities {
         SipralCapabilities {
@@ -241,6 +262,31 @@ mod tests {
         ] {
             assert_ne!(capabilities.features & bit, 0, "bit {bit:#x} should be set");
         }
+    }
+
+    /// The bit and the codec list are two ways of asking the same question
+    /// and have to agree, or an application greys out a control this build
+    /// can honour, or offers one it cannot.
+    ///
+    /// Asked of the catalogue and never of `cfg!(feature = "opus")`: this
+    /// crate's feature is its own, and `--no-default-features` here over a
+    /// facade built with `sipral/opus` is a legal configuration in which the
+    /// flag says no and the build can negotiate the codec.
+    #[test]
+    fn opus_reads_present_exactly_when_the_catalogue_contains_it() {
+        let capabilities = read();
+        assert_eq!(
+            capabilities.features & SIPRAL_FEATURE_OPUS != 0,
+            Codec::ALL
+                .iter()
+                .any(|codec| codec.encoding_name() == "opus"),
+            "the bit and the catalogue disagree about what was linked"
+        );
+        assert_eq!(
+            capabilities.features & SIPRAL_FEATURE_OPUS != 0,
+            Capabilities::of_this_build().opus,
+            "the bit is the facade's answer and not a second opinion"
+        );
     }
 
     #[test]

@@ -59,6 +59,35 @@ ISC, Zlib). None of them restricts either arm. Their attributions are in
 binaries. The dependency allow-list is enforced by `cargo deny`, which
 `scripts/check.sh` runs.
 
+### Patents, and one codec in particular
+
+A licence on source and a patent reading on what that source does are different
+things, and a permissive licence settles only the first. Nothing in this file,
+and nothing in either arm, is a representation that Sipral infringes no patent.
+
+One dependency is worth knowing about before you build on it. Opus is the
+subject of a patent pool licensing for Dolby, Fraunhofer and NTT, which names
+**IP phones** among the product categories it pursues and publishes a per-unit
+rate. The pool states that it does not direct the programme at open source
+software distributed independently of a hardware device. Read that for what it
+is: a statement of aim, revisable, granting nobody anything. It is not a
+licence and it is not cover.
+
+So the two situations are not the same. Sipral shipped as software, on its own,
+is outside what the programme says it currently pursues. A handset with Sipral
+inside is in a category the pool names by name. That exposure is yours rather
+than ours, and it is written here so that it is a decision you make rather than
+something you discover later.
+
+Two things follow. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) sets out
+the pool, its licensors, what it claims to cover and where to read the primary
+sources, at `opuspool.com`. And if your product cannot carry that exposure,
+build without the codec: Opus sits behind a Cargo feature that is on by
+default, and `--no-default-features` on `sipral` — or on `sipral-ffi`, if what
+you ship is the C library — links no libopus at all and leaves you G.711 and
+G.722. What such a build offers is in
+[`docs/05-media.md`](docs/05-media.md).
+
 ## The name
 
 The licence covers the code, not the name. Read [`TRADEMARK.md`](TRADEMARK.md)

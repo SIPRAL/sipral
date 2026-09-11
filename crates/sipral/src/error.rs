@@ -11,6 +11,7 @@
 use core::fmt;
 
 use sipral_core::sdp::SdpError;
+#[cfg(feature = "opus")]
 use sipral_media::opus::CodecError;
 use sipral_ua::UaError;
 
@@ -89,7 +90,10 @@ pub enum MediaError {
     /// network fault for as long as somebody is willing to keep looking.
     UnusableKeying,
     /// The codec refused a frame. Opus is the only one that can, and it does
-    /// so for a frame length it was not built for.
+    /// so for a frame length it was not built for — so a build with the
+    /// `opus` feature off has nothing that produces this and no variant for
+    /// it.
+    #[cfg(feature = "opus")]
     Codec(CodecError),
     /// The packet did not fit the buffer it had to be built in.
     PacketTooLong {
@@ -157,6 +161,39 @@ impl MediaError {
             name: codec.to_owned(),
         }
     }
+
+    /// Whether this is the codec's own refusal.
+    ///
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well or a build without it documents a variant it has not got
+    #[cfg_attr(
+        feature = "opus",
+        doc = "That is [`MediaError::Codec`], and it is what Opus produces \
+               for a frame it was not built to cut."
+    )]
+    #[cfg_attr(
+        not(feature = "opus"),
+        doc = "The variant that would say so is Opus's, this build has no \
+               Opus, and so this is always `false`."
+    )]
+    ///
+    /// Asked rather than matched, because the variant exists only where Opus
+    /// does and a crate above this one cannot write that `cfg`: a Cargo
+    /// feature belongs to the crate that declares it, so an arm written
+    /// under `sipral-ffi`'s own `opus` goes missing in a build whose facade
+    /// linked the codec, and the refusal falls through to whatever the
+    /// catch-all beneath it says.
+    #[must_use]
+    pub const fn is_codec(&self) -> bool {
+        #[cfg(feature = "opus")]
+        {
+            matches!(*self, Self::Codec(_))
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            false
+        }
+    }
 }
 
 impl From<SdpError> for MediaError {
@@ -165,6 +202,7 @@ impl From<SdpError> for MediaError {
     }
 }
 
+#[cfg(feature = "opus")]
 impl From<CodecError> for MediaError {
     fn from(error: CodecError) -> Self {
         Self::Codec(error)
@@ -222,6 +260,7 @@ impl fmt::Display for MediaError {
             Self::UnusableKeying => {
                 f.write_str("the crypto line asks for terms this build will not be held to")
             }
+            #[cfg(feature = "opus")]
             Self::Codec(error) => write!(f, "codec: {error}"),
             Self::PacketTooLong { need, got } => {
                 write!(f, "the packet needs {need} octets and there are {got}")

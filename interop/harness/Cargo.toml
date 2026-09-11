@@ -12,7 +12,11 @@ publish = false
 
 [dependencies]
 sipral-core.workspace = true
-sipral-media = { path = "../../crates/sipral-media", version = "0.0.1" }
+# default-features = false: the lab is driven on G.711 and G.722, nothing here
+# encodes Opus, and this way the harness builds on a machine with no C++
+# toolchain. A workspace build still links libopus, because the facade asks
+# for it and features unify.
+sipral-media = { path = "../../crates/sipral-media", version = "0.0.1", default-features = false }
 sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
 sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1", features = ["reference-loop"] }
 

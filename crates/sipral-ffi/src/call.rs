@@ -1282,10 +1282,37 @@ a=recvonly\r\n";
         tune: impl FnOnce(&mut crate::stack::SipralStackConfig),
     ) -> (SipralHandle, SipralHandle) {
         let (handle, account) = media_line(observed, tune);
+        up(observed, handle, account, ANSWER)
+    }
+
+    /// The same, offering the codecs named and answered with the line given,
+    /// for the test that needs a call on something other than the mu-law
+    /// every other fixture here negotiates.
+    pub(crate) fn media_call_offering(
+        observed: &mut Observed,
+        codecs: &'static str,
+        answer: &[u8],
+    ) -> (SipralHandle, SipralHandle) {
+        let (handle, account) = media_line(observed, |config| {
+            let (text, len) = as_text(codecs);
+            config.codecs = text;
+            config.codecs_len = len;
+        });
+        up(observed, handle, account, answer)
+    }
+
+    /// One call placed on a line that is ready, answered with `answer`, and
+    /// up with audio on it.
+    fn up(
+        observed: &Observed,
+        handle: SipralHandle,
+        account: SipralHandle,
+        answer: &[u8],
+    ) -> (SipralHandle, SipralHandle) {
         let (status, call) = place(handle, account, &managed_config(), 1_000);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let invite = one(handle);
-        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        deliver(handle, &accepted(&invite, answer, true), 1_100);
         poll(handle, 1_100);
         assert_eq!(
             state_of(handle, call),

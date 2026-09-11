@@ -12,12 +12,24 @@ keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
 
+[features]
+# The facade's Opus feature, carried up once more so that an application
+# linking the C ABI and nothing else still decides it here. On by default.
+# Nothing in this crate branches on it: `SIPRAL_FEATURE_OPUS`, the codec list
+# and every name the ABI gives a codec are read from the catalogue `sipral`
+# hands down, because a feature belongs to the crate that declares it and
+# this one can be off over a facade that did link libopus. `SIPRAL_CODEC_OPUS`
+# is 4 in every build and always will be, because a number that has left this
+# header is spent for good.
+default = ["opus"]
+opus = ["sipral/opus"]
+
 [dependencies]
 # the facade, which is what carries media across this boundary. The two below
 # it stay because this crate drives the endpoint directly in places the facade
 # has no opinion about -- transport binding, timers, an in-dialog INFO -- and
 # they are the same crates the facade re-exports, so no type is duplicated.
-sipral = { path = "../sipral", version = "0.0.1" }
+sipral = { path = "../sipral", version = "0.0.1", default-features = false }
 sipral-core.workspace = true
 sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 

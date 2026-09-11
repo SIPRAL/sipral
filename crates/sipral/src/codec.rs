@@ -35,7 +35,9 @@ use sipral_core::sdp::{
     KeySalt, MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, SrtpSupport,
     static_rtpmap,
 };
-use sipral_media::{g711, g722, opus};
+#[cfg(feature = "opus")]
+use sipral_media::opus;
+use sipral_media::{g711, g722};
 
 use crate::error::MediaError;
 use crate::keying::{self, SrtpPolicy};
@@ -46,7 +48,14 @@ use crate::keying::{self, SrtpPolicy};
 pub const DEFAULT_FRAME_MS: u32 = 20;
 
 /// The first dynamic payload type, from RFC 3551 table 5's "96-127 dynamic".
-/// Opus has no static number and takes this one.
+///
+/// Handed out from here, in offer order, to every codec in the catalogue that
+/// has no static number of its own — which is Opus, and has only ever been
+/// Opus. A build that linked it therefore offers it on 96, and in a build
+/// without it no codec takes this number at all: every one left is in table
+/// 4, and the first thing to reach 96 is the named-event type the DTMF line
+/// carries. `named_events_get_a_dynamic_type_no_codec_took` asserts both
+/// halves.
 const FIRST_DYNAMIC: u8 = 96;
 
 /// One codec this build contains.
@@ -67,7 +76,10 @@ pub enum Codec {
     /// almost every PBX in service.
     G722,
     /// Opus: the best of them, and the only one here that is linked rather
-    /// than written.
+    /// than written, which is why it is the one behind a feature. A build
+    /// with the `opus` feature off has no variant for it at all — see
+    /// `docs/05-media.md`.
+    #[cfg(feature = "opus")]
     Opus,
 }
 
@@ -77,7 +89,17 @@ impl Codec {
     /// The order is quality first, which is the order to offer them in when
     /// nobody has said otherwise; [`CodecCatalog::with_order`] is how a site
     /// says otherwise.
+    ///
+    /// Its length is the build's own and not a number to be relied on: four
+    /// here, three where the `opus` feature is off. Anything that needs the
+    /// count reads it from this array.
+    #[cfg(feature = "opus")]
     pub const ALL: [Self; 4] = [Self::Opus, Self::G722, Self::Pcmu, Self::Pcma];
+    /// Every codec this build contains, which is the three written ones: the
+    /// `opus` feature is off, so there is no encoder for Opus to offer. See
+    /// the other declaration of this constant for the rest.
+    #[cfg(not(feature = "opus"))]
+    pub const ALL: [Self; 3] = [Self::G722, Self::Pcmu, Self::Pcma];
 
     /// The name that goes on an `a=rtpmap` line, spelled as IANA registered
     /// it.
@@ -87,7 +109,27 @@ impl Codec {
             Self::Pcmu => "PCMU",
             Self::Pcma => "PCMA",
             Self::G722 => g722::ENCODING_NAME,
+            #[cfg(feature = "opus")]
             Self::Opus => opus::ENCODING_NAME,
+        }
+    }
+
+    /// Whether this is Opus: the one codec in the catalogue that is linked
+    /// rather than written, and therefore the one a build can be without.
+    ///
+    /// The question has to be answerable from the value, because a crate
+    /// above this one cannot ask a `cfg` for it. Cargo features are
+    /// per-crate and additive, so `sipral-ffi`'s own `opus` being off says
+    /// nothing about whether this catalogue has the codec in it — and an
+    /// answer derived from the wrong crate's flag is an ABI that lies about
+    /// what the build can negotiate. The variant is the fact; the feature
+    /// only decides whether there is one.
+    #[must_use]
+    pub const fn is_opus(self) -> bool {
+        match self {
+            Self::Pcmu | Self::Pcma | Self::G722 => false,
+            #[cfg(feature = "opus")]
+            Self::Opus => true,
         }
     }
 
@@ -100,6 +142,7 @@ impl Codec {
             Self::Pcmu => Some(0),
             Self::Pcma => Some(8),
             Self::G722 => Some(g722::PAYLOAD_TYPE),
+            #[cfg(feature = "opus")]
             Self::Opus => None,
         }
     }
@@ -113,6 +156,7 @@ impl Codec {
     pub const fn clock_rate(self) -> u32 {
         match self {
             Self::Pcmu | Self::Pcma | Self::G722 => g711::CLOCK_RATE,
+            #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
         }
     }
@@ -124,6 +168,7 @@ impl Codec {
         match self {
             Self::Pcmu | Self::Pcma => g711::CLOCK_RATE,
             Self::G722 => g722::SAMPLE_RATE,
+            #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
         }
     }
@@ -156,6 +201,7 @@ impl Codec {
         match self {
             Self::Pcmu | Self::Pcma => self.frame_samples(millis),
             Self::G722 => self.frame_samples(millis) / 2,
+            #[cfg(feature = "opus")]
             Self::Opus => opus::MAX_FRAME_BYTES,
         }
     }
@@ -173,6 +219,7 @@ impl Codec {
             encoding: self.encoding_name().to_owned(),
             clock_rate: self.clock_rate(),
             parameters: match self {
+                #[cfg(feature = "opus")]
                 Self::Opus => Some(opus::RTPMAP_CHANNELS.to_string()),
                 Self::Pcmu | Self::Pcma | Self::G722 => None,
             },
@@ -189,6 +236,7 @@ impl Codec {
     #[must_use]
     pub const fn fmtp(self) -> Option<&'static str> {
         match self {
+            #[cfg(feature = "opus")]
             Self::Opus => Some("useinbandfec=1"),
             Self::Pcmu | Self::Pcma | Self::G722 => None,
         }
@@ -324,13 +372,18 @@ impl CodecCatalog {
     ///
     /// # Errors
     /// [`MediaError::BadFrameLength`] for zero, and for an interval Opus has
-    /// no frame size for when Opus is one of the codecs offered. The three
-    /// written codecs cut a whole number of samples at any whole millisecond,
-    /// because every rate here is a multiple of a thousand; Opus has a fixed
-    /// set of frame durations and encodes nothing else.
+    /// no frame size for when Opus is in this build and is one of the codecs
+    /// offered. The three written codecs cut a whole number of samples at any
+    /// whole millisecond, because every rate here is a multiple of a thousand;
+    /// Opus has a fixed set of frame durations and encodes nothing else, so a
+    /// build without it takes any interval at all.
     pub fn with_frame_length(mut self, millis: u32) -> Result<Self, MediaError> {
+        #[cfg(feature = "opus")]
         let opus_refuses = self.order.contains(&Codec::Opus)
             && opus::FrameDuration::from_micros(millis.saturating_mul(1_000)).is_err();
+        // nothing left in the catalogue has an opinion about frame length
+        #[cfg(not(feature = "opus"))]
+        let opus_refuses = false;
         if millis == 0 || opus_refuses {
             return Err(MediaError::BadFrameLength { millis });
         }
@@ -504,10 +557,26 @@ impl Default for CodecCatalog {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
     use crate::error::MediaError;
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtpMap};
+
+    /// A codec this build has that the far end in these tests never names,
+    /// spelled the way an order spells it and named the way the enumeration
+    /// names it.
+    ///
+    /// Which codec that is depends on the build: Opus where it is compiled
+    /// in, and G.722 where it is not. What the tests using it are about is a
+    /// codec on this side that the other side does not offer — so that there
+    /// is always a candidate to come back `NotNamed` — and that has to be
+    /// some codec in either build. Declared once and shared with the
+    /// two-stack tests in `crate::tests`, which want the same thing of it.
+    #[cfg(feature = "opus")]
+    pub(crate) const UNMATCHED: (&str, Codec) = ("opus", Codec::Opus);
+    /// See the other declaration.
+    #[cfg(not(feature = "opus"))]
+    pub(crate) const UNMATCHED: (&str, Codec) = ("G722", Codec::G722);
 
     /// The trap the interop harness walked into once already, kept here so
     /// that it cannot be walked into again from the other side.
@@ -521,8 +590,11 @@ mod tests {
         assert_eq!(Codec::G722.max_payload(DEFAULT_FRAME_MS), 160);
         assert_eq!(Codec::G722.frame_ticks(DEFAULT_FRAME_MS), 160);
 
-        assert_eq!(Codec::Opus.frame_samples(DEFAULT_FRAME_MS), 960);
-        assert_eq!(Codec::Opus.frame_ticks(DEFAULT_FRAME_MS), 960);
+        #[cfg(feature = "opus")]
+        {
+            assert_eq!(Codec::Opus.frame_samples(DEFAULT_FRAME_MS), 960);
+            assert_eq!(Codec::Opus.frame_ticks(DEFAULT_FRAME_MS), 960);
+        }
     }
 
     /// G.722 counts at half the rate it hears at, and a line that says
@@ -534,6 +606,7 @@ mod tests {
         assert_eq!(Codec::G722.rtpmap(9).to_value(), "9 G722/8000");
     }
 
+    #[cfg(feature = "opus")]
     #[test]
     fn opus_advertises_two_channels_whatever_it_carries() {
         assert_eq!(Codec::Opus.rtpmap(96).to_value(), "96 opus/48000/2");
@@ -544,11 +617,28 @@ mod tests {
         assert_eq!(Codec::Pcmu.static_payload(), Some(0));
         assert_eq!(Codec::Pcma.static_payload(), Some(8));
         assert_eq!(Codec::G722.static_payload(), Some(9));
+        #[cfg(feature = "opus")]
         assert_eq!(Codec::Opus.static_payload(), None);
     }
 
     #[test]
     fn an_order_names_the_codecs_and_keeps_them_in_that_order() {
+        let catalog = CodecCatalog::with_order(&["PCMA", "G722"]).unwrap();
+        assert_eq!(catalog.codecs(), [Codec::Pcma, Codec::G722]);
+        let offered: Vec<u8> = catalog
+            .capabilities()
+            .codecs
+            .iter()
+            .map(NegotiatedCodec::payload)
+            .collect();
+        assert_eq!(offered, [8, 9]);
+    }
+
+    /// The same, for the one codec that has no static number: it is the
+    /// dynamic types this build hands out that the order decides.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn an_order_naming_opus_gives_it_the_first_dynamic_type_left() {
         let catalog = CodecCatalog::with_order(&["PCMA", "opus"]).unwrap();
         assert_eq!(catalog.codecs(), [Codec::Pcma, Codec::Opus]);
         let offered: Vec<u8> = catalog
@@ -574,7 +664,10 @@ mod tests {
             }
         );
         assert!(error.to_string().contains("SILK"));
-        // and the message says what there is instead
+        // and the message says what there is instead, which is what the build
+        // has and not a list written out somewhere
+        assert!(error.to_string().contains("G722"));
+        #[cfg(feature = "opus")]
         assert!(error.to_string().contains("opus"));
 
         // and beside a codec that does exist, where the order is still refused
@@ -595,6 +688,7 @@ mod tests {
     /// milliseconds is a perfectly ordinary `ptime` for G.711 and Opus has no
     /// such frame, so which answer comes back depends on what is being
     /// offered — and both answers have to be the right one.
+    #[cfg(feature = "opus")]
     #[test]
     fn a_frame_length_opus_has_no_frame_for_is_refused_only_where_opus_is() {
         assert_eq!(
@@ -622,16 +716,50 @@ mod tests {
         );
     }
 
+    /// The other half of that, for the build with no Opus in it: nothing
+    /// left has an opinion about frame length, so thirty milliseconds is
+    /// taken and only zero is refused.
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn without_opus_every_whole_millisecond_cuts_a_frame() {
+        assert_eq!(
+            CodecCatalog::new()
+                .with_frame_length(30)
+                .unwrap()
+                .frame_length(),
+            30
+        );
+        assert_eq!(
+            CodecCatalog::new().with_frame_length(0).unwrap_err(),
+            MediaError::BadFrameLength { millis: 0 }
+        );
+    }
+
     /// The named-event payload type has to fall clear of the codecs, whatever
     /// order they were put in.
     #[test]
     fn named_events_get_a_dynamic_type_no_codec_took() {
         let capabilities = CodecCatalog::new().capabilities();
-        assert_eq!(
-            capabilities.codecs.first().map(NegotiatedCodec::payload),
-            Some(96)
-        );
-        assert_eq!(capabilities.dtmf_payload(), Some(97));
+        #[cfg(feature = "opus")]
+        {
+            // Opus is first and takes the first dynamic type, so events take
+            // the next one
+            assert_eq!(
+                capabilities.codecs.first().map(NegotiatedCodec::payload),
+                Some(96)
+            );
+            assert_eq!(capabilities.dtmf_payload(), Some(97));
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            // every codec left has a static number of its own, so events take
+            // the first dynamic one
+            assert_eq!(
+                capabilities.codecs.first().map(NegotiatedCodec::payload),
+                Some(9)
+            );
+            assert_eq!(capabilities.dtmf_payload(), Some(96));
+        }
 
         let narrow = CodecCatalog::with_order(&["PCMU"]).unwrap().capabilities();
         assert_eq!(narrow.dtmf_payload(), Some(96));
@@ -650,9 +778,17 @@ mod tests {
         let offer = CodecCatalog::new()
             .capabilities()
             .offer("audio", 40_000, Direction::SendRecv);
-        assert_eq!(offer.formats, ["96", "9", "0", "8", "97"]);
-        assert_eq!(offer.fmtp(96), Some("useinbandfec=1"));
-        assert_eq!(offer.fmtp(97), Some("0-15"));
+        #[cfg(feature = "opus")]
+        {
+            assert_eq!(offer.formats, ["96", "9", "0", "8", "97"]);
+            assert_eq!(offer.fmtp(96), Some("useinbandfec=1"));
+            assert_eq!(offer.fmtp(97), Some("0-15"));
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            assert_eq!(offer.formats, ["9", "0", "8", "96"]);
+            assert_eq!(offer.fmtp(96), Some("0-15"));
+        }
         assert!(!offer.has_flag("rtcp-mux"));
     }
 
@@ -675,7 +811,12 @@ mod tests {
             clock_rate: 48_000,
             parameters: Some("2".to_owned()),
         });
+        #[cfg(feature = "opus")]
         assert_eq!(Codec::of(&opus), Some(Codec::Opus));
+        // and a build that compiled it out does not recognise it, which is
+        // the whole of what "no Opus" means on the receiving side
+        #[cfg(not(feature = "opus"))]
+        assert_eq!(Codec::of(&opus), None);
 
         let unknown = NegotiatedCodec::new(RtpMap {
             payload: 0,
@@ -690,11 +831,11 @@ mod tests {
     /// catalogue offers — membership, not agreement.
     #[test]
     fn named_in_reads_every_codec_a_stream_lists_by_encoding_not_by_number() {
-        let stream = CodecCatalog::with_order(&["opus", "PCMU"])
+        let stream = CodecCatalog::with_order(&[UNMATCHED.0, "PCMU"])
             .unwrap()
             .capabilities()
             .offer("audio", 40_000, Direction::SendRecv);
-        assert_eq!(Codec::named_in(&stream), [Codec::Opus, Codec::Pcmu]);
+        assert_eq!(Codec::named_in(&stream), [UNMATCHED.1, Codec::Pcmu]);
 
         // named events and comfort noise are not codecs, whatever number they
         // land on
@@ -702,10 +843,7 @@ mod tests {
             CodecCatalog::new()
                 .capabilities()
                 .offer("audio", 40_000, Direction::SendRecv);
-        assert_eq!(
-            Codec::named_in(&with_events),
-            [Codec::Opus, Codec::G722, Codec::Pcmu, Codec::Pcma]
-        );
+        assert_eq!(Codec::named_in(&with_events), Codec::ALL);
     }
 
     /// D5: the codec chosen and why each other candidate was not — a lost
@@ -713,7 +851,7 @@ mod tests {
     /// whichever candidate its own list preferred first.
     #[test]
     fn candidates_says_why_each_codec_that_was_not_chosen_was_not() {
-        let catalog = CodecCatalog::with_order(&["opus", "PCMA", "PCMU"]).unwrap();
+        let catalog = CodecCatalog::with_order(&[UNMATCHED.0, "PCMA", "PCMU"]).unwrap();
         // the far end's own description names only PCMA and PCMU, PCMA first
         let remote = CodecCatalog::with_order(&["PCMA", "PCMU"])
             .unwrap()
@@ -725,7 +863,7 @@ mod tests {
             outcomes,
             vec![
                 CodecCandidate {
-                    codec: Codec::Opus,
+                    codec: UNMATCHED.1,
                     outcome: CodecOutcome::NotNamed,
                 },
                 CodecCandidate {

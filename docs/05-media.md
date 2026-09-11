@@ -275,10 +275,13 @@ user agent's own answer writer, not in the facade, and it is not papered over
 here: carrying the key forward locally would make this end believe a
 negotiation the far end saw fail.
 
-**Buffers.** A session holds two 1500-octet scratch buffers. The largest RTP
-packet this build produces is twelve octets of header, 1275 of Opus and ten of
-tag — 1297 — and a protected compound report is thirty-nine octets under the
-same roof, so SRTP fits in what was already there. `RtpSession` subtracts its
+**Buffers.** A session holds two 1500-octet scratch buffers. No RTP packet
+this build produces gets past twelve octets of header, 1275 of payload and ten
+of tag — 1297 at the top, and that top is the largest Opus frame, so it is the
+bound where the codec is linked and a generous one where it is not: twenty
+milliseconds of G.711 is 160 octets of payload. A protected compound report is
+thirty-nine octets under the same roof, so SRTP fits in what was already
+there. `RtpSession` subtracts its
 own overhead from whatever buffer it is handed and refuses a short one before
 a sequence number is spent, so a buffer that stopped being big enough would be
 a refused frame with a reason on it rather than a truncated packet.
@@ -302,10 +305,11 @@ The pipeline between the codec and whatever produces or consumes samples.
   headers and its comments word for word. So it is implemented from the
   Recommendation, which is what a specification is for — a filter pair, two
   ADPCM sub-bands and about a dozen tables. Opus linked, and the codec worth
-  defaulting to where the far end has it. G.729 follows in phase 2 for the
-  carrier that insists, written in-tree the same way, because the common
-  implementation is GPL and the base patents are reported expired; it is never
-  in the default offer.
+  defaulting to where the far end has it — behind a compile-time feature that
+  is on, for the reason below. G.729 follows in phase 2 for the carrier that
+  insists, written in-tree the same way, because the common implementation is
+  GPL and the base patents are reported expired; it is never in the default
+  offer.
 
   G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
@@ -318,6 +322,45 @@ The pipeline between the codec and whatever produces or consumes samples.
   not a seam.
 - **Voice activity detection and comfort noise**, needed by the jitter buffer's
   adjustment schedule and by silence suppression where a carrier expects it.
+
+### Opus is behind a feature, and the feature is on
+
+libopus is the one part of the audio path that is licensed rather than
+written, and the licence that matters is not the BSD one on the source. Three
+companies run a patent pool over Opus; the list of patents is public, it names
+IP phones as a category, and it is priced per unit. A library distributed on
+its own is not who that pool says it approaches — a desk phone with this stack
+inside it is, and the exposure there is the customer's. So the codec is a
+Cargo feature: `opus` on `sipral-media`, carried up by `sipral` and by
+`sipral-ffi`, so that a product which must not contain libopus leaves it out
+when it compiles rather than turns it off when it runs.
+`THIRD-PARTY-NOTICES.md` carries the licensing position itself.
+
+On by default, because a default decides only for whoever did not choose, and
+whoever did not choose is either an open-source user or a licensee who
+configures the build anyway. The one place where leaving it on would put the
+codec into a product quietly is the precompiled artefacts — the binaries
+somebody downloads instead of compiling — and there are none: nothing in this
+tree packages, signs or publishes one yet. When that work happens the default
+there is off, or two variants labelled clearly enough that nobody ships the
+wrong one without noticing. It is written down where the packaging is — the
+artefact bullet of phase 3 in `docs/10-roadmap.md` — and not decided here.
+
+A build without it offers G.722 and the two G.711 laws, and it needs no cmake
+and no C++ toolchain, because nothing compiles libopus from source: on a bare
+machine that build is a Rust compiler and nothing else. Nothing else about it
+is a special case. There is no `sipral_media::opus` and nothing links
+libopus; `Codec::ALL` is three long; a codec order naming `opus` is refused
+where it is set, by name, exactly as one naming G.729 is; and an offer that
+names Opus and nothing else ends as no common codec, on the ordinary path.
+Across the C ABI the `SIPRAL_FEATURE_OPUS` bit is clear and
+`sipral_codec_count` answers three, while `SIPRAL_CODEC_OPUS` is still 4: a
+number that has left the header is spent for good, whatever the build behind
+it can encode. The bit, the name `sipral_codec_name` gives 4 and the number a
+stream reports are all read from the codec catalogue and never from
+`sipral-ffi`'s own copy of the feature — that copy can be off over a facade
+that linked the codec, and an ABI that answered from it would deny a codec the
+build can negotiate.
 
 ## The processor seam, and the frame that is hard to produce
 

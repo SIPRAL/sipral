@@ -96,12 +96,16 @@ codes! {
 }
 
 codes! {
-    /// One codec this build contains. Names for every member that says which.
+    /// One codec this ABI has a number for. Names for every member that says
+    /// which.
     ///
-    /// A value here means there is an encoder and a decoder behind it. That is
-    /// what makes the enumeration worth reporting to a settings screen at all: a
-    /// list of names the build cannot produce is a list of controls that do
-    /// nothing.
+    /// A value here is permanent, and that is all it is: a number that has left
+    /// this header is spent for good, so a binding compiled against one keeps
+    /// working whatever a later build contains. Whether *this* build can produce
+    /// the codec is a different question, and `SIPRAL_FEATURE_*` together with
+    /// `sipral_codec_at` are what answer it. A settings screen that offers this
+    /// list unfiltered is a settings screen with controls that do nothing, which
+    /// is the mistake `sipral_capabilities` exists to prevent.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralCodec: u32 {
         /// No codec: the call has none, or the event is not about one.
@@ -112,7 +116,10 @@ codes! {
         Pcma = 2,
         /// G.722, wideband at the price of a narrowband stream.
         G722 = 3,
-        /// Opus.
+        /// Opus. Declared in every build, whether or not this one linked
+        /// libopus, for the reason the enumeration above gives. Whether the
+        /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
+        /// `sipral_codec_at` enumerates, never the presence of this name.
         Opus = 4,
     }
 }
@@ -276,8 +283,9 @@ record! {
         /// A [`SipralCodec`]: what the two ends agreed on.
         pub codec: u32,
         /// The payload type on the wire. It is the offer's own number and not
-        /// necessarily ours: a peer that numbers Opus 111 has said what we say
-        /// with 96.
+        /// necessarily ours: the two ends pick their own numbers for a format
+        /// with no static one, so a peer that numbers it 111 has said what we
+        /// say with 96.
         pub payload_type: u32,
         /// The RTP timestamp clock, in hertz.
         pub clock_rate: u32,
@@ -455,15 +463,28 @@ unsafe impl Versioned for SipralMediaPacket {
 
 /// The name this ABI gives a codec.
 pub(crate) const fn named_codec(codec: Codec) -> SipralCodec {
+    // Opus asked of the value and not of a `cfg` on this crate's own `opus`
+    // feature: features are per-crate and additive, so that arm would go
+    // missing in a build of this crate whose facade did link the codec, and
+    // every answer below would then be wrong about a codec the build can
+    // negotiate. `Codec::is_opus` is the catalogue's own answer.
+    if codec.is_opus() {
+        return SipralCodec::Opus;
+    }
     match codec {
         Codec::Pcmu => SipralCodec::Pcmu,
         Codec::Pcma => SipralCodec::Pcma,
         Codec::G722 => SipralCodec::G722,
-        Codec::Opus => SipralCodec::Opus,
         // the layer below has grown a codec this ABI has no number for, and
         // saying so beats picking one that is wrong
         _ => SipralCodec::Unknown,
     }
+}
+
+/// Whether this build's catalogue contains the codec this ABI numbers
+/// `named` — what `sipral_codec_at` enumerates, asked by number.
+fn linked(named: SipralCodec) -> bool {
+    Codec::ALL.iter().any(|codec| named_codec(*codec) == named)
 }
 
 /// The name this ABI gives a direction.
@@ -478,6 +499,13 @@ pub(crate) const fn direction_of(direction: Direction) -> SipralDirection {
 
 /// Which kind of failure a media error is.
 pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
+    // asked of the value for the same reason `named_codec` asks it: the
+    // variant exists only where Opus does, and an arm under this crate's own
+    // `opus` would go missing in a build whose facade linked the codec, so a
+    // refusal that has a code of its own would leave as `Other`
+    if error.is_codec() {
+        return SipralMediaFault::Codec;
+    }
     match *error {
         MediaError::UnsupportedCodec { .. } | MediaError::UnknownPayload { .. } => {
             SipralMediaFault::UnsupportedCodec
@@ -493,7 +521,6 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         MediaError::Recording(_) | MediaError::NotRecording | MediaError::AlreadyRecording => {
             SipralMediaFault::Recording
         }
-        MediaError::Codec(_) => SipralMediaFault::Codec,
         _ => SipralMediaFault::Other,
     }
 }
@@ -503,6 +530,12 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
 /// The sentence comes from the error itself, which already names the codec, the
 /// interval or the file that was the problem. Only the code is decided here.
 pub(crate) fn media_failed(error: &MediaError) -> Fail {
+    // the codec's own refusal, asked of the value and not of a `cfg` — see
+    // `fault_of`. It is a value that would be taken if it were corrected,
+    // which is what the two arms below it are
+    if error.is_codec() {
+        return fail(SipralStatus::InvalidArgument, error.to_string());
+    }
     let status = match *error {
         // the value is right and there is nothing in this build behind it,
         // which is the one case SIPRAL_STATUS_NOT_SUPPORTED exists for. A call
@@ -516,7 +549,6 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         MediaError::NoCodecs
         | MediaError::BadFrameLength { .. }
         | MediaError::Description(_)
-        | MediaError::Codec(_)
         | MediaError::Recording(_)
         | MediaError::DigitTooShort { .. }
         | MediaError::UnknownDigit { .. }
@@ -702,7 +734,10 @@ entry! {
             1 => c"PCMU".as_ptr(),
             2 => c"PCMA".as_ptr(),
             3 => c"G722".as_ptr(),
-            4 => c"opus".as_ptr(),
+            // the number stays in the enumeration whether or not this build
+            // linked the codec; the name is what the build has, which the
+            // catalogue says and no feature of this crate's does
+            4 if linked(SipralCodec::Opus) => c"opus".as_ptr(),
             _ => std::ptr::null(),
         }
     }
@@ -1276,14 +1311,15 @@ pub(crate) mod tests {
         sipral_codec_count, sipral_codec_name, sipral_stack_codec_order, sipral_stack_poll_rtcp,
     };
     use crate::call::tests::{
-        PEER_MEDIA, connected, hangup, media_call, media_call_refused, media_call_tuned, media_line,
+        PEER_MEDIA, connected, hangup, media_call, media_call_offering, media_call_refused,
+        media_call_tuned, media_line,
     };
     use crate::error::last_error_text;
     use crate::event::SipralEventKind;
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::stack::tests::Observed;
     use crate::status::SipralStatus;
-    use sipral::MediaError;
+    use sipral::{Capabilities, MediaError};
     use std::ffi::{CStr, c_char};
     use std::net::SocketAddr;
     use std::ptr;
@@ -1294,6 +1330,30 @@ pub(crate) mod tests {
 
     /// An order naming two of the four this build contains, to read back.
     const ORDER: &str = "G722,PCMA";
+
+    /// What the far end answers an offer of Opus alone with: the dynamic
+    /// payload type this build's offer put it on, and the channel count RFC
+    /// 7587 §7 makes every Opus line carry whatever is really being sent.
+    const OPUS_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+a=sendrecv\r\n";
+
+    /// The same for G.722, which is the codec at the top of a build that has
+    /// no Opus. Its static type, and the clock rate RFC 3551 §4.5.2 fixes at
+    /// half the rate it hears at.
+    const WIDEBAND_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 9\r\n\
+a=rtpmap:9 G722/8000\r\n\
+a=sendrecv\r\n";
 
     /// One RTP packet of mu-law from the far end: version two, payload type
     /// zero, and a source of its own.
@@ -1518,7 +1578,17 @@ pub(crate) mod tests {
         assert_eq!(SipralCodec::Pcmu as u32, 1);
         assert_eq!(SipralCodec::Pcma as u32, 2);
         assert_eq!(SipralCodec::G722 as u32, 3);
-        assert_eq!(SipralCodec::Opus as u32, 4);
+        assert_eq!(
+            SipralCodec::Opus as u32,
+            4,
+            "the number is the ABI and stays whether or not the codec is here"
+        );
+        assert_eq!(
+            name(SipralCodec::Opus as u32).is_some(),
+            Capabilities::of_this_build().opus,
+            "the number is published in every build and the name is the \
+             catalogue's: null where this build linked no Opus"
+        );
         assert_eq!(name(0), None, "no codec is zero");
         assert_eq!(name(5), None);
         assert_eq!(name(u32::MAX), None);
@@ -1571,10 +1641,16 @@ pub(crate) mod tests {
 
         let opus = seen
             .iter()
-            .find(|info| info.codec == SipralCodec::Opus as u32)
-            .expect("this build contains Opus");
-        assert_eq!(opus.has_static_payload_type, 0);
-        assert_eq!(opus.static_payload_type, 0);
+            .find(|info| info.codec == SipralCodec::Opus as u32);
+        assert_eq!(
+            opus.is_some(),
+            Capabilities::of_this_build().opus,
+            "the enumeration and the build disagree about Opus"
+        );
+        if let Some(opus) = opus {
+            assert_eq!(opus.has_static_payload_type, 0);
+            assert_eq!(opus.static_payload_type, 0);
+        }
     }
 
     #[test]
@@ -1625,19 +1701,125 @@ pub(crate) mod tests {
 
     #[test]
     fn an_order_that_names_what_this_build_has_is_taken_in_that_order() {
-        let catalog = ordered(" opus , PCMA ").expect("both are in this build");
-        assert_eq!(catalog.codecs(), [Codec::Opus, Codec::Pcma]);
+        let catalog = ordered(" G722 , PCMA ").expect("both are in this build");
+        assert_eq!(catalog.codecs(), [Codec::G722, Codec::Pcma]);
     }
 
+    /// Where Opus was linked an order naming it is taken, and where it was
+    /// not it is refused where it is set, by name, like any other codec this
+    /// build has no encoder for. That is the whole of what a build without
+    /// Opus does differently: no special error, no silent substitution.
+    ///
+    /// One test rather than a `cfg`-ed pair, because the two halves are told
+    /// apart by the catalogue and not by this crate's `opus` feature: that
+    /// feature is this crate's own, and a build with it off can sit on a
+    /// facade that linked the codec, which would run whichever half of a
+    /// pair was the wrong one.
     #[test]
-    fn a_frame_length_no_codec_in_the_order_cuts_is_refused() {
-        let refused = catalog_of(Some("opus"), 7, true, false)
-            .expect_err("Opus has a fixed set of frame durations");
-        assert_eq!(refused.status, SipralStatus::InvalidArgument);
+    fn an_order_that_names_opus_follows_the_catalogue() {
+        let asked = ordered(" opus , PCMA ");
+        if Capabilities::of_this_build().opus {
+            let named: Vec<&str> = asked
+                .expect("both are in this build")
+                .codecs()
+                .iter()
+                .map(|codec| codec.encoding_name())
+                .collect();
+            assert_eq!(named, ["opus", "PCMA"]);
+        } else {
+            let refused = asked.expect_err("this build has no Opus");
+            assert_eq!(refused.status, SipralStatus::NotSupported);
+        }
+    }
 
+    /// Seven milliseconds is a frame Opus has no size for, so an order that
+    /// names it is refused — and where the codec was never linked the same
+    /// order is refused one step earlier, by name, before any frame length
+    /// is looked at. Both configurations refuse, which is what the name
+    /// says; only the reason differs, and each one is asserted.
+    ///
+    /// Told apart by the catalogue rather than by a `cfg` on this crate's
+    /// `opus` feature, for the reason
+    /// `an_order_that_names_opus_follows_the_catalogue` gives.
+    #[test]
+    fn an_order_naming_a_codec_that_cannot_cut_the_frame_length_is_refused() {
+        let refused = catalog_of(Some("opus"), 7, true, false)
+            .expect_err("no build here cuts a seven-millisecond Opus frame");
+        assert_eq!(
+            refused.status,
+            if Capabilities::of_this_build().opus {
+                SipralStatus::InvalidArgument
+            } else {
+                SipralStatus::NotSupported
+            }
+        );
+    }
+
+    /// The other half: a frame length every codec in the order can cut is
+    /// taken, in every build. G.711 cuts at any whole millisecond, so this
+    /// one says the refusal above is the codec's opinion and not a limit on
+    /// the setting itself.
+    #[test]
+    fn a_frame_length_every_codec_in_the_order_cuts_is_taken() {
         let taken = catalog_of(Some("PCMU"), 7, true, false)
             .expect("G.711 cuts a whole number of samples at any millisecond");
         assert_eq!(taken.frame_length(), 7);
+    }
+
+    /// The codec's own refusal: the one media error both answers to the C
+    /// side decide before they reach their tables, and the one this crate
+    /// may write no `cfg` about, because `sipral-ffi` with its own `opus`
+    /// off over a facade that linked the codec is a build somebody can
+    /// compile.
+    ///
+    /// Produced the way it is really produced rather than assembled here:
+    /// the encoder of the codec at the top of this build's catalogue is
+    /// handed half a frame. Opus encodes one length and refuses every other,
+    /// and the three written codecs cut whatever they are given — so a build
+    /// without Opus produces nothing here at all, which is the other half of
+    /// what this asserts and what says those two answers are unreachable
+    /// there rather than merely untested.
+    #[test]
+    fn the_codecs_own_refusal_is_answered_before_the_table() {
+        let opus = Capabilities::of_this_build().opus;
+        let (order, answer) = if opus {
+            ("opus", OPUS_ANSWER)
+        } else {
+            ("G722", WIDEBAND_ANSWER)
+        };
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_offering(&mut observed, order, answer);
+        assert_eq!(
+            media_info(stack, call).codec,
+            named_codec(Codec::ALL[0]) as u32,
+            "the call did not settle on the codec at the top of this build"
+        );
+
+        let refused = super::with_session(stack, call, |session| {
+            // loud, so that nothing on the way down mistakes it for silence
+            // and swallows the frame before the encoder sees it
+            Ok(session
+                .capture(&vec![8_000_i16; session.frame_samples() / 2])
+                .err())
+        })
+        .expect("the call has media");
+
+        assert_eq!(
+            refused.is_some(),
+            opus,
+            "Opus is the only codec here with an opinion about a frame it \
+             did not expect"
+        );
+        let Some(error) = refused else { return };
+        assert!(error.is_codec(), "{error}");
+        assert_eq!(super::fault_of(&error), SipralMediaFault::Codec);
+        assert_eq!(
+            media_failed(&error).status,
+            SipralStatus::InvalidArgument,
+            "the same frame at the length the call agreed would be taken, \
+             so it is the argument that was wrong and not the build"
+        );
+        hangup(stack, call, 2_000);
     }
 
     #[test]

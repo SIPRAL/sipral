@@ -44,6 +44,27 @@
 //! instant — the wall clock an RTCP sender report carries — is set once, as a
 //! [`WallClock`].
 //!
+//! # Features
+//!
+//! One, `opus`, and it is on by default. It is the only part of this stack a
+//! build can be without, because libopus is the only part that is licensed
+//! rather than written: the patent pool over Opus names IP phones as a
+//! category and prices them per unit, so a product shipping this stack
+//! inside hardware has to be able to leave the codec out of the binary
+//! rather than argue about it. `LICENSING.md` at the root of the repository
+//! carries the two arms this crate is offered under and
+//! `THIRD-PARTY-NOTICES.md` the position on libopus itself;
+//! `docs/05-media.md` says which customer needs it out.
+//!
+//! With the feature off there is no `Codec::Opus` variant at all and no
+//! `MediaError::Codec` for it to refuse anything with, so [`Codec::ALL`] is
+//! G.722 and the two G.711 laws, [`Capabilities::opus`] reads false, and
+//! nothing links libopus. Nothing else is a special case: a codec order
+//! naming `opus` is refused where it is set, by name, exactly as one naming
+//! G.729 is, and a peer that offers nothing else ends as no common codec on
+//! the ordinary path. The published documentation is built with every
+//! feature on, so what is written here is the whole surface.
+//!
 //! # Driving it
 //!
 //! ```no_run

@@ -408,7 +408,7 @@ mod tests {
             ..sipral_rtp::Quality::default()
         };
         StreamStatistics {
-            codec: Codec::Opus,
+            codec: Codec::G722,
             quality,
             round_trip: None,
             packets_sent: 0,
@@ -575,7 +575,7 @@ mod tests {
     fn media_starting_and_ending_move_the_active_calls_gauge() {
         let mut counters = Counters::default();
         counters.observe_media(&MediaEvent::Started {
-            codec: Codec::Opus,
+            codec: Codec::G722,
             direction: Direction::SendRecv,
         });
         assert_eq!(counters.active_calls.get(), 1);
@@ -589,7 +589,7 @@ mod tests {
         // counted a second time or the gauge drifts upward on every re-offer
         let mut counters = Counters::default();
         counters.observe_media(&MediaEvent::Started {
-            codec: Codec::Opus,
+            codec: Codec::G722,
             direction: Direction::SendRecv,
         });
         counters.observe_media(&MediaEvent::Changed {
@@ -633,7 +633,7 @@ mod tests {
         let mut earlier = Counters::default();
         earlier.observe_signalling(&UaEvent::Registering { account });
         earlier.observe_media(&MediaEvent::Started {
-            codec: Codec::Opus,
+            codec: Codec::G722,
             direction: Direction::SendRecv,
         });
 

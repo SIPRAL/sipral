@@ -17,10 +17,12 @@
 //! [`Capabilities::of_this_build`] reads facts that already exist elsewhere
 //! rather than repeating them. The codec count is [`Codec::ALL`]'s own
 //! length, so a codec added to the build changes what this reports without
-//! anybody updating a second list; the transport list names the protocols
-//! `sipral-core`'s endpoint has logic for, and not a socket this crate has
-//! never opened. A capability list that can drift from the build it
-//! describes is worse than none, because it is believed.
+//! anybody updating a second list; [`Capabilities::opus`] is that same list
+//! read for one codec rather than a second copy of the feature that fills
+//! it; the transport list names the protocols `sipral-core`'s endpoint has
+//! logic for, and not a socket this crate has never opened. A capability
+//! list that can drift from the build it describes is worse than none,
+//! because it is believed.
 
 use sipral_ua::TransportProtocol;
 
@@ -63,6 +65,24 @@ pub enum SrtpKeying {
     /// opened in the clear, which is the behaviour this absence is derived
     /// from.
     Dtls,
+}
+
+/// Whether a catalogue contains Opus, walked rather than asked of a `cfg`.
+///
+/// What a build can encode is the catalogue and nothing else, and this is
+/// the one place that reads it for a single codec, so that every layer above
+/// — [`Capabilities::opus`], and the C ABI's `SIPRAL_FEATURE_OPUS` on top of
+/// it — answers from the same fact instead of from whichever crate's feature
+/// flag was nearest.
+const fn contains_opus(codecs: &[Codec]) -> bool {
+    let mut rest = codecs;
+    while let Some((codec, tail)) = rest.split_first() {
+        if codec.is_opus() {
+            return true;
+        }
+        rest = tail;
+    }
+    false
 }
 
 /// The key exchanges a call on this build can actually complete.
@@ -121,6 +141,16 @@ pub struct Capabilities {
     /// Whether RFC 6665 subscriptions and the dialog-state package this
     /// crate wraps ([`sipral_ua::UserAgent::subscribe`]) are compiled in.
     pub subscriptions: bool,
+    /// Whether this build has an Opus encoder and decoder, which is
+    /// [`Capabilities::codecs`] containing it and never a fact of its own.
+    ///
+    /// The one codec a build can be without, because it is licensed rather
+    /// than written — `docs/05-media.md` says which customer needs it out.
+    /// It is a field and not a `cfg` a caller writes for itself so that a
+    /// crate above this one answers the question from this build's
+    /// catalogue: a Cargo feature belongs to the crate that declares it, and
+    /// another crate's is not evidence about this one.
+    pub opus: bool,
 }
 
 impl Capabilities {
@@ -142,6 +172,7 @@ impl Capabilities {
             srtp: !KEYING.is_empty(),
             srtp_keying: &KEYING,
             subscriptions: true,
+            opus: contains_opus(&Codec::ALL),
         }
     }
 }
@@ -186,6 +217,30 @@ mod tests {
         assert!(capabilities.media_stall_watchdog);
         assert!(capabilities.srtp);
         assert!(capabilities.subscriptions);
+    }
+
+    /// The two ways of asking "does this build have Opus" have to agree,
+    /// because everything above reads one of them: the flag is what the C
+    /// ABI's `SIPRAL_FEATURE_OPUS` is derived from, and the catalogue is
+    /// what a negotiation actually offers. A build whose flag said yes and
+    /// whose catalogue had nothing in it would grey in a control that
+    /// negotiates nothing.
+    #[test]
+    fn opus_reads_present_exactly_when_the_catalogue_contains_it() {
+        let capabilities = Capabilities::of_this_build();
+        assert_eq!(
+            capabilities.opus,
+            capabilities
+                .codecs
+                .iter()
+                .any(|codec| codec.encoding_name() == "opus"),
+            "the flag and the catalogue disagree about what was linked"
+        );
+        assert_eq!(
+            capabilities.opus,
+            cfg!(feature = "opus"),
+            "this crate owns the feature, so here the two are the same fact"
+        );
     }
 
     /// The claim is that SDES is reachable and DTLS-SRTP is not, and both

@@ -65,9 +65,11 @@ use crate::stats::StreamStatistics;
 /// Not a path MTU: RTP does not discover one, and a payload that would not fit
 /// here is a payload no codec in this build produces. It is the bound on the
 /// two scratch buffers, and it is generous enough that SRTP's tag and index
-/// still fit behind the largest Opus frame: twelve octets of fixed header,
-/// 1275 of Opus (`opus::MAX_FRAME_BYTES`) and ten of tag come to 1297, and a
-/// protected compound report is thirty-nine octets under the same roof.
+/// still fit behind the largest frame anything here can produce: twelve
+/// octets of fixed header, at most 1275 of payload — the largest Opus frame
+/// (`opus::MAX_FRAME_BYTES`), and only where the codec is linked, against 160
+/// for twenty milliseconds of G.711 — and ten of tag, so 1297 at the top, and
+/// a protected compound report is thirty-nine octets under the same roof.
 /// `RtpSession` subtracts its own overhead from whatever it is handed and
 /// refuses a buffer that is short before a sequence number is spent, so a
 /// number that stopped being enough would be a refused frame rather than a
@@ -280,11 +282,18 @@ impl MediaSession {
     ///
     /// # Errors
     /// [`MediaError::UnknownPayload`] when the answer named a format this
-    /// build cannot decode, [`MediaError::Codec`] when the codec refuses the
-    /// frame length, [`MediaError::RenderDelayTooLong`] for a
-    /// render-to-capture delay no device has, and
-    /// [`MediaError::NoDtlsSrtp`] or [`MediaError::UnusableKeying`] for a
-    /// plan whose keys this build cannot open a stream with.
+    /// build cannot decode,
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well, or the documentation of a build without it points at
+    // nothing and promises an error that build cannot produce
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when the codec refuses the frame length,"
+    )]
+    /// [`MediaError::RenderDelayTooLong`] for a render-to-capture delay no
+    /// device has, and [`MediaError::NoDtlsSrtp`] or
+    /// [`MediaError::UnusableKeying`] for a plan whose keys this build cannot
+    /// open a stream with.
     pub(crate) fn open(
         plan: &MediaPlan,
         frame_ms: u32,
@@ -634,7 +643,12 @@ impl MediaSession {
     /// stopped while the call went on would hear the resumption as a jump.
     ///
     /// # Errors
-    /// [`MediaError::Codec`] when the codec refuses the frame, and
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well or the documentation of a build without it points at nothing
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when the codec refuses the frame, and"
+    )]
     /// [`MediaError::PacketTooLong`] for a payload no buffer here can hold,
     /// which no codec in this build produces.
     pub fn capture(&mut self, samples: &[i16]) -> Result<Option<Datagram<'_>>, MediaError> {

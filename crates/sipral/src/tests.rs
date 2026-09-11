@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{Crypto, Direction, MediaDescription, SessionDescription, parse};
 
+use crate::codec::tests::UNMATCHED;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome};
 use crate::dtmf::{DEFAULT_DIGIT, Digit};
 use crate::error::MediaError;
@@ -35,6 +36,12 @@ use crate::{
 };
 
 const UDP: TransportId = TransportId(1);
+
+/// The codec at the top of the default catalogue, which is what a call
+/// between two default stacks settles on: Opus where the feature is on, and
+/// G.722 where it is off. Read off `Codec::ALL` rather than written down, so
+/// that these tests say "the one the offer preferred" in either build.
+const PREFERRED: Codec = Codec::ALL[0];
 
 /// A tick of the fake clock, and the length of one frame.
 const TICK: Duration = Duration::from_millis(20);
@@ -481,14 +488,14 @@ fn both_ends_settle_on_the_codec_the_offer_preferred() {
             .engine
             .session(call)
             .map(|session| session.codec()),
-        Some(Codec::Opus)
+        Some(PREFERRED)
     );
     assert_eq!(
         pair.callee
             .engine
             .session(remote)
             .map(|session| session.codec()),
-        Some(Codec::Opus)
+        Some(PREFERRED)
     );
 }
 
@@ -512,13 +519,14 @@ fn reordering_the_catalogue_changes_what_the_call_uses() {
 #[test]
 fn a_live_call_says_why_every_other_candidate_was_not_chosen() {
     let mut pair = Pair::asymmetric(
-        CodecCatalog::with_order(&["opus", "PCMA", "PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&[UNMATCHED.0, "PCMA", "PCMU"]).expect("an order"),
         CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order"),
     );
     let call = pair.connect();
 
-    // the callee cannot do Opus, so the caller's offer of it goes nowhere;
-    // both ends do PCMA and PCMU, and the callee's answer names PCMA first
+    // the callee cannot do the caller's first choice, so the offer of it goes
+    // nowhere; both ends do PCMA and PCMU, and the callee's answer names PCMA
+    // first
     let candidates = pair
         .caller
         .engine
@@ -529,7 +537,7 @@ fn a_live_call_says_why_every_other_candidate_was_not_chosen() {
         candidates,
         [
             CodecCandidate {
-                codec: Codec::Opus,
+                codec: UNMATCHED.1,
                 outcome: CodecOutcome::NotNamed,
             },
             CodecCandidate {
@@ -860,10 +868,11 @@ fn the_default_offers_no_keys_and_still_answers_a_peer_that_asks_for_them() {
             .expect("media")
             .is_encrypted()
     );
-    // and it is Opus through the protected path, not only the narrowband one
+    // and it is the codec at the top of the catalogue through the protected
+    // path, not only the narrowband one
     assert_eq!(
         pair.caller.engine.session(call).expect("media").codec(),
-        Codec::Opus
+        PREFERRED
     );
 
     let frame = pair
@@ -888,7 +897,7 @@ fn the_default_offers_no_keys_and_still_answers_a_peer_that_asks_for_them() {
     }
     assert!(
         loudness(&heard) > 2_000,
-        "the tone came back at {} through a secured Opus call",
+        "the tone came back at {} through a secured {PREFERRED} call",
         loudness(&heard)
     );
 }

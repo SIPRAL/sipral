@@ -1056,6 +1056,7 @@ pub(crate) mod tests {
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::media::SipralToggle;
     use crate::status::SipralStatus;
+    use sipral::Codec;
     use std::ffi::{c_char, c_void};
     use std::ptr;
 
@@ -1498,7 +1499,11 @@ pub(crate) mod tests {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         let read = read_settings(handle);
-        assert_eq!(read.codec_count, 4, "everything this build contains");
+        assert_eq!(
+            read.codec_count,
+            Codec::ALL.len(),
+            "everything this build contains"
+        );
         assert_eq!(read.frame_ms, 20, "the default, not the zero given");
         assert_eq!(read.offer_dtmf, SipralToggle::On as u32);
         assert_eq!(read.offer_rtcp_mux, SipralToggle::Off as u32);

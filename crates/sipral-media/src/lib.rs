@@ -11,11 +11,22 @@
 //! [`drift`] to keep two clocks that disagree from emptying a buffer over the
 //! length of a call, and [`mix`] for a conference leg or a local tone.
 //!
-//! [`opus`] is the exception to all of that: the wideband codec worth
-//! defaulting to, linked rather than written, wrapped here so that libopus
-//! stops at this crate's edge. It brings its own concealment and its own
-//! forward error correction, which are better than [`plc`]'s and are used
-//! instead of it on an Opus stream.
+#![cfg_attr(
+    feature = "opus",
+    doc = "[`opus`] is the exception to all of that: the wideband codec worth
+defaulting to, linked rather than written, wrapped here so that libopus stops
+at this crate's edge. It brings its own concealment and its own forward error
+correction, which are better than [`plc`]'s and are used instead of it on an
+Opus stream. It is behind the `opus` feature, which is on unless somebody
+turned it off — `docs/05-media.md` says who does and why.\n"
+)]
+#![cfg_attr(
+    not(feature = "opus"),
+    doc = "Opus is the exception to all of that, and this build does not have
+it: the `opus` feature is off, nothing links libopus, and what is here is
+G.711 and G.722 with [`plc`] concealing for both. `docs/05-media.md` says who
+builds it this way and why.\n"
+)]
 //!
 //! [`vad`] decides whether a frame is speech or a pause, which the jitter
 //! buffer's adjustment schedule and [`comfort_noise`]'s silence suppression
@@ -49,6 +60,7 @@ pub mod drift;
 pub mod g711;
 pub mod g722;
 pub mod mix;
+#[cfg(feature = "opus")]
 pub mod opus;
 pub mod plc;
 pub mod processor;

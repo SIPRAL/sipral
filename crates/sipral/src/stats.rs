@@ -129,7 +129,7 @@ mod tests {
 
     fn statistics() -> StreamStatistics {
         StreamStatistics {
-            codec: Codec::Opus,
+            codec: Codec::G722,
             quality: Quality::default(),
             round_trip: None,
             packets_sent: 0,

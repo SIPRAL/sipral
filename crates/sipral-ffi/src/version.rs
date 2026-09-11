@@ -23,9 +23,13 @@ constants! {
     /// against another.
     pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 0;
 
-    /// The ABI's minor version, raised by every function or struct member
-    /// added.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 6;
+    /// The ABI's minor version, raised by anything the header gains —
+    /// everything the generator prints, and not only a function or a struct
+    /// member. `sipral_abi_check` compares the major and this one; the patch it
+    /// does not ask about. The
+    /// rule for all three numbers is the Versioning section of
+    /// `docs/08-ffi.md`, which is where the ABI contract is written down.
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 7;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;

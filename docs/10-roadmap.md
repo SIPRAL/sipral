@@ -286,7 +286,11 @@ because each of these is a shape and a shape is permanent once published:
   application skeleton that makes a call;
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
   AAR with the shared object for each Android ABI, a NuGet with native runtimes,
-  wheels — with publishing left to a person;
+  wheels — with publishing left to a person, and each of them built without
+  the `opus` feature or published as two variants labelled clearly enough that
+  nobody ships the wrong one without noticing, because a binary somebody
+  downloads instead of compiling is the one place the default would put
+  libopus into a product quietly (`05-media.md`);
 - `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
   PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
   crate holding what the two device crates currently duplicate;

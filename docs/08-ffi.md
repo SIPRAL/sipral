@@ -374,3 +374,31 @@ foreground service for the call lifetime are all still ahead.
 The C ABI carries its own version, independent of the crate version. It is
 reported by a function, checked by every binding at load, and a mismatch is a
 hard failure with a legible message rather than a crash later.
+
+Which number moves is a rule about the printed surface and not about the Rust
+behind it. `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH` in
+`crates/sipral-ffi/src/version.rs` are where they are written down, and this
+is what they mean:
+
+- **major**, when a declaration that was published changes meaning, changes
+  shape or goes away. Nothing built against one major works against another.
+  While it is 0 the ABI is not frozen and no minor promises anything about
+  another, so `sipral_abi_check` takes an exact match; from 1.0 a binding
+  built against an earlier minor of the same major keeps working.
+- **minor**, for anything the header gains: a function, a struct member, an
+  enumerator, a published constant, a type alias — everything the generator
+  prints, and not only the function and the struct member the rule used to
+  name. `sipral_abi_check` compares the major and the minor, and does not ask about the patch, so a
+  surface that grew without the bump is a surface no load-time check can tell
+  from the one before it: a binding generated against the grown header loads
+  happily against a library built before the addition, and finds the symbol
+  or the member missing at the first call that wants it.
+- **patch**, for a fix that changes no declaration. It is not asked for at
+  load, because it cannot make two builds disagree.
+
+Growing the surface is therefore a minor bump in the same change as the
+addition, next to the regenerated `bindings/`. The gate forces the second
+half of that — committed output against what the declarations print, which is
+the check described above — and nothing but a reader forces the first, which
+is why the rule is written here rather than left to be inferred from the
+constant.

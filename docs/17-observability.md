@@ -129,7 +129,13 @@ Every field is read from a fact that already exists rather than copied from
 one. `codecs` is `&Codec::ALL` — the same compile-time list
 `sipral_codec_count` and `sipral_codec_at` already report from — so a codec
 added to the build changes what this answers without a second list to update
-by hand. `transports` names the protocols `sipral-core`'s endpoint has
+by hand. `opus` is that same list walked for one codec, and the C ABI's
+`SIPRAL_FEATURE_OPUS` bit is set from it rather than from a `cfg` in
+`sipral-ffi`: a Cargo feature belongs to the crate that declares it and
+features are additive, so `sipral-ffi` compiled without its own `opus` over a
+`sipral` that linked libopus is a real configuration, and a bit copied from
+the wrong crate's flag would deny a codec that build can negotiate.
+`transports` names the protocols `sipral-core`'s endpoint has
 framing and timers for, not a socket this crate has ever opened: no build of
 `sipral` opens one, so "this build supports TLS" and "this process can open a
 TLS connection" are two different questions, and this answers only the first.

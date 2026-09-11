@@ -3,24 +3,28 @@
 
 //! One codec, driven for one call.
 //!
-//! `sipral-media` holds four encoders and four decoders and has no opinion
-//! about which of them a call is using, because it never sees a negotiation.
-//! This is where the negotiation's answer becomes a pair of state machines: an
-//! encoder fed frames of PCM and a decoder fed payloads, both at the rate the
-//! codec hears at rather than the rate the wire counts in.
+//! `sipral-media` holds an encoder and a decoder for every codec this build
+//! contains, and has no opinion about which of them a call is using because
+//! it never sees a negotiation. This is where the negotiation's answer
+//! becomes a pair of state machines: an encoder fed frames of PCM and a
+//! decoder fed payloads, both at the rate the codec hears at rather than the
+//! rate the wire counts in.
 //!
-//! Concealment belongs here for the same reason. Opus carries its own — it can
-//! reconstruct a lost frame from the redundancy in the next one, which is
-//! better than anything that works on the decoded waveform — and the three
-//! written codecs get [`plc::Concealer`], which extends the pitch period of
-//! the last audio that arrived. Which of the two runs is decided by what the
-//! call negotiated and by nothing else, so the decision is made once, here,
-//! rather than at every lost packet.
+//! Concealment belongs here for the same reason. What fills a lost frame is
+//! the codec's business, so it is settled once, where the pair is built,
+//! rather than at every lost packet: the three written codecs get
+//! [`plc::Concealer`], which extends the pitch period of the last audio that
+//! arrived, and Opus, in a build that has it, carries its own — it can
+//! reconstruct the lost frame from the redundancy in the next packet, which
+//! is better than anything that works on the decoded waveform.
 
 use sipral_media::g711::Law;
+use sipral_media::g722;
+#[cfg(feature = "opus")]
+use sipral_media::opus;
+#[cfg(feature = "opus")]
 use sipral_media::opus::{FrameDuration, SampleRate};
 use sipral_media::plc::Concealer;
-use sipral_media::{g722, opus};
 
 use crate::codec::Codec;
 use crate::error::MediaError;
@@ -34,9 +38,10 @@ pub(crate) struct Coder {
 }
 
 /// What is behind the pair, which is a different thing for each codec and not
-/// a trait: four codecs is not enough to earn dynamic dispatch, and the
-/// differences between them — a stateless companding table, a filter bank with
-/// memory, a C library with a pointer — do not share a shape worth naming.
+/// a trait: a handful of codecs is not enough to earn dynamic dispatch, and
+/// the differences between them — a stateless companding table, a filter bank
+/// with memory, a C library with a pointer — do not share a shape worth
+/// naming.
 enum Kind {
     /// G.711, either law. Stateless in both directions, so the only state is
     /// the concealer's history.
@@ -53,10 +58,17 @@ enum Kind {
     /// [`Concealer::new`](sipral_media::plc::Concealer::new) would make them
     /// right rather than acceptable.
     Wideband(Box<(g722::Encoder, g722::Decoder)>, Concealer),
-    /// Opus, which conceals for itself.
+    /// Opus, which conceals for itself. Only where the `opus` feature is on;
+    /// without it there is no codec here that libopus decodes.
+    #[cfg(feature = "opus")]
     Opus(Box<(opus::Encoder, opus::Decoder)>),
 }
 
+// Opus is the only codec here that refuses anything, so with the feature off
+// these four return a `Result` that is always `Ok`. The signature is the same
+// in both builds on purpose: a caller written against one of them compiles
+// against the other, and this crate has one shape of error path and not two.
+#[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
 impl Coder {
     /// The pair for a codec, cutting frames of `frame_ms` milliseconds.
     ///
@@ -69,9 +81,21 @@ impl Coder {
     /// spending rather than a guess about this particular network.
     ///
     /// # Errors
-    /// [`MediaError::Codec`] when Opus refuses the rate or the frame length,
-    /// which for the frame length can only happen for a peer that negotiated
-    /// a `ptime` Opus has no frame for.
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well, or the documentation of a build without it points at
+    // nothing and promises an error that build cannot produce
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when Opus refuses the rate or the frame \
+               length, which for the frame length can only happen for a peer \
+               that negotiated a `ptime` Opus has no frame for."
+    )]
+    #[cfg_attr(
+        not(feature = "opus"),
+        doc = "None. Opus is the only codec here that refuses anything and \
+               this build does not have it, so the answer is always `Ok` — \
+               see the note above the `impl`."
+    )]
     pub(crate) fn new(codec: Codec, frame_ms: u32) -> Result<Self, MediaError> {
         let kind = match codec {
             Codec::Pcmu => Kind::Companded(Law::Mu, Concealer::new()),
@@ -80,6 +104,7 @@ impl Coder {
                 Box::new((g722::Encoder::new(), g722::Decoder::default())),
                 Concealer::new(),
             ),
+            #[cfg(feature = "opus")]
             Codec::Opus => {
                 let rate = SampleRate::from_hertz(codec.sample_rate())?;
                 let frame = FrameDuration::from_micros(frame_ms.saturating_mul(1_000))?;
@@ -109,11 +134,23 @@ impl Coder {
     /// Turn one frame of PCM into a payload, and say how long it is.
     ///
     /// # Errors
-    /// [`MediaError::Codec`] when Opus refuses the frame.
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well, or the documentation of a build without it points at
+    // nothing and promises an error that build cannot produce
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when Opus refuses the frame."
+    )]
+    #[cfg_attr(
+        not(feature = "opus"),
+        doc = "None. Nothing in this build refuses a frame it can cut, so \
+               the answer is always `Ok`."
+    )]
     pub(crate) fn encode(&mut self, samples: &[i16], out: &mut [u8]) -> Result<usize, MediaError> {
         match &mut self.kind {
             Kind::Companded(law, _) => Ok(law.encode_into(samples, out)),
             Kind::Wideband(pair, _) => Ok(pair.0.encode_into(samples, out)),
+            #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(pair.0.encode(samples, out)?),
         }
     }
@@ -121,8 +158,19 @@ impl Coder {
     /// Turn one payload into PCM, and say how many samples it held.
     ///
     /// # Errors
-    /// [`MediaError::Codec`] when Opus refuses the packet, which for a payload
-    /// off the wire means a corrupt one.
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well, or the documentation of a build without it points at
+    // nothing and promises an error that build cannot produce
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when Opus refuses the packet, which for \
+               a payload off the wire means a corrupt one."
+    )]
+    #[cfg_attr(
+        not(feature = "opus"),
+        doc = "None. The codecs in this build decode whatever octets arrive, \
+               so the answer is always `Ok`."
+    )]
     pub(crate) fn decode(&mut self, payload: &[u8], out: &mut [i16]) -> Result<usize, MediaError> {
         match &mut self.kind {
             Kind::Companded(law, concealer) => {
@@ -135,6 +183,7 @@ impl Coder {
                 concealer.received(out.get_mut(..count).unwrap_or_default());
                 Ok(count)
             }
+            #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(pair.1.decode(payload, out)?),
         }
     }
@@ -142,8 +191,19 @@ impl Coder {
     /// Fill a frame the far end sent and this end did not get.
     ///
     /// # Errors
-    /// [`MediaError::Codec`] when Opus refuses, which it does only for an
-    /// output slice too short for one frame.
+    // the variant is Opus's and exists only where Opus does, so the link has
+    // to as well, or the documentation of a build without it points at
+    // nothing and promises an error that build cannot produce
+    #[cfg_attr(
+        feature = "opus",
+        doc = "[`MediaError::Codec`] when Opus refuses, which it does only \
+               for an output slice too short for one frame."
+    )]
+    #[cfg_attr(
+        not(feature = "opus"),
+        doc = "None. The concealer in this build fills whatever it is given, \
+               so the answer is always `Ok`."
+    )]
     pub(crate) fn conceal(&mut self, out: &mut [i16]) -> Result<usize, MediaError> {
         let frame = self.frame_samples.min(out.len());
         match &mut self.kind {
@@ -151,6 +211,7 @@ impl Coder {
                 concealer.conceal(out.get_mut(..frame).unwrap_or_default());
                 Ok(frame)
             }
+            #[cfg(feature = "opus")]
             Kind::Opus(pair) => Ok(pair.1.conceal(out)?),
         }
     }
@@ -259,9 +320,25 @@ mod tests {
 
     /// Opus is the codec that has an opinion about frame length, and it says
     /// so when the pair is built rather than at the first packet of a call.
+    #[cfg(feature = "opus")]
     #[test]
     fn opus_refuses_a_frame_length_it_has_no_frame_for() {
-        assert!(Coder::new(Codec::Opus, 30).is_err());
+        let refused = Coder::new(Codec::Opus, 30).expect_err("Opus has no 30 ms frame");
+        assert!(
+            refused.is_codec(),
+            "the refusal is the codec's own, and everything above reads that \
+             rather than a `cfg` of its own"
+        );
         assert!(Coder::new(Codec::Pcmu, 30).is_ok());
+    }
+
+    /// And without it, nothing refuses one: every codec left cuts a whole
+    /// number of samples at any whole millisecond.
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn without_opus_every_codec_takes_any_whole_millisecond() {
+        for codec in Codec::ALL {
+            assert!(Coder::new(codec, 30).is_ok(), "{codec}");
+        }
     }
 }

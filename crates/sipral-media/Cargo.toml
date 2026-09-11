@@ -12,13 +12,24 @@ keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
 
+[features]
+# On, so that a build nobody configured is the build everybody wants. Optional,
+# because libopus is the one thing here that is not ours to license: the pool
+# that licenses the patents over Opus names IP phones as a category and prices
+# them per unit, and a customer who ships this stack inside a desk phone has to
+# be able to leave the codec out of the binary rather than argue about it.
+# Without it this crate is G.711 and G.722, and nothing links libopus.
+# `THIRD-PARTY-NOTICES.md` carries the position; `docs/05-media.md` the reason.
+default = ["opus"]
+opus = ["dep:opus"]
+
 [dependencies]
 # libopus, vendored and built by opusic-sys. Pinned exactly: this is the one
 # component of the audio path that is linked rather than written, and the
 # version that gets built is a fact worth being able to point at.
 # `build-bindgen` stays off — opusic-sys ships generated bindings, and turning
 # it on would pull bindgen and clang into the build for no gain.
-opus = "=0.4.0"
+opus = { version = "=0.4.0", optional = true }
 
 [lints]
 workspace = true
