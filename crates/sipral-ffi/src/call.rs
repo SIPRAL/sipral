@@ -394,7 +394,7 @@ entry! {
 }
 
 entry! {
-    /// Refuse a call that came in, with a status of your choosing.
+    /// Refuse a call that came in, with a response code of your choosing.
     ///
     /// 486 Busy Here for a line that is in use, 603 Decline for a person who
     /// does not want to talk. The difference is what a proxy does next.
@@ -405,12 +405,12 @@ entry! {
     fn sipral_call_reject(
         stack: SipralHandle,
         call: SipralHandle,
-        status: u32,
+        code: u32,
         now_ms: u64,
     ) {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let status = status_code(status)?;
+            let status = status_code(code)?;
             state
                 .agent
                 .reject(id, status, now)
@@ -518,7 +518,7 @@ entry! {
 entry! {
     /// Refuse one instead. The session stands exactly as it was (§14.1).
     ///
-    /// 488 Not Acceptable Here is the status that says the description was the
+    /// 488 Not Acceptable Here is the code that says the description was the
     /// problem rather than the request.
     ///
     /// As with [`sipral_call_accept_session`], only for a call the application
@@ -530,13 +530,13 @@ entry! {
     fn sipral_call_reject_session(
         stack: SipralHandle,
         call: SipralHandle,
-        status: u32,
+        code: u32,
         now_ms: u64,
     ) {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             describes_its_own(state, id)?;
-            let status = status_code(status)?;
+            let status = status_code(code)?;
             state
                 .agent
                 .reject_reoffer(id, status, now)
@@ -748,7 +748,7 @@ entry! {
 
 entry! {
     /// Call the transfer target, so that there is somebody to hand the call
-    /// to, and write the new call's handle to `out_call`.
+    /// to, and write the new call's handle to `out_consultation`.
     ///
     /// The consultation leg of an attended transfer. It is answered like any
     /// other call, and [`sipral_call_transfer_to`] is what follows. Putting
@@ -768,11 +768,14 @@ entry! {
         stack: SipralHandle,
         call: SipralHandle,
         config: *const SipralCallConfig,
-        out_call: *mut SipralHandle,
+        out_consultation: *mut SipralHandle,
         now_ms: u64,
     ) {
-        if out_call.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
+        if out_consultation.is_null() {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "out_consultation is null",
+            ));
         }
         let config = unsafe { read_versioned(config) }?;
         if unsafe { managed_media(&config) }?.is_some() {
@@ -794,7 +797,7 @@ entry! {
                 .name_of(placed)
                 .map_err(|status| fail(status, "no room for another call on this stack"))
         })?;
-        unsafe { out_call.write(handle) };
+        unsafe { out_consultation.write(handle) };
         Ok(())
     }
 }
@@ -828,19 +831,19 @@ entry! {
 
 entry! {
     /// Take a transfer that was asked for, place the call it names, and write
-    /// that call's handle to `out_call`.
+    /// that call's handle to `out_placed`.
     ///
     /// # Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`.
+    /// `out_placed` must point at one `sipral_handle_t`.
     fn sipral_call_accept_transfer(
         stack: SipralHandle,
         call: SipralHandle,
-        out_call: *mut SipralHandle,
+        out_placed: *mut SipralHandle,
         now_ms: u64,
     ) {
-        if out_call.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
+        if out_placed.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_placed is null"));
         }
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
@@ -853,7 +856,7 @@ entry! {
                 .name_of(placed)
                 .map_err(|status| fail(status, "no room for another call on this stack"))
         })?;
-        unsafe { out_call.write(handle) };
+        unsafe { out_placed.write(handle) };
         Ok(())
     }
 }
@@ -867,12 +870,12 @@ entry! {
     fn sipral_call_reject_transfer(
         stack: SipralHandle,
         call: SipralHandle,
-        status: u32,
+        code: u32,
         now_ms: u64,
     ) {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            let status = status_code(status)?;
+            let status = status_code(code)?;
             state
                 .agent
                 .reject_transfer(id, status, now)

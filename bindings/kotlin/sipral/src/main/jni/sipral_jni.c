@@ -345,11 +345,11 @@ Java_org_sipral_SipralNative_sipral_1call_1answer_1media(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1reject(JNIEnv *env, jobject self, jlong stack, jlong call, jlong status, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1reject(JNIEnv *env, jobject self, jlong stack, jlong call, jlong code, jlong nowMs)
 {
     (void)env;
     (void)self;
-    sipral_status_t status = sipral_call_reject((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)status, (uint64_t)nowMs);
+    sipral_status_t status = sipral_call_reject((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)code, (uint64_t)nowMs);
     return (jint)status;
 }
 
@@ -395,11 +395,11 @@ Java_org_sipral_SipralNative_sipral_1call_1accept_1session(JNIEnv *env, jobject 
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1reject_1session(JNIEnv *env, jobject self, jlong stack, jlong call, jlong status, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1reject_1session(JNIEnv *env, jobject self, jlong stack, jlong call, jlong code, jlong nowMs)
 {
     (void)env;
     (void)self;
-    sipral_status_t status = sipral_call_reject_session((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)status, (uint64_t)nowMs);
+    sipral_status_t status = sipral_call_reject_session((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)code, (uint64_t)nowMs);
     return (jint)status;
 }
 
@@ -432,15 +432,15 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jlong config, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jlong config, jlongArray consultation, jlong nowMs)
 {
     (void)env;
     (void)self;
-    sipral_handle_t call_value = 0;
-    sipral_status_t status = sipral_call_consult((sipral_handle_t)stack, (sipral_handle_t)call, (const sipral_call_config_t *)(intptr_t)config, &call_value, (uint64_t)nowMs);
+    sipral_handle_t consultation_value = 0;
+    sipral_status_t status = sipral_call_consult((sipral_handle_t)stack, (sipral_handle_t)call, (const sipral_call_config_t *)(intptr_t)config, &consultation_value, (uint64_t)nowMs);
     {
-        jlong slot = (jlong)call_value;
-        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+        jlong slot = (jlong)consultation_value;
+        (*env)->SetLongArrayRegion(env, consultation, 0, 1, &slot);
     }
     return (jint)status;
 }
@@ -455,25 +455,25 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer_1to(JNIEnv *env, jobject sel
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jlongArray placed, jlong nowMs)
 {
     (void)env;
     (void)self;
-    sipral_handle_t call_value = 0;
-    sipral_status_t status = sipral_call_accept_transfer((sipral_handle_t)stack, (sipral_handle_t)call, &call_value, (uint64_t)nowMs);
+    sipral_handle_t placed_value = 0;
+    sipral_status_t status = sipral_call_accept_transfer((sipral_handle_t)stack, (sipral_handle_t)call, &placed_value, (uint64_t)nowMs);
     {
-        jlong slot = (jlong)call_value;
-        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+        jlong slot = (jlong)placed_value;
+        (*env)->SetLongArrayRegion(env, placed, 0, 1, &slot);
     }
     return (jint)status;
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1reject_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jlong status, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1reject_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jlong code, jlong nowMs)
 {
     (void)env;
     (void)self;
-    sipral_status_t status = sipral_call_reject_transfer((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)status, (uint64_t)nowMs);
+    sipral_status_t status = sipral_call_reject_transfer((sipral_handle_t)stack, (sipral_handle_t)call, (uint32_t)code, (uint64_t)nowMs);
     return (jint)status;
 }
 

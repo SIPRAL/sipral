@@ -12,6 +12,90 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Nine more fuzz targets, and the gate builds all thirteen.**
+  `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
+  `srtp_unprotect`, `stun` and `turn` join the four that existed, one per door
+  an attacker's bytes come through that the first four never reached: the
+  `a=crypto` policy reader that decodes key material, the recording format a
+  person hand-edits, the dialog-info body a SUBSCRIBE gets back, the control
+  channel a voice agent connects on, RTCP and its typed accessors, the RFC
+  4733 event receiver, SRTP and SRTCP unprotect ahead of the authentication
+  check, the STUN parser that shares a port with media, and TURN's framer and
+  ChannelData both ways they arrive. `srtp_unprotect` drives a run of
+  length-prefixed datagrams through one unprotector per suite rather than one
+  packet through a fresh one, because the replay window and the rollover
+  estimate are the only state an unprotector keeps between packets and a
+  fresh one reaches neither. `scripts/check.sh` now runs `cargo fmt
+  --check`, `cargo clippy -D warnings` and `cargo fuzz build` over all
+  thirteen under the nightly `fuzz/` pins, so a target cannot rot uncompiled
+  or unformatted between releases — `cargo test --workspace`, `cargo fmt
+  --all` and the workspace clippy run all stop at the edge of `fuzz/`, which
+  is a workspace of its own, and four of the targets had already drifted out
+  from under all three. Where the binaries landed is cargo's answer now
+  rather than a hard-coded `fuzz/target`, which was the wrong directory on
+  any machine that sets `CARGO_TARGET_DIR`. The step says `skip` and names
+  what is missing when `cargo-fuzz` or that nightly is not installed, which
+  is the one place in this gate a skip is allowed.
+
+- **The fuzz seed corpus is committed, and says where it came from.**
+  `fuzz/corpus/<target>/` holds 37 seeds, 10 KB in all, so a clone gets
+  thirteen targets with something to start from rather than thirteen runs
+  beginning at the empty input. `tools/fuzz-seeds` writes them out of the
+  library's own builders and encoders — `RequestBuilder`, `CompoundBuilder`,
+  `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector` — and
+  puts each one through the reader its target puts it through before writing
+  it, so a seed that is not what it claims to be fails the generator rather
+  than sitting in the corpus doing nothing: the framer seeds through the
+  framer, the control-channel seeds through the frame decoder, the protected
+  runs through an unprotector holding the target's own key, which is also
+  what says the three that authenticate and the one that is refused as a
+  replay really do. Twelve of the thirteen families go through that; the
+  thirteenth is `builder`, whose input is not a message but the five field
+  values its target cuts it into, so what is checked there is the cut. The
+  one seed that is not written at all is a copy of
+  `fixtures/replay/registration-challenged.sipralrec`, which is this
+  project's own. The generator owns the directory besides writing it: what it
+  does not write, it removes, so a seed dropped from the generator cannot sit
+  in the tree for good behind a check that only counts directories. Nothing
+  here is a capture of anybody's traffic, addresses are RFC 5737's and names
+  are RFC 2606's, and `fuzz/corpus/README.md` says so. `scripts/check.sh`
+  holds the directory to it twice over — its shape, every subdirectory a
+  target `fuzz/Cargo.toml` declares, every target one, the README tracked and
+  the whole of it under 200 KB; and its content, every byte of every seed
+  read for an address somebody could harvest, a forbidden project's name, an
+  assistant trace and Romanian, which are the four things the rest of the
+  tree is read for and which no scan had ever read here. `scripts/fuzz.sh`
+  now writes what a run finds into a scratch corpus under `fuzz/target/`, so
+  a run does not push a thousand mutations in beside the seeds.
+
+- **`tools/abi-gen` has tests, and a pass that reads the names back after it
+  derives them.** The tool that prints the header and three bindings had none.
+  It now has golden files for a small synthetic surface, one per file the
+  generator writes — five of them, since the Kotlin back end prints the
+  binding and the JNI shim beside it — so a change to an emitter shows up as
+  a diff in `tools/abi-gen/golden/` rather than buried in three thousand
+  lines of `bindings/`; and it has a pass that
+  claims every identifier each back end will print, in the scope it will sit
+  in, refusing two declarations that derive one name and naming both. The same
+  pass carries a reserved-word list per language. C#, Kotlin and Swift can be
+  made to take one of their own keywords — `@event`, backticks — and the back
+  ends do; C cannot, and the header is a C++ header too, so a member called
+  `class` or `switch` stops the generator instead of reaching a consumer. A
+  test asserts the real surface passes all four, so the day a declaration is
+  added with a colliding or a reserved name, `cargo test` says so. The
+  callback goes through the same walk: it is the one signature that is not an
+  entry point, it is printed into the header as a function pointer and into
+  the .NET binding as a delegate, and its parameters were the last names in
+  the surface that nothing read back. Every refusal now names the declaration
+  as well as the identifier, in all four languages rather than in the one
+  that happened to report a qualified name. And how wide the golden surface
+  is stopped being a claim: a test counts the shapes of the real surface
+  against the synthetic one and fails naming each one the golden files do not
+  reach, which was twenty of them — the union, the records with no size
+  member, a pointer to a record, the callback in a field, samples going both
+  ways, a struct crossing in both directions at once, and three of the four
+  shapes a documentation link has.
+
 - **`Screen::on_replaces`: the application has the last word on a takeover.**
   A matched `Replaces` is honoured only when the INVITE carrying it arrived
   from the same place the named call's own signalling does, which is right as
@@ -146,6 +230,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **The derived constant names in two bindings were nonsense, and are not any
+  more.** `SIPRAL_FEATURE_OPUS` — the one symbol a hardware customer is told
+  to check for — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,
+  beside `fEATURESUBSCRIPTIONS` and `MEDIAPACKETBYTES` and seventeen others.
+  The camel-case derivation looked for an underscore or a capital to start a
+  word at, and a name already in capitals has neither, so it lower-cased the
+  first letter and left the rest. It now finds word boundaries the way
+  `abi::snake` does, which is the rule the library itself answers with, and
+  the twenty constants are `featureOpus` in Swift, `FeatureOpus` in C#,
+  `FEATURE_OPUS` in Kotlin and `SIPRAL_FEATURE_OPUS` in C. Nothing else in any
+  of the four files moved. The ABI is not frozen and nothing depends on the
+  old spellings, which is why this is a rename rather than an alias.
+
 - **The roadmap carries what an outside reading of the tree found, and what
   was decided about it.** Phase 1 gains two exit criteria: the lab's flows run
   through the join an application links and then through `sipral.h`, and no
@@ -168,6 +265,31 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   Video waits for 1.0 and is phase 6 after it, with its contents named.
 
 ### Fixed
+
+- **Two entry points took a `call` and an `out_call`, and three printed
+  bindings could not survive it.** `sipral_call_consult` and
+  `sipral_call_accept_transfer` both had a parameter named `call` and one
+  named `out_call`; every binding that derives a name off `out_` collapsed the
+  two into one. C# declared two parameters called `call` and would not
+  compile. The JNI shim declared two called `call` and would not compile
+  either. Swift did compile, and was wrong: it wrote `var call` beside the
+  parameter `call`, so the handle it passed the library was a zeroed one and
+  the caller's was never used. The out parameters are now `out_consultation`
+  and `out_placed`. Likewise the three `sipral_call_reject*` entry points took
+  a SIP response code in a parameter named `status`, which the JNI shim
+  shadowed with its own result local — `sipral_status_t status = f(...,
+  status, ...)`, a variable read inside its own initialiser. It is `code` now,
+  which is also what it is. Only parameter names changed: no symbol, no type
+  and no number moved, and nothing about the ABI is different.
+
+- **The Swift back end read the spelling of a return type instead of the
+  type.** It compared `function.returns` against the string `*const c_char`
+  where the other three back ends go through `Type::read`, so
+  `sipral_event_kind_name`, whose declaration sits inside a macro and reaches
+  `stringify!` as `* const c_char` with a space in it, was printed as a call
+  returning a status: `let status = sipral_event_kind_name(kind)` handed a
+  `char` pointer to the status check. It is printed as the string-returning
+  call it is.
 
 - **A NOTIFY of the `refer` package drove a transfer nobody here asked for.**
   A notification of that package arriving in any dialog this layer maps to a

@@ -20,6 +20,18 @@ libfuzzer-sys = "0.4"
 [dependencies.sipral-core]
 path = "../crates/sipral-core"
 
+[dependencies.sipral-headless]
+path = "../crates/sipral-headless"
+
+[dependencies.sipral-ua]
+path = "../crates/sipral-ua"
+
+[dependencies.sipral-rtp]
+path = "../crates/sipral-rtp"
+
+[dependencies.sipral-nat]
+path = "../crates/sipral-nat"
+
 [workspace]
 
 [profile.release]
@@ -49,6 +61,69 @@ bench = false
 [[bin]]
 name = "sdp"
 path = "fuzz_targets/sdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto"
+path = "fuzz_targets/crypto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "headless"
+path = "fuzz_targets/headless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dialoginfo"
+path = "fuzz_targets/dialoginfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtcp"
+path = "fuzz_targets/rtcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_dtmf"
+path = "fuzz_targets/rtp_dtmf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "srtp_unprotect"
+path = "fuzz_targets/srtp_unprotect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stun"
+path = "fuzz_targets/stun.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "turn"
+path = "fuzz_targets/turn.rs"
 test = false
 doc = false
 bench = false

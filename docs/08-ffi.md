@@ -279,6 +279,34 @@ price of one source of truth, and it is the right price: a mistake that is
 everywhere is a mistake somebody finds, where a mistake in one binding of three
 is the failure B7 exists for.
 
+**The names are read back after they are derived.** Each back end makes names
+of its own: `out_state` becomes `state` in C# and in Kotlin, a struct the
+library fills in becomes a `long[]` beside the locals the JNI shim writes
+around it, and a constant becomes `featureOpus`, `FeatureOpus`,
+`FEATURE_OPUS` or `SIPRAL_FEATURE_OPUS` depending on who is reading. Two
+declarations whose derived names land on the same word produce a file that
+does not compile, or — worse, and this happened — one that does: Swift
+printed `var call` beside a parameter called `call` and passed a zeroed handle
+where the caller's was meant to go. So every identifier each back end will
+print is claimed first, in the scope it will sit in, and a second claim on the
+same word stops the generator with both declarations named. The same pass
+carries a reserved-word list per language. Three of the four can be made to
+take one of their own keywords — `@event` in C#, backticks in Swift and in
+Kotlin — and they do; C cannot, and the header is also a C++ header, so a
+member called `class` or `switch` stops the generator rather than reaching a
+consumer. The callback goes through the same walk as everything else: it is
+the one signature that is not an entry point, it is printed into the header
+as a function pointer and into the .NET binding as a delegate, and its
+parameters were the last names in the surface nothing read back.
+`tools/abi-gen/src/names.rs` is the pass, and `tools/abi-gen/golden/` holds a
+small synthetic surface printed as the five files the generator writes — the
+header, the Swift binding, the .NET binding, and the Kotlin binding with the
+JNI shim beside it — so a change to an emitter shows up there rather than
+buried in `bindings/`. "Small" and "reaches every emitter path" pull against
+each other, so the second one is counted rather than claimed: a test takes
+the shapes of the real surface and the shapes of the synthetic one and fails
+naming each shape the golden files do not reach.
+
 **The conventions are load-bearing now.** The generator reads the ABI's own
 shapes off the parameter lists: a pointer followed by a length is one buffer
 going in, a pointer followed by `capacity` is a buffer the library fills, a
@@ -298,6 +326,12 @@ a parameter added to a function, a type changed. The number an event kind
 spends, which travels into all four files. Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.
+
+Two declarations that derive one name in one of the four languages, and a
+name one of them will not take — a parameter of the callback as much as a
+parameter of an entry point or a member of a struct. Those stop the
+generator, so they fail the gate step above and `cargo test -p sipral-abi-gen`
+alike, each naming the language, the declaration and the identifier.
 
 And, because the artefacts exist to be linked rather than read: every entry
 point `abi.rs` lists present in `libsipral_ffi.dylib` and in

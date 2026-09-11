@@ -267,34 +267,81 @@ pub(crate) fn screaming(name: &str) -> String {
     snake(name).to_ascii_uppercase()
 }
 
-/// `bind_address_len` becomes `bindAddressLen`, and `InvalidArgument`
-/// becomes `invalidArgument`.
-pub(crate) fn lower_camel(name: &str) -> String {
-    let mut out = String::new();
-    let mut capitalise = false;
+/// The words a name is made of, lower case, however the declaration spelled
+/// it: `bind_address_len`, `BindAddressLen` and `BIND_ADDRESS_LEN` all give
+/// the same three.
+///
+/// The boundaries are [`snake`]'s own, letter for letter, and
+/// `tests::the_words_a_name_is_made_of_join_back_into_snake` holds the two to
+/// each other over every name the ABI spells: the words joined back with `_`
+/// and lowered are what `snake` produces. A derivation written twice is a
+/// derivation that can disagree with itself.
+///
+/// They part over one shape, and only one: an underscore that borders nothing
+/// -- a leading one, or two in a row -- is a boundary `snake` keeps and this
+/// drops. No name in the ABI has one and none can, because C reserves those
+/// spellings to the implementation and the `refuses` rule [`crate::c::Names`]
+/// carries stops them at the gate.
+pub(crate) fn words(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut previous_lower = false;
     for letter in name.chars() {
         if letter == '_' {
-            capitalise = true;
-        } else if capitalise {
-            out.push(letter.to_ascii_uppercase());
-            capitalise = false;
-        } else if out.is_empty() {
-            out.push(letter.to_ascii_lowercase());
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            previous_lower = false;
+            continue;
+        }
+        if letter.is_ascii_uppercase() && previous_lower && !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+        }
+        previous_lower = letter.is_ascii_lowercase() || letter.is_ascii_digit();
+        word.push(letter);
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// One word with its first letter up and the rest down: `ADDRESS` and
+/// `address` both give `Address`.
+fn capitalised(word: &str) -> String {
+    let mut characters = word.chars();
+    match characters.next() {
+        Some(first) => {
+            first.to_ascii_uppercase().to_string() + &characters.as_str().to_ascii_lowercase()
+        }
+        None => String::new(),
+    }
+}
+
+/// `bind_address_len` becomes `bindAddressLen`, `InvalidArgument` becomes
+/// `invalidArgument`, and `FEATURE_OPUS` becomes `featureOpus`.
+///
+/// The third case is the one this was got wrong for: a name already in
+/// capitals has no lower-case letter for a boundary to be found beside, and a
+/// rule that only looked for `_` and for a capital left `SIPRAL_FEATURE_OPUS`
+/// as `fEATUREOPUS` in the Swift binding.
+pub(crate) fn lower_camel(name: &str) -> String {
+    let words = words(name);
+    let mut out = String::new();
+    for (index, word) in words.iter().enumerate() {
+        if index == 0 {
+            out.push_str(&word.to_ascii_lowercase());
         } else {
-            out.push(letter);
+            out.push_str(&capitalised(word));
         }
     }
     out
 }
 
-/// `bind_address_len` becomes `BindAddressLen`.
+/// `bind_address_len` becomes `BindAddressLen`, and `FEATURE_OPUS` becomes
+/// `FeatureOpus`.
 pub(crate) fn upper_camel(name: &str) -> String {
-    let camel = lower_camel(name);
-    let mut characters = camel.chars();
-    match characters.next() {
-        Some(first) => first.to_ascii_uppercase().to_string() + characters.as_str(),
-        None => camel,
-    }
+    words(name).iter().map(|word| capitalised(word)).collect()
 }
 
 /// The name an entry point takes once the library's prefix is off, in the

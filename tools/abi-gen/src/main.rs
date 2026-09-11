@@ -13,7 +13,11 @@ mod c;
 mod csharp;
 mod kotlin;
 mod model;
+mod names;
 mod swift;
+
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

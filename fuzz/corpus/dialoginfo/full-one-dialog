@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info" version="0" state="full" entity="sip:alice@example.com">
+  <dialog id="as7d900as8" call-id="a84b4c76e66710" local-tag="1928301774" direction="initiator">
+    <state>confirmed</state>
+    <local><identity>sip:alice@example.com</identity></local>
+    <remote><identity>sip:bob@example.com</identity></remote>
+  </dialog>
+</dialog-info>

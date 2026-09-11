@@ -11,12 +11,13 @@
 
 use std::fmt::Write as _;
 
-use sipral_ffi::abi::{Shape, Stands, Surface};
+use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Shape, Stands, Surface, Value};
 
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Type, Writable, linked, plain_named, read_all, screaming,
-    snake,
+    Base, Int, Linked, Read, Refused, Role, Type, Writable, linked, plain_named, read_all,
+    screaming, snake,
 };
+use crate::names::{Layout, Named, Spelling, audit};
 
 /// What a name inside a documentation link is called in C.
 fn spelled(surface: &Surface, path: &str) -> String {
@@ -216,6 +217,7 @@ fn structures(out: &mut String, surface: &Surface) -> Result<(), Refused> {
 
 /// Print the header.
 pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
+    audit(surface, &Names)?;
     let mut out = String::new();
     out.push_str(
         "/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -266,4 +268,245 @@ pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
 /// with.
 pub(crate) fn screaming_prefix(name: &str) -> String {
     snake(name).to_ascii_uppercase()
+}
+
+/// Words C will not take as a name, and the words C++ will not take either.
+///
+/// Both lists, because the header wraps itself in `extern "C"` for a C++
+/// compiler and is included from C++ as often as from C -- a member called
+/// `class` or `new` costs nothing in C and costs the C++ half of the
+/// consumers everything. C's own reserved spellings (`_Bool` and the rest)
+/// are in here too, and the identifiers the standard reserves to the
+/// implementation are caught by the rule below rather than by this list,
+/// since no list can hold them.
+const RESERVED: &[&str] = &[
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_BitInt",
+    "_Bool",
+    "_Complex",
+    "_Decimal128",
+    "_Decimal32",
+    "_Decimal64",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
+    "alignas",
+    "alignof",
+    "and",
+    "and_eq",
+    "asm",
+    "auto",
+    "bitand",
+    "bitor",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "char",
+    "char16_t",
+    "char32_t",
+    "char8_t",
+    "class",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "compl",
+    "concept",
+    "const",
+    "const_cast",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "continue",
+    "decltype",
+    "default",
+    "delete",
+    "do",
+    "double",
+    "dynamic_cast",
+    "else",
+    "enum",
+    "explicit",
+    "export",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "register",
+    "reinterpret_cast",
+    "requires",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "static_assert",
+    "static_cast",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typeid",
+    "typename",
+    "typeof",
+    "typeof_unqual",
+    "union",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "wchar_t",
+    "while",
+    "xor",
+    "xor_eq",
+];
+
+/// What C calls what the surface declares.
+pub(crate) struct Names;
+
+impl Spelling for Names {
+    fn language(&self) -> &'static str {
+        "C"
+    }
+
+    fn reserved(&self) -> &'static [&'static str] {
+        RESERVED
+    }
+
+    /// C has no way at all to spell a keyword as a name -- no `@`, no
+    /// backticks -- so a keyword here is the end of it. The second half is
+    /// §7.1.3: a name that starts with an underscore, or holds two in a row,
+    /// belongs to the implementation, and a header that takes one has taken
+    /// something that was never its to take.
+    fn refuses(&self, place: &str, emitted: &str) -> Option<String> {
+        let _ = place;
+        if RESERVED.contains(&emitted) {
+            return Some(format!("`{emitted}` is a keyword in C or in C++"));
+        }
+        (emitted.starts_with('_') || emitted.contains("__")).then(|| {
+            format!("`{emitted}` is a name C reserves to the implementation (ISO C §7.1.3)")
+        })
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::Flat
+    }
+
+    fn types(&self, surface: &Surface) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for alias in surface.aliases {
+            out.push((named(alias.name), alias.name.to_owned()));
+        }
+        for enumeration in surface.enumerations {
+            out.push((named(enumeration.name), enumeration.name.to_owned()));
+        }
+        for record in surface.records {
+            out.push((named(record.name), record.name.to_owned()));
+        }
+        out
+    }
+
+    fn members(&self, record: &Record) -> Result<Vec<(String, String)>, Refused> {
+        Ok(record
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.to_owned(),
+                    format!("{}::{}", record.name, field.name),
+                )
+            })
+            .collect())
+    }
+
+    fn code(&self, enumeration: &Enumeration, code: &Code) -> String {
+        format!(
+            "{}_{}",
+            screaming_prefix(enumeration.name),
+            screaming(code.name)
+        )
+    }
+
+    fn constant(&self, value: &Value) -> String {
+        value.name.to_owned()
+    }
+
+    fn entry(&self, function: &Function) -> String {
+        function.name.to_owned()
+    }
+
+    fn written_by_hand(&self) -> &'static [(&'static str, &'static str)] {
+        // the include guard is a name in the same namespace as everything else
+        &[("SIPRAL_H", "the include guard")]
+    }
+
+    /// The header prints the callback as a function pointer, and names its
+    /// parameters exactly as the declaration spelled them -- the same rule
+    /// [`Spelling::inside`] follows for an entry point, through the same
+    /// printer.
+    fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
+        let _ = alias;
+        read.iter()
+            .map(|parameter| {
+                Named::new(
+                    "the declaration",
+                    parameter.member.name.to_owned(),
+                    parameter.member.name,
+                )
+            })
+            .collect()
+    }
+
+    fn inside(
+        &self,
+        surface: &Surface,
+        function: &Function,
+        read: &[Read<'_>],
+        parts: &[Role<'_>],
+    ) -> Result<Vec<Named>, Refused> {
+        // C prints the parameters as the declaration spelled them and writes
+        // no local of its own, so the conventions the roles carry change
+        // nothing here
+        let _ = (surface, function, parts);
+        Ok(read
+            .iter()
+            .map(|parameter| {
+                Named::new(
+                    "the declaration",
+                    parameter.member.name.to_owned(),
+                    parameter.member.name,
+                )
+            })
+            .collect())
+    }
 }

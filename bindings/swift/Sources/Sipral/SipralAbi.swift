@@ -610,11 +610,11 @@ public extension sipral_event_t {
 /// Everything the library does, with the C conventions read off it.
 public enum Sipral {
     /// The value no live handle ever takes.
-    public static let hANDLENONE: SipralHandle = 0
+    public static let handleNone: SipralHandle = 0
 
     /// The ABI's major version. Nothing published against one major works
     /// against another.
-    public static let aBIVERSIONMAJOR: UInt32 = 0
+    public static let abiVersionMajor: UInt32 = 0
 
     /// The ABI's minor version, raised by anything the header gains —
     /// everything the generator prints, and not only a function or a struct
@@ -622,10 +622,10 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let aBIVERSIONMINOR: UInt32 = 8
+    public static let abiVersionMinor: UInt32 = 8
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
-    public static let aBIVERSIONPATCH: UInt32 = 0
+    public static let abiVersionPatch: UInt32 = 0
 
     /// Bits of sipral_capabilities_t.transports. A caller checks
     /// `capabilities.transports & SIPRAL_TRANSPORT_BIT_TLS != 0` rather than a
@@ -636,38 +636,38 @@ public enum Sipral {
     /// Named after SipralTransport's own numbers (`1 << (value - 1)`), so
     /// a transport added there in the future gets a bit here without the two
     /// numbering schemes ever being asked to agree by hand.
-    public static let tRANSPORTBITUDP: UInt32 = 1
+    public static let transportBitUdp: UInt32 = 1
 
     /// See SIPRAL_TRANSPORT_BIT_UDP.
-    public static let tRANSPORTBITTCP: UInt32 = 2
+    public static let transportBitTcp: UInt32 = 2
 
     /// See SIPRAL_TRANSPORT_BIT_UDP.
-    public static let tRANSPORTBITTLS: UInt32 = 4
+    public static let transportBitTls: UInt32 = 4
 
     /// See SIPRAL_TRANSPORT_BIT_UDP.
-    public static let tRANSPORTBITWS: UInt32 = 8
+    public static let transportBitWs: UInt32 = 8
 
     /// See SIPRAL_TRANSPORT_BIT_UDP.
-    public static let tRANSPORTBITWSS: UInt32 = 16
+    public static let transportBitWss: UInt32 = 16
 
     /// Bits of sipral_capabilities_t.features.
-    public static let fEATUREDTMF: UInt32 = 1
+    public static let featureDtmf: UInt32 = 1
 
     /// See SIPRAL_FEATURE_DTMF.
-    public static let fEATURERTCPMUX: UInt32 = 2
+    public static let featureRtcpMux: UInt32 = 2
 
     /// See SIPRAL_FEATURE_DTMF.
-    public static let fEATURERECORDING: UInt32 = 4
+    public static let featureRecording: UInt32 = 4
 
     /// See SIPRAL_FEATURE_DTMF.
-    public static let fEATUREMEDIASTALLWATCHDOG: UInt32 = 8
+    public static let featureMediaStallWatchdog: UInt32 = 8
 
     /// See SIPRAL_FEATURE_DTMF.
-    public static let fEATURESRTP: UInt32 = 16
+    public static let featureSrtp: UInt32 = 16
 
     /// See SIPRAL_FEATURE_DTMF, and the module documentation for why this
     /// build never sets it.
-    public static let fEATURESUBSCRIPTIONS: UInt32 = 32
+    public static let featureSubscriptions: UInt32 = 32
 
     /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
     /// because libopus is the one part of the audio path that is licensed
@@ -677,7 +677,7 @@ public enum Sipral {
     /// than from any crate's feature flag; `SIPRAL_CODEC_OPUS` keeps its
     /// number either way, since a value that has left this header is spent
     /// for good.
-    public static let fEATUREOPUS: UInt32 = 64
+    public static let featureOpus: UInt32 = 64
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -686,11 +686,11 @@ public enum Sipral {
     /// codec in this build produces. It is checked before anything is encoded,
     /// because a frame that was encoded and then had nowhere to go is a frame
     /// lost from a stream whose timestamps have already moved past it.
-    public static let mEDIAPACKETBYTES: Int = 1500
+    public static let mediaPacketBytes: Int = 1500
 
     /// Room enough for any address this ABI writes, the NUL included:
     /// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
-    public static let aDDRESSBYTES: Int = 64
+    public static let addressBytes: Int = 64
 
     /// The transport a stack is created with, and the only one this build
     /// binds.
@@ -698,7 +698,7 @@ public enum Sipral {
     /// Named rather than assumed, so that the day a stack has two of them is a
     /// day more numbers become valid and not a day this ABI grows a second way
     /// to hand bytes over.
-    public static let tRANSPORTMAIN: UInt32 = 0
+    public static let transportMain: UInt32 = 0
 
     /// The largest message that crosses in either direction.
     ///
@@ -707,7 +707,7 @@ public enum Sipral {
     /// to be this big on a stream, where one read can hold the end of one
     /// message and the start of another, and 1500 bytes or so on a datagram
     /// socket, where anything larger was fragmented on the way.
-    public static let mESSAGEBYTES: Int = 65535
+    public static let messageBytes: Int = 65535
 
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
@@ -1100,7 +1100,7 @@ public enum Sipral {
         try check(status)
     }
 
-    /// Refuse a call that came in, with a status of your choosing.
+    /// Refuse a call that came in, with a response code of your choosing.
     ///
     /// 486 Busy Here for a line that is in use, 603 Decline for a person who
     /// does not want to talk. The difference is what a proxy does next.
@@ -1108,8 +1108,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Safe to call with any handle values.
-    public static func callReject(stack: SipralHandle, call: SipralHandle, status: UInt32, nowMs: UInt64) throws {
-        let status = sipral_call_reject(stack, call, status, nowMs)
+    public static func callReject(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        let status = sipral_call_reject(stack, call, code, nowMs)
         try check(status)
     }
 
@@ -1181,7 +1181,7 @@ public enum Sipral {
 
     /// Refuse one instead. The session stands exactly as it was (§14.1).
     ///
-    /// 488 Not Acceptable Here is the status that says the description was the
+    /// 488 Not Acceptable Here is the code that says the description was the
     /// problem rather than the request.
     ///
     /// As with sipral_call_accept_session, only for a call the application
@@ -1190,8 +1190,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Safe to call with any handle values.
-    public static func callRejectSession(stack: SipralHandle, call: SipralHandle, status: UInt32, nowMs: UInt64) throws {
-        let status = sipral_call_reject_session(stack, call, status, nowMs)
+    public static func callRejectSession(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        let status = sipral_call_reject_session(stack, call, code, nowMs)
         try check(status)
     }
 
@@ -1252,7 +1252,7 @@ public enum Sipral {
     }
 
     /// Call the transfer target, so that there is somebody to hand the call
-    /// to, and write the new call's handle to `out_call`.
+    /// to, and write the new call's handle to `out_consultation`.
     ///
     /// The consultation leg of an attended transfer. It is answered like any
     /// other call, and sipral_call_transfer_to is what follows. Putting
@@ -1270,10 +1270,10 @@ public enum Sipral {
     /// As sipral_call_place.
     public static func callConsult(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, nowMs: UInt64) throws -> SipralHandle {
         var config = config
-        var call = SipralHandle()
-        let status = sipral_call_consult(stack, call, &config, &call, nowMs)
+        var consultation = SipralHandle()
+        let status = sipral_call_consult(stack, call, &config, &consultation, nowMs)
         try check(status)
-        return call
+        return consultation
     }
 
     /// Hand `call` to the far end of `other` (RFC 3891).
@@ -1291,16 +1291,16 @@ public enum Sipral {
     }
 
     /// Take a transfer that was asked for, place the call it names, and write
-    /// that call's handle to `out_call`.
+    /// that call's handle to `out_placed`.
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`.
+    /// `out_placed` must point at one `sipral_handle_t`.
     public static func callAcceptTransfer(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws -> SipralHandle {
-        var call = SipralHandle()
-        let status = sipral_call_accept_transfer(stack, call, &call, nowMs)
+        var placed = SipralHandle()
+        let status = sipral_call_accept_transfer(stack, call, &placed, nowMs)
         try check(status)
-        return call
+        return placed
     }
 
     /// Refuse one instead.
@@ -1308,8 +1308,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Safe to call with any handle values.
-    public static func callRejectTransfer(stack: SipralHandle, call: SipralHandle, status: UInt32, nowMs: UInt64) throws {
-        let status = sipral_call_reject_transfer(stack, call, status, nowMs)
+    public static func callRejectTransfer(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        let status = sipral_call_reject_transfer(stack, call, code, nowMs)
         try check(status)
     }
 
@@ -1811,9 +1811,9 @@ public enum Sipral {
     ///
     /// Reads no memory the caller owns, and is safe to call from any
     /// thread.
-    public static func eventKindName(kind: UInt32) throws {
-        let status = sipral_event_kind_name(kind)
-        try check(status)
+    public static func eventKindName(kind: UInt32) -> String? {
+        guard let text = sipral_event_kind_name(kind) else { return nil }
+        return String(cString: text)
     }
 
 }

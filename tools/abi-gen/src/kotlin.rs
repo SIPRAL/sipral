@@ -19,13 +19,14 @@
 
 use std::fmt::Write as _;
 
-use sipral_ffi::abi::{Function, Record, Surface};
+use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Surface, Value};
 
 use crate::c;
 use crate::model::{
     Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
     plain_named, read_all, record_named, roles, screaming, without_prefix,
 };
+use crate::names::{Layout, Named, Spelling, audit};
 
 /// What a name inside a documentation link is called in Kotlin.
 fn spelled(surface: &Surface, path: &str) -> String {
@@ -49,6 +50,79 @@ fn lines(surface: &Surface, doc: &[&str]) -> Vec<String> {
 /// The name a value coming back takes.
 fn returned(name: &str) -> String {
     lower_camel(name.strip_prefix("out_").unwrap_or(name))
+}
+
+/// Words Kotlin will not take as a name.
+///
+/// The hard keywords only. Kotlin's soft and modifier keywords -- `data`,
+/// `value`, `operator` and the rest -- are ordinary names everywhere but the
+/// one place they modify a declaration, and refusing them would refuse
+/// declarations that are perfectly good.
+const RESERVED: &[&str] = &[
+    "as",
+    "break",
+    "class",
+    "continue",
+    "do",
+    "else",
+    "false",
+    "for",
+    "fun",
+    "if",
+    "in",
+    "interface",
+    "is",
+    "null",
+    "object",
+    "package",
+    "return",
+    "super",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typealias",
+    "typeof",
+    "val",
+    "var",
+    "when",
+    "while",
+];
+
+/// How Kotlin spells a name it would otherwise refuse. The C below has no
+/// such thing, which is why [`Names::refuses`] asks C about the shim.
+fn safe(name: &str) -> String {
+    if RESERVED.contains(&name) {
+        format!("`{name}`")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The one spelling of a parameter's name on the Kotlin side.
+fn held(read: &Read<'_>) -> String {
+    safe(&lower_camel(read.member.name))
+}
+
+/// The same parameter on the C side of JNI, where there are no backticks.
+fn c_held(read: &Read<'_>) -> String {
+    lower_camel(read.member.name)
+}
+
+/// The one spelling of the name a value written back takes, Kotlin side.
+fn written(read: &Read<'_>) -> String {
+    safe(&returned(read.member.name))
+}
+
+/// One local the wrapper writes beside a parameter, escaped as a whole: the
+/// backticks go round the finished name, never round a piece of it.
+fn beside(base: &str, suffix: &str) -> String {
+    safe(&format!("{base}{suffix}"))
+}
+
+/// The one spelling of what an entry point is called here.
+fn called(function: &Function) -> String {
+    safe(&without_prefix(function.name))
 }
 
 fn doc(out: &mut String, indent: &str, lines: &[String]) {
@@ -128,42 +202,52 @@ fn plain_jni(ty: &Type) -> &'static str {
     }
 }
 
-/// How one parameter appears on each side of JNI.
+/// How one parameter appears on each side of JNI: what is declared, and the
+/// bare identifiers, which the uniqueness pass reads rather than deriving
+/// them a second time.
 struct Crossing {
     kotlin: Vec<String>,
     jni: Vec<String>,
+    names: Vec<(String, String)>,
+    shim: Vec<(String, String)>,
 }
 
 fn crossing(role: &Role<'_>) -> Crossing {
-    match role {
-        Role::Plain(read) => {
-            let name = lower_camel(read.member.name);
-            Crossing {
-                kotlin: vec![format!("{name}: {}", plain_kotlin(&read.ty))],
-                jni: vec![format!("{} {name}", plain_jni(&read.ty))],
-            }
-        }
-        Role::Buffer { data, .. } | Role::Fill { data, .. } => {
-            let name = lower_camel(data.member.name);
-            Crossing {
-                kotlin: vec![format!("{name}: {}", array_of(&data.ty))],
-                jni: vec![format!("{} {name}", jni_array_of(&data.ty))],
-            }
-        }
-        Role::Config(read) | Role::Shared(read) => {
-            let name = lower_camel(read.member.name);
-            Crossing {
-                kotlin: vec![format!("{name}: Long")],
-                jni: vec![format!("jlong {name}")],
-            }
-        }
-        Role::Given(read) | Role::Out(read) => {
-            let name = returned(read.member.name);
-            Crossing {
-                kotlin: vec![format!("{name}: LongArray")],
-                jni: vec![format!("jlongArray {name}")],
-            }
-        }
+    let (kotlin_type, jni_type, read, kotlin_name, c_name) = match role {
+        Role::Plain(read) => (
+            plain_kotlin(&read.ty).to_owned(),
+            plain_jni(&read.ty).to_owned(),
+            read,
+            held(read),
+            c_held(read),
+        ),
+        Role::Buffer { data, .. } | Role::Fill { data, .. } => (
+            array_of(&data.ty).to_owned(),
+            jni_array_of(&data.ty).to_owned(),
+            data,
+            held(data),
+            c_held(data),
+        ),
+        Role::Config(read) | Role::Shared(read) => (
+            "Long".to_owned(),
+            "jlong".to_owned(),
+            read,
+            held(read),
+            c_held(read),
+        ),
+        Role::Given(read) | Role::Out(read) => (
+            "LongArray".to_owned(),
+            "jlongArray".to_owned(),
+            read,
+            written(read),
+            returned(read.member.name),
+        ),
+    };
+    Crossing {
+        kotlin: vec![format!("{kotlin_name}: {kotlin_type}")],
+        jni: vec![format!("{jni_type} {c_name}")],
+        names: vec![(kotlin_name, read.member.name.to_owned())],
+        shim: vec![(c_name, read.member.name.to_owned())],
     }
 }
 
@@ -191,12 +275,7 @@ fn data_classes(surface: &Surface) -> Result<String, Refused> {
         let _ = writeln!(out, "data class {}(", record.name);
         for field in read_all(record.name, record.fields)? {
             doc(&mut out, "    ", &lines(surface, field.member.doc));
-            let _ = writeln!(
-                out,
-                "    val {}: {},",
-                lower_camel(field.member.name),
-                slot_type(&field.ty)
-            );
+            let _ = writeln!(out, "    val {}: {},", held(&field), slot_type(&field.ty));
         }
         out.push_str(") {\n    internal companion object {\n");
         let _ = writeln!(
@@ -227,22 +306,13 @@ fn naming(function: &Function, read: &[Read<'_>]) -> String {
     let mut out = String::new();
     let arguments: Vec<String> = read
         .iter()
-        .map(|parameter| {
-            format!(
-                "{}: {}",
-                lower_camel(parameter.member.name),
-                plain_kotlin(&parameter.ty)
-            )
-        })
+        .map(|parameter| format!("{}: {}", held(parameter), plain_kotlin(&parameter.ty)))
         .collect();
-    let passed: Vec<String> = read
-        .iter()
-        .map(|parameter| lower_camel(parameter.member.name))
-        .collect();
+    let passed: Vec<String> = read.iter().map(held).collect();
     let _ = writeln!(
         out,
         "    fun {}({}): String? =\n        SipralNative.{}({})\n",
-        without_prefix(function.name),
+        called(function),
         arguments.join(", "),
         function.name,
         passed.join(", ")
@@ -258,6 +328,9 @@ struct Handover {
     passed: Vec<String>,
     prologue: String,
     results: Vec<(String, String)>,
+    /// Every identifier the wrapper puts in its own scope, reported so the
+    /// uniqueness pass reads what was written rather than deriving it again.
+    names: Vec<Named>,
 }
 
 fn hand_over(parts: &[Role<'_>]) -> Result<Handover, Refused> {
@@ -267,55 +340,61 @@ fn hand_over(parts: &[Role<'_>]) -> Result<Handover, Refused> {
         passed,
         prologue,
         results,
+        names,
     } = &mut out;
     for role in parts {
         match role {
             Role::Plain(read) => {
-                let held = lower_camel(read.member.name);
+                let held = held(read);
+                names.push(Named::new("the wrapper", held.clone(), read.member.name));
                 arguments.push(format!("{held}: {}", plain_kotlin(&read.ty)));
                 passed.push(held);
             }
             Role::Buffer { data, .. } => {
-                let held = lower_camel(data.member.name);
+                let held = held(data);
+                names.push(Named::new("the wrapper", held.clone(), data.member.name));
                 if data.ty.base == Base::Char && data.ty.pointer == Some(Writable::No) {
+                    let bytes = beside(&lower_camel(data.member.name), "Bytes");
+                    names.push(Named::new("the wrapper", bytes.clone(), data.member.name));
                     arguments.push(format!("{held}: String"));
                     let _ = writeln!(
                         prologue,
-                        "        val {held}Bytes = {held}.toByteArray(Charsets.UTF_8)"
+                        "        val {bytes} = {held}.toByteArray(Charsets.UTF_8)"
                     );
-                    passed.push(format!("{held}Bytes"));
+                    passed.push(bytes);
                 } else {
                     arguments.push(format!("{held}: {}", array_of(&data.ty)));
                     passed.push(held);
                 }
             }
             Role::Fill { data, .. } => {
-                let held = lower_camel(data.member.name);
+                let held = held(data);
+                names.push(Named::new("the wrapper", held.clone(), data.member.name));
                 arguments.push(format!("{held}: {}", array_of(&data.ty)));
                 passed.push(held);
             }
             Role::Config(read) | Role::Shared(read) => {
-                let held = lower_camel(read.member.name);
+                let held = held(read);
+                names.push(Named::new("the wrapper", held.clone(), read.member.name));
                 arguments.push(format!("{held}: Long"));
                 passed.push(held);
             }
             Role::Given(read) => {
-                let held = returned(read.member.name);
                 let Base::Named(record) = &read.ty.base else {
                     return Err(Refused::about("a struct with no name"));
                 };
-                let _ = writeln!(
-                    prologue,
-                    "        val {held}Slots = LongArray({record}.SLOTS)"
-                );
-                passed.push(format!("{held}Slots"));
-                results.push((format!("{record}.of({held}Slots)"), record.clone()));
+                let slots = beside(&returned(read.member.name), "Slots");
+                names.push(Named::new("the wrapper", slots.clone(), read.member.name));
+                let _ = writeln!(prologue, "        val {slots} = LongArray({record}.SLOTS)");
+                passed.push(slots.clone());
+                results.push((format!("{record}.of({slots})"), record.clone()));
             }
             Role::Out(read) => {
-                let held = returned(read.member.name);
-                let _ = writeln!(prologue, "        val {held}Slot = LongArray(1)");
-                passed.push(format!("{held}Slot"));
-                results.push((format!("{held}Slot[0]"), "Long".to_owned()));
+                let slot = beside(&returned(read.member.name), "Slot");
+                names.push(Named::new("the wrapper", slot.clone(), read.member.name));
+                let _ = writeln!(prologue, "        val {slot} = LongArray(1)");
+                passed.push(slot.clone());
+                results.push((format!("{slot}[0]"), "Long".to_owned()));
             }
         }
     }
@@ -328,12 +407,13 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
         return Ok(naming(function, read));
     }
     let mut out = String::new();
-    let name = without_prefix(function.name);
+    let name = called(function);
     let Handover {
         arguments,
         passed,
         prologue,
         results,
+        names: _,
     } = hand_over(&roles(surface, read))?;
     let returns = match results.len() {
         0 => String::new(),
@@ -438,6 +518,7 @@ fn natives(surface: &Surface) -> Result<String, Refused> {
 
 /// Print the Kotlin binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
+    audit(surface, &Names)?;
     let mut out = String::new();
     out.push_str(
         "// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -539,84 +620,123 @@ struct Around {
     fetches: String,
     releases: String,
     writes: String,
+    /// Every identifier the shim writes in the C function's own scope. C has
+    /// no backticks, so these are the names as they are, and the uniqueness
+    /// pass reads them against C's keywords rather than Kotlin's.
+    names: Vec<Named>,
+}
+
+impl Around {
+    /// One array parameter: fetched on the way in, released on the way out,
+    /// and passed as a pointer and a length like every other buffer.
+    fn array(&mut self, data: &Read<'_>) {
+        let name = c_held(data);
+        for suffix in ["_data", "_size"] {
+            self.names.push(Named::new(
+                "the shim",
+                format!("{name}{suffix}"),
+                data.member.name,
+            ));
+        }
+        let (element, kind) = jni_element_of(&data.ty);
+        let writable = data.ty.pointer == Some(Writable::Yes);
+        let _ = writeln!(
+            self.fetches,
+            "    {element} *{name}_data = {name} ? (*env)->Get{kind}ArrayElements(env, \
+             {name}, NULL) : NULL;"
+        );
+        let _ = writeln!(
+            self.fetches,
+            "    jsize {name}_size = {name} ? (*env)->GetArrayLength(env, {name}) : 0;"
+        );
+        let mode = if writable { "0" } else { "JNI_ABORT" };
+        let _ = writeln!(
+            self.releases,
+            "    if ({name}) {{\n        (*env)->Release{kind}ArrayElements(env, \
+             {name}, {name}_data, {mode});\n    }}"
+        );
+        self.passed
+            .push(format!("({}){name}_data", c::spell(&data.ty)));
+        self.passed.push(format!("(size_t){name}_size"));
+    }
+
+    /// One value written back, which crosses in a `long[]` of one.
+    fn out(&mut self, read: &Read<'_>) {
+        let name = returned(read.member.name);
+        self.names.push(Named::new(
+            "the shim",
+            format!("{name}_value"),
+            read.member.name,
+        ));
+        self.names.push(Named::new(
+            "the shim",
+            "slot".to_owned(),
+            "the long this shim hands one value back in",
+        ));
+        let mut written = read.ty.clone();
+        written.pointer = None;
+        let _ = writeln!(self.fetches, "    {} {name}_value = 0;", c::spell(&written));
+        self.passed.push(format!("&{name}_value"));
+        let _ = writeln!(
+            self.writes,
+            "    {{\n        jlong slot = (jlong){name}_value;\n        \
+             (*env)->SetLongArrayRegion(env, {name}, 0, 1, &slot);\n    }}"
+        );
+    }
+
+    /// One struct the library fills in whole, handed back a member at a time.
+    fn given(&mut self, surface: &Surface, read: &Read<'_>) -> Result<(), Refused> {
+        let name = returned(read.member.name);
+        self.names.push(Named::new(
+            "the shim",
+            format!("{name}_value"),
+            read.member.name,
+        ));
+        self.names.push(Named::new(
+            "the shim",
+            "slots".to_owned(),
+            "the array this shim hands a struct back in",
+        ));
+        let Base::Named(record_name) = &read.ty.base else {
+            return Err(Refused::about("a struct with no name"));
+        };
+        let Some(record) = record_named(surface, record_name) else {
+            return Err(Refused::about(&format!(
+                "{record_name} is handed back a member at a time and the surface does not \
+                 declare it"
+            )));
+        };
+        let spelled = c::named(record_name);
+        let _ = writeln!(self.fetches, "    {spelled} {name}_value;");
+        let _ = writeln!(
+            self.fetches,
+            "    memset(&{name}_value, 0, sizeof {name}_value);"
+        );
+        let _ = writeln!(self.fetches, "    {name}_value.size = sizeof {name}_value;");
+        self.passed.push(format!("&{name}_value"));
+        self.writes.push_str(&slots(&name, record_name, record)?);
+        Ok(())
+    }
 }
 
 fn around(surface: &Surface, parts: &[Role<'_>]) -> Result<Around, Refused> {
     let mut out = Around::default();
-    let Around {
-        passed,
-        fetches,
-        releases,
-        writes,
-    } = &mut out;
     for role in parts {
         match role {
             Role::Plain(read) => {
-                passed.push(format!(
-                    "({}){}",
-                    c::spell(&read.ty),
-                    lower_camel(read.member.name)
-                ));
+                out.passed
+                    .push(format!("({}){}", c::spell(&read.ty), c_held(read)));
             }
-            Role::Buffer { data, .. } | Role::Fill { data, .. } => {
-                let name = lower_camel(data.member.name);
-                let (element, kind) = jni_element_of(&data.ty);
-                let writable = data.ty.pointer == Some(Writable::Yes);
-                let _ = writeln!(
-                    fetches,
-                    "    {element} *{name}_data = {name} ? (*env)->Get{kind}ArrayElements(env, \
-                     {name}, NULL) : NULL;"
-                );
-                let _ = writeln!(
-                    fetches,
-                    "    jsize {name}_size = {name} ? (*env)->GetArrayLength(env, {name}) : 0;"
-                );
-                let mode = if writable { "0" } else { "JNI_ABORT" };
-                let _ = writeln!(
-                    releases,
-                    "    if ({name}) {{\n        (*env)->Release{kind}ArrayElements(env, \
-                     {name}, {name}_data, {mode});\n    }}"
-                );
-                passed.push(format!("({}){name}_data", c::spell(&data.ty)));
-                passed.push(format!("(size_t){name}_size"));
-            }
+            Role::Buffer { data, .. } | Role::Fill { data, .. } => out.array(data),
             Role::Config(read) | Role::Shared(read) => {
-                passed.push(format!(
+                out.passed.push(format!(
                     "({})(intptr_t){}",
                     c::spell(&read.ty),
-                    lower_camel(read.member.name)
+                    c_held(read)
                 ));
             }
-            Role::Out(read) => {
-                let name = returned(read.member.name);
-                let mut written = read.ty.clone();
-                written.pointer = None;
-                let _ = writeln!(fetches, "    {} {name}_value = 0;", c::spell(&written));
-                passed.push(format!("&{name}_value"));
-                let _ = writeln!(
-                    writes,
-                    "    {{\n        jlong slot = (jlong){name}_value;\n        \
-                     (*env)->SetLongArrayRegion(env, {name}, 0, 1, &slot);\n    }}"
-                );
-            }
-            Role::Given(read) => {
-                let name = returned(read.member.name);
-                let Base::Named(record_name) = &read.ty.base else {
-                    return Err(Refused::about("a struct with no name"));
-                };
-                let Some(record) = record_named(surface, record_name) else {
-                    return Err(Refused::about(record_name));
-                };
-                let spelled = c::named(record_name);
-                let _ = writeln!(fetches, "    {spelled} {name}_value;");
-                let _ = writeln!(
-                    fetches,
-                    "    memset(&{name}_value, 0, sizeof {name}_value);"
-                );
-                let _ = writeln!(fetches, "    {name}_value.size = sizeof {name}_value;");
-                passed.push(format!("&{name}_value"));
-                writes.push_str(&slots(&name, record_name, record)?);
-            }
+            Role::Out(read) => out.out(read),
+            Role::Given(read) => out.given(surface, read)?,
         }
     }
     Ok(out)
@@ -681,6 +801,7 @@ fn implementation(
         fetches,
         releases,
         writes,
+        names: _,
     } = around(surface, &parts)?;
     out.push_str(&fetches);
     if answers_text {
@@ -708,6 +829,7 @@ fn implementation(
 
 /// Print the C that implements the declarations above.
 pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
+    audit(surface, &Names)?;
     let mut out = String::new();
     out.push_str(
         "/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -728,4 +850,152 @@ pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
         out.push_str(&implementation(surface, function, &read)?);
     }
     Ok(out)
+}
+
+/// What Kotlin calls what the surface declares.
+pub(crate) struct Names;
+
+impl Spelling for Names {
+    fn language(&self) -> &'static str {
+        "Kotlin"
+    }
+
+    fn reserved(&self) -> &'static [&'static str] {
+        RESERVED
+    }
+
+    /// Kotlin can be made to take any of its own keywords, in backticks, and
+    /// [`safe`] does that. The shim is the exception and the reason this is
+    /// overridden: it is C, it has no escape of any kind, and it is printed
+    /// from the same walk. So the names in it are read against C's keywords.
+    fn refuses(&self, place: &str, emitted: &str) -> Option<String> {
+        if place == "the shim" {
+            return crate::c::Names.refuses(place, emitted);
+        }
+        RESERVED
+            .contains(&emitted)
+            .then(|| format!("`{emitted}` is a keyword in Kotlin"))
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::Nested
+    }
+
+    fn types(&self, surface: &Surface) -> Vec<(String, String)> {
+        let mut out = vec![
+            ("SipralException".to_owned(), "this back end".to_owned()),
+            ("SipralNative".to_owned(), "this back end".to_owned()),
+            ("Sipral".to_owned(), "this back end".to_owned()),
+        ];
+        for enumeration in surface.enumerations {
+            out.push((enumeration.name.to_owned(), enumeration.name.to_owned()));
+        }
+        for record in surface.records {
+            if is_given(record) {
+                out.push((record.name.to_owned(), record.name.to_owned()));
+            }
+        }
+        out
+    }
+
+    fn members(&self, record: &Record) -> Result<Vec<(String, String)>, Refused> {
+        // only the records that come back a member at a time are printed;
+        // the rest cross as an address and have no Kotlin shape at all
+        if !is_given(record) {
+            return Ok(Vec::new());
+        }
+        Ok(read_all(record.name, record.fields)?
+            .iter()
+            .map(|field| {
+                (
+                    held(field),
+                    format!("{}::{}", record.name, field.member.name),
+                )
+            })
+            .collect())
+    }
+
+    fn code(&self, enumeration: &Enumeration, code: &Code) -> String {
+        let _ = enumeration;
+        screaming(code.name)
+    }
+
+    fn constant(&self, value: &Value) -> String {
+        screaming(value.name.strip_prefix("SIPRAL_").unwrap_or(value.name))
+    }
+
+    fn entry(&self, function: &Function) -> String {
+        called(function)
+    }
+
+    fn written_by_hand(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("lastErrorMessage", "sipral_last_error_message"),
+            ("check", "the status check this back end writes"),
+        ]
+    }
+
+    /// Nothing. This binding never prints the callback: the settings struct
+    /// crosses JNI as an address, so the function pointer inside it is never
+    /// spelled on the Kotlin side, and the shim includes `sipral.h` rather
+    /// than declaring a typedef of its own. The only spelling of these
+    /// parameters anywhere this back end writes is the header's, and
+    /// [`crate::c::Names`] reads that one. The day a Kotlin-side callback is
+    /// printed, it is named here.
+    fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
+        let _ = (alias, read);
+        Vec::new()
+    }
+
+    fn inside(
+        &self,
+        surface: &Surface,
+        function: &Function,
+        read: &[Read<'_>],
+        parts: &[Role<'_>],
+    ) -> Result<Vec<Named>, Refused> {
+        let mut out = Vec::new();
+        for role in parts {
+            let crossing = crossing(role);
+            out.extend(
+                crossing
+                    .names
+                    .into_iter()
+                    .map(|(name, from)| Named::new("the declaration", name, from)),
+            );
+            out.extend(
+                crossing
+                    .shim
+                    .into_iter()
+                    .map(|(name, from)| Named::new("the shim", name, from)),
+            );
+        }
+        // the shim's own locals, the same ones for every entry point
+        for (name, what) in [
+            ("env", "the JNI environment every shim function is handed"),
+            ("self", "the object every shim function is handed"),
+        ] {
+            out.push(Named::new("the shim", name.to_owned(), what));
+        }
+        let ty = Type::read(function.returns)?;
+        if ty.pointer.is_some() && ty.base == Base::Char {
+            out.push(Named::new(
+                "the shim",
+                "text".to_owned(),
+                "the string the shim reads back",
+            ));
+            out.extend(read.iter().map(|parameter| {
+                Named::new("the wrapper", held(parameter), parameter.member.name)
+            }));
+            return Ok(out);
+        }
+        out.push(Named::new(
+            "the shim",
+            "status".to_owned(),
+            "the status the shim holds on to",
+        ));
+        out.extend(around(surface, parts)?.names);
+        out.extend(hand_over(parts)?.names);
+        Ok(out)
+    }
 }

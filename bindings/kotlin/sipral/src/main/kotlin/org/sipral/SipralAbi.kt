@@ -1482,18 +1482,18 @@ internal object SipralNative {
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
-    external fun sipral_call_reject(stack: Long, call: Long, status: Long, nowMs: Long): Int
+    external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_hangup(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_hold(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_resume(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_accept_session(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_reject_session(stack: Long, call: Long, status: Long, nowMs: Long): Int
+    external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, config: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, config: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, call: LongArray, nowMs: Long): Int
-    external fun sipral_call_reject_transfer(stack: Long, call: Long, status: Long, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
     external fun sipral_codec_name(codec: Long): String?
@@ -2059,7 +2059,7 @@ object Sipral {
     }
 
     /**
-     * Refuse a call that came in, with a status of your choosing.
+     * Refuse a call that came in, with a response code of your choosing.
      *
      * 486 Busy Here for a line that is in use, 603 Decline for a person who
      * does not want to talk. The difference is what a proxy does next.
@@ -2068,8 +2068,8 @@ object Sipral {
      *
      * Safe to call with any handle values.
      */
-    fun callReject(stack: Long, call: Long, status: Long, nowMs: Long) {
-        check(SipralNative.sipral_call_reject(stack, call, status, nowMs))
+    fun callReject(stack: Long, call: Long, code: Long, nowMs: Long) {
+        check(SipralNative.sipral_call_reject(stack, call, code, nowMs))
     }
 
     /**
@@ -2142,7 +2142,7 @@ object Sipral {
     /**
      * Refuse one instead. The session stands exactly as it was (§14.1).
      *
-     * 488 Not Acceptable Here is the status that says the description was the
+     * 488 Not Acceptable Here is the code that says the description was the
      * problem rather than the request.
      *
      * As with sipral_call_accept_session, only for a call the application
@@ -2152,8 +2152,8 @@ object Sipral {
      *
      * Safe to call with any handle values.
      */
-    fun callRejectSession(stack: Long, call: Long, status: Long, nowMs: Long) {
-        check(SipralNative.sipral_call_reject_session(stack, call, status, nowMs))
+    fun callRejectSession(stack: Long, call: Long, code: Long, nowMs: Long) {
+        check(SipralNative.sipral_call_reject_session(stack, call, code, nowMs))
     }
 
     /**
@@ -2208,7 +2208,7 @@ object Sipral {
 
     /**
      * Call the transfer target, so that there is somebody to hand the call
-     * to, and write the new call's handle to `out_call`.
+     * to, and write the new call's handle to `out_consultation`.
      *
      * The consultation leg of an attended transfer. It is answered like any
      * other call, and sipral_call_transfer_to is what follows. Putting
@@ -2226,9 +2226,9 @@ object Sipral {
      * As sipral_call_place.
      */
     fun callConsult(stack: Long, call: Long, config: Long, nowMs: Long): Long {
-        val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, config, callSlot, nowMs))
-        return callSlot[0]
+        val consultationSlot = LongArray(1)
+        check(SipralNative.sipral_call_consult(stack, call, config, consultationSlot, nowMs))
+        return consultationSlot[0]
     }
 
     /**
@@ -2248,16 +2248,16 @@ object Sipral {
 
     /**
      * Take a transfer that was asked for, place the call it names, and write
-     * that call's handle to `out_call`.
+     * that call's handle to `out_placed`.
      *
      * Safety
      *
-     * `out_call` must point at one `sipral_handle_t`.
+     * `out_placed` must point at one `sipral_handle_t`.
      */
     fun callAcceptTransfer(stack: Long, call: Long, nowMs: Long): Long {
-        val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, callSlot, nowMs))
-        return callSlot[0]
+        val placedSlot = LongArray(1)
+        check(SipralNative.sipral_call_accept_transfer(stack, call, placedSlot, nowMs))
+        return placedSlot[0]
     }
 
     /**
@@ -2267,8 +2267,8 @@ object Sipral {
      *
      * Safe to call with any handle values.
      */
-    fun callRejectTransfer(stack: Long, call: Long, status: Long, nowMs: Long) {
-        check(SipralNative.sipral_call_reject_transfer(stack, call, status, nowMs))
+    fun callRejectTransfer(stack: Long, call: Long, code: Long, nowMs: Long) {
+        check(SipralNative.sipral_call_reject_transfer(stack, call, code, nowMs))
     }
 
     /**

@@ -93,35 +93,101 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Four targets: `parse`, `framer`, `builder`, `sdp`. `parse` walks every typed
-accessor after a successful parse, because a message that parses can still hold
-a field nobody can read and reading it is what the stack does next. `framer`
-takes the first byte of the input as its read size, so one input covers both
-"the whole message at once" and "one byte at a time". `builder` feeds arbitrary
-bytes in as header values and asserts the result parses back with exactly the
-fields that went in: what it is really testing is that a caller's data cannot
-become structure. `sdp` asserts that a description which parses, written back
-out, parses again into exactly the same description — a body travels through a
-call inside messages that get forwarded, so one that changes meaning by passing
+Thirteen targets, one per door an attacker's bytes come through.
+
+The four over SIP itself. `parse` walks every typed accessor after a
+successful parse, because a message that parses can still hold a field nobody
+can read and reading it is what the stack does next. `framer` takes the first
+byte of the input as its read size, so one input covers both "the whole
+message at once" and "one byte at a time". `builder` feeds arbitrary bytes in
+as header values and asserts the result parses back with exactly the fields
+that went in: what it is really testing is that a caller's data cannot become
+structure. `sdp` asserts that a description which parses, written back out,
+parses again into exactly the same description — a body travels through a call
+inside messages that get forwarded, so one that changes meaning by passing
 through here is a bug even when nothing crashes — and then answers the offer,
 since an answer is derived from the offer and a strange offer is the shortest
 way to a strange answer.
 
+Nine more, added once it was clear how much of the receive path the first four
+never reached. `crypto` takes an `a=crypto` line through the syntax parser and
+then through the policy reader that decodes its key material, which `sdp`
+never calls into. `replay` takes the recording format, which is a text file a
+person hand-edits and mails as an attachment. `dialoginfo` takes the
+`application/dialog-info+xml` body a SUBSCRIBE gets back, through a
+hand-rolled reader with bounds of its own on nesting, element count and value
+length. `headless` takes the control channel a voice agent connects on, frame
+reassembly and JSON decode together, cut into arbitrary reads. `rtcp` takes a
+compound packet and every typed accessor the receive path calls on one.
+`rtp_dtmf` takes a stream of datagrams through the packet parser and the RFC
+4733 event receiver behind it, where the timestamps, the end bits and the
+reordering are all the sender's to choose. `srtp_unprotect` takes forged and
+truncated packets through SRTP and SRTCP unprotect with a fixed key: almost
+everything fails authentication, which is the point — what is under test is
+the length arithmetic, the header parse, the rollover estimate and the replay
+window, all of which run before the check. Its input is a run of datagrams,
+an octet of length in front of each, driven through one unprotector per
+suite rather than one packet through a fresh one: the window and the
+estimate are the only state an unprotector keeps between packets, and a
+fresh one for every input reaches neither of them. `stun` takes a datagram
+through the message parser and every accessor a binding client or an ICE
+agent calls, since STUN and media share a port by design. `turn` takes the stream framer
+and ChannelData both ways they arrive, delimited and self-delimiting.
+
 ```sh
-cd fuzz
-cp ../fixtures/rfc4475/*/*.dat corpus/parse/     # seeds
-cargo fuzz run parse -- -max_total_time=600 -max_len=65535 -rss_limit_mb=2048
+./scripts/fuzz.sh 600 parse        # one target, ten minutes
+./scripts/fuzz.sh 600              # every target, ten minutes each
 ```
 
-Seeds are the RFC 4475 corpus plus every anonymised capture; `fuzz/corpus/` is
-not committed, since it is generated and grows without bound. Bounds: a memory
-limit and a time limit per run, so a hang is a failure rather than something to
-wait out.
+That is the command to reach for, and it works on a clone that has never
+fuzzed. What it runs, for one target, is this — and the `mkdir` is part of
+it rather than a detail, because libFuzzer refuses a corpus directory that
+does not exist instead of creating one, and on a fresh tree the first of the
+two does not:
+
+```sh
+cd fuzz
+mkdir -p target/corpus/parse       # where the run puts what it finds
+cargo fuzz run parse target/corpus/parse corpus/parse -- \
+    -max_total_time=600 -max_len=65535 -rss_limit_mb=2048
+```
+
+Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
+targets with something to start from rather than thirteen runs beginning at
+the empty input. `tools/fuzz-seeds` writes them out of the library's own
+builders and encoders and puts each one through the reader its target puts
+it through — the framer seeds through the framer, the protected runs through
+an unprotector holding the target's own key — so a seed that is not what it
+claims to be fails the generator rather than sitting in the corpus doing
+nothing. Twelve of the thirteen families go through that check; the
+thirteenth is `builder`, whose input is not a message but the five field
+values the target cuts it into, so what is checked there is the cut. The
+generator also owns the directory: what it does not write, it removes, since
+a seed dropped from the generator and left on disk would otherwise pass a
+check that only asks whether every target has a directory.
+
+That is also what makes their origin sayable: `fuzz/corpus/README.md` says
+where every byte came from, and `scripts/check.sh` holds the directory to
+it, shape and content both — every subdirectory a target and every target a
+subdirectory, the whole of it under 200 KB, and every byte of every seed
+read for an address, a forbidden project's name, an assistant trace and
+Romanian, the same four things the rest of the tree is read for. What a run
+finds goes somewhere else — the first corpus directory on the command line
+above is a scratch under `fuzz/target/`, which is ignored, so a corpus that
+grows without bound is not the committed one. The RFC 4475 corpus is a
+second seed source worth pointing a long run at; it stays in
+`fixtures/rfc4475/`, where its licence is declared.
+
+Bounds: a memory limit and a time limit per run, so a hang is a failure rather
+than something to wait out.
 
 The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
 five minutes each by default — before a release and overnight, not before
-every commit, which would add half an hour to buy very little. Every crashing
+every commit, which would add an hour to buy very little. What the gate does
+do on every run is **build** all thirteen, under the nightly that `fuzz/` pins, so
+that a target cannot rot uncompiled between releases; `cargo test --workspace`
+never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
 fix, and the test suite will replay that directory forever. No input has
 crashed a target yet, so the directory does not exist — and the whitelist in
@@ -216,11 +282,19 @@ the test suite, `rustdoc` with warnings as errors, a release build, the symbols
 in the C library that build produces, `bindings/c/smoke.c` compiled against the
 header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
-machine cannot execute, `cargo deny` for dependency licences, `gitleaks`
-over the history, and the tree checks — SPDX headers, provenance references,
-language, and whether an internal file or a capture has reached the tree. A
-tool that is missing fails the step rather than skipping it: a gate that goes
-green without the scanner has not looked. It must exit zero before a commit
+machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
+over all thirteen fuzz targets under their own nightly — which nothing else
+here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
+at its edge — `cargo deny` for dependency licences, `gitleaks` over the
+history, and the tree checks — SPDX headers, provenance references,
+language, whether an internal file or a capture has reached the tree, and
+whether the seed corpus still matches the targets it belongs to and holds
+only what the rest of the tree is allowed to hold. A tool that
+is missing fails the step rather than skipping it: a gate that goes green
+without the scanner has not looked. The one exception is `cargo fuzz`, which
+needs a nightly toolchain and a cargo subcommand a clone will not have: that
+step says `skip` and names what is missing, because the alternative is a gate
+nobody outside this machine can run at all. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
 `scripts/lab.sh` runs the container lab: the three servers, the flows against

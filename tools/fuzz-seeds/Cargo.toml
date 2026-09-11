@@ -1,0 +1,25 @@
+[package]
+name = "sipral-fuzz-seeds"
+description = "Writes the seed corpus the fuzz targets start from, out of this repository's own writers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "fuzz-seeds"
+path = "src/main.rs"
+
+[dependencies]
+sipral-core = { path = "../../crates/sipral-core", version = "0.0.1" }
+sipral-headless = { path = "../../crates/sipral-headless", version = "0.0.1" }
+sipral-nat = { path = "../../crates/sipral-nat", version = "0.0.1" }
+sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
+sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1" }
+
+[lints]
+workspace = true

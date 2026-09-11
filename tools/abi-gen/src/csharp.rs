@@ -12,12 +12,15 @@
 
 use std::fmt::Write as _;
 
-use sipral_ffi::abi::{Function, Shape, Stands, Surface};
+use sipral_ffi::abi::{
+    Alias, Code, Enumeration, Function, Member, Record, Shape, Stands, Surface, Value,
+};
 
 use crate::model::{
     Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
     plain_named, read_all, roles, upper_camel,
 };
+use crate::names::{Layout, Named, Spelling, audit};
 
 /// What a name inside a documentation link is called in C#.
 fn spelled(surface: &Surface, path: &str) -> String {
@@ -180,44 +183,54 @@ fn returned(name: &str) -> String {
     lower_camel(name.strip_prefix("out_").unwrap_or(name))
 }
 
+/// The one spelling of a parameter's name, used everywhere it is spelled.
+fn held(read: &Read<'_>) -> String {
+    safe(&lower_camel(read.member.name))
+}
+
+/// The one spelling of the name a value written back takes.
+fn written(read: &Read<'_>) -> String {
+    safe(&returned(read.member.name))
+}
+
+/// One parameter as P/Invoke declares it, and the member it came from.
+struct Declared<'a> {
+    kind: String,
+    name: String,
+    member: &'a Member,
+}
+
+impl Declared<'_> {
+    fn spelled(&self) -> String {
+        format!("{} {}", self.kind, self.name)
+    }
+}
+
 /// How the declaration hands one parameter over to P/Invoke.
-fn declared(role: &Role<'_>) -> Vec<String> {
+fn declared<'a>(role: &Role<'a>) -> Vec<Declared<'a>> {
+    let one = |kind: String, read: &Read<'a>, name: String| Declared {
+        kind,
+        name,
+        member: read.member,
+    };
     match role {
-        Role::Plain(read) => vec![format!(
-            "{} {}",
-            scalar(&read.ty),
-            safe(&lower_camel(read.member.name))
-        )],
+        Role::Plain(read) => vec![one(scalar(&read.ty), read, held(read))],
         Role::Buffer { data, len } => vec![
-            format!(
-                "{}[] {}",
-                scalar(&data.ty),
-                safe(&lower_camel(data.member.name))
-            ),
-            format!("nuint {}", safe(&lower_camel(len.member.name))),
+            one(format!("{}[]", scalar(&data.ty)), data, held(data)),
+            one("nuint".to_owned(), len, held(len)),
         ],
         Role::Fill { data, capacity } => vec![
-            format!(
-                "{}[] {}",
-                scalar(&data.ty),
-                safe(&lower_camel(data.member.name))
-            ),
-            format!("nuint {}", safe(&lower_camel(capacity.member.name))),
+            one(format!("{}[]", scalar(&data.ty)), data, held(data)),
+            one("nuint".to_owned(), capacity, held(capacity)),
         ],
-        Role::Config(read) => vec![format!(
-            "in {} {}",
-            scalar(&read.ty),
-            safe(&lower_camel(read.member.name))
-        )],
-        Role::Shared(read) | Role::Given(read) => vec![format!(
-            "ref {} {}",
-            scalar(&read.ty),
-            safe(&lower_camel(read.member.name))
-        )],
-        Role::Out(read) => vec![format!(
-            "out {} {}",
-            scalar(&read.ty),
-            safe(&returned(read.member.name))
+        Role::Config(read) => vec![one(format!("in {}", scalar(&read.ty)), read, held(read))],
+        Role::Shared(read) | Role::Given(read) => {
+            vec![one(format!("ref {}", scalar(&read.ty)), read, held(read))]
+        }
+        Role::Out(read) => vec![one(
+            format!("out {}", scalar(&read.ty)),
+            read,
+            written(read),
         )],
     }
 }
@@ -245,7 +258,11 @@ fn native(surface: &Surface) -> Result<String, Refused> {
     );
     for (function, read) in functions(surface)? {
         let parts = roles(surface, &read);
-        let arguments: Vec<String> = parts.iter().flat_map(declared).collect();
+        let arguments: Vec<String> = parts
+            .iter()
+            .flat_map(declared)
+            .map(|parameter| parameter.spelled())
+            .collect();
         let _ = writeln!(
             out,
             "    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, \
@@ -275,18 +292,9 @@ fn naming(function: &Function, read: &[Read<'_>]) -> String {
     );
     let arguments: Vec<String> = read
         .iter()
-        .map(|parameter| {
-            format!(
-                "{} {}",
-                scalar(&parameter.ty),
-                safe(&lower_camel(parameter.member.name))
-            )
-        })
+        .map(|parameter| format!("{} {}", scalar(&parameter.ty), held(parameter)))
         .collect();
-    let passed: Vec<String> = read
-        .iter()
-        .map(|parameter| safe(&lower_camel(parameter.member.name)))
-        .collect();
+    let passed: Vec<String> = read.iter().map(held).collect();
     let _ = writeln!(
         out,
         "    public static string? {name}({}) =>",
@@ -309,6 +317,9 @@ struct Handover {
     passed: Vec<String>,
     prologue: String,
     results: Vec<(String, String)>,
+    /// Every identifier the wrapper puts in its own scope, reported so the
+    /// uniqueness pass reads what was written rather than deriving it again.
+    names: Vec<Named>,
 }
 
 fn hand_over(parts: &[Role<'_>]) -> Handover {
@@ -318,17 +329,25 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
         passed,
         prologue,
         results,
+        names,
     } = &mut out;
+    let mut wrote = |name: &str, member: &Member| {
+        names.push(Named::new("the wrapper", name.to_owned(), member.name));
+    };
     for role in parts {
         match role {
             Role::Plain(read) => {
-                let held = safe(&lower_camel(read.member.name));
+                let held = held(read);
+                wrote(&held, read.member);
                 arguments.push(format!("{} {held}", scalar(&read.ty)));
                 passed.push(held);
             }
             Role::Buffer { data, .. } => {
-                let held = safe(&lower_camel(data.member.name));
+                let held = held(data);
+                wrote(&held, data.member);
                 if data.ty.base == Base::Char && data.ty.pointer == Some(Writable::No) {
+                    wrote(&format!("{held}Bytes"), data.member);
+                    wrote(&format!("{held}Signed"), data.member);
                     arguments.push(format!("string {held}"));
                     let _ = writeln!(
                         prologue,
@@ -352,23 +371,27 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
                 }
             }
             Role::Fill { data, .. } => {
-                let held = safe(&lower_camel(data.member.name));
+                let held = held(data);
+                wrote(&held, data.member);
                 arguments.push(format!("{}[] {held}", scalar(&data.ty)));
                 passed.push(held.clone());
                 passed.push(format!("(nuint){held}.Length"));
             }
             Role::Config(read) => {
-                let held = safe(&lower_camel(read.member.name));
+                let held = held(read);
+                wrote(&held, read.member);
                 arguments.push(format!("in {} {held}", scalar(&read.ty)));
                 passed.push(format!("in {held}"));
             }
             Role::Shared(read) => {
-                let held = safe(&lower_camel(read.member.name));
+                let held = held(read);
+                wrote(&held, read.member);
                 arguments.push(format!("ref {} {held}", scalar(&read.ty)));
                 passed.push(format!("ref {held}"));
             }
             Role::Given(read) => {
-                let held = returned(read.member.name);
+                let held = written(read);
+                wrote(&held, read.member);
                 let _ = writeln!(
                     prologue,
                     "        var {held} = {}.Sized();",
@@ -378,7 +401,8 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
                 results.push((held, scalar(&read.ty)));
             }
             Role::Out(read) => {
-                let held = safe(&returned(read.member.name));
+                let held = written(read);
+                wrote(&held, read.member);
                 passed.push(format!("out var {held}"));
                 results.push((held, scalar(&read.ty)));
             }
@@ -404,6 +428,7 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
         passed,
         prologue,
         results,
+        names: _,
     } = hand_over(&roles(surface, read));
     let returns = match results.len() {
         0 => "void".to_owned(),
@@ -490,7 +515,7 @@ fn declarations(surface: &Surface) -> Result<String, Refused> {
         let read = read_all(alias.name, arguments)?;
         let declared: Vec<String> = read
             .iter()
-            .map(|parameter| format!("IntPtr {}", safe(&lower_camel(parameter.member.name))))
+            .map(|parameter| format!("IntPtr {}", held(parameter)))
             .collect();
         let _ = writeln!(
             out,
@@ -542,6 +567,7 @@ fn declarations(surface: &Surface) -> Result<String, Refused> {
 
 /// Print the .NET binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
+    audit(surface, &Names)?;
     let mut out = String::new();
     out.push_str(
         "// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -639,4 +665,123 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str("}\n");
     Ok(out)
+}
+
+/// What C# calls what the surface declares.
+pub(crate) struct Names;
+
+impl Spelling for Names {
+    fn language(&self) -> &'static str {
+        "C#"
+    }
+
+    fn reserved(&self) -> &'static [&'static str] {
+        RESERVED
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::Nested
+    }
+
+    fn types(&self, surface: &Surface) -> Vec<(String, String)> {
+        let mut out = vec![
+            ("SipralException".to_owned(), "this back end".to_owned()),
+            ("NativeMethods".to_owned(), "this back end".to_owned()),
+            ("Sipral".to_owned(), "this back end".to_owned()),
+        ];
+        for enumeration in surface.enumerations {
+            out.push((enumeration.name.to_owned(), enumeration.name.to_owned()));
+        }
+        for alias in surface.aliases {
+            if matches!(alias.stands, Stands::Callback(_)) {
+                out.push((alias.name.to_owned(), alias.name.to_owned()));
+            }
+        }
+        for record in surface.records {
+            out.push((record.name.to_owned(), record.name.to_owned()));
+        }
+        out
+    }
+
+    fn members(&self, record: &Record) -> Result<Vec<(String, String)>, Refused> {
+        let mut out: Vec<(String, String)> = record
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    upper_camel(field.name),
+                    format!("{}::{}", record.name, field.name),
+                )
+            })
+            .collect();
+        if record.is_versioned() {
+            out.push((
+                "Sized".to_owned(),
+                format!("the initialiser this back end gives {}", record.name),
+            ));
+        }
+        Ok(out)
+    }
+
+    fn code(&self, enumeration: &Enumeration, code: &Code) -> String {
+        let _ = enumeration;
+        code.name.to_owned()
+    }
+
+    fn constant(&self, value: &Value) -> String {
+        upper_camel(value.name.strip_prefix("SIPRAL_").unwrap_or(value.name))
+    }
+
+    fn entry(&self, function: &Function) -> String {
+        upper_camel(
+            function
+                .name
+                .strip_prefix("sipral_")
+                .unwrap_or(function.name),
+        )
+    }
+
+    fn written_by_hand(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("LastErrorMessage", "sipral_last_error_message"),
+            ("Check", "the status check this back end writes"),
+        ]
+    }
+
+    /// The delegate this back end prints, one `IntPtr` for each parameter,
+    /// named through the same [`held`] every other parameter here goes
+    /// through -- which is what puts `@event` in front of the reader rather
+    /// than a keyword.
+    fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
+        let _ = alias;
+        read.iter()
+            .map(|parameter| Named::new("the delegate", held(parameter), parameter.member.name))
+            .collect()
+    }
+
+    fn inside(
+        &self,
+        surface: &Surface,
+        function: &Function,
+        read: &[Read<'_>],
+        parts: &[Role<'_>],
+    ) -> Result<Vec<Named>, Refused> {
+        let _ = surface;
+        let mut out: Vec<Named> = parts
+            .iter()
+            .flat_map(declared)
+            .map(|parameter| Named::new("the declaration", parameter.name, parameter.member.name))
+            .collect();
+        let ty = Type::read(function.returns)?;
+        if ty.pointer.is_some() && ty.base == Base::Char {
+            // a call that answers with a static string takes its parameters
+            // as they came and writes no local
+            out.extend(read.iter().map(|parameter| {
+                Named::new("the wrapper", held(parameter), parameter.member.name)
+            }));
+            return Ok(out);
+        }
+        out.extend(hand_over(parts).names);
+        Ok(out)
+    }
 }

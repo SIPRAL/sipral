@@ -235,9 +235,16 @@ trusts.
   2026 the tree built no C-linkable library at all, three of the four printed
   bindings did not compile, and the gate could not tell, because it compared
   the generator's output with itself. The library and a C program that links
-  it are now steps of the gate. Compiling the Swift, Kotlin and .NET bindings,
-  a name-uniqueness pass in the generator and tests of its own are still to be
-  added, and the ABI does not freeze before they are.
+  it are now steps of the gate. The generator has tests of its own and reads
+  its derived names back before it prints anything — two declarations that
+  become one name, or a name a language will not take, stop it rather than
+  reaching a consumer — which is what found the two entry points that made
+  the C# file unbuildable and the five that made the JNI shim unbuildable:
+  the same two, where `out_call` beside `call` derived one name twice, and
+  three more where a parameter called `status` landed on the local the shim
+  writes for the status it is about to return. Compiling the Swift, Kotlin and .NET
+  bindings in the gate is still to be added, and the ABI does not freeze
+  before it is.
 - **D6** — device, codec and transport as properties of a call rather than of
   the process. *Built* in Rust; the transport half is not yet across the ABI.
 

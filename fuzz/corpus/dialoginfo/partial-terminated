@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<dialog-info xmlns="urn:ietf:params:xml:ns:dialog-info" version="4" state="partial" entity="sip:alice@example.com">
+  <dialog id="as7d900as8"><state>terminated</state></dialog>
+</dialog-info>

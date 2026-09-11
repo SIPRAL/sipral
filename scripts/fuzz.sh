@@ -8,13 +8,21 @@
 #   scripts/fuzz.sh 3600       an hour a target
 #   scripts/fuzz.sh 60 parse   one target, one minute
 #
-# Not part of scripts/check.sh: four targets at five minutes each would add
-# half an hour to every commit and buy very little, since the corpus only grows
-# when something new reaches it. Run it before a release, and overnight on a
-# machine that has nothing better to do.
+# Not a part of scripts/check.sh: thirteen targets at five minutes each would
+# add an hour to every commit and buy very little, since the corpus only grows
+# when something new reaches it. The gate builds them instead, so they cannot
+# rot uncompiled. Run this before a release, and overnight on a machine that
+# has nothing better to do.
 #
 # `fuzz/` is a workspace of its own with its own nightly pin, because libFuzzer
 # needs one and the rest of the tree does not.
+#
+# Two corpus directories per target, and the order matters. libFuzzer writes
+# what it finds into the first one, so that is a scratch under `fuzz/target/`,
+# which is ignored; `fuzz/corpus/<target>` comes second and is read only. The
+# seeds are committed and a run must not push a thousand mutations in beside
+# them -- an input worth keeping is copied in on purpose, with the commit that
+# says why.
 set -uo pipefail
 
 cd "$(dirname "$0")/../fuzz"
@@ -33,7 +41,9 @@ FAIL=0
 for target in $(cargo fuzz list); do
     [ -n "$ONLY" ] && [ "$target" != "$ONLY" ] && continue
     printf '\n%s, %s seconds\n' "$target" "$SECONDS_EACH"
-    if cargo fuzz run "$target" -- \
+    FOUND="target/corpus/$target"
+    mkdir -p "$FOUND"
+    if cargo fuzz run "$target" "$FOUND" "corpus/$target" -- \
         -max_total_time="$SECONDS_EACH" -max_len=65535 -rss_limit_mb=2048; then
         printf '  ok    %s found nothing\n' "$target"
     else

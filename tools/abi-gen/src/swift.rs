@@ -11,13 +11,14 @@
 
 use std::fmt::Write as _;
 
-use sipral_ffi::abi::{Function, Stands, Surface};
+use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Stands, Surface, Value};
 
 use crate::c;
 use crate::model::{
     Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
     plain_named, record_named, roles, without_prefix,
 };
+use crate::names::{Layout, Named, Spelling, audit};
 
 /// What a name inside a documentation link is called in Swift.
 fn spelled(surface: &Surface, path: &str) -> String {
@@ -145,21 +146,39 @@ fn returned(name: &str) -> String {
     lower_camel(name.strip_prefix("out_").unwrap_or(name))
 }
 
+/// The one spelling of a parameter's name, used everywhere it is spelled.
+fn held(read: &Read<'_>) -> String {
+    safe(&lower_camel(read.member.name))
+}
+
+/// The one spelling of the name a value written back takes.
+fn written(read: &Read<'_>) -> String {
+    safe(&returned(read.member.name))
+}
+
+/// The one spelling of what an entry point is called here.
+fn called(function: &Function) -> String {
+    safe(&without_prefix(function.name))
+}
+
 /// One wrapping closure around the call, for a buffer that has to stay alive
 /// while C reads it.
 struct Wrap {
     opening: String,
     binding: String,
+    /// The name the closure introduces, which is a name in the function's
+    /// scope like any other and is claimed as one.
+    bound: String,
 }
 
 fn wrapping(index: usize, role: &Role<'_>) -> Vec<Wrap> {
     let (name, ty, writable) = match role {
         Role::Buffer { data, .. } => (
-            lower_camel(data.member.name),
+            held(data),
             data.ty.clone(),
             data.ty.pointer == Some(Writable::Yes),
         ),
-        Role::Fill { data, .. } => (lower_camel(data.member.name), data.ty.clone(), true),
+        Role::Fill { data, .. } => (held(data), data.ty.clone(), true),
         _ => return Vec::new(),
     };
     let pointer = format!("p{index}");
@@ -175,16 +194,19 @@ fn wrapping(index: usize, role: &Role<'_>) -> Vec<Wrap> {
             Wrap {
                 opening: format!("Array({name}.utf8).withUnsafeBufferPointer {{ raw{index} in"),
                 binding: String::new(),
+                bound: format!("raw{index}"),
             },
             Wrap {
                 opening: format!("raw{index}.withMemoryRebound(to: CChar.self) {{ {pointer} in"),
-                binding: pointer,
+                binding: pointer.clone(),
+                bound: pointer,
             },
         ];
     }
     vec![Wrap {
         opening: format!("{name}.{method} {{ {pointer} in"),
-        binding: pointer,
+        binding: pointer.clone(),
+        bound: pointer,
     }]
 }
 
@@ -194,14 +216,10 @@ fn signature(function: &Function, parts: &[Role<'_>]) -> String {
     for role in parts {
         match role {
             Role::Plain(read) | Role::Config(read) => {
-                arguments.push(format!(
-                    "{}: {}",
-                    safe(&lower_camel(read.member.name)),
-                    scalar(&read.ty)
-                ));
+                arguments.push(format!("{}: {}", held(read), scalar(&read.ty)));
             }
             Role::Buffer { data, .. } => {
-                let name = safe(&lower_camel(data.member.name));
+                let name = held(data);
                 let element = scalar(&data.ty);
                 let held = match (&data.ty.base, data.ty.pointer) {
                     (Base::Char, Some(Writable::No)) => "String".to_owned(),
@@ -211,21 +229,13 @@ fn signature(function: &Function, parts: &[Role<'_>]) -> String {
                 arguments.push(format!("{name}: {held}"));
             }
             Role::Fill { data, .. } => {
-                arguments.push(format!(
-                    "{}: inout [{}]",
-                    safe(&lower_camel(data.member.name)),
-                    scalar(&data.ty)
-                ));
+                arguments.push(format!("{}: inout [{}]", held(data), scalar(&data.ty)));
             }
             Role::Shared(read) => {
-                arguments.push(format!(
-                    "{}: inout {}",
-                    safe(&lower_camel(read.member.name)),
-                    scalar(&read.ty)
-                ));
+                arguments.push(format!("{}: inout {}", held(read), scalar(&read.ty)));
             }
             Role::Given(read) | Role::Out(read) => {
-                results.push((returned(read.member.name), scalar(&read.ty)));
+                results.push((written(read), scalar(&read.ty)));
             }
         }
     }
@@ -246,7 +256,7 @@ fn signature(function: &Function, parts: &[Role<'_>]) -> String {
     };
     format!(
         "    public static func {}({}) throws{returns} {{",
-        without_prefix(function.name),
+        called(function),
         arguments.join(", ")
     )
 }
@@ -260,16 +270,16 @@ fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
             .map(|wrap| wrap.binding.clone())
             .unwrap_or_default();
         match role {
-            Role::Plain(read) => arguments.push(safe(&lower_camel(read.member.name))),
+            Role::Plain(read) => arguments.push(held(read)),
             Role::Buffer { .. } | Role::Fill { .. } => {
                 arguments.push(format!("{pointer}.baseAddress"));
                 arguments.push(format!("{pointer}.count"));
             }
             Role::Config(read) | Role::Shared(read) => {
-                arguments.push(format!("&{}", safe(&lower_camel(read.member.name))));
+                arguments.push(format!("&{}", held(read)));
             }
             Role::Given(read) | Role::Out(read) => {
-                arguments.push(format!("&{}", returned(read.member.name)));
+                arguments.push(format!("&{}", written(read)));
             }
         }
     }
@@ -281,14 +291,14 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
     for role in parts {
         match role {
             Role::Config(read) => {
-                let name = safe(&lower_camel(read.member.name));
+                let name = held(read);
                 let _ = writeln!(out, "        var {name} = {name}");
             }
             Role::Given(read) | Role::Out(read) => {
                 let _ = writeln!(
                     out,
                     "        var {} = {}",
-                    returned(read.member.name),
+                    written(read),
                     empty(surface, &read.ty)
                 );
             }
@@ -333,7 +343,7 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
     let results: Vec<String> = parts
         .iter()
         .filter_map(|role| match role {
-            Role::Given(read) | Role::Out(read) => Some(returned(read.member.name)),
+            Role::Given(read) | Role::Out(read) => Some(written(read)),
             _ => None,
         })
         .collect();
@@ -358,25 +368,15 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
 fn naming(function: &Function, read: &[Read<'_>]) -> String {
     let arguments = read
         .iter()
-        .map(|parameter| {
-            format!(
-                "{}: {}",
-                safe(&lower_camel(parameter.member.name)),
-                scalar(&parameter.ty)
-            )
-        })
+        .map(|parameter| format!("{}: {}", held(parameter), scalar(&parameter.ty)))
         .collect::<Vec<_>>()
         .join(", ");
-    let passed = read
-        .iter()
-        .map(|parameter| safe(&lower_camel(parameter.member.name)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let passed = read.iter().map(held).collect::<Vec<_>>().join(", ");
     let mut out = String::new();
     let _ = writeln!(
         out,
         "    public static func {}({arguments}) -> String? {{",
-        without_prefix(function.name)
+        called(function)
     );
     let _ = writeln!(
         out,
@@ -461,6 +461,7 @@ fn sized(surface: &Surface) -> String {
 
 /// Print the Swift binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
+    audit(surface, &Names)?;
     let mut out = String::new();
     out.push_str(
         "// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
@@ -500,7 +501,9 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
         for value in *group {
             doc(&mut out, "    ", &lines(surface, value.doc));
             let ty = scalar(&Type::read(value.rust_type)?);
-            let name = lower_camel(value.name.strip_prefix("SIPRAL_").unwrap_or(value.name));
+            let name = safe(&lower_camel(
+                value.name.strip_prefix("SIPRAL_").unwrap_or(value.name),
+            ));
             let _ = writeln!(
                 out,
                 "    public static let {name}: {ty} = {}\n",
@@ -539,7 +542,12 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
             continue;
         }
         doc(&mut out, "    ", &lines(surface, function.doc));
-        if function.returns == "*const c_char" {
+        // through Type::read, like the other three back ends: a declaration
+        // that spells the same type differently -- `*const i8`, or a space
+        // where this one had none -- is the same type, and a string compare
+        // against one spelling of it silently prints the wrong shape
+        let returns = Type::read(function.returns)?;
+        if returns.pointer.is_some() && returns.base == Base::Char {
             out.push_str(&naming(function, &read));
             out.push('\n');
             continue;
@@ -552,4 +560,131 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str("}\n");
     Ok(out)
+}
+
+/// What Swift calls what the surface declares.
+pub(crate) struct Names;
+
+impl Spelling for Names {
+    fn language(&self) -> &'static str {
+        "Swift"
+    }
+
+    fn reserved(&self) -> &'static [&'static str] {
+        RESERVED
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::Nested
+    }
+
+    fn types(&self, surface: &Surface) -> Vec<(String, String)> {
+        // the records and the callback are the C target's, imported rather
+        // than printed; what this back end names for itself is the
+        // typealiases, the enumerations, the error and the container
+        let mut out = vec![
+            ("SipralError".to_owned(), "this back end".to_owned()),
+            ("Sipral".to_owned(), "this back end".to_owned()),
+        ];
+        for alias in surface.aliases {
+            if matches!(alias.stands, Stands::For(_)) {
+                out.push((alias.name.to_owned(), alias.name.to_owned()));
+            }
+        }
+        for enumeration in surface.enumerations {
+            out.push((enumeration.name.to_owned(), enumeration.name.to_owned()));
+        }
+        out
+    }
+
+    fn members(&self, record: &Record) -> Result<Vec<(String, String)>, Refused> {
+        // a record's members are C's, spelled as C spells them; the one name
+        // this back end adds to a record is the initialiser
+        Ok(if record.is_versioned() {
+            vec![(
+                "sized".to_owned(),
+                format!("the initialiser this back end gives {}", record.name),
+            )]
+        } else {
+            Vec::new()
+        })
+    }
+
+    fn code(&self, enumeration: &Enumeration, code: &Code) -> String {
+        let _ = enumeration;
+        safe(&lower_camel(code.name))
+    }
+
+    fn constant(&self, value: &Value) -> String {
+        safe(&lower_camel(
+            value.name.strip_prefix("SIPRAL_").unwrap_or(value.name),
+        ))
+    }
+
+    fn entry(&self, function: &Function) -> String {
+        called(function)
+    }
+
+    fn written_by_hand(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("lastErrorMessage", "sipral_last_error_message"),
+            ("check", "the status check this back end writes"),
+        ]
+    }
+
+    /// Nothing. The callback is the C target's, imported rather than
+    /// printed -- which is what [`Spelling::types`] says about it too -- and
+    /// a C function pointer reaches Swift as `@convention(c)` with its
+    /// parameter names dropped. So this back end spells none of them, and
+    /// [`crate::c::Names`] reads the one spelling there is.
+    fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
+        let _ = (alias, read);
+        Vec::new()
+    }
+
+    fn inside(
+        &self,
+        surface: &Surface,
+        function: &Function,
+        read: &[Read<'_>],
+        parts: &[Role<'_>],
+    ) -> Result<Vec<Named>, Refused> {
+        let _ = surface;
+        let here = "the wrapper";
+        let ty = Type::read(function.returns)?;
+        if ty.pointer.is_some() && ty.base == Base::Char {
+            let mut out: Vec<Named> = read
+                .iter()
+                .map(|parameter| Named::new(here, held(parameter), parameter.member.name))
+                .collect();
+            out.push(Named::new(
+                here,
+                "text".to_owned(),
+                "the string this back end reads back",
+            ));
+            return Ok(out);
+        }
+        let mut out = vec![Named::new(
+            here,
+            "status".to_owned(),
+            "the status this back end holds on to",
+        )];
+        for (index, role) in parts.iter().enumerate() {
+            match role {
+                Role::Plain(read) | Role::Config(read) | Role::Shared(read) => {
+                    out.push(Named::new(here, held(read), read.member.name));
+                }
+                Role::Buffer { data, .. } | Role::Fill { data, .. } => {
+                    out.push(Named::new(here, held(data), data.member.name));
+                    for wrap in wrapping(index, role) {
+                        out.push(Named::new(here, wrap.bound, data.member.name));
+                    }
+                }
+                Role::Given(read) | Role::Out(read) => {
+                    out.push(Named::new(here, written(read), read.member.name));
+                }
+            }
+        }
+        Ok(out)
+    }
 }

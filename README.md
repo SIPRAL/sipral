@@ -87,11 +87,15 @@ here treats them as exceptional.
   lints across the workspace, and `scripts/check.sh` runs with `-D warnings`.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
   128 header fields, 4 KiB per header value, all three lower on request.
-- **Fuzzing** since the twenty-sixth commit — four `cargo-fuzz` targets over the
-  parser, the builder, the stream framer and SDP, run by `scripts/fuzz.sh`. The
-  corpus is not committed: seed it from the torture messages before the first
-  run, `mkdir -p fuzz/corpus/parse && cp fixtures/rfc4475/*/*.dat
-  fuzz/corpus/parse/`.
+- **Fuzzing** since the twenty-sixth commit — thirteen `cargo-fuzz` targets,
+  over the parser, the builder, the stream framer, SDP and its `a=crypto`
+  lines, the recording format, the dialog-info body, the headless control
+  channel, RTCP, RTP named events, SRTP unprotect, STUN and TURN. Run by
+  `scripts/fuzz.sh`; built by `scripts/check.sh` on every run so none of them
+  can rot uncompiled. The seeds are committed under `fuzz/corpus/`, written by
+  `tools/fuzz-seeds` out of the library's own encoders, so a clone starts with
+  something rather than with the empty input; a long run is worth pointing at
+  `fixtures/rfc4475/` as well.
 - **The RFC 4475 torture corpus** is in the tree bit-exact, 49 messages with a
   SHA-256 per file, and a test asserts on the outcome the RFC specifies for each
   one rather than on "it did not crash".

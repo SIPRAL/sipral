@@ -2457,7 +2457,7 @@ sipral_status_t sipral_call_answer(sipral_handle_t stack, sipral_handle_t call, 
 sipral_status_t sipral_call_answer_media(sipral_handle_t stack, sipral_handle_t call, const char *media_address, size_t media_address_len, uint64_t now_ms);
 
 /**
- * Refuse a call that came in, with a status of your choosing.
+ * Refuse a call that came in, with a response code of your choosing.
  *
  * 486 Busy Here for a line that is in use, 603 Decline for a person who
  * does not want to talk. The difference is what a proxy does next.
@@ -2466,7 +2466,7 @@ sipral_status_t sipral_call_answer_media(sipral_handle_t stack, sipral_handle_t 
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_call_reject(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+sipral_status_t sipral_call_reject(sipral_handle_t stack, sipral_handle_t call, uint32_t code, uint64_t now_ms);
 
 /**
  * Hang up, whatever the call is doing.
@@ -2530,7 +2530,7 @@ sipral_status_t sipral_call_accept_session(sipral_handle_t stack, sipral_handle_
 /**
  * Refuse one instead. The session stands exactly as it was (§14.1).
  *
- * 488 Not Acceptable Here is the status that says the description was the
+ * 488 Not Acceptable Here is the code that says the description was the
  * problem rather than the request.
  *
  * As with sipral_call_accept_session, only for a call the application
@@ -2540,7 +2540,7 @@ sipral_status_t sipral_call_accept_session(sipral_handle_t stack, sipral_handle_
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_call_reject_session(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+sipral_status_t sipral_call_reject_session(sipral_handle_t stack, sipral_handle_t call, uint32_t code, uint64_t now_ms);
 
 /**
  * Send DTMF on a call that is up, in whichever of the three forms the far
@@ -2588,7 +2588,7 @@ sipral_status_t sipral_call_transfer(sipral_handle_t stack, sipral_handle_t call
 
 /**
  * Call the transfer target, so that there is somebody to hand the call
- * to, and write the new call's handle to `out_call`.
+ * to, and write the new call's handle to `out_consultation`.
  *
  * The consultation leg of an attended transfer. It is answered like any
  * other call, and sipral_call_transfer_to is what follows. Putting
@@ -2605,7 +2605,7 @@ sipral_status_t sipral_call_transfer(sipral_handle_t stack, sipral_handle_t call
  *
  * As sipral_call_place.
  */
-sipral_status_t sipral_call_consult(sipral_handle_t stack, sipral_handle_t call, const sipral_call_config_t *config, sipral_handle_t *out_call, uint64_t now_ms);
+sipral_status_t sipral_call_consult(sipral_handle_t stack, sipral_handle_t call, const sipral_call_config_t *config, sipral_handle_t *out_consultation, uint64_t now_ms);
 
 /**
  * Hand `call` to the far end of `other` (RFC 3891).
@@ -2622,13 +2622,13 @@ sipral_status_t sipral_call_transfer_to(sipral_handle_t stack, sipral_handle_t c
 
 /**
  * Take a transfer that was asked for, place the call it names, and write
- * that call's handle to `out_call`.
+ * that call's handle to `out_placed`.
  *
  * Safety
  *
- * `out_call` must point at one `sipral_handle_t`.
+ * `out_placed` must point at one `sipral_handle_t`.
  */
-sipral_status_t sipral_call_accept_transfer(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t *out_call, uint64_t now_ms);
+sipral_status_t sipral_call_accept_transfer(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t *out_placed, uint64_t now_ms);
 
 /**
  * Refuse one instead.
@@ -2637,7 +2637,7 @@ sipral_status_t sipral_call_accept_transfer(sipral_handle_t stack, sipral_handle
  *
  * Safe to call with any handle values.
  */
-sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle_t call, uint32_t status, uint64_t now_ms);
+sipral_status_t sipral_call_reject_transfer(sipral_handle_t stack, sipral_handle_t call, uint32_t code, uint64_t now_ms);
 
 /**
  * Where a call is, as a `SipralCallState`.

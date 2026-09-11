@@ -15,7 +15,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sipral_core::sdp::{AcceptedStream, Connection, Origin, SessionDescription, StreamAnswer, parse};
+use sipral_core::sdp::{
+    AcceptedStream, Connection, Origin, SessionDescription, StreamAnswer, parse,
+};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(offer) = parse(data) else {

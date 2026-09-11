@@ -152,6 +152,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-fuzz-seeds"
+version = "0.0.1"
+dependencies = [
+ "sipral-core",
+ "sipral-headless",
+ "sipral-nat",
+ "sipral-rtp",
+ "sipral-ua",
+]
+
+[[package]]
 name = "sipral-headless"
 version = "0.0.1"
 

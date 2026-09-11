@@ -1,0 +1,10 @@
+REGISTER sip:example.com SIP/2.0
+Via: SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bK2d4790.1
+Max-Forwards: 70
+From: <sip:alice@example.com>;tag=9fxced76sl
+To: <sip:alice@example.com>
+Call-ID: 1j9FpLxk3uxtm8tn@192.0.2.1
+CSeq: 1 REGISTER
+Contact: <sip:alice@192.0.2.1:5060>;expires=3600
+Content-Length: 0
+

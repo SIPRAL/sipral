@@ -14,6 +14,10 @@ HYGIENE_ONLY=0
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
+# only for a tool that is not on this machine, and only when it names what is
+# missing and how to get it. Never for something that could be checked here
+# and was not: a gate that goes green without looking has not looked.
+skip() { printf '  skip  %s\n' "$1"; }
 step() { printf '\n%s\n' "$1"; }
 
 SELF="scripts/check.sh"
@@ -133,6 +137,172 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
     printf '        fixtures/%s\n' $stray
     printf '        ITU material is never committed. Widen this list only alongside a README naming the licence.\n'
 }
+
+# The other place bytes of no obvious origin could land. fuzz/corpus/ is
+# committed -- a clone that gets thirteen targets and no corpus gets thirteen
+# targets that start from the empty input -- and two things keep it from
+# becoming somewhere unvetted material is dropped. Both are checked here.
+#
+# Its shape, first: every directory in it is a target fuzz/Cargo.toml
+# declares, every target has one, fuzz/corpus/README.md says where the bytes
+# came from, and the whole of it is bounded. tools/fuzz-seeds writes them out
+# of this repository's own builders, puts each one through the reader its
+# target puts it through, and sweeps whatever it did not write.
+#
+# Its content, second, because shape alone would pass a seed holding
+# anything at all.
+#
+# WHAT IS READ. Every byte of every tracked file under fuzz/corpus/, for the
+# same four things the rest of the tree is read for: an address somebody
+# could harvest, a forbidden project's name, an assistant trace, and
+# Romanian. Read as bytes, with `grep -a`, because a seed is a datagram as
+# often as it is a message and the `-I` the scans above carry would skip
+# exactly the files this exists for.
+#
+# The first three patterns are ASCII and several characters long, so a
+# chance match inside ciphertext is not a thing that happens. Romanian is
+# different and is matched differently: each letter is two bytes of UTF-8,
+# and an encrypted payload holds those pairs by chance -- the three
+# srtp_unprotect seeds really do, which is how this was found out. So what
+# is looked for here is not the bare character class the Markdown scan uses
+# but a Romanian letter with an ASCII letter on either side of it, which is
+# what one looks like inside a word and what ciphertext does not produce.
+#
+# WHAT IS NOT READ. A lone Romanian letter with no ASCII letter on either
+# side of it. One letter is enough, and both was too much: the commonest
+# words in the language carry the diacritic at an edge -- `si`, `sa`,
+# `doua`, `invata` -- so a rule wanting a letter on both sides reads past
+# exactly the words a leak would be made of. The
+# SPDX and copyright headers, which a seed cannot carry and is not asked
+# for. fuzz/corpus/README.md, which is Markdown and went through the scans
+# above with the rest of the tree. The asset provenance scan, which is for
+# images. And anything a run leaves under fuzz/target/, which is not
+# committed and never will be.
+#
+# The declared names are read out of the manifest rather than written here:
+# a list of thirteen kept by hand beside a list of thirteen kept by cargo is
+# two lists, and they drift.
+# One ASCII letter on at least one side of a Romanian letter. Written as an
+# alternation rather than a bracket because under LC_ALL=C a bracket over
+# multi-byte characters matches single bytes, and the halves of those
+# sequences do occur inside ciphertext.
+dia='ă\|â\|î\|ș\|ț\|Ă\|Â\|Î\|Ș\|Ț\|ş\|ţ\|Ş\|Ţ'
+romanian="[A-Za-z]\\($dia\\)\\|\\($dia\\)[A-Za-z]"
+
+declared=$(awk '/^\[\[bin\]\]/ {found=1; next}
+                found && /^name = / {gsub(/"/, "", $3); print $3; found=0}' fuzz/Cargo.toml)
+seeded=$(tracked | grep '^fuzz/corpus/' | cut -d/ -f3 | grep -v '^README\.md$' | sort -u)
+if [ -z "$declared" ]; then
+    fail "fuzz/Cargo.toml declares no target, so the corpus was compared against nothing"
+elif [ -z "$seeded" ]; then
+    fail "nothing is tracked under fuzz/corpus/: a clone gets targets with nothing to start from"
+else
+    unseeded=$(comm -23 <(printf '%s\n' "$declared" | sort -u) <(printf '%s\n' "$seeded"))
+    unknown=$(comm -13 <(printf '%s\n' "$declared" | sort -u) <(printf '%s\n' "$seeded"))
+    if [ -z "$unseeded" ] && [ -z "$unknown" ]; then
+        pass "every fuzz target has seeds, and every seed directory a target"
+    else
+        fail "fuzz/corpus/ and the targets fuzz/Cargo.toml declares disagree:"
+        [ -n "$unseeded" ] && {
+            printf '        a target with no seeds: %s\n' $unseeded
+            printf '        write them with: cargo run -p sipral-fuzz-seeds\n'
+        }
+        [ -n "$unknown" ] && {
+            printf '        not a fuzz target: %s\n' $unknown
+            printf '        bytes under fuzz/corpus/ belong to a target, and fuzz/corpus/README.md says where they came from.\n'
+        }
+    fi
+fi
+
+# Every tracked byte under fuzz/corpus/ except the README, which the
+# Markdown scans above already read.
+seeds() { tracked | grep '^fuzz/corpus/' | grep -vx 'fuzz/corpus/README\.md'; }
+
+corpus_files=$(seeds)
+corpus_count=$(printf '%s\n' "$corpus_files" | grep -c . || true)
+unreadable=$(printf '%s\n' "$corpus_files" | while read -r f; do
+    [ -n "$f" ] && { [ -r "$f" ] && [ -s "$f" ]; } || echo "${f:-<nothing listed>}"
+done)
+# The scan is asked for the addresses first with the allow-list off. The
+# seeds really do hold them -- they are built out of RFC 2606 names, and
+# fuzz/corpus/README.md says so -- so a run that matches none of those
+# matched nothing because it read nothing, which is the one way this step
+# could go green having looked at no bytes at all.
+control=$(printf '%s\n' "$corpus_files" | while read -r f; do
+    [ -n "$f" ] && LC_ALL=C grep -aoE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$f" 2>/dev/null
+done | grep -c . || true)
+suspect=$(printf '%s\n' "$corpus_files" | while read -r f; do
+    [ -n "$f" ] || continue
+    LC_ALL=C grep -aoE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$f" 2>/dev/null \
+        | grep -v 'users\.noreply\.github\.com' \
+        | grep -vE '@([A-Za-z0-9.-]+\.)?(example\.(com|net|org)|[A-Za-z0-9-]+\.(example|invalid|test|localhost))\b' \
+        | sort -u | sed "s|^|$f: an address: |"
+    LC_ALL=C grep -aoi "$forbidden" "$f" 2>/dev/null \
+        | sort -u | sed "s|^|$f: a forbidden project: |"
+    LC_ALL=C grep -aoi 'co-authored-by: claude\|generated with \[claude\|copilot' "$f" 2>/dev/null \
+        | sort -u | sed "s|^|$f: an assistant trace: |"
+    LC_ALL=C grep -ao "$romanian" \
+        "$f" 2>/dev/null | sort -u | sed "s|^|$f: a Romanian word: |"
+done)
+if [ "$corpus_count" -eq 0 ]; then
+    fail "no seed under fuzz/corpus/ was listed, so not one of them was read"
+elif [ -n "$unreadable" ]; then
+    fail "a seed could not be read, so the scan below did not read it:"
+    printf '        %s\n' $unreadable
+elif [ "$control" -eq 0 ]; then
+    fail "the address scan read no bytes: it matched nothing under fuzz/corpus/, not even the RFC 2606 names the seeds are built out of"
+elif [ -z "$suspect" ]; then
+    pass "$corpus_count seeds read for addresses, Romanian, provenance and assistant traces"
+
+    # And they are the seeds this repository says they are. Everything above
+    # reads the bytes for what they must not hold; none of it asks whether
+    # they are the bytes `tools/fuzz-seeds` writes. Replace one with any text
+    # at all and the shape check still passes, the content scan still passes,
+    # and the corpus has quietly stopped being the corpus documented in
+    # fuzz/corpus/README.md -- while the generator, which validates every seed
+    # through its own target's parser, would never have produced it.
+    fresh=$(mktemp -d)
+    if ! cargo run -q -p sipral-fuzz-seeds -- "$fresh" >/dev/null 2>&1; then
+        fail "cargo run -p sipral-fuzz-seeds could not write a corpus, so nothing was compared"
+    elif [ -z "$(find "$fresh" -type f 2>/dev/null)" ]; then
+        fail "the seed generator wrote no file, so the tracked corpus was compared against nothing"
+    else
+        drift=$( (cd "$ROOT/fuzz/corpus" && find . -type f ! -name 'README.md' | sed 's|^\./||' | sort) \
+            | while read -r one; do
+                cmp -s "$ROOT/fuzz/corpus/$one" "$fresh/$one" 2>/dev/null || echo "$one"
+              done
+            (cd "$fresh" && find . -type f | sed 's|^\./||' | sort) \
+            | while read -r one; do
+                [ -f "$ROOT/fuzz/corpus/$one" ] || echo "$one (the generator writes it; it is not tracked)"
+              done )
+        [ -z "$drift" ] && pass "every seed is what the generator produces" || {
+            fail "fuzz/corpus/ is not what tools/fuzz-seeds writes:"
+            printf '        %s\n' $drift
+        }
+    fi
+    rm -rf "$fresh"
+else
+    fail "fuzz/corpus/ holds what the rest of the tree is not allowed to hold:"
+    printf '%s\n' "$suspect" | sed 's/^/        /'
+    printf '        seeds come out of tools/fuzz-seeds, which builds them from RFC 5737 and RFC 2606 names.\n'
+fi
+
+readme=$(tracked | grep -cx 'fuzz/corpus/README.md' || true)
+[ "$readme" = "1" ] && pass "the corpus says where its bytes came from" || {
+    fail "fuzz/corpus/README.md is not tracked: committed bytes need an origin"
+}
+
+# and a bound, so that the corpus a clone pays for stays something a person
+# would read rather than a directory nobody opens
+weight=$(tracked | grep '^fuzz/corpus/' | while read -r f; do wc -c <"$f"; done \
+    | awk '{total += $1} END {print total + 0}')
+if [ -z "$weight" ] || [ "$weight" -eq 0 ]; then
+    fail "fuzz/corpus/ weighed nothing, so the bound was not checked"
+elif [ "$weight" -le 204800 ]; then
+    pass "the seed corpus is $weight bytes, inside the 204800 it is allowed"
+else
+    fail "the seed corpus is $weight bytes and the bound is 204800"
+fi
 
 # No code enters this tree from outside it before 1.0, so an attribution
 # trailer or a tool fingerprint left in a file is a mistake rather than a
@@ -516,6 +686,133 @@ if printed=$(cargo run -q -p sipral-abi-gen -- --check 2>&1); then
 else
     fail "bindings/ is not what the declarations produce:"
     printf '%s\n' "$printed" | sed 's/^/        /'
+fi
+
+# Thirteen fuzz targets in a workspace of its own, on a nightly pin of its
+# own, and nothing else here reads them: `cargo test --workspace`, `cargo
+# fmt --all` and the clippy run above all stop at the workspace boundary. A
+# target that stops building, or drifts out of the format the rest of the
+# tree keeps, is then found the next time somebody fuzzes -- which is before
+# a release, which is the worst moment to find it. So the gate formats,
+# lints and builds them. It does not run them: thirteen targets at five
+# minutes each is an hour, and that is what scripts/fuzz.sh is for.
+#
+# The toolchain is named out of fuzz/rust-toolchain.toml and passed
+# explicitly, so that all three use the pinned nightly and not whatever a
+# stray rustup default happens to be.
+step "the fuzz targets"
+NIGHTLY=$(awk -F'"' '/^channel = /{print $2; exit}' fuzz/rust-toolchain.toml 2>/dev/null)
+if [ -z "$NIGHTLY" ]; then
+    fail "fuzz/rust-toolchain.toml names no toolchain, so nothing says what to build with"
+elif ! rustup toolchain list 2>/dev/null | grep -q "^$NIGHTLY"; then
+    skip "fuzz/: $NIGHTLY is not installed (rustup toolchain install $NIGHTLY)"
+else
+    # these two need the pinned nightly and nothing else, so they run even
+    # on a machine with no cargo-fuzz
+    (cd "$ROOT/fuzz" && cargo "+$NIGHTLY" fmt -- --check) >/dev/null 2>&1 \
+        && pass "cargo fmt, in fuzz/" || fail "cargo +$NIGHTLY fmt -- --check, in fuzz/"
+    (cd "$ROOT/fuzz" && cargo "+$NIGHTLY" clippy --all-targets -- -D warnings) >/dev/null 2>&1 \
+        && pass "cargo clippy, in fuzz/" \
+        || fail "cargo +$NIGHTLY clippy --all-targets -- -D warnings, in fuzz/"
+
+    if ! command -v cargo-fuzz >/dev/null 2>&1; then
+        skip "cargo fuzz build: cargo-fuzz is not installed (cargo install cargo-fuzz --locked)"
+    elif ! (cd "$ROOT/fuzz" && cargo "+$NIGHTLY" fuzz build) >/dev/null 2>&1; then
+        fail "cargo +$NIGHTLY fuzz build, in fuzz/"
+    else
+        # exiting zero is not the same as having produced anything, and the
+        # names come from cargo-fuzz rather than from a list kept here. Each
+        # one is then looked for on disk, non-empty.
+        #
+        # Where on disk is cargo's answer and not a guess: cargo-fuzz builds
+        # with plain `cargo build`, which honours CARGO_TARGET_DIR, so a
+        # machine that sets it puts the binaries somewhere fuzz/target/ is
+        # not -- and a step that looks in fuzz/target/ then reports thirteen
+        # targets missing, or worse finds yesterday's.
+        targets=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" fuzz list 2>/dev/null)
+        built_into=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" metadata --no-deps --format-version 1 \
+            2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+        if [ -z "$targets" ]; then
+            fail "cargo fuzz list named no target, so no binary was looked for"
+        elif [ -z "$built_into" ]; then
+            fail "cargo metadata did not say where fuzz/ builds, so no binary was looked for"
+        elif [ ! -d "$built_into" ]; then
+            fail "cargo says fuzz/ builds into $built_into, and there is no such directory"
+        else
+            absent=$(printf '%s\n' $targets | while read -r one; do
+                built=$(find "$built_into" -type f -name "$one" -perm -u+x 2>/dev/null | head -1)
+                { [ -n "$built" ] && [ -s "$built" ]; } || echo "$one"
+            done)
+            count=$(printf '%s\n' $targets | grep -c .)
+            [ -z "$absent" ] && pass "$count fuzz targets build under $NIGHTLY" || {
+                fail "cargo fuzz build left no binary under $built_into for:"
+                printf '        %s\n' $absent
+            }
+        fi
+    fi
+fi
+
+# A generated file nobody compiles is a file that is wrong the day it changes.
+# Until the generator grew a name pass, the C# binding had two entry points
+# with duplicated P/Invoke parameter names and the JNI shim had five; a
+# compiler would have said so on the day they were printed, and no compiler had
+# ever been pointed at them. Build outputs land in bin/, obj/ and .build/,
+# which .gitignore already covers.
+step "the bindings compile"
+
+if command -v dotnet >/dev/null 2>&1; then
+    (cd "$ROOT/bindings/dotnet/Sipral" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
+        && pass "dotnet build" || fail "dotnet build -c Release, in bindings/dotnet/Sipral"
+else
+    skip "dotnet build: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
+fi
+
+if command -v kotlinc >/dev/null 2>&1; then
+    # The sources are found rather than listed: a new file nobody added here
+    # would otherwise go uncompiled, which is the failure this step exists
+    # for. Collected NUL-separated into an array, because a checkout whose
+    # path has a space in it -- and this one has -- splits an unquoted list
+    # into halves that are not filenames, and the compiler then reports that
+    # it found no source while looking at two.
+    kotlin_sources=()
+    while IFS= read -r -d '' one; do
+        kotlin_sources+=("$one")
+    done < <(find "$ROOT/bindings/kotlin" -name '*.kt' -print0 2>/dev/null)
+    if [ "${#kotlin_sources[@]}" -eq 0 ]; then
+        fail "no Kotlin source found under bindings/kotlin, so nothing was compiled"
+    else
+        classes=$(mktemp -d)
+        kotlinc "${kotlin_sources[@]}" -d "$classes" >/dev/null 2>&1 \
+            && pass "kotlinc" || fail "kotlinc, over bindings/kotlin"
+        rm -rf "$classes"
+    fi
+else
+    skip "kotlinc: no Kotlin compiler (brew install kotlin)"
+fi
+
+# The JNI shim needs jni.h, and `java_home` answers with a JRE on a machine
+# that has one installed beside no JDK -- the applet plugin is one. So the
+# header is what is looked for, not the command.
+jdk="${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}"
+if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
+    cc -fsyntax-only -Wall -Wextra -Werror \
+        -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
+        "$ROOT/bindings/kotlin/sipral/src/main/jni/sipral_jni.c" >/dev/null 2>&1 \
+        && pass "cc -fsyntax-only, the JNI shim" \
+        || fail "cc -fsyntax-only, bindings/kotlin/sipral/src/main/jni/sipral_jni.c"
+else
+    skip "the JNI shim: no JDK carrying include/jni.h (JAVA_HOME must name a JDK, not a JRE)"
+fi
+
+# SwiftPM reads Package.swift by compiling it against the PackageDescription
+# module, which a full Xcode ships and the Command Line Tools alone do not --
+# so the manifest is tried first and its failure is told apart from the
+# package's.
+if (cd "$ROOT/bindings" && xcrun --toolchain default swift package dump-package) >/dev/null 2>&1; then
+    (cd "$ROOT/bindings" && xcrun --toolchain default swift build) >/dev/null 2>&1 \
+        && pass "swift build" || fail "swift build, in bindings/"
+else
+    skip "swift build: SwiftPM cannot read the manifest here (the Command Line Tools ship no PackageDescription module; a full Xcode does)"
 fi
 
 step "dependency licences"

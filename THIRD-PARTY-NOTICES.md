@@ -219,7 +219,12 @@ The fuzz harness under `fuzz/` links `libfuzzer-sys` and, through it,
 `arbitrary`, `libc`, `cc`, `jobserver` and `shlex`. That crate is a separate
 workspace with its own lockfile and its own nightly pin, it is never published
 and never linked into anything shipped, and `scripts/check.sh` runs
-`cargo deny` over it too. All of them are MIT or Apache-2.0, except
+`cargo deny` over it too. Its targets also reach into the workspace they test,
+so that lockfile carries whatever those crates carry as well — today `aes`,
+`zeroize` and the RustCrypto support crates named further up. None of that is
+new to the product: every one is already in the shipped graph and already
+attributed above, which is why the five named at the start of this
+paragraph are the harness's own and not a second copy of that list. All of them are MIT or Apache-2.0, except
 `libfuzzer-sys` itself, which is `(MIT OR Apache-2.0) AND NCSA` — NCSA is
 LLVM's old permissive licence, and `deny.toml` allows it by name for that one
 crate rather than opening the allow-list.

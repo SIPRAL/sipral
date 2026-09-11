@@ -2202,7 +2202,7 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_answer_media(ulong stack, ulong call, sbyte[] mediaAddress, nuint mediaAddressLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_reject(ulong stack, ulong call, uint status, ulong nowMs);
+    internal static extern SipralStatus sipral_call_reject(ulong stack, ulong call, uint code, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_hangup(ulong stack, ulong call, ulong nowMs);
@@ -2217,7 +2217,7 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_accept_session(ulong stack, ulong call, byte[] sdp, nuint sdpLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_reject_session(ulong stack, ulong call, uint status, ulong nowMs);
+    internal static extern SipralStatus sipral_call_reject_session(ulong stack, ulong call, uint code, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_send_dtmf(ulong stack, ulong call, sbyte[] digits, nuint digitsLen, uint via, uint durationMs, ulong nowMs);
@@ -2226,16 +2226,16 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_transfer(ulong stack, ulong call, sbyte[] target, nuint targetLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_consult(ulong stack, ulong call, in SipralCallConfig config, out ulong call, ulong nowMs);
+    internal static extern SipralStatus sipral_call_consult(ulong stack, ulong call, in SipralCallConfig config, out ulong consultation, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_transfer_to(ulong stack, ulong call, ulong other, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_accept_transfer(ulong stack, ulong call, out ulong call, ulong nowMs);
+    internal static extern SipralStatus sipral_call_accept_transfer(ulong stack, ulong call, out ulong placed, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_reject_transfer(ulong stack, ulong call, uint status, ulong nowMs);
+    internal static extern SipralStatus sipral_call_reject_transfer(ulong stack, ulong call, uint code, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_state(ulong stack, ulong call, out uint state);
@@ -2318,13 +2318,13 @@ public static class Sipral
     /// <summary>
     /// The value no live handle ever takes.
     /// </summary>
-    public const ulong HANDLENONE = 0;
+    public const ulong HandleNone = 0;
 
     /// <summary>
     /// The ABI's major version. Nothing published against one major works
     /// against another.
     /// </summary>
-    public const uint ABIVERSIONMAJOR = 0;
+    public const uint AbiVersionMajor = 0;
 
     /// <summary>
     /// The ABI's minor version, raised by anything the header gains —
@@ -2334,12 +2334,12 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint ABIVERSIONMINOR = 8;
+    public const uint AbiVersionMinor = 8;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
     /// </summary>
-    public const uint ABIVERSIONPATCH = 0;
+    public const uint AbiVersionPatch = 0;
 
     /// <summary>
     /// Bits of SipralCapabilities.Transports. A caller checks
@@ -2352,58 +2352,58 @@ public static class Sipral
     /// a transport added there in the future gets a bit here without the two
     /// numbering schemes ever being asked to agree by hand.
     /// </summary>
-    public const uint TRANSPORTBITUDP = 1;
+    public const uint TransportBitUdp = 1;
 
     /// <summary>
     /// See SIPRAL_TRANSPORT_BIT_UDP.
     /// </summary>
-    public const uint TRANSPORTBITTCP = 2;
+    public const uint TransportBitTcp = 2;
 
     /// <summary>
     /// See SIPRAL_TRANSPORT_BIT_UDP.
     /// </summary>
-    public const uint TRANSPORTBITTLS = 4;
+    public const uint TransportBitTls = 4;
 
     /// <summary>
     /// See SIPRAL_TRANSPORT_BIT_UDP.
     /// </summary>
-    public const uint TRANSPORTBITWS = 8;
+    public const uint TransportBitWs = 8;
 
     /// <summary>
     /// See SIPRAL_TRANSPORT_BIT_UDP.
     /// </summary>
-    public const uint TRANSPORTBITWSS = 16;
+    public const uint TransportBitWss = 16;
 
     /// <summary>
     /// Bits of SipralCapabilities.Features.
     /// </summary>
-    public const uint FEATUREDTMF = 1;
+    public const uint FeatureDtmf = 1;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF.
     /// </summary>
-    public const uint FEATURERTCPMUX = 2;
+    public const uint FeatureRtcpMux = 2;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF.
     /// </summary>
-    public const uint FEATURERECORDING = 4;
+    public const uint FeatureRecording = 4;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF.
     /// </summary>
-    public const uint FEATUREMEDIASTALLWATCHDOG = 8;
+    public const uint FeatureMediaStallWatchdog = 8;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF.
     /// </summary>
-    public const uint FEATURESRTP = 16;
+    public const uint FeatureSrtp = 16;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF, and the module documentation for why this
     /// build never sets it.
     /// </summary>
-    public const uint FEATURESUBSCRIPTIONS = 32;
+    public const uint FeatureSubscriptions = 32;
 
     /// <summary>
     /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
@@ -2415,7 +2415,7 @@ public static class Sipral
     /// number either way, since a value that has left this header is spent
     /// for good.
     /// </summary>
-    public const uint FEATUREOPUS = 64;
+    public const uint FeatureOpus = 64;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -2426,13 +2426,13 @@ public static class Sipral
     /// because a frame that was encoded and then had nowhere to go is a frame
     /// lost from a stream whose timestamps have already moved past it.
     /// </summary>
-    public static readonly nuint MEDIAPACKETBYTES = 1500;
+    public static readonly nuint MediaPacketBytes = 1500;
 
     /// <summary>
     /// Room enough for any address this ABI writes, the NUL included:
     /// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
     /// </summary>
-    public static readonly nuint ADDRESSBYTES = 64;
+    public static readonly nuint AddressBytes = 64;
 
     /// <summary>
     /// The transport a stack is created with, and the only one this build
@@ -2442,7 +2442,7 @@ public static class Sipral
     /// day more numbers become valid and not a day this ABI grows a second way
     /// to hand bytes over.
     /// </summary>
-    public const uint TRANSPORTMAIN = 0;
+    public const uint TransportMain = 0;
 
     /// <summary>
     /// The largest message that crosses in either direction.
@@ -2453,7 +2453,7 @@ public static class Sipral
     /// message and the start of another, and 1500 bytes or so on a datagram
     /// socket, where anything larger was fragmented on the way.
     /// </summary>
-    public static readonly nuint MESSAGEBYTES = 65535;
+    public static readonly nuint MessageBytes = 65535;
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -2878,7 +2878,7 @@ public static class Sipral
     }
 
     /// <summary>
-    /// Refuse a call that came in, with a status of your choosing.
+    /// Refuse a call that came in, with a response code of your choosing.
     ///
     /// 486 Busy Here for a line that is in use, 603 Decline for a person who
     /// does not want to talk. The difference is what a proxy does next.
@@ -2887,9 +2887,9 @@ public static class Sipral
     ///
     /// Safe to call with any handle values.
     /// </summary>
-    public static void CallReject(ulong stack, ulong call, uint status, ulong nowMs)
+    public static void CallReject(ulong stack, ulong call, uint code, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_reject(stack, call, status, nowMs));
+        Check(NativeMethods.sipral_call_reject(stack, call, code, nowMs));
     }
 
     /// <summary>
@@ -2966,7 +2966,7 @@ public static class Sipral
     /// <summary>
     /// Refuse one instead. The session stands exactly as it was (§14.1).
     ///
-    /// 488 Not Acceptable Here is the status that says the description was the
+    /// 488 Not Acceptable Here is the code that says the description was the
     /// problem rather than the request.
     ///
     /// As with sipral_call_accept_session, only for a call the application
@@ -2976,9 +2976,9 @@ public static class Sipral
     ///
     /// Safe to call with any handle values.
     /// </summary>
-    public static void CallRejectSession(ulong stack, ulong call, uint status, ulong nowMs)
+    public static void CallRejectSession(ulong stack, ulong call, uint code, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_reject_session(stack, call, status, nowMs));
+        Check(NativeMethods.sipral_call_reject_session(stack, call, code, nowMs));
     }
 
     /// <summary>
@@ -3039,7 +3039,7 @@ public static class Sipral
 
     /// <summary>
     /// Call the transfer target, so that there is somebody to hand the call
-    /// to, and write the new call's handle to `out_call`.
+    /// to, and write the new call's handle to `out_consultation`.
     ///
     /// The consultation leg of an attended transfer. It is answered like any
     /// other call, and sipral_call_transfer_to is what follows. Putting
@@ -3058,8 +3058,8 @@ public static class Sipral
     /// </summary>
     public static ulong CallConsult(ulong stack, ulong call, in SipralCallConfig config, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_consult(stack, call, in config, out var call, nowMs));
-        return call;
+        Check(NativeMethods.sipral_call_consult(stack, call, in config, out var consultation, nowMs));
+        return consultation;
     }
 
     /// <summary>
@@ -3080,16 +3080,16 @@ public static class Sipral
 
     /// <summary>
     /// Take a transfer that was asked for, place the call it names, and write
-    /// that call's handle to `out_call`.
+    /// that call's handle to `out_placed`.
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`.
+    /// `out_placed` must point at one `sipral_handle_t`.
     /// </summary>
     public static ulong CallAcceptTransfer(ulong stack, ulong call, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_accept_transfer(stack, call, out var call, nowMs));
-        return call;
+        Check(NativeMethods.sipral_call_accept_transfer(stack, call, out var placed, nowMs));
+        return placed;
     }
 
     /// <summary>
@@ -3099,9 +3099,9 @@ public static class Sipral
     ///
     /// Safe to call with any handle values.
     /// </summary>
-    public static void CallRejectTransfer(ulong stack, ulong call, uint status, ulong nowMs)
+    public static void CallRejectTransfer(ulong stack, ulong call, uint code, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_reject_transfer(stack, call, status, nowMs));
+        Check(NativeMethods.sipral_call_reject_transfer(stack, call, code, nowMs));
     }
 
     /// <summary>
