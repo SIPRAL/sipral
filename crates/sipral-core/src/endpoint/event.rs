@@ -192,6 +192,10 @@ pub enum Event {
         dialog: DialogId,
         /// The status.
         status: StatusCode,
+        /// The handle to acknowledge it by, when the response asked to be
+        /// sent reliably (RFC 3262 §3 puts a re-INVITE's provisionals in
+        /// scope exactly like an initial INVITE's).
+        provisional: Option<ProvisionalResponseId>,
         /// The response, whole.
         response: OwnedMessage,
     },

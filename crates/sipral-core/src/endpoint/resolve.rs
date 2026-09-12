@@ -34,6 +34,29 @@ use crate::msg::Uri;
 use crate::transaction::DialogId;
 
 impl Endpoint {
+    /// Ask again when a response or request just applied moved the remote
+    /// target (§12.2.1.2, §12.2.2's target refresh).
+    ///
+    /// `ask_to_resolve` runs once at dialog creation, and nothing else moves
+    /// the flow a dialog's requests go out on — `Dialog::on_response` and
+    /// `Dialog::on_request` are pure, sans-I/O mutations with no access to it.
+    /// `before` is the remote target as it read just before the call that may
+    /// have changed it; comparing strings rather than `Uri`s is deliberate,
+    /// since `Uri` has no `PartialEq` that answers this question. `None`
+    /// means the dialog was already gone and there is nothing to compare.
+    pub(super) fn resolve_if_target_moved(&mut self, dialog: DialogId, before: Option<&str>) {
+        let Some(before) = before else {
+            return;
+        };
+        let moved = self
+            .dialogs
+            .get(dialog)
+            .is_some_and(|held| held.remote_target().as_str() != before);
+        if moved {
+            self.ask_to_resolve(dialog);
+        }
+    }
+
     /// Point a dialog's requests at an address that was resolved outside.
     ///
     /// The first address that can be used is taken; the rest are the caller's
@@ -61,8 +84,19 @@ impl Endpoint {
     /// Say what a dialog's next hop is, if it is not where its requests are
     /// already going.
     ///
-    /// Called once, when the dialog is created. A name always asks, because
-    /// nothing here can tell whether it resolves to the address in hand.
+    /// Called when the dialog is created, and again whenever a target
+    /// refresh moves its remote target. A name always asks, because nothing
+    /// here can tell whether it resolves to the address in hand.
+    ///
+    /// A literal address is not applied here either, and that is the whole of
+    /// the decision this function makes. The flow a dialog keeps is the one
+    /// its first message travelled on, which is the only address that
+    /// survives the NAT nearly every softphone sits behind; the literal
+    /// address in a `Contact` from behind one is private and unreachable, and
+    /// that is the ordinary case rather than the exotic one. Nothing here can
+    /// tell it from a far end that genuinely moved. So the event goes out and
+    /// the flow stands until the caller answers with
+    /// [`Endpoint::resolved`], which is what that event is for.
     pub(super) fn ask_to_resolve(&mut self, dialog: DialogId) {
         let (Some(flow), Some(target)) = (
             self.dialogs.flow(dialog),

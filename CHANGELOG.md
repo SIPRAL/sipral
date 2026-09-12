@@ -30,6 +30,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A target refresh inside a dialog is now reported.** §12.2.1.2 and §12.2.2
+  both replace the dialog's remote target on a target refresh — a re-INVITE's
+  2xx, or an incoming one — but nothing compared the new target to the flow
+  those requests actually go out on, since `Dialog::on_response`/`on_request`
+  are pure, sans-I/O mutations with no access to it. `Endpoint::ack_reinvite`
+  built the ACK's Request-URI from the new target while still sending it to
+  the flow from before the move: one host named, another dialled, and no
+  event. The endpoint now compares the remote target before and after each
+  call into the dialog and pushes `Event::ResolveNeeded` when it moved. The
+  flow itself deliberately stands, literal address or not, until the caller
+  answers with `resolved`: a far end behind a NAT writes its own private
+  address into `Contact`, which is the ordinary case, and following it would
+  take the call off the only address that reaches it.
+
+- **A reliable provisional to a re-INVITE can now be acknowledged.** This
+  endpoint answers a re-INVITE with a 1xx sent reliably the same as it
+  answers an initial INVITE — RFC 3262 §3 carves out no exception for a
+  request already inside a dialog — but on the receiving end such a response
+  reached the caller as a bare `ReinviteProgress` with no handle to PRACK it
+  by, while the far end retransmits it until it gives up on the call
+  entirely. `Event::ReinviteProgress` now carries the same
+  `ProvisionalResponseId` a fresh `Endpoint::prack` call needs, exactly like
+  `ReliableProvisional` does for an initial INVITE.
+
+- **A 2xx to a re-INVITE retransmitted before the ACK went out was reported
+  to the caller twice.** The dedup that answers a retransmission from the
+  cached ACK only applies once that ACK exists; before the caller has built
+  it — which can take longer than one retransmit interval, since the ACK may
+  carry the answer — a retransmitted 2xx fell through to the same branch that
+  handles the first one and pushed a second, indistinguishable
+  `Event::ReinviteAnswered`. The branch now checks whether this re-INVITE's
+  answer has already been reported and returns without pushing again.
+
 - **A recording could not tell two sessions apart that sent their requests to
   different addresses.** `Endpoint::resolved` is a third way into a sans-I/O
   core, beside `receive` and `handle_timeout`, and the replay format had no

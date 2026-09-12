@@ -171,23 +171,31 @@ impl Endpoint {
 // -- the receiving end -------------------------------------------------------
 
 impl Endpoint {
-    /// A provisional response that says it was sent reliably.
-    pub(super) fn on_reliable_provisional(
+    /// The RFC 3262 §4 bookkeeping for a provisional response that says it
+    /// was sent reliably: mint the handle a PRACK will need, or say the
+    /// response does not get one.
+    ///
+    /// Shared by the initial-INVITE path, which reports a dedicated event
+    /// through [`Self::on_reliable_provisional`] below, and a re-INVITE's
+    /// provisional, which rides inside `Event::ReinviteProgress` instead —
+    /// §3 puts sending one in scope for any response numbered 101-199 once
+    /// 100rel was offered, with no exception for a request already inside a
+    /// dialog.
+    pub(super) fn keep_reliable_provisional(
         &mut self,
-        invite: TransactionId<InviteClient>,
         dialog: DialogId,
         response: &RawMessage<'_>,
         flow: Flow,
-    ) {
+    ) -> Option<(StatusCode, ProvisionalResponseId)> {
         let (Ok(rseq), Ok(cseq), Some(status)) =
             (response.rseq(), response.cseq(), response.status())
         else {
-            return;
+            return None;
         };
         // §4: a retransmission, or one with a gap before it, "MUST NOT be
         // acknowledged with a PRACK, and MUST NOT be processed further"
         if !self.reliable.in_order(dialog, rseq) {
-            return;
+            return None;
         }
         let raw = self.reliable.keep(Reliable {
             dialog,
@@ -197,10 +205,26 @@ impl Endpoint {
             flow,
             sent: None,
         });
+        Some((status, ProvisionalResponseId::new(dialog, rseq, raw)))
+    }
+
+    /// A provisional response to an initial INVITE that says it was sent
+    /// reliably.
+    pub(super) fn on_reliable_provisional(
+        &mut self,
+        invite: TransactionId<InviteClient>,
+        dialog: DialogId,
+        response: &RawMessage<'_>,
+        flow: Flow,
+    ) {
+        let Some((status, provisional)) = self.keep_reliable_provisional(dialog, response, flow)
+        else {
+            return;
+        };
         self.push(Event::ReliableProvisional {
             invite,
             dialog,
-            provisional: ProvisionalResponseId::new(dialog, rseq, raw),
+            provisional,
             status,
             response: response.to_owned(),
         });

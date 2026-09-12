@@ -667,6 +667,20 @@ address (such as a default outbound proxy not represented in the route set)",
 which is exactly what keeping the flow is — and the only thing that survives
 the NAT nearly every softphone sits behind.
 
+This fires again whenever a target refresh moves the remote target
+(§12.2.1.2, §12.2.2), not only at dialog creation — nothing else compares the
+new target to the flow, so before this a re-INVITE could move the target while
+the Request-URI named one host and the datagram went to another, with nothing
+said about it.
+
+What it does **not** do is move the flow itself, even when the new target is a
+literal address that needs no resolver. A far end behind a NAT writes its own
+private address into `Contact` — that is the ordinary case, not the exotic one
+— and following it would take the call off the only address that reaches it.
+Nothing at this layer can tell that apart from a far end that genuinely moved.
+So the event goes out, the flow stands, and the caller decides with
+`resolved`. That is what the event is for.
+
 ## Endpoint operations
 
 ```rust
@@ -948,7 +962,11 @@ pub enum Event {
 
     // UAC, inside a dialog: a re-INVITE never forks (§14.1), so none of these
     // carries a set of dialogs to choose between
-    ReinviteProgress { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },
+    /// `provisional` is set when the response asked to be sent reliably
+    /// (RFC 3262 §3 puts a re-INVITE's provisionals in scope exactly like an
+    /// initial INVITE's); use it with `prack` the same way as for
+    /// `ReliableProvisional`.
+    ReinviteProgress { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, provisional: Option<ProvisionalResponseId>, response: OwnedMessage },
     /// Caller must `ack_reinvite`. The remote target has already been
     /// refreshed from the `Contact` of this response (§12.2.1.2).
     ReinviteAnswered { invite: TransactionId<InviteClient>, dialog: DialogId, status: StatusCode, response: OwnedMessage },

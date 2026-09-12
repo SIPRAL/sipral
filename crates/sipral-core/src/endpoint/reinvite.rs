@@ -38,6 +38,7 @@ use super::driver::Endpoint;
 use super::error::AckError;
 use super::event::{DialogEndReason, Event, FailureReason};
 use super::outgoing::OutgoingResponse;
+use super::reliable;
 use super::table::Flow;
 use crate::diag::{Direction, Reason};
 use crate::dialog::DialogState;
@@ -366,22 +367,47 @@ impl Endpoint {
             return;
         }
 
+        let before = self
+            .dialogs
+            .get(dialog)
+            .map(|held| held.remote_target().as_str().to_owned());
         let state = self
             .dialogs
             .get_mut(dialog)
             .and_then(|held| held.on_response(response).ok());
+        self.resolve_if_target_moved(dialog, before.as_deref());
 
         if status.is_provisional() {
+            // §3 puts sending a reliable provisional in scope for any
+            // response numbered 101-199 once 100rel was offered, with no
+            // exception for a request already inside a dialog; §4 obliges the
+            // UAC to PRACK it. `ReinviteProgress` stays the event a
+            // re-INVITE's progress reports through, but carries the handle
+            // when there is one to acknowledge.
+            let provisional = reliable::is_reliable(response)
+                .then(|| self.keep_reliable_provisional(dialog, response, flow))
+                .flatten()
+                .map(|(_, provisional)| provisional);
             self.push(Event::ReinviteProgress {
                 invite: id,
                 dialog,
                 status,
+                provisional,
                 response: response.to_owned(),
             });
             return;
         }
 
         if status.is_success() {
+            // §13.2.2.4 obliges retransmitting the *ACK* for every
+            // retransmission of the 2xx it answers; it says nothing about
+            // telling the caller about the same answer twice. Before the
+            // caller has built the first ACK there is nothing cached at the
+            // branch above to retransmit, and a retransmitted 2xx would
+            // otherwise fall through to here a second time.
+            if self.reinvites.answered(id) {
+                return;
+            }
             self.reinvites.answer(id);
             self.push(Event::ReinviteAnswered {
                 invite: id,

@@ -738,10 +738,19 @@ impl Endpoint {
         flow: Flow,
         now: Instant,
     ) -> bool {
+        let before = self
+            .dialogs
+            .get(dialog)
+            .map(|state| state.remote_target().as_str().to_owned());
         let out_of_order = self
             .dialogs
             .get_mut(dialog)
             .is_some_and(|state| state.on_request(request) == Ok(Incoming::OutOfOrder));
+        // §12.2.2's ordering check runs before the target-refresh mutation,
+        // so an out-of-order request never reaches it and this is a no-op
+        // for one; a target refresh that was accepted asks the caller to
+        // resolve exactly as a 2xx to one does (§12.2.1.2).
+        self.resolve_if_target_moved(dialog, before.as_deref());
         if !out_of_order {
             return false;
         }

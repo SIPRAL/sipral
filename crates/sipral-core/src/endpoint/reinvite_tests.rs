@@ -733,3 +733,225 @@ fn a_refused_call_reaches_the_caller_whole() {
         "the redirect target survived"
     );
 }
+
+// -- 8.3.8 / 8.3.9: target refresh, and a reliable provisional on a re-INVITE
+
+/// The same as `reply`, with extra header lines before `Content-Length`.
+fn reply_with(
+    request: &[u8],
+    status: u16,
+    reason: &str,
+    tag: &str,
+    contact: Option<&str>,
+    extra: &str,
+) -> Vec<u8> {
+    let base = reply(request, status, reason, tag, contact);
+    let text = String::from_utf8(base).expect("utf-8");
+    text.replace(
+        "Content-Length: 0\r\n",
+        &format!("{extra}Content-Length: 0\r\n"),
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_reliable_provisional_to_a_reinvite_can_be_prackd() {
+    // RFC 3262 §3: a UAS may send any 101-199 reliably when the request offers
+    // 100rel, and this very endpoint does that for a re-INVITE —
+    // `respond_reliable` takes any InviteServer transaction. The sender
+    // retransmits until a PRACK arrives and gives up on the request after
+    // 64·T1, so a reliable 183 to a re-INVITE has to reach the caller with a
+    // handle to acknowledge it by.
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (_, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+
+    deliver(
+        &mut endpoint,
+        &reply_with(
+            &reinvite,
+            183,
+            "Session Progress",
+            "desk",
+            Some("<sip:bob@192.0.2.9>"),
+            "Require: 100rel\r\nRSeq: 314\r\n",
+        ),
+        t0,
+    );
+
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            Event::ReinviteProgress {
+                provisional: Some(_),
+                ..
+            }
+        )),
+        "a reliable provisional to a re-INVITE reaches the caller with no way to PRACK it: {seen:?}"
+    );
+}
+
+#[test]
+fn a_retransmitted_2xx_before_the_ack_is_not_reported_twice() {
+    // the 2xx to a re-INVITE is retransmitted every T1 until the ACK goes out.
+    // The caller builds that ACK — it may carry the answer — so it can take
+    // longer than T1.
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (_, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+    let ok = reply(&reinvite, 200, "OK", "desk", Some("<sip:bob@192.0.2.9>"));
+
+    deliver(&mut endpoint, &ok, t0);
+    let first = events(&mut endpoint);
+    assert_eq!(
+        first
+            .iter()
+            .filter(|event| matches!(**event, Event::ReinviteAnswered { .. }))
+            .count(),
+        1
+    );
+
+    deliver(&mut endpoint, &ok, t0 + T1);
+    let again = events(&mut endpoint);
+    assert!(
+        !again
+            .iter()
+            .any(|event| matches!(*event, Event::ReinviteAnswered { .. })),
+        "the caller heard about this answer already: {again:?}"
+    );
+}
+
+#[test]
+fn a_target_refresh_that_moves_the_far_end_asks_the_caller_to_resolve() {
+    // §12.2.1.2 makes the 2xx to a target refresh replace the remote target,
+    // and it does. Nothing moved the flow the dialog's requests go out on, so
+    // from here on the Request-URI named one host and the datagram was
+    // addressed to another, with nothing said about it.
+    //
+    // Moving the flow here would be the wrong repair, and the flow standing
+    // is asserted below rather than left to chance: the literal address in a
+    // Contact from behind a NAT is private and unreachable, which is the
+    // ordinary case, and nothing at this layer can tell it from a far end
+    // that genuinely moved. What was missing is the asking.
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (id, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+    deliver(
+        &mut endpoint,
+        &reply(
+            &reinvite,
+            200,
+            "OK",
+            "desk",
+            Some("<sip:bob@198.51.100.7:5060>"),
+        ),
+        t0,
+    );
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(*event, Event::ResolveNeeded { .. })),
+        "the next hop moved and nothing said so: {seen:?}"
+    );
+
+    endpoint.ack_reinvite(id, None, t0).expect("the ACK");
+    let out = transmits(&mut endpoint).pop().expect("the ACK went out");
+    assert!(
+        out.payload.starts_with(b"ACK sip:bob@198.51.100.7"),
+        "the Request-URI moved"
+    );
+    assert_eq!(
+        out.destination.to_string(),
+        "192.0.2.9:5060",
+        "the flow moved on its own, before the caller had answered"
+    );
+
+    // and once the caller has answered, it moves
+    endpoint.resolved(dialog, &["198.51.100.7:5060".parse().expect("an address")]);
+    endpoint
+        .reinvite(
+            dialog,
+            &renegotiation().body(b"application/sdp", Arc::from(HOLD)),
+            t0,
+        )
+        .expect("the re-INVITE goes");
+    let out = transmits(&mut endpoint)
+        .pop()
+        .expect("the re-INVITE went out");
+    assert_eq!(
+        out.destination.to_string(),
+        "198.51.100.7:5060",
+        "the caller answered and the flow did not follow"
+    );
+}
+
+/// The other half of the same decision, and the one that is easy to break
+/// while fixing the first: a far end behind a NAT puts its private address in
+/// `Contact`, and the flow the call actually travelled on is the only thing
+/// that reaches it. Applying the literal address because it needs no resolver
+/// sends the ACK to 10.0.0.5 and the call dies on connect.
+#[test]
+fn a_private_contact_address_does_not_take_the_call_off_the_flow_that_works() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .invite(&invite_request(), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &reply(&invite, 200, "OK", "desk", Some("<sip:bob@10.0.0.5>")),
+        t0,
+    );
+    let dialog = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call connected");
+
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let out = transmits(&mut endpoint).pop().expect("the ACK went out");
+    assert!(
+        out.payload.starts_with(b"ACK sip:bob@10.0.0.5"),
+        "§12.2.1.1 puts the remote target in the Request-URI"
+    );
+    assert_eq!(
+        out.destination.to_string(),
+        "192.0.2.9:5060",
+        "the ACK went to the private address the far end believes it has"
+    );
+}
+
+#[test]
+fn an_incoming_target_refresh_asks_the_caller_to_resolve() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, ack) = call_up(&mut endpoint, t0);
+    let mut theirs = String::from_utf8(reversed(&ack, "INVITE", "moved", 4)).expect("utf-8");
+    theirs = theirs.replace(
+        "Contact: <sip:bob@192.0.2.9>",
+        "Contact: <sip:bob@203.0.113.5>",
+    );
+    deliver(&mut endpoint, theirs.as_bytes(), t0);
+    transmits(&mut endpoint);
+    let seen = events(&mut endpoint);
+    assert_eq!(
+        endpoint
+            .dialog(dialog)
+            .map(|d| d.remote_target.to_string())
+            .as_deref(),
+        Some("sip:bob@203.0.113.5"),
+        "§12.2.2 moved the target"
+    );
+    assert!(
+        seen.iter()
+            .any(|event| matches!(*event, Event::ResolveNeeded { .. })),
+        "the next hop moved and nothing said so: {seen:?}"
+    );
+}
