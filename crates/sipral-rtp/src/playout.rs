@@ -741,6 +741,33 @@ impl JitterBuffer {
         self.timing.restart();
     }
 
+    /// Rebuild for a stream that changed codec mid-call, keeping what the call
+    /// has counted.
+    ///
+    /// A codec change moves the clock rate and the packet length, and those
+    /// two are the units everything measured here is in: the window is sized
+    /// in packets, the delay distribution is in packet-times, the jitter
+    /// estimate is in ticks. None of them converts, so all of them start
+    /// again.
+    ///
+    /// The cumulative counters do not, and that is the point of having this
+    /// rather than a new buffer. They belong to the call, which has not ended:
+    /// a reception report that began again from zero would tell the far end
+    /// that nothing had been lost since the beginning of a stream that is
+    /// seconds old, and the call's own statistics would lose everything before
+    /// the re-negotiation.
+    pub fn reformat(&mut self, clock_rate: u32, config: &BufferConfig) {
+        let mut counts = self.counts;
+        // the same accounting `restart` does, for the same reason: what is in
+        // the window belongs to the old format and cannot be played under the
+        // new one
+        counts.discarded_overflow = counts
+            .discarded_overflow
+            .saturating_add(u64::from(self.held));
+        *self = Self::new(clock_rate, config);
+        self.counts = counts;
+    }
+
     /// Everything measured about this stream.
     #[must_use]
     pub fn quality(&self) -> Quality {

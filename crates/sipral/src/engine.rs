@@ -750,7 +750,13 @@ impl MediaEngine {
         }
     }
 
-    /// Open the stream for a plan, replacing whatever was there.
+    /// Open the stream for a plan, or carry the one that is running onto a
+    /// codec the negotiation has moved to.
+    ///
+    /// A session already on this call is re-formatted rather than replaced, so
+    /// that the stream, its SRTP contexts and everything the call has
+    /// accumulated survive a codec change. [`MediaSession::reformat`] says
+    /// what that is and why each piece of it matters.
     fn start(
         &mut self,
         call: CallHandle,
@@ -762,19 +768,27 @@ impl MediaEngine {
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
+        let frame_length = managed.catalog.frame_length();
+        let config = managed.config.clone();
+        let identity = managed.identity;
         let replacing = self.sessions.contains_key(&call);
-        let opened = MediaSession::open(
-            plan,
-            managed.catalog.frame_length(),
-            &managed.config,
-            managed.identity,
-            self.clock,
-            candidates,
-            now,
-        );
-        match opened {
-            Ok(session) => {
+        let outcome = match self.sessions.get_mut(&call) {
+            Some(session) => session.reformat(plan, frame_length, &config, candidates, now),
+            None => MediaSession::open(
+                plan,
+                frame_length,
+                &config,
+                identity,
+                self.clock,
+                candidates,
+                now,
+            )
+            .map(|session| {
                 self.sessions.insert(call, session);
+            }),
+        };
+        match outcome {
+            Ok(()) => {
                 let event = if replacing {
                     MediaEvent::Changed {
                         codec,

@@ -204,6 +204,29 @@ impl Dialling {
         self.gap = 0;
     }
 
+    /// Carry the digits this end still owes across a change of clock rate.
+    ///
+    /// Everything counted here is counted in the stream's own ticks, and a
+    /// codec change moves what a tick is worth. Left alone, a digit queued as
+    /// a fifth of a second at eight kilohertz would last a tenth at sixteen,
+    /// and the far end would hear a keypress too short to register — the one
+    /// failure nobody reports as a bug, because the caller simply presses
+    /// again.
+    ///
+    /// `elapsed` is deliberately not rescaled. It is the duration already
+    /// reported on the wire, and RFC 4733 §2.5.1.2 has that field only ever
+    /// grow; a rescale downwards would walk it backwards mid-event.
+    pub(crate) fn reformat(&mut self, was: u32, now: u32) {
+        self.gap_ticks = rescale(self.gap_ticks, was, now);
+        self.gap = rescale(self.gap, was, now);
+        for (_, ticks) in &mut self.waiting {
+            *ticks = rescale(*ticks, was, now);
+        }
+        if let Some(sending) = self.sending.as_mut() {
+            sending.left = rescale(sending.left, was, now);
+        }
+    }
+
     /// What this frame carries, given that `frame` ticks pass in it.
     ///
     /// `start` is called only for a digit that is beginning, because the
@@ -279,6 +302,23 @@ impl Dialling {
         self.gap = self.gap_ticks;
         None
     }
+}
+
+/// The same span of time, counted in a different clock's ticks.
+///
+/// Widened to sixty-four bits first: a second of a sixteen-kilohertz digit
+/// rescaled from eight would overflow nothing, but a queue full of long
+/// digits multiplied before dividing is exactly where a thirty-two bit
+/// product stops being one.
+fn rescale(ticks: u32, was: u32, now: u32) -> u32 {
+    if was == 0 || was == now {
+        return ticks;
+    }
+    let scaled = u64::from(ticks)
+        .saturating_mul(u64::from(now))
+        .checked_div(u64::from(was))
+        .unwrap_or(0);
+    u32::try_from(scaled).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

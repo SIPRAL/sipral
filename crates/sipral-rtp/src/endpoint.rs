@@ -22,6 +22,33 @@ use crate::wire::{
     BuildError, FIXED_HEADER_LEN, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket,
 };
 
+/// What a re-negotiation onto a different codec changes about a stream that
+/// is going to carry on regardless.
+///
+/// Deliberately not a [`StreamConfig`]. That one opens a stream and therefore
+/// carries the three fields RFC 3550 §5.1 wants drawn once and never redrawn —
+/// the synchronization source, the first sequence number, the first timestamp.
+/// A stream being re-formatted has all three already, and the whole point of
+/// [`RtpSession::reformat`] is that it must not be handed the chance to take
+/// them again: a source that restarts its counters reads as a different source
+/// (§5.1), and under SRTP it reads as a repeated packet index under a key that
+/// has already sent.
+#[derive(Clone, Debug)]
+pub struct StreamFormat {
+    /// The payload type we send from here on.
+    pub payload_type: u8,
+    /// The payload types we will accept from here on.
+    pub accepted: PayloadTypes,
+    /// Timestamp ticks per second, from the new payload format.
+    pub clock_rate: u32,
+    /// Where the fresh pair of descriptions says the peer is.
+    pub remote: SocketAddr,
+    /// Whether we stop sending during silence.
+    pub silence_suppression: bool,
+    /// How the de-jitter buffer is sized at the new packet length.
+    pub playout: BufferConfig,
+}
+
 /// Everything one stream needs before it can start.
 ///
 /// The SSRC, the first sequence number and the first timestamp arrive from the
@@ -654,6 +681,48 @@ impl RtpSession {
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
         self.inbound.rtcp = ReceptionTracker::new();
+    }
+
+    /// Carry this stream on under a different codec.
+    ///
+    /// Everything that belongs to the stream stays: the synchronization
+    /// source, the sequence number and timestamp it has reached, both SRTP
+    /// contexts with their rollover counter and SRTCP index, the octet and
+    /// packet totals, the reception tracker, the RTCP interval and the CNAME.
+    /// Everything measured in the old codec's units is rebuilt, because a
+    /// clock rate and a packet length are what those units are.
+    ///
+    /// Two of those are not housekeeping. RFC 3550 §5.1 has a source that
+    /// resets its counters read as a different source, so a stream whose
+    /// sequence number rewound would be heard as somebody else arriving. And
+    /// under SRTP the packet index is `2^16 · ROC + sequence`, so a rewound
+    /// sequence under an unchanged master key hands the same keystream to a
+    /// second packet — the reuse RFC 3711 §9.1 exists to forbid. Neither is
+    /// visible in a capture until it is too late to ask.
+    ///
+    /// The timestamp carries on in the new clock rate rather than being
+    /// converted (RFC 7160's case). The source has not changed, so a receiver
+    /// reads the discontinuity as one, and drawing a fresh source to signal it
+    /// would cost more than it explains.
+    ///
+    /// A peer that also moved its address is relocated and re-synchronised,
+    /// for the reason [`RtpSession::relocate`] gives.
+    pub fn reformat(&mut self, format: &StreamFormat) {
+        self.outbound.payload_type = format.payload_type;
+        self.outbound.clock_rate = format.clock_rate;
+        self.outbound.silence_suppression = format.silence_suppression;
+        // the first packet of the new format starts a talkspurt: §4.1's
+        // marker bit says "the first packet after a silence", and a decoder
+        // that has just been replaced is exactly that
+        self.outbound.spurt_start = true;
+        self.inbound.accepted = format.accepted;
+        self.inbound
+            .buffer
+            .reformat(format.clock_rate, &format.playout);
+        if self.inbound.signalled != format.remote {
+            self.relocate(format.remote);
+            self.resync();
+        }
     }
 
     /// Protect what this stream sends under what a re-negotiation settled on,

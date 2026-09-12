@@ -30,6 +30,30 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A codec change no longer restarts the stream, or the SRTP keystream under
+  it.** A re-INVITE onto another codec opened a new media session and dropped
+  the running one, and the new one was built from the identity the *call*
+  opened with — so the outgoing sequence number rewound to where it had
+  started while the master key stayed exactly as it was. The SRTP packet index
+  is `2^16 · ROC + SEQ`, so every packet after such a change re-used a
+  keystream already spent, which is the two-time pad RFC 3711 §9.1 calls
+  catastrophic; the SRTCP index, which §3.4 says is never reset, went back to
+  zero with it. Nothing about it was audible and nothing about it showed in a
+  capture. Separately, RFC 3550 §5.1 has a source that resets its counters
+  read as a different source. The session is now re-formatted rather than
+  replaced: `RtpSession::reformat` keeps the stream and both SRTP contexts and
+  rebuilds only what is measured in the old codec's units, and
+  `JitterBuffer::reformat` keeps the cumulative counters across that rebuild.
+  Everything else the running session held is carried with it — the octet and
+  packet totals, the RTCP timeline and CNAME, the stall watchdog, the render
+  delay and device the application set at run time, the events it had not
+  collected, the digits still owed (rescaled into the new clock's ticks), the
+  processor it attached, and the recording. A recording whose sample rate or
+  frame length moves under it cannot follow a WAVE header written once at the
+  front of the file, so it is now closed properly and reported with the new
+  `MediaError::CodecChanged` rather than dropped with the session, which left
+  a file with zeroes where its two lengths should be.
+
 - **A re-negotiation that moves the SRTP keys now reaches the running
   stream.** `MediaSession::adopt` looked at the media address and nothing
   else, so a re-offer or an answer carrying a fresh `a=crypto` updated the

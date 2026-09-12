@@ -114,6 +114,17 @@ impl Echo {
         self.near_end.get(..count).unwrap_or_default()
     }
 
+    /// Take back the application's own object, so a stream that changed
+    /// codec can be given rings of the new size around the same processor.
+    ///
+    /// The application handed this over once and has no way to hand it over
+    /// again — a re-negotiation is not something it is told about before it
+    /// happens — so losing it here would silence echo cancellation for the
+    /// rest of the call and tell nobody.
+    pub(crate) fn into_processor(self) -> Box<dyn Processor> {
+        self.processor
+    }
+
     /// Forget the echo path and the history it was built from.
     pub(crate) fn reset(&mut self) {
         self.processor.reset();

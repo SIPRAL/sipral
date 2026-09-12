@@ -518,9 +518,13 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         MediaError::StreamRefused => SipralMediaFault::StreamRefused,
         MediaError::NoDescription => SipralMediaFault::NoDescription,
         MediaError::Description(_) => SipralMediaFault::BadDescription,
-        MediaError::Recording(_) | MediaError::NotRecording | MediaError::AlreadyRecording => {
-            SipralMediaFault::Recording
-        }
+        // a recording that a codec change ended is reported as a recording
+        // that ended, not as "something this ABI has no word for": what the
+        // application does about it is what it does about any of the others
+        MediaError::Recording(_)
+        | MediaError::NotRecording
+        | MediaError::AlreadyRecording
+        | MediaError::CodecChanged => SipralMediaFault::Recording,
         _ => SipralMediaFault::Other,
     }
 }
@@ -558,6 +562,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::NoDescription
         | MediaError::NotRecording
         | MediaError::AlreadyRecording
+        | MediaError::CodecChanged
         | MediaError::NoCommonCodec
         | MediaError::StreamRefused => SipralStatus::WrongState,
         MediaError::PacketTooLong { .. } => SipralStatus::BufferTooSmall,

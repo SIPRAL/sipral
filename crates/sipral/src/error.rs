@@ -145,6 +145,16 @@ pub enum MediaError {
     /// A recording was asked for while one was already running. Two writers on
     /// one stream would interleave frames into both files.
     AlreadyRecording,
+    /// A re-negotiation moved the sample rate or the frame length under a
+    /// recording that was running.
+    ///
+    /// A WAVE header is written once, at the start, and names the rate the
+    /// file is to be played back at; audio taken at another rate written in
+    /// behind it plays at the wrong speed for the rest of the file. So the
+    /// recording is closed properly — the lengths patched, the file playable —
+    /// and the application is told, because it is the only one that can decide
+    /// whether to open a second file.
+    CodecChanged,
     /// The user agent refused the request the media was for.
     Signalling(UaError),
 }
@@ -283,6 +293,9 @@ impl fmt::Display for MediaError {
             Self::Recording(kind) => write!(f, "recording: {kind}"),
             Self::NotRecording => f.write_str("nothing is being recorded on this call"),
             Self::AlreadyRecording => f.write_str("this call is already being recorded"),
+            Self::CodecChanged => {
+                f.write_str("the recording stopped: the call moved to a codec at another rate")
+            }
             Self::Signalling(error) => write!(f, "user agent: {error}"),
         }
     }

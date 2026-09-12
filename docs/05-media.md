@@ -322,6 +322,58 @@ user agent's own answer writer, not in the facade, and it is not papered over
 here: carrying the key forward locally would make this end believe a
 negotiation the far end saw fail.
 
+## What a re-negotiation keeps
+
+A re-INVITE settles on a plan, and one of two things happens to the media.
+
+If the codec did not move, the running session takes the new plan in place —
+the address, the direction, the record of what became of each candidate, and
+whatever keys moved, on the terms the SRTP section above sets out.
+
+If the codec did move, the session is **re-formatted, not replaced**. The
+stream carries on: the same synchronization source, the sequence number and
+timestamp it has reached, both SRTP contexts with their rollover counter and
+SRTCP index, the octet and packet totals, the reception tracker, the RTCP
+interval and the CNAME. Everything measured in the old codec's units is
+rebuilt — the coder, the frame length, the payload buffer, the voice
+detectors, the de-jitter buffer — and the cumulative counters inside the
+buffer survive that rebuild, because they belong to the call.
+
+Two of those are not housekeeping, and both fail silently:
+
+- RFC 3550 §5.1 has a source that resets its counters read as a different
+  source. A stream that rewound its sequence number is heard as somebody else
+  arriving mid-call.
+- Under SRTP the packet index is `2^16 · ROC + SEQ`. A rewind under an
+  unchanged master key hands a second packet a keystream already spent, which
+  is the two-time pad RFC 3711 §9.1 calls catastrophic. Nothing about it is
+  audible and nothing about it shows in a capture.
+
+Carried across too, because they are the call's and not the negotiation's: the
+render delay and the device the application set at run time, the events it has
+not collected yet, the digits this end still owes — rescaled into the new
+clock's ticks, since a digit measured in the old one would last half as long
+or twice as long — and the processor the application attached, which it has no
+second chance to hand over because nothing warns it a re-negotiation is
+coming. The processor is kept and `reset`, which is the case
+`Processor::reset` names: the echo path it has learned describes a signal that
+no longer exists.
+
+The recording is the one thing that cannot always follow. A WAVE header names
+the playback rate once, at the front of the file, so a recording survives every
+codec change that keeps the rate and the frame length — the three
+eight-kilohertz codecs are interchangeable under one header — and is closed
+properly when one of them moves, with `MediaEvent::RecordingStopped` carrying
+`MediaError::CodecChanged` and the length written so far. The file is
+playable; whether to open a second one is the application's to decide.
+
+The timestamp continues in the new clock rate rather than being converted,
+which is RFC 7160's case. The source has not changed, so a receiver reads the
+discontinuity as one; drawing a fresh source to announce it would cost an
+RTCP BYE and explain less. Early media is the same path and not a rarity: a
+183 with SDP opens the session and the 200 OK naming another codec
+re-formats it seconds later.
+
 **Buffers.** A session holds two 1500-octet scratch buffers. No RTP packet
 this build produces gets past twelve octets of header, 1275 of payload and ten
 of tag — 1297 at the top, and that top is the largest Opus frame, so it is the

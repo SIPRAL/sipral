@@ -1874,9 +1874,13 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
 /// An `RTP/SAVP` description with one PCMU stream, the suite and the key
 /// given.
 fn savp(host: &str, port: u16, suite: &str, key: &str) -> String {
+    savp_of(host, port, 0, "PCMU/8000", suite, key)
+}
+
+fn savp_of(host: &str, port: u16, payload: u8, rtpmap: &str, suite: &str, key: &str) -> String {
     format!(
         "v=0\r\no=- 1 1 IN IP4 {host}\r\ns=-\r\nc=IN IP4 {host}\r\nt=0 0\r\n\
-         m=audio {port} RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+         m=audio {port} RTP/SAVP {payload}\r\na=rtpmap:{payload} {rtpmap}\r\n\
          a=crypto:1 {suite} {key}\r\na=sendrecv\r\n"
     )
 }
@@ -2092,5 +2096,444 @@ fn a_re_offer_that_shortens_the_tag_is_followed_without_a_new_key() {
         ),
         "the stream is still stamping the tag length the previous \
          negotiation settled on: {arrival:?}"
+    );
+}
+
+// -- a re-negotiation that moves the codec -----------------------------------
+
+fn re_offer_onto(pair: &mut Pair, remote: CallHandle, payload: u8, rtpmap: &str) {
+    let offer = format!(
+        "v=0\r\no=- 9 9 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP {payload}\r\na=rtpmap:{payload} {rtpmap}\r\na=sendrecv\r\n"
+    );
+    pair.callee
+        .agent
+        .reoffer(remote, offer.as_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    pair.settle();
+}
+
+fn re_offer_onto_pcma(pair: &mut Pair, remote: CallHandle) {
+    re_offer_onto(pair, remote, 8, "PCMA/8000");
+}
+
+fn re_offer_onto_g722(pair: &mut Pair, remote: CallHandle) {
+    re_offer_onto(pair, remote, 9, "G722/8000");
+}
+
+fn sequence_of(datagram: &[u8]) -> u16 {
+    u16::from_be_bytes([
+        *datagram.get(2).unwrap_or(&0),
+        *datagram.get(3).unwrap_or(&0),
+    ])
+}
+
+fn ssrc_of(datagram: &[u8]) -> u32 {
+    u32::from_be_bytes([
+        *datagram.get(8).unwrap_or(&0),
+        *datagram.get(9).unwrap_or(&0),
+        *datagram.get(10).unwrap_or(&0),
+        *datagram.get(11).unwrap_or(&0),
+    ])
+}
+
+/// Forty packets of tone out of one end, and the last one as it went.
+fn talk(pair: &mut Pair, call: CallHandle, packets: usize) -> Vec<u8> {
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut last = Vec::new();
+    for _ in 0..packets {
+        tone(&mut samples, 8_000, &mut phase);
+        let session = pair.caller.engine.session(call).expect("media");
+        let frame = vec![0_i16; session.frame_samples()];
+        let audio = if samples.len() == frame.len() {
+            samples.clone()
+        } else {
+            frame
+        };
+        if let Some(out) = session.capture(&audio).expect("it encodes") {
+            last = out.payload.to_vec();
+        }
+        pair.advance();
+    }
+    last
+}
+
+/// A re-INVITE that moves the call onto another codec keeps the same
+/// synchronization source, so RFC 3550 §5.1 has the sequence number carry on
+/// from where it was. A stream that rewound it by forty packets is one the far
+/// end drops as ancient duplicates — and, on a secured call, one that hands a
+/// second packet a keystream already spent.
+#[test]
+fn a_codec_change_carries_the_sequence_number_on_rather_than_rewinding_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let last = talk(&mut pair, call, 40);
+    let before = sequence_of(&last);
+    let source = ssrc_of(&last);
+
+    re_offer_onto_pcma(&mut pair, remote);
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcma,
+        "the re-offer never reached the media"
+    );
+
+    let after = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .capture(&[100_i16; 160])
+        .expect("it encodes")
+        .expect("a frame goes out")
+        .payload
+        .to_vec();
+    assert_eq!(
+        ssrc_of(&after),
+        source,
+        "the synchronization source moved without an RTCP BYE for the old one"
+    );
+    let moved = sequence_of(&after).wrapping_sub(before);
+    assert!(
+        moved > 0 && moved < 0x8000,
+        "the stream rewound from {before} to {}",
+        sequence_of(&after)
+    );
+}
+
+/// The call's own totals belong to the call. A re-negotiation that set them
+/// back to zero would tell the application the call had just started, and
+/// would tell the far end, through RTCP, that nothing had been lost since a
+/// beginning that never happened.
+#[test]
+fn a_codec_change_carries_the_statistics_the_call_has_accumulated() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    talk(&mut pair, call, 40);
+    let at = pair.now;
+    let before = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .statistics(at);
+    assert!(before.packets_sent >= 40, "{before:?}");
+
+    re_offer_onto_pcma(&mut pair, remote);
+    let at = pair.now;
+
+    let after = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .statistics(at);
+    assert!(
+        after.packets_sent >= before.packets_sent,
+        "the call's totals went backwards across the re-negotiation: {} then {}",
+        before.packets_sent,
+        after.packets_sent
+    );
+}
+
+/// A codec change that keeps the rate and the frame length keeps the
+/// recording: the three eight-kilohertz codecs are interchangeable under one
+/// WAVE header, and a file that stopped here would stop for no reason the
+/// application could have predicted.
+#[test]
+fn a_codec_change_at_the_same_rate_does_not_lose_the_recording_that_was_running() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let file = Buffer::new();
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .start_recording(Box::new(file.clone()))
+        .expect("the recording starts");
+    talk(&mut pair, call, 8);
+    let before = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .recorded()
+        .expect("something was taken");
+
+    re_offer_onto_pcma(&mut pair, remote);
+
+    let session = pair.caller.engine.session(call).expect("media");
+    assert!(
+        session.is_recording(),
+        "the recording was dropped with the session that was replaced"
+    );
+    assert_eq!(
+        session.recorded(),
+        Some(before),
+        "the recording restarted its own clock"
+    );
+}
+
+/// A codec change that moves the rate cannot keep it: a WAVE header names the
+/// playback rate once, at the front of the file. So the recording is closed
+/// properly rather than dropped, and the application is told, because it is
+/// the only one that can decide whether to open a second file.
+#[test]
+fn a_codec_change_that_moves_the_rate_closes_the_recording_and_says_so() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "G722"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let file = Buffer::new();
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .start_recording(Box::new(file.clone()))
+        .expect("the recording starts");
+    talk(&mut pair, call, 8);
+
+    re_offer_onto_g722(&mut pair, remote);
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::G722,
+        "the re-offer never reached the media"
+    );
+
+    let wav = file.contents();
+    let data_len = u32::from_le_bytes([
+        *wav.get(40).unwrap_or(&0),
+        *wav.get(41).unwrap_or(&0),
+        *wav.get(42).unwrap_or(&0),
+        *wav.get(43).unwrap_or(&0),
+    ]);
+    assert!(
+        data_len > 0,
+        "the file was left with zeroes where its lengths should be"
+    );
+    assert!(
+        !pair
+            .caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_recording()
+    );
+    pair.caller.drain(pair.now, false);
+    assert!(
+        pair.caller.media_events().into_iter().any(|event| matches!(
+            event,
+            MediaEvent::RecordingStopped {
+                reason: MediaError::CodecChanged,
+                ..
+            }
+        )),
+        "the recording ended and nobody was told"
+    );
+}
+
+/// The echo canceller and the render delay a device reported are properties of
+/// the call, not of one negotiation. A re-INVITE onto another codec must not
+/// silently take them away — and the application has no second chance to hand
+/// its processor over, because nothing tells it a re-negotiation happened
+/// until after it has.
+#[test]
+fn a_codec_change_keeps_the_processor_and_the_render_delay_the_device_reported() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    {
+        let session = pair.caller.engine.session(call).expect("media");
+        session.attach_processor(Box::new(Heard(Arc::new(Mutex::new(Vec::new())))));
+        session
+            .set_render_delay(Duration::from_millis(40))
+            .expect("a delay a headset really has");
+        session.set_device(Some("bluetooth-headset".to_owned()));
+    }
+
+    re_offer_onto_pcma(&mut pair, remote);
+
+    let session = pair.caller.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::Pcma);
+    assert_eq!(
+        session.render_delay(),
+        Duration::from_millis(40),
+        "the render delay went back to zero across the re-negotiation"
+    );
+    assert_eq!(
+        session.device(),
+        Some("bluetooth-headset"),
+        "the device the call is on was forgotten across the re-negotiation"
+    );
+    assert!(
+        session.has_processor(),
+        "the echo canceller was dropped across the re-negotiation"
+    );
+}
+
+/// The same, across a codec change that moves the rate: the rings around the
+/// processor have to be rebuilt at the new size, and the application's own
+/// object has to survive that rebuild.
+#[test]
+fn a_codec_change_that_moves_the_rate_keeps_the_processor_too() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "G722"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .attach_processor(Box::new(Heard(Arc::new(Mutex::new(Vec::new())))));
+
+    re_offer_onto_g722(&mut pair, remote);
+
+    let session = pair.caller.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::G722);
+    assert!(
+        session.has_processor(),
+        "the processor was dropped by the rebuild that resized its rings"
+    );
+    // and it is fed frames of the new size rather than the old
+    let frame = vec![100_i16; session.frame_samples()];
+    session.capture(&frame).expect("it encodes");
+}
+
+/// A guard rather than a proof, and worth saying which: audio crossed a codec
+/// change before this repair too, because both ends restarted together and
+/// neither noticed. That is exactly why the defect survived — the damage was
+/// to the packet index under an unchanged key, which nothing audible reports.
+/// This is here so that carrying the stream on does not break what replacing
+/// it happened to get right.
+#[test]
+fn audio_still_crosses_after_a_codec_change() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    for _ in 0..40 {
+        tone(&mut samples, 8_000, &mut phase);
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+
+    re_offer_onto_pcma(&mut pair, remote);
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcma
+    );
+    assert_eq!(
+        pair.callee.engine.session(remote).expect("media").codec(),
+        Codec::Pcma
+    );
+
+    let mut heard = Vec::new();
+    let mut queued = 0;
+    for _ in 0..40 {
+        tone(&mut samples, 8_000, &mut phase);
+        let outbound = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("media")
+            .capture(&samples)
+            .expect("it encodes")
+            .map(|out| out.payload.to_vec());
+        if let Some(mut datagram) = outbound {
+            let session = pair.callee.engine.session(remote).expect("media");
+            if session.receive(&mut datagram, caller_media(), pair.now) == Arrival::Queued {
+                queued += 1;
+            }
+        }
+        let session = pair.callee.engine.session(remote).expect("media");
+        heard = vec![0_i16; session.frame_samples()];
+        session.playback(&mut heard);
+        pair.advance();
+    }
+
+    assert!(
+        queued > 20,
+        "only {queued} of forty packets were taken after the codec change"
+    );
+    assert!(
+        loudness(&heard) > 4_000,
+        "the tone came back at {} after the codec change",
+        loudness(&heard)
+    );
+}
+
+/// The defect this whole change exists for, stated where it can be seen.
+///
+/// A codec change used to open a session on the identity the *call* opened
+/// with, so the sequence number rewound to where it started while the master
+/// key stayed exactly as it was. The SRTP packet index is `2^16 · ROC + SEQ`,
+/// so every packet after the change re-used a keystream already spent — the
+/// two-time pad RFC 3711 §9.1 calls catastrophic, and invisible in a capture.
+///
+/// The live assertion is the sequence number: break the carry and this test
+/// goes red. The replay assertion after it is a guard rather than a proof —
+/// nothing touches the receive context when the keys have not moved, and it
+/// is there so that a later `reformat` which rebuilt that context would be
+/// caught here rather than in a capture.
+#[test]
+fn a_codec_change_on_a_secured_call_does_not_re_open_the_packet_index() {
+    let now = Instant::now();
+    let config = MediaConfig::default();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut sender = session(&ours, &theirs, now);
+    let mut receiver = session(&theirs, &ours, now);
+
+    let mut already_taken = Vec::new();
+    for _ in 0..40 {
+        already_taken = one_packet(&mut sender);
+        receiver.receive(&mut already_taken.clone(), ours_address(), now);
+    }
+    let before = sequence_of(&already_taken);
+
+    // the same two ends, the same keys, PCMA instead of PCMU
+    let ours_2 = parse(savp_of("192.0.2.1", 40_000, 8, "PCMA/8000", SHA1_80, OURS).as_bytes())
+        .expect("the offer parses");
+    let theirs_2 = parse(savp_of("192.0.2.2", 40_002, 8, "PCMA/8000", SHA1_80, THEIRS).as_bytes())
+        .expect("the answer parses");
+    sender
+        .reformat(&plan_of(&ours_2, &theirs_2), 20, &config, Vec::new(), now)
+        .expect("the codec is one this build has");
+    receiver
+        .reformat(&plan_of(&theirs_2, &ours_2), 20, &config, Vec::new(), now)
+        .expect("the codec is one this build has");
+    assert_eq!(sender.codec(), Codec::Pcma, "the plan never reached it");
+
+    let moved = sequence_of(&one_packet(&mut sender)).wrapping_sub(before);
+    assert!(
+        moved > 0 && moved < 0x8000,
+        "the stream rewound its sequence number under a key that has sent \
+         forty packets already"
+    );
+
+    let arrival = receiver.receive(&mut already_taken.clone(), ours_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Dropped(crate::Discard::Insecure(SrtpError::Replayed))
+        ),
+        "the codec change re-opened the replay window on an unchanged master \
+         key: {arrival:?}"
     );
 }

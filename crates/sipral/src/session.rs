@@ -47,7 +47,8 @@ use sipral_media::vad::{self, Vad};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
-    PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, is_rtcp,
+    PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
+    is_rtcp,
 };
 
 use crate::clock::WallClock;
@@ -969,6 +970,161 @@ impl MediaSession {
             self.stalled = false;
         }
         Ok(())
+    }
+
+    /// Carry this session on under a codec the negotiation has just moved to.
+    ///
+    /// The alternative is to open a session and drop this one, and that is
+    /// what this exists to replace. Dropping it rewound the stream to the
+    /// numbers the *call* opened with — RFC 3550 §5.1 has a source that resets
+    /// its counters read as a different source, and under SRTP the packet
+    /// index is `2^16 · ROC + sequence`, so a rewind under an unchanged master
+    /// key hands a second packet a keystream already spent. It also threw away
+    /// everything the running session held, none of which has anything to do
+    /// with which codec the audio is in.
+    ///
+    /// Carried, because it belongs to the call and the call has not ended: the
+    /// stream itself with both SRTP contexts ([`RtpSession::reformat`] says
+    /// what that keeps), the cumulative octet and packet totals, the timeline
+    /// the RTCP interval is counted on, the RTCP randomisation, the stall
+    /// watchdog, the render delay and the device the application chose at run
+    /// time, the events it has not collected yet, the digits this end still
+    /// owes, the recording, and the processor it attached.
+    ///
+    /// Rebuilt, because it is measured in the old codec's units: the coder,
+    /// the frame length, the payload buffer, the voice detectors, the comfort
+    /// noise, the event receiver, and D5's record of what became of each
+    /// candidate.
+    ///
+    /// # Errors
+    /// As [`MediaSession::open`]. Every one of them is ruled out before
+    /// anything is written, so a re-negotiation naming a codec this build
+    /// cannot open leaves the call running on the one it has.
+    pub(crate) fn reformat(
+        &mut self,
+        plan: &MediaPlan,
+        frame_ms: u32,
+        config: &MediaConfig,
+        candidates: Vec<CodecCandidate>,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        // open()'s own order, and all of it before the first assignment
+        let agreed = Codec::of_plan(plan)?;
+        if config.render_delay > MAX_RENDER_DELAY {
+            return Err(MediaError::RenderDelayTooLong {
+                asked: config.render_delay,
+                most: MAX_RENDER_DELAY,
+            });
+        }
+        let coder = Coder::new(agreed, frame_ms)?;
+        let (fresh_local, fresh_remote) = Self::rekeyed(&self.plan, plan)?;
+
+        let was_rate = self.sample_rate();
+        let was_samples = self.frame_samples();
+        let was_clock = self.plan.codec.clock_rate();
+        let frame_ticks = agreed.frame_ticks(frame_ms);
+
+        self.rtp.reformat(&StreamFormat {
+            payload_type: plan.codec.payload(),
+            accepted: accepted(plan),
+            clock_rate: plan.codec.clock_rate(),
+            remote: plan.remote,
+            silence_suppression: config.silence_suppression,
+            playout: BufferConfig::new(frame_ticks),
+        });
+        if let Some(Rekey {
+            policy,
+            master,
+            what,
+        }) = fresh_local
+        {
+            self.rtp.rekey_local(policy, master, what);
+        }
+        if let Some(Rekey {
+            policy,
+            master,
+            what,
+        }) = fresh_remote
+        {
+            self.rtp.rekey_remote(policy, master, what);
+        }
+
+        let rate = agreed.sample_rate();
+        let samples = coder.frame_samples();
+        let resized = rate != was_rate || samples != was_samples;
+        self.retain_recording(resized, was_rate);
+        self.retain_processor(resized, rate, samples);
+        self.dialling.reformat(was_clock, plan.codec.clock_rate());
+
+        self.coder = coder;
+        self.frame_ms = frame_ms;
+        self.frame_ticks = frame_ticks;
+        self.payload = vec![0; agreed.max_payload(frame_ms)];
+        self.activity = Activity::Speech;
+        self.inbound_voice = Vad::new(rate);
+        self.outbound_voice = Vad::new(rate);
+        self.suppressing = config.silence_suppression;
+        self.noise = Generator::new();
+        self.stall_after = config.stall_after;
+        self.heard = plan.dtmf.map(EventReceiver::new);
+        self.plan = plan.clone();
+        self.codec_candidates = candidates;
+        self.last_inbound = now;
+        // adopt's guard, for the same reason: a stream told to stop receiving
+        // must not be reported as stalled for having done so
+        if !self.is_receiving() {
+            self.stalled = false;
+        }
+        Ok(())
+    }
+
+    /// Keep the recording running, or close it and say why.
+    ///
+    /// A recorder is pinned to the rate and the frame length it started at —
+    /// `Recorder::start` writes both into the header — so it survives every
+    /// codec change that moves neither, which is most of them: the three
+    /// eight-kilohertz codecs are interchangeable under one recording.
+    fn retain_recording(&mut self, resized: bool, was_rate: u32) {
+        if !resized {
+            return;
+        }
+        let Some(recorder) = self.recorder.take() else {
+            return;
+        };
+        let samples = recorder.written();
+        // at the rate the audio was taken at, not the one about to replace it
+        let written = Duration::from_nanos(
+            samples.saturating_mul(1_000_000_000) / u64::from(was_rate.max(1)),
+        );
+        // the lengths are patched and the file is playable; this is a
+        // recording that ended, not one that broke
+        let reason = recorder
+            .finish()
+            .err()
+            .map_or(MediaError::CodecChanged, MediaError::from);
+        self.events
+            .push_back(MediaEvent::RecordingStopped { reason, written });
+    }
+
+    /// Keep the application's processor, with rings the new codec's size.
+    ///
+    /// The object came from the application once and there is no second
+    /// chance to ask for it: nothing tells an application that a
+    /// re-negotiation is about to happen. Losing it here would leave the rest
+    /// of the call with no echo cancellation and no way to notice.
+    fn retain_processor(&mut self, resized: bool, rate: u32, samples: usize) {
+        let Some(echo) = self.echo.take() else {
+            return;
+        };
+        let mut echo = if resized {
+            Echo::new(echo.into_processor(), rate, samples, self.render_delay)
+        } else {
+            echo
+        };
+        // `Processor::reset` names a codec change mid-call in as many words:
+        // what it has learned describes a signal that no longer exists
+        echo.reset();
+        self.echo = Some(echo);
     }
 
     /// What a re-negotiated plan does to each direction, or `None` for a
