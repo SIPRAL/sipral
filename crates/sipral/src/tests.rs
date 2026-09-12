@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{Crypto, Direction, MediaDescription, SessionDescription, parse};
+use sipral_rtp::srtp::SrtpError;
 
 use crate::codec::tests::UNMATCHED;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome};
@@ -1865,5 +1866,231 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
             payload: 97,
             encoding: "SPEEX".to_owned()
         })
+    );
+}
+
+// -- a re-negotiation that moves the keys ------------------------------------
+
+/// An `RTP/SAVP` description with one PCMU stream, the suite and the key
+/// given.
+fn savp(host: &str, port: u16, suite: &str, key: &str) -> String {
+    format!(
+        "v=0\r\no=- 1 1 IN IP4 {host}\r\ns=-\r\nc=IN IP4 {host}\r\nt=0 0\r\n\
+         m=audio {port} RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=crypto:1 {suite} {key}\r\na=sendrecv\r\n"
+    )
+}
+
+const SHA1_80: &str = "AES_CM_128_HMAC_SHA1_80";
+const OURS_AGAIN: &str = "inline:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const THEIRS_AGAIN: &str = "inline:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+
+/// The two descriptions of a secured PCMU call, with the keys given.
+fn savp_pair(ours: &str, theirs: &str) -> (SessionDescription, SessionDescription) {
+    savp_pair_of(SHA1_80, ours, theirs)
+}
+
+fn savp_pair_of(suite: &str, ours: &str, theirs: &str) -> (SessionDescription, SessionDescription) {
+    plan_pair(
+        &savp("192.0.2.1", 40_000, suite, ours),
+        &savp("192.0.2.2", 40_002, suite, theirs),
+    )
+}
+
+fn plan_of(local: &SessionDescription, remote: &SessionDescription) -> crate::MediaPlan {
+    local
+        .media_plan(remote, 0)
+        .expect("a plan")
+        .expect("a stream")
+}
+
+/// One packet's worth of audio, as it goes on the wire.
+fn one_packet(from: &mut MediaSession) -> Vec<u8> {
+    from.capture(&[1_000_i16; 160])
+        .expect("the frame encodes")
+        .expect("a frame goes out")
+        .payload
+        .to_vec()
+}
+
+fn theirs_address() -> SocketAddr {
+    "192.0.2.2:40002".parse().expect("an address")
+}
+
+fn ours_address() -> SocketAddr {
+    "192.0.2.1:40000".parse().expect("an address")
+}
+
+/// RFC 4568 §7.1.4: a re-offer is an opportunity to re-key, and both ends put
+/// a fresh master key in the new descriptions. Whatever the negotiation
+/// settles on is what has to be on the wire from then on.
+#[test]
+fn a_stream_re_keyed_by_a_re_negotiation_sends_under_the_new_key() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut sender = session(&ours, &theirs, now);
+    assert!(sender.is_encrypted());
+
+    // the same two ends, same codec, same addresses, fresh keys
+    let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
+    sender
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .expect("the fresh keys are ones this build can open a stream with");
+
+    // the far end, keyed the way the fresh pair of descriptions says
+    let mut receiver = session(&theirs_2, &ours_2, now);
+    let mut datagram = one_packet(&mut sender);
+    let arrival = receiver.receive(&mut datagram, ours_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Queued | Arrival::Dropped(crate::Discard::Probation)
+        ),
+        "the stream is still sending under the key the previous negotiation \
+         settled on: {arrival:?}"
+    );
+}
+
+/// The other direction, and the one that decides whether a call stays audible
+/// through a re-key: the far end's answer reaches us before the far end's
+/// first packet under the key it names.
+#[test]
+fn a_stream_re_keyed_by_a_re_negotiation_reads_the_peers_new_key() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut receiver = session(&ours, &theirs, now);
+
+    let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
+    receiver
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .expect("the fresh keys open");
+
+    let mut peer = session(&theirs_2, &ours_2, now);
+    let mut datagram = one_packet(&mut peer);
+    let arrival = receiver.receive(&mut datagram, theirs_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Queued | Arrival::Dropped(crate::Discard::Probation)
+        ),
+        "the far end has switched to the key it named and is not being \
+         heard: {arrival:?}"
+    );
+}
+
+/// The far end has not switched yet, which is the ordinary case for as long
+/// as the answer and the packets are crossing.
+#[test]
+fn a_peer_that_has_not_switched_to_its_new_key_yet_is_still_heard() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut receiver = session(&ours, &theirs, now);
+    let mut peer = session(&theirs, &ours, now);
+
+    let (ours_2, theirs_2) = savp_pair(OURS_AGAIN, THEIRS_AGAIN);
+    receiver
+        .adopt(&plan_of(&ours_2, &theirs_2), Vec::new(), now)
+        .expect("the fresh keys open");
+
+    // still protected with the key the far end is replacing
+    let mut in_flight = one_packet(&mut peer);
+    let arrival = receiver.receive(&mut in_flight, theirs_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Queued | Arrival::Dropped(crate::Discard::Probation)
+        ),
+        "a packet the far end sent before it saw our answer: {arrival:?}"
+    );
+}
+
+/// A re-negotiation that moves nothing about the keys must not touch the
+/// contexts. The harm is not theoretical: a fresh receive context brings a
+/// fresh replay window, and a fresh window accepts a packet this stream has
+/// already taken.
+#[test]
+fn a_re_offer_that_keeps_the_keys_does_not_re_open_the_replay_window() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut receiver = session(&ours, &theirs, now);
+    let mut peer = session(&theirs, &ours, now);
+
+    let datagram = one_packet(&mut peer);
+    receiver.receive(&mut datagram.clone(), theirs_address(), now);
+
+    // a session timer refresh, or a hold that changed only the direction:
+    // the same two crypto lines, to the octet
+    receiver
+        .adopt(&plan_of(&ours, &theirs), Vec::new(), now)
+        .expect("the keys it already holds open");
+
+    let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Dropped(crate::Discard::Insecure(SrtpError::Replayed))
+        ),
+        "the replay window was re-opened by a re-negotiation that changed no \
+         key: {arrival:?}"
+    );
+}
+
+/// The halves move one at a time. Each end keys what it sends, so a
+/// negotiation in which only our own key moved leaves the far end's context —
+/// and its replay window — exactly where they were.
+#[test]
+fn a_re_offer_that_moves_only_our_own_key_leaves_the_peers_context_alone() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut receiver = session(&ours, &theirs, now);
+    let mut peer = session(&theirs, &ours, now);
+
+    let datagram = one_packet(&mut peer);
+    receiver.receive(&mut datagram.clone(), theirs_address(), now);
+
+    // our key moved; theirs did not
+    let (ours_2, _) = savp_pair(OURS_AGAIN, THEIRS);
+    receiver
+        .adopt(&plan_of(&ours_2, &theirs), Vec::new(), now)
+        .expect("the fresh key opens");
+
+    let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Dropped(crate::Discard::Insecure(SrtpError::Replayed))
+        ),
+        "our own key moving re-opened the far end's replay window: {arrival:?}"
+    );
+}
+
+/// §6.1 lets a re-offer keep the `inline:` and change the terms around it.
+/// `AES_CM_128_HMAC_SHA1_32` keeps all thirty octets of the key and salt and
+/// shortens only the tag, so the transform has to follow — while the packet
+/// index, which is all that stops the unchanged keystream from being spent
+/// twice, must not restart. The index half is
+/// `terms_that_move_under_the_same_key_do_not_restart_the_packet_index`, in
+/// the crate that owns the counters; this is the half a peer can see.
+#[test]
+fn a_re_offer_that_shortens_the_tag_is_followed_without_a_new_key() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut sender = session(&ours, &theirs, now);
+
+    let (ours_32, theirs_32) = savp_pair_of("AES_CM_128_HMAC_SHA1_32", OURS, THEIRS);
+    sender
+        .adopt(&plan_of(&ours_32, &theirs_32), Vec::new(), now)
+        .expect("the same keys under a shorter tag open");
+
+    let mut receiver = session(&theirs_32, &ours_32, now);
+    let mut datagram = one_packet(&mut sender);
+    let arrival = receiver.receive(&mut datagram, ours_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Queued | Arrival::Dropped(crate::Discard::Probation)
+        ),
+        "the stream is still stamping the tag length the previous \
+         negotiation settled on: {arrival:?}"
     );
 }

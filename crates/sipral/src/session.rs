@@ -40,10 +40,11 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral_core::sdp::{Direction, Keying, MediaPlan, RtcpPlan};
+use sipral_core::sdp::{CryptoPolicy, Direction, Keying, MediaPlan, RtcpPlan};
 use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFORT_NOISE};
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
+use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
     PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, is_rtcp,
@@ -871,6 +872,38 @@ impl MediaSession {
 
 // -- what changes under a live call ------------------------------------------
 
+/// One direction's keying, as a re-negotiation left it.
+struct Rekey {
+    policy: Policy,
+    master: Master,
+    what: Rekeyed,
+}
+
+impl Rekey {
+    /// What has to happen to one direction, given the crypto line it was
+    /// running under and the one the negotiation settled on.
+    ///
+    /// # Errors
+    /// As [`keying::context`], for a fresh line this build cannot open a
+    /// stream with.
+    fn between(was: &CryptoPolicy, now: &CryptoPolicy) -> Result<Option<Self>, MediaError> {
+        let what = if was.keys == now.keys {
+            if was == now {
+                return Ok(None);
+            }
+            Rekeyed::Terms
+        } else {
+            Rekeyed::Key
+        };
+        let (policy, master) = keying::context(now)?;
+        Ok(Some(Self {
+            policy,
+            master,
+            what,
+        }))
+    }
+}
+
 impl MediaSession {
     /// Take a plan that has moved: a hold, a resume, or a far end that
     /// changed its media address.
@@ -885,12 +918,25 @@ impl MediaSession {
     /// descriptions says now — a hold or a resume still runs a negotiation,
     /// and the losers it names can differ from the ones that opened the
     /// session even though the codec itself did not move.
+    ///
+    /// Keys move here too, one direction at a time, and only the direction
+    /// whose master key actually changed. A re-negotiation is free to carry
+    /// the key it already named; re-keying on that would restart the packet
+    /// index under a key that has already sent, which is the one thing RFC
+    /// 3711 §9.1 asks never to happen.
+    ///
+    /// # Errors
+    /// [`MediaError::NoDtlsSrtp`] and [`MediaError::UnusableKeying`], for a
+    /// fresh crypto line this build cannot open a stream with. Both are
+    /// decided before anything is written, so a plan that fails leaves the
+    /// session exactly as it was rather than half adopted.
     pub(crate) fn adopt(
         &mut self,
         plan: &MediaPlan,
         candidates: Vec<CodecCandidate>,
         now: Instant,
-    ) {
+    ) -> Result<(), MediaError> {
+        let (fresh_local, fresh_remote) = Self::rekeyed(&self.plan, plan)?;
         if plan.remote != self.plan.remote {
             self.rtp.relocate(plan.remote);
             // a far end that moved its media address has almost always
@@ -899,6 +945,22 @@ impl MediaSession {
             self.rtp.resync();
             self.last_inbound = now;
         }
+        if let Some(Rekey {
+            policy,
+            master,
+            what,
+        }) = fresh_local
+        {
+            self.rtp.rekey_local(policy, master, what);
+        }
+        if let Some(Rekey {
+            policy,
+            master,
+            what,
+        }) = fresh_remote
+        {
+            self.rtp.rekey_remote(policy, master, what);
+        }
         self.plan = plan.clone();
         self.codec_candidates = candidates;
         // a stream that has just been told to stop receiving must not be
@@ -906,6 +968,44 @@ impl MediaSession {
         if !self.is_receiving() {
             self.stalled = false;
         }
+        Ok(())
+    }
+
+    /// What a re-negotiated plan does to each direction, or `None` for a
+    /// direction it leaves exactly as it found it.
+    ///
+    /// The two are told apart by the key material alone, because that is what
+    /// the derivation reads. A re-offer is free to keep the same `inline:` and
+    /// move only the terms around it — `AES_CM_128_HMAC_SHA1_80` giving way to
+    /// `_32` keeps all thirty octets and shortens only the tag — and the
+    /// session keys then come out identical. Calling that a new key would hand
+    /// a stream that has already sent a packet index starting again at zero,
+    /// under a keystream already spent: the reuse RFC 3711 §9.1 exists to
+    /// forbid. So the terms follow and the index does not restart.
+    ///
+    /// A change of shape is neither, and is not decided here. Encryption
+    /// turning on or off mid-call, or SDES giving way to DTLS, is not
+    /// expressible as a context for a stream that is running; the session
+    /// keeps the keys it has, and the engine's `keying_holds` is where a
+    /// stream that lost a required policy is refused.
+    fn rekeyed(
+        was: &MediaPlan,
+        plan: &MediaPlan,
+    ) -> Result<(Option<Rekey>, Option<Rekey>), MediaError> {
+        let (
+            Some(Keying::Sdes {
+                local: was_local,
+                remote: was_remote,
+            }),
+            Some(Keying::Sdes { local, remote }),
+        ) = (&was.keying, &plan.keying)
+        else {
+            return Ok((None, None));
+        };
+        Ok((
+            Rekey::between(was_local, local)?,
+            Rekey::between(was_remote, remote)?,
+        ))
     }
 
     /// The plan this session is running.

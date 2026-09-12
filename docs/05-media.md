@@ -267,6 +267,37 @@ and zeroises on drop; the engine's own `Debug` prints every `a=crypto` line
 with its keying information replaced, since that is the last place the same
 material is still text.
 
+**When a re-negotiation moves the keys.** RFC 4568 §7.1.4 makes a re-offer an
+opportunity to re-key, and the new keys reach the running stream: `adopt`
+compares each direction against the one it is running and hands `RtpSession`
+what moved, so the far end's answer to a hold, a resume or a session refresh
+is heard. A crypto-only re-offer arriving here is the other direction and does
+not get this far — see "One known gap" below. Three things about the answer
+direction are worth stating, because getting any of them wrong is silent.
+
+*It is per direction.* Each end keys what it sends, so an answer that moves
+only the far end's key must leave our own sending context alone, and the other
+way round. A comparison on the whole of the keying restarts the untouched half.
+
+*It compares the key material, not the terms around it.* A line may keep its
+`inline:` and change only the crypto suite — `AES_CM_128_HMAC_SHA1_80` giving
+way to `_32` keeps all thirty octets and shortens only the tag. §4.3.1 derives
+the session keys from the master key, the salt and the packet index and from
+nothing else, so those two lines produce the same keystream. The transform
+follows; the packet index does not restart, because restarting it would spend
+that keystream a second time. A new master key is the opposite case: the index
+starts again, since §9.1 asks only that (key, SSRC, index) never repeat and a
+key that has never been used cannot repeat one.
+
+*The key being replaced outlives the answer by a little.* The far end names
+its new key in SDP and then starts using it, and the two cross on the wire, so
+everything still in flight is under the key being replaced. The receive
+context that was replaced keeps opening packets for 250 of them and is dropped
+the moment one authenticates under the new key. Trying twice is sound only
+because a failed attempt leaves the datagram untouched — §3.3's order is
+replay window, then tag, then decrypt — and a change that decrypted first
+would break this without any test noticing.
+
 **What it deliberately does not do.** DTLS-SRTP. `sipral-core` reads an
 `a=fingerprint` and carries it through, and there is no DTLS in this tree at
 all, so an offer arriving on `UDP/TLS/RTP/SAVP` has its stream refused rather

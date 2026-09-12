@@ -29,4 +29,4 @@ mod testing;
 
 pub use index::WINDOW as REPLAY_WINDOW;
 pub use kdf::{KEY, Master, Rate, SALT};
-pub use session::{Mki, Policy, Protector, Security, SrtpError, Suite, Unprotector};
+pub use session::{Mki, Policy, Protector, Rekeyed, Security, SrtpError, Suite, Unprotector};

@@ -137,9 +137,8 @@ and each is cheaper before the ABI carries it than after:
 
 - **a re-negotiation that keeps what it should** — a codec change no longer
   restarts the stream on the identity the call opened with, and never reuses
-  an SRTP index under a master key; re-keying reaches the RTP session; a
-  re-offer that drops `a=crypto` under a *required* policy is refused, not
-  answered;
+  an SRTP index under a master key; a re-offer that drops `a=crypto` under a
+  *required* policy is refused, not answered;
 - **RTCP-XR** (RFC 3611) VoIP metrics, sent and read, with the R factor and
   MOS from the E-model written from ITU-T G.107, and **quality reports**
   published per RFC 6035 where an account names a collector;

@@ -30,6 +30,26 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A re-negotiation that moves the SRTP keys now reaches the running
+  stream.** `MediaSession::adopt` looked at the media address and nothing
+  else, so a re-offer or an answer carrying a fresh `a=crypto` updated the
+  plan — `is_encrypted` went on saying yes — while the contexts kept the keys
+  the call opened with. From the first packet after such a re-key the far end
+  heard silence, reported as `Discard::Insecure`, and RFC 4568 §7.1.4 makes a
+  re-offer exactly the place both ends expect to re-key. Each direction is now
+  compared against the one it is running and only what moved is replaced.
+  `Security` and `RtpSession` gain `rekey_local` and `rekey_remote`, and the
+  new `Rekeyed` says which of two things a negotiation did, because the two
+  must not be confused: a master key that has never been used starts the
+  packet index again, while the same key under different terms — the same
+  `inline:` with `AES_CM_128_HMAC_SHA1_80` giving way to `_32` — keeps it,
+  since §4.3.1 derives the session keys from the key, the salt and the index
+  alone and restarting there would spend one keystream twice. The receive
+  context a re-key replaces keeps opening packets for 250 more, because the
+  answer naming a key and the first packet under it cross on the wire;
+  `Protector::retune` and `Unprotector::retune` are the same-key half.
+  `adopt` is fallible from here on.
+
 - **A challenge no longer dies when the answer to it outgrows a datagram.**
   Credentials are the one addition certain to make a request bigger, and a
   retry that crossed RFC 3261 §18.1.1's line was refused with "open a stream

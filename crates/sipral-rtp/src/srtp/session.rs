@@ -455,6 +455,19 @@ impl Protector {
         self.policy.rtcp_overhead()
     }
 
+    /// Protect under different terms from the same master key, keeping every
+    /// counter where it is. See [`Rekeyed::Terms`] for why it has to keep
+    /// them: the session keys do not depend on what changed, so the index is
+    /// the only thing stopping a keystream from being spent twice.
+    ///
+    /// `master` is the key already in use, handed in again because a [`Master`]
+    /// cannot be copied out of the one this holds — it zeroises on drop and
+    /// has no other way out.
+    pub fn retune(&mut self, policy: Policy, master: Master) {
+        self.keys = Derived::new(&policy, master);
+        self.policy = policy;
+    }
+
     /// The rollover counter, which a peer joining an ongoing session has to
     /// be told out of band (§3.3.1).
     #[must_use]
@@ -636,6 +649,16 @@ impl Unprotector {
             initial: rollover,
             ..Self::new(policy, master)
         }
+    }
+
+    /// Open under different terms from the same master key, keeping the
+    /// stream's index and replay window where they are. The mirror of
+    /// [`Protector::retune`], and it keeps the window for a second reason
+    /// besides the keystream: a fresh window accepts a packet this stream has
+    /// already taken.
+    pub fn retune(&mut self, policy: Policy, master: Master) {
+        self.keys = Derived::new(&policy, master);
+        self.policy = policy;
     }
 
     /// The rollover counter of the stream being received, which is what a
@@ -833,7 +856,51 @@ impl Unprotector {
 pub struct Security {
     sending: Protector,
     receiving: Unprotector,
+    retiring: Option<Retiring>,
 }
+
+/// The receive context a re-key replaced, and what is left of its grace.
+struct Retiring {
+    context: Unprotector,
+    left: u32,
+}
+
+/// What a re-negotiation did to one direction's keying, which is what decides
+/// the fate of the packet index.
+///
+/// The distinction is not cosmetic. §4.3.1 derives the session keys from the
+/// master key, the master salt and the index, and from nothing else — not the
+/// crypto suite, not the tag length. So two crypto lines that name the same
+/// `inline:` produce the same keystream however much else about them differs,
+/// and a stream that restarted its index across such a change would encrypt a
+/// second packet under a keystream it had already spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rekeyed {
+    /// A master key that has never been used here. The index starts again:
+    /// §9.1 asks that the triple (master key, SSRC, index) never repeat, and
+    /// a key that has never been used cannot repeat one.
+    Key,
+    /// The same master key under terms that moved — `AES_CM_128_HMAC_SHA1_80`
+    /// giving way to `_32`, say, which keeps the sixteen key octets and the
+    /// fourteen salt octets and shortens only the tag. The transform follows;
+    /// the index does not restart.
+    Terms,
+}
+
+/// How many arriving RTP packets the previous receive context outlives a
+/// re-key.
+///
+/// A peer re-keys by naming the new key in SDP and then using it, and the two
+/// cross on the wire: the answer that carries the key is processed here before
+/// the first packet protected with it arrives, and everything still in flight
+/// is under the key it is replacing. Without a grace those packets are all
+/// [`SrtpError::NotAuthentic`].
+///
+/// It must not last, either. A superseded master key that still opens packets
+/// is a key whose replacement bought nothing. At the usual twenty milliseconds
+/// a packet this is five seconds — longer than any crossing, shorter than any
+/// call.
+const GRACE: u32 = 250;
 
 impl Security {
     /// The two halves. `sending` protects what this endpoint transmits and
@@ -849,6 +916,7 @@ impl Security {
         Self {
             sending: Protector::new(sending, sending_key),
             receiving: Unprotector::new(receiving, receiving_key),
+            retiring: None,
         }
     }
 
@@ -882,18 +950,97 @@ impl Security {
 
     /// Verify and decrypt an arriving RTP packet in place.
     ///
+    /// A packet that does not open under the current key is offered to the
+    /// context a recent [`Security::rekey_remote`] retired, while that context
+    /// still has grace. Trying twice is sound because a failed attempt leaves
+    /// the datagram byte-identical: [`Unprotector::unprotect_rtp`] checks the
+    /// replay window against a copy and verifies the tag before it decrypts
+    /// anything. A refactor that decrypted first would break this silently.
+    ///
     /// # Errors
-    /// As [`Unprotector::unprotect_rtp`].
+    /// As [`Unprotector::unprotect_rtp`], reported for the current key even
+    /// when a retired one was tried as well.
     pub fn unprotect_rtp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
-        self.receiving.unprotect_rtp(packet)
+        let fresh = self.receiving.unprotect_rtp(packet);
+        if fresh.is_ok() {
+            // the peer is using the key it named, so the one it replaced has
+            // nothing left to open
+            self.retiring = None;
+            return fresh;
+        }
+        let Some(retiring) = self.retiring.as_mut() else {
+            return fresh;
+        };
+        retiring.left = retiring.left.saturating_sub(1);
+        let opened = retiring.context.unprotect_rtp(packet);
+        if retiring.left == 0 {
+            self.retiring = None;
+        }
+        opened.or(fresh)
     }
 
     /// Verify and decrypt an arriving RTCP packet in place.
     ///
+    /// Reports travel far less often than media, so the grace is counted in
+    /// RTP packets alone; an SRTCP packet is offered to a retired context for
+    /// as long as one is there.
+    ///
     /// # Errors
-    /// As [`Unprotector::unprotect_rtcp`].
+    /// As [`Unprotector::unprotect_rtcp`], reported for the current key.
     pub fn unprotect_rtcp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
-        self.receiving.unprotect_rtcp(packet)
+        let fresh = self.receiving.unprotect_rtcp(packet);
+        if fresh.is_ok() {
+            self.retiring = None;
+            return fresh;
+        }
+        match self.retiring.as_mut() {
+            Some(retiring) => retiring.context.unprotect_rtcp(packet).or(fresh),
+            None => fresh,
+        }
+    }
+
+    /// Send under what a re-negotiation settled on, from here on.
+    ///
+    /// On [`Rekeyed::Key`] a plain replacement, counters and all: the index
+    /// starting again repeats nothing, because the key it counts under has
+    /// never been used. On [`Rekeyed::Terms`] the transform is replaced and
+    /// the index carries on, for the reason [`Rekeyed`] gives.
+    ///
+    /// There is no crossing to cover on this side. This endpoint decides when
+    /// it starts stamping with what the negotiation settled on, and that is
+    /// now.
+    pub fn rekey_local(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        match what {
+            // the Protector going out of scope drops its derived session keys
+            // and the master they came from, both of which zeroise
+            Rekeyed::Key => self.sending = Protector::new(policy, master),
+            Rekeyed::Terms => self.sending.retune(policy, master),
+        }
+    }
+
+    /// Open arriving packets with what a re-negotiation settled on, without
+    /// losing the ones already in flight under what it replaced.
+    ///
+    /// On [`Rekeyed::Key`] the peer's answer reaches us before the peer's
+    /// first packet under the key it names, so the context being replaced is
+    /// kept for a bounded run of packets and dropped the moment one authenticates
+    /// under the new key — whichever comes first.
+    ///
+    /// On [`Rekeyed::Terms`] there is nothing to stage: every packet in
+    /// flight is under the key we still hold, and only the tag length around
+    /// it moved.
+    pub fn rekey_remote(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        match what {
+            Rekeyed::Key => {
+                let previous =
+                    core::mem::replace(&mut self.receiving, Unprotector::new(policy, master));
+                self.retiring = Some(Retiring {
+                    context: previous,
+                    left: GRACE,
+                });
+            }
+            Rekeyed::Terms => self.receiving.retune(policy, master),
+        }
     }
 
     /// The rollover counter of the stream being sent, which a second receiver
@@ -960,7 +1107,10 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Master, Mki, Policy, Protector, Rate, SrtpError, Suite, Unprotector};
+    use super::{
+        GRACE, Master, Mki, Policy, Protector, Rate, Rekeyed, Security, SrtpError, Suite,
+        Unprotector,
+    };
 
     const SSRC: u32 = 0xdead_beef;
 
@@ -1612,6 +1762,167 @@ mod tests {
         assert_eq!(
             unprotector.unprotect_rtp(&mut received),
             Err(SrtpError::NotAuthentic)
+        );
+    }
+
+    // -- re-keying a session that is already running -------------------------
+
+    fn third_master() -> Master {
+        Master::new([0x44; 16], [0x22; 14])
+    }
+
+    /// One protected packet, ready to hand to an unprotector.
+    fn sent(protector: &mut Protector, sequence: u16) -> Vec<u8> {
+        let plain = packet(sequence, b"payload");
+        let mut buffer = room(&plain, protector.rtp_overhead());
+        let len = protector
+            .protect_rtp(&mut buffer, plain.len())
+            .expect("the packet protects");
+        buffer.truncate(len);
+        buffer
+    }
+
+    // §9.1 asks that (master key, SSRC, index) never repeat. A key that has
+    // never been used cannot repeat one, so a genuine re-key is free to start
+    // the index again — and has to, because carrying an advanced index over
+    // would only make the two ends disagree about where the stream is
+    /// One protected packet out of a whole session rather than out of a bare
+    /// protector.
+    fn issued(security: &mut Security, sequence: u16) -> Vec<u8> {
+        let plain = packet(sequence, b"payload");
+        let mut buffer = room(&plain, security.rtp_overhead());
+        let len = security
+            .protect_rtp(&mut buffer, plain.len())
+            .expect("the packet protects");
+        buffer.truncate(len);
+        buffer
+    }
+
+    #[test]
+    fn a_new_master_key_starts_the_packet_index_again() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut security = Security::new(policy, master(), policy, master());
+        issued(&mut security, 65_535);
+        issued(&mut security, 0);
+        assert_eq!(security.rollover(), 1, "the stream wrapped");
+
+        security.rekey_local(policy, other_master(), Rekeyed::Key);
+        assert_eq!(
+            security.rollover(),
+            0,
+            "a key that has never been used counts from zero"
+        );
+
+        // and the far end, keyed to match and with no rollover counter handed
+        // to it out of band, hears the stream from where it now is
+        let mut receiver = Unprotector::new(policy, other_master());
+        let mut carried = issued(&mut security, 7);
+        assert_eq!(
+            receiver.unprotect_rtp(&mut carried).map(|_| ()),
+            Ok(()),
+            "the two ends disagree about where the stream is"
+        );
+    }
+
+    // The same master key under a shorter tag: §4.3.1 derives the session
+    // keys from the key, the salt and the index, and from none of what moved.
+    // So the keystream is the one already in use, and an index that started
+    // again would spend it twice — the two-time pad §9.1 calls catastrophic
+    #[test]
+    fn terms_that_move_under_the_same_key_do_not_restart_the_packet_index() {
+        let mut security = Security::new(
+            Policy::new(Suite::AesCm80),
+            master(),
+            Policy::new(Suite::AesCm80),
+            master(),
+        );
+        let body = |security: &mut Security, sequence: u16| {
+            let plain = packet(sequence, b"payload");
+            let mut buffer = room(&plain, security.rtp_overhead());
+            security
+                .protect_rtp(&mut buffer, plain.len())
+                .expect("the packet protects");
+            buffer.get(12..plain.len()).unwrap_or_default().to_vec()
+        };
+
+        let before = body(&mut security, 100);
+        body(&mut security, 65_535);
+        body(&mut security, 0);
+        assert_eq!(security.rollover(), 1, "the stream wrapped");
+
+        // the far end answered with the same inline: and a shorter tag
+        security.rekey_local(Policy::new(Suite::AesCm32), master(), Rekeyed::Terms);
+        assert_eq!(security.rollover(), 1, "the index is not what moved");
+        assert_ne!(
+            before,
+            body(&mut security, 100),
+            "the same key, the same sequence number and the same payload \
+             encrypted to the same octets: the index restarted"
+        );
+    }
+
+    // A peer re-keys by naming the key in SDP and then using it, and the two
+    // cross on the wire: the answer is processed here before the first packet
+    // protected with it arrives. Without a grace every packet still in flight
+    // is thrown away as forged
+    #[test]
+    fn a_peer_that_has_not_switched_to_its_new_key_yet_is_still_heard() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut before = Protector::new(policy, master());
+        let mut after = Protector::new(policy, other_master());
+        let mut security = Security::new(policy, master(), policy, master());
+
+        security.rekey_remote(policy, other_master(), Rekeyed::Key);
+
+        let mut crossing = sent(&mut before, 100);
+        assert_eq!(
+            security.unprotect_rtp(&mut crossing).map(|_| ()),
+            Ok(()),
+            "a packet sent before the far end saw our answer"
+        );
+
+        let mut switched = sent(&mut after, 101);
+        assert_eq!(security.unprotect_rtp(&mut switched).map(|_| ()), Ok(()));
+
+        // the far end has switched, so the key it left behind opens nothing
+        let mut late = sent(&mut before, 102);
+        assert_eq!(
+            security.unprotect_rtp(&mut late),
+            Err(SrtpError::NotAuthentic),
+            "a key that has been replaced and proven replaced is still open"
+        );
+    }
+
+    // The grace exists to cover a crossing, which takes packets, not minutes.
+    // A superseded master key that goes on opening packets is a key whose
+    // replacement bought nothing
+    #[test]
+    fn a_key_that_was_replaced_does_not_outlive_its_grace() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut before = Protector::new(policy, master());
+        let mut stranger = Protector::new(policy, third_master());
+        let mut security = Security::new(policy, master(), policy, master());
+
+        security.rekey_remote(policy, other_master(), Rekeyed::Key);
+        let mut early = sent(&mut before, 1);
+        assert_eq!(
+            security.unprotect_rtp(&mut early).map(|_| ()),
+            Ok(()),
+            "the grace is not there at all"
+        );
+
+        // packets that open under neither key still spend it
+        for step in 0..GRACE {
+            let sequence = 1_000_u32.saturating_add(step);
+            let mut junk = sent(&mut stranger, u16::try_from(sequence).unwrap_or(u16::MAX));
+            assert!(security.unprotect_rtp(&mut junk).is_err());
+        }
+
+        let mut late = sent(&mut before, 500);
+        assert_eq!(
+            security.unprotect_rtp(&mut late),
+            Err(SrtpError::NotAuthentic),
+            "the replaced key is still open after its grace ran out"
         );
     }
 }

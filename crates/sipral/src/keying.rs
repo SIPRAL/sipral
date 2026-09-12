@@ -192,7 +192,14 @@ pub(crate) fn security(plan: &MediaPlan) -> Result<Option<Security>, MediaError>
 }
 
 /// One direction's transform and master key.
-fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), MediaError> {
+///
+/// [`security`] builds both halves at once for a session being opened; a
+/// session already running re-keys one direction at a time, so this is reached
+/// on its own from `MediaSession::adopt`.
+///
+/// # Errors
+/// As [`security`], for the one direction.
+pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), MediaError> {
     let inline = negotiated
         .keys
         .first()

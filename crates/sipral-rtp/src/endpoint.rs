@@ -17,7 +17,7 @@ use crate::rtcp::{
 use crate::rtcp_stats::{ReceptionTracker, round_trip_time};
 use crate::rtcp_timer::{Due, IntervalTimer};
 use crate::source::{SeqUpdate, SequenceState};
-use crate::srtp::{Security, SrtpError};
+use crate::srtp::{Master, Policy, Rekeyed, Security, SrtpError};
 use crate::wire::{
     BuildError, FIXED_HEADER_LEN, PacketBuilder, PacketError, PayloadTypes, RtpHeader, RtpPacket,
 };
@@ -654,6 +654,35 @@ impl RtpSession {
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
         self.inbound.rtcp = ReceptionTracker::new();
+    }
+
+    /// Protect what this stream sends under what a re-negotiation settled on,
+    /// for one that moved this endpoint's own `a=crypto` line.
+    ///
+    /// Nothing else about the stream moves: the same sequence numbers, the
+    /// same timestamps, the same source. As [`Security::rekey_local`], and
+    /// [`Rekeyed`] is what decides the packet index.
+    ///
+    /// A stream that was never given keys is left alone. A negotiation cannot
+    /// arrive here having turned encryption on — that is a different session,
+    /// opened rather than re-keyed — so there is nothing to do and no error to
+    /// report.
+    pub fn rekey_local(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        if let Some(security) = self.security.as_mut() {
+            security.rekey_local(policy, master, what);
+        }
+    }
+
+    /// Open what arrives under what a re-negotiation settled on, for one in
+    /// which the far end moved its own `a=crypto` line.
+    ///
+    /// A key being replaced keeps opening packets for a short while, because
+    /// the far end's answer arrives before the far end's first packet under
+    /// the key it names. As [`Security::rekey_remote`].
+    pub fn rekey_remote(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        if let Some(security) = self.security.as_mut() {
+            security.rekey_remote(policy, master, what);
+        }
     }
 
     /// Whether a periodic RTCP report is due, or how long to wait (§6.3.6).

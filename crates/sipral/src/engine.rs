@@ -730,14 +730,19 @@ impl MediaEngine {
             // the same codec on a session that is already running: a hold, a
             // resume, or a peer that moved its address
             Some(session) if session.codec() == codec => {
-                session.adopt(&plan, candidates, now);
-                self.events.push_back((
-                    call,
-                    MediaEvent::Changed {
-                        codec,
-                        direction: plan.direction,
-                    },
-                ));
+                match session.adopt(&plan, candidates, now) {
+                    Ok(()) => self.events.push_back((
+                        call,
+                        MediaEvent::Changed {
+                            codec,
+                            direction: plan.direction,
+                        },
+                    )),
+                    // a fresh crypto line this build cannot open: the session
+                    // is still running on the keys it had, and the call is
+                    // told rather than left to wonder why nothing arrives
+                    Err(error) => self.fail(call, error),
+                }
             }
             // a different codec needs a different encoder, a different decoder
             // and a different frame length, so it needs a different session
