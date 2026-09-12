@@ -20,20 +20,25 @@
 
 use std::time::Duration;
 
+use crate::auth::KeySource;
 use crate::auth::digest::hex;
-use crate::auth::sha2::sha256;
 
 /// A stream of tokens derived from one seed.
+///
+/// The seed lives inside the [`KeySource`], which does not print it and wipes
+/// it on the way out. That matters here rather than being tidiness: this is
+/// reached by `{:?}` on an `Endpoint`, and through that on a `UserAgent`.
 #[derive(Debug)]
 pub(crate) struct Tokens {
-    seed: [u8; 32],
-    counter: u64,
+    keys: KeySource,
 }
 
 impl Tokens {
     /// Start from the caller's seed.
     pub(crate) const fn new(seed: [u8; 32]) -> Self {
-        Self { seed, counter: 0 }
+        Self {
+            keys: KeySource::new(seed),
+        }
     }
 
     /// A fresh token: 32 hexadecimal characters.
@@ -108,15 +113,9 @@ impl Tokens {
         Duration::from_nanos(nanos.saturating_sub(u64::try_from(taken).unwrap_or(span)))
     }
 
-    /// `SHA-256(seed || counter)`, and the counter moves on.
+    /// The next block of the stream.
     fn draw(&mut self) -> [u8; 32] {
-        let counter = self.counter.to_be_bytes();
-        self.counter = self.counter.wrapping_add(1);
-        let mut input = [0_u8; 40];
-        for (slot, byte) in input.iter_mut().zip(self.seed.iter().chain(counter.iter())) {
-            *slot = *byte;
-        }
-        sha256(&input)
+        self.keys.block()
     }
 }
 

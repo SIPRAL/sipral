@@ -465,6 +465,14 @@ is what they mean:
 - **patch**, for a fix that changes no declaration. It is not asked for at
   load, because it cannot make two builds disagree.
 
+A member appended to a config struct is the ordinary case of that, and it is
+not free even when it is only an addition: `declared_size` refuses anything
+smaller than the struct the library was built with, so a caller compiled
+against the older header is turned away at `sipral_stack_create` with
+`SIPRAL_STATUS_UNSUPPORTED_VERSION`. Loud rather than silent, which is the
+behaviour worth having when the new member is a security one — `media_seed`,
+added at minor 9, is exactly that.
+
 Growing the surface is therefore a minor bump in the same change as the
 addition, next to the regenerated `bindings/`. The gate forces the second
 half of that — committed output against what the declarations print, which is

@@ -46,11 +46,19 @@ replayed into whichever layer the bug is thought to be in.
 ## What a recording holds
 
 **The seed.** Thirty-two bytes, and every branch, tag, `Call-ID` and `cnonce`
-the stack writes is derived from it. Without it a replay writes different
-requests, and the recorded answers — which echo `Via`, `From`, `To`, `Call-ID`
-and `CSeq` — no longer belong to anything the replay sent. A recording that
-did not carry the seed would replay into a different call and would not say
-so.
+the stack writes is derived from it — **and nothing else is.** Without it a
+replay writes different requests, and the recorded answers — which echo `Via`,
+`From`, `To`, `Call-ID` and `CSeq` — no longer belong to anything the replay
+sent. A recording that did not carry the seed would replay into a different
+call and would not say so.
+
+The media keys are not in that list, and the format has no field for them.
+They come from a second seed the application supplies to `MediaEngine::new`,
+which is never written here. The two are separate for exactly this reason: a
+recording is meant to reproduce a session, not to decrypt one. A consequence
+worth expecting — replaying a secured session produces a *different*
+`a=crypto` from the one recorded, deliberately, because the key that made the
+original is not in the file and cannot be derived from what is.
 
 **The frames**, each with how far into the session it was, from the first
 frame rather than from a wall clock:
@@ -220,13 +228,15 @@ let text = recorder.finish()?.to_text(); // and this is the file
 was never whole. A long-running driver reads `Recorder::spoiled()` and stops
 early rather than finding out at the end.
 
-The file carries no credentials of its own beyond what was on the wire, and
-what was on the wire is what a capture would have carried. It is not the
-diagnostic record of `docs/14-diagnostics.md`, which is safe to send without
-being read: **a recording holds messages, so it holds whatever the messages
-held.** A `To` and a `From` name the parties, an SDP names the addresses, and
-an `Authorization` holds the digest response. Anyone asking a user to send one
-should say so, and this is why the two artefacts are separate.
+The file carries no key of this end's and permits deriving none. What it does
+carry, beyond the seed, is what was on the wire — which is what a capture
+would have carried. It is not the diagnostic record of
+`docs/14-diagnostics.md`, which is safe to send without being read: **a
+recording holds messages, so it holds whatever the messages held.** A `To` and
+a `From` name the parties, an SDP names the addresses, an `Authorization`
+holds the digest response, and a recorded *inbound* SDP for a secured call
+holds the far end's `inline:` key exactly as it arrived. Anyone asking a user
+to send one should say so, and this is why the two artefacts are separate.
 
 ## The recording in the tree
 

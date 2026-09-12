@@ -53,7 +53,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)8)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)9)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -1142,6 +1142,10 @@ struct sipral_stack_config {
      * Every branch parameter, tag and `Call-ID` is derived from it, and
      * §19.3 wants a tag unguessable — cryptographically random, not a
      * counter or a clock. Two stacks must never be given the same bytes.
+     *
+     * Not the media keys: those come from `media_seed`, and the reason
+     * they are a separate draw is that a replay recording carries this
+     * one in clear.
      */
     const uint8_t *entropy;
     /**
@@ -1249,6 +1253,24 @@ struct sipral_stack_config {
      * else's.
      */
     uint64_t media_clock_unix_seconds;
+    /**
+     * Thirty-two more bytes of entropy, for the media keys, and **not
+     * the same bytes as `entropy`**.
+     *
+     * Every SRTP master key this stack offers or answers with is derived
+     * from these and from nothing else. They are a second draw rather
+     * than a slice of the first because a replay recording writes
+     * `entropy` into the file in clear: one generator for both would put
+     * every key the stack will ever offer into every recording it makes.
+     *
+     * Handing the same bytes twice is refused rather than accepted
+     * quietly. This is the only place in the library that can see both.
+     */
+    const uint8_t *media_seed;
+    /**
+     * How many bytes of it. Thirty-two.
+     */
+    size_t media_seed_len;
 };
 
 /**

@@ -101,6 +101,8 @@ impl Stack {
             catalog,
             MediaConfig::default(),
             WallClock::from_unix(now, 1_700_000_000, 0),
+            // neither this stack's signalling seed nor the other stack's
+            [seed ^ 0xa5; 32],
         );
         Self {
             agent,

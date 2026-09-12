@@ -115,9 +115,12 @@ int main(void)
      * this file after guarding the gate: it is the shortest correct example of
      * the ABI anybody will read. */
     uint8_t entropy[32];
+    uint8_t media_seed[32];
     FILE *urandom = fopen("/dev/urandom", "rb");
-    if (urandom == NULL || fread(entropy, 1, sizeof entropy, urandom) != sizeof entropy) {
-        printf("  smoke.c: could not read %zu bytes of entropy\n", sizeof entropy);
+    if (urandom == NULL || fread(entropy, 1, sizeof entropy, urandom) != sizeof entropy ||
+        fread(media_seed, 1, sizeof media_seed, urandom) != sizeof media_seed) {
+        printf("  smoke.c: could not read %zu bytes of entropy\n",
+               sizeof entropy + sizeof media_seed);
         if (urandom != NULL) {
             fclose(urandom);
         }
@@ -165,6 +168,12 @@ int main(void)
     config.bind_address_len = strlen(bind);
     config.entropy = entropy;
     config.entropy_len = sizeof entropy;
+    /* A second, independent draw. Not a slice of the first and not a copy of
+     * it: the library refuses the same bytes twice, because a replay recording
+     * carries the signalling entropy in clear and must never carry the means
+     * to derive a media key. */
+    config.media_seed = media_seed;
+    config.media_seed_len = sizeof media_seed;
     expect("the stack would not start",
            sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
 

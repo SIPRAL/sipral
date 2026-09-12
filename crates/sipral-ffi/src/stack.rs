@@ -175,6 +175,10 @@ record! {
         /// Every branch parameter, tag and `Call-ID` is derived from it, and
         /// §19.3 wants a tag unguessable — cryptographically random, not a
         /// counter or a clock. Two stacks must never be given the same bytes.
+        ///
+        /// Not the media keys: those come from `media_seed`, and the reason
+        /// they are a separate draw is that a replay recording carries this
+        /// one in clear.
         pub entropy: *const u8,
         /// How many bytes of it. Thirty-two.
         pub entropy_len: usize,
@@ -255,6 +259,20 @@ record! {
         /// absolute — and costs the correlation of this call's media with anything
         /// else's.
         pub media_clock_unix_seconds: u64,
+        /// Thirty-two more bytes of entropy, for the media keys, and **not
+        /// the same bytes as `entropy`**.
+        ///
+        /// Every SRTP master key this stack offers or answers with is derived
+        /// from these and from nothing else. They are a second draw rather
+        /// than a slice of the first because a replay recording writes
+        /// `entropy` into the file in clear: one generator for both would put
+        /// every key the stack will ever offer into every recording it makes.
+        ///
+        /// Handing the same bytes twice is refused rather than accepted
+        /// quietly. This is the only place in the library that can see both.
+        pub media_seed: *const u8,
+        /// How many bytes of it. Thirty-two.
+        pub media_seed_len: usize,
     }
 }
 
@@ -680,6 +698,7 @@ unsafe fn engine_for(
     config: &SipralStackConfig,
     media: MediaConfig,
     origin: Instant,
+    media_seed: [u8; SEED_BYTES],
 ) -> Result<MediaEngine, Fail> {
     let named = unsafe { text(config.codecs, config.codecs_len, "codecs") }?;
     let catalog = catalog_of(
@@ -689,7 +708,7 @@ unsafe fn engine_for(
         toggled(config.offer_rtcp_mux, "offer_rtcp_mux", false)?,
     )?;
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
-    Ok(MediaEngine::new(catalog, media, clock))
+    Ok(MediaEngine::new(catalog, media, clock, media_seed))
 }
 
 entry! {
@@ -725,7 +744,26 @@ entry! {
             ));
         };
         let named = unsafe { text(config.user_agent, config.user_agent_len, "user_agent") }?;
-        let seed = seed_from(unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?)?;
+        let seed = seed_from(
+            unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
+            "entropy",
+        )?;
+        let media_seed = seed_from(
+            unsafe { bytes(config.media_seed, config.media_seed_len, "media_seed") }?,
+            "media_seed",
+        )?;
+        if media_seed == seed {
+            // The one check that has to live here: nowhere else can see both.
+            // Sharing them undoes the separation silently — every message
+            // still looks right, and every SRTP key is derivable from a
+            // recording that was meant to carry none.
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "media_seed is the same as entropy; they must be two independent draws, because a \
+                 replay recording carries entropy in clear and must not permit deriving a key"
+                    .to_owned(),
+            ));
+        }
 
         let timers = timers_for(speaks.protocol(), &config)?;
         let media = media_for(&config)?;
@@ -733,7 +771,7 @@ entry! {
         endpoint.timers = timers;
 
         let origin = Instant::now();
-        let engine = unsafe { engine_for(&config, media.clone(), origin) }?;
+        let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
         let mut agent = UserAgent::new(endpoint, seed);
         // the socket is the caller's; what the stack is told is the address
         // the far end will answer to, which is what goes in every Via
@@ -782,13 +820,13 @@ entry! {
     }
 }
 
-fn seed_from(entropy: Option<&[u8]>) -> Result<[u8; SEED_BYTES], Fail> {
+fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<[u8; SEED_BYTES], Fail> {
     let supplied = entropy.unwrap_or_default();
     <[u8; SEED_BYTES]>::try_from(supplied).map_err(|_| {
         fail(
             SipralStatus::InvalidArgument,
             format!(
-                "entropy is {} bytes and a stack needs exactly {SEED_BYTES}, from the platform's \
+                "{member} is {} bytes and a stack needs exactly {SEED_BYTES}, from the platform's \
                  own generator",
                 supplied.len()
             ),
@@ -1062,6 +1100,9 @@ pub(crate) mod tests {
 
     pub(crate) const BIND: &str = "192.0.2.10:5060";
     pub(crate) const SEED: [u8; 32] = [7; 32];
+    /// The media seed a test stack runs with: a different draw, because the
+    /// library refuses the same bytes twice and is right to.
+    pub(crate) const MEDIA_SEED: [u8; 32] = [23; 32];
 
     /// One member of the config, named as a caller's header names it, and the
     /// way to put a value in it.
@@ -1215,6 +1256,8 @@ pub(crate) mod tests {
             user_agent_len: 0,
             entropy: SEED.as_ptr(),
             entropy_len: SEED.len(),
+            media_seed: MEDIA_SEED.as_ptr(),
+            media_seed_len: MEDIA_SEED.len(),
             timer_t1_ms: 0,
             timer_t2_ms: 0,
             timer_t4_ms: 0,

@@ -10,6 +10,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Security
+
+- **A replay recording no longer carries the means to decrypt what it
+  recorded.** SRTP master keys were drawn from the same seeded stream as the
+  branches, tags and `Call-ID`s — and that seed is written into every
+  recording, in clear, under a document promising the file held only what a
+  capture would have held. Anyone handed a recording taken to diagnose
+  something else could derive every key the stack had offered and every key it
+  ever would. The media engine now has a seed of its own, supplied by the
+  application, written nowhere. `MediaEngine::new` takes it as a fourth
+  argument; `sipral_stack_config_t` gains `media_seed` and `media_seed_len`,
+  and `sipral_stack_create` **refuses** the two seeds being equal, because
+  that call is the only place in the library that can see both. The ABI minor
+  moves 8 → 9, so a caller built against the older header is turned away at
+  create rather than running with one generator for both. A key is now one
+  block of `SHA-256(media seed || counter)` rather than two hex tokens, and
+  the block is wiped before it leaves the stack.
+
 ### Fixed
 
 - **A challenge no longer dies when the answer to it outgrows a datagram.**

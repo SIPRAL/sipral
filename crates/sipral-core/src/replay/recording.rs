@@ -36,12 +36,17 @@ impl Recording {
     /// is worse than one that would not start.
     pub const VERSION: u32 = 1;
 
-    /// The seed the recorded stack was built with.
+    /// The signalling seed the recorded stack was built with.
     ///
     /// Every branch, tag, `Call-ID` and `cnonce` is derived from it
     /// ([`Endpoint::new`](crate::endpoint::Endpoint::new)), so a replay built
     /// with a different one writes different messages and the answers in the
     /// recording no longer belong to them.
+    ///
+    /// **And nothing else is derived from it.** Media keys come from a second
+    /// seed this format has no field for, which is why a recording can be
+    /// handed to somebody to reproduce a session without handing them the
+    /// means to decrypt the media that went with it.
     #[must_use]
     pub const fn seed(&self) -> [u8; 32] {
         self.seed

@@ -20,10 +20,12 @@
 
 mod cache;
 pub(crate) mod digest;
+mod keysource;
 mod md5;
 mod secret;
 pub(crate) mod sha2;
 
 pub use cache::{Answered, AuthCache, Learned};
 pub use digest::{Challenge, DigestAlgorithm};
+pub use keysource::KeySource;
 pub use secret::{Credentials, Secret};

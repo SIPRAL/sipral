@@ -73,14 +73,18 @@
 //! use sipral::{CodecCatalog, Event, MediaConfig, MediaEngine, WallClock};
 //! use sipral::{EndpointConfig, OutgoingCall, UserAgent, Uri};
 //!
-//! # fn run(config: EndpointConfig, seed: [u8; 32], account: sipral::AccountId,
-//! #        target: Uri, media: SocketAddr, unix_seconds: u64) {
+//! # fn run(config: EndpointConfig, seed: [u8; 32], media_seed: [u8; 32],
+//! #        account: sipral::AccountId, target: Uri, media: SocketAddr,
+//! #        unix_seconds: u64) {
 //! let now = Instant::now();
+//! // two independent draws, never the same bytes: the first is written into
+//! // a replay recording in clear, the second derives every SRTP key
 //! let mut agent = UserAgent::new(config, seed);
 //! let mut engine = MediaEngine::new(
 //!     CodecCatalog::new(),
 //!     MediaConfig::default(),
 //!     WallClock::from_unix(now, unix_seconds, 0),
+//!     media_seed,
 //! );
 //!
 //! // the offer is written from the catalogue, and names the address the

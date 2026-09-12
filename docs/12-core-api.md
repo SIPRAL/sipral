@@ -869,8 +869,12 @@ impl Endpoint {
     // -- introspection ----------------------------------------------------------
     /// An unguessable token from the stream the branches, tags and `Call-ID`s
     /// come from. The layer above needs them too — §10.2.4 wants one `Call-ID`
-    /// for every registration of a boot cycle — and a second generator would
-    /// be a second thing for a caller to supply entropy for.
+    /// for every registration of a boot cycle — and drawing from this one
+    /// guarantees the values never collide with a branch.
+    ///
+    /// This stream is for what goes on the wire in clear, and only for that.
+    /// Media keys come from a generator of their own, seeded separately,
+    /// because this seed is written into every replay recording.
     pub fn token(&mut self) -> Box<[u8]>;
     pub fn transaction_state<K: TransactionKind>(&self, id: TransactionId<K>) -> Option<K::State>;
     pub fn dialog(&self, id: DialogId) -> Option<DialogSnapshot>;

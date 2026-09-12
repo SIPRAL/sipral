@@ -288,10 +288,14 @@ impl Endpoint {
     /// and `Call-ID`s come from.
     ///
     /// The layer above needs them too — §10.2.4 wants one `Call-ID` for every
-    /// registration of a boot cycle, and something has to mint it — and a
-    /// second generator would be a second thing for a caller to supply entropy
-    /// for. Drawing from this one also guarantees the values never collide
-    /// with a branch.
+    /// registration of a boot cycle, and something has to mint it — and
+    /// drawing from this one guarantees the values never collide with a
+    /// branch.
+    ///
+    /// This is the stream for everything that goes on the wire in clear, and
+    /// only for that. Media keys come from a generator of their own, seeded
+    /// separately, because this seed is written into every replay recording
+    /// and a recording must not carry the means to decrypt what it recorded.
     #[must_use]
     pub fn token(&mut self) -> Box<[u8]> {
         self.tokens.token()

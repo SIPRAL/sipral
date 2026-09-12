@@ -53,8 +53,10 @@ use core::fmt;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{Ordering, compiler_fence};
 use std::time::Instant;
 
+use sipral_core::auth::KeySource;
 use sipral_core::msg::OwnedMessage;
 use sipral_core::sdp::{
     AcceptedStream, Attribute, Connection, Direction, KeySalt, Keying, MASTER_KEY, MASTER_SALT,
@@ -196,15 +198,35 @@ pub struct MediaEngine {
     /// D3's health counters, fed from the same drain that hands events to
     /// the application — see `crate::counters`.
     counters: Counters,
+    /// Where every SRTP master key comes from, and nothing else does.
+    ///
+    /// Its own stream, separate from the endpoint's, because the endpoint's
+    /// seed is written in clear into every replay recording. A recording must
+    /// be able to reproduce a session byte for byte without carrying the
+    /// means to decrypt any of the media that went with it.
+    keys: KeySource,
 }
 
 impl MediaEngine {
     /// An engine that will offer what `catalog` holds.
     ///
+    /// `media_seed` is thirty-two bytes of entropy this engine derives every
+    /// SRTP master key from. **It must not be the bytes handed to
+    /// `UserAgent::new`, and no two engines may be given the same ones.**
+    /// Neither rule can be enforced here — both are a caller's to keep, the
+    /// way the seed itself is — and the first one is what keeps a replay
+    /// recording, which carries the signalling seed in clear, from carrying
+    /// the means to derive every key this stack will ever offer.
+    ///
     /// `clock` is what the RTCP sender reports need and the only thing here
     /// that a monotonic instant cannot supply; see [`WallClock`].
     #[must_use]
-    pub fn new(catalog: CodecCatalog, config: MediaConfig, clock: WallClock) -> Self {
+    pub fn new(
+        catalog: CodecCatalog,
+        config: MediaConfig,
+        clock: WallClock,
+        media_seed: [u8; 32],
+    ) -> Self {
         Self {
             catalog,
             config,
@@ -213,6 +235,7 @@ impl MediaEngine {
             calls: BTreeMap::new(),
             events: VecDeque::new(),
             counters: Counters::default(),
+            keys: KeySource::new(media_seed),
         }
     }
 
@@ -308,7 +331,7 @@ impl MediaEngine {
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
-        let keys = catalog.srtp().offers().then(|| draw_key(agent));
+        let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let offer = write_offer(&catalog, local, session_id, 1, keys);
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
@@ -387,7 +410,7 @@ impl MediaEngine {
         if !keying_allows(&catalog, offered.as_ref()) {
             return Err(MediaError::SrtpRequired);
         }
-        let keys = will_key(&catalog, offered.as_ref()).then(|| draw_key(agent));
+        let keys = will_key(&catalog, offered.as_ref()).then(|| draw_key(&mut self.keys));
         let description = match offered {
             Some(offer) => {
                 write_answer(&catalog, &offer, local, session_id, version, keys.as_ref())?
@@ -616,7 +639,7 @@ impl MediaEngine {
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
-        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(agent));
+        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
         match write_answer(
             &catalog,
             &offer,
@@ -1005,34 +1028,31 @@ fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
     (identity, hex(&token, 0, 16))
 }
 
-/// The master key and salt for one description, out of the same seeded token
-/// stream the branches, tags and `Call-ID`s come from.
+/// The master key and salt for one description, out of the engine's own seed.
 ///
-/// A token is half a SHA-256 of the caller's seed and a counter that never
-/// repeats, so a token that goes out in a `Via` says nothing about the next
-/// one and nothing about the seed; two of them are 256 bits of material for
-/// the 240 an `inline:` parameter carries. **What a poor seed costs is the
-/// whole of the encryption**: an attacker who can guess the thirty-two bytes
-/// handed to [`UserAgent::new`] can derive every master key this stack will
-/// ever offer, and SDES then protects the media against nobody. The seed is
-/// the application's for the reason the clock and the socket are, and this is
-/// the one place where getting it wrong is silent.
-fn draw_key(agent: &mut UserAgent) -> KeySalt {
-    let wanted = (MASTER_KEY + MASTER_SALT) * 2;
-    let mut digits = Vec::with_capacity(wanted);
-    while digits.len() < wanted {
-        digits.extend_from_slice(&agent.endpoint().token());
-    }
-    let octets = digits
-        .iter()
-        .step_by(2)
-        .zip(digits.iter().skip(1).step_by(2))
-        .map(|(high, low)| (nibble(*high) << 4) | nibble(*low));
+/// Its own and not the endpoint's, which is the whole point: the endpoint's
+/// seed is written in clear into every replay recording, so a recording made
+/// from a stack that shared one generator would carry the means to derive
+/// every key that stack had ever offered and every key it ever would.
+///
+/// One block of `SHA-256(media seed || counter)` covers both halves — thirty
+/// of its thirty-two bytes — and the counter never repeats, which is what
+/// RFC 4568 §7.1.2 needs when it says "the master key(s) in the answer MUST
+/// be different from those in the offer". **What a poor media seed costs is
+/// the whole of the encryption**, and it costs it silently: SDES then
+/// protects the media against nobody while every message still looks right.
+///
+/// The block is wiped before it goes out of scope. Thirty of its bytes are
+/// now key material, and a buffer that is merely dropped is a buffer that
+/// stays on the stack for whatever runs next.
+fn draw_key(keys: &mut KeySource) -> KeySalt {
+    let mut block = keys.block();
     let mut key = [0_u8; MASTER_KEY];
     let mut salt = [0_u8; MASTER_SALT];
-    for (slot, octet) in key.iter_mut().chain(salt.iter_mut()).zip(octets) {
-        *slot = octet;
-    }
+    key.copy_from_slice(&block[..MASTER_KEY]);
+    salt.copy_from_slice(&block[MASTER_KEY..MASTER_KEY + MASTER_SALT]);
+    block.fill(0);
+    compiler_fence(Ordering::SeqCst);
     KeySalt::new(key, salt)
 }
 
@@ -1296,6 +1316,7 @@ mod counter_wiring {
             CodecCatalog::new(),
             MediaConfig::default(),
             WallClock::from_unix(now, 1_700_000_000, 0),
+            [23; 32],
         );
         let (mut agent, _call) = call_with_a_stalling_session(&mut engine, now);
         assert_eq!(
@@ -1327,5 +1348,47 @@ mod counter_wiring {
             "session_event's branch of poll_event has to feed the counters too, not only \
              the branch that drains self.events"
         );
+    }
+}
+
+#[cfg(test)]
+mod key_source_tests {
+    use super::{KeySource, draw_key};
+
+    #[test]
+    fn the_media_key_follows_the_media_seed_and_nothing_else() {
+        // The whole of the fix, in three lines: two stacks given the same
+        // signalling entropy — which a replay recording carries in clear —
+        // must not be derivable from it to the same media keys.
+        let mut one = KeySource::new([1; 32]);
+        let mut other = KeySource::new([2; 32]);
+        let mut same_again = KeySource::new([1; 32]);
+
+        let first = draw_key(&mut one);
+        assert_ne!(
+            first.key(),
+            draw_key(&mut other).key(),
+            "two media seeds, two keys"
+        );
+        assert_eq!(
+            first.key(),
+            draw_key(&mut same_again).key(),
+            "and a seed is a stream, so the same one still reproduces"
+        );
+    }
+
+    #[test]
+    fn no_two_keys_from_one_seed_are_the_same() {
+        // RFC 4568 section 7.1.2: "the master key(s) in the answer MUST be
+        // different from those in the offer". The counter is what provides
+        // that, and it provides it for the salt too.
+        let mut keys = KeySource::new([0; 32]);
+        let mut seen = Vec::new();
+        for _ in 0..64 {
+            let drawn = draw_key(&mut keys);
+            let pair = (drawn.key(), drawn.salt());
+            assert!(!seen.contains(&pair), "a key repeated");
+            seen.push(pair);
+        }
     }
 }

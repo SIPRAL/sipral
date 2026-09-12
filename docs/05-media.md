@@ -244,16 +244,25 @@ code; and a plain re-offer inside a live call is rejected with 488 rather than
 accepted, which is the case that matters, because the alternative is a call
 that started encrypted, stopped being encrypted, and told nobody.
 
-**Where the key comes from.** The same seeded token stream as the branches,
-the tags and the `Call-ID`s: a token is half a SHA-256 of the thirty-two bytes
-the application handed `UserAgent::new` and a counter that never repeats, so a
-token that goes out in a `Via` says nothing about the next one, and two of them
-are 256 bits of material for the 240 an `inline:` parameter carries. **A poor
-seed costs the whole of the encryption** — an attacker who can guess those
-thirty-two bytes can derive every master key this stack will ever offer — and
-nothing about a call made with one looks wrong. That is the same bargain the
-rest of the tree makes about entropy, and this is the place where losing it is
-silent. The key itself lives in `KeySalt`, which has no `Debug` worth the name
+**Where the key comes from.** The engine's own seed, and not the endpoint's.
+`MediaEngine::new` takes thirty-two bytes of its own; each key is one block of
+`SHA-256(media seed || counter)`, with a counter that never repeats, which is
+also what RFC 4568 §7.1.2 needs when it requires the answer's key to differ
+from the offer's.
+
+They are a second draw rather than a slice of the first because the endpoint's
+seed is written in clear into every replay recording (`docs/18-replay.md`).
+One generator for both would have put every key the stack will ever offer into
+every recording it makes — including recordings taken to diagnose something
+else entirely, by somebody who was told the file holds only what a capture
+holds. The C ABI refuses the two seeds being equal, since `sipral_stack_create`
+is the one place that can see both.
+
+**A poor media seed costs the whole of the encryption** — an attacker who can
+guess those thirty-two bytes can derive every master key this stack will ever
+offer — and nothing about a call made with one looks wrong. That is the same
+bargain the rest of the tree makes about entropy, and this is the place where
+losing it is silent. The key itself lives in `KeySalt`, which has no `Debug` worth the name
 and zeroises on drop; the engine's own `Debug` prints every `a=crypto` line
 with its keying information replaced, since that is the last place the same
 material is still text.
