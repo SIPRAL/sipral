@@ -30,16 +30,17 @@ now could not be reproduced at all.
 It is the sans-I/O design collecting a dividend, and it is the reason to build
 this here rather than wish for it in the application.
 
-Everything that enters the stack enters through `Endpoint::receive` and
+Most of what enters the stack enters through `Endpoint::receive` and
 `Endpoint::handle_timeout`, and the time they work from is the caller's rather
 than the clock's — D9, which `scripts/check.sh` enforces as a build gate. So a
-session **is** the sequence of those two calls and the offsets they were made
-at. A recording is that sequence written down, and a replay is making the
-calls again. There is nothing to simulate, no network to fake and no clock to
-freeze, because none of the three was ever there.
+session **is** the sequence of those calls (and, where a resolver answered
+one, `Endpoint::resolved`) and the offsets they were made at. A recording is
+that sequence written down, and a replay is making the calls again. There is
+nothing to simulate, no network to fake and no clock to freeze, because none
+of the three was ever there.
 
 The same shape is why a recording is not tied to a layer.
-`sipral_core::replay::Driven` is those two calls as a trait, `Endpoint` and
+`sipral_core::replay::Driven` is those calls as a trait, `Endpoint` and
 `UserAgent` both implement it, and a session taken from a phone is therefore
 replayed into whichever layer the bug is thought to be in.
 
@@ -69,6 +70,9 @@ frame rather than from a wall clock:
 - **a wake** — a deadline the application came back at. Recorded because the
   deadlines are part of the session: whether a retransmission went before the
   answer arrived is a fact about the run, not a detail of the loop.
+- **a resolved answer** — `Endpoint::resolved`, the dialog it named and the
+  addresses it was given. Unlike a cue this is data rather than a name, so a
+  replay repeats it exactly instead of asking the caller to.
 - **a cue** — the application acting on its own, under a name the application
   chose. Placing a call, answering one, registering an account: none of those
   arrive from anywhere, so no recording can feed them back. What it does
@@ -113,7 +117,7 @@ It also holds no configuration. See the boundaries below.
 
 ## The version rule
 
-The first line is `sipral-recording 1`.
+The first line is `sipral-recording 2`.
 
 A reader that meets a higher number **refuses the file and says so** —
 `ReadError::Version { found, supported }` — rather than reading the lines it
@@ -121,11 +125,16 @@ recognises and ignoring the rest. A later version may have changed what one of
 those lines means, and a recording is fed into a state machine: a replay that
 quietly took a wrong turn would report a result that looks exactly like a
 real one. Every other line is read the same way. A line the reader does not
-understand stops the read; it is never skipped.
+understand stops the read; it is never skipped. A version 1 file is still read
+without complaint — this build's reader understands everything version 1
+wrote, and a `resolved` line is simply absent from one, not misread.
 
 The version rises when what an existing line means changes, or when a frame is
 added that a version 1 reader would have to understand to replay the session
-correctly.
+correctly. Version 2 is the second case: `resolved` lines
+(`Endpoint::resolved`, above) carry an address a version 1 replay would send
+nothing to, so a version 1 reader is made to refuse the file rather than
+replay the session at the wrong destination.
 
 ## The file
 
@@ -197,9 +206,13 @@ runs are compared byte for byte, event for event, and record for record:
   different run, and nothing here can tell. A recording made under the
   defaults needs nothing said about it; one made under anything else says so
   in its `note`.
-- **Anything outside the two entry points.** Nothing else exists in a sans-I/O
-  core, which is the reason this works at all — but a layer that grows a third
-  way in has to record it or the recordings of it are incomplete.
+- **Anything that changes the stack from outside `receive`, `handle_timeout`
+  and `resolved`.** Those three are the whole of what a sans-I/O core lets in,
+  which is the reason this works at all — but a layer that grows a fourth way
+  in has to record it too or the recordings of it are incomplete, the way
+  `resolved` itself once was: two runs that called it differently produced the
+  identical recording text right up until version 2 gave it a frame of its
+  own.
 - **The wall clock.** Offsets are from the first frame. A session that
   depended on the time of day would not be reproduced, and nothing in these
   crates depends on it, because nothing in them reads it.

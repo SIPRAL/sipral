@@ -4,23 +4,25 @@
 //! Feeding a recording back.
 //!
 //! The replay is the smaller half of this feature, and that is the point of
-//! having built the stack sans-I/O: there is nothing to simulate. The two
-//! calls that a session enters through are the two calls a replay makes, in
-//! the order and at the offsets the recording holds.
+//! having built the stack sans-I/O: there is nothing to simulate. The calls
+//! that a session enters through are the calls a replay makes, in the order
+//! and at the offsets the recording holds.
 
+use std::net::SocketAddr;
 use std::time::Instant;
 
 use super::frame::{Frame, Step};
 use super::recording::Recording;
 use crate::endpoint::{Endpoint, Input, ReceiveError};
+use crate::transaction::DialogId;
 
 /// Something a recording can be fed into.
 ///
-/// The two entry points every layer of this stack shares. A replay does not
-/// know or care whether it is driving the endpoint, the user agent above it
-/// or an application's own wrapper around either, which is what lets a
-/// recording taken from a phone in the field be replayed into whichever layer
-/// the bug is thought to be in.
+/// The entry points every layer of this stack shares. A replay does not know
+/// or care whether it is driving the endpoint, the user agent above it or an
+/// application's own wrapper around either, which is what lets a recording
+/// taken from a phone in the field be replayed into whichever layer the bug
+/// is thought to be in.
 pub trait Driven {
     /// Bytes, or news about a transport.
     ///
@@ -30,6 +32,10 @@ pub trait Driven {
 
     /// Time has passed.
     fn handle_timeout(&mut self, now: Instant);
+
+    /// A dialog's next hop was answered from outside
+    /// ([`Endpoint::resolved`](crate::endpoint::Endpoint::resolved)).
+    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]);
 }
 
 impl Driven for Endpoint {
@@ -39,6 +45,10 @@ impl Driven for Endpoint {
 
     fn handle_timeout(&mut self, now: Instant) {
         Self::handle_timeout(self, now);
+    }
+
+    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]) {
+        Self::resolved(self, dialog, addresses);
     }
 }
 
@@ -109,6 +119,10 @@ impl<'a> Replay<'a> {
         match frame.step {
             Step::Arrived(ref arrival) => target.receive(arrival.as_input(), now)?,
             Step::Woke => target.handle_timeout(now),
+            Step::Resolved {
+                dialog,
+                ref addresses,
+            } => target.resolved(dialog, addresses),
             Step::Cue(ref label) => return Ok(Some(Played::Cue(label))),
         }
         Ok(Some(Played::Fed))

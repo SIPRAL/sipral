@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use super::{Arrival, Payload, Played, ReadError, RecordError, Recorder, Recording, Replay, Step};
 use crate::endpoint::{
-    Endpoint, EndpointConfig, Input, OutgoingRequest, TransportId, TransportProtocol,
+    Endpoint, EndpointConfig, Event, Input, OutgoingRequest, TransportId, TransportProtocol,
 };
 use crate::msg::{HeaderName, Method, ParseMode, ParseScratch, Uri, parse};
+use crate::transaction::DialogId;
 
 const UDP: TransportId = TransportId(1);
 const SEED: [u8; 32] = [23; 32];
@@ -72,6 +73,42 @@ fn answer(request: &[u8]) -> Vec<u8> {
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+    out
+}
+
+/// A call, for the test that resolves a dialog after it connects.
+fn invite_request() -> OutgoingRequest {
+    OutgoingRequest::new(
+        Method::Invite,
+        Uri::parse_str("sip:bob@example.com").expect("a URI"),
+        UDP,
+        peer(),
+    )
+    .to(b"<sip:bob@example.com>")
+    .from(b"<sip:alice@example.com>")
+}
+
+/// The 200 that confirms the dialog `invite_request` opens.
+fn invite_ok(request: &[u8]) -> Vec<u8> {
+    let mut scratch = ParseScratch::new();
+    let message = parse(request, &mut scratch, ParseMode::Lenient).expect("a request");
+    let mut out = b"SIP/2.0 200 OK\r\n".to_vec();
+    for name in [HeaderName::Via, HeaderName::From] {
+        out.extend_from_slice(name.canonical().as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(message.header(name).unwrap_or_default());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"To: ");
+    out.extend_from_slice(message.header(HeaderName::To).unwrap_or_default());
+    out.extend_from_slice(b";tag=desk\r\n");
+    for name in [HeaderName::CallId, HeaderName::CSeq] {
+        out.extend_from_slice(name.canonical().as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(message.header(name).unwrap_or_default());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"Contact: <sip:bob@192.0.2.9>\r\nContent-Length: 0\r\n\r\n");
     out
 }
 
@@ -223,6 +260,135 @@ fn a_replay_that_ignores_its_cues_is_a_replay_of_a_different_session() {
     assert_eq!(endpoint.in_flight(), (0, 0));
 }
 
+// -- a third way in -----------------------------------------------------
+
+/// `Endpoint::resolved` is a third way into a sans-I/O core, beside `receive`
+/// and `handle_timeout`. Unlike a cue it carries data — the addresses a
+/// resolver found — so a replay does not have to be told to redo it: it
+/// reads the frame and calls `resolved` itself.
+#[test]
+fn a_resolved_answer_is_captured_and_a_replay_repeats_it_unasked() {
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().expect("another address");
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), SEED);
+    let mut recorder =
+        Recorder::new(SEED).about("a call whose dialog is re-resolved after it connects");
+
+    recorder.arrived(&bound(), t0);
+    endpoint.receive(bound(), t0).expect("binding a transport");
+
+    recorder.cue("invite", t0);
+    endpoint
+        .invite(&invite_request(), t0)
+        .expect("the INVITE goes");
+    let invite_bytes = endpoint
+        .poll_transmit()
+        .expect("the INVITE")
+        .payload
+        .to_vec();
+
+    let ok = invite_ok(&invite_bytes);
+    let arrived = Input::Datagram {
+        transport: UDP,
+        remote: peer(),
+        local: local(),
+        data: &ok,
+    };
+    recorder.arrived(&arrived, t0);
+    endpoint.receive(arrived, t0).expect("the 200");
+    let dialog = established(&mut endpoint).expect("the call connected");
+
+    recorder.cue("ack", t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK");
+    while endpoint.poll_transmit().is_some() {}
+
+    // the answer to an `Event::ResolveNeeded` this test never reads, which is
+    // the point: nothing about this call goes through `receive` or
+    // `handle_timeout`
+    endpoint.resolved(dialog, &[elsewhere]);
+    recorder.resolved(dialog, &[elsewhere], t0);
+
+    recorder.cue("bye", t0);
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    assert_eq!(
+        endpoint.poll_transmit().expect("the BYE").destination,
+        elsewhere,
+        "resolved moved the dialog's flow before the BYE was built"
+    );
+
+    let text = recorder.finish().expect("a recording").to_text();
+    assert!(
+        text.contains("resolved "),
+        "the answer is a frame of its own, not folded into an arrival: {text}"
+    );
+    let recording = Recording::parse(&text).expect("this build's own text");
+    assert_eq!(recording.to_text(), text, "round trips");
+
+    // fed back into an endpoint that never saw the call, and nobody here
+    // calls `resolved` a second time
+    let origin = Instant::now();
+    let mut replayed = Endpoint::new(EndpointConfig::default(), recording.seed());
+    let mut dialog_replayed = None;
+    let mut replay = Replay::new(&recording, origin);
+    while let Some(now) = replay.next_at() {
+        match replay
+            .step(&mut replayed)
+            .expect("the recorded bytes read as they did the first time")
+        {
+            Some(Played::Cue("invite")) => {
+                replayed
+                    .invite(&invite_request(), now)
+                    .expect("the INVITE goes");
+                while replayed.poll_transmit().is_some() {}
+            }
+            Some(Played::Cue("ack")) => {
+                replayed
+                    .ack_2xx(
+                        dialog_replayed.expect("established before it is acknowledged"),
+                        None,
+                        now,
+                    )
+                    .expect("the ACK");
+                while replayed.poll_transmit().is_some() {}
+            }
+            Some(Played::Cue("bye")) => {
+                replayed
+                    .bye(
+                        dialog_replayed.expect("established before the cue that ends it"),
+                        now,
+                    )
+                    .expect("the BYE goes");
+            }
+            Some(Played::Cue(other)) => panic!("an unnamed cue: {other}"),
+            Some(Played::Fed) | None => {}
+        }
+        if dialog_replayed.is_none() {
+            dialog_replayed = established(&mut replayed);
+        }
+    }
+
+    assert_eq!(
+        replayed
+            .poll_transmit()
+            .expect("the replayed BYE")
+            .destination,
+        elsewhere,
+        "the replay answered `Driven::resolved` from the frame and reached the same address"
+    );
+}
+
+/// The dialog an `Event::Established` names, draining every event so none of
+/// it is left for the next call to see.
+fn established(endpoint: &mut Endpoint) -> Option<DialogId> {
+    let mut dialog = None;
+    while let Some(event) = endpoint.poll_event() {
+        if let Event::Established { dialog: id, .. } = event {
+            dialog = Some(id);
+        }
+    }
+    dialog
+}
+
 // -- the format --------------------------------------------------------------
 
 #[test]
@@ -238,7 +404,7 @@ fn a_recording_round_trips_through_its_own_text() {
 fn the_text_holds_the_seed_the_session_was_drawn_from() {
     let (recording, _) = record();
     let text = recording.to_text();
-    assert!(text.starts_with("sipral-recording 1\nseed "), "{text}");
+    assert!(text.starts_with("sipral-recording 2\nseed "), "{text}");
     assert!(
         text.contains(&"17".repeat(32)),
         "the seed is the twenty-third byte, sixty-four times over: {text}"
@@ -251,18 +417,18 @@ fn a_reader_refuses_a_recording_from_a_later_version_and_says_so() {
     let (recording, _) = record();
     let text = recording
         .to_text()
-        .replacen("sipral-recording 1", "sipral-recording 2", 1);
+        .replacen("sipral-recording 2", "sipral-recording 3", 1);
     let error = Recording::parse(&text).expect_err("a version this build cannot know");
     assert_eq!(
         error,
         ReadError::Version {
-            found: 2,
-            supported: 1
+            found: 3,
+            supported: 2
         }
     );
     assert_eq!(
         error.to_string(),
-        "recording is version 2 and this reader knows 1"
+        "recording is version 3 and this reader knows 2"
     );
 }
 

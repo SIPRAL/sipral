@@ -22,6 +22,7 @@ use super::frame::{Arrival, Frame, Payload, Step, failure_kind};
 use super::recording::Recording;
 use super::text::{one_line, read_payload};
 use crate::endpoint::{TransportId, TransportProtocol};
+use crate::transaction::{DialogId, Raw};
 
 /// A frame whose payload lines have not all arrived yet.
 struct Pending {
@@ -188,6 +189,20 @@ fn frame(line: &str, at: usize, last: Duration) -> Result<Taken, ReadError> {
                 data: Vec::new(),
             }));
         }
+        "resolved" => {
+            let dialog = word.next().and_then(dialog_id).ok_or(bad)?;
+            let mut addresses = Vec::new();
+            for token in word {
+                addresses.push(address(token).ok_or(bad)?);
+            }
+            return Ok(Taken::Done(Frame {
+                at: when,
+                step: Step::Resolved {
+                    dialog,
+                    addresses: addresses.into(),
+                },
+            }));
+        }
         "closed" => Step::Arrived(Arrival::StreamClosed {
             transport: word.next().and_then(transport).ok_or(bad)?,
         }),
@@ -255,6 +270,16 @@ fn offset(stamp: &str) -> Option<Duration> {
 
 fn transport(text: &str) -> Option<TransportId> {
     text.parse().ok().map(TransportId)
+}
+
+/// `3.0`, slot and generation, as [`Recorder::resolved`](super::Recorder::resolved)
+/// wrote it.
+fn dialog_id(text: &str) -> Option<DialogId> {
+    let (slot, generation) = text.split_once('.')?;
+    Some(DialogId::new(Raw {
+        slot: slot.parse().ok()?,
+        generation: generation.parse().ok()?,
+    }))
 }
 
 fn address(text: &str) -> Option<SocketAddr> {

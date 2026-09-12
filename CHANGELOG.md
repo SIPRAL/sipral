@@ -30,6 +30,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A recording could not tell two sessions apart that sent their requests to
+  different addresses.** `Endpoint::resolved` is a third way into a sans-I/O
+  core, beside `receive` and `handle_timeout`, and the replay format had no
+  frame for it — a call whose dialog was re-resolved and one that never was
+  wrote byte-identical text, so replaying either sent every later request to
+  the address the dialog opened with rather than the one it was told to use.
+  `Step::Resolved` gives the answer a frame of its own, `Recorder::resolved`
+  records it beside the call, and a replay applies it itself rather than
+  asking the caller to redo it, the way a cue would. The recording format
+  moves to version 2 for it; a version 1 file still reads.
+
+- **An `a=crypto` tag with a leading zero was accepted and silently
+  renumbered.** RFC 4568 §4's "leading zeroes MUST NOT be used" already
+  covered the MKI, the lifetime and the key identifier in this parser;
+  `Crypto::parse` checked only that the tag was all digits, so `"01 ..."`
+  parsed to tag `1` instead of being refused. `Crypto::parse` now shares the
+  same check the other three fields use.
+
 - **A codec change no longer restarts the stream, or the SRTP keystream under
   it.** A re-INVITE onto another codec opened a new media session and dropped
   the running one, and the new one was built from the identity the *call*

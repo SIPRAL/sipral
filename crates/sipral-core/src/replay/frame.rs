@@ -3,19 +3,24 @@
 
 //! One thing that happened to the stack, and when.
 //!
-//! Everything that enters a sans-I/O stack enters through two calls —
+//! Most of what drives a sans-I/O stack enters through two calls —
 //! [`Endpoint::receive`](crate::endpoint::Endpoint::receive) and
 //! [`Endpoint::handle_timeout`](crate::endpoint::Endpoint::handle_timeout) —
-//! so a session is the sequence of those calls and the instants they were
-//! made at. The third kind of frame is the one thing neither of them covers:
-//! the application acting on its own, which a recording cannot repeat for it
-//! and therefore names instead.
+//! so most of a session is the sequence of those calls and the instants they
+//! were made at. [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved) is
+//! a third way in: an answer from outside — a resolver, today — to a question
+//! the stack asked. It carries data rather than a decision, so unlike the
+//! fourth kind below it can be written down and fed back exactly, and
+//! [`Step::Resolved`] is where it goes. What is left over, and cannot be any
+//! of the three, is the application acting on its own, which a recording
+//! cannot repeat for it and therefore names instead.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use super::text::writable;
 use crate::endpoint::{Input, TransportErrorKind, TransportId, TransportProtocol};
+use crate::transaction::DialogId;
 
 /// Bytes a recording can hold: text, or nothing.
 ///
@@ -198,6 +203,21 @@ pub enum Step {
     Arrived(Arrival),
     /// A deadline passed and `handle_timeout` was called.
     Woke,
+    /// A dialog's next hop was answered from outside
+    /// ([`Endpoint::resolved`](crate::endpoint::Endpoint::resolved)).
+    ///
+    /// Unlike [`Step::Cue`] this is data, not a name: the addresses a
+    /// resolver returned are everything `resolved` needs, so a replay can
+    /// make the same call again itself rather than asking the caller to.
+    Resolved {
+        /// Which dialog the answer was for.
+        dialog: DialogId,
+        /// The addresses that were resolved, in the order they were handed
+        /// to `resolved`. Only the first is ever used, but the rest are part
+        /// of what happened and are kept for the same reason a retransmitted
+        /// datagram is kept rather than folded into the one before it.
+        addresses: Box<[SocketAddr]>,
+    },
     /// The application did something of its own here, under a name it chose.
     ///
     /// Placing a call, answering one, registering an account: none of those

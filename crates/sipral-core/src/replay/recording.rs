@@ -4,12 +4,14 @@
 //! The artefact, and the thing that makes one.
 
 use core::fmt::Write as _;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::error::RecordError;
 use super::frame::{Arrival, Frame, Step, failure_token};
 use super::text::{one_line, write_payload};
 use crate::endpoint::Input;
+use crate::transaction::DialogId;
 
 /// A session, written down.
 ///
@@ -34,7 +36,12 @@ impl Recording {
     /// reading the lines it recognises: a later version may have changed what
     /// one of those lines means, and a replay that quietly took a wrong turn
     /// is worse than one that would not start.
-    pub const VERSION: u32 = 1;
+    ///
+    /// Raised from `1` to `2` for [`Step::Resolved`]: a version 1 reader has
+    /// no way to know what a `resolved` line means, and reading past it as if
+    /// it were one of the frames it does understand would replay a dialog to
+    /// an address nobody recorded.
+    pub const VERSION: u32 = 2;
 
     /// The signalling seed the recorded stack was built with.
     ///
@@ -100,6 +107,10 @@ impl Recording {
             );
             match frame.step {
                 Step::Woke => out.push_str("wake\n"),
+                Step::Resolved {
+                    dialog,
+                    ref addresses,
+                } => write_resolved(&mut out, dialog, addresses),
                 Step::Cue(ref label) => {
                     let _ = writeln!(out, "cue {label}");
                 }
@@ -108,6 +119,20 @@ impl Recording {
         }
         out
     }
+}
+
+/// One `resolved` line: the dialog it answers for, then the addresses, in the
+/// order they were handed to [`Recorder::resolved`].
+fn write_resolved(out: &mut String, dialog: DialogId, addresses: &[SocketAddr]) {
+    let _ = write!(
+        out,
+        "resolved {}.{}",
+        dialog.raw.slot, dialog.raw.generation
+    );
+    for address in addresses {
+        let _ = write!(out, " {address}");
+    }
+    out.push('\n');
 }
 
 /// One arrival: its line, and the payload lines under it.
@@ -218,6 +243,21 @@ impl Recorder {
     /// A deadline passed. Called beside `handle_timeout`, with the same `now`.
     pub fn woke(&mut self, now: Instant) {
         self.push(Step::Woke, now);
+    }
+
+    /// A dialog's next hop was answered from outside. Called beside
+    /// [`Endpoint::resolved`](crate::endpoint::Endpoint::resolved), which
+    /// takes no `now` of its own — there is nothing in it that is timed — so
+    /// `now` here only places the frame in the recording's own timeline,
+    /// the same as it does for [`Recorder::cue`].
+    pub fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr], now: Instant) {
+        self.push(
+            Step::Resolved {
+                dialog,
+                addresses: Box::from(addresses),
+            },
+            now,
+        );
     }
 
     /// The application did something of its own, under a name it chose.

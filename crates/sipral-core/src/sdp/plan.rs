@@ -195,7 +195,7 @@ impl Crypto {
     pub fn parse(value: &str) -> Option<Self> {
         let mut parts = value.split_ascii_whitespace();
         let tag = parts.next()?;
-        if !tag.bytes().all(|b| b.is_ascii_digit()) {
+        if !tag.bytes().all(|b| b.is_ascii_digit()) || super::crypto::leading_zero(tag) {
             return None;
         }
         Some(Self {
@@ -1425,6 +1425,7 @@ KDR=1 UNENCRYPTED_SRTCP",
             "1 SUITE",
             "x SUITE inline:abcd",
             "-1 SUITE inline:a",
+            "01 AES_CM_128_HMAC_SHA1_80 inline:abcd",
         ] {
             assert!(Crypto::parse(bad).is_none(), "{bad}");
         }

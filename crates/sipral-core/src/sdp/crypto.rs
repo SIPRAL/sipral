@@ -472,7 +472,11 @@ fn parse_lifetime(field: &str) -> Option<u64> {
 
 /// "leading zeroes MUST NOT be used", which the RFC says of the tag, the
 /// lifetime, the identifier and its length alike.
-fn leading_zero(text: &str) -> bool {
+///
+/// `pub(super)` because [`Crypto`](super::plan::Crypto) owns the one of those
+/// four fields that lives outside this module and has to check it the same
+/// way.
+pub(super) fn leading_zero(text: &str) -> bool {
     text.len() > 1 && text.starts_with('0')
 }
 

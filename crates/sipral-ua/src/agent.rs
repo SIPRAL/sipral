@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sipral_core::dialog::CallId;
@@ -251,8 +252,8 @@ impl UserAgent {
 
 /// A recorded session is fed back into whichever layer the bug is thought to
 /// be in (`docs/18-replay.md`), and registration, back-off and call policy are
-/// decided here rather than below. So the same two calls again, under the
-/// trait a replay drives.
+/// decided here rather than below. So the same calls again, under the trait a
+/// replay drives.
 impl Driven for UserAgent {
     fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
         Self::receive(self, input, now)
@@ -260,6 +261,10 @@ impl Driven for UserAgent {
 
     fn handle_timeout(&mut self, now: Instant) {
         Self::handle_timeout(self, now);
+    }
+
+    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]) {
+        self.endpoint.resolved(dialog, addresses);
     }
 }
 
