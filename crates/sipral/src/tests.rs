@@ -2117,6 +2117,39 @@ fn a_re_offer_that_moves_only_our_own_key_leaves_the_peers_context_alone() {
     );
 }
 
+/// Only the key and salt decide whether a direction was re-keyed. RFC 4568
+/// §6.1 lets an `inline:` carry a lifetime and a master key identifier beside
+/// them, and a re-offer that adds a lifetime has not changed the key the far
+/// end is counting under. Read as a new key, it opened a fresh receive
+/// context, and a fresh replay window accepts what the stream already took.
+#[test]
+fn a_re_offer_that_only_adds_a_key_lifetime_does_not_re_open_the_replay_window() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut receiver = session(&ours, &theirs, now);
+    let mut peer = session(&theirs, &ours, now);
+
+    let datagram = one_packet(&mut peer);
+    receiver.receive(&mut datagram.clone(), theirs_address(), now);
+
+    // the same thirty octets, with a lifetime written beside them
+    let with_lifetime = format!("{THEIRS}|2^31");
+    let (_, theirs_2) = savp_pair(OURS, &with_lifetime);
+    receiver
+        .adopt(&plan_of(&ours, &theirs_2), Vec::new(), now)
+        .expect("the key it already holds opens");
+
+    let arrival = receiver.receive(&mut datagram.clone(), theirs_address(), now);
+    assert!(
+        matches!(
+            arrival,
+            Arrival::Dropped(crate::Discard::Insecure(SrtpError::Replayed))
+        ),
+        "a lifetime beside an unchanged key re-opened the far end's replay \
+         window: {arrival:?}"
+    );
+}
+
 /// §6.1 lets a re-offer keep the `inline:` and change the terms around it.
 /// `AES_CM_128_HMAC_SHA1_32` keeps all thirty octets of the key and salt and
 /// shortens only the tag, so the transform has to follow — while the packet

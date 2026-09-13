@@ -357,6 +357,13 @@ impl RtpSession {
     /// whether its sequence number belongs to the stream. A packet only
     /// reaches the buffer once all five agree.
     ///
+    /// One of them is taken early. Once the stream has latched, a datagram
+    /// from any other address is refused before anything else looks at it,
+    /// SRTP included. That check reads nothing out of the datagram, and SRTP
+    /// records an index the moment a tag verifies, so a copy refused only
+    /// afterwards would already have spent the index of the genuine packet and
+    /// turned the genuine one into the replay.
+    ///
     /// The third and fourth of those also *decide* the address and the source,
     /// on the first packet that gets that far — before probation, which is
     /// the fifth. That order is deliberate: closing the latch late would leave
@@ -368,6 +375,10 @@ impl RtpSession {
     /// here reads a clock of its own, so a caller that does not care about
     /// RTCP may pass anything monotonic.
     pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Duration) -> Received {
+        if self.inbound.latch.is_some_and(|latched| latched != from) {
+            return Received::Dropped(Discard::ForeignAddress);
+        }
+
         // §3.3: verify, then decrypt, then believe. Nothing below this line
         // sees a packet whose tag did not check out
         let plain = match &mut self.security {
@@ -397,14 +408,11 @@ impl RtpSession {
         // they are why most calls need no NAT traversal at all.
         //
         // The other half of the rule matters as much: after latching, a packet
-        // from any other address is dropped rather than merged. Merging is how
-        // someone who can guess a port gets their audio into the call.
-        match self.inbound.latch {
-            Some(latched) if latched != from => {
-                return Received::Dropped(Discard::ForeignAddress);
-            }
-            Some(_) => {}
-            None => self.inbound.latch = Some(from),
+        // from any other address is dropped rather than merged, which is the
+        // first thing this function does. Merging is how someone who can guess
+        // a port gets their audio into the call.
+        if self.inbound.latch.is_none() {
+            self.inbound.latch = Some(from);
         }
 
         // A second SSRC on a two-party stream is either the far end restarting
@@ -900,6 +908,13 @@ impl RtpSession {
     /// round-trip estimate and its report cadence from off to the side.
     /// Only the parse comes first, so that a datagram that is not RTCP at
     /// all never decides where RTCP is heard from.
+    ///
+    /// On a secured stream the refusal comes earlier still, ahead of SRTCP,
+    /// for the reason [`RtpSession::receive`] refuses a foreign address
+    /// before SRTP: SRTCP records a report's index the moment its tag
+    /// verifies, so a copy refused only afterwards would already have spent
+    /// the index of the genuine report. Only the refusal moves; the latch is
+    /// still taken after the parse.
     pub fn rtcp_receive<'a>(
         &mut self,
         datagram: &'a mut [u8],
@@ -907,6 +922,9 @@ impl RtpSession {
         now: Duration,
         ntp: u64,
     ) -> RtcpReceived<'a> {
+        if self.security.is_some() && !self.rtcp_origin_possible(from) {
+            return RtcpReceived::ForeignAddress;
+        }
         // what §6.3.3 folds into the report interval is the size on the wire,
         // which is the protected one
         let wire = datagram.len();
@@ -1001,18 +1019,31 @@ impl RtpSession {
     /// another host, that earlier latch is dropped instead of kept, or one
     /// early report would shut the real peer out of its own call.
     fn rtcp_origin_accepted(&mut self, from: SocketAddr) -> bool {
-        let expected = self.destination().ip();
-        if let Some(latched) = self.inbound.rtcp_latch {
-            if latched.ip() == expected {
-                return latched == from;
-            }
-            self.inbound.rtcp_latch = None;
-        }
-        if from.ip() != expected {
+        if !self.rtcp_origin_possible(from) {
             return false;
         }
-        self.inbound.rtcp_latch = Some(from);
+        // a latch on the expected host is `from` itself by now; one on any
+        // other host was taken before RTP settled elsewhere, and gives way
+        let expected = self.destination().ip();
+        if self
+            .inbound
+            .rtcp_latch
+            .is_none_or(|latched| latched.ip() != expected)
+        {
+            self.inbound.rtcp_latch = Some(from);
+        }
         true
+    }
+
+    /// Whether [`RtpSession::rtcp_origin_accepted`] would take RTCP from
+    /// `from`, without latching onto it: the latched address when the latch
+    /// is on the host expected, and otherwise any port on that host.
+    fn rtcp_origin_possible(&self, from: SocketAddr) -> bool {
+        let expected = self.destination().ip();
+        match self.inbound.rtcp_latch {
+            Some(latched) if latched.ip() == expected => latched == from,
+            _ => from.ip() == expected,
+        }
     }
 
     /// Whichever of a report's blocks describes this session's own SSRC
@@ -2294,6 +2325,52 @@ mod tests {
         );
     }
 
+    // The address a latch gives way to is pinned exactly, port included, the
+    // same as one taken from nothing: a second port on the very host RTP
+    // just settled on does not inherit the trust the first one earned.
+    #[test]
+    fn a_latch_that_gave_way_to_rtp_still_pins_the_exact_port_it_moved_to() {
+        const PEER_OTHER_PORT: &str = "198.51.100.7:16386";
+
+        let mut session = session();
+        let mut incoming = [0_u8; 256];
+        let n = round_trip_report(&mut incoming, 99);
+        let arrival_ntp = 0xb710_8000_u64 << 16;
+
+        // a report arrives from the answer's address before any audio does
+        assert_eq!(
+            session.rtcp_receive(&mut incoming[..n], addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report
+        );
+
+        // RTP settles the call on the peer's real address, which moves the
+        // latch there too
+        establish(&mut session, 7, addr(PEER));
+        assert_eq!(
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                arrival_ntp
+            ),
+            RtcpReceived::Report
+        );
+
+        // a report from another port on that same host is not the address
+        // that just earned the latch
+        assert_eq!(
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_OTHER_PORT),
+                Duration::ZERO,
+                arrival_ntp
+            ),
+            RtcpReceived::ForeignAddress,
+            "a second port on the host RTP settled on was let through \
+             without ever having reported"
+        );
+    }
+
     #[test]
     fn rtcp_multiplexed_onto_the_rtp_port_arrives_from_the_address_the_audio_uses() {
         // RFC 5761 §4: one socket for both, so the reports come from the
@@ -2522,6 +2599,31 @@ mod tests {
         assert!(matches!(stranger.pull(Activity::Speech), Pull::Empty));
     }
 
+    // A datagram from an address this stream has not latched onto is refused
+    // either way. Refused only after SRTP has taken it, it has already spent
+    // its index in the replay list, so a copy sent from anywhere ahead of the
+    // genuine packet turns the genuine one into a replay
+    #[test]
+    fn a_copy_from_another_address_does_not_spend_the_genuine_packets_index() {
+        let (mut caller, mut peer) = secured_pair();
+        flow(&mut caller, &mut peer, 2);
+
+        let mut wire = vec![0_u8; 64];
+        let len = caller.send(b"eight ok", 160, &mut wire).expect("room");
+        let mut copy = wire[..len].to_vec();
+        assert_eq!(
+            peer.receive(&mut copy, addr(IMPOSTOR), Duration::ZERO),
+            Received::Dropped(Discard::ForeignAddress)
+        );
+        let mut genuine = wire[..len].to_vec();
+        assert_eq!(
+            peer.receive(&mut genuine, addr(SIGNALLED), Duration::ZERO),
+            Received::Queued,
+            "the packet from the peer was refused because a copy of it had \
+             arrived from somewhere else first"
+        );
+    }
+
     #[test]
     fn a_buffer_with_no_room_for_the_tag_is_refused_before_anything_is_spent() {
         let (mut caller, _) = secured_pair();
@@ -2561,6 +2663,32 @@ mod tests {
         assert_eq!(
             peer.rtcp_receive(&mut received, addr(SIGNALLED_RTCP), Duration::ZERO, 0),
             RtcpReceived::Report
+        );
+    }
+
+    // The RTCP half of the copy above. SRTCP records a report's index the
+    // moment its tag verifies, so a copy from a host the origin check refuses
+    // anyway, let through SRTCP first, turns the genuine report into a replay
+    #[test]
+    fn a_report_copied_from_another_address_does_not_spend_the_genuine_reports_index() {
+        let (mut caller, mut peer) = secured_pair();
+        flow(&mut caller, &mut peer, 2);
+
+        let mut wire = vec![0_u8; 256];
+        let (len, _) = caller
+            .build_report(&mut wire, Duration::ZERO, 0, 0.5)
+            .expect("room");
+        let mut copy = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            peer.rtcp_receive(&mut copy, addr(IMPOSTOR), Duration::ZERO, 0),
+            RtcpReceived::ForeignAddress
+        );
+        let mut genuine = wire.get(..len).unwrap_or_default().to_vec();
+        assert_eq!(
+            peer.rtcp_receive(&mut genuine, addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report,
+            "the report from the peer was refused because a copy of it had \
+             arrived from another host first"
         );
     }
 

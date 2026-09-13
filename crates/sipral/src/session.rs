@@ -894,7 +894,15 @@ impl Rekey {
     /// As [`keying::context`], for a fresh line this build cannot open a
     /// stream with.
     fn between(was: &CryptoPolicy, now: &CryptoPolicy) -> Result<Option<Self>, MediaError> {
-        let what = if was.keys == now.keys {
+        // the key and salt alone, because RFC 3711 §4.3.1 derives the session
+        // keys from them and the index and from nothing else: a lifetime or an
+        // identifier written beside an unchanged key has re-keyed nothing
+        let same_key = was
+            .keys
+            .iter()
+            .map(|inline| &inline.keys)
+            .eq(now.keys.iter().map(|inline| &inline.keys));
+        let what = if same_key {
             if was == now {
                 return Ok(None);
             }

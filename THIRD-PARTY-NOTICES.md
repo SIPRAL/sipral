@@ -155,6 +155,77 @@ optimiser needs `unsafe`, which `sipral-rtp` denies.
 through `opusic-sys`. All four are MIT OR Apache-2.0, all four run during the
 build, and none of them is linked into anything that ships.
 
+### The primitives under DTLS
+
+`sipral-dtls` is DTLS 1.2 for DTLS-SRTP, and everything in it that is protocol
+— the record layer, the handshake framing and messages, the PRF and the
+exporter, the certificate writer and reader — is written in-tree from the
+RFCs. The primitives are not: P-256 for ECDHE and ECDSA, AES-GCM, SHA-256 and
+HMAC come from the same RustCrypto family that supplies `aes`, because a
+constant-time elliptic curve is the one place an implementation of our own
+would be a risk rather than a virtue. SHA-1, used only to read an old
+certificate fingerprint, is written in-tree like the other two copies.
+
+Nothing in the tree depends on `sipral-dtls` yet, so none of this is in a
+binary built from the facade today. It is listed now because it is in the
+lockfile now, and the rule is the same commit.
+
+The crate names four of them — `p256`, `aes-gcm`, `sha2`, `hmac` — and
+`zeroize`; the rest arrive through those. Every licence below was read from
+the component's own manifest, and every component ships its licence files
+beside it.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `p256` 0.14.0 | the NIST P-256 curve: ECDH and ECDSA | Apache-2.0 OR MIT |
+| `ecdsa` 0.17.0 | ECDSA, with the deterministic nonces of RFC 6979 | Apache-2.0 OR MIT |
+| `rfc6979` 0.6.0 | those nonces | Apache-2.0 OR MIT |
+| `elliptic-curve` 0.14.1 | keys, points and ECDH over any curve | Apache-2.0 OR MIT |
+| `primeorder` 0.14.0 | complete point formulas for prime-order curves | Apache-2.0 OR MIT |
+| `primefield` 0.14.0 | arithmetic in the curve's prime fields | Apache-2.0 OR MIT |
+| `wnaf` 0.14.1 | windowed scalar multiplication | Apache-2.0 OR MIT |
+| `ff` 0.14.0 | finite field traits | MIT OR Apache-2.0 |
+| `group` 0.14.0 | elliptic curve group traits | MIT OR Apache-2.0 |
+| `crypto-bigint` 0.7.5 | constant-time big integers | Apache-2.0 OR MIT |
+| `num-traits` 0.2.19 | numeric traits `crypto-bigint` uses | MIT OR Apache-2.0 |
+| `sec1` 0.8.1 | SEC1 point encoding | Apache-2.0 OR MIT |
+| `der` 0.8.2 | the DER types `sec1` and `ecdsa` use | Apache-2.0 OR MIT |
+| `base16ct` 1.0.0 | constant-time hexadecimal `sec1` uses | Apache-2.0 OR MIT |
+| `hkdf` 0.13.0 | HKDF, arriving with the curve crates' ECDH; unused here | MIT OR Apache-2.0 |
+| `signature` 3.0.0 | the signing and verifying traits | Apache-2.0 OR MIT |
+| `aes-gcm` 0.11.1 | AES-GCM record protection | Apache-2.0 OR MIT |
+| `aead` 0.6.1 | AEAD traits | MIT OR Apache-2.0 |
+| `ctr` 0.10.1 | counter mode | MIT OR Apache-2.0 |
+| `ghash` 0.6.0 | GHASH, GCM's authenticator | Apache-2.0 OR MIT |
+| `polyval` 0.7.3 | POLYVAL, which `ghash` is built on | Apache-2.0 OR MIT |
+| `universal-hash` 0.6.1 | universal hash traits | MIT OR Apache-2.0 |
+| `sha2` 0.11.0 | SHA-256 | MIT OR Apache-2.0 |
+| `hmac` 0.13.0 | HMAC | MIT OR Apache-2.0 |
+| `digest` 0.11.3 | hash function traits | MIT OR Apache-2.0 |
+| `block-buffer` 0.12.1 | the block buffering of the hashes | MIT OR Apache-2.0 |
+| `const-oid` 0.10.2 | object identifiers the hash traits carry | Apache-2.0 OR MIT |
+| `cfg-if` 1.0.4 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
+| `ctutils` 0.4.2 | constant-time comparison and selection | Apache-2.0 OR MIT |
+| `cmov` 0.5.4 | constant-time conditional moves `ctutils` uses | Apache-2.0 OR MIT |
+| `rand_core` 0.10.1 | randomness traits the curve crates name; no generator is linked | MIT OR Apache-2.0 |
+| `subtle` 2.6.1 | constant-time comparison and selection | BSD-3-Clause |
+
+`ff` and `group` write their licence in the deprecated `MIT/Apache-2.0` form,
+which is the dual licence and is read as such. `aes`, `cipher`,
+`crypto-common`, `hybrid-array`, `typenum`, `inout`, `cpufeatures`, `cpubits`
+and `zeroize` are shared with SRTP and listed above.
+
+All but one are dual-licensed like the rest, and one MIT notice covers them.
+`subtle` is the exception: BSD-3-Clause, whose second condition requires a
+binary to reproduce its notice. Its `LICENSE` reads:
+
+> Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights
+> reserved.
+> Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.
+
+followed by the three BSD conditions and the disclaimer, which a binary
+containing Sipral must carry once this crate is linked into it.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`
@@ -175,7 +246,6 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 | Component | Use | Licence |
 |---|---|---|
 | webrtc-audio-processing | AEC3, AGC, noise suppression, as an optional crate attached at the processor seam | BSD-3-Clause |
-| p256, aes-gcm, sha2, hmac (RustCrypto) | the primitives under the in-tree DTLS 1.2, for DTLS-SRTP | MIT OR Apache-2.0 |
 | libpipewire | Linux audio device I/O, through hand-written bindings; the ALSA and PulseAudio client libraries are LGPL and stay out | MIT |
 | libvpx, libaom | video codecs, phase 6, after 1.0 | BSD-3-Clause / BSD-2-Clause |
 | rustls | the TLS example only; the transport, and its TLS, belong to the application | Apache-2.0 OR ISC OR MIT |

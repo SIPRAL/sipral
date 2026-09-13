@@ -232,10 +232,10 @@ pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), Med
 fn usable(policy: &CryptoPolicy) -> bool {
     let params = policy.params;
     policy.keys.len() == 1
-        && policy
-            .keys
-            .iter()
-            .all(|key| key.mki.is_none_or(|mki| (1..=16).contains(&mki.length)))
+        && policy.keys.iter().all(|key| {
+            key.mki
+                .is_none_or(|mki| Mki::new(mki.value, usize::from(mki.length)).is_some())
+        })
         && !params.unencrypted_rtp
         && !params.unencrypted_rtcp
         && !params.unauthenticated_rtp
@@ -418,6 +418,24 @@ mod tests {
         assert!(
             !usable(&two_keys),
             "one context opens one key, so two is refused rather than half used"
+        );
+    }
+
+    /// An identifier travels in a field of the width its line names, so a
+    /// value that field cannot carry is a line no stream can be opened with.
+    /// It is refused where it is read, not answered and then failed.
+    #[test]
+    fn a_line_whose_identifier_does_not_fit_its_width_is_not_answered() {
+        let line = Crypto::parse(
+            "1 AES_CM_128_HMAC_SHA1_80 \
+             inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2^20|1066:1",
+        )
+        .expect("a line")
+        .policy()
+        .expect("the parser takes the identifier as written");
+        assert!(
+            !usable(&line),
+            "1066 does not fit in the one octet the line gives it"
         );
     }
 

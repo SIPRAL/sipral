@@ -97,10 +97,14 @@ pub struct Mki {
 impl Mki {
     /// An identifier of `length` octets. RFC 4568 allows one to 128; anything
     /// wider than the value it has to hold is refused here rather than
-    /// silently truncated.
+    /// silently truncated, and so is a value too wide for `length` octets to
+    /// carry, which would go out truncated and never match coming back.
     #[must_use]
     pub fn new(value: u128, length: usize) -> Option<Self> {
-        (1..=16).contains(&length).then_some(Self { value, length })
+        // the width is checked first, so the shift below is never by 128 bits
+        // or more
+        let fits = (1..=16).contains(&length) && (length == 16 || value >> (8 * length) == 0);
+        fits.then_some(Self { value, length })
     }
 
     const fn len(self) -> usize {
@@ -546,7 +550,9 @@ impl Protector {
         if self.rtcp_packets >= RTCP_LIMIT {
             return Err(SrtpError::KeyExhausted);
         }
-        if len < RTCP_HEADER {
+        // a length past the end of the buffer is refused before anything is
+        // added to it, as protect_rtp refuses it
+        if len < RTCP_HEADER || len > packet.len() {
             return Err(SrtpError::TooShort { got: len });
         }
         let need = len + self.policy.rtcp_overhead();
@@ -611,32 +617,125 @@ impl Protector {
     }
 }
 
-/// One remote stream's index and replay state, bound to an SSRC.
+/// One remote source's index and replay state.
 #[derive(Debug, Clone, Copy)]
 struct Stream {
-    ssrc: u32,
     index: Receiving,
     replay: Replay,
+}
+
+/// How many remote synchronization sources one receive context keeps a
+/// rollover counter and a replay list for.
+///
+/// RFC 3711 §3.2.3 identifies a cryptographic context by its SSRC, and RFC
+/// 4568 §6.4.2 has every source a peer sends share the one `a=crypto` line, so
+/// each source needs state of its own. A source that loses its replay list
+/// takes a recording of what it already delivered as new, and one that loses
+/// its rollover counter has everything it sends after its first wrap refused
+/// as forged.
+///
+/// Only a packet that authenticates takes a slot, so nothing a forger sends
+/// can fill the table. A peer that has sent from more sources than this under
+/// one master key has the one heard from least recently give way, which is
+/// never the one carrying the call, and what that costs is the replay list of
+/// the source that gave way. Every new master key starts a table of its own.
+const SOURCES: usize = 8;
+
+/// One source's state, and when it last authenticated a packet.
+#[derive(Debug, Clone, Copy)]
+struct Heard<T> {
+    ssrc: u32,
+    state: T,
+    last: u64,
+}
+
+/// Per-source receive state for at most [`SOURCES`] sources, held in place.
+#[derive(Debug, Clone, Copy)]
+struct Sources<T> {
+    slots: [Option<Heard<T>>; SOURCES],
+    /// Counts what has been stored, so the source heard from least recently
+    /// is the one with the smallest mark.
+    clock: u64,
+}
+
+impl<T: Copy> Sources<T> {
+    fn new() -> Self {
+        Self {
+            slots: [None; SOURCES],
+            clock: 0,
+        }
+    }
+
+    /// What the last authenticated packet from `ssrc` left its state as.
+    fn get(&self, ssrc: u32) -> Option<T> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|heard| heard.ssrc == ssrc)
+            .map(|heard| heard.state)
+    }
+
+    /// The state of the source heard from most recently.
+    fn latest(&self) -> Option<T> {
+        self.slots
+            .iter()
+            .flatten()
+            .max_by_key(|heard| heard.last)
+            .map(|heard| heard.state)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.slots.iter().all(Option::is_none)
+    }
+
+    /// Keep what an authenticated packet left `ssrc` as: in the slot it
+    /// already has, in an empty one, or in place of the source heard from
+    /// least recently.
+    fn put(&mut self, ssrc: u32, state: T) {
+        self.clock = self.clock.saturating_add(1);
+        let own = self
+            .slots
+            .iter()
+            .position(|slot| slot.is_some_and(|heard| heard.ssrc == ssrc));
+        let empty = self.slots.iter().position(Option::is_none);
+        let stalest = self
+            .slots
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, slot)| slot.map_or(0, |heard| heard.last))
+            .map(|(at, _)| at);
+        if let Some(slot) = own
+            .or(empty)
+            .or(stalest)
+            .and_then(|at| self.slots.get_mut(at))
+        {
+            *slot = Some(Heard {
+                ssrc,
+                state,
+                last: self.clock,
+            });
+        }
+    }
 }
 
 /// The receiving half of an SRTP session.
 pub struct Unprotector {
     policy: Policy,
     keys: Derived,
-    rtp: Option<Stream>,
-    rtcp: Option<(u32, Replay)>,
+    rtp: Sources<Stream>,
+    rtcp: Sources<Replay>,
     initial: u32,
 }
 
 impl Unprotector {
-    /// An unprotector for one incoming stream.
+    /// An unprotector for what one peer sends.
     #[must_use]
     pub fn new(policy: Policy, master: Master) -> Self {
         Self {
             keys: Derived::new(&policy, master),
             policy,
-            rtp: None,
-            rtcp: None,
+            rtp: Sources::new(),
+            rtcp: Sources::new(),
             initial: 0,
         }
     }
@@ -651,8 +750,8 @@ impl Unprotector {
         }
     }
 
-    /// Open under different terms from the same master key, keeping the
-    /// stream's index and replay window where they are. The mirror of
+    /// Open under different terms from the same master key, keeping every
+    /// source's index and replay window where they are. The mirror of
     /// [`Protector::retune`], and it keeps the window for a second reason
     /// besides the keystream: a fresh window accepts a packet this stream has
     /// already taken.
@@ -661,34 +760,35 @@ impl Unprotector {
         self.policy = policy;
     }
 
-    /// The rollover counter of the stream being received, which is what a
-    /// second receiver of the same stream would have to be given (§3.3.1).
+    /// The rollover counter of the source heard from most recently, which is
+    /// what a second receiver of that stream would have to be given (§3.3.1).
     #[must_use]
     pub fn rollover(&self) -> u32 {
         self.rtp
+            .latest()
             .map_or(self.initial, |stream| stream.index.rollover())
     }
 
-    /// The state a packet from `ssrc` is judged against.
+    /// The state a packet from `ssrc` is judged against: the source's own
+    /// when it has been heard from, a fresh one when it has not.
     ///
-    /// A packet whose SSRC is not the one we are latched to gets a fresh
-    /// stream — a copy, not the stored one. Nothing is written back until the
-    /// tag verifies, so a forged packet carrying an unused SSRC cannot clear
-    /// the replay window of the stream that is actually running.
+    /// A copy either way, and nothing is written back until the tag verifies,
+    /// so a forged packet naming an unused SSRC takes no slot and a forged
+    /// packet naming a known one moves nothing of that source's state.
+    ///
+    /// A new source starts from a rollover counter of zero, which RFC 4568
+    /// §6.4 makes the counter of every source "at the time that each SSRC
+    /// commences sending packets". Only the first source of a receiver that
+    /// joined a session in progress starts from the counter it was given.
     fn stream_for(&self, ssrc: u32) -> Stream {
-        match self.rtp {
-            Some(stream) if stream.ssrc == ssrc => stream,
-            Some(_) => Stream {
-                ssrc,
-                index: Receiving::default(),
-                replay: Replay::default(),
+        self.rtp.get(ssrc).unwrap_or_else(|| Stream {
+            index: if self.rtp.is_empty() {
+                Receiving::joining(self.initial)
+            } else {
+                Receiving::default()
             },
-            None => Stream {
-                ssrc,
-                index: Receiving::joining(self.initial),
-                replay: Replay::default(),
-            },
-        }
+            replay: Replay::default(),
+        })
     }
 
     /// Verify and decrypt an SRTP packet in place, returning the length of
@@ -761,7 +861,7 @@ impl Unprotector {
 
         stream.index.accept(estimate);
         stream.replay.record(estimate.index);
-        self.rtp = Some(stream);
+        self.rtp.put(ssrc, stream);
         Ok(body)
     }
 
@@ -788,11 +888,9 @@ impl Unprotector {
         let ssrc = read_u32(packet, 4);
 
         // a copy, for the same reason as on the RTP side: the stored window
-        // moves only once the tag has verified
-        let mut replay = match self.rtcp {
-            Some((known, replay)) if known == ssrc => replay,
-            _ => Replay::default(),
-        };
+        // moves only once the tag has verified. One list per sending source,
+        // since §3.4 keeps SRTCP's list beside the SRTP one of the same context
+        let mut replay = self.rtcp.get(ssrc).unwrap_or_default();
         if !replay.accepts(u64::from(index)) {
             return Err(SrtpError::Replayed);
         }
@@ -827,7 +925,7 @@ impl Unprotector {
         }
 
         replay.record(u64::from(index));
-        self.rtcp = Some((ssrc, replay));
+        self.rtcp.put(ssrc, replay);
         Ok(body)
     }
 
@@ -1108,7 +1206,7 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        GRACE, Master, Mki, Policy, Protector, Rate, Rekeyed, Security, SrtpError, Suite,
+        GRACE, Master, Mki, Policy, Protector, Rate, Rekeyed, SOURCES, Security, SrtpError, Suite,
         Unprotector,
     };
 
@@ -1644,6 +1742,37 @@ mod tests {
         assert!(Mki::new(1, 17).is_none());
     }
 
+    // RFC 4568 §6.1 gives an identifier a value and the width of the field it
+    // travels in. A value wider than its field was written truncated and
+    // compared whole, so a policy the constructor had accepted could not open
+    // a single packet protected under it
+    #[test]
+    fn an_identifier_whose_value_does_not_fit_its_length_is_refused() {
+        assert!(Mki::new(255, 1).is_some());
+        assert!(
+            Mki::new(256, 1).is_none(),
+            "a value of 256 in a one-octet field"
+        );
+        assert!(Mki::new(1 << 32, 4).is_none());
+        assert!(Mki::new(u128::MAX, 16).is_some());
+    }
+
+    // protect_rtp refuses a length past the end of its buffer before it adds
+    // anything to it, and protect_rtcp has to as well
+    #[test]
+    fn a_length_past_the_end_of_the_buffer_is_refused_on_both_protocols() {
+        let (mut protector, _) = pair(Policy::new(Suite::AesCm80));
+        let mut buffer = vec![0_u8; 64];
+        assert_eq!(
+            protector.protect_rtp(&mut buffer, usize::MAX),
+            Err(SrtpError::TooShort { got: usize::MAX })
+        );
+        assert_eq!(
+            protector.protect_rtcp(&mut buffer, usize::MAX),
+            Err(SrtpError::TooShort { got: usize::MAX })
+        );
+    }
+
     #[test]
     fn a_key_derivation_rate_survives_the_round_trip() {
         let mut policy = Policy::new(Suite::AesCm80);
@@ -1763,6 +1892,195 @@ mod tests {
             unprotector.unprotect_rtp(&mut received),
             Err(SrtpError::NotAuthentic)
         );
+    }
+
+    // -- more than one source under one master key ----------------------------
+
+    /// One packet from `ssrc`, protected by the context that sender keeps for
+    /// it.
+    fn sent_from(protector: &mut Protector, ssrc: u32, sequence: u16) -> Vec<u8> {
+        let mut plain = packet(sequence, b"payload");
+        if let Some(slot) = plain.get_mut(8..12) {
+            slot.copy_from_slice(&ssrc.to_be_bytes());
+        }
+        let mut buffer = room(&plain, protector.rtp_overhead());
+        let len = protector
+            .protect_rtp(&mut buffer, plain.len())
+            .expect("the packet protects");
+        buffer.truncate(len);
+        buffer
+    }
+
+    // RFC 3711 §3.2.3 names a context by its SSRC, and RFC 4568 §6.4.2 lets
+    // every source a peer sends share one master key. A receiver that keeps a
+    // replay list for one source at a time forgets the list of the source it
+    // moved away from, and then takes a recording of that source as new
+    #[test]
+    fn a_replay_is_refused_after_the_peer_has_moved_to_another_source() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut first = Protector::new(policy, master());
+        let mut second = Protector::new(policy, master());
+        let mut unprotector = Unprotector::new(policy, master());
+
+        let early = sent_from(&mut first, SSRC, 100);
+        assert!(unprotector.unprotect_rtp(&mut early.clone()).is_ok());
+        let later = sent_from(&mut second, 0x0bad_cafe, 7_000);
+        assert!(unprotector.unprotect_rtp(&mut later.clone()).is_ok());
+
+        assert_eq!(
+            unprotector.unprotect_rtp(&mut early.clone()),
+            Err(SrtpError::Replayed),
+            "a recording of the first source was taken as new once a second \
+             source had spoken"
+        );
+        assert_eq!(
+            unprotector.unprotect_rtp(&mut later.clone()),
+            Err(SrtpError::Replayed),
+            "and the second source's list went the moment the first came back"
+        );
+    }
+
+    // The same forgetting, costing the running source its rollover counter:
+    // one packet from a second source, and every packet of the first after its
+    // wrap is checked against a counter of zero and refused as forged
+    #[test]
+    fn a_second_source_does_not_cost_the_first_its_rollover_counter() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut running = Protector::new(policy, master());
+        let mut other = Protector::new(policy, master());
+        let mut unprotector = Unprotector::new(policy, master());
+
+        for sequence in [65_534, 65_535, 0, 1] {
+            let mut datagram = sent_from(&mut running, SSRC, sequence);
+            assert!(
+                unprotector.unprotect_rtp(&mut datagram).is_ok(),
+                "sequence {sequence}"
+            );
+        }
+        assert_eq!(unprotector.rollover(), 1, "the running source wrapped");
+
+        let mut interleaved = sent_from(&mut other, 0x0bad_cafe, 20);
+        assert!(unprotector.unprotect_rtp(&mut interleaved).is_ok());
+
+        let mut next = sent_from(&mut running, SSRC, 2);
+        assert_eq!(
+            unprotector.unprotect_rtp(&mut next).map(|_| ()),
+            Ok(()),
+            "the running source lost its rollover counter to a packet from \
+             another one"
+        );
+    }
+
+    // The table is bounded, so at some point a source has to give way to a
+    // new one. It has to be the one heard from least recently, which is never
+    // the one carrying the call
+    #[test]
+    fn a_crowd_of_sources_does_not_displace_the_one_that_is_talking() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut running = Protector::new(policy, master());
+        let mut unprotector = Unprotector::new(policy, master());
+
+        let mut sequence = 65_534_u16;
+        for _ in 0..4 {
+            let mut datagram = sent_from(&mut running, SSRC, sequence);
+            assert!(unprotector.unprotect_rtp(&mut datagram).is_ok());
+            sequence = sequence.wrapping_add(1);
+        }
+        assert_eq!(unprotector.rollover(), 1, "the running source wrapped");
+
+        let crowd = u32::try_from(SOURCES * 2).unwrap_or(u32::MAX);
+        for source in 1..=crowd {
+            let mut stranger = Protector::new(policy, master());
+            let mut datagram = sent_from(&mut stranger, source, 10);
+            assert!(
+                unprotector.unprotect_rtp(&mut datagram).is_ok(),
+                "source {source}"
+            );
+
+            let mut talking = sent_from(&mut running, SSRC, sequence);
+            assert_eq!(
+                unprotector.unprotect_rtp(&mut talking).map(|_| ()),
+                Ok(()),
+                "the running source gave way to source {source}"
+            );
+            sequence = sequence.wrapping_add(1);
+        }
+    }
+
+    #[test]
+    fn an_srtcp_replay_is_refused_after_the_peer_has_moved_to_another_source() {
+        let (mut protector, mut unprotector) = pair(Policy::new(Suite::AesCm80));
+        let report = |protector: &mut Protector, ssrc: u32| {
+            let mut plain = compound();
+            if let Some(slot) = plain.get_mut(4..8) {
+                slot.copy_from_slice(&ssrc.to_be_bytes());
+            }
+            let mut buffer = room(&plain, protector.rtcp_overhead());
+            let len = protector
+                .protect_rtcp(&mut buffer, plain.len())
+                .expect("the report protects");
+            buffer.truncate(len);
+            buffer
+        };
+
+        let early = report(&mut protector, SSRC);
+        assert!(unprotector.unprotect_rtcp(&mut early.clone()).is_ok());
+        let later = report(&mut protector, 0x0bad_cafe);
+        assert!(unprotector.unprotect_rtcp(&mut later.clone()).is_ok());
+
+        assert_eq!(
+            unprotector.unprotect_rtcp(&mut early.clone()),
+            Err(SrtpError::Replayed),
+            "a recorded report from the first source was taken as new once a \
+             second source had reported"
+        );
+    }
+
+    // RFC 3711 §3.3.1 has a receiver joining a session already in progress
+    // told the current rollover counter out of band, since nothing in a
+    // packet's own sequence number says how many times it has wrapped. Only
+    // the first source a receiver hears from is owed that counter — every
+    // later source starts its own count at zero, from the point it starts
+    // sending (§6.4 of RFC 4568)
+    #[test]
+    fn a_receiver_joining_late_starts_from_the_rollover_it_is_given() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut protector = Protector::new(policy, master());
+
+        // wrap the sender's rollover counter to one before any receiver
+        // exists, the way a session already running would have
+        for sequence in [65_534, 65_535] {
+            let plain = packet(sequence, b"warmup");
+            let mut buffer = room(&plain, protector.rtp_overhead());
+            protector
+                .protect_rtp(&mut buffer, plain.len())
+                .expect("the packet protects");
+        }
+        assert_eq!(protector.rollover(), 0, "not wrapped yet");
+
+        let plain = packet(0, b"joined");
+        let mut buffer = room(&plain, protector.rtp_overhead());
+        let len = protector
+            .protect_rtp(&mut buffer, plain.len())
+            .expect("the packet protects");
+        assert_eq!(protector.rollover(), 1, "the sender has now wrapped");
+        let wire = buffer.get(..len).unwrap_or_default().to_vec();
+
+        // a receiver with no rollover counter of its own reads this low
+        // sequence number as rollover zero, which is not what it was sent
+        // under
+        let mut fresh = Unprotector::new(policy, master());
+        assert_eq!(
+            fresh.unprotect_rtp(&mut wire.clone()),
+            Err(SrtpError::NotAuthentic),
+            "a fresh receiver guessed rollover zero for a packet sent under \
+             rollover one"
+        );
+
+        // one given the sender's rollover counter out of band decodes it
+        let mut joined = Unprotector::joining(policy, master(), 1);
+        assert_eq!(joined.unprotect_rtp(&mut wire.clone()), Ok(plain.len()));
+        assert_eq!(joined.rollover(), 1);
     }
 
     // -- re-keying a session that is already running -------------------------

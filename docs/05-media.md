@@ -56,9 +56,12 @@ the seam a shared vocabulary rather than a call.
 
 ### RTP
 
-RFC 3550. Sequence numbers with wraparound, timestamps per clock rate, SSRC
-collision handling, contributing sources parsed and ignored. Marker bit on talk
-spurt start, which is the audio profile's rule (RFC 3551 §4.1), not RFC 3550's.
+RFC 3550. Sequence numbers with wraparound, timestamps per clock rate,
+contributing sources parsed and ignored. Marker bit on talk spurt start, which
+is the audio profile's rule (RFC 3551 §4.1), not RFC 3550's. There is no SSRC
+collision handling (§8.2): the two directions of a call are keyed apart, so a
+collision is not a reuse of keystream, and a stream follows the one remote
+source it latched onto.
 
 **Symmetric RTP always.** Send from the port we receive on, and latch onto the
 source address of the first valid packet. This single behaviour, together with
@@ -66,7 +69,10 @@ source address of the first valid packet. This single behaviour, together with
 
 Validation before anything else: version, payload type in the negotiated set,
 plausible SSRC, length. Packets from an unexpected source after latching are
-dropped, not merged.
+dropped, not merged — and dropped first, ahead of that validation and ahead of
+SRTP, since the address is the one check that reads nothing out of the
+datagram. A copy that SRTP had already taken would have spent its index in the
+replay list, and the genuine packet from the peer would then be the one refused.
 
 ### RTCP
 
@@ -349,6 +355,30 @@ is not. The code is reviewed adversarially before it ships under the
 commercial licence. An application that already runs DTLS of its own can
 still export its keys per RFC 5705 and hand them to the engine through the
 seam SDES uses, which costs one function and keeps the gateway case cheap.
+
+**The foundation exists, and no call reaches it yet.** `crates/sipral-dtls`
+holds what the handshake will stand on, each piece tested on its own: the TLS
+1.2 PRF with SHA-256, the master secret and RFC 7627's extended master secret,
+the Finished `verify_data` and the record key block; the RFC 5705 exporter and
+the key layout of RFC 5764 §4.2 for `SRTP_AES128_CM_HMAC_SHA1_80` and `_32`;
+the record layer with its epoch and 48-bit sequence number, AES-128-GCM
+protection per RFC 5288 and the anti-replay window of RFC 6347 §4.1.2.6;
+handshake fragmentation to a path MTU and reassembly bounded in message length,
+pieces and memory; strict codecs for every message of an
+`ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake, with HelloVerifyRequest
+cookies and the `use_srtp`, `supported_groups`, `ec_point_formats`,
+`signature_algorithms`, `extended_master_secret` and `renegotiation_info`
+extensions; P-256 keys made from randomness the caller supplies; and a
+self-signed certificate written in DER, the key read out of a peer's, and
+fingerprints — `sha-256` written, `sha-1` also read — compared in constant
+time. The client and server state machines, retransmission, alerts and the
+join to `MediaSession` are the next step, so everything above and below about
+what the engine does without DTLS still holds. One choice made in the
+foundation shapes that step: the exporter refuses a master secret derived
+without the extended master secret, because RFC 7627 §5.4 requires a session
+without it to disable RFC 5705. RFC 5764 and RFC 8827 never mention the
+extension, so a peer whose TLS library predates RFC 7627 is one this crate will
+not key SRTP with.
 
 ### SRTP through the facade
 

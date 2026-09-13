@@ -71,6 +71,40 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   §7.1.4 makes a re-offer an opportunity to re-key, and a re-key reaches the
   media session by its own path.
 
+- **An SRTP receiver no longer forgets one source the moment another one
+  speaks.** `Unprotector` kept the rollover counter and the replay list of a
+  single SSRC, and an authenticated packet from any other SSRC under the same
+  master key replaced both. RFC 3711 §3.2.3 names a context by its SSRC and
+  RFC 4568 §6.4.2 lets every source a peer sends share one key, so nothing had
+  to be forged: once a peer had changed its SSRC, a recording of either source
+  was accepted again, and a single packet from a second source cost the running
+  one its rollover counter, so everything it sent after its first wrap was
+  refused as forged. SRTP and SRTCP now keep that state per source, for up to
+  eight sources held in place, and the one heard from least recently is the one
+  that gives way.
+
+- **A copy of a secured packet sent from another address no longer costs the
+  genuine packet its place.** `RtpSession::receive` ran SRTP before the address
+  latch, so a datagram the latch was about to refuse had already had its index
+  recorded in the replay list, and the genuine packet arriving from the peer
+  afterwards was dropped as a replay. Anyone who could see the stream and get a
+  datagram in ahead of it could silence a call packet by packet without holding
+  a key. A stream that has latched now refuses a foreign address before SRTP
+  looks at the datagram. `RtpSession::rtcp_receive` had the same order for
+  SRTCP, so a copied report, a goodbye included, cost the genuine one its
+  index in the same way; a secured stream now refuses a report from a host
+  its origin check would refuse before SRTCP looks at it.
+
+- **A re-offer that writes a lifetime or an identifier beside an unchanged key
+  no longer re-opens the replay window.** The facade decided whether a
+  direction had been re-keyed by comparing the whole `inline:` parameter,
+  lifetime and MKI included, so the same thirty octets with `|2^31` added read
+  as a new master key: the receive context was replaced, its fresh replay list
+  accepted packets the stream had already taken, and a peer whose rollover
+  counter had moved past zero was refused once the 250-packet grace ran out.
+  Only the key and salt are compared now, which are all RFC 3711 §4.3.1 derives
+  the session keys from.
+
 ### Fixed
 
 - **On Windows, a saved device choice now falls back when the headset is
@@ -146,6 +180,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   [1.03 s, 3.08 s]. It now draws that factor
   from the call's own seeded generator before the session exists — the same
   generator every later report already drew from.
+
+- **A master key identifier whose value does not fit the width its line gives
+  it is refused rather than truncated.** `Mki::new` checked only the width, so
+  `|1066:1` built an identifier that went out as the single octet `0x2a` and
+  was compared on arrival with 1066, which no octet equals: every packet of the
+  call was refused as `UnknownKey`. The facade answered such a line, because
+  `keying::usable` kept a copy of the width check of its own. `Mki::new` now
+  also refuses a value its width cannot carry, and `usable` asks `Mki::new`
+  rather than repeating the rule, so the line is refused where it is read.
+
+- **`Protector::protect_rtcp` no longer overflows on a length past the end of
+  its buffer.** It added the SRTCP overhead to the length before comparing the
+  sum with the buffer, and a length near `usize::MAX` wrapped: a panic in a
+  debug build, and in a release build a call that went on, spent an SRTCP
+  index and, under `UNENCRYPTED_SRTCP`, wrote the tag over the packet's own
+  header and reported success. Such a length is now refused as `TooShort`
+  before anything is added to it, as `protect_rtp` already refused it.
 
 - **A session timer that could not be refreshed yet stayed due at the instant
   that had already fired, forever.** `send_refresh` returned without moving
@@ -260,6 +311,35 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   refused the same way, and so is one on a stream whose checklist has Failed,
   one naming a peer fragment the stream does not hold, and one on a component
   the stream was reduced away from: each was also answered and then dropped.
+
+- **A DTLS handshake fragment could be cut larger than a record may carry.**
+  `record_payload_budget` in `sipral-dtls` returned whatever the datagram
+  left — 65494 octets on a loopback path — and `fragment_message` cut to
+  whatever it was given, while RFC 5246 §6.2.1 holds a record's fragment to
+  2^14 and `encode_plaintext` refuses anything longer, so a flight on a wide
+  path could not be sent at all. Both now stop at 2^14. Nothing calls the
+  crate yet.
+
+- **A stateless DTLS server could not reassemble anything after its cookie
+  exchange.** `Reassembler` only ever started at message 0, but a server that
+  answers the first ClientHello with a HelloVerifyRequest keeps nothing until
+  the second, which RFC 6347 §4.2.2 numbers 1, so that ClientHello and every
+  message after it would have waited for a message 0 the server never kept.
+  `Reassembler::expecting` starts where the server's state does.
+
+- **Three `sipral-dtls` tests stayed green with the guarantee they named
+  removed.** Two DER length bounds (`wire::bounded`'s upper end, `wire::block`'s)
+  passed their own unit test with the bound deleted, because the one case each
+  test tried also tripped a width overflow; both now include a length inside
+  the field's width but over the caller's narrower bound. A P-256 signature
+  check that ignores the message it was asked to verify passed the test named
+  for exactly that, because every case in it already expected a refusal; it
+  now asserts the correct pairing verifies first. The certificate reader's
+  panic-fuzz test bit-flipped each octet through four fixed masks, which a
+  length or count field is rarely one of, so it missed a missing empty-content
+  guard entirely; it now tries every octet value at every position. Two pieces
+  of the foundation had no test at all — `Role::peer` and `Error`'s `Display`
+  — and now do.
 
 - **The lab's outage profile could pass without the outage touching the
   call.** `interop/impairment/blackout.sh` cut the link five seconds after its
@@ -624,6 +704,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   from a thread no JVM made. The event payload union is not carried yet:
   nothing in the declarations says which kind writes which arm. A
   `stackCreate` that throws instead of answering lets its listener go too.
+
+- **The foundation of DTLS-SRTP, in a new crate nothing calls yet.**
+  `sipral-dtls` is DTLS 1.2 written from RFC 6347 and RFC 5246 over
+  RustCrypto's P-256, AES-GCM, SHA-256 and HMAC: the PRF, the master secret
+  and RFC 7627's extended master secret, the RFC 5705 exporter and RFC 5764's
+  SRTP key layout, the record layer with AES-128-GCM and the anti-replay
+  window, fragmentation and bounded reassembly, every message and extension of
+  an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake with its cookie, and a
+  self-signed certificate with its fingerprint. The state machines come next;
+  the exporter already refuses a session without the extended master secret,
+  as RFC 7627 §5.4 requires.
 
 - **Nine more fuzz targets, and the gate builds all thirteen.**
   `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,

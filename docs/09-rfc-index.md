@@ -56,11 +56,19 @@ by no call yet.
 | 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one | sipral-rtp, sipral | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |
-| 5764 | DTLS-SRTP: the `use_srtp` extension and the keys it exports | sipral-dtls, sipral-rtp | phase 2 |
-| 6347 | DTLS 1.2, both roles, written in-tree over permissively licensed primitives; no renegotiation, no resumption | sipral-dtls | phase 2 |
+| 5764 | DTLS-SRTP: the `use_srtp` extension and the keys it exports. The extension with its MKI, and the key layout of §4.2 for `SRTP_AES128_CM_HMAC_SHA1_80` and `_32`, are written in `sipral-dtls`; keying `sipral-rtp` with them is not | sipral-dtls, sipral-rtp | phase 2; extension and key layout written, not linked |
+| 6347 | DTLS 1.2, both roles, written in-tree over permissively licensed primitives; no renegotiation, no resumption. The record layer with its epoch, 48-bit sequence number and anti-replay window, handshake fragmentation and bounded reassembly, the HelloVerifyRequest cookie and every message codec are written; the client and server state machines and retransmission are not | sipral-dtls | phase 2; foundation written, not linked |
+| 5246 | TLS 1.2, where DTLS 1.2 defers to it: the PRF with SHA-256, the master secret, `verify_data`, the key block, AEAD record protection, the hello and key exchange message syntax | sipral-dtls | phase 2; written, not linked |
+| 7627 | The extended master secret. The exporter refuses a master secret made without it, since §5.4 requires such a session to disable RFC 5705 | sipral-dtls | phase 2; written, not linked |
+| 5288 | AES-GCM cipher suites: the nonce and the additional data of each protected record | sipral-dtls | phase 2; written, not linked |
+| 5289 | `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, the one suite negotiated | sipral-dtls | phase 2; written, not linked |
+| 8422 | ECC cipher suites: named curves and point formats, the ServerKeyExchange and ClientKeyExchange of ECDHE, ECDSA signatures in DER, public key validation | sipral-dtls | phase 2; written, not linked |
+| 5746 | `renegotiation_info`, empty on the initial handshake, which is the only one performed | sipral-dtls | phase 2; written, not linked |
 | 4145 | `a=setup`, which end starts the handshake | sipral-core | phase 2 |
-| 5705 | Keying material exporter, for the SRTP keys | sipral-dtls | phase 2 |
-| 8122 | `a=fingerprint`, the only thing a peer's certificate is checked against | sipral-core, sipral-dtls | phase 2 |
+| 5705 | Keying material exporter, for the SRTP keys | sipral-dtls | phase 2; written, not linked |
+| 8122 | `a=fingerprint`, the only thing a peer's certificate is checked against. `sha-256` fingerprints are written and `sha-1` ones read, and compared in constant time, in `sipral-dtls` | sipral-core, sipral-dtls | phase 2; `sipral-dtls` half written, not linked |
+| 5280 | X.509 v3: a self-signed certificate written, a peer's read as far as its public key | sipral-dtls | phase 2; written, not linked |
+| 5480 / 5758 / 3279 | An ECDSA P-256 key and signature in a certificate: `id-ecPublicKey` with the named curve, `ecdsa-with-SHA256`, `Ecdsa-Sig-Value` | sipral-dtls | phase 2; written, not linked |
 | 7983 | Telling DTLS, STUN and RTP apart on one socket | sipral-nat | phase 2 |
 | 5761 | Multiplexing RTP and RTCP | sipral-rtp | phase 2 |
 | 6716 | Opus | sipral-media | phase 2 |

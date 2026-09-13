@@ -1,0 +1,42 @@
+[package]
+name = "sipral-dtls"
+description = "DTLS 1.2 for DTLS-SRTP: the record layer, handshake framing and messages, key derivation and self-signed certificates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The primitives, and nothing but the primitives. The protocol around them is
+# written in this crate from the RFCs; a constant-time elliptic curve, AES-GCM
+# and SHA-256 are the places where an implementation of our own would be a
+# liability. All four come from the RustCrypto family that already supplies
+# `aes` to sipral-rtp, and resolve onto the same `aes`, `cipher` and
+# `hybrid-array` in the lockfile.
+#
+# P-256 for ECDHE and for ECDSA over SHA-256. Default features are off: they
+# would pull PEM, PKCS#8 and the operating system's random source, and this
+# crate reads no randomness of its own. That rules out `precomputed-tables`
+# too, which needs `std`, which in this crate enables `getrandom`; without the
+# tables a key or a signature costs a few milliseconds, once per handshake.
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "ecdh"] }
+# the record protection of TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, with the
+# key schedule wiped on drop
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
+# the handshake hash, the PRF's hash, certificate fingerprints
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+# the PRF (RFC 5246 §5) and the HelloVerifyRequest cookie
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+# wiping master secrets, key blocks and exported SRTP keys where this crate
+# holds them; the write that survives the optimiser needs `unsafe`, which this
+# crate denies
+zeroize = "=1.9.0"
+
+[lints]
+workspace = true

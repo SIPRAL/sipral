@@ -62,6 +62,7 @@ you pick, or replace, or leave out entirely.
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
 | `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
+| `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the record layer, handshake framing and messages, key derivation and the SRTP key export, self-signed certificates and their fingerprints. The foundation is written and tested; the handshake state machines are not, and no call reaches it |
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 follows in phase 2, written the same way, for the carrier that insists |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
