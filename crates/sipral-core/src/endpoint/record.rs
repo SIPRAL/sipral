@@ -94,6 +94,30 @@ impl Endpoint {
         self.diag.note(call, decision);
     }
 
+    /// A decision the layer above made about a message this endpoint handed
+    /// it, written into the record of the call the message names.
+    ///
+    /// The endpoint delivers a response to a REGISTER and has no opinion about
+    /// most of what is in it; the user agent reads further, and what it
+    /// refuses to trust belongs in the same record as the send and the
+    /// arrival around it rather than in a second one a reader has to line up
+    /// by hand. The entry carries what every other one does — the reason, and
+    /// the message by method or status and size — and never a header value,
+    /// which is the rule that keeps a record safe to send unread.
+    pub fn note_arrival(&mut self, message: &RawMessage<'_>, reason: Reason, now: Instant) {
+        self.mark(now);
+        let bytes = message.as_bytes().len();
+        let wire = if let Some(status) = message.status() {
+            WireEvent::response(status, Direction::Inbound, bytes)
+        } else if let Some(method) = message.method() {
+            WireEvent::request(method, Direction::Inbound, bytes)
+        } else {
+            return;
+        };
+        let decision = Decision::of(reason).caused_by(wire);
+        self.diag.note(message.call_id().ok(), decision);
+    }
+
     /// One decision about a message, which names the call it belongs to.
     pub(super) fn note_wire(
         &mut self,

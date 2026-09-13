@@ -86,6 +86,18 @@ pub enum Reason {
     FailedTimeout,
     /// The transport could not deliver.
     FailedTransport,
+    /// A registrar's 2xx carried a `Service-Route` that could not be read, or
+    /// one longer than this stack puts on every request, so no service route
+    /// was taken from it (RFC 3608 §6.1). Written by `sipral-ua`.
+    ServiceRouteIgnored,
+    /// A registrar's 2xx carried a `pub-gruu` or `temp-gruu` for this
+    /// instance that could not be read, so that GRUU was not used (RFC 5627
+    /// §4.2). Written by `sipral-ua`.
+    GruuIgnored,
+    /// A registrar's 2xx carried a `P-Associated-URI` that could not be read,
+    /// so no associated identity was reported from it (RFC 7315 §4.1).
+    /// Written by `sipral-ua`.
+    AssociatedUriIgnored,
 }
 
 impl Reason {
@@ -111,6 +123,9 @@ impl Reason {
             Self::FailedRefused => "failure.refused",
             Self::FailedTimeout => "failure.timeout",
             Self::FailedTransport => "failure.transport",
+            Self::ServiceRouteIgnored => "registration.service_route.ignored",
+            Self::GruuIgnored => "registration.gruu.ignored",
+            Self::AssociatedUriIgnored => "registration.associated_uri.ignored",
         }
     }
 }
@@ -127,7 +142,7 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 18] = [
+    const ALL: [Reason; 21] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
@@ -146,6 +161,9 @@ mod tests {
         Reason::FailedRefused,
         Reason::FailedTimeout,
         Reason::FailedTransport,
+        Reason::ServiceRouteIgnored,
+        Reason::GruuIgnored,
+        Reason::AssociatedUriIgnored,
     ];
 
     #[test]
@@ -189,5 +207,14 @@ mod tests {
         );
         assert_eq!(Reason::RequestSent.to_string(), "request.sent");
         assert_eq!(Reason::FailedRefused.as_str(), "failure.refused");
+        assert_eq!(
+            Reason::ServiceRouteIgnored.as_str(),
+            "registration.service_route.ignored"
+        );
+        assert_eq!(Reason::GruuIgnored.as_str(), "registration.gruu.ignored");
+        assert_eq!(
+            Reason::AssociatedUriIgnored.as_str(),
+            "registration.associated_uri.ignored"
+        );
     }
 }

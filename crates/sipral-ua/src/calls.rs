@@ -50,6 +50,7 @@ use crate::call::{
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::parked::needs_a_stream;
+use crate::registration::{anonymous, dialog_contact};
 use crate::renegotiate::ALLOW;
 use crate::timers::FLOOR;
 
@@ -94,7 +95,8 @@ impl UserAgent {
         now: Instant,
     ) -> Result<CallHandle, UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
-        let contact = config.contact_value();
+        let learned = self.learned_for(account, outgoing.destination, now);
+        let contact = dialog_contact(config, learned, anonymous(&outgoing.extra));
         let asked = config.session_interval;
         let mut call = Call::outgoing(account, outgoing.forks, contact);
         // minted here rather than by the endpoint, because §7.3 has a 422
@@ -131,11 +133,12 @@ impl UserAgent {
         let (transport, remote) = outgoing
             .destination
             .unwrap_or((config.transport, config.remote));
-        let contact = config.contact_value();
         let from = config.sender_value();
-        let (call_id, cseq, asked) = {
+        // the Contact the call was placed with, which every request of its
+        // dialog repeats, so that a 422 asked again names the same target
+        let (call_id, cseq, asked, contact) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            (held.id.clone(), held.cseq, held.asked)
+            (held.id.clone(), held.cseq, held.asked, held.contact.clone())
         };
         let mut request =
             OutgoingRequest::new(Method::Invite, outgoing.target.clone(), transport, remote)
@@ -149,6 +152,13 @@ impl UserAgent {
                 .cseq(cseq);
         if let Some(call_id) = call_id {
             request = request.call_id(call_id);
+        }
+        // RFC 3608 §6.1: the service route is "a preloaded Route header field
+        // in outgoing initial requests", and "the UA MUST preserve the order"
+        if let Some(learned) = self.learned_for(account, outgoing.destination, now) {
+            for hop in learned.service_route() {
+                request = request.route(hop);
+            }
         }
         for (name, value) in &self.asking_for(call, asked) {
             request = request.header(*name, value);
@@ -842,10 +852,14 @@ impl UserAgent {
                     return None;
                 }
                 let account = self.line_for(&request.as_raw());
-                let contact = account.and_then(|id| self.accounts.get(&id)).map_or_else(
-                    || Box::from(&b""[..]),
-                    crate::account::Account::contact_value,
-                );
+                // RFC 5627 §4.4 names "a 2xx or 18x response to an INVITE"
+                // among what carries a GRUU, so the answer's Contact is one too
+                let contact = account
+                    .and_then(|id| Some((self.accounts.get(&id)?, self.learned_for(id, None, now))))
+                    .map_or_else(
+                        || Box::from(&b""[..]),
+                        |(config, learned)| dialog_contact(config, learned, false),
+                    );
                 let source = self.guard.source();
                 let call = self.keep(Call::incoming(account, transaction, contact));
                 if let Some(held) = self.calls.get_mut(&call) {

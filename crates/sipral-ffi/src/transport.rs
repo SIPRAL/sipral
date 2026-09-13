@@ -956,6 +956,73 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// Every 2xx a callback was handed on a registration that went live,
+    /// copied out while the callback was still running.
+    #[derive(Default)]
+    struct Granted {
+        messages: Vec<Vec<u8>>,
+    }
+
+    unsafe extern "C" fn keep_granted(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let granted = unsafe { &mut *user_data.cast::<Granted>() };
+        let event = unsafe { &*event };
+        if event.kind != SipralEventKind::RegistrationChanged || event.message.is_null() {
+            return;
+        }
+        let state = unsafe { event.payload.registration.state };
+        if state == SipralRegistrationState::Registered as u32 {
+            let bytes = unsafe { std::slice::from_raw_parts(event.message, event.message_len) };
+            granted.messages.push(bytes.to_vec());
+        }
+    }
+
+    /// The 200 OK to a REGISTER reaches the callback whole, the way a refusal
+    /// always has. A Service-Route, the GRUUs and P-Associated-URI are read out
+    /// of `message`, and no binding needs a member of its own for any of them.
+    #[test]
+    fn the_200_ok_to_a_register_reaches_the_callback_whole() {
+        let mut observed = Observed::default();
+        let mut granted = Granted::default();
+        let mut settings = config(keep_granted, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut granted).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = line(handle);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        let (request, _, _) = take_one(handle);
+
+        let ok = reply(
+            &request,
+            200,
+            "OK",
+            "Contact: <sip:alice@192.0.2.10:5060>;expires=3600\r\n\
+             Service-Route: <sip:edge.example.com;lr>\r\n\
+             P-Associated-URI: <sip:alice.smith@example.com>\r\n",
+        );
+        assert_eq!(
+            feed(handle, REGISTRAR, &ok, 1_100),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_100);
+        assert_eq!(
+            granted.messages,
+            vec![ok],
+            "the registered event carries the 200 it was granted by, byte for byte"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     fn start_of(message: &[u8]) -> String {
         String::from_utf8_lossy(
             message

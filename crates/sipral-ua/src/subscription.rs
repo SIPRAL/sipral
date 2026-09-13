@@ -75,7 +75,9 @@ use crate::dialoginfo::{Applied, DialogInfo, DialogInfoTable};
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::parked::{Parked, call_needs_a_stream};
-use crate::registration::{backoff_delay, refresh_after, retry_after};
+use crate::registration::{
+    RegistrarInfo, anonymous, backoff_delay, dialog_contact, refresh_after, retry_after,
+};
 
 /// How long a subscription asks for when nothing says otherwise.
 ///
@@ -655,7 +657,8 @@ impl UserAgent {
             return;
         };
         let expires = held.wanted.expires;
-        let request = build_subscribe(account, held, expires);
+        let learned = self.learned_for(held.account, held.wanted.destination, now);
+        let request = build_subscribe(account, held, expires, learned);
         let Ok(id) = self.endpoint.request(&request, now) else {
             self.unsendable(subscription);
             return;
@@ -742,7 +745,8 @@ impl UserAgent {
             .accounts
             .get(&held.account)
             .ok_or(UaError::NoSuchAccount)?;
-        let request = build_refresh(account, held, expires);
+        let learned = self.learned_for(held.account, held.wanted.destination, now);
+        let request = build_refresh(account, held, expires, learned);
         let id = self.endpoint.request_in_dialog(dialog, &request, now)?;
         let timer_n = self.timer_n;
         if let Some(held) = self.subscriptions.get_mut(&subscription) {
@@ -853,8 +857,14 @@ impl UserAgent {
     }
 }
 
-/// The out-of-dialog SUBSCRIBE that starts an attempt (§4.1.2.1).
-fn build_subscribe(account: &Account, held: &Subscription, expires: Duration) -> OutgoingRequest {
+/// The out-of-dialog SUBSCRIBE that starts an attempt (§4.1.2.1), with what the
+/// account's registrar said when it goes where the account registers.
+fn build_subscribe(
+    account: &Account,
+    held: &Subscription,
+    expires: Duration,
+    learned: Option<&RegistrarInfo>,
+) -> OutgoingRequest {
     let seconds = expires.as_secs().to_string();
     let mut from = account.sender_value().to_vec();
     from.extend_from_slice(b";tag=");
@@ -878,10 +888,19 @@ fn build_subscribe(account: &Account, held: &Subscription, expires: Duration) ->
     .from(&from)
     .call_id(held.call_id.clone())
     .cseq(held.cseq.saturating_add(1))
-    // §8.1.1.8: a request that can establish a dialog carries one
-    .contact(&account.contact_value())
+    // §8.1.1.8: a request that can establish a dialog carries one, and
+    // RFC 5627 §4.4 lists the SUBSCRIBE among those that name a GRUU
+    .contact(&dialog_contact(
+        account,
+        learned,
+        anonymous(&held.wanted.extra),
+    ))
     .header(HeaderName::Event, &held.wanted.package)
     .header(HeaderName::Expires, seconds.as_bytes());
+    // RFC 3608 §6.1: the service route preloaded, in the registrar's order
+    for hop in learned.into_iter().flat_map(RegistrarInfo::service_route) {
+        request = request.route(hop);
+    }
     if let Some(ref accept) = held.wanted.accept {
         request = request.header(HeaderName::Accept, accept);
     }
@@ -893,15 +912,22 @@ fn build_subscribe(account: &Account, held: &Subscription, expires: Duration) ->
     request
 }
 
-/// The in-dialog one that refreshes or ends it.
+/// The in-dialog one that refreshes or ends it. A refresh is a target refresh
+/// request, which RFC 5627 §4.4 gives a GRUU as well; the route is the
+/// dialog's own by now, and the service route has no part in it.
 fn build_refresh(
     account: &Account,
     held: &Subscription,
     expires: Duration,
+    learned: Option<&RegistrarInfo>,
 ) -> OutgoingInDialogRequest {
     let seconds = expires.as_secs().to_string();
     let mut request = OutgoingInDialogRequest::new(Method::Subscribe)
-        .contact(&account.contact_value())
+        .contact(&dialog_contact(
+            account,
+            learned,
+            anonymous(&held.wanted.extra),
+        ))
         .header(HeaderName::Event, &held.wanted.package)
         .header(HeaderName::Expires, seconds.as_bytes());
     if let Some(ref accept) = held.wanted.accept {

@@ -96,6 +96,22 @@ to instrument its own socket writes.
 are in `docs/10-roadmap.md`. Registration, subscription and media decisions do
 not appear here because `sipral-core` does not make them.
 
+## The vocabulary `sipral-ua` emits
+
+Three codes, all about what a registrar said beside a binding it granted
+(`docs/04-ua.md`). Each is written into the REGISTER's record, against the 2xx
+that carried the field, when the field could not be read or was larger than the
+stack carries; the field is then left out whole, and the binding still stands.
+They reach the record through `Endpoint::note_arrival`, which takes a code and
+the message it is about and nothing else, so the entry names the response by
+status and size and never the value that was refused.
+
+| Code | The decision |
+|---|---|
+| `registration.service_route.ignored` | RFC 3608: a `Service-Route` with an entry that does not parse, is not a loose route, carries URI headers, holds a byte no SIP URI is written with, or runs past eight hops or 512 bytes a hop. No service route was taken from that response. |
+| `registration.gruu.ignored` | RFC 5627 §4.2: a `pub-gruu` or `temp-gruu` on this instance's `Contact` that is not a quoted SIP URI with a `gr` parameter, is written twice, carries URI headers, holds a byte no SIP URI is written with, or runs past 512 bytes. That GRUU was not used. |
+| `registration.associated_uri.ignored` | RFC 7315 §4.1: a `P-Associated-URI` entry that is not a name-addr, or more than thirty-two of them. No associated identity was reported from that response. |
+
 ## What an entry carries
 
 Only what applies to it. A `Decision` has the reason and the offset always, and

@@ -815,6 +815,12 @@ impl UserAgent {
             }
             reg.due = None;
             reg.transaction = None;
+            // the service route and the GRUUs came off the same network, and
+            // the lapse that would stop them being used is measured on the
+            // clock that stopped. RFC 5627 §4.4 wants an active registration
+            // before a GRUU is used, and nothing here is one until a 2xx says
+            // it all again
+            reg.learned = None;
             if matches!(
                 reg.state,
                 RegistrationState::Registering

@@ -151,7 +151,10 @@ and each is cheaper before the ABI carries it than after:
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one;
 - **the 200 OK to REGISTER kept**, and with it Service-Route (RFC 3608) in the
-  route set, GRUU (RFC 5627) learned and used, P-Associated-URI reported;
+  route set, GRUU (RFC 5627) learned and used, P-Associated-URI reported.
+  *Built*: the route on what an account starts and never on its REGISTER, the
+  GRUU as the `Contact` of what opens a dialog, and every value bounded and
+  written down when it is refused, as `docs/04-ua.md` sets out;
 - **G.729**, base plus Annex A and Annex B, written from the text of the
   Recommendation the way G.722 was — never from the reference C code, never
   from the crates that repackage a GPL implementation under another name.

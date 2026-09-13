@@ -662,11 +662,18 @@ fn about_registration(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sip
             account,
             expires,
             refresh_in,
+            ref response,
+            ..
         } => {
             let mut payload = registration_payload(known, account, None);
             payload.expires_ms = millis(expires);
             payload.refresh_in_ms = millis(refresh_in);
-            Some(registration_event(known, account, payload))
+            // the 2xx, whole, as a refusal always was: the Service-Route, the
+            // GRUUs and the P-Associated-URI a registrar sent are read out of
+            // it rather than out of members of their own
+            let mut out = registration_event(known, account, payload);
+            attach(&mut out, Some(response));
+            Some(out)
         }
         UaEvent::RegistrationFailed {
             account,

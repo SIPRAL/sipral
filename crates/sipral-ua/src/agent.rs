@@ -43,7 +43,8 @@ use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::lifecycle::Machine;
 use crate::parked::Parked;
 use crate::registration::{
-    Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
+    Registration, backoff_delay, echoed, granted_expiry, min_expires, read_registrar_info,
+    retry_after,
 };
 use crate::renegotiate::ParkedOffer;
 use crate::screening::Guard;
@@ -482,10 +483,37 @@ fn build_register(
     // de-registration leaves the identifier out of them (§4.1.2)
     .contact(&account.register_contact_value(expires.is_zero()))
     .header(HeaderName::Expires, seconds.as_bytes());
+    // RFC 5627 §4.1: a UA that wants GRUUs "MUST include the Supported header
+    // field in the request", with `gruu` in it, and §5.2 hands them out only
+    // for a contact that names its instance — so the tag goes with the
+    // instance identifier and never without it. A `Supported` the application
+    // added is folded into the same field rather than written beside it.
+    let wants_gruu = account.instance_id.is_some();
+    let mut supported: Vec<u8> = Vec::new();
     for extra in &account.extra {
-        if let Some(name) = HeaderName::from_bytes(&extra.name) {
-            request = request.header(name, &extra.value);
+        let Some(name) = HeaderName::from_bytes(&extra.name) else {
+            continue;
+        };
+        if wants_gruu && name == HeaderName::Supported {
+            if !supported.is_empty() {
+                supported.extend_from_slice(b", ");
+            }
+            supported.extend_from_slice(&extra.value);
+            continue;
         }
+        request = request.header(name, &extra.value);
+    }
+    if wants_gruu {
+        let listed = supported
+            .split(|byte| *byte == b',')
+            .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"gruu"));
+        if !listed {
+            if !supported.is_empty() {
+                supported.extend_from_slice(b", ");
+            }
+            supported.extend_from_slice(b"gruu");
+        }
+        request = request.header(HeaderName::Supported, &supported);
     }
     request
 }
@@ -689,16 +717,24 @@ impl UserAgent {
             reg.unregistering = false;
             reg.failures = 0;
             reg.due = None;
+            // the binding is gone, and what the registrar said about it went
+            // with it: RFC 5627 §5.3 removes the GRUUs, and RFC 3608 §6.1's
+            // service route belongs to a registration there no longer is
+            reg.learned = None;
             self.events.push_back(UaEvent::Unregistered { account });
             return;
         }
 
-        let granted =
-            granted_expiry(&response.as_raw(), &config.contact, reg.asking).unwrap_or(reg.asking);
-        let echo = echoed(&response.as_raw(), config);
+        let raw = response.as_raw();
+        let granted = granted_expiry(&raw, &config.contact, reg.asking).unwrap_or(reg.asking);
+        let echo = echoed(&raw, config);
         // a granted zero is a binding the registrar did not keep; there is
-        // nothing to refresh and nothing to celebrate
+        // nothing to refresh and nothing to celebrate, and nothing it said
+        // about that binding is worth keeping either
         if granted.is_zero() {
+            if let Some(reg) = self.registrations.get_mut(&account) {
+                reg.learned = None;
+            }
             self.give_up(
                 account,
                 RegistrationFailure::Rejected,
@@ -707,6 +743,10 @@ impl UserAgent {
             );
             return;
         }
+        let (info, ignored) = read_registrar_info(&raw, config);
+        for reason in ignored {
+            self.endpoint.note_arrival(&raw, reason, now);
+        }
 
         let cold = self.cold;
         let Some(reg) = self.registrations.get_mut(&account) else {
@@ -714,6 +754,11 @@ impl UserAgent {
         };
         reg.echo = echo;
         let refresh_in = reg.bound(granted, cold, now);
+        // Replaced whole, never merged. RFC 3608 §6.1: the stored service
+        // route "is updated according to the Service-Route header field of
+        // the latest 200 class response", and one without the field clears
+        // it; RFC 5627 §4.2 hands out a new temporary GRUU with every 2xx.
+        reg.learned = Some(info.clone());
         reg.state = RegistrationState::Registered;
         reg.failures = 0;
         reg.raised = false;
@@ -722,6 +767,8 @@ impl UserAgent {
             account,
             expires: granted,
             refresh_in,
+            response: response.clone(),
+            info,
         });
         self.registration_proved();
     }
@@ -938,6 +985,11 @@ impl UserAgent {
             return;
         };
         reg.failures = reg.failures.saturating_add(1);
+        // a 5xx is the registrar refusing; a timeout or a dead transport is
+        // no answer at all, and says nothing about the route it handed out
+        if status.is_some() {
+            reg.refused();
+        }
         // "a 503 response to an earlier failed registration attempt with a
         // Retry-After header field value may cause the UA to wait longer"
         let wait = backoff_delay(reg.failures, &entropy).max(asked_for.unwrap_or(Duration::ZERO));
@@ -967,6 +1019,7 @@ impl UserAgent {
             reg.transaction = None;
             reg.unregistering = false;
             reg.due = None;
+            reg.refused();
         }
         self.events.push_back(UaEvent::RegistrationFailed {
             account,

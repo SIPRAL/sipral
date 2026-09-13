@@ -80,7 +80,7 @@ pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 pub use lifecycle::{
     Idle, LifecycleState, Link, Network, Recovery, RecoveryFailure, Rung, Suspending,
 };
-pub use registration::{PushEcho, SnapshotError};
+pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, RateError, Refusals, Replacing, Screen, Screening};

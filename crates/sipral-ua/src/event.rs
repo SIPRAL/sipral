@@ -20,6 +20,7 @@ use crate::announce::Announcement;
 use crate::call::{CallEndReason, CallHandle, CallState};
 use crate::dialoginfo::DialogInfo;
 use crate::lifecycle::{LifecycleState, RecoveryFailure, Rung};
+use crate::registration::RegistrarInfo;
 use crate::session::Hold;
 use crate::subscription::{SubscriptionEnd, SubscriptionHandle, SubscriptionState};
 
@@ -160,7 +161,9 @@ pub enum UaEvent {
     /// `expires` is what it granted, which wins over what was asked for
     /// (§10.2.4), and `refresh_in` is when the next REGISTER goes — early
     /// enough that one lost refresh and one retransmission round still fit
-    /// before the binding lapses.
+    /// before the binding lapses. The 2xx rides whole, for the same reason a
+    /// refusal does: the `Contact` set the registrar holds for the address of
+    /// record, and whatever else it said, says more than a lifetime can.
     Registered {
         /// Which account.
         account: AccountId,
@@ -168,6 +171,12 @@ pub enum UaEvent {
         expires: Duration,
         /// How long until the refresh.
         refresh_in: Duration,
+        /// The 2xx, whole.
+        response: OwnedMessage,
+        /// The service route, the GRUUs and the associated identities it
+        /// carried, as far as they could be read. What this account's
+        /// requests use from here on, until the next 2xx replaces it.
+        info: RegistrarInfo,
     },
     /// A refresh is in flight. The binding stands until it is answered.
     Refreshing {

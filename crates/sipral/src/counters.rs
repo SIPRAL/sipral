@@ -351,10 +351,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use sipral_core::endpoint::{Event as CoreEvent, TransportProtocol};
+    use sipral_core::msg::{ParseMode, ParseScratch, parse};
     use sipral_core::sdp::Direction;
     use sipral_ua::{
-        Account, AccountId, CallEndReason, Input, OutgoingCall, RegistrationFailure, TransportId,
-        UaEvent, Uri, UserAgent,
+        Account, AccountId, CallEndReason, Input, OutgoingCall, RegistrarInfo, RegistrationFailure,
+        TransportId, UaEvent, Uri, UserAgent,
     };
 
     use super::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
@@ -500,10 +501,26 @@ mod tests {
         assert_eq!(counters.registrations_attempted.get(), 1);
         assert_eq!(counters.registrations_succeeded.get(), 0);
 
+        let mut scratch = ParseScratch::new();
+        let granted = parse(
+            b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKcounted\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:alice@example.com>;tag=2\r\n\
+Call-ID: counted\r\n\
+CSeq: 1 REGISTER\r\n\
+Content-Length: 0\r\n\r\n",
+            &mut scratch,
+            ParseMode::Strict,
+        )
+        .expect("a 200 to a REGISTER")
+        .to_owned();
         counters.observe_signalling(&UaEvent::Registered {
             account,
             expires: Duration::from_secs(3600),
             refresh_in: Duration::from_secs(3000),
+            response: granted,
+            info: RegistrarInfo::default(),
         });
         assert_eq!(counters.registrations_succeeded.get(), 1);
 

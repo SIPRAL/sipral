@@ -37,15 +37,20 @@
 //! [`RegistrationState::Registered`] only when a registrar has answered.
 
 use core::fmt;
+use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use sipral_core::diag::Reason;
 use sipral_core::dialog::CallId;
+use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{
-    Contacts, HeaderError, HeaderName, OwnedMessage, Params, RawMessage, Uri, digits,
+    Contacts, HeaderError, HeaderName, NameAddrRef, OwnedMessage, Params, RawMessage, RouteRef,
+    Uri, digits, is_quoted, trim, unfold, unquote,
 };
 use sipral_core::transaction::{AnyTransactionId, NonInviteClient, TransactionId};
 
-use crate::account::{Account, AccountId};
+use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
 use crate::event::RegistrationState;
 
@@ -67,6 +72,19 @@ const SNAPSHOT_VERSION: u16 = 1;
 /// Magic, version, sequence number, granted seconds, remaining seconds and
 /// the length of the `Call-ID` that follows them.
 const SNAPSHOT_HEAD: usize = 20;
+/// RFC 3608's field. It has no compact form and no variant of its own.
+const SERVICE_ROUTE: HeaderName<'static> = HeaderName::Extension("Service-Route");
+/// RFC 7315 §4.1's.
+const P_ASSOCIATED_URI: HeaderName<'static> = HeaderName::Extension("P-Associated-URI");
+/// The most `Service-Route` entries taken from one response. Every one of them
+/// rides on every request the account starts, so a long list makes every
+/// INVITE longer, and past a handful it makes one that no longer fits a
+/// datagram (RFC 3261 §18.1.1). RFC 3608's own examples have two.
+const MAX_SERVICE_ROUTE: usize = 8;
+/// The most associated identities kept from one response.
+const MAX_ASSOCIATED: usize = 32;
+/// The longest route entry or URI taken from a registrar.
+const MAX_LEARNED_BYTES: usize = 512;
 
 /// Everything one account's registration is doing.
 #[derive(Debug)]
@@ -116,6 +134,11 @@ pub(crate) struct Registration {
     /// While this is set the refusal held in `unanswered` is not a refusal
     /// yet, so nothing settles it.
     pub(crate) waiting_for_stream: Option<AnyTransactionId>,
+    /// What the registrar's last 2xx said beside the binding's lifetime.
+    /// `None` until one has, and again once the binding it came with is given
+    /// up. Read through [`Registration::learned`], which also stops answering
+    /// the moment that binding lapses.
+    pub(crate) learned: Option<RegistrarInfo>,
 }
 
 impl Registration {
@@ -136,6 +159,32 @@ impl Registration {
             ready: None,
             owed: false,
             waiting_for_stream: None,
+            learned: None,
+        }
+    }
+
+    /// What the registrar last said, for as long as the binding it said it
+    /// about still stands.
+    ///
+    /// RFC 5627 §4.4: a UA "MUST NOT reuse a GRUU learned through a previous
+    /// registration that has lapsed"; RFC 3608 §6.1 discards the service route
+    /// when "an existing registration expires and the UA chooses not to
+    /// re-register". The lapse is what both turn on, so it is checked here, at
+    /// the moment of use, rather than by a timer that could fire late.
+    pub(crate) fn learned(&self, now: Instant) -> Option<&RegistrarInfo> {
+        let info = self.learned.as_ref()?;
+        self.lapses_at.is_some_and(|at| now < at).then_some(info)
+    }
+
+    /// The registrar refused this registration.
+    ///
+    /// RFC 3608 §6.1: "If the re-registration request is refused ... the UA
+    /// SHOULD discard any stored service route". The GRUUs stay: RFC 5627 §4.2
+    /// says a non-2xx "does not remove, delete, or otherwise invalidate" one,
+    /// and the binding they route to stands at the registrar until it lapses.
+    pub(crate) fn refused(&mut self) {
+        if let Some(info) = self.learned.as_mut() {
+            info.service_route.clear();
         }
     }
 
@@ -256,6 +305,367 @@ pub(crate) fn echoed(response: &RawMessage<'_>, account: &Account) -> Option<Pus
         }
     }
     Some(echo)
+}
+
+/// What a registrar's 2xx said beyond how long the binding lasts.
+///
+/// Three things, each from its own RFC, and every one of them arrives from a
+/// peer. Each is read with the core's parsers and bounded before it is kept,
+/// and one that does not survive that is left out and written into the
+/// REGISTER's diagnostic record rather than trusted: a value that goes back
+/// out in this account's own requests is one that could otherwise stop every
+/// one of them. None of it outlives the binding it came with; see
+/// [`UserAgent::registrar_info`].
+#[derive(Clone, Debug, Default)]
+pub struct RegistrarInfo {
+    service_route: Vec<Box<[u8]>>,
+    public_gruu: Option<Uri>,
+    temporary_gruu: Option<Uri>,
+    associated: Vec<Uri>,
+}
+
+impl RegistrarInfo {
+    /// The service route (RFC 3608) in the registrar's order, the first hop
+    /// first, each entry a `Route` value as it goes out: angle brackets and
+    /// parameters included.
+    ///
+    /// It is placed as a preloaded route on the requests this account starts
+    /// towards the address it registers with — an INVITE, a SUBSCRIBE — and
+    /// not on the REGISTER that refreshes the binding. §3 hands the route out
+    /// "to request services from the system it just registered with", and a
+    /// refresh sent along it would make a stale route unrecoverable: the one
+    /// request that can replace it would have to travel it.
+    #[must_use]
+    pub fn service_route(&self) -> impl ExactSizeIterator<Item = &[u8]> {
+        self.service_route.iter().map(|hop| &**hop)
+    }
+
+    /// The public GRUU (RFC 5627 §3.1.1): the address of record with a `gr`
+    /// parameter naming this instance, the same across registrations.
+    #[must_use]
+    pub const fn public_gruu(&self) -> Option<&Uri> {
+        self.public_gruu.as_ref()
+    }
+
+    /// The temporary GRUU from this 2xx (RFC 5627 §3.1.2), which names neither
+    /// the address of record nor the instance, and is new on every refresh.
+    #[must_use]
+    pub const fn temporary_gruu(&self) -> Option<&Uri> {
+        self.temporary_gruu.as_ref()
+    }
+
+    /// The other identities the provider has given this user (RFC 7315 §4.1),
+    /// in the order they were sent.
+    ///
+    /// Reported and not acted on. §4.1 says a UAC "MUST NOT assume that the
+    /// associated URIs are registered", so none of them changes what this
+    /// account sends.
+    #[must_use]
+    pub fn associated(&self) -> &[Uri] {
+        &self.associated
+    }
+
+    /// Which GRUU a dialog opens with.
+    ///
+    /// RFC 5627 §3.3: "use one of its temporary GRUUs for anonymous calls, and
+    /// use its public GRUU otherwise", and §4.4 lets either be used where the
+    /// other is missing — except that an anonymous request never falls back to
+    /// the public one, which names the address of record it is trying not to.
+    const fn gruu_for(&self, anonymous: bool) -> Option<&Uri> {
+        if anonymous {
+            return self.temporary_gruu.as_ref();
+        }
+        match self.public_gruu {
+            Some(ref public) => Some(public),
+            None => self.temporary_gruu.as_ref(),
+        }
+    }
+}
+
+/// Everything a 2xx to a REGISTER says beyond the binding, and the codes for
+/// what in it could not be read.
+pub(crate) fn read_registrar_info(
+    response: &RawMessage<'_>,
+    account: &Account,
+) -> (RegistrarInfo, Vec<Reason>) {
+    let mut ignored = Vec::new();
+    let service_route = read_service_route(response).unwrap_or_else(|| {
+        ignored.push(Reason::ServiceRouteIgnored);
+        Vec::new()
+    });
+    let (public, temporary) = offered_gruus(response, account);
+    if matches!(public, Offered::Garbled) || matches!(temporary, Offered::Garbled) {
+        ignored.push(Reason::GruuIgnored);
+    }
+    let associated = read_associated(response).unwrap_or_else(|| {
+        ignored.push(Reason::AssociatedUriIgnored);
+        Vec::new()
+    });
+    let info = RegistrarInfo {
+        service_route,
+        public_gruu: public.readable(),
+        temporary_gruu: temporary.readable(),
+        associated,
+    };
+    (info, ignored)
+}
+
+/// RFC 3608 §5: `Service-Route = "Service-Route" HCOLON sr-value *(COMMA
+/// sr-value)`, each value a `Route` element that "MUST include the
+/// loose-routing indicator parameter".
+///
+/// `None` when any of it cannot be taken. A route is an order of hops, and one
+/// with a hop left out of it goes somewhere else.
+fn read_service_route(response: &RawMessage<'_>) -> Option<Vec<Box<[u8]>>> {
+    let mut hops = Vec::new();
+    for value in response.field_values(SERVICE_ROUTE) {
+        if hops.len() == MAX_SERVICE_ROUTE {
+            return None;
+        }
+        let flat = one_line(value)?;
+        let entry = RouteRef::parse(&flat).ok()?;
+        // a strict router would need the Request-URI rewritten (§12.2.1.1),
+        // which nothing does for a preloaded route here, and §5 rules one out
+        let hop = entry.uri().sip()?;
+        if !hop.is_loose_route()
+            || hop.headers().next().is_some()
+            || !uri_bytes_only(entry.addr().uri_bytes())
+        {
+            return None;
+        }
+        hops.push(Box::from(&*flat));
+    }
+    Some(hops)
+}
+
+/// Whether every byte is one a SIP URI is written with (RFC 3261 §25.1):
+/// `alphanum`, the `mark` characters, `%` for an escape, the `reserved` set,
+/// and the square brackets of an IPv6 reference and of `param-unreserved`.
+///
+/// The core's URI reader splits a URI at its delimiters and leaves the bytes
+/// between them alone, which is right for a message that is only being read.
+/// A value kept here is written back into this account's own requests, and a
+/// `<`, `>`, `"` or space inside it would change where the header it sits in
+/// ends.
+fn uri_bytes_only(text: &[u8]) -> bool {
+    text.iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.!~*'()%;/?:@&=+$,[]".contains(byte))
+}
+
+/// What the registrar's `Contact` for this instance says about one GRUU.
+enum Offered {
+    Absent,
+    Readable(Uri),
+    Garbled,
+}
+
+impl Offered {
+    fn readable(self) -> Option<Uri> {
+        match self {
+            Self::Readable(uri) => Some(uri),
+            Self::Absent | Self::Garbled => None,
+        }
+    }
+}
+
+/// The GRUUs on the `Contact` the registrar returned for this instance
+/// (RFC 5627 §4.2), public first.
+///
+/// The response lists every binding the address of record has, and another
+/// device's GRUUs are not this one's to use, so the entry is found by its
+/// `+sip.instance` rather than by its address — which is also what survives a
+/// registrar that rewrote the address behind a NAT. An entry that does not
+/// parse cannot be shown to be this instance's, and is passed over.
+fn offered_gruus(response: &RawMessage<'_>, account: &Account) -> (Offered, Offered) {
+    let nothing = (Offered::Absent, Offered::Absent);
+    let Some(ref instance) = account.instance_id else {
+        return nothing;
+    };
+    let Ok(Contacts::Addrs(addrs)) = response.contact() else {
+        return nothing;
+    };
+    for addr in addrs.flatten() {
+        let params = addr.params();
+        let ours = params
+            .get("+sip.instance")
+            .is_some_and(|echoed| same_instance(&echoed, instance));
+        // a stated zero is a binding the registrar removed, and §5.3 removes
+        // its GRUUs with it
+        let removed = addr
+            .expires()
+            .ok()
+            .flatten()
+            .is_some_and(|seconds| seconds.value == Some(0));
+        if ours && !removed {
+            return (
+                gruu_param(&params, "pub-gruu"),
+                gruu_param(&params, "temp-gruu"),
+            );
+        }
+    }
+    nothing
+}
+
+/// Whether an echoed `+sip.instance` names this instance.
+///
+/// RFC 5626 §4.1: the instance identifier is "extracted" from the value, out
+/// of the angle brackets RFC 3840 §9 wraps a string value in, and "equality
+/// comparisons are performed using the rules for URN equality that are
+/// specific to the scheme in the URN", or lexically by RFC 2141 where the
+/// scheme is not understood. Lexically, `urn:` and the namespace identifier are
+/// compared without regard to case and the rest exactly; `uuid` is the one
+/// namespace understood here, and RFC 4122 §3 makes its hexadecimal case
+/// insensitive as well. The account may be configured with or without the
+/// brackets, so they are taken off both sides.
+fn same_instance(echoed: &[u8], ours: &str) -> bool {
+    let (theirs, mine) = (bare_urn(echoed), bare_urn(ours.as_bytes()));
+    match (urn_parts(theirs), urn_parts(mine)) {
+        (Some((their_namespace, their_rest)), Some((my_namespace, my_rest))) => {
+            let uuid = my_namespace.eq_ignore_ascii_case(b"uuid");
+            their_namespace.eq_ignore_ascii_case(my_namespace)
+                && (their_rest == my_rest || (uuid && their_rest.eq_ignore_ascii_case(my_rest)))
+        }
+        _ => theirs == mine,
+    }
+}
+
+/// `urn:<namespace>:<rest>`, split, or `None` for what is not a URN.
+fn urn_parts(value: &[u8]) -> Option<(&[u8], &[u8])> {
+    let colon = value.iter().position(|byte| *byte == b':')?;
+    if !value.get(..colon)?.eq_ignore_ascii_case(b"urn") {
+        return None;
+    }
+    let rest = value.get(colon + 1..)?;
+    let colon = rest.iter().position(|byte| *byte == b':')?;
+    Some((rest.get(..colon)?, rest.get(colon + 1..)?))
+}
+
+fn bare_urn(value: &[u8]) -> &[u8] {
+    value
+        .strip_prefix(b"<")
+        .and_then(|inner| inner.strip_suffix(b">"))
+        .unwrap_or(value)
+}
+
+/// One of `pub-gruu` and `temp-gruu`: `EQUAL quoted-string`, and the quoted
+/// string "MUST contain a SIP URI" (RFC 5627 §7). A GRUU is known by its `gr`
+/// parameter (§4.5), so a URI without one is not taken for one.
+fn gruu_param(params: &Params<'_>, name: &str) -> Offered {
+    let mut named = params
+        .clone()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name.as_bytes()));
+    let Some((_, written)) = named.next() else {
+        return Offered::Absent;
+    };
+    // two values for one GRUU are two answers to one question, and taking
+    // either is guessing which one the registrar meant
+    if named.next().is_some() {
+        return Offered::Garbled;
+    }
+    let Some(written) = written.filter(|value| is_quoted(value)) else {
+        return Offered::Garbled;
+    };
+    gruu_uri(&unquote(written)).map_or(Offered::Garbled, Offered::Readable)
+}
+
+fn gruu_uri(text: &[u8]) -> Option<Uri> {
+    let flat = one_line(text)?;
+    // the value came out of a quoted string and goes back in angle brackets,
+    // where a `>` it held would end the Contact and whatever followed would
+    // become a second one
+    if !uri_bytes_only(&flat) {
+        return None;
+    }
+    let uri = Uri::parse(&flat).ok()?;
+    let usable = uri
+        .sip()
+        .is_some_and(|sip| sip.has_param("gr") && sip.headers().next().is_none());
+    usable.then_some(uri)
+}
+
+/// RFC 7315 §4.1: `P-Associated-URI = "P-Associated-URI" HCOLON
+/// [p-aso-uri-spec] *(COMMA p-aso-uri-spec)`, `p-aso-uri-spec = name-addr
+/// *(SEMI ai-param)`. A field with nothing in it is the grammar's own way of
+/// saying there are none.
+///
+/// `None` when an entry cannot be read, or when there are more than are kept.
+/// The response rides on the event whole, so nothing is lost to the
+/// application by refusing the list rather than guessing at part of it.
+fn read_associated(response: &RawMessage<'_>) -> Option<Vec<Uri>> {
+    let values = response.field_values(P_ASSOCIATED_URI);
+    if values.clone().all(<[u8]>::is_empty) {
+        return Some(Vec::new());
+    }
+    let mut uris = Vec::new();
+    for value in values {
+        if uris.len() == MAX_ASSOCIATED {
+            return None;
+        }
+        let flat = one_line(value)?;
+        let addr = NameAddrRef::parse(&flat).ok()?;
+        if !addr.is_name_addr() {
+            return None;
+        }
+        uris.push(Uri::parse(addr.uri_bytes()).ok()?);
+    }
+    Some(uris)
+}
+
+/// A value from the wire as one line: a fold becomes the space it stands for
+/// (§7.3.1), and anything else that could end or corrupt a header this stack
+/// writes is refused.
+///
+/// What is kept here goes back out in the account's own requests, and a byte
+/// that made the builder refuse one would stop every INVITE the account sends
+/// until the next registration replaced it.
+fn one_line(value: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if value.len() > MAX_LEARNED_BYTES {
+        return None;
+    }
+    let flat = unfold(value);
+    if flat
+        .iter()
+        .any(|&byte| (byte < 0x20 && byte != b'\t') || byte == 0x7f)
+    {
+        return None;
+    }
+    Some(flat)
+}
+
+/// The `Contact` of a request or a response that opens a dialog for `account`.
+///
+/// RFC 5627 §4.4: "A UA SHOULD use a GRUU when populating the Contact header
+/// field of dialog-forming and target refresh requests and responses", which
+/// is the INVITE, the 18x and 2xx that answer one, and the SUBSCRIBE. The GRUU
+/// goes out bare, without `+sip.instance`: §9's examples write it so, the
+/// public one carries the instance in its `gr` already, and on a temporary one
+/// the instance is exactly what §10.3 says a correspondent must not be able to
+/// read.
+pub(crate) fn dialog_contact(
+    account: &Account,
+    learned: Option<&RegistrarInfo>,
+    anonymous: bool,
+) -> Box<[u8]> {
+    let Some(gruu) = learned.and_then(|info| info.gruu_for(anonymous)) else {
+        return account.contact_value();
+    };
+    let text = gruu.as_bytes();
+    let mut out = Vec::with_capacity(text.len() + 2);
+    out.push(b'<');
+    out.extend_from_slice(text);
+    out.push(b'>');
+    out.into_boxed_slice()
+}
+
+/// Whether a request asks for privacy (RFC 3323 §4.2): a `Privacy` field with
+/// any value but `none` among the ones the application added.
+pub(crate) fn anonymous(extra: &[Extra]) -> bool {
+    extra
+        .iter()
+        .filter(|one| one.name.eq_ignore_ascii_case(b"Privacy"))
+        .flat_map(|one| one.value.split(|byte| *byte == b';'))
+        .map(trim)
+        .any(|value| !value.is_empty() && !value.eq_ignore_ascii_case(b"none"))
 }
 
 /// When to send the next request for something granted for `granted`, with
@@ -648,6 +1058,12 @@ impl UserAgent {
         reg.raised = false;
         reg.lapses_at = Some(now + left);
         reg.ready = None;
+        // a thaw puts the snapshot's Call-ID in place of the one the GRUUs
+        // were learned under, and RFC 5627 §4.2 has a UA on another Call-ID
+        // "discard all temporary GRUUs learned through prior REGISTER
+        // responses"; a restored registration proves nothing either, so it
+        // carries nothing until the next 2xx says it all again
+        reg.learned = None;
         // the same schedule a fresh grant of what is left would have earned,
         // which is now when there is nothing left
         reg.due = Some(now + refresh_after(left));
@@ -711,6 +1127,41 @@ impl UserAgent {
     #[must_use]
     pub fn push_echo(&self, account: AccountId) -> Option<PushEcho> {
         self.registrations.get(&account)?.echo
+    }
+
+    /// What an account's registrar said beside the binding: the service route,
+    /// the GRUUs, the associated identities.
+    ///
+    /// `None` while no binding it said them about is standing — none granted
+    /// yet, one given up, or one that has lapsed — because none of the three
+    /// means anything once the binding is gone, and RFC 5627 §4.4 forbids
+    /// using a GRUU from one that has.
+    #[must_use]
+    pub fn registrar_info(&self, account: AccountId, now: Instant) -> Option<&RegistrarInfo> {
+        self.registrations.get(&account)?.learned(now)
+    }
+
+    /// The same, for something this account sends to `destination`, where
+    /// `None` is the address the account registers with.
+    ///
+    /// Nothing when it goes anywhere else. Both halves are about that path: a
+    /// service route is the rest of the route behind the proxy the account
+    /// registers through (RFC 3608 §6.1 appends it "to any locally configured
+    /// route needed to egress the access proxy chain"), and a GRUU is reached
+    /// through the registrar's domain. A request the application sent
+    /// somewhere else on purpose would be pulled back through the network it
+    /// chose not to use, and so would everything the far end sent back to it.
+    pub(crate) fn learned_for(
+        &self,
+        account: AccountId,
+        destination: Option<(TransportId, SocketAddr)>,
+        now: Instant,
+    ) -> Option<&RegistrarInfo> {
+        let config = self.accounts.get(&account)?;
+        if destination.is_some_and(|path| path != (config.transport, config.remote)) {
+            return None;
+        }
+        self.registrar_info(account, now)
     }
 }
 

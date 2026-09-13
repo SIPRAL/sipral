@@ -467,6 +467,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   pre-warm touches it; and a registration snapshot offered to it is refused
   (`SnapshotError::NotRegistering`). `Account::registrar` now answers
   `Option<&Uri>`.
+
+- **The 200 OK to REGISTER is kept, and what a registrar says in it is used.**
+  `UaEvent::Registered` gains `response`, the 2xx whole, and `info`, a
+  `RegistrarInfo` with the service route, the GRUUs and the associated
+  identities; `UserAgent::registrar_info` reads the same while the binding
+  stands, and the C event for a registration that went live carries the 2xx in
+  `message` as a refusal always has. The Service-Route (RFC 3608) is preloaded
+  on the INVITEs and SUBSCRIBEs an account starts towards its registrar and
+  never on the REGISTER; an account with an instance identifier asks for GRUUs
+  with `Supported: gruu` and uses the one RFC 5627 §4.4 names as the `Contact`
+  of what opens a dialog; P-Associated-URI (RFC 7315) is reported. Every value
+  is parsed strictly and bounded, and one that is not is left out and written
+  into the REGISTER's diagnostic record under three new codes.
+
 - **Nine more fuzz targets, and the gate builds all thirteen.**
   `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
   `srtp_unprotect`, `stun` and `turn` join the four that existed, one per door

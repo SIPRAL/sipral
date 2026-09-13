@@ -34,13 +34,14 @@ by no call yet.
 | 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515), and `Allow-Events` is read but not yet advertised | sipral-ua | phase 2 |
 | 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body reaches the application whole; parsed to a count in phase 2 | sipral-ua | phase 2 |
 | 3428 | The MESSAGE method, pager-mode instant messaging in both directions | sipral-ua | phase 2 |
-| 3608 | Service-Route, learned from the 200 OK to REGISTER and placed on the requests that follow | sipral-ua | phase 2 |
+| 3608 | Service-Route, learned from the 200 OK to REGISTER and preloaded on the INVITEs and SUBSCRIBEs the account starts towards its registrar; not on the REGISTER itself | sipral-ua | phase 2, built |
 | 4235 | Dialog event package, and the `application/dialog-info+xml` reader a busy lamp field is built on | sipral-ua | phase 2 |
 | 3856 | Presence event package: the subscription is the framework's, and the PIDF body reaches the application whole | sipral-ua | phase 2 |
 | 6026 | Correct transaction handling for 2xx | sipral-core | phase 1 |
 | 5626 | Outbound: managing client connections | sipral-ua | phase 2 |
 | 3327 | The Path header, which Outbound registrations travel on | sipral-ua | phase 2 |
-| 5627 | Globally routable UA URIs (GRUU) | sipral-ua | phase 2 |
+| 5627 | Globally routable UA URIs (GRUU): asked for on REGISTER, learned from this instance's `Contact`, and used as the `Contact` of what opens a dialog, public or temporary as §3.3 says. Self-made GRUUs and the RFC 5628 event extension are not | sipral-ua | phase 2, built |
+| 7315 | P-Associated-URI, reported from the 200 OK to REGISTER and not acted on (obsoletes RFC 3455) | sipral-ua | phase 2, built |
 | 8599 | Push notification bindings: `pn-provider`, `pn-prid`, `pn-param`, and the 555 refusal | sipral-ua | phase 4 |
 | 7118 | SIP over WebSocket | sipral-core | phase 1, in part |
 | 3323 / 3325 | Privacy, and asserted identity | sipral-ua | phase 2 |

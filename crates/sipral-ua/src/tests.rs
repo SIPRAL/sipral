@@ -13,6 +13,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use sipral_core::diag::Reason;
+use sipral_core::dialog::CallId;
 use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
 use sipral_core::sdp;
 
@@ -491,6 +493,932 @@ fn a_binding_granted_for_nothing_is_not_a_binding() {
     assert_eq!(
         agent.registration_state(id),
         Some(RegistrationState::Failed)
+    );
+}
+
+// -- what the registrar says beside the binding ------------------------------
+
+/// This device's instance, as the account is configured with it: without the
+/// angle brackets, which the registrar below puts back the way RFC 5627 §9
+/// writes them.
+const INSTANCE: &str = "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+const PUBLIC_GRUU: &str = "sip:alice@example.com;gr=urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+const TEMPORARY_GRUU: &str = "sip:tgruu.7hs==jd7vnzga5w7fajsc7-ajd6fabz0f8g5@example.com;gr";
+/// The `Contact` an account with no GRUU to use writes on a dialog.
+const CONFIGURED: &str =
+    "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"";
+/// A two-hop service route with a fold in the middle of it (RFC 3608 §6.4.1),
+/// and two associated identities, one of them a telephone number (RFC 7315).
+const SERVICES: &str = "Service-Route: <sip:p2.example.com;lr>,\r\n <sip:hsp.example.com;lr>\r\n ;role=home\r\n\
+P-Associated-URI: <sip:alice.smith@example.com>, <tel:+15551234567>\r\n";
+
+fn gruu_account() -> Account {
+    account().instance_id(INSTANCE)
+}
+
+/// A 200 that grants the binding, with both GRUUs on this device's contact and
+/// `extra` beside them. The desk phone on the same address of record comes
+/// first, with GRUUs of its own that are not this device's to use.
+fn serviced(request: &[u8], temporary: &str, extra: &str) -> Vec<u8> {
+    reply(
+        request,
+        200,
+        "OK",
+        &format!(
+            "Contact: <sip:alice@192.0.2.77>;+sip.instance=\"<urn:uuid:00000000-0000-0000-0000-0000000d35c0>\"\
+             ;pub-gruu=\"sip:alice@example.com;gr=urn:uuid:00000000-0000-0000-0000-0000000d35c0\"\
+             ;temp-gruu=\"sip:tgruu.desk@example.com;gr\";expires=3600\r\n\
+             Contact: <sip:alice@192.0.2.1>;pub-gruu=\"{PUBLIC_GRUU}\";temp-gruu=\"{temporary}\"\
+             ;+sip.instance=\"<{INSTANCE}>\";expires=3600\r\n{extra}"
+        ),
+    )
+}
+
+/// Register, and take a 200 carrying both GRUUs and `extra`.
+fn serviced_registration(agent: &mut UserAgent, id: AccountId, extra: &str, now: Instant) {
+    agent.register(id, now).expect("the REGISTER goes");
+    let request = sent(agent);
+    deliver(agent, &serviced(&request, TEMPORARY_GRUU, extra), now);
+    events(agent);
+}
+
+/// Every `Route` value of a message, in order, across lines and commas.
+fn routes(bytes: &[u8]) -> Vec<Vec<u8>> {
+    with(bytes, |message| {
+        message
+            .field_values(HeaderName::Route)
+            .map(<[u8]>::to_vec)
+            .collect()
+    })
+}
+
+fn angled(uri: &str) -> Vec<u8> {
+    format!("<{uri}>").into_bytes()
+}
+
+fn registered_info(agent: &mut UserAgent) -> Option<crate::RegistrarInfo> {
+    events(agent).into_iter().find_map(|event| match event {
+        UaEvent::Registered { info, .. } => Some(info),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_registrar_that_says_more_than_the_binding_is_heard_on_the_event() {
+    // RFC 3608 §6.1, RFC 5627 §4.2 and RFC 7315 §4.1, all in one 200
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    // §4.1: a registrar hands no GRUU to a REGISTER that did not ask for one
+    assert_eq!(header(&request, HeaderName::Supported), b"gruu");
+    deliver(
+        &mut agent,
+        &serviced(&request, TEMPORARY_GRUU, SERVICES),
+        t0,
+    );
+
+    let (response, info) = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::Registered { response, info, .. } => Some((response, info)),
+            _ => None,
+        })
+        .expect("the binding is live");
+    let raw = response.as_raw();
+    assert_eq!(raw.status(), Some(StatusCode::OK));
+    assert_eq!(
+        raw.header(HeaderName::Extension("P-Associated-URI")),
+        Some(&b"<sip:alice.smith@example.com>, <tel:+15551234567>"[..]),
+        "the 200 rides whole"
+    );
+    assert_eq!(
+        info.service_route().collect::<Vec<_>>(),
+        vec![
+            &b"<sip:p2.example.com;lr>"[..],
+            &b"<sip:hsp.example.com;lr> ;role=home"[..]
+        ],
+        "in the registrar's order, and each on one line"
+    );
+    assert_eq!(info.public_gruu().map(Uri::as_str), Some(PUBLIC_GRUU));
+    assert_eq!(
+        info.temporary_gruu().map(Uri::as_str),
+        Some(TEMPORARY_GRUU),
+        "this device's, and not the desk phone's"
+    );
+    assert_eq!(
+        info.associated()
+            .iter()
+            .map(Uri::as_str)
+            .collect::<Vec<_>>(),
+        vec!["sip:alice.smith@example.com", "tel:+15551234567"]
+    );
+    assert_eq!(
+        agent
+            .registrar_info(id, t0)
+            .and_then(|kept| kept.public_gruu().map(Uri::as_str)),
+        Some(PUBLIC_GRUU)
+    );
+}
+
+#[test]
+fn an_instance_is_matched_by_the_rules_of_its_urn_and_not_byte_for_byte() {
+    // RFC 5626 §4.1: URN equality for the namespace, RFC 2141 lexical
+    // equality where it is not understood, and RFC 4122 §3 for a UUID
+    let t0 = Instant::now();
+    let gruu_of = |configured: &str, echoed: &str| {
+        let mut agent = self::agent(t0);
+        let id = agent.add_account(account().instance_id(configured));
+        agent.register(id, t0).expect("the REGISTER goes");
+        let request = sent(&mut agent);
+        let ok = reply(
+            &request,
+            200,
+            "OK",
+            &format!(
+                "Contact: <sip:alice@192.0.2.1>;pub-gruu=\"{PUBLIC_GRUU}\"\
+                 ;+sip.instance=\"<{echoed}>\";expires=3600\r\n"
+            ),
+        );
+        deliver(&mut agent, &ok, t0);
+        registered_info(&mut agent)
+            .and_then(|info| info.public_gruu().map(|gruu| gruu.as_str().to_owned()))
+    };
+
+    assert_eq!(
+        gruu_of(INSTANCE, &INSTANCE.to_ascii_uppercase()).as_deref(),
+        Some(PUBLIC_GRUU),
+        "a UUID URN echoed in capitals is still this device"
+    );
+    assert_eq!(
+        gruu_of(INSTANCE, "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf7"),
+        None,
+        "one digit off is another device"
+    );
+    assert_eq!(
+        gruu_of("urn:example:Device1", "URN:EXAMPLE:Device1").as_deref(),
+        Some(PUBLIC_GRUU),
+        "the prefix and the namespace are compared without regard to case"
+    );
+    assert_eq!(
+        gruu_of("urn:example:Device1", "urn:example:device1"),
+        None,
+        "the rest of a URN outside a namespace understood here is compared exactly"
+    );
+}
+
+#[test]
+fn the_next_invite_travels_the_service_route_and_names_the_public_gruu() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    // RFC 3608 §6.1: preloaded, and "the UA MUST preserve the order"
+    assert_eq!(
+        routes(&invite),
+        vec![
+            b"<sip:p2.example.com;lr>".to_vec(),
+            b"<sip:hsp.example.com;lr> ;role=home".to_vec()
+        ]
+    );
+    // RFC 5627 §4.4, written bare the way §9 writes it
+    assert_eq!(header(&invite, HeaderName::Contact), angled(PUBLIC_GRUU));
+}
+
+#[test]
+fn the_refresh_does_not_travel_the_service_route_it_would_replace() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = sent(&mut agent);
+    assert!(refresh.starts_with(b"REGISTER "));
+    assert!(
+        routes(&refresh).is_empty(),
+        "a stale route could never be replaced if the refresh had to travel it"
+    );
+    assert_eq!(header(&refresh, HeaderName::Supported), b"gruu");
+    assert!(
+        text(&refresh, HeaderName::Contact).starts_with("<sip:alice@192.0.2.1>"),
+        "RFC 5627 §4.1: the binding registered is the device's, never a GRUU"
+    );
+}
+
+#[test]
+fn a_supported_the_application_added_is_folded_in_with_gruu() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account().header(HeaderName::Supported, b"path"));
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    assert_eq!(
+        with(&request, |message| message
+            .header_count(HeaderName::Supported)),
+        1
+    );
+    assert_eq!(header(&request, HeaderName::Supported), b"path, gruu");
+
+    let plain = agent.add_account(account());
+    agent.register(plain, t0).expect("the REGISTER goes");
+    assert!(
+        header(&sent(&mut agent), HeaderName::Supported).is_empty(),
+        "an account with no instance cannot be given a GRUU, and does not ask"
+    );
+}
+
+#[test]
+fn a_call_that_comes_in_is_answered_from_the_gruu() {
+    // RFC 5627 §4.4: "a 2xx or 18x response to an INVITE which contains a To
+    // tag"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    deliver(&mut agent, &incoming_invite("gr1", Some(OFFER)), t0);
+    transmits(&mut agent);
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+
+    agent.ring(call, None, t0).expect("180 goes");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::Contact),
+        angled(PUBLIC_GRUU)
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::Contact),
+        angled(PUBLIC_GRUU)
+    );
+}
+
+#[test]
+fn a_refresh_that_leaves_the_service_route_out_clears_it() {
+    // RFC 3608 §6.1: "If there is no Service-Route header field in the
+    // response, the UA clears any service route for that address-of-record"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let later = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(later);
+    let refresh = sent(&mut agent);
+    let second = "sip:tgruu.second@example.com;gr";
+    deliver(&mut agent, &serviced(&refresh, second, ""), later);
+    let info = registered_info(&mut agent).expect("the refresh was granted");
+    assert_eq!(info.service_route().len(), 0);
+    assert!(info.associated().is_empty());
+    let call_id = CallId::new(&header(&refresh, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record.decisions().all(|decision| !matches!(
+                decision.reason,
+                Reason::ServiceRouteIgnored | Reason::GruuIgnored | Reason::AssociatedUriIgnored
+            ))),
+        "a field left out is not a field garbled"
+    );
+    // RFC 5627 §4.2: "The UA will receive a new temporary GRUU in each
+    // successful REGISTER response"
+    assert_eq!(info.temporary_gruu().map(Uri::as_str), Some(second));
+
+    agent.call(id, &outgoing(), later).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(
+        routes(&invite).is_empty(),
+        "the cleared route is not travelled"
+    );
+    assert_eq!(header(&invite, HeaderName::Contact), angled(PUBLIC_GRUU));
+}
+
+#[test]
+fn what_a_registrar_garbled_is_not_trusted_and_is_written_down() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let garbled = reply(
+        &request,
+        200,
+        "OK",
+        &format!(
+            // a strict router beside a loose one, which RFC 3608 §5 rules out;
+            // a public GRUU with no `gr`, and a temporary one with a header in
+            // it; an associated identity outside the name-addr RFC 7315 asks for
+            "Service-Route: <sip:p1.example.com;lr>, <sip:p2.example.com>\r\n\
+             Contact: <sip:alice@192.0.2.1>;+sip.instance=\"<{INSTANCE}>\";expires=3600\
+             ;pub-gruu=\"sip:alice@example.com\";temp-gruu=\"sip:tgruu.9@example.com;gr?Subject=x\"\r\n\
+             P-Associated-URI: sip:bare@example.com\r\n"
+        ),
+    );
+    deliver(&mut agent, &garbled, t0);
+
+    let info = registered_info(&mut agent)
+        .expect("what the registrar garbled does not undo the binding it granted");
+    assert_eq!(
+        info.service_route().len(),
+        0,
+        "a route with a hop it cannot travel is no route"
+    );
+    assert!(info.public_gruu().is_none(), "a URI with no gr is no GRUU");
+    assert!(info.temporary_gruu().is_none());
+    assert!(info.associated().is_empty());
+
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    let written: Vec<Reason> = agent
+        .endpoint()
+        .call_record(&call_id)
+        .expect("the REGISTER has a record")
+        .decisions()
+        .map(|decision| decision.reason)
+        .collect();
+    for reason in [
+        Reason::ServiceRouteIgnored,
+        Reason::GruuIgnored,
+        Reason::AssociatedUriIgnored,
+    ] {
+        assert!(written.contains(&reason), "no {reason} in {written:?}");
+    }
+
+    agent
+        .call(id, &outgoing(), t0)
+        .expect("the INVITE still goes");
+    let invite = sent(&mut agent);
+    assert!(routes(&invite).is_empty());
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn an_associated_uri_with_a_control_byte_in_it_is_not_reported() {
+    // the list rides out to the application whole (§4.1's own event), and a
+    // byte that never belongs in a URI is not something this stack repeats
+    // just because a name-addr around it parsed
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let hostile = reply(
+        &request,
+        200,
+        "OK",
+        "P-Associated-URI: <sip:ali\u{1}ce@example.com>\r\n",
+    );
+    deliver(&mut agent, &hostile, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert!(
+        info.associated().is_empty(),
+        "a control byte in the middle of it is not a byte a URI is written with"
+    );
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record
+                .decisions()
+                .any(|decision| decision.reason == Reason::AssociatedUriIgnored)),
+        "the refusal is written down"
+    );
+}
+
+#[test]
+fn a_gruu_that_would_close_its_own_brackets_never_reaches_a_contact() {
+    // RFC 5627 §7: the quoted string "MUST contain a SIP URI", and no SIP URI
+    // holds a `>`, a `<` or a space (RFC 3261 §25.1). Unquoted and put back in
+    // angle brackets, this one would end the Contact early and start a second
+    // one that names somebody else
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let hostile = reply(
+        &request,
+        200,
+        "OK",
+        &format!(
+            "Contact: <sip:alice@192.0.2.1>;+sip.instance=\"<{INSTANCE}>\";expires=3600\
+             ;pub-gruu=\"sip:alice@example.com;gr=x>,<sip:mallory@203.0.113.66\"\r\n"
+        ),
+    );
+    deliver(&mut agent, &hostile, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert!(
+        info.public_gruu().is_none(),
+        "a value no SIP URI can hold is not a GRUU"
+    );
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record
+                .decisions()
+                .any(|decision| decision.reason == Reason::GruuIgnored)),
+        "the refusal is written down"
+    );
+
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(
+        with(&invite, |message| message
+            .field_values(HeaderName::Contact)
+            .count()),
+        1,
+        "one Contact, and it is this device's"
+    );
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn two_pub_gruus_on_one_contact_answer_the_same_question_twice() {
+    // a second value is not a correction of the first; taking either would be
+    // guessing which one the registrar meant
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let confused = reply(
+        &request,
+        200,
+        "OK",
+        &format!(
+            "Contact: <sip:alice@192.0.2.1>;+sip.instance=\"<{INSTANCE}>\";expires=3600\
+             ;pub-gruu=\"{PUBLIC_GRUU}\";pub-gruu=\"sip:alice@example.com;gr=other\"\r\n"
+        ),
+    );
+    deliver(&mut agent, &confused, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert!(
+        info.public_gruu().is_none(),
+        "two answers to the same question is not one taken over the other"
+    );
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record
+                .decisions()
+                .any(|decision| decision.reason == Reason::GruuIgnored)),
+        "the refusal is written down"
+    );
+}
+
+#[test]
+fn a_service_route_hop_no_uri_can_hold_is_not_preloaded() {
+    // RFC 3608 §6.3: every element "MUST conform to the syntax of a Route
+    // element", and a `|` is in no SIP URI. Preloaded, it would ride on every
+    // INVITE the account sends, and a strict next hop refuses every one
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let hostile = reply(
+        &request,
+        200,
+        "OK",
+        "Contact: <sip:alice@192.0.2.1>;expires=3600\r\n\
+         Service-Route: <sip:p1.example.com;lr;x=a|b>\r\n",
+    );
+    deliver(&mut agent, &hostile, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert_eq!(info.service_route().len(), 0);
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record
+                .decisions()
+                .any(|decision| decision.reason == Reason::ServiceRouteIgnored)),
+        "the refusal is written down"
+    );
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    assert!(routes(&sent(&mut agent)).is_empty());
+}
+
+#[test]
+fn a_service_route_hop_with_a_header_component_is_not_preloaded() {
+    // a hop carries a `?` component here only to smuggle a header into
+    // whatever reads it next, and this stack is not the one meant to read it:
+    // a preloaded route is a place this account writes to, not one it takes
+    // instructions from
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let hostile = reply(
+        &request,
+        200,
+        "OK",
+        "Contact: <sip:alice@192.0.2.1>;expires=3600\r\n\
+         Service-Route: <sip:p1.example.com;lr?Subject=x>\r\n",
+    );
+    deliver(&mut agent, &hostile, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert_eq!(info.service_route().len(), 0);
+    let call_id = CallId::new(&header(&request, HeaderName::CallId));
+    assert!(
+        agent
+            .endpoint()
+            .call_record(&call_id)
+            .is_some_and(|record| record
+                .decisions()
+                .any(|decision| decision.reason == Reason::ServiceRouteIgnored)),
+        "the refusal is written down"
+    );
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    assert!(routes(&sent(&mut agent)).is_empty());
+}
+
+#[test]
+fn a_binding_the_stack_stopped_believing_in_lends_nothing_to_the_next_call() {
+    // RFC 5627 §4.4: a UA "MUST have an active registration prior to using a
+    // GRUU". A clock that did not run while the machine slept still reads the
+    // binding as fifty minutes from lapsing, which is why a suspend makes it
+    // unverified; what the registrar said about it is no better evidence
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent.suspending(t0);
+    events(&mut agent);
+    let woke = t0 + Duration::from_millis(4);
+    assert!(
+        agent.registrar_info(id, woke).is_none(),
+        "an unverified binding has nothing the registrar said to lend"
+    );
+    agent.resumed(woke);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.call(id, &outgoing(), woke).expect("the INVITE goes");
+    let invite = transmits(&mut agent)
+        .into_iter()
+        .find(|message| message.starts_with(b"INVITE "))
+        .expect("an INVITE");
+    assert!(
+        routes(&invite).is_empty(),
+        "no service route from before the machine slept"
+    );
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn nothing_the_registrar_said_outlives_the_binding_it_said_it_about() {
+    // RFC 5627 §4.4: a UA "MUST NOT reuse a GRUU learned through a previous
+    // registration that has lapsed"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let lapsed = t0 + Duration::from_secs(3_600);
+    assert!(agent.registrar_info(id, lapsed).is_none());
+    agent
+        .call(id, &outgoing(), lapsed)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(routes(&invite).is_empty());
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn a_refused_refresh_forgets_the_service_route_and_keeps_the_gruu() {
+    // RFC 3608 §6.1: "If the re-registration request is refused ... the UA
+    // SHOULD discard any stored service route"; RFC 5627 §4.2: a failed one
+    // "does not remove, delete, or otherwise invalidate the GRUU"
+    for (status, reason) in [(403, "Forbidden"), (503, "Service Unavailable")] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(gruu_account());
+        serviced_registration(&mut agent, id, SERVICES, t0);
+
+        let later = t0 + Duration::from_secs(3_060);
+        agent.handle_timeout(later);
+        let refresh = sent(&mut agent);
+        deliver(&mut agent, &reply(&refresh, status, reason, ""), later);
+        events(&mut agent);
+
+        agent.call(id, &outgoing(), later).expect("the INVITE goes");
+        let invite = only(&transmits(&mut agent), "INVITE ");
+        assert!(routes(&invite).is_empty(), "{status}: the route is dropped");
+        assert_eq!(
+            header(&invite, HeaderName::Contact),
+            angled(PUBLIC_GRUU),
+            "{status}: the binding stands until it lapses, and so does its GRUU"
+        );
+    }
+}
+
+#[test]
+fn a_refresh_nobody_answered_keeps_the_service_route() {
+    // a timeout is no answer at all, and says nothing about the route
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let later = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(later);
+    transmits(&mut agent);
+    let failed = later + Duration::from_secs(32);
+    agent.handle_timeout(failed);
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Retrying)
+    );
+
+    agent
+        .call(id, &outgoing(), failed)
+        .expect("the INVITE goes");
+    let invite = only(&transmits(&mut agent), "INVITE ");
+    assert_eq!(routes(&invite).len(), 2);
+}
+
+#[test]
+fn an_anonymous_call_names_a_temporary_gruu_and_never_the_public_one() {
+    // RFC 5627 §3.3: "use one of its temporary GRUUs for anonymous calls, and
+    // use its public GRUU otherwise"
+    let privacy = HeaderName::Extension("Privacy");
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    agent
+        .call(id, &outgoing().header(privacy, b"id"), t0)
+        .expect("the INVITE goes");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::Contact),
+        angled(TEMPORARY_GRUU)
+    );
+    agent
+        .call(id, &outgoing().header(privacy, b"none"), t0)
+        .expect("the INVITE goes");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::Contact),
+        angled(PUBLIC_GRUU),
+        "none is not a request for privacy"
+    );
+
+    // a registrar that gave only the public one
+    let mut agent = self::agent(t0);
+    let id = agent.add_account(gruu_account());
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let public_only = reply(
+        &request,
+        200,
+        "OK",
+        &format!(
+            "Contact: <sip:alice@192.0.2.1>;pub-gruu=\"{PUBLIC_GRUU}\"\
+             ;+sip.instance=\"<{INSTANCE}>\";expires=3600\r\n"
+        ),
+    );
+    deliver(&mut agent, &public_only, t0);
+    events(&mut agent);
+    agent
+        .call(id, &outgoing().header(privacy, b"id"), t0)
+        .expect("the INVITE goes");
+    assert_eq!(
+        text(&sent(&mut agent), HeaderName::Contact),
+        CONFIGURED,
+        "the public GRUU names the address of record the call is hiding"
+    );
+}
+
+#[test]
+fn a_call_sent_somewhere_else_takes_neither_the_route_nor_the_gruu() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let elsewhere: SocketAddr = "192.0.2.200:5060".parse().expect("an address");
+    agent
+        .call(id, &outgoing().to_address(UDP, elsewhere), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(routes(&invite).is_empty());
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+
+    agent
+        .call(id, &outgoing().to_address(UDP, registrar()), t0)
+        .expect("the INVITE goes");
+    assert_eq!(
+        routes(&sent(&mut agent)).len(),
+        2,
+        "naming the address the account registers with is not somewhere else"
+    );
+}
+
+#[test]
+fn giving_the_binding_up_forgets_what_the_registrar_said_about_it() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent.unregister(id, t0).expect("the REGISTER goes");
+    let removal = sent(&mut agent);
+    deliver(&mut agent, &reply(&removal, 200, "OK", ""), t0);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Unregistered { .. }))
+    );
+    assert!(agent.registrar_info(id, t0).is_none());
+
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(routes(&invite).is_empty());
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn a_subscription_travels_the_service_route_and_refreshes_from_the_gruu() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:bob@example.com"), "presence"),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = sent(&mut agent);
+    assert_eq!(routes(&subscribe).len(), 2);
+    assert_eq!(header(&subscribe, HeaderName::Contact), angled(PUBLIC_GRUU));
+
+    deliver(
+        &mut agent,
+        &answered(&subscribe, 200, "OK", "notifier", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "presence",
+            "active;expires=600",
+            None,
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(590));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    // RFC 5627 §4.4: a target refresh names the GRUU too; the route is the
+    // dialog's own by now
+    assert_eq!(header(&refresh, HeaderName::Contact), angled(PUBLIC_GRUU));
+    assert!(routes(&refresh).is_empty());
+}
+
+#[test]
+fn a_restored_registration_carries_nothing_the_registrar_said() {
+    // RFC 5627 §4.2 discards the temporary GRUUs of another Call-ID, and a
+    // restored registration is not evidence of anything
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let snapshot = agent
+        .freeze_registration(id, t0)
+        .expect("a live binding is written down");
+    agent
+        .thaw_registration(id, &snapshot, Duration::ZERO, t0)
+        .expect("its own snapshot reads back");
+    assert!(agent.registrar_info(id, t0).is_none());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert!(routes(&invite).is_empty());
+    assert_eq!(text(&invite, HeaderName::Contact), CONFIGURED);
+}
+
+#[test]
+fn a_binding_granted_for_nothing_takes_its_gruus_with_it() {
+    // RFC 5627 §5.3: a contact that is removed loses its GRUUs with it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    let later = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(later);
+    let refresh = sent(&mut agent);
+    deliver(&mut agent, &granted(&refresh, 0), later);
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Failed)
+    );
+    assert!(agent.registrar_info(id, later).is_none());
+    agent.call(id, &outgoing(), later).expect("the INVITE goes");
+    assert_eq!(
+        text(
+            &only(&transmits(&mut agent), "INVITE "),
+            HeaderName::Contact
+        ),
+        CONFIGURED
+    );
+}
+
+#[test]
+fn a_registrar_that_says_more_than_is_carried_is_not_trusted() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    let hops = |count: usize| {
+        (1..=count)
+            .map(|n| format!("<sip:p{n}.example.com;lr>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let identities = |count: usize| {
+        (1..=count)
+            .map(|n| format!("<sip:alias{n}@example.com>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let saying = |request: &[u8], routes: usize, aliases: usize, user: usize| {
+        let gruu = format!("sip:{}@example.com;gr", "u".repeat(user));
+        reply(
+            request,
+            200,
+            "OK",
+            &format!(
+                "Service-Route: {}\r\n\
+                 Contact: <sip:alice@192.0.2.1>;+sip.instance=\"<{INSTANCE}>\";expires=3600\
+                 ;pub-gruu=\"{gruu}\"\r\n\
+                 P-Associated-URI: {}\r\n",
+                hops(routes),
+                identities(aliases)
+            ),
+        )
+    };
+
+    // one past every bound: nine hops, thirty-three identities, and a GRUU
+    // of 513 bytes
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    deliver(&mut agent, &saying(&request, 9, 33, 494), t0);
+    let info = registered_info(&mut agent).expect("the binding is still granted");
+    assert_eq!(
+        info.service_route().len(),
+        0,
+        "nine hops on every INVITE is not a route this stack carries"
+    );
+    assert!(
+        info.associated().is_empty(),
+        "thirty-three identities are more than are kept"
+    );
+    assert!(
+        info.public_gruu().is_none(),
+        "a GRUU longer than any registrar mints is not taken"
+    );
+
+    // and at every bound, all of it is kept
+    let later = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(later);
+    let refresh = sent(&mut agent);
+    deliver(&mut agent, &saying(&refresh, 8, 32, 493), later);
+    let info = registered_info(&mut agent).expect("the refresh is granted");
+    assert_eq!(info.service_route().len(), 8);
+    assert_eq!(info.associated().len(), 32);
+    assert_eq!(
+        info.public_gruu().map(|gruu| gruu.as_str().len()),
+        Some(512)
     );
 }
 
