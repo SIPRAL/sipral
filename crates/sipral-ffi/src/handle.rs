@@ -16,9 +16,10 @@
 //!
 //! # What the sixty-four bits are
 //!
-//! The low half says where and the high half says when. The bottom twenty-four
-//! bits are the slot; the eight above them are the tag of the stack the handle
-//! belongs to; the top thirty-two are the generation. Zero is never a
+//! The low half says where, and the high half says when and of what. The
+//! bottom twenty-four bits are the slot; the eight above them are the tag of
+//! the stack the handle belongs to; the four above that are the `Kind` of
+//! thing it names; the top twenty-eight are the generation. Zero is never a
 //! generation, so zero is never a handle, and neither is a handle that lost its
 //! top half on the way through a 32-bit variable: both are refused before a
 //! slot is looked at.
@@ -30,11 +31,27 @@
 //! handle used on a stack other than the one that minted it is refused before
 //! a slot is read.
 //!
-//! The generation keeps all thirty-two bits because a slot that is reused runs
-//! out of them: at ten calls a second through one slot, thirty-two bits last
-//! about thirteen and a half years, and twenty-four would last nineteen days.
-//! Twenty-four bits of slot is sixteen million live objects on one stack, and
-//! eight bits of tag is 256 live stacks in one process.
+//! The kind is there for the same reason one level down: the first stack of a
+//! process, its first account and its first call are *also* the same number —
+//! tag 0, slot 0, generation 1 — because each is the first entry of a table
+//! that starts counting at zero. Without the kind, `sipral_call_hangup(stack,
+//! stack, now)` reaches the account or the call sitting in slot zero, which
+//! answers `SIPRAL_STATUS_OK` for a hang-up that named no call at all. Every
+//! table mints with the one `Kind` it holds, and every lookup refuses a
+//! handle of a different kind before it looks at a slot, the same way it
+//! refuses a different tag.
+//!
+//! The generation lost four bits to the kind and kept the rest: at ten calls a
+//! second through one slot, twenty-eight bits last a little over three hundred
+//! and ten days, where the thirty-two this used to be gave thirteen and a half
+//! years. A slot that runs out is retired rather than wrapped — see
+//! `next_generation` — so the shorter span retires a slot after two hundred
+//! and sixty-eight million reuses rather than four billion, and buys back the
+//! four bits a kind cannot be checked without; it does not cost correctness,
+//! because a generation that cannot move on is never handed out again; there is
+//! no value it can wrap around to that would answer to an old handle. Twenty-four
+//! bits of slot is sixteen million live objects on one stack, and eight bits of
+//! tag is 256 live stacks in one process.
 //!
 //! # Where a tag comes from, and what happens when it comes back
 //!
@@ -89,12 +106,74 @@ pub(crate) const STACK_TAGS: usize = 256;
 
 const INDEX_BITS: u32 = 24;
 const TAG_SHIFT: u32 = INDEX_BITS;
-const GENERATION_SHIFT: u32 = 32;
+const KIND_SHIFT: u32 = TAG_SHIFT + 8;
+const KIND_BITS: u32 = 4;
+const GENERATION_SHIFT: u32 = KIND_SHIFT + KIND_BITS;
 const INDEX_MASK: u64 = (1 << INDEX_BITS) - 1;
 const TAG_MASK: u64 = 0xFF;
+const KIND_MASK: u64 = (1 << KIND_BITS) - 1;
 
 /// One past the last slot a handle has room to name.
 pub(crate) const INDEX_LIMIT: u32 = 1 << INDEX_BITS;
+
+/// One past the last generation a handle has room to name. A `join` asked for
+/// one at or past this would spill into the [`Kind`] above it, so it is
+/// refused there the same way a slot past [`INDEX_LIMIT`] is.
+pub(crate) const GENERATION_LIMIT: u32 = 1 << (32 - KIND_BITS);
+
+/// What sort of thing a handle names.
+///
+/// Carried in the handle itself rather than left to context, because two
+/// tables of one stack otherwise start counting from the same first slot: the
+/// first stack of a process, its first account and its first call are all
+/// slot zero, tag zero, generation one, and a caller that hands one where
+/// another is expected must be refused before a slot is ever read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// `sipral_stack_create`'s handle.
+    Stack,
+    /// `sipral_account_add`'s.
+    Account,
+    /// `sipral_call_place`'s and every other call handle.
+    Call,
+    /// `sipral_call_media`'s.
+    Media,
+}
+
+impl Kind {
+    const fn bits(self) -> u8 {
+        match self {
+            Self::Stack => 0,
+            Self::Account => 1,
+            Self::Call => 2,
+            Self::Media => 3,
+        }
+    }
+
+    /// The kind these four bits name, or none for a pattern no table mints —
+    /// which is most of them: four bits hold sixteen values and this library
+    /// has four kinds.
+    const fn from_bits(bits: u8) -> Option<Self> {
+        match bits {
+            0 => Some(Self::Stack),
+            1 => Some(Self::Account),
+            2 => Some(Self::Call),
+            3 => Some(Self::Media),
+            _ => None,
+        }
+    }
+
+    /// What to call one, for the sentence a caller reads when it handed over
+    /// the wrong one.
+    pub(crate) const fn noun(self) -> &'static str {
+        match self {
+            Self::Stack => "a stack",
+            Self::Account => "an account",
+            Self::Call => "a call",
+            Self::Media => "a call's media",
+        }
+    }
+}
 
 /// Why a handle names nothing where it was used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +184,9 @@ pub(crate) enum Refused {
     /// Minted by a stack other than the one it was used on: one that is
     /// alive, or one destroyed before this stack took its tag.
     OtherStack,
+    /// The right stack, but the wrong table: a handle of this [`Kind`] where
+    /// another was expected.
+    WrongKind(Kind),
     /// Minted here, and what it named is gone.
     Gone,
 }
@@ -113,7 +195,7 @@ impl Refused {
     /// The code C switches on.
     pub(crate) const fn status(self) -> SipralStatus {
         match self {
-            Self::NotOurs | Self::OtherStack => SipralStatus::InvalidHandle,
+            Self::NotOurs | Self::OtherStack | Self::WrongKind(_) => SipralStatus::InvalidHandle,
             Self::Gone => SipralStatus::StaleHandle,
         }
     }
@@ -125,28 +207,57 @@ pub(crate) struct Parts {
     pub(crate) tag: u8,
     pub(crate) index: u32,
     pub(crate) generation: u32,
+    pub(crate) kind: Kind,
 }
 
-/// Put a handle together, or refuse a slot it has no room to name.
+/// The generation after this one, or none if the slot has used up every one a
+/// handle has room to name.
+///
+/// A slot whose generation cannot move on is never offered back: nothing
+/// stops here to make room, because there is nothing correct to move it to.
+/// Wrapping to zero would make generation zero a live value, which
+/// [`FIRST_GENERATION`] exists to keep from ever being one; wrapping to one
+/// would answer to the very first handle this slot ever gave out. Retiring
+/// the slot instead means the reuse that ran out never happens: the slot sits
+/// unused for the rest of the process rather than lying to whoever holds the
+/// old handle.
+pub(crate) const fn next_generation(generation: u32) -> Option<u32> {
+    match generation.checked_add(1) {
+        Some(next) if next < GENERATION_LIMIT => Some(next),
+        _ => None,
+    }
+}
+
+/// Put a handle together, or refuse a slot or a generation it has no room to
+/// name.
 ///
 /// Every handle in the library is made here, so an index past the limit can
-/// never spill into the tag above it.
-pub(crate) fn join(tag: u8, index: u32, generation: u32) -> Result<SipralHandle, SipralStatus> {
-    if index >= INDEX_LIMIT {
+/// never spill into the tag above it, and a generation past its own limit can
+/// never spill into the kind above that.
+pub(crate) fn join(
+    tag: u8,
+    index: u32,
+    generation: u32,
+    kind: Kind,
+) -> Result<SipralHandle, SipralStatus> {
+    if index >= INDEX_LIMIT || generation >= GENERATION_LIMIT {
         return Err(SipralStatus::Exhausted);
     }
     Ok((u64::from(generation) << GENERATION_SHIFT)
+        | (u64::from(kind.bits()) << KIND_SHIFT)
         | (u64::from(tag) << TAG_SHIFT)
         | u64::from(index))
 }
 
-/// Take a handle apart, refusing one with no generation.
+/// Take a handle apart, refusing one with no generation or a kind no table
+/// here mints.
 pub(crate) fn split(handle: SipralHandle) -> Result<Parts, Refused> {
     // each field is masked to its width first, so none of the conversions can
     // fail; a failure is answered as a value nobody minted rather than
     // replaced with a stand-in that might be somebody's
-    let (Ok(generation), Ok(tag), Ok(index)) = (
+    let (Ok(generation), Ok(kind_bits), Ok(tag), Ok(index)) = (
         u32::try_from(handle >> GENERATION_SHIFT),
+        u8::try_from((handle >> KIND_SHIFT) & KIND_MASK),
         u8::try_from((handle >> TAG_SHIFT) & TAG_MASK),
         u32::try_from(handle & INDEX_MASK),
     ) else {
@@ -155,48 +266,62 @@ pub(crate) fn split(handle: SipralHandle) -> Result<Parts, Refused> {
     if generation < FIRST_GENERATION {
         return Err(Refused::NotOurs);
     }
+    let Some(kind) = Kind::from_bits(kind_bits) else {
+        return Err(Refused::NotOurs);
+    };
     Ok(Parts {
         tag,
         index,
         generation,
+        kind,
     })
 }
 
-/// What one stack's tables mint with: its tag, the generation its slots start
-/// at, and the highest generation any of them has put in a handle so far.
+/// What one table of one stack mints with: the [`Kind`] it names, and a share
+/// of that stack's lease on its tag.
 ///
-/// Each table of the stack holds a copy, and all of them share the one high
-/// mark, which is what the tag carries forward when it is given back.
-#[derive(Clone, Debug)]
+/// The share is what makes a handle minted under a tag that has been given
+/// back impossible rather than merely unlikely: the tag goes back to
+/// [`StackTags`] when the last share of the lease does, so a mint kept past its
+/// [`StackTag`] — in a table that outlives its stack, or anywhere else — keeps
+/// the tag from being handed to another stack for as long as it can still
+/// mint with it. Every table of one stack shares the one high mark on the
+/// lease, which is what the tag carries forward when it is given back.
 pub(crate) struct Mint {
-    tag: u8,
-    first: u32,
-    highest: Arc<AtomicU32>,
+    kind: Kind,
+    lease: Arc<Lease>,
 }
 
 impl Mint {
     /// The generation a new slot starts at.
-    pub(crate) const fn first(&self) -> u32 {
-        self.first
+    pub(crate) fn first(&self) -> u32 {
+        self.lease.first
     }
 
     /// A handle for a slot of this stack's, remembered as minted.
     pub(crate) fn join(&self, index: u32, generation: u32) -> Result<SipralHandle, SipralStatus> {
-        let handle = join(self.tag, index, generation)?;
+        let handle = join(self.lease.tag, index, generation, self.kind)?;
         // every table of a stack is behind that stack's lock, so this is never
         // raced; the atomic is what lets the tables and the tag share it
-        self.highest.fetch_max(generation, Ordering::Relaxed);
+        self.lease.highest.fetch_max(generation, Ordering::Relaxed);
         Ok(handle)
     }
 
-    /// Take a handle apart, refusing one this stack cannot have minted.
+    /// Take a handle apart, refusing one this table's kind or this stack
+    /// cannot have minted.
     ///
-    /// A tag that is not this stack's is another stack's handle. A tag that is
-    /// this stack's with a generation below the first this stack mints is a
-    /// handle from the stack that held the tag before it.
+    /// The kind is checked first: a handle of another kind is not this
+    /// stack's business to say whether it is stale or another stack's, it
+    /// simply is not one of these. A tag that is not this stack's is another
+    /// stack's handle. A tag that is this stack's with a generation below the
+    /// first this stack mints is a handle from the stack that held the tag
+    /// before it.
     pub(crate) fn split(&self, handle: SipralHandle) -> Result<Parts, Refused> {
         let parts = split(handle)?;
-        if parts.tag != self.tag || parts.generation < self.first {
+        if parts.kind != self.kind {
+            return Err(Refused::WrongKind(parts.kind));
+        }
+        if parts.tag != self.lease.tag || parts.generation < self.lease.first {
             return Err(Refused::OtherStack);
         }
         Ok(parts)
@@ -246,12 +371,12 @@ impl StackTags {
             return Err(SipralStatus::Exhausted);
         };
         Ok(StackTag {
-            tags: self,
-            mint: Mint {
+            lease: Arc::new(Lease {
+                tags: self,
                 tag,
                 first,
-                highest: Arc::new(AtomicU32::new(first.saturating_sub(1))),
-            },
+                highest: AtomicU32::new(first.saturating_sub(1)),
+            }),
         })
     }
 
@@ -268,29 +393,47 @@ impl StackTags {
     }
 }
 
+/// One stack's hold on its tag: the tag, the generation its slots start at, and
+/// the highest generation any table of the stack has put in a handle so far.
+///
+/// Shared between the [`StackTag`] and every [`Mint`] taken from it, and the
+/// tag is given back only when the last of those goes.
+struct Lease {
+    tags: &'static StackTags,
+    tag: u8,
+    first: u32,
+    highest: AtomicU32,
+}
+
+impl Drop for Lease {
+    /// Give the tag back, carrying past everything this stack minted.
+    fn drop(&mut self) {
+        let next = next_generation(self.highest.load(Ordering::Relaxed));
+        self.tags.give_back(self.tag, next);
+    }
+}
+
 /// One stack's tag, held for as long as the stack is.
 pub(crate) struct StackTag {
-    tags: &'static StackTags,
-    mint: Mint,
+    lease: Arc<Lease>,
 }
 
 impl StackTag {
     /// The byte every handle this stack mints carries.
-    pub(crate) const fn tag(&self) -> u8 {
-        self.mint.tag
+    pub(crate) fn tag(&self) -> u8 {
+        self.lease.tag
     }
 
-    /// What a table of this stack's mints with.
-    pub(crate) fn mint(&self) -> Mint {
-        self.mint.clone()
-    }
-}
-
-impl Drop for StackTag {
-    /// Give the tag back, carrying past everything this stack minted.
-    fn drop(&mut self) {
-        let next = self.mint.highest.load(Ordering::Relaxed).checked_add(1);
-        self.tags.give_back(self.mint.tag, next);
+    /// A mint for one [`Kind`] of thing this stack names.
+    ///
+    /// It holds a share of this stack's lease rather than a copy of the tag,
+    /// so it cannot outlive the tag it mints with: while it exists the tag is
+    /// not given to another stack, whatever became of this one.
+    pub(crate) fn mint(&self, kind: Kind) -> Mint {
+        Mint {
+            kind,
+            lease: Arc::clone(&self.lease),
+        }
     }
 }
 
@@ -326,14 +469,19 @@ struct Inner<T> {
 ///
 /// A slot's generation here never starts over, so a tag coming back to a new
 /// stack does not bring an old handle in this table back to life; the tag is
-/// kept with the slot so that a handle whose tag was altered is not taken.
+/// kept with the slot so that a handle whose tag was altered is not taken. The
+/// [`Kind`] is the table's own rather than the slot's — every handle this
+/// table ever mints is the same kind — so it is checked once per call, before
+/// a slot is ever read, rather than stored per slot beside the tag.
 pub(crate) struct HandleTable<T> {
+    kind: Kind,
     inner: Mutex<Inner<T>>,
 }
 
 impl<T> HandleTable<T> {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn new(kind: Kind) -> Self {
         Self {
+            kind,
             inner: Mutex::new(Inner {
                 slots: Vec::new(),
                 free: Vec::new(),
@@ -350,7 +498,7 @@ impl<T> HandleTable<T> {
             let Some(slot) = inner.slots.get_mut(index as usize) else {
                 return Err(SipralStatus::Exhausted);
             };
-            let handle = join(tag, index, slot.generation)?;
+            let handle = join(tag, index, slot.generation, self.kind)?;
             slot.tag = tag;
             slot.value = Some(value);
             return Ok(handle);
@@ -358,7 +506,7 @@ impl<T> HandleTable<T> {
         let Ok(index) = u32::try_from(inner.slots.len()) else {
             return Err(SipralStatus::Exhausted);
         };
-        let handle = join(tag, index, FIRST_GENERATION)?;
+        let handle = join(tag, index, FIRST_GENERATION, self.kind)?;
         inner.slots.push(Slot {
             generation: FIRST_GENERATION,
             tag,
@@ -375,6 +523,9 @@ impl<T> HandleTable<T> {
     /// a free that arrives during that call takes effect at the end of it.
     pub(crate) fn get(&self, handle: SipralHandle) -> Result<Arc<T>, Refused> {
         let parts = split(handle)?;
+        if parts.kind != self.kind {
+            return Err(Refused::WrongKind(parts.kind));
+        }
         let inner = self.lock();
         let Some(slot) = inner.slots.get(parts.index as usize) else {
             return Err(Refused::NotOurs);
@@ -392,6 +543,9 @@ impl<T> HandleTable<T> {
     /// after this returns.
     pub(crate) fn remove(&self, handle: SipralHandle) -> Result<Arc<T>, Refused> {
         let parts = split(handle)?;
+        if parts.kind != self.kind {
+            return Err(Refused::WrongKind(parts.kind));
+        }
         let mut inner = self.lock();
         let (value, reusable) = {
             let Some(slot) = inner.slots.get_mut(parts.index as usize) else {
@@ -401,7 +555,7 @@ impl<T> HandleTable<T> {
             let Some(value) = slot.value.take() else {
                 return Err(Refused::Gone);
             };
-            match slot.generation.checked_add(1) {
+            match next_generation(slot.generation) {
                 Some(next) => {
                     slot.generation = next;
                     (value, true)
@@ -435,8 +589,8 @@ impl<T> HandleTable<T> {
     }
 
     /// Move a slot to a chosen generation. Only a test needs this: it is how
-    /// the last generation a slot can have is reached without freeing it four
-    /// billion times.
+    /// the last generation a slot can have is reached without freeing it that
+    /// many times over.
     fn force_generation(&self, index: u32, generation: u32) {
         let mut inner = self.lock();
         if let Some(slot) = inner.slots.get_mut(index as usize) {
@@ -456,23 +610,27 @@ impl<T> HandleTable<T> {
 #[cfg(test)]
 impl StackTag {
     /// Say that this stack has minted up to `generation`, without minting
-    /// four billion handles to get there.
+    /// that many handles to get there.
     pub(crate) fn force_highest(&self, generation: u32) {
-        self.mint.highest.store(generation, Ordering::Relaxed);
+        self.lease.highest.store(generation, Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FIRST_GENERATION, HandleTable, INDEX_LIMIT, Parts, Refused, SIPRAL_HANDLE_NONE, STACK_TAGS,
-        StackTags, join, split,
+        FIRST_GENERATION, GENERATION_LIMIT, HandleTable, INDEX_LIMIT, Kind, Parts, Refused,
+        SIPRAL_HANDLE_NONE, STACK_TAGS, StackTags, join, split,
     };
     use crate::status::SipralStatus;
     use std::sync::Arc;
 
+    /// The kind every generic test below mints, since none of them is about
+    /// telling kinds apart — that is what the tests further down do.
+    const KIND: Kind = Kind::Call;
+
     fn table() -> HandleTable<u32> {
-        HandleTable::new()
+        HandleTable::new(KIND)
     }
 
     #[test]
@@ -525,32 +683,58 @@ mod tests {
     }
 
     #[test]
-    fn the_three_parts_come_back_out_as_they_went_in() {
-        let widest = join(u8::MAX, INDEX_LIMIT - 1, u32::MAX).expect("every part fits");
+    fn the_four_parts_come_back_out_as_they_went_in() {
+        let widest = join(u8::MAX, INDEX_LIMIT - 1, GENERATION_LIMIT - 1, Kind::Media)
+            .expect("every part fits");
         assert_eq!(
             split(widest),
             Ok(Parts {
                 tag: u8::MAX,
                 index: INDEX_LIMIT - 1,
-                generation: u32::MAX,
+                generation: GENERATION_LIMIT - 1,
+                kind: Kind::Media,
             })
         );
-        let plain = join(1, 2, 3).expect("every part fits");
+        let plain = join(1, 2, 3, Kind::Account).expect("every part fits");
         assert_eq!(
             split(plain),
             Ok(Parts {
                 tag: 1,
                 index: 2,
                 generation: 3,
+                kind: Kind::Account,
             })
         );
     }
 
     #[test]
+    fn every_kind_round_trips_through_a_handle() {
+        for kind in [Kind::Stack, Kind::Account, Kind::Call, Kind::Media] {
+            let handle = join(0, 0, FIRST_GENERATION, kind).expect("fits");
+            assert_eq!(split(handle).map(|parts| parts.kind), Ok(kind));
+        }
+    }
+
+    #[test]
     fn a_slot_past_what_a_handle_can_name_is_refused_rather_than_spilled_into_the_tag() {
         assert_eq!(
-            join(0, INDEX_LIMIT, FIRST_GENERATION),
+            join(0, INDEX_LIMIT, FIRST_GENERATION, KIND),
             Err(SipralStatus::Exhausted)
+        );
+    }
+
+    #[test]
+    fn a_generation_past_what_a_handle_can_name_is_refused_rather_than_spilled_into_the_kind() {
+        assert_eq!(
+            join(0, 0, GENERATION_LIMIT, KIND),
+            Err(SipralStatus::Exhausted),
+            "this generation's bottom bit is the kind's own bit zero"
+        );
+        let widest = join(0, 0, GENERATION_LIMIT - 1, Kind::Stack).expect("the last one fits");
+        assert_eq!(
+            split(widest).map(|parts| parts.kind),
+            Ok(Kind::Stack),
+            "one below the limit does not touch the kind above it"
         );
     }
 
@@ -558,7 +742,7 @@ mod tests {
     fn an_index_that_was_never_allocated_is_not_a_handle() {
         let table = table();
         table.insert(0, 1).expect("room for one");
-        let invented = join(0, 7, FIRST_GENERATION).expect("fits");
+        let invented = join(0, 7, FIRST_GENERATION, KIND).expect("fits");
         assert_eq!(table.get(invented).err(), Some(Refused::NotOurs));
     }
 
@@ -567,10 +751,44 @@ mod tests {
         let table = table();
         let handle = table.insert(4, 1).expect("room for one");
         let parts = split(handle).expect("a handle");
-        let altered = join(5, parts.index, parts.generation).expect("fits");
+        let altered = join(5, parts.index, parts.generation, parts.kind).expect("fits");
         assert_eq!(table.get(altered).err(), Some(Refused::NotOurs));
         assert_eq!(table.remove(altered).err(), Some(Refused::NotOurs));
         assert_eq!(*table.get(handle).expect("untouched"), 1);
+    }
+
+    #[test]
+    fn a_handle_of_another_kind_is_refused_before_a_slot_is_looked_at() {
+        // a stack table and a call table both mint their first handle from
+        // tag zero, slot zero, generation one -- the exact collision this
+        // kind bit exists to end
+        let stacks: HandleTable<u32> = HandleTable::new(Kind::Stack);
+        let calls: HandleTable<u32> = HandleTable::new(Kind::Call);
+        let stack_handle = stacks.insert(0, 100).expect("room");
+        let call_handle = calls.insert(0, 200).expect("room");
+        let stack_parts = split(stack_handle).expect("a handle");
+        let call_parts = split(call_handle).expect("a handle");
+        assert_eq!(
+            (stack_parts.tag, stack_parts.index, stack_parts.generation),
+            (call_parts.tag, call_parts.index, call_parts.generation),
+            "both tables started at the same slot, or this proves nothing"
+        );
+        assert_ne!(
+            stack_handle, call_handle,
+            "the kind is what tells them apart now that everything else matches"
+        );
+
+        assert_eq!(
+            calls.get(stack_handle).err(),
+            Some(Refused::WrongKind(Kind::Stack)),
+            "a stack handle names no call, whatever slot it shares"
+        );
+        assert_eq!(
+            stacks.get(call_handle).err(),
+            Some(Refused::WrongKind(Kind::Call))
+        );
+        assert_eq!(*stacks.get(stack_handle).expect("its own kind"), 100);
+        assert_eq!(*calls.get(call_handle).expect("its own kind"), 200);
     }
 
     #[test]
@@ -626,8 +844,8 @@ mod tests {
     fn a_generation_that_cannot_move_retires_the_slot() {
         let table = table();
         let handle = table.insert(0, 1).expect("room");
-        table.force_generation(0, u32::MAX);
-        let last = join(0, 0, u32::MAX).expect("fits");
+        table.force_generation(0, GENERATION_LIMIT - 1);
+        let last = join(0, 0, GENERATION_LIMIT - 1, KIND).expect("fits");
         table.remove(last).expect("the last generation still frees");
         assert_eq!(table.free_count(), 0, "a spent slot is not offered again");
         let next = table.insert(0, 2).expect("room");
@@ -662,7 +880,7 @@ mod tests {
 
     #[test]
     fn two_threads_can_hold_handles_from_the_same_table() {
-        static TABLE: HandleTable<u32> = HandleTable::new();
+        static TABLE: HandleTable<u32> = HandleTable::new(KIND);
         let first = TABLE.insert(0, 1).expect("room");
         let worker = std::thread::spawn(|| {
             let second = TABLE.insert(0, 2).expect("room");
@@ -683,7 +901,7 @@ mod tests {
         let first = TAGS.lease().expect("room");
         let second = TAGS.lease().expect("room");
         assert_eq!((first.tag(), second.tag()), (0, 1));
-        assert_eq!(first.mint().first(), FIRST_GENERATION);
+        assert_eq!(first.mint(KIND).first(), FIRST_GENERATION);
         drop(first);
         let again = TAGS.lease().expect("room");
         assert_eq!(again.tag(), 0, "the tag given back is the lowest free");
@@ -708,16 +926,16 @@ mod tests {
     fn a_tag_given_back_starts_its_next_stack_past_everything_the_last_one_minted() {
         static TAGS: StackTags = StackTags::new();
         let before = TAGS.lease().expect("room");
-        let mint = before.mint();
+        let mint = before.mint(KIND);
         let early = mint.join(0, FIRST_GENERATION).expect("fits");
         let late = mint.join(3, 41).expect("fits");
-        drop(before);
+        drop((mint, before));
 
         let after = TAGS.lease().expect("room");
         assert_eq!(after.tag(), 0, "the same tag");
-        assert_eq!(after.mint().first(), 42);
+        assert_eq!(after.mint(KIND).first(), 42);
         for kept in [early, late] {
-            assert_eq!(after.mint().split(kept), Err(Refused::OtherStack));
+            assert_eq!(after.mint(KIND).split(kept), Err(Refused::OtherStack));
         }
     }
 
@@ -727,14 +945,14 @@ mod tests {
         let idle = TAGS.lease().expect("room");
         drop(idle);
         let next = TAGS.lease().expect("room");
-        assert_eq!(next.mint().first(), FIRST_GENERATION);
+        assert_eq!(next.mint(KIND).first(), FIRST_GENERATION);
     }
 
     #[test]
     fn a_tag_whose_generations_are_used_up_is_never_offered_again() {
         static TAGS: StackTags = StackTags::new();
         let worn = TAGS.lease().expect("room");
-        worn.force_highest(u32::MAX);
+        worn.force_highest(GENERATION_LIMIT - 1);
         drop(worn);
         let next = TAGS.lease().expect("room");
         assert_eq!(next.tag(), 1, "tag 0 is spent");
@@ -747,19 +965,64 @@ mod tests {
         static TAGS: StackTags = StackTags::new();
         let one = TAGS.lease().expect("room");
         let other = TAGS.lease().expect("room");
-        let handle = one.mint().join(0, FIRST_GENERATION).expect("fits");
+        let handle = one.mint(KIND).join(0, FIRST_GENERATION).expect("fits");
         assert_eq!(
-            other.mint().split(handle),
+            other.mint(KIND).split(handle),
             Err(Refused::OtherStack),
             "the same slot and generation, on another tag"
         );
-        assert!(one.mint().split(handle).is_ok());
+        assert!(one.mint(KIND).split(handle).is_ok());
+    }
+
+    #[test]
+    fn a_mint_refuses_a_handle_of_another_kind_before_it_asks_whose_stack_minted_it() {
+        static TAGS: StackTags = StackTags::new();
+        let stack = TAGS.lease().expect("room");
+        let accounts = stack.mint(Kind::Account);
+        let calls = stack.mint(Kind::Call);
+        let account = accounts.join(0, FIRST_GENERATION).expect("fits");
+        assert_eq!(
+            calls.split(account),
+            Err(Refused::WrongKind(Kind::Account)),
+            "the same tag and the same slot, and still not a call"
+        );
+        assert!(accounts.split(account).is_ok());
     }
 
     #[test]
     fn a_refusal_is_the_status_its_kind_of_failure_has_always_been() {
         assert_eq!(Refused::NotOurs.status(), SipralStatus::InvalidHandle);
         assert_eq!(Refused::OtherStack.status(), SipralStatus::InvalidHandle);
+        assert_eq!(
+            Refused::WrongKind(Kind::Stack).status(),
+            SipralStatus::InvalidHandle
+        );
         assert_eq!(Refused::Gone.status(), SipralStatus::StaleHandle);
+    }
+
+    /// A mint that outlives the stack it was taken from keeps that stack's tag
+    /// out of the hands of the next one, so nothing it can still mint is ever
+    /// a handle another stack would take for its own.
+    #[test]
+    fn a_tag_is_not_given_to_another_stack_while_a_mint_of_it_is_alive() {
+        static TAGS: StackTags = StackTags::new();
+        let gone = TAGS.lease().expect("room");
+        let kept = gone.mint(KIND);
+        drop(gone);
+        let taken = TAGS.lease().expect("room");
+        let late = kept.join(0, kept.first()).expect("fits");
+        assert_eq!(
+            taken.mint(KIND).split(late),
+            Err(Refused::OtherStack),
+            "a handle minted after its stack was gone answers to the stack that took the tag"
+        );
+        drop(kept);
+        drop(taken);
+        let again = TAGS.lease().expect("room");
+        assert_eq!(
+            again.tag(),
+            0,
+            "the tag comes back once the last mint is gone"
+        );
     }
 }

@@ -113,6 +113,23 @@ Rules for the ABI:
   from the one that polls, and a reading a millisecond behind the last poll is
   not a caller bug.
 
+  Signalling makes a smaller version of the same allowance rather than none at
+  all. It *is* checked against the stack's own clock — `sipral_stack_poll` and
+  every other entry point that takes `now_ms` still refuse a caller whose
+  reading has gone backwards — but signalling may be called from any thread,
+  and two threads reading the same clock a moment apart do not agree to the
+  millisecond any more than a media thread and the poll thread do. So a
+  `now_ms` up to fifty milliseconds behind the last one this stack saw is
+  honoured rather than refused, and only a jump further back than that is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`. Honouring one never moves the clock
+  backward to it: the stack's high-water mark only ever advances, so a
+  fifty-millisecond straggler from one thread cannot make a second thread's
+  later, larger reading look like a jump forward it was not. And the clock
+  moves only once the call it was read for has actually gone through — a
+  refusal for an unrelated reason, a stale handle or a bad argument, leaves the
+  clock exactly where it was, because validating `now_ms` and committing it are
+  two separate steps in `crates/sipral-ffi/src/stack.rs`.
+
   **Why a handle, and not a lock per session found through the stack.**
   Finding the session through `stack` and `call` means taking the stack's lock
   on every frame, however briefly, and a frame that can meet the stack's lock
@@ -173,15 +190,17 @@ Rules for the ABI:
 ## Handles
 
 A handle is sixty-four bits naming one thing the library owns: a stack, an
-account, a call. A caller reads nothing out of it. The layout is written down
-for the person reading a log line or a crash dump, and for whoever adds a table.
+account, a call, a call's media. A caller reads nothing out of it. The layout
+is written down for the person reading a log line or a crash dump, and for
+whoever adds a table.
 
 - **The layout.** The low twenty-four bits are the slot, the eight above them
-  are the tag of the stack the handle belongs to, and the top thirty-two are the
-  slot's generation. Zero is never a generation, so zero is never a handle, and
-  a handle that lost its top half in a 32-bit variable is refused before a slot
-  is read — rather than working for the first call on the first stack and
-  failing for every other.
+  are the tag of the stack the handle belongs to, the four above that are the
+  kind of thing it names, and the top twenty-eight are the slot's generation.
+  Zero is never a generation, so zero is never a handle, and a handle that lost
+  its top half in a 32-bit variable is refused before a slot is read — rather
+  than working for the first call on the first stack and failing for every
+  other.
 - **A handle names something only on the stack that minted it.** Every stack
   numbers its accounts and its calls from the same first slot, so before the tag
   the first call on one stack and the first call on a second were the same
@@ -189,16 +208,37 @@ for the person reading a log line or a crash dump, and for whoever adds a table.
   answered `SIPRAL_STATUS_OK`. An account or call handle used with any other
   stack is now `SIPRAL_STATUS_INVALID_HANDLE`, and the last error says it was
   minted by another stack. The tag is checked where a stack's tables look a
-  handle up, `crates/sipral-ffi/src/names.rs`, and every handle of every kind is
-  put together by one function in `crates/sipral-ffi/src/handle.rs` that takes
-  it, so a table added later cannot mint without one.
-- **The widths.** The generation keeps all thirty-two bits because a slot that is
-  reused runs out of them: ten calls a second through one slot last about
-  thirteen and a half years on thirty-two bits, and nineteen days on
-  twenty-four. Twenty-four bits of slot is sixteen million live objects on one
-  stack. Eight bits of tag is 256 stacks alive in one process, and that is the
-  limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and writes
-  no handle.
+  handle up, `crates/sipral-ffi/src/names.rs`.
+- **A handle names something of the kind it was asked for.** The tag alone was
+  not the whole of the collision: every table starts its own slots at zero and
+  its own generation at one, so on the first stack of a process the stack
+  itself, its first account and its first call were *also* the same
+  number — tag 0, slot 0, generation 1 — and `sipral_call_hangup(stack, stack,
+  now)` reached whichever of the three sat in that slot, most often the account
+  or the call, and answered `SIPRAL_STATUS_OK` for a hang-up that named no call
+  at all. The four bits of kind are what a handle now carries to say which
+  table it came from — a stack, an account, a call, or a call's media — and
+  every lookup refuses a handle of another kind with
+  `SIPRAL_STATUS_INVALID_HANDLE` before it looks at a slot, naming the kind it
+  actually got. Every handle of every kind, tag included, is put together by one
+  function in `crates/sipral-ffi/src/handle.rs` that takes both, so a table
+  added later cannot mint without either.
+- **The widths.** Twenty-four bits of slot is sixteen million live objects on
+  one stack. Eight bits of tag is 256 stacks alive in one process, and that is
+  the limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and
+  writes no handle. Four bits of kind is sixteen values for the four this
+  library mints; a fifth kind is still eleven away. What is left for the
+  generation is twenty-eight bits rather than the thirty-two a handle with no
+  kind could give it: ten calls a second through one slot ran for about
+  thirteen and a half years on thirty-two bits and runs about three hundred and
+  ten days on twenty-eight. A generation that reaches the limit is retired rather
+  than wrapped: nothing here recycles it, because the only two values a wrap
+  could land on are zero, which is not a generation, and the first generation
+  the slot ever had, which would make its very first handle look live again.
+  Retiring the slot instead of wrapping it is what makes a spilled generation
+  merely wasteful rather than a handle answering to the wrong kind of thing —
+  `join` refuses one at or past the limit outright, so it can never reach into
+  the kind above it in the first place.
 - **A tag is given back when the stack is gone, not when it is destroyed.** A
   stack takes the lowest free tag when it is created. It gives it back when the
   last share of it goes: inside `sipral_stack_destroy` for a stack nothing is
@@ -212,11 +252,20 @@ for the person reading a log line or a crash dump, and for whoever adds a table.
   from the destroyed stack carries the new stack's tag and a generation below
   anything the new stack mints, so it is refused the same way, in the same
   words, as a handle from a stack that is alive. A tag whose generations the
-  stacks holding it have used up between them — four billion reuses of one slot
-  — is not offered again, and the limit is one stack lower from then on.
+  stacks holding it have used up between them — the limit above, reused between
+  them — is not offered again, and the limit is one stack lower from then on.
 - A stack's own handle lives in one table for the whole process, whose
   generations never start over, so the handle of a destroyed stack is
   `SIPRAL_STATUS_STALE_HANDLE` even once another stack carries its tag.
+- **A mint cannot outlive the tag it mints with.** What puts a tag, a kind and
+  the generation high mark together for one table is `Mint`, and it holds a
+  share of its stack's lease on the tag rather than a copy of the tag's byte.
+  The tag is given back only when the last share goes — the stack's own and
+  every mint taken from it — so a mint kept somewhere that outlives its stack
+  keeps the tag from going to another stack for as long as it could still mint
+  with it, and no handle is ever minted under a tag another stack holds. Every
+  mint in the library today lives inside the stack whose tag it shares and goes
+  with it, so the tag is given back at the same moment as before.
 
 ## Signalling across the boundary
 

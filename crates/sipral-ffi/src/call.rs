@@ -1031,10 +1031,13 @@ pub(crate) mod tests {
         sipral_call_reject_session, sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf,
         sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
-    use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
+    use crate::account::{
+        SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
+    };
     use crate::error::last_error_text;
     use crate::event::{SipralCallState, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags, split};
+    use crate::media::{sipral_call_media, sipral_media_release};
     use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
     use crate::stack::{sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
@@ -2471,6 +2474,101 @@ Content-Length: 0\r\n\r\n";
             assert_eq!(status, SipralStatus::InvalidHandle);
         }
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The size is checked before either handle is even looked up: a stack
+    /// that was never created and a call config too short to be any version
+    /// of this one both fail, and the size is the one this answers with — for
+    /// a call placed on an account and for a consultation leg of a call alike.
+    #[test]
+    fn a_call_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle() {
+        let mut config = call_config();
+        config.size = crate::versioned::min_size::CALL_CONFIG - 1;
+        let (placed, _) = place(SIPRAL_HANDLE_NONE, SIPRAL_HANDLE_NONE, &config, 0);
+        assert_eq!(
+            placed,
+            SipralStatus::UnsupportedVersion,
+            "sipral_call_place"
+        );
+        let mut consultation = SIPRAL_HANDLE_NONE;
+        let consulted = unsafe {
+            sipral_call_consult(
+                SIPRAL_HANDLE_NONE,
+                SIPRAL_HANDLE_NONE,
+                ptr::from_ref(&config),
+                &raw mut consultation,
+                0,
+            )
+        };
+        assert_eq!(
+            consulted,
+            SipralStatus::UnsupportedVersion,
+            "sipral_call_consult"
+        );
+    }
+
+    /// The collision 8.4.17 exists to close: on the first stack of a
+    /// process, its first account, its first call and its first media handle
+    /// are all tag zero, slot zero, generation one, and every lookup here
+    /// used to tell them apart only by which table happened to be asked. A
+    /// handle of any other kind is now `SIPRAL_STATUS_INVALID_HANDLE`
+    /// wherever one kind is expected — including
+    /// `sipral_call_hangup(stack, stack, now)`, the exact call this test is
+    /// named for.
+    #[test]
+    fn a_handle_of_the_wrong_kind_is_invalid_handle_wherever_it_is_offered() {
+        let mut observed = Observed::default();
+        let (stack_handle, call) = media_call(&mut observed);
+        // a second account of this stack's, so a wrong-kind check can be
+        // proven without disturbing the one the call was placed on
+        let account = account_on(stack_handle);
+        let mut media = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_media(stack_handle, call, &raw mut media) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+
+        // sipral_call_hangup(stack, stack, now): a call was expected
+        for wrong in [stack_handle, account, media] {
+            assert_eq!(
+                unsafe { sipral_call_hangup(stack_handle, wrong, 2_000) },
+                SipralStatus::InvalidHandle,
+                "{wrong:#018x} is not a call"
+            );
+        }
+        // an account was expected
+        for wrong in [stack_handle, call, media] {
+            assert_eq!(
+                unsafe { sipral_account_remove(stack_handle, wrong) },
+                SipralStatus::InvalidHandle,
+                "{wrong:#018x} is not an account"
+            );
+        }
+        // media was expected — reached by its own handle, with no stack to
+        // resolve first, so this is the table's own kind check alone
+        for wrong in [stack_handle, account, call] {
+            assert_eq!(
+                unsafe { sipral_media_release(wrong) },
+                SipralStatus::InvalidHandle,
+                "{wrong:#018x} is not a call's media"
+            );
+        }
+        // a stack was expected
+        for wrong in [account, call, media] {
+            assert_eq!(
+                unsafe { sipral_stack_destroy(wrong) },
+                SipralStatus::InvalidHandle,
+                "{wrong:#018x} is not a stack"
+            );
+        }
+
+        hangup(stack_handle, call, 2_000);
+        assert_eq!(
+            unsafe { sipral_stack_destroy(stack_handle) },
+            SipralStatus::Ok
+        );
     }
 
     // -- header fields -------------------------------------------------------

@@ -1619,6 +1619,21 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The size is checked before the handle is even looked up: a stack that
+    /// was never created and a transmit struct too short to be any version of
+    /// this one both fail, and the size is the one this answers with.
+    #[test]
+    fn a_transmit_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut buffers = Buffers::new();
+        let mut transmit = buffers.transmit();
+        transmit.size = crate::versioned::min_size::TRANSMIT - 1;
+        assert_eq!(
+            unsafe { sipral_stack_poll_transmit(SIPRAL_HANDLE_NONE, &raw mut transmit) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
     #[test]
     fn stream_bytes_on_a_datagram_transport_are_refused_and_the_other_way_round() {
         let mut observed = Observed::default();

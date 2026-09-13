@@ -12,6 +12,46 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A stack handle could reach a call, an account or a call's media through
+  `sipral_call_hangup`, `sipral_account_remove`, `sipral_media_release` and
+  every other entry point that names one of those, because the first stack of
+  a process, its first account and its first call were tag 0, slot 0,
+  generation 1 alike.** Every table numbered its own slots and its own
+  generations from the same start, and the tag alone told two stacks apart, not
+  two kinds of thing on the same stack. A handle now carries a four-bit kind —
+  a stack, an account, a call, or a call's media — set once by the one function
+  in `crates/sipral-ffi/src/handle.rs` that assembles every handle, and every
+  lookup refuses a handle of another kind with `SIPRAL_STATUS_INVALID_HANDLE`
+  before it looks at a slot, naming the kind it actually got. The generation
+  gave up four of its thirty-two bits to make room and is retired rather than
+  wrapped when it runs out, the same as before, in a stack's account and call
+  tables as in the process-wide ones. What a stack's tables mint with holds a
+  share of that stack's lease on its tag, so the tag is never given to another
+  stack while anything that could still mint with it exists.
+
+- **A media entry point's declared struct size was checked after the handle
+  it was named through had already been resolved**, in `sipral_media_info` and
+  `sipral_media_statistics`, and the same was true of the stack handle in
+  `sipral_stack_settings`, `sipral_stack_counters` and `sipral_stack_poll`'s
+  `result`, although each one's own comment said the size came first. A caller
+  whose handle was stale or simply invalid never reached the size check at
+  all, so a struct one version behind this build's — the case the size exists
+  to answer — was reported as a bad handle instead of
+  `SIPRAL_STATUS_UNSUPPORTED_VERSION`. The size is now checked before any
+  handle in the same call is looked up, in all five.
+
+- **A signalling call that failed for a reason that had nothing to do with
+  time still moved the stack's clock**, because `now_ms` was written down
+  before the rest of the call was validated. A refusal for a stale handle or a
+  bad argument now leaves the clock exactly where it was: validating `now_ms`
+  and committing it to the stack are two separate steps, and the second only
+  runs once the call it was read for has actually gone through. Signalling
+  also now tolerates a `now_ms` up to fifty milliseconds behind the last one a
+  stack saw rather than refusing any backward step at all — it may be called
+  from any thread, and two of them reading the same clock a moment apart is
+  not the caller losing track of time — while a media entry point, which never
+  checked against the stack's clock in the first place, is unaffected.
+
 - **A call kept naming a GRUU after the registration that issued it had
   lapsed.** The `Contact` of a re-INVITE, a session-timer `UPDATE`, a REFER and
   a NOTIFY was the one the dialog opened with, fixed for the life of the call;

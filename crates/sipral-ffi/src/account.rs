@@ -917,6 +917,20 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The size is checked before the handle is even looked up: a stack that
+    /// was never created and a config too short to be any version of this one
+    /// both fail, and the size is the one this answers with.
+    #[test]
+    fn an_account_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut config = account_config();
+        config.size = crate::versioned::min_size::ACCOUNT_CONFIG - 1;
+        assert_eq!(
+            add(SIPRAL_HANDLE_NONE, &config).0,
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
     fn header_of(name: &'static str, value: &'static str) -> crate::header::SipralHeader {
         let (name, name_len) = text(name);
         let (value, value_len) = text(value);

@@ -68,7 +68,7 @@ use sipral_core::sdp::SdpError;
 
 use crate::abi::{codes, constants, record};
 use crate::error::{Fail, entry, fail};
-use crate::handle::{HandleTable, SipralHandle};
+use crate::handle::{HandleTable, Kind, SipralHandle};
 use crate::stack::{StackState, handle_failed, instant_at, with_stack};
 use crate::status::SipralStatus;
 use crate::text::required_text;
@@ -703,7 +703,7 @@ fn ordered(list: &str) -> Result<CodecCatalog, Fail> {
 /// number has to be looked up somewhere. Its lock is held for an index and a
 /// reference count, never for a frame and never while anything else is waited
 /// for.
-static MEDIA: HandleTable<MediaEntry> = HandleTable::new();
+static MEDIA: HandleTable<MediaEntry> = HandleTable::new(Kind::Media);
 
 /// What a media handle names.
 pub(crate) struct MediaEntry {
@@ -998,12 +998,10 @@ entry! {
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
     fn sipral_media_info(media: SipralHandle, out_info: *mut SipralMediaInfo) {
-        let info = with_media(media, |session, _| {
-            // checked before it is filled in, so a caller that got its size
-            // wrong is told that and not something about the call
-            unsafe { crate::versioned::declared_size(out_info.cast_const()) }?;
-            Ok(media_info(session))
-        })?;
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the call
+        unsafe { crate::versioned::declared_size(out_info.cast_const()) }?;
+        let info = with_media(media, |session, _| Ok(media_info(session)))?;
         unsafe { write_versioned(out_info, info) }
     }
 }
@@ -1062,8 +1060,10 @@ entry! {
         now_ms: u64,
         out_stats: *mut SipralStreamStats,
     ) {
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the call
+        unsafe { crate::versioned::declared_size(out_stats.cast_const()) }?;
         let stats = with_media(media, |session, entry| {
-            unsafe { crate::versioned::declared_size(out_stats.cast_const()) }?;
             let now = entry.instant(now_ms)?;
             Ok(stream_stats(&session.statistics(now)))
         })?;
@@ -2055,6 +2055,20 @@ a=sendrecv\r\n";
         );
     }
 
+    /// The size is checked before the handle is even looked up: a media
+    /// handle nothing minted and an info struct too short to be any version
+    /// of this one both fail, and the size is the one this answers with.
+    #[test]
+    fn a_media_info_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut info = media_info_zeroed();
+        info.size = crate::versioned::min_size::MEDIA_INFO - 1;
+        assert_eq!(
+            unsafe { sipral_media_info(SIPRAL_HANDLE_NONE, &raw mut info) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
     /// The event that says audio started carries the same answer, so an
     /// application that only listens does not have to ask.
     #[test]
@@ -2189,6 +2203,85 @@ a=sendrecv\r\n";
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
+        );
+    }
+
+    /// The other half of the same guarantee: an older reading is not only
+    /// accepted where it was asked, it also leaves the stack's own clock
+    /// exactly where signalling put it, so the very next poll is not refused
+    /// as if the media call had dragged the watermark backward.
+    #[test]
+    fn a_media_call_with_an_older_now_ms_does_not_refuse_the_next_signalling_call() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+
+        // the stack's own clock is already at 1_100 from bringing the call
+        // up; a reading forty times further behind than the slack this
+        // stack's own signalling gets is answered anyway, because a media
+        // entry point never checks against that clock at all
+        let stats = statistics(media, 100);
+        assert_eq!(
+            stats.codec,
+            SipralCodec::Pcmu as u32,
+            "the reading was answered"
+        );
+
+        // and signalling picks up exactly where it left off: a normal next
+        // poll is not refused as more than the slack behind some watermark
+        // the media call never touched
+        let mut result = crate::stack::tests::poll_result();
+        let polled = unsafe { crate::stack::sipral_stack_poll(stack, 1_101, &raw mut result) };
+        assert_eq!(polled, SipralStatus::Ok, "{}", last_error_text());
+
+        hangup(stack, call, 1_200);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The size is checked before the handle is even looked up: a media
+    /// handle nothing minted and a stats struct too short to be any version
+    /// of this one both fail, and the size is the one this answers with.
+    #[test]
+    fn a_stream_stats_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut stats = empty_stats();
+        stats.size = crate::versioned::min_size::STREAM_STATS - 1;
+        assert_eq!(
+            unsafe { sipral_media_statistics(SIPRAL_HANDLE_NONE, 0, &raw mut stats) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
+    /// The size is checked before the handle is even looked up: a media
+    /// handle nothing minted and a packet struct too short to be any version
+    /// of this one both fail, and the size is the one this answers with — on
+    /// the way out with a frame and on the way out with a report alike.
+    #[test]
+    fn a_media_packet_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let samples = [0_i16; FRAME];
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        packet.size = crate::versioned::min_size::MEDIA_PACKET - 1;
+        assert_eq!(
+            unsafe {
+                sipral_media_capture(
+                    SIPRAL_HANDLE_NONE,
+                    samples.as_ptr(),
+                    samples.len(),
+                    &raw mut packet,
+                )
+            },
+            SipralStatus::UnsupportedVersion,
+            "sipral_media_capture"
+        );
+        assert_eq!(
+            unsafe { sipral_media_poll_rtcp(SIPRAL_HANDLE_NONE, 0, &raw mut packet) },
+            SipralStatus::UnsupportedVersion,
+            "sipral_media_poll_rtcp"
         );
     }
 

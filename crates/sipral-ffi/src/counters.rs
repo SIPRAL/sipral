@@ -130,12 +130,10 @@ entry! {
     /// `out_counters` must point at a `sipral_counters_t` whose `size` member
     /// says how long it is.
     fn sipral_stack_counters(stack: SipralHandle, out_counters: *mut SipralCounters) {
-        let counters = with_stack(stack, |state| {
-            // checked before it is filled in, so a caller that got its size
-            // wrong is told that and not something about the stack
-            unsafe { declared_size(out_counters.cast_const()) }?;
-            Ok(counters_of(state.engine.counters()))
-        })?;
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the stack
+        unsafe { declared_size(out_counters.cast_const()) }?;
+        let counters = with_stack(stack, |state| Ok(counters_of(state.engine.counters())))?;
         unsafe { write_versioned(out_counters, counters) }
     }
 }
@@ -145,7 +143,7 @@ mod tests {
     use super::{SipralCounters, sipral_stack_counters};
     use crate::call::tests::{hangup, media_call};
     use crate::error::last_error_text;
-    use crate::handle::SipralHandle;
+    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::stack::tests::Observed;
     use crate::status::SipralStatus;
 
@@ -236,6 +234,20 @@ mod tests {
         let status = unsafe { sipral_stack_counters(stack, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.registrations_attempted, u64::MAX, "nothing was written");
+    }
+
+    /// The size is checked before the handle is even looked up: a stack that
+    /// was never created and a counters struct too short to be any version of
+    /// this one both fail, and the size is the one this answers with.
+    #[test]
+    fn a_counters_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut out = zeroed();
+        out.size = crate::versioned::min_size::COUNTERS - 1;
+        assert_eq!(
+            unsafe { sipral_stack_counters(SIPRAL_HANDLE_NONE, &raw mut out) },
+            SipralStatus::UnsupportedVersion
+        );
     }
 
     #[test]

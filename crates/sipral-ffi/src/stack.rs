@@ -15,8 +15,15 @@
 //! creation, to have an origin for the milliseconds the caller counts from —
 //! because the layers below own no time either: the caller says what time it
 //! is on every call that can put something on the wire, and a clock that goes
-//! backwards is a caller bug reported as one rather than a timer that never
-//! fires.
+//! backwards by more than `CLOCK_SLACK_MS` is a caller bug reported as one
+//! rather than a timer that never fires. Not further back than that, because
+//! signalling may run on any thread and `now_ms` is read from whichever one
+//! called last: two threads reading one clock do not agree to the
+//! millisecond, and a reading a little behind the one before it is that and
+//! not a caller mistake. Refusing anything moves nothing — the check runs
+//! before the work the caller asked for, and the clock only ever advances
+//! once that work has actually succeeded, so a call refused for an unrelated
+//! reason (a bad handle, a bad argument) leaves it exactly where it was.
 //!
 //! # May one stack be used from two threads at once?
 //!
@@ -88,14 +95,14 @@ use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
-use crate::handle::{HandleTable, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
+use crate::handle::{HandleTable, Kind, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
 use crate::media::{SipralStreamStats, catalog_of, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
 use crate::versioned::{Versioned, declared_size, read_versioned, write_versioned};
 
-static STACKS: HandleTable<StackEntry> = HandleTable::new();
+static STACKS: HandleTable<StackEntry> = HandleTable::new(Kind::Stack);
 
 /// The tags every stack in this process mints its handles with, one each.
 static TAGS: StackTags = StackTags::new();
@@ -109,6 +116,17 @@ const SEED_BYTES: usize = 32;
 /// Published to C as `SIPRAL_TRANSPORT_MAIN`, in [`crate::transport`], which is
 /// also where the reason a stack has exactly one is written down.
 const TRANSPORT: TransportId = TransportId(0);
+
+/// How far behind this stack's last reading of the caller's clock a
+/// signalling call may be and still be honoured.
+///
+/// Signalling may run on any thread, and each carries its own reading of the
+/// same clock rather than sharing one: two of them a few milliseconds apart
+/// is ordinary drift, not a caller that lost track of time. A media entry
+/// point does not check against this at all — see `crate::media` — because
+/// it never touches `polled_at_ms` in the first place; this is the tolerance
+/// for the calls that do.
+const CLOCK_SLACK_MS: u64 = 50;
 
 codes! {
     /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -626,20 +644,49 @@ impl StackState {
         self.origin
     }
 
-    /// Move the stack's clock to `now_ms`, refusing one that went backwards.
-    pub(crate) fn advance(&mut self, now_ms: u64) -> Result<Instant, Fail> {
-        if now_ms < self.polled_at_ms {
+    /// The instant `now_ms` names, refusing one more than [`CLOCK_SLACK_MS`]
+    /// behind this stack's last reading — without moving that reading.
+    ///
+    /// Moving it is [`Self::commit_clock`]'s job, and it is deliberately a
+    /// second step: this only says whether `now_ms` is one the caller might
+    /// reasonably have read from the stack's clock, and every other reason a
+    /// call can fail is checked after this returns, so the clock must not
+    /// move until the whole call has actually succeeded.
+    fn checked_instant(&self, now_ms: u64) -> Result<Instant, Fail> {
+        let floor = self.polled_at_ms.saturating_sub(CLOCK_SLACK_MS);
+        if now_ms < floor {
             return Err(fail(
                 SipralStatus::InvalidArgument,
                 format!(
-                    "now_ms is {now_ms} after this stack was last used at {}, and a clock that \
-                     goes backwards stops timers from firing",
+                    "now_ms is {now_ms}, more than {CLOCK_SLACK_MS} ms behind this stack's last \
+                     reading of {}; two threads reading one clock can disagree by a little, but \
+                     not by that much",
                     self.polled_at_ms
                 ),
             ));
         }
-        let now = self.instant(now_ms)?;
-        self.polled_at_ms = now_ms;
+        self.instant(now_ms)
+    }
+
+    /// Record that this stack has been used at `now_ms`. Never moves
+    /// backward: a reading accepted because it was within the slack leaves
+    /// the high-water mark exactly where a later thread's reading already put
+    /// it.
+    fn commit_clock(&mut self, now_ms: u64) {
+        self.polled_at_ms = self.polled_at_ms.max(now_ms);
+    }
+
+    /// Move the stack's clock to `now_ms` and commit it immediately, refusing
+    /// one more than the slack behind.
+    ///
+    /// Only [`sipral_stack_poll`] calls this directly: everything it still
+    /// does after reading the clock cannot fail, so validating and committing
+    /// in one step costs it nothing. Every other signalling entry point goes
+    /// through [`with_stack_at`], which commits only once the call it wraps
+    /// has actually succeeded.
+    pub(crate) fn advance(&mut self, now_ms: u64) -> Result<Instant, Fail> {
+        let now = self.checked_instant(now_ms)?;
+        self.commit_clock(now_ms);
         Ok(now)
     }
 
@@ -661,15 +708,22 @@ impl StackState {
 }
 
 pub(crate) fn handle_failed(refused: Refused) -> Fail {
-    let explanation = match refused {
-        Refused::Gone => "what the handle named is gone",
-        Refused::NotOurs => "not a handle from this library",
-        Refused::OtherStack => {
+    match refused {
+        Refused::Gone => fail(refused.status(), "what the handle named is gone"),
+        Refused::NotOurs => fail(refused.status(), "not a handle from this library"),
+        Refused::OtherStack => fail(
+            refused.status(),
             "the handle was minted by another stack, and a handle names something only on the \
-             stack that minted it"
-        }
-    };
-    fail(refused.status(), explanation)
+             stack that minted it",
+        ),
+        Refused::WrongKind(found) => fail(
+            refused.status(),
+            format!(
+                "this handle names {}, and that is not what was asked for here",
+                found.noun()
+            ),
+        ),
+    }
 }
 
 /// Do something to a stack, or say why not.
@@ -708,14 +762,22 @@ fn inside_media() -> Fail {
 }
 
 /// The same, for something that happens at a time the caller names.
+///
+/// The clock is validated before `act` runs and committed only after it
+/// succeeds: a call refused for a reason `act` finds — a stale handle, a bad
+/// argument, the wrong state — leaves `now_ms` unrecorded, exactly as if it
+/// had never been asked. Only a call this stack actually goes through moves
+/// its clock.
 pub(crate) fn with_stack_at<R>(
     stack: SipralHandle,
     now_ms: u64,
     act: impl FnOnce(&mut StackState, Instant) -> Result<R, Fail>,
 ) -> Result<R, Fail> {
     with_stack(stack, |state| {
-        let now = state.advance(now_ms)?;
-        act(state, now)
+        let now = state.checked_instant(now_ms)?;
+        let done = act(state, now)?;
+        state.commit_clock(now_ms);
+        Ok(done)
     })
 }
 
@@ -987,8 +1049,8 @@ pub(crate) unsafe fn create_on(
             agent,
             engine,
             managed: Vec::new(),
-            accounts: Names::new(&tag),
-            calls: Names::new(&tag),
+            accounts: Names::new(&tag, Kind::Account),
+            calls: Names::new(&tag, Kind::Call),
             tag,
             transport: TRANSPORT,
             speaks,
@@ -1035,10 +1097,10 @@ entry! {
     /// `out_settings` must point at a `sipral_stack_settings_t` whose `size`
     /// member says how long it is.
     fn sipral_stack_settings(stack: SipralHandle, out_settings: *mut SipralStackSettings) {
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the stack
+        unsafe { declared_size(out_settings.cast_const()) }?;
         let settings = with_stack(stack, |state| {
-            // checked before it is filled in, so a caller that got its size
-            // wrong is told that and not something about the stack
-            unsafe { declared_size(out_settings.cast_const()) }?;
             let catalog = state.engine.catalog();
             Ok(SipralStackSettings {
                 size: size_of::<SipralStackSettings>(),
@@ -1097,8 +1159,11 @@ entry! {
     /// Let the stack do its work, and deliver what it has to say.
     ///
     /// `now_ms` is the caller's monotonic clock in milliseconds. It must not
-    /// go backwards between calls on the same stack; one that does is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
+    /// fall more than fifty milliseconds behind the last one this stack saw —
+    /// signalling may be called from any thread, and two of them reading the
+    /// same clock a moment apart is not a caller mistake — and a jump further
+    /// back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
+    /// delivered.
     ///
     /// The event callback is called from inside this function, on this
     /// thread, and with nothing held: the stack's work is done and its lock
@@ -1122,6 +1187,12 @@ entry! {
     /// `result` must be null or point at a `sipral_poll_result_t` whose `size`
     /// member says how long it is.
     fn sipral_stack_poll(stack: SipralHandle, now_ms: u64, result: *mut SipralPollResult) {
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the stack,
+        // and before the clock moves, so a refusal here leaves it untouched
+        if !result.is_null() {
+            unsafe { declared_size(result.cast_const()) }?;
+        }
         // held until this poll returns, delivery included, so a stack
         // destroyed from inside its own callback is freed afterwards rather
         // than underneath the queue being read
@@ -1129,11 +1200,6 @@ entry! {
         let (mut counted, speaker) = {
             let mut state = lock(&entry)?;
             let now = state.advance(now_ms)?;
-            // the result struct is checked before anything is delivered: a
-            // caller that got its size wrong should not also lose the events
-            if !result.is_null() {
-                unsafe { declared_size(result.cast_const()) }?;
-            }
             let mut raised = Vec::new();
             let counted = run(stack, &mut state, now, &mut raised);
             // posted with the stack still held, so that a poll on another
@@ -1894,6 +1960,20 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The size is checked before the handle is even looked up: a stack that
+    /// was never created and a settings struct too short to be any version of
+    /// this one both fail, and the size is the one this answers with.
+    #[test]
+    fn a_settings_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+     {
+        let mut out = settings();
+        out.size = crate::versioned::min_size::STACK_SETTINGS - 1;
+        assert_eq!(
+            unsafe { sipral_stack_settings(SIPRAL_HANDLE_NONE, &raw mut out) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
     #[test]
     fn a_stack_without_a_callback_is_refused() {
         let mut observed = Observed::default();
@@ -2061,8 +2141,22 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The size is checked before the handle is even looked up: a stack that
+    /// was never created and a result struct too short to be any version of
+    /// this one both fail, and the size is the one this answers with.
     #[test]
-    fn a_clock_that_goes_backwards_is_refused_and_says_by_how_much() {
+    fn a_result_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
+    {
+        let mut result = poll_result();
+        result.size = crate::versioned::min_size::POLL_RESULT - 1;
+        assert_eq!(
+            unsafe { sipral_stack_poll(SIPRAL_HANDLE_NONE, 0, &raw mut result) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
+    #[test]
+    fn fifty_ms_behind_is_accepted_and_fifty_one_is_refused_and_says_by_how_much() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         assert_eq!(
@@ -2070,18 +2164,52 @@ pub(crate) mod tests {
             SipralStatus::Ok
         );
         assert_eq!(
-            unsafe { sipral_stack_poll(handle, 4_999, ptr::null_mut()) },
-            SipralStatus::InvalidArgument
+            unsafe { sipral_stack_poll(handle, 4_950, ptr::null_mut()) },
+            SipralStatus::Ok,
+            "fifty milliseconds behind is two threads reading one clock, not a caller bug"
+        );
+        assert_eq!(
+            unsafe { sipral_stack_poll(handle, 4_949, ptr::null_mut()) },
+            SipralStatus::InvalidArgument,
+            "fifty-one milliseconds behind is"
         );
         let message = last_error_text();
         assert!(
-            message.contains("4999") && message.contains("5000"),
+            message.contains("4949") && message.contains("5000"),
             "the message names neither instant: {message}"
         );
         assert_eq!(
             unsafe { sipral_stack_poll(handle, 5_000, ptr::null_mut()) },
             SipralStatus::Ok,
-            "the same instant twice is not backwards"
+            "the accepted reading behind it did not drag the watermark down"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The failure this guards against: `sipral_stack_poll` used to advance
+    /// the clock before checking `result`'s declared size, so a caller with a
+    /// too-short struct lost the clock along with the call.
+    #[test]
+    fn a_call_refused_for_a_bad_argument_leaves_the_clock_where_it_was() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        assert_eq!(poll(handle, 1_000).events_delivered, 1);
+
+        // no call was ever minted with this handle: refused for a reason that
+        // has nothing to do with the clock, at a now_ms far ahead of the last
+        // one this stack saw
+        assert_eq!(
+            unsafe { crate::call::sipral_call_hangup(handle, SIPRAL_HANDLE_NONE, 9_000) },
+            SipralStatus::InvalidHandle
+        );
+
+        // had the refused call moved the clock to 9_000 anyway, this would
+        // now be more than the slack behind it and refused for that instead
+        assert_eq!(
+            poll(handle, 1_010).events_delivered,
+            0,
+            "{}",
+            last_error_text()
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
@@ -2338,15 +2466,17 @@ pub(crate) mod tests {
     fn a_stack_can_be_polled_from_another_thread_than_the_one_that_made_it() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
-        let polled =
-            std::thread::spawn(move || unsafe { sipral_stack_poll(handle, 7, ptr::null_mut()) })
-                .join()
-                .expect("the thread finished");
+        let polled = std::thread::spawn(move || unsafe {
+            sipral_stack_poll(handle, 1_000, ptr::null_mut())
+        })
+        .join()
+        .expect("the thread finished");
         assert_eq!(polled, SipralStatus::Ok);
         assert_eq!(
-            unsafe { sipral_stack_poll(handle, 6, ptr::null_mut()) },
+            unsafe { sipral_stack_poll(handle, 900, ptr::null_mut()) },
             SipralStatus::InvalidArgument,
-            "the clock is the stack's, not the thread's"
+            "the clock is the stack's, not the thread's -- a hundred milliseconds is well past \
+             the slack two threads reading it are allowed"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
         assert_eq!(observed.events.len(), 1);

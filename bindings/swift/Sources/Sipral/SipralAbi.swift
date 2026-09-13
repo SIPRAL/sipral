@@ -1003,8 +1003,11 @@ public enum Sipral {
     /// Let the stack do its work, and deliver what it has to say.
     ///
     /// `now_ms` is the caller's monotonic clock in milliseconds. It must not
-    /// go backwards between calls on the same stack; one that does is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
+    /// fall more than fifty milliseconds behind the last one this stack saw —
+    /// signalling may be called from any thread, and two of them reading the
+    /// same clock a moment apart is not a caller mistake — and a jump further
+    /// back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
+    /// delivered.
     ///
     /// The event callback is called from inside this function, on this
     /// thread, and with nothing held: the stack's work is done and its lock

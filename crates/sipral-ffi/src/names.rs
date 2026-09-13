@@ -17,7 +17,7 @@
 //! Nothing locks. The stack's own lock is already held by whoever is looking,
 //! which is the arrangement [`crate::stack`] describes.
 
-use crate::handle::{Mint, Refused, SipralHandle, StackTag};
+use crate::handle::{Kind, Mint, Refused, SipralHandle, StackTag, next_generation};
 use crate::status::SipralStatus;
 
 struct Named<T> {
@@ -33,10 +33,10 @@ pub(crate) struct Names<T> {
 }
 
 impl<T: Copy + PartialEq> Names<T> {
-    /// An empty table for the stack holding `stack`.
-    pub(crate) fn new(stack: &StackTag) -> Self {
+    /// An empty table for the stack holding `stack`, naming things of `kind`.
+    pub(crate) fn new(stack: &StackTag, kind: Kind) -> Self {
         Self {
-            mint: stack.mint(),
+            mint: stack.mint(kind),
             slots: Vec::new(),
             free: Vec::new(),
         }
@@ -88,7 +88,7 @@ impl<T: Copy + PartialEq> Names<T> {
         let value = slot.value.take().ok_or(Refused::Gone)?;
         // a generation that wrapped would make an old handle look live again,
         // so a slot that has run out of them is never offered back
-        if let Some(next) = slot.generation.checked_add(1) {
+        if let Some(next) = next_generation(slot.generation) {
             slot.generation = next;
             self.free.push(parts.index);
         }
@@ -132,7 +132,7 @@ impl<T: Copy + PartialEq> Names<T> {
         let Ok(index) = u32::try_from(index) else {
             return;
         };
-        if let Some(next) = slot.generation.checked_add(1) {
+        if let Some(next) = next_generation(slot.generation) {
             slot.generation = next;
             self.free.push(index);
         }
@@ -143,11 +143,16 @@ impl<T: Copy + PartialEq> Names<T> {
 mod tests {
     use super::Names;
     use crate::handle::{
-        FIRST_GENERATION, Refused, SIPRAL_HANDLE_NONE, StackTag, StackTags, split,
+        FIRST_GENERATION, GENERATION_LIMIT, Kind, Refused, SIPRAL_HANDLE_NONE, StackTag, StackTags,
+        split,
     };
 
+    /// The kind every test below names, since none of them is about telling
+    /// kinds apart — `crate::call::tests` and `crate::handle`'s own tests do.
+    const KIND: Kind = Kind::Call;
+
     fn names(stack: &StackTag) -> Names<u32> {
-        Names::new(stack)
+        Names::new(stack, KIND)
     }
 
     #[test]
@@ -175,7 +180,7 @@ mod tests {
         let stack = TAGS.lease().expect("a tag");
         let mut names = names(&stack);
         names.insert(7).expect("room for one");
-        let invented = stack.mint().join(9, FIRST_GENERATION).expect("fits");
+        let invented = stack.mint(KIND).join(9, FIRST_GENERATION).expect("fits");
         assert_eq!(names.get(invented), Err(Refused::NotOurs));
     }
 
@@ -320,5 +325,34 @@ mod tests {
         }
         assert_eq!(accounts.get(own_account), Ok(10));
         assert_eq!(calls.get(own_call), Ok(10));
+    }
+
+    /// A slot on the last generation a handle has room to name is retired
+    /// when it is let go, by `remove` and by `forget` alike, rather than put
+    /// back on the free list at a generation no handle can carry — where the
+    /// next thing named would be refused as if the stack were full.
+    #[test]
+    fn a_slot_whose_generation_cannot_move_on_is_retired_and_not_offered_again() {
+        static TAGS: StackTags = StackTags::new();
+        let stack = TAGS.lease().expect("a tag");
+        let mut names = names(&stack);
+        names.insert(1).expect("room");
+        names.insert(2).expect("room");
+        let last = GENERATION_LIMIT - 1;
+        for slot in &mut names.slots {
+            slot.generation = last;
+        }
+        let spent = stack.mint(KIND).join(0, last).expect("the last one fits");
+        assert_eq!(names.remove(spent), Ok(1));
+        names.forget(2);
+        assert!(
+            names.free.is_empty(),
+            "a slot with no generation left was offered again"
+        );
+        let next = names
+            .insert(3)
+            .expect("a fresh slot, not a refusal for want of room");
+        assert_eq!(split(next).map(|parts| parts.index), Ok(2));
+        assert_eq!(names.get(spent), Err(Refused::Gone));
     }
 }
