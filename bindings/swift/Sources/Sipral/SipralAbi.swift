@@ -12,6 +12,10 @@ import CSipral
 /// It is a number, not a pointer: nothing is to be read from it, and
 /// nothing but this library can make one. Zero is never a live handle,
 /// which is what a caller can zero a variable to.
+///
+/// An account or a call handle names something only on the stack that
+/// minted it. Used with any other stack — one alive beside it, or one
+/// created after it was destroyed — it is `SIPRAL_STATUS_INVALID_HANDLE`.
 public typealias SipralHandle = sipral_handle_t
 
 /// The result of a call across the C ABI.
@@ -24,7 +28,8 @@ public enum SipralStatus: Int32, Sendable {
     /// A pointer was null where one is required, a length disagreed with what
     /// it describes, or a value was outside what the call accepts.
     case invalidArgument = 1
-    /// The handle never came from this library.
+    /// The handle never came from this library, or it came from a stack
+    /// other than the one it was used with.
     case invalidHandle = 2
     /// The handle came from this library and what it named is gone: a use
     /// after free, or a second free.
@@ -390,6 +395,11 @@ public enum SipralRegistrationState: UInt32, Sendable {
     /// A binding read back from a snapshot rather than granted in this
     /// process. It has not been proved either.
     case restored = 9
+    /// The account was configured with no registrar and never registers:
+    /// a trunk that knows this end by its address. It starts here and
+    /// stays here, and `sipral_account_register` refuses it. Not idle,
+    /// which is one `sipral_account_register` away from a binding.
+    case notRegistering = 10
 }
 
 /// Why a registration is not live. Names for
@@ -849,6 +859,10 @@ public enum Sipral {
     /// The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
     /// that is created must be destroyed with sipral_stack_destroy.
     ///
+    /// A process holds 256 stacks at once. The next is
+    /// `SIPRAL_STATUS_EXHAUSTED` until one of them is destroyed and no poll is
+    /// still running on it.
+    ///
     /// Safety
     ///
     /// `config` must point at a `sipral_stack_config_t` whose `size` member
@@ -984,6 +998,9 @@ public enum Sipral {
     /// sipral_account_unregister, or a refusal that trying again cannot
     /// fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
     ///
+    /// An account configured with no registrar never registers, and this
+    /// answers `SIPRAL_STATUS_INVALID_ARGUMENT` for it with nothing sent.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle values.
@@ -998,6 +1015,9 @@ public enum Sipral {
     /// the address of record has, including the one belonging to the desk
     /// phone somebody else is holding.
     ///
+    /// An account configured with no registrar has no binding to give up, and
+    /// is refused the way `sipral_account_register` refuses it.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle values.
@@ -1007,6 +1027,9 @@ public enum Sipral {
     }
 
     /// Where an account's registration is, as a `SipralRegistrationState`.
+    ///
+    /// An account configured with no registrar answers
+    /// `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
     ///
     /// Safety
     ///

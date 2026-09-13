@@ -100,10 +100,11 @@ impl UserAgent {
         call.id = Some(CallId::new(&self.endpoint.token()));
         call.placed = Some(outgoing.clone());
         call.asked = asked;
+        let limits = self.sdp_limits;
         if let Some(described) = outgoing
             .offer
             .as_deref()
-            .and_then(|sdp| sdp::parse(sdp).ok())
+            .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok())
         {
             call.session.set_local(described);
         }
@@ -185,6 +186,7 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let transaction = self.answerable(call)?;
+        let limits = self.sdp_limits;
         let status = if early.is_some() {
             StatusCode::SESSION_PROGRESS
         } else {
@@ -194,7 +196,9 @@ impl UserAgent {
         let mut response = OutgoingResponse::new(status)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
-        let described = early.as_deref().and_then(|sdp| sdp::parse(sdp).ok());
+        let described = early
+            .as_deref()
+            .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
         if let Some(sdp) = early {
             response = response.body(b"application/sdp", sdp);
         }
@@ -249,6 +253,7 @@ impl UserAgent {
             return Ok(());
         }
         let transaction = self.answerable(call)?;
+        let limits = self.sdp_limits;
         let contact = self.contact_of(call)?;
         // RFC 3311 §4: "a 2xx response SHOULD contain an Allow header field
         // listing the UPDATE method"
@@ -267,7 +272,9 @@ impl UserAgent {
                 response = response.header(HeaderName::Require, b"timer");
             }
         }
-        let described = sdp.as_deref().and_then(|sdp| sdp::parse(sdp).ok());
+        let described = sdp
+            .as_deref()
+            .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
         if let Some(sdp) = sdp {
             response = response.body(b"application/sdp", sdp);
         }
@@ -331,7 +338,7 @@ impl UserAgent {
         sdp: &[u8],
         now: Instant,
     ) -> Result<(), UaError> {
-        let described = sdp::parse(sdp).map_err(UaError::Sdp)?;
+        let described = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
         let (provisional, state) = {
             let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             let state = held.state;
@@ -379,7 +386,7 @@ impl UserAgent {
         }
         let dialog = held.dialog.ok_or(UaError::WrongState(state))?;
         self.endpoint.ack_2xx(dialog, answer, now)?;
-        let described = answer.and_then(|sdp| sdp::parse(sdp).ok());
+        let described = answer.and_then(|sdp| sdp::parse_with_limits(sdp, self.sdp_limits).ok());
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = true;
             if let Some(described) = described {
@@ -828,7 +835,8 @@ impl UserAgent {
                 }
                 self.by_server.insert(transaction, call);
                 self.note_allow(call, &request.as_raw());
-                if let Some(offer) = sdp::parse(request.as_raw().body()).ok()
+                if let Some(offer) =
+                    sdp::parse_with_limits(request.as_raw().body(), self.sdp_limits).ok()
                     && let Some(held) = self.calls.get_mut(&call)
                 {
                     held.session.set_remote(offer);
@@ -935,7 +943,7 @@ impl UserAgent {
     fn note_session(&mut self, call: CallHandle, response: &OwnedMessage) {
         let raw = response.as_raw();
         self.note_allow(call, &raw);
-        if let Ok(described) = sdp::parse(raw.body())
+        if let Ok(described) = sdp::parse_with_limits(raw.body(), self.sdp_limits)
             && let Some(held) = self.calls.get_mut(&call)
         {
             held.session.set_remote(described);

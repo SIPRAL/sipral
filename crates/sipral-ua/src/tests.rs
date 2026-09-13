@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
+use sipral_core::sdp;
 
 use crate::account::{Account, AccountId};
 use crate::agent::UserAgent;
@@ -46,6 +47,24 @@ fn uri(text: &str) -> Uri {
 /// A user agent with one UDP transport bound.
 fn agent(now: Instant) -> UserAgent {
     let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]);
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            now,
+        )
+        .expect("binding a transport");
+    agent
+}
+
+/// As [`agent`], with a configuration of the caller's own rather than
+/// [`EndpointConfig::default`].
+fn agent_with(config: EndpointConfig, now: Instant) -> UserAgent {
+    let mut agent = UserAgent::new(config, [11; 32]);
     agent
         .receive(
             Input::TransportBound {
@@ -291,6 +310,102 @@ fn a_request_for_an_account_that_is_gone_names_nothing() {
     agent.remove_account(id);
     assert_eq!(agent.register(id, t0), Err(UaError::NoSuchAccount));
     assert!(transmits(&mut agent).is_empty());
+}
+
+// -- an account that never registers -----------------------------------------
+
+/// Where an account with no registrar sends what it places. Not the
+/// registrar's address, so a request that went there out of habit shows.
+fn proxy() -> SocketAddr {
+    "198.51.100.20:5060".parse().expect("the proxy's address")
+}
+
+/// A trunk: known to the far end by its address, with nobody to register
+/// with.
+fn trunk() -> Account {
+    Account::unregistered(
+        uri("sip:pbx@example.com"),
+        uri("sip:pbx@192.0.2.1"),
+        UDP,
+        proxy(),
+    )
+}
+
+#[test]
+fn an_account_without_a_registrar_is_refused_a_register_before_anything_is_built() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(trunk());
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::NotRegistering)
+    );
+    assert_eq!(agent.register(id, t0), Err(UaError::NoRegistrar));
+    assert_eq!(agent.unregister(id, t0), Err(UaError::NoRegistrar));
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a REGISTER went somewhere"
+    );
+    assert_eq!(
+        agent.endpoint().in_flight(),
+        (0, 0),
+        "a transaction was opened for it"
+    );
+    assert!(
+        events(&mut agent).is_empty(),
+        "a registration was reported for an account that has none"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::NotRegistering)
+    );
+    assert_eq!(
+        agent.idle().registrations,
+        0,
+        "something was scheduled for it"
+    );
+}
+
+#[test]
+fn an_account_without_a_registrar_places_its_calls_at_the_proxy_and_never_registers() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(trunk());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+
+    // a day of this layer's timers and the endpoint's, retransmissions and
+    // all, kept with where each message was going
+    let mut out = Vec::new();
+    let mut at = t0;
+    for _ in 0..48 {
+        while let Some(transmit) = agent.poll_transmit() {
+            out.push(transmit);
+        }
+        at += Duration::from_secs(1_800);
+        agent.handle_timeout(at);
+    }
+    while let Some(transmit) = agent.poll_transmit() {
+        out.push(transmit);
+    }
+
+    assert!(
+        out.first()
+            .is_some_and(|first| first.payload.starts_with(b"INVITE ")),
+        "the call went nowhere"
+    );
+    assert!(
+        out.iter().all(|transmit| transmit.destination == proxy()),
+        "everything the account placed goes to its proxy"
+    );
+    assert!(
+        !out.iter()
+            .any(|transmit| transmit.payload.starts_with(b"REGISTER ")),
+        "a REGISTER went out for an account with no registrar"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::NotRegistering)
+    );
 }
 
 // -- what the registrar grants -----------------------------------------------
@@ -2347,6 +2462,37 @@ fn an_offer_that_changes_the_codecs_is_the_applications() {
 }
 
 #[test]
+fn an_accepted_reoffers_answer_past_the_configured_sdp_bound_is_refused() {
+    let t0 = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.sdp_limits = sdp::Limits {
+        max_media: 1,
+        ..sdp::Limits::DEFAULT
+    };
+    let mut agent = agent_with(config, t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let two_streams: &[u8] = b"v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 0\r\nm=video 9002 RTP/AVP 31\r\n";
+    let err = agent
+        .accept_reoffer(call, Some(two_streams), t0)
+        .expect_err("a second stream is past the configured bound");
+    assert_eq!(
+        err,
+        UaError::Sdp(sdp::SdpError::TooManyStreams { limit: 1 })
+    );
+}
+
+#[test]
 fn a_description_that_cannot_be_read_is_refused_with_488_and_a_warning() {
     // 14.2: "the UAS can reject it by returning a 488 (Not Acceptable Here)
     // response ... This response SHOULD include a Warning header field"
@@ -2653,6 +2799,34 @@ fn an_offer_the_application_wrote_gets_a_version_that_has_moved() {
     let reinvite = sent(&mut agent);
     let offer = body_of(&reinvite);
     assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+#[test]
+fn a_reoffer_past_the_configured_sdp_bound_is_refused() {
+    // EndpointConfig::sdp_limits is read once at construction and threaded
+    // through every sdp::parse_with_limits call this layer makes; an
+    // application-written re-INVITE is one of them
+    let t0 = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.sdp_limits = sdp::Limits {
+        max_media: 1,
+        ..sdp::Limits::DEFAULT
+    };
+    let mut agent = agent_with(config, t0);
+    let id = agent.add_account(account());
+    // the initial offer and answer each carry one stream, inside the
+    // configured bound
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    let two_streams: &[u8] = b"v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 0\r\nm=video 8002 RTP/AVP 31\r\n";
+    let err = agent
+        .reoffer(call, two_streams, t0)
+        .expect_err("a second stream is past the configured bound");
+    assert_eq!(
+        err,
+        UaError::Sdp(sdp::SdpError::TooManyStreams { limit: 1 })
+    );
 }
 
 // -- session timers ----------------------------------------------------------
@@ -2968,6 +3142,139 @@ fn answering_a_call_settles_the_timer_in_the_2xx() {
     );
 }
 
+#[test]
+fn a_retry_that_rang_past_its_half_interval_is_still_asked_only_once() {
+    // 10: "the UAC SHOULD NOT continuously retry the request if the server
+    // indicates the same error response". The retry after a 422 carries the
+    // timer that remembers it was already raised, and that memory has to
+    // survive the retry ringing for longer than half the interval it asked for.
+    // A tagged 180 with a Contact opens an early dialog and an untagged one
+    // does not, and the timer meets a different early return for each
+    for early_dialog in [true, false] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+        let first = sent(&mut agent);
+        deliver(
+            &mut agent,
+            &reply(&first, 422, "Session Interval Too Small", "Min-SE: 120\r\n"),
+            t0,
+        );
+        let again = transmits(&mut agent)
+            .into_iter()
+            .find(|bytes| bytes.starts_with(b"INVITE "))
+            .expect("it is asked again");
+        events(&mut agent);
+
+        let ringing = if early_dialog {
+            answered(&again, 180, "Ringing", "desk", None)
+        } else {
+            reply(&again, 180, "Ringing", "")
+        };
+        deliver(&mut agent, &ringing, t0);
+        transmits(&mut agent);
+        events(&mut agent);
+        // half of the 120 seconds the retry asked for
+        agent.handle_timeout(t0 + Duration::from_secs(60));
+        transmits(&mut agent);
+        events(&mut agent);
+
+        deliver(
+            &mut agent,
+            &reply(
+                &again,
+                422,
+                "Session Interval Too Small",
+                "Min-SE: 1800\r\n",
+            ),
+            t0 + Duration::from_secs(61),
+        );
+        assert!(
+            transmits(&mut agent)
+                .iter()
+                .all(|bytes| !bytes.starts_with(b"INVITE ")),
+            "a third INVITE went (early dialog: {early_dialog}): the far end can keep \
+             this call asking for ever"
+        );
+        assert_eq!(
+            ended(&mut agent).map(|(_, reason)| reason),
+            Some(CallEndReason::Refused),
+            "asked once more, not for ever (early dialog: {early_dialog})"
+        );
+    }
+}
+
+#[test]
+fn a_refresh_that_fell_due_before_the_ack_still_goes_before_the_session_expires() {
+    // 7.2 and 9: the session expiration runs from the 2xx, and the refresher
+    // "MUST generate a refresh before the session expiration". With a T1 of two
+    // seconds the INVITE server transaction waits 128 s for the ACK, so an ACK
+    // that arrives after half of a 90 s interval is still an ACK
+    let t0 = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.timers.t1 = Duration::from_secs(2);
+    let mut agent = UserAgent::new(config, [11; 32]);
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+    agent.add_account(account());
+    let invite = plus(
+        &incoming_invite("lateack", Some(OFFER)),
+        "Supported: timer\r\nSession-Expires: 90\r\nAllow: INVITE, ACK, BYE, CANCEL, UPDATE\r\n",
+    );
+    let call = call_arriving(&mut agent, &invite, t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+    let ok = sent(&mut agent);
+    assert_eq!(header(&ok, HeaderName::SessionExpires), b"90;refresher=uas");
+
+    // half the interval passes with the 2xx still unacknowledged
+    agent.handle_timeout(t0 + Duration::from_secs(45));
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let mut at = t0 + Duration::from_secs(50);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "lateack2", 1), at);
+    transmits(&mut agent);
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+    events(&mut agent);
+
+    let expiry = t0 + Duration::from_secs(90);
+    let mut refreshed = false;
+    for _ in 0..64 {
+        let Some(next) = agent.poll_timeout() else {
+            break;
+        };
+        let next = next.max(at);
+        if next >= expiry {
+            break;
+        }
+        agent.handle_timeout(next);
+        at = next;
+        if transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"UPDATE ") || bytes.starts_with(b"INVITE "))
+        {
+            refreshed = true;
+            break;
+        }
+    }
+    assert!(
+        refreshed,
+        "the session this end promised to refresh runs out with no refresh sent"
+    );
+}
+
 // -- reliable provisional responses ------------------------------------------
 
 /// The same message with extra header fields, inserted after the start line.
@@ -3140,6 +3447,38 @@ fn an_offer_in_a_reliable_response_is_answered_in_the_prack() {
     assert!(prack.starts_with(b"PRACK "));
     assert_eq!(header(&prack, HeaderName::RAck), b"314 1 INVITE");
     assert!(body_of(&prack).contains("m=audio 8000 RTP/AVP 0\r\n"));
+}
+
+#[test]
+fn an_early_answer_past_the_configured_sdp_bound_is_refused() {
+    let t0 = Instant::now();
+    let mut config = EndpointConfig::default();
+    config.sdp_limits = sdp::Limits {
+        max_media: 1,
+        ..sdp::Limits::DEFAULT
+    };
+    let mut agent = agent_with(config, t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let progress = plus(
+        &answered(&invite, 183, "Session Progress", "desk", Some(ANSWER)),
+        "Require: 100rel\r\nRSeq: 314\r\n",
+    );
+    deliver(&mut agent, &progress, t0);
+    events(&mut agent);
+
+    let two_streams: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 0\r\nm=video 8002 RTP/AVP 31\r\n";
+    let err = agent
+        .answer_early(call, two_streams, t0)
+        .expect_err("a second stream is past the configured bound");
+    assert_eq!(
+        err,
+        UaError::Sdp(sdp::SdpError::TooManyStreams { limit: 1 })
+    );
 }
 
 #[test]

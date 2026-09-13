@@ -297,6 +297,11 @@ codes! {
         /// A binding read back from a snapshot rather than granted in this
         /// process. It has not been proved either.
         Restored = 9,
+        /// The account was configured with no registrar and never registers:
+        /// a trunk that knows this end by its address. It starts here and
+        /// stays here, and `sipral_account_register` refuses it. Not idle,
+        /// which is one `sipral_account_register` away from a binding.
+        NotRegistering = 10,
     }
 }
 
@@ -1050,6 +1055,7 @@ pub(crate) fn registration_state(state: Option<RegistrationState>) -> SipralRegi
         Some(RegistrationState::Failed) => SipralRegistrationState::Failed,
         Some(RegistrationState::Unverified) => SipralRegistrationState::Unverified,
         Some(RegistrationState::Restored) => SipralRegistrationState::Restored,
+        Some(RegistrationState::NotRegistering) => SipralRegistrationState::NotRegistering,
         // nothing to ask about, or a state the layer below has grown and this
         // ABI has no number for; saying so beats picking one that is wrong
         None | Some(_) => SipralRegistrationState::Unknown,
@@ -1189,6 +1195,10 @@ mod tests {
             (
                 RegistrationState::Restored,
                 SipralRegistrationState::Restored,
+            ),
+            (
+                RegistrationState::NotRegistering,
+                SipralRegistrationState::NotRegistering,
             ),
         ];
         for (state, expected) in all {

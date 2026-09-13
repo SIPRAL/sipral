@@ -60,6 +60,16 @@ pub enum RegistrationState {
     /// this state except that the next REGISTER can be a refresh rather than a
     /// new registration.
     Restored,
+    /// The account has no registrar
+    /// ([`Account::unregistered`](crate::Account::unregistered)) and never
+    /// sends a REGISTER: a trunk that knows this end by its address.
+    ///
+    /// Not `Idle`, which is one
+    /// [`UserAgent::register`](crate::UserAgent::register) away from a binding;
+    /// that call is refused here. An account starts in this state and never
+    /// leaves it — nothing on the wire moves it, and a wake, a move or a push
+    /// has no binding of its to doubt or refresh.
+    NotRegistering,
 }
 
 impl core::fmt::Display for RegistrationState {
@@ -74,6 +84,7 @@ impl core::fmt::Display for RegistrationState {
             Self::Unregistered => "unregistered",
             Self::Failed => "failed",
             Self::Restored => "restored",
+            Self::NotRegistering => "not registering",
         })
     }
 }

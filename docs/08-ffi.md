@@ -86,6 +86,54 @@ Rules for the ABI:
   value rather than deriving it, so a declaration that moved would disagree with
   a test that did not.
 
+## Handles
+
+A handle is sixty-four bits naming one thing the library owns: a stack, an
+account, a call. A caller reads nothing out of it. The layout is written down
+for the person reading a log line or a crash dump, and for whoever adds a table.
+
+- **The layout.** The low twenty-four bits are the slot, the eight above them
+  are the tag of the stack the handle belongs to, and the top thirty-two are the
+  slot's generation. Zero is never a generation, so zero is never a handle, and
+  a handle that lost its top half in a 32-bit variable is refused before a slot
+  is read — rather than working for the first call on the first stack and
+  failing for every other.
+- **A handle names something only on the stack that minted it.** Every stack
+  numbers its accounts and its calls from the same first slot, so before the tag
+  the first call on one stack and the first call on a second were the same
+  number, and a hang-up passed to the wrong stack ended that stack's call and
+  answered `SIPRAL_STATUS_OK`. An account or call handle used with any other
+  stack is now `SIPRAL_STATUS_INVALID_HANDLE`, and the last error says it was
+  minted by another stack. The tag is checked where a stack's tables look a
+  handle up, `crates/sipral-ffi/src/names.rs`, and every handle of every kind is
+  put together by one function in `crates/sipral-ffi/src/handle.rs` that takes
+  it, so a table added later cannot mint without one.
+- **The widths.** The generation keeps all thirty-two bits because a slot that is
+  reused runs out of them: ten calls a second through one slot last about
+  thirteen and a half years on thirty-two bits, and nineteen days on
+  twenty-four. Twenty-four bits of slot is sixteen million live objects on one
+  stack. Eight bits of tag is 256 stacks alive in one process, and that is the
+  limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and writes
+  no handle.
+- **A tag is given back when the stack is gone, not when it is destroyed.** A
+  stack takes the lowest free tag when it is created. It gives it back when the
+  last share of it goes: inside `sipral_stack_destroy` for a stack nothing is
+  polling, and when the poll returns for a stack destroyed from its own
+  callback. That poll is still delivering and can still name an incoming call,
+  so a tag handed on at the destroy would belong to two stacks that are both
+  minting.
+- **A tag that comes back brings no old handle back with it.** Given back, a tag
+  remembers the highest generation its stack put in any handle, and the next
+  stack to take it starts every slot of every table above that. A handle kept
+  from the destroyed stack carries the new stack's tag and a generation below
+  anything the new stack mints, so it is refused the same way, in the same
+  words, as a handle from a stack that is alive. A tag whose generations the
+  stacks holding it have used up between them — four billion reuses of one slot
+  — is not offered again, and the limit is one stack lower from then on.
+- A stack's own handle lives in one table for the whole process, whose
+  generations never start over, so the handle of a destroyed stack is
+  `SIPRAL_STATUS_STALE_HANDLE` even once another stack carries its tag.
+
 ## Signalling across the boundary
 
 The ABI could describe a call, negotiate its audio, record it and report what it
@@ -128,6 +176,18 @@ next to the message. `sipral_transmit_t` carries the source address as well,
 empty for everything this stack originates: RFC 3581 §4 makes a response go out
 from the address its request arrived on, which a caller on a wildcard socket
 cannot work out for itself.
+
+**An account with no registrar never registers.** A `registrar_len` of zero in
+`sipral_account_config_t` is a trunk that knows this end by the address its
+requests come from. `registrar_address` is still required, and is then the
+outbound proxy every request the account places is sent to — the same member a
+registering account's calls already default to, so placing a call does not
+change. The account reads `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` from the
+moment it is added and never moves; `sipral_account_register` and
+`sipral_account_unregister` answer `SIPRAL_STATUS_INVALID_ARGUMENT` for it and
+send nothing. It is a registration state rather than a status because it is a
+fact about the account for as long as the account exists, not about one
+request.
 
 **One transport, and its number is published.** `SIPRAL_TRANSPORT_MAIN` is the
 transport a stack is created with and the only one this build binds; every other

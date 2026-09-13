@@ -203,7 +203,7 @@ impl UserAgent {
     /// The answer to an offer that arrived in a PRACK, when this layer can
     /// write one at all.
     fn answer_for(&mut self, call: CallHandle, body: &[u8]) -> Option<Arc<[u8]>> {
-        let offer = sipral_core::sdp::parse(body).ok()?;
+        let offer = sipral_core::sdp::parse_with_limits(body, self.sdp_limits).ok()?;
         let held = self.calls.get_mut(&call)?;
         if !held.session.is_same_media(&offer) {
             return None;

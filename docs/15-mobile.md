@@ -178,6 +178,9 @@ file exists. Adding a field means version 2, never a longer version 1. Trailing
 bytes are refused for the same reason: a document that is longer than it says
 it is, is not the document it says it is. A snapshot whose address of record is
 not this account's is refused too, and the account is left exactly as it was.
+So is one offered to an account that never registers
+(`SnapshotError::NotRegistering`): there is no binding for it to continue, and
+restoring one would book a refresh that can never be sent.
 
 **How long the snapshot sat unused is the application's to say.** This crate
 never reads a clock, and a monotonic `Instant` does not survive the process
@@ -212,8 +215,9 @@ more strongly than that.
 
 `cold_start(now)` says when the process was launched or woken;
 `time_to_ready(account)` answers with how long that account took to become
-reachable. Measured from the same injected instants as everything else, and
-`None` until an account has registered.
+reachable. Measured from the same injected instants as everything else,
+`None` until an account has registered, and `None` always for one that never
+registers.
 
 The application has to declare the cold start, and the reason is the same one
 that makes this stack testable: the launch happened before any of this existed,

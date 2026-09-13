@@ -12,6 +12,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **`sdp::parse` had no bound on a session description's size, `m=` count or
+  attribute lists — the message parser has had one since it was written, this
+  did not.** A body arrives inside a message a proxy may have grown on the
+  way, and every line of it becomes an allocation; nothing stopped a hostile
+  peer from writing thousands of `m=` blocks, an attribute flood, or a single
+  line long enough to be the whole body by itself. `sdp::Limits` now bounds
+  body size, line length, `m=` blocks, attributes per section and in total,
+  and formats on one `m=` line, mirroring `msg::Limits`'s shape; exceeding one
+  is a typed `SdpError`, and every default is sized and documented against
+  what a real call plus ICE and SRTP actually carry. `EndpointConfig` gains
+  `sdp_limits`, and every place `sipral-ua` reads a session description off
+  the wire now parses against it instead of an implicit default.
+
 - **A replay recording no longer carries the means to decrypt what it
   recorded.** SRTP master keys were drawn from the same seeded stream as the
   branches, tags and `Call-ID`s — and that seed is written into every
@@ -59,6 +72,31 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   media session by its own path.
 
 ### Fixed
+
+- **A session timer that could not be refreshed yet stayed due at the instant
+  that had already fired, forever.** `send_refresh` returned without moving
+  `due` when the call had no dialog to send a refresh in, and when it was not
+  up yet: the timer this end arms for the retry after a 422 while that retry
+  is still ringing, and the one armed with a 2xx this end sent whose ACK has
+  not arrived. `poll_timeout` kept handing back the past deadline, so the
+  event loop never slept. Both returns now wait a quarter of the interval, as
+  the refresh already did when a request could not go. The timer is kept, not
+  dropped: it holds the mark that makes a second 422 end the call instead of
+  asking again (RFC 4028 §10), and on an answered call nothing re-arms it when
+  the ACK arrives, while §7.2 still wants the refresh before the session
+  expires.
+
+- **A call or account handle no longer names a call on another stack.** Every
+  stack numbered its handles from the same first slot, so the first call on one
+  stack and the first call on a second were the same number, and a hang-up
+  passed to the wrong stack ended that stack's call and answered
+  `SIPRAL_STATUS_OK`. A handle now carries the tag of the stack that minted it —
+  generation (32 bits), stack tag (8), slot (24) — and one used with another
+  stack is `SIPRAL_STATUS_INVALID_HANDLE`, "minted by another stack". A tag is
+  reused once its stack is gone, and the stack that takes it mints above every
+  generation the last one handed out, so a handle kept from a destroyed stack is
+  refused the same way. A process holds 256 live stacks; the next
+  `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED`.
 
 - **The lab's outage profile could pass without the outage touching the
   call.** `interop/impairment/blackout.sh` cut the link five seconds after its
@@ -369,6 +407,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **An account can have no registrar.** A trunk that knows this end by its
+  address could not be configured: `sipral_account_add` refused an empty
+  `registrar`, and `Account` had no way to say there was none.
+  `Account::unregistered(aor, contact, transport, outbound_proxy)` makes one,
+  and so does a `registrar_len` of zero in C, where `registrar_address` becomes
+  the outbound proxy its requests go to. Its state is `NotRegistering`
+  (`SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, 10) for as long as it exists;
+  registering it is refused with nothing sent (`UaError::NoRegistrar`,
+  `SIPRAL_STATUS_INVALID_ARGUMENT`); no refresh, back-off, recovery rung or push
+  pre-warm touches it; and a registration snapshot offered to it is refused
+  (`SnapshotError::NotRegistering`). `Account::registrar` now answers
+  `Option<&Uri>`.
 - **Nine more fuzz targets, and the gate builds all thirteen.**
   `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
   `srtp_unprotect`, `stun` and `turn` join the four that existed, one per door

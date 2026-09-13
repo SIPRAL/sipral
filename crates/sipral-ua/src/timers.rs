@@ -425,6 +425,20 @@ impl UserAgent {
             return;
         };
         let (Some(dialog), Some(timer)) = (state.dialog, state.timer) else {
+            // no dialog to send a refresh in: the retry after a 422 has not
+            // had a provisional that opened one, or the one it opened was
+            // refused while the INVITE is still being answered. The call gets
+            // a dialog or ends, and until then the timer waits a quarter of
+            // the interval at a time. Dropping it would forget the floor and
+            // the mark a second 422 is judged by; leaving `due` where it was
+            // would have fire_session_timers pick it again on every turn
+            if let Some(timer) = self
+                .calls
+                .get_mut(&call)
+                .and_then(|held| held.timer.as_mut())
+            {
+                timer.due = now + timer.interval / 4;
+            }
             return;
         };
         if state.offering.is_some() || state.answering.is_some() {
@@ -446,6 +460,18 @@ impl UserAgent {
             state.session.repeat(),
         );
         if !confirmed {
+            // not up yet: a retry after a 422 still ringing, or a 2xx this end
+            // sent whose ACK has not arrived. §7.2 and §9 run the session
+            // expiration from the 2xx and want the refresh before it, and
+            // nothing re-arms the timer when the ACK comes, so it is kept and
+            // waits a quarter of the interval, as it does when a request
+            // cannot go
+            if let Some(held) = self.calls.get_mut(&call) {
+                held.timer = Some(SessionTimer {
+                    due: now + timer.interval / 4,
+                    ..timer
+                });
+            }
             return;
         }
 

@@ -3,14 +3,20 @@
 
 //! Accounts: configured, registered, given up.
 //!
-//! An account is one relationship with one registrar, and several of them live
-//! in one stack without sharing anything. Adding one sends nothing;
-//! [`sipral_account_register`] is what puts a REGISTER on the wire, and from
-//! then on the binding is refreshed, retried and backed off without another
+//! An account is one identity, usually with one registrar behind it, and
+//! several of them live in one stack without sharing anything. Adding one sends
+//! nothing; [`sipral_account_register`] is what puts a REGISTER on the wire, and
+//! from then on the binding is refreshed, retried and backed off without another
 //! call. What the application hears about is the state, not the transactions.
 //!
-//! Three things here are the caller's and cannot be defaulted. The address the
-//! REGISTER is sent to, because resolving a registrar's name is I/O; the
+//! An account configured with no registrar never registers at all. It is a
+//! trunk that knows this end by the address its requests come from: its state
+//! reads `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` from the moment it is
+//! added, registering it is refused, and what it places goes to
+//! `registrar_address`, which for it is the outbound proxy.
+//!
+//! Three things here are the caller's and cannot be defaulted. The address
+//! requests are sent to, because resolving a server's name is I/O; the
 //! `Contact` this end is reachable at, because a library that never opened a
 //! socket does not know what the world sees; and the instance identifier,
 //! because RFC 5626 §4.1 wants one that survives a power cycle and nothing
@@ -49,6 +55,11 @@ record! {
         /// How many bytes of it.
         pub aor_len: usize,
         /// Where the REGISTER is addressed, `sip:example.com`, no user part.
+        ///
+        /// A `registrar_len` of zero makes an account that never registers: a
+        /// trunk that knows this end by the address its requests come from.
+        /// Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` for as long
+        /// as it exists, and `sipral_account_register` refuses it.
         pub registrar: *const c_char,
         /// How many bytes of it.
         pub registrar_len: usize,
@@ -56,8 +67,11 @@ record! {
         pub contact: *const c_char,
         /// How many bytes of it.
         pub contact_len: usize,
-        /// Where the REGISTER actually goes, as `host:port`. An address, not a
-        /// name: RFC 3263 resolution is the caller's.
+        /// Where this account's requests go, as `host:port`: the registrar's
+        /// address for an account that registers, and the outbound proxy for
+        /// one configured with no registrar. A call that names no destination
+        /// of its own goes here either way, so it is required either way. An
+        /// address, not a name: RFC 3263 resolution is the caller's.
         pub registrar_address: *const c_char,
         /// How many bytes of it.
         pub registrar_address_len: usize,
@@ -149,15 +163,30 @@ fn address(supplied: &str, name: &'static str) -> Result<SocketAddr, Fail> {
 /// Every pointer in `config` must be readable for the length beside it.
 unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Result<Account, Fail> {
     let aor = unsafe { required_text(config.aor, config.aor_len, "aor") }?;
-    let registrar = unsafe { required_text(config.registrar, config.registrar_len, "registrar") }?;
+    // no registrar is an account that never registers, not a mistake
+    let registrar = unsafe { text(config.registrar, config.registrar_len, "registrar") }?;
     let contact = unsafe { required_text(config.contact, config.contact_len, "contact") }?;
     let remote = unsafe {
-        required_text(
+        text(
             config.registrar_address,
             config.registrar_address_len,
             "registrar_address",
         )
     }?;
+    // said for the trunk in its own words, because a caller who left the
+    // registrar out on purpose reads "required" as a contradiction
+    let Some(remote) = remote else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            if registrar.is_some() {
+                "registrar_address is required and was not given"
+            } else {
+                "registrar_address is required and was not given: with registrar_len zero the \
+                 account never registers, and registrar_address is the outbound proxy every \
+                 request it places is sent to"
+            },
+        ));
+    };
     let display = unsafe { text(config.display_name, config.display_name_len, "display_name") }?;
     let user = unsafe { text(config.auth_user, config.auth_user_len, "auth_user") }?;
     let password = unsafe {
@@ -169,13 +198,16 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }?;
     let instance = unsafe { text(config.instance_id, config.instance_id_len, "instance_id") }?;
 
-    let mut account = Account::new(
-        uri(aor, "aor")?,
-        uri(registrar, "registrar")?,
-        uri(contact, "contact")?,
-        state.transport,
-        address(remote, "registrar_address")?,
-    );
+    let aor = uri(aor, "aor")?;
+    let registrar = registrar
+        .map(|registrar| uri(registrar, "registrar"))
+        .transpose()?;
+    let contact = uri(contact, "contact")?;
+    let remote = address(remote, "registrar_address")?;
+    let mut account = match registrar {
+        Some(registrar) => Account::new(aor, registrar, contact, state.transport, remote),
+        None => Account::unregistered(aor, contact, state.transport, remote),
+    };
     if let Some(display) = display {
         account = account.display_name(display);
     }
@@ -266,6 +298,9 @@ entry! {
     /// [`sipral_account_unregister`], or a refusal that trying again cannot
     /// fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
     ///
+    /// An account configured with no registrar never registers, and this
+    /// answers `SIPRAL_STATUS_INVALID_ARGUMENT` for it with nothing sent.
+    ///
     /// # Safety
     ///
     /// Safe to call with any handle values.
@@ -287,6 +322,9 @@ entry! {
     /// the address of record has, including the one belonging to the desk
     /// phone somebody else is holding.
     ///
+    /// An account configured with no registrar has no binding to give up, and
+    /// is refused the way `sipral_account_register` refuses it.
+    ///
     /// # Safety
     ///
     /// Safe to call with any handle values.
@@ -303,6 +341,9 @@ entry! {
 
 entry! {
     /// Where an account's registration is, as a `SipralRegistrationState`.
+    ///
+    /// An account configured with no registrar answers
+    /// `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
     ///
     /// # Safety
     ///
@@ -330,14 +371,18 @@ pub(crate) mod tests {
         SipralAccountConfig, sipral_account_add, sipral_account_register,
         sipral_account_registration_state, sipral_account_remove, sipral_account_unregister,
     };
+    use crate::call::sipral_call_place;
+    use crate::call::tests::call_config;
     use crate::error::last_error_text;
     use crate::event::{SipralEventKind, SipralRegistrationState};
-    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags};
+    use crate::media::SIPRAL_ADDRESS_BYTES;
     use crate::stack::sipral_stack_destroy;
-    use crate::stack::tests::{Observed, poll, stack};
+    use crate::stack::tests::{Observed, poll, stack, stack_on};
     use crate::status::SipralStatus;
     use crate::transport::tests::drain;
-    use std::ffi::c_char;
+    use crate::transport::{SIPRAL_MESSAGE_BYTES, SipralTransmit, sipral_stack_poll_transmit};
+    use std::ffi::{CStr, c_char};
     use std::ptr;
 
     const AOR: &str = "sip:alice@example.com";
@@ -373,6 +418,51 @@ pub(crate) mod tests {
             instance_id: ptr::null(),
             instance_id_len: 0,
             expires_seconds: 0,
+        }
+    }
+
+    /// The same, for an account that never registers: no registrar, and the
+    /// address is the outbound proxy its requests go to.
+    fn trunk_config() -> SipralAccountConfig {
+        SipralAccountConfig {
+            registrar: ptr::null(),
+            registrar_len: 0,
+            ..account_config()
+        }
+    }
+
+    /// Everything the stack wants written, and where each message is going,
+    /// through the C ABI and nothing else.
+    fn written(stack: SipralHandle) -> Vec<(Vec<u8>, String)> {
+        let mut message = vec![0_u8; SIPRAL_MESSAGE_BYTES];
+        let mut destination: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut source: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
+        let mut all = Vec::new();
+        loop {
+            let mut transmit = SipralTransmit {
+                size: size_of::<SipralTransmit>(),
+                transport: u32::MAX,
+                protocol: u32::MAX,
+                data: message.as_mut_ptr(),
+                capacity: message.len(),
+                len: usize::MAX,
+                destination: destination.as_mut_ptr(),
+                destination_capacity: destination.len(),
+                destination_len: usize::MAX,
+                source: source.as_mut_ptr(),
+                source_capacity: source.len(),
+                source_len: usize::MAX,
+            };
+            let status = unsafe { sipral_stack_poll_transmit(stack, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                return all;
+            }
+            let bytes = message.get(..transmit.len).unwrap_or_default().to_vec();
+            let to = unsafe { CStr::from_ptr(destination.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            all.push((bytes, to));
         }
     }
 
@@ -440,16 +530,35 @@ pub(crate) mod tests {
 
     #[test]
     fn an_account_handle_from_one_stack_does_not_open_another() {
+        // tags of its own, so both stacks start at the first generation the way
+        // every stack did before a handle carried one; tags from the process's
+        // own set come back carrying whatever other tests minted, and can refuse
+        // the handle for a reason that has nothing to do with its stack
+        static TAGS: StackTags = StackTags::new();
         let mut first_observed = Observed::default();
         let mut second_observed = Observed::default();
-        let first = stack(&mut first_observed);
-        let second = stack(&mut second_observed);
-        let (_, account) = add(first, &account_config());
+        let first = stack_on(&TAGS, &mut first_observed);
+        let second = stack_on(&TAGS, &mut second_observed);
+        let (_, foreign) = add(first, &account_config());
+        let (_, own) = add(second, &account_config());
+        // both stacks number their accounts from the same first slot, so the
+        // two handles differ in nothing but the stack they carry
+        assert_ne!(foreign, own);
         assert_eq!(
-            unsafe { sipral_account_register(second, account, 0) },
+            unsafe { sipral_account_register(second, foreign, 0) },
             SipralStatus::InvalidHandle,
-            "the second stack has never handed out that handle"
+            "the handle opened the second stack's own account"
         );
+        let message = last_error_text();
+        assert!(
+            message.contains("minted by another stack"),
+            "the refusal does not say why: {message}"
+        );
+        assert!(
+            drain(second).is_empty(),
+            "the second stack's own account was registered"
+        );
+        assert_eq!(state_of(second, own), SipralRegistrationState::Idle as u32);
         assert_eq!(unsafe { sipral_stack_destroy(first) }, SipralStatus::Ok);
         assert_eq!(unsafe { sipral_stack_destroy(second) }, SipralStatus::Ok);
     }
@@ -473,9 +582,9 @@ pub(crate) mod tests {
     fn every_field_an_account_cannot_do_without_is_asked_for() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
-        let missing: [fn(&mut SipralAccountConfig); 4] = [
+        // the registrar is not among them: an account without one is a trunk
+        let missing: [fn(&mut SipralAccountConfig); 3] = [
             |config| (config.aor, config.aor_len) = (ptr::null(), 0),
-            |config| (config.registrar, config.registrar_len) = (ptr::null(), 0),
             |config| (config.contact, config.contact_len) = (ptr::null(), 0),
             |config| {
                 (config.registrar_address, config.registrar_address_len) = (ptr::null(), 0);
@@ -486,6 +595,106 @@ pub(crate) mod tests {
             leave_out(&mut config);
             assert_eq!(add(handle, &config).0, SipralStatus::InvalidArgument);
         }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_with_no_registrar_is_added_and_says_it_never_registers() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let (status, account) = add(handle, &trunk_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(account, SIPRAL_HANDLE_NONE);
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::NotRegistering as u32,
+            "not idle: idle is one sipral_account_register away from a binding"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_account_with_no_registrar_still_has_to_say_where_its_requests_go() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let mut config = trunk_config();
+        (config.registrar_address, config.registrar_address_len) = (ptr::null(), 0);
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(account, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(
+            message.contains("registrar_address") && message.contains("never registers"),
+            "the refusal has to name the member and say why an account without a registrar \
+             still needs it: {message}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn registering_an_account_with_no_registrar_is_refused_and_sends_nothing() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let (_, account) = add(handle, &trunk_config());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+        let message = last_error_text();
+        assert!(message.contains("no registrar"), "{message}");
+        assert_eq!(
+            unsafe { sipral_account_unregister(handle, account, 1_000) },
+            SipralStatus::InvalidArgument
+        );
+
+        poll(handle, 1_000);
+        assert!(
+            drain(handle).is_empty(),
+            "a REGISTER was written for an account with no registrar"
+        );
+        assert_eq!(
+            observed.kinds(),
+            vec![SipralEventKind::Started],
+            "a registration was reported for an account that has none"
+        );
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::NotRegistering as u32
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_call_on_an_account_with_no_registrar_goes_to_the_address_it_was_given() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let (status, account) = add(handle, &trunk_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let config = call_config();
+        let mut call = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_place(handle, account, ptr::from_ref(&config), &raw mut call, 0) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+
+        poll(handle, 0);
+        let out = written(handle);
+        assert!(
+            out.first()
+                .is_some_and(|(bytes, _)| bytes.starts_with(b"INVITE ")),
+            "the call went nowhere"
+        );
+        let destinations: Vec<&str> = out.iter().map(|(_, to)| to.as_str()).collect();
+        assert!(
+            destinations.iter().all(|to| *to == ADDRESS),
+            "everything the account placed goes to the proxy it was given: {destinations:?}"
+        );
+        assert!(
+            !out.iter().any(|(bytes, _)| bytes.starts_with(b"REGISTER ")),
+            "a REGISTER went out beside the call"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

@@ -54,15 +54,11 @@ the seam a shared vocabulary rather than a call.
 
 ## sipral-rtp
 
-### RTP and RTCP
+### RTP
 
 RFC 3550. Sequence numbers with wraparound, timestamps per clock rate, SSRC
 collision handling, contributing sources parsed and ignored. Marker bit on talk
 spurt start, which is the audio profile's rule (RFC 3551 §4.1), not RFC 3550's.
-
-RTCP sender and receiver reports on the standard interval, because carriers use
-them for quality reporting and their absence is noticed. RTCP-mux when
-negotiated, a separate port when not.
 
 **Symmetric RTP always.** Send from the port we receive on, and latch onto the
 source address of the first valid packet. This single behaviour, together with
@@ -71,6 +67,151 @@ source address of the first valid packet. This single behaviour, together with
 Validation before anything else: version, payload type in the negotiated set,
 plausible SSRC, length. Packets from an unexpected source after latching are
 dropped, not merged.
+
+### RTCP
+
+The wire format — SR, RR, SDES, BYE, the compound-packet rules of §6.1, and
+telling RTCP apart from RTP on a muxed socket (RFC 5761 §4) — is
+`sipral-rtp::rtcp`. Deciding when to send one and what to make of one that
+arrived is `RtpSession` in `sipral-rtp::endpoint`, backed by two modules that do
+the RFC's own bookkeeping: `rtcp_timer::IntervalTimer` for §6.2's transmission
+interval and §6.3's join/leave/reconsideration state machine, and
+`rtcp_stats::ReceptionTracker` for §6.4.1's report-block arithmetic and the
+round-trip calculation of A.3 and A.8. Driving both, per call, is `MediaSession`
+and `MediaEngine` in the `sipral` facade.
+
+**What is generated.** `RtpSession::build_report` writes one compound packet:
+an SR when this session has sent RTP since the previous report
+(`Outbound::sent_since_report`), an RR otherwise — never both, and never an SR
+from a stream that sent nothing in the last interval, which is one interval
+stricter than §6.4 (see the departures below) — carrying a
+reception report block for the remote source once one is known
+(`ReceptionTracker::block`: fraction lost and cumulative lost over the
+interval since the last report per §6.4.1/A.3, interarrival jitter per A.8,
+and LSR/DLSR from the last SR heard from that source), plus an SDES chunk
+naming this session's own CNAME (`StreamConfig::cname`, defaulted to
+`sipral@<local-ip>` in `sipral::session` when the application does not choose
+one — RFC 3550 §6.5.1's "user@host" form). The CNAME chunk is unconditional:
+every compound packet built here carries one, which is what §6.1 requires of
+all of them. Hanging up sends one more packet that is not on this schedule:
+`RtpSession::send_bye` builds a BYE (§6.6) for this stream's own SSRC with an
+empty reason, from `MediaSession::goodbye`, queued in
+`MediaEngine::farewells` because the call and its session are already gone by
+the time there is anything left to send it from (see the doc comment on
+`MediaEngine::poll_farewell`).
+
+**When, and how often.** `MediaEngine::poll_rtcp` asks each call in turn
+whether its deadline has passed (`MediaSession::rtcp_deadline_passed`); the
+actual send-or-wait decision, with the reconsideration §6.3.6 describes, is
+`RtpSession::rtcp_due` over `IntervalTimer`, which is §6.2's calculated
+interval and §6.3's state for it: the sender share of §6.3.1 point 1 (A.7's
+`RTCP_SENDER_BW_FRACTION`: a quarter of the RTCP bandwidth divided among
+senders and the rest among everyone else while senders are at most a quarter
+of the members, all of it divided among every member once they are more — so
+on a two-party call the split holds only until either side sends RTP), a
+five-second floor once the session is no longer new and half of that for the
+very first report (§6.2), a running average of compound-packet sizes that both
+sent and received packets fold into (`IntervalTimer::observe`, counting the
+UDP payload only — see the departures below), the interval's own random draw
+scaled to
+`[0.5, 1.5)` and divided by `e - 3/2` to undo reconsideration's bias (§6.3.1
+point 5, A.7), and reverse reconsideration — pulling the next deadline
+forward — when a member's BYE arrives (§6.3.4, `IntervalTimer::remove_member`).
+The random draw itself is `Draws::unit` in `sipral::session`: a seeded
+SplitMix64 generator, deliberately not a source of secrecy, since a
+predictable report time leaks nothing but when the next report goes.
+The one number that scaling starts from is fixed: `RTCP_BANDWIDTH` in
+`sipral::session`, five hundred octets per second — five percent of a
+two-party narrowband call's roughly ten-kilo-octet-a-second wire rate, which
+is also small enough that the five-second §6.2 floor, not the
+bandwidth-derived figure, is what actually sets the cadence for a call this
+size. In practice that puts a report on the wire roughly every two to a
+little over six seconds once the session has settled — the exact figure moves
+with each random draw and with which side has sent since the last one — and
+the very first one sooner, inside half that span.
+
+**What it reads back.** `RtpSession::rtcp_receive` parses the compound packet
+and refuses to believe any of it unless it came from the address this stream
+has latched RTCP onto (`rtcp_origin_accepted` — see its doc comment for why
+that check runs before anything in the packet is trusted). For every SR or RR
+inside, the block naming this session's own SSRC gives the round-trip time
+(`RtpSession::note_round_trip`, `rtcp_stats::round_trip_time`, §6.4.1's
+`A - LSR - DLSR` from A.3, `None` until the peer has echoed an SR of ours); an
+SR from the remote source is separately remembered
+(`ReceptionTracker::on_sender_report`) so this session's own next report can
+carry that source's LSR and DLSR. A BYE naming the remote SSRC drops it from
+the interval timer's membership and sender counts (§6.3.4) and is reported to
+the caller as `Arrival::Goodbye` from `MediaSession::receive_control` (or from
+`MediaSession::receive`, which hands it RTCP on a muxed socket) — audio is
+assumed to stop, but the call itself ends only when signalling says so, which
+is `sipral-ua`'s decision, not this crate's. An incoming SDES is parsed
+(`rtcp::SourceDescription`) but nothing here reads its content; only its
+presence is required, to keep the compound packet the shape §6.1 demands.
+
+**What reaches the application.** `MediaSession::statistics` returns
+`StreamStatistics`: the negotiated codec, `Quality` from the jitter buffer
+(packet counts, loss, jitter and delay, measured from arrival times rather
+than from RTCP, so it stands even on a call that negotiated none), the
+`round_trip: Option<Duration>` read back above, and this session's own send
+counters. `StreamStatistics::score` folds the worst of loss, round trip and
+buffer delay into one 0-to-100 number for a screen — explicitly not a MOS,
+which its doc comment says outright — and `StreamStatistics::is_suffering`
+answers whether the call is in trouble right now. None of this arrives as an
+event on its own: it is polled, cheaply, at whatever rate the application
+wants, except at the end of a call, where `MediaEvent::Ended` carries one
+final `StreamStatistics` snapshot so the record of how a call sounded outlives
+the session. The one thing that does arrive as news mid-call is
+`Arrival::Goodbye` above, and — correlated with RTCP's silence but not derived
+from it — `MediaEvent::Stalled` when audio itself stops arriving.
+
+**Whether it happens at all.** RFC 3556's `b=RS:0` and `b=RR:0`, on either
+side, turn RTCP off for a stream entirely (`sdp::plan::rtcp_refused`), the
+same as a media port of 65535 with no `a=rtcp` line to say where RTCP would
+go. `a=rtcp-mux`, agreed by both sides, shares the RTP port instead of the
+classic even/odd pair (`RtcpPlan::Muxed`, RFC 5761 §4) — told apart from RTP
+on the wire by `rtcp::is_rtcp`'s read of §4's reserved packet-type span.
+`sdp::plan::RtcpPlan` carries the outcome into `MediaPlan::rtcp`.
+
+**Where this departs from RFC 3550 §6.2 and the rules built on it.** Four
+places, plainly:
+
+1. §6.2 sizes the RTCP bandwidth as a fraction of the session's own bandwidth
+   — the bit rate the negotiated codec actually uses. This stack does not read
+   that back out of the negotiation: `RTCP_BANDWIDTH` is one constant, sized
+   for a 64 kbit/s codec (G.711, or G.722 at the same bit rate), not derived
+   per call from `MediaPlan::codec` — so not re-derived when Opus, the default
+   build's first choice, is negotiated at whatever rate its encoder runs — nor
+   from a negotiated `b=AS`, `b=RS` or `b=RR`; of those, only `b=RS:0` together
+   with `b=RR:0` is read, and only as "off". A stream running at a very
+   different rate would need a bandwidth figure of its own, and nothing here
+   computes one automatically.
+2. §6.2 counts the UDP and IP headers in every bandwidth and packet-size
+   figure, and §6.3.1 defines `avg_rtcp_size` to include them. The sizes
+   `IntervalTimer` averages do not: `RtpSession::rtcp_receive` hands
+   `IntervalTimer::observe` the datagram's length, and
+   `RtpSession::build_report` hands `IntervalTimer::sent` the octets it wrote,
+   so the average runs 28 octets (IPv4) or 48 (IPv6) short of what §6.2 means,
+   while `RTCP_BANDWIDTH` is derived from a rate that does include headers. On
+   a two-party call this changes nothing observable — the size-derived
+   interval is well under the five-second floor either way — but the two
+   figures are not in the same units.
+3. §6.3.5 ("Timing Out an SSRC") asks a participant assumed gone — nothing
+   heard from it in five calculated intervals — to be dropped from membership
+   even without a BYE, and a sender silent for two intervals to be dropped
+   from the sender count. Nothing here runs either sweep: `IntervalTimer` only
+   loses a member or a sender when a BYE actually arrives (§6.3.4, above), and
+   this session's own `we_sent`, which §6.3.8 clears after two intervals
+   without RTP, is set by `IntervalTimer::note_local_sender` and cleared only
+   by `IntervalTimer::leaving`. The consequence is bounded for the two-party
+   call this crate targets — a far end that stops sending without a BYE is
+   `MediaEvent::Stalled`'s job to notice, not the RTCP scheduler's — but the
+   interval timer's own counts will not reflect it, which matters the day this
+   scheduling code is asked to serve more than two members.
+4. §6.4 issues an SR when a site "has sent any data packets during the
+   interval since issuing the last report or the previous one". The choice in
+   `RtpSession::build_report` looks at the last interval only, because every
+   report clears `Outbound::sent_since_report`: a stream that falls silent
+   sends RRs one interval sooner than §6.4 says.
 
 ### Jitter buffer
 

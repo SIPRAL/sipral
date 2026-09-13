@@ -28,6 +28,10 @@ pub enum UaError {
     /// The call is not somewhere this can be done: answering one that was
     /// placed from here, acknowledging one that is not waiting for it.
     WrongState(CallState),
+    /// The account has no registrar
+    /// ([`Account::unregistered`](crate::Account::unregistered)), so there is
+    /// nothing to register with and no binding to give up. Nothing was built.
+    NoRegistrar,
     /// The request could not be assembled or handed to a transport.
     Send(SendError),
     /// The response could not be sent.
@@ -54,6 +58,7 @@ impl fmt::Display for UaError {
             Self::NoSuchCall => f.write_str("no such call"),
             Self::NoSuchSubscription => f.write_str("no such subscription"),
             Self::WrongState(state) => write!(f, "the call is {state}"),
+            Self::NoRegistrar => f.write_str("the account has no registrar and never registers"),
             Self::Send(ref error) => write!(f, "cannot send it: {error}"),
             Self::Respond(ref error) => write!(f, "cannot answer it: {error}"),
             Self::Ack(ref error) => write!(f, "cannot acknowledge it: {error}"),

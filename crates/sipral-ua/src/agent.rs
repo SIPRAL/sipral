@@ -28,8 +28,9 @@ use sipral_core::endpoint::{
     AuthRetryError, Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest,
     ReceiveError, SendError, Transmit, TransportId,
 };
-use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode};
+use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
 use sipral_core::replay::Driven;
+use sipral_core::sdp;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
 };
@@ -119,6 +120,9 @@ pub struct UserAgent {
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
     pub(crate) timer_n: Duration,
+    /// The bounds a session description read off the wire is held to, read
+    /// off the configuration once for the same reason `timer_n` is.
+    pub(crate) sdp_limits: sdp::Limits,
     /// What the operating system last said about sleeping, moving and losing a
     /// network, and how far up the recovery ladder that left this.
     pub(crate) life: Machine,
@@ -147,6 +151,7 @@ impl UserAgent {
     #[must_use]
     pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self {
         let timer_n = config.timers.sixty_four_t1();
+        let sdp_limits = config.sdp_limits;
         Self {
             endpoint: Endpoint::new(config, seed),
             accounts: HashMap::new(),
@@ -167,6 +172,7 @@ impl UserAgent {
             events: VecDeque::new(),
             guard: Guard::default(),
             timer_n,
+            sdp_limits,
             life: Machine::default(),
             announcements: Vec::new(),
             arrivals: HashMap::new(),
@@ -271,7 +277,8 @@ impl Driven for UserAgent {
 // -- accounts ----------------------------------------------------------------
 
 impl UserAgent {
-    /// Take an account. Nothing is sent until [`UserAgent::register`].
+    /// Take an account. Nothing is sent until [`UserAgent::register`], and
+    /// nothing ever is for an account that has no registrar.
     pub fn add_account(&mut self, account: Account) -> AccountId {
         let id = AccountId(self.next_account);
         self.next_account = self.next_account.wrapping_add(1);
@@ -279,8 +286,13 @@ impl UserAgent {
         // registrar reads a refresh as a refresh rather than as a second device
         let call_id = CallId::new(&self.endpoint.token());
         let asking = account.expires;
-        self.registrations
-            .insert(id, Registration::new(call_id, asking));
+        let mut registration = Registration::new(call_id, asking);
+        // said once, here, and never moved: nothing that changes a
+        // registration's state can reach an account no REGISTER leaves for
+        if account.registrar.is_none() {
+            registration.state = RegistrationState::NotRegistering;
+        }
+        self.registrations.insert(id, registration);
         self.accounts.insert(id, account);
         id
     }
@@ -316,8 +328,9 @@ impl UserAgent {
     /// refusal that trying again cannot fix.
     ///
     /// # Errors
-    /// [`UaError::NoSuchAccount`], or [`UaError::Send`] when the REGISTER
-    /// cannot be built or the transport is unknown.
+    /// [`UaError::NoSuchAccount`], [`UaError::NoRegistrar`] for an account
+    /// that never registers, or [`UaError::Send`] when the REGISTER cannot be
+    /// built or the transport is unknown.
     pub fn register(&mut self, account: AccountId, now: Instant) -> Result<(), UaError> {
         self.send_register(account, false, now)?;
         self.drain(now);
@@ -349,6 +362,12 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        // every REGISTER goes through here -- the application's, a refresh, a
+        // retry, a wake's, a push's -- so this is the one place an account
+        // with no registrar is turned away, before anything is built
+        let Some(registrar) = config.registrar.as_ref() else {
+            return Err(UaError::NoRegistrar);
+        };
         let reg = self
             .registrations
             .get(&account)
@@ -360,7 +379,7 @@ impl UserAgent {
             reg.asking
         };
 
-        let request = build_register(config, reg, expires);
+        let request = build_register(config, registrar, reg, expires);
         // §22.2: a registrar that has challenged this account before gets the
         // credentials on the way in, rather than a REGISTER it has to refuse
         // first. Nothing is added unless it has, so the first one of the boot
@@ -436,12 +455,17 @@ impl UserAgent {
     }
 }
 
-/// The REGISTER for one account (§10.2.1).
-fn build_register(account: &Account, reg: &Registration, expires: Duration) -> OutgoingRequest {
+/// The REGISTER for one account (§10.2.1), addressed to `registrar`.
+fn build_register(
+    account: &Account,
+    registrar: &Uri,
+    reg: &Registration,
+    expires: Duration,
+) -> OutgoingRequest {
     let seconds = expires.as_secs().to_string();
     let mut request = OutgoingRequest::new(
         Method::Register,
-        account.registrar.clone(),
+        registrar.clone(),
         account.transport,
         account.remote,
     )

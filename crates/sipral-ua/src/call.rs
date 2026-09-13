@@ -222,9 +222,11 @@ pub struct OutgoingCall {
 impl OutgoingCall {
     /// A call to `target`.
     ///
-    /// It leaves on the account's transport, for the address the account
-    /// registers with — which is the outbound proxy for a registered line, and
-    /// the reason a softphone behind a NAT works at all. Somewhere else needs
+    /// It leaves on the account's transport, for the account's address: the
+    /// one it registers with — which is the outbound proxy for a registered
+    /// line, and the reason a softphone behind a NAT works at all — or, for an
+    /// account that never registers, the outbound proxy it was given
+    /// ([`crate::Account::unregistered`]). Somewhere else needs
     /// [`OutgoingCall::to_address`].
     #[must_use]
     pub const fn new(target: Uri) -> Self {
@@ -249,7 +251,7 @@ impl OutgoingCall {
         self
     }
 
-    /// Send it somewhere other than where the account registers.
+    /// Send it somewhere other than the account's address.
     ///
     /// Resolving a name is the caller's, here as everywhere: this takes the
     /// answer, not the question.

@@ -65,7 +65,7 @@ use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
-use crate::handle::{HandleTable, SipralHandle};
+use crate::handle::{HandleTable, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
 use crate::media::{catalog_of, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
@@ -73,6 +73,9 @@ use crate::text::{bytes, required_text, text};
 use crate::versioned::{Versioned, declared_size, read_versioned, write_versioned};
 
 static STACKS: HandleTable<StackEntry> = HandleTable::new();
+
+/// The tags every stack in this process mints its handles with, one each.
+static TAGS: StackTags = StackTags::new();
 
 /// Thirty-two bytes, which is what the endpoint derives every branch
 /// parameter, tag and `Call-ID` from.
@@ -414,6 +417,15 @@ pub(crate) struct StackState {
     /// question, not the engine's: it decides which re-offers the application
     /// is asked to answer and which the stack has already answered for it.
     managed: Vec<CallHandle>,
+    /// The tag every handle this stack mints carries.
+    ///
+    /// Held here rather than beside the stack's handle so that it is given back
+    /// when the last share of this state goes, not when the stack is destroyed:
+    /// a poll that destroyed its own stack from the callback is still delivering,
+    /// and can still name a call, and a tag handed to a new stack before that
+    /// poll returned would start the new stack below a handle the old one had
+    /// yet to mint. Nothing reads it; holding it is the whole of its job.
+    _tag: StackTag,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
     /// The transport every account and every call uses. There is one.
@@ -529,13 +541,16 @@ impl Drop for StackState {
     }
 }
 
-pub(crate) fn handle_failed(status: SipralStatus) -> Fail {
-    let explanation = match status {
-        SipralStatus::StaleHandle => "what the handle named is gone",
-        SipralStatus::InvalidHandle => "not a handle from this library",
-        _ => "the handle cannot be used",
+pub(crate) fn handle_failed(refused: Refused) -> Fail {
+    let explanation = match refused {
+        Refused::Gone => "what the handle named is gone",
+        Refused::NotOurs => "not a handle from this library",
+        Refused::OtherStack => {
+            "the handle was minted by another stack, and a handle names something only on the \
+             stack that minted it"
+        }
     };
-    fail(status, explanation)
+    fail(refused.status(), explanation)
 }
 
 /// Do something to a stack, or say why not.
@@ -717,6 +732,10 @@ entry! {
     /// The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
     /// that is created must be destroyed with [`sipral_stack_destroy`].
     ///
+    /// A process holds 256 stacks at once. The next is
+    /// `SIPRAL_STATUS_EXHAUSTED` until one of them is destroyed and no poll is
+    /// still running on it.
+    ///
     /// # Safety
     ///
     /// `config` must point at a `sipral_stack_config_t` whose `size` member
@@ -726,98 +745,126 @@ entry! {
         if out_stack.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_stack is null"));
         }
-        let config = unsafe { read_versioned(config) }?;
-        let Some(callback) = config.event_callback else {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                "a stack needs an event callback",
-            ));
-        };
-        let speaks = transport_of(config.transport)?;
-        let bound = unsafe {
-            required_text(config.bind_address, config.bind_address_len, "bind_address")
-        }?;
-        let Ok(local) = bound.parse::<SocketAddr>() else {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                format!("bind_address is {bound:?}, which is not an address and a port"),
-            ));
-        };
-        let named = unsafe { text(config.user_agent, config.user_agent_len, "user_agent") }?;
-        let seed = seed_from(
-            unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
-            "entropy",
-        )?;
-        let media_seed = seed_from(
-            unsafe { bytes(config.media_seed, config.media_seed_len, "media_seed") }?,
-            "media_seed",
-        )?;
-        if media_seed == seed {
-            // The one check that has to live here: nowhere else can see both.
-            // Sharing them undoes the separation silently — every message
-            // still looks right, and every SRTP key is derivable from a
-            // recording that was meant to carry none.
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                "media_seed is the same as entropy; they must be two independent draws, because a \
-                 replay recording carries entropy in clear and must not permit deriving a key"
-                    .to_owned(),
-            ));
-        }
-
-        let timers = timers_for(speaks.protocol(), &config)?;
-        let media = media_for(&config)?;
-        let mut endpoint = EndpointConfig::default();
-        endpoint.timers = timers;
-
-        let origin = Instant::now();
-        let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
-        let mut agent = UserAgent::new(endpoint, seed);
-        // the socket is the caller's; what the stack is told is the address
-        // the far end will answer to, which is what goes in every Via
-        let bound = agent.receive(
-            Input::TransportBound {
-                transport: TRANSPORT,
-                protocol: speaks.protocol(),
-                local,
-                remote: None,
-            },
-            origin,
-        );
-        if bound.is_err() {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                "the transport could not be bound",
-            ));
-        }
-
-        let entry = StackEntry {
-            state: Mutex::new(StackState {
-                callback,
-                user_data: config.event_user_data,
-                agent,
-                engine,
-                managed: Vec::new(),
-                accounts: Names::new(),
-                calls: Names::new(),
-                transport: TRANSPORT,
-                speaks,
-                local,
-                held: None,
-                timers,
-                media,
-                user_agent: named.map(|name| Box::from(name.as_bytes())),
-                origin,
-                polled_at_ms: 0,
-                started: false,
-            }),
-        };
-        let handle = STACKS
-            .insert(entry)
-            .map_err(|status| fail(status, "no room for another stack"))?;
+        let handle = unsafe { create_on(&TAGS, config) }?;
         unsafe { out_stack.write(handle) };
         Ok(())
     }
+}
+
+/// Everything [`sipral_stack_create`] does but write the handle, with the tag
+/// drawn from `tags`.
+///
+/// The tags are passed in rather than reached for so that a test can hold a set
+/// of its own. Which tag a stack gets, and whether any is left, are otherwise
+/// decided by every other test creating stacks in the same process at the same
+/// moment.
+///
+/// # Safety
+///
+/// `config` as [`sipral_stack_create`] takes it.
+pub(crate) unsafe fn create_on(
+    tags: &'static StackTags,
+    config: *const SipralStackConfig,
+) -> Result<SipralHandle, Fail> {
+    let config = unsafe { read_versioned(config) }?;
+    let Some(callback) = config.event_callback else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "a stack needs an event callback",
+        ));
+    };
+    let speaks = transport_of(config.transport)?;
+    let bound =
+        unsafe { required_text(config.bind_address, config.bind_address_len, "bind_address") }?;
+    let Ok(local) = bound.parse::<SocketAddr>() else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            format!("bind_address is {bound:?}, which is not an address and a port"),
+        ));
+    };
+    let named = unsafe { text(config.user_agent, config.user_agent_len, "user_agent") }?;
+    let seed = seed_from(
+        unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
+        "entropy",
+    )?;
+    let media_seed = seed_from(
+        unsafe { bytes(config.media_seed, config.media_seed_len, "media_seed") }?,
+        "media_seed",
+    )?;
+    if media_seed == seed {
+        // The one check that has to live here: nowhere else can see both.
+        // Sharing them undoes the separation silently — every message
+        // still looks right, and every SRTP key is derivable from a
+        // recording that was meant to carry none.
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "media_seed is the same as entropy; they must be two independent draws, because a \
+             replay recording carries entropy in clear and must not permit deriving a key"
+                .to_owned(),
+        ));
+    }
+
+    let timers = timers_for(speaks.protocol(), &config)?;
+    let media = media_for(&config)?;
+    let mut endpoint = EndpointConfig::default();
+    endpoint.timers = timers;
+
+    let origin = Instant::now();
+    let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
+    let mut agent = UserAgent::new(endpoint, seed);
+    // the socket is the caller's; what the stack is told is the address
+    // the far end will answer to, which is what goes in every Via
+    let bound = agent.receive(
+        Input::TransportBound {
+            transport: TRANSPORT,
+            protocol: speaks.protocol(),
+            local,
+            remote: None,
+        },
+        origin,
+    );
+    if bound.is_err() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "the transport could not be bound",
+        ));
+    }
+
+    let tag = tags.lease().map_err(|status| {
+        fail(
+            status,
+            format!(
+                "no stack tag is free: a process has {STACK_TAGS}, and a stack holds one from its \
+                 creation until it is destroyed and no poll is still running on it"
+            ),
+        )
+    })?;
+    let stamp = tag.tag();
+    let entry = StackEntry {
+        state: Mutex::new(StackState {
+            callback,
+            user_data: config.event_user_data,
+            agent,
+            engine,
+            managed: Vec::new(),
+            accounts: Names::new(&tag),
+            calls: Names::new(&tag),
+            _tag: tag,
+            transport: TRANSPORT,
+            speaks,
+            local,
+            held: None,
+            timers,
+            media,
+            user_agent: named.map(|name| Box::from(name.as_bytes())),
+            origin,
+            polled_at_ms: 0,
+            started: false,
+        }),
+    };
+    STACKS
+        .insert(stamp, entry)
+        .map_err(|status| fail(status, "no room for another stack"))
 }
 
 fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<[u8; SEED_BYTES], Fail> {
@@ -1086,12 +1133,12 @@ fn media(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SipralPollResult, SipralStackConfig, SipralStackSettings, SipralTransport,
+        SipralPollResult, SipralStackConfig, SipralStackSettings, SipralTransport, create_on,
         sipral_stack_create, sipral_stack_destroy, sipral_stack_poll, sipral_stack_settings,
     };
-    use crate::error::last_error_text;
+    use crate::error::{guard, last_error_text};
     use crate::event::{SipralEvent, SipralEventKind};
-    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+    use crate::handle::{SIPRAL_HANDLE_NONE, STACK_TAGS, SipralHandle, StackTags, split};
     use crate::media::SipralToggle;
     use crate::status::SipralStatus;
     use sipral::Codec;
@@ -1136,6 +1183,9 @@ pub(crate) mod tests {
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
+        /// What creating a stack from inside the callback answered, and the
+        /// handle it wrote.
+        created_inside: Option<(SipralStatus, SipralHandle)>,
     }
 
     impl Observed {
@@ -1285,6 +1335,32 @@ pub(crate) mod tests {
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::Ok);
         handle
+    }
+
+    /// Create a stack with its tag drawn from a set the test holds, answered
+    /// the way C is: a status, and the sentence in the last error.
+    pub(crate) fn create_with(
+        tags: &'static StackTags,
+        config: &SipralStackConfig,
+    ) -> (SipralStatus, SipralHandle) {
+        let mut handle = SIPRAL_HANDLE_NONE;
+        let status = guard(|| {
+            handle = unsafe { create_on(tags, ptr::from_ref(config)) }?;
+            Ok(())
+        });
+        (status, handle)
+    }
+
+    /// The same as [`stack`], on a set of tags the test holds.
+    pub(crate) fn stack_on(tags: &'static StackTags, observed: &mut Observed) -> SipralHandle {
+        let config = config(record, observed);
+        let (status, handle) = create_with(tags, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        handle
+    }
+
+    fn tag_of(handle: SipralHandle) -> u8 {
+        split(handle).expect("a handle").tag
     }
 
     pub(crate) fn poll_result() -> SipralPollResult {
@@ -2011,5 +2087,99 @@ pub(crate) mod tests {
     fn what_the_stack_holds_can_move_between_threads() {
         const fn moves<T: Send>() {}
         moves::<sipral_ua::UserAgent>();
+    }
+
+    #[test]
+    fn a_stack_handle_carries_the_tag_its_stack_mints_with() {
+        let mut first_observed = Observed::default();
+        let mut second_observed = Observed::default();
+        let first = stack(&mut first_observed);
+        let second = stack(&mut second_observed);
+        assert_ne!(tag_of(first), tag_of(second), "two live stacks share a tag");
+        assert_eq!(unsafe { sipral_stack_destroy(first) }, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(second) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn the_stack_after_the_last_tag_is_refused_until_one_is_destroyed() {
+        static FULL: StackTags = StackTags::new();
+        let mut observed = Observed::default();
+        let config = config(record, &mut observed);
+        let mut live: Vec<SipralHandle> = (0..STACK_TAGS)
+            .map(|_| {
+                let (status, handle) = create_with(&FULL, &config);
+                assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+                handle
+            })
+            .collect();
+
+        let (status, refused) = create_with(&FULL, &config);
+        assert_eq!(status, SipralStatus::Exhausted);
+        assert_eq!(refused, SIPRAL_HANDLE_NONE, "nothing was written");
+        let message = last_error_text();
+        assert!(
+            message.contains(&STACK_TAGS.to_string()),
+            "the message does not say what the limit is: {message}"
+        );
+
+        let destroyed = live.swap_remove(7);
+        assert_eq!(unsafe { sipral_stack_destroy(destroyed) }, SipralStatus::Ok);
+        let (status, again) = create_with(&FULL, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(tag_of(again), tag_of(destroyed), "the tag it freed");
+        live.push(again);
+        for handle in live {
+            assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        }
+    }
+
+    /// The tags the test below creates its stacks on, reachable from its
+    /// callback.
+    static INSIDE: StackTags = StackTags::new();
+
+    unsafe extern "C" fn destroy_then_create_from_inside(
+        event: *const SipralEvent,
+        user_data: *mut c_void,
+    ) {
+        let observed = unsafe { &mut *user_data.cast::<Observed>() };
+        let event = unsafe { &*event };
+        observed.events.push((event.stack, event.kind, event.size));
+        observed.destroy_status = Some(unsafe { sipral_stack_destroy(event.stack) });
+        let config = config(record, observed);
+        observed.created_inside = Some(create_with(&INSIDE, &config));
+    }
+
+    /// A stack destroyed from inside its own callback is still being polled,
+    /// and that poll can still mint. Its tag stays with it until the poll
+    /// returns, so no stack created in the meantime starts below a handle it
+    /// has yet to hand out.
+    #[test]
+    fn a_stack_destroyed_from_inside_its_callback_keeps_its_tag_until_the_poll_returns() {
+        let mut observed = Observed::default();
+        let config = config(destroy_then_create_from_inside, &mut observed);
+        let (status, held) = create_with(&INSIDE, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_stack_poll(held, 0, ptr::null_mut()) },
+            SipralStatus::Ok
+        );
+        assert_eq!(observed.destroy_status, Some(SipralStatus::Ok));
+        let (status, inside) = observed.created_inside.expect("the callback ran");
+        assert_eq!(status, SipralStatus::Ok);
+        assert_ne!(
+            tag_of(inside),
+            tag_of(held),
+            "the tag was handed on while its stack was still being polled"
+        );
+
+        let (status, after) = create_with(&INSIDE, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            tag_of(after),
+            tag_of(held),
+            "the tag came back once the poll returned"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(inside) }, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(after) }, SipralStatus::Ok);
     }
 }

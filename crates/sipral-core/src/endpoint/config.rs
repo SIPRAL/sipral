@@ -100,6 +100,10 @@ pub struct EndpointConfig {
     /// The parser's bounds, which are what stops a hostile peer from making
     /// it do unbounded work.
     pub limits: Limits,
+    /// The same, one layer down, for the session description a message body
+    /// carries (RFC 4566). The message is bounded before its body is even
+    /// looked at; this is what bounds the body once it is.
+    pub sdp_limits: crate::sdp::Limits,
     /// When a request is too large for a datagram (§18.1.1).
     pub datagram_limit: DatagramLimit,
     /// Whether to put `;rport` on every `Via` we write (RFC 3581 §3).
@@ -158,6 +162,7 @@ impl EndpointConfig {
         timers: TimerConfig::DEFAULT,
         parse_mode: ParseMode::Lenient,
         limits: Limits::DEFAULT,
+        sdp_limits: crate::sdp::Limits::DEFAULT,
         datagram_limit: DatagramLimit::DEFAULT,
         always_request_rport: true,
         keepalive_interval: Some(Duration::from_secs(25)),

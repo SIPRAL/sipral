@@ -213,7 +213,11 @@ the boundary does not carry is what this crate does not.
 - **No video.** The audio path is deep enough to be worth doing properly. Video
   would make it shallow.
 - **No global state, no singletons, no ambient logger.** Multiple independent
-  stacks in one process must not interfere.
+  stacks in one process must not interfere. The one exception is at the C
+  boundary, where a handle has to be checked against something before it can
+  be trusted: `sipral-ffi` keeps a process-wide table of live stacks and the
+  256 tags that make a handle name only the stack that minted it. Nothing below
+  the ABI reads either.
 - **No `unsafe`**, except inside `sipral-ffi` and the platform I/O crates, where
   it is unavoidable. The workspace denies it everywhere else, and those two
   crates re-enable it explicitly in their own manifests.

@@ -795,7 +795,10 @@ impl UserAgent {
     /// A binding that was never asked for is not started, one that was given
     /// up on purpose stays given up, and one that was refused for good is left
     /// refused — none of those claimed anything, so there is nothing to stop
-    /// believing. What is left is exactly the set the next rung re-registers.
+    /// believing. An account with no registrar never had a binding to claim
+    /// and stays `NotRegistering`; its subscriptions are not a binding and are
+    /// demoted like anybody's. What is left is exactly the set the next rung
+    /// re-registers.
     fn distrust(&mut self) -> Suspending {
         // only a lost resolver divides the accounts. Every other way of losing
         // a network loses it for all of them at once
@@ -918,13 +921,17 @@ impl UserAgent {
 
     /// The accounts whose registrar was written as a name, and so needed a
     /// resolver to become an address at all.
+    ///
+    /// An account with no registrar is not among them. What it has is an
+    /// outbound proxy, which is an address and never a name, so a resolver
+    /// going away changes nothing about where its requests go.
     fn named_registrars(&self) -> Vec<AccountId> {
         self.accounts
             .iter()
             .filter(|(_, config)| {
                 config
                     .registrar()
-                    .sip()
+                    .and_then(Uri::sip)
                     .is_some_and(|uri| matches!(uri.host, HostRef::Name(_)))
             })
             .map(|(id, _)| *id)
@@ -1031,12 +1038,31 @@ mod tests {
         )
     }
 
+    /// One with no registrar at all, whose requests go to a proxy that is not
+    /// the registrar's address.
+    fn trunk() -> Account {
+        Account::unregistered(
+            uri("sip:pbx@example.com"),
+            uri("sip:pbx@192.0.2.1"),
+            UDP,
+            "198.51.100.20:5060".parse().expect("the proxy's address"),
+        )
+    }
+
     fn transmits(agent: &mut UserAgent) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         while let Some(transmit) = agent.poll_transmit() {
             out.push(transmit.payload.to_vec());
         }
         out
+    }
+
+    /// The `To` of every REGISTER in `out`, which says whose binding it is.
+    fn registering(out: &[Vec<u8>]) -> Vec<String> {
+        out.iter()
+            .filter(|bytes| bytes.starts_with(b"REGISTER "))
+            .map(|bytes| String::from_utf8_lossy(&header(bytes, HeaderName::To)).into_owned())
+            .collect()
     }
 
     fn events(agent: &mut UserAgent) -> Vec<UaEvent> {
@@ -1554,6 +1580,108 @@ mod tests {
             )
             .expect("an account that exists");
         assert_eq!(transmits(&mut agent).len(), 1);
+    }
+
+    // -- an account with no registrar ----------------------------------------
+
+    #[test]
+    fn a_wake_a_move_and_a_lost_resolver_never_register_an_account_without_a_registrar() {
+        let t0 = Instant::now();
+        let (mut agent, _) = registered(t0);
+        let pbx = agent.add_account(trunk());
+        let _ = events(&mut agent);
+
+        let report = agent.suspending(t0);
+        agent.resumed(t0);
+        let out = transmits(&mut agent);
+        let to = registering(&out);
+        assert!(
+            to.len() == 1 && to.iter().all(|to| to.contains("alice")),
+            "a wake re-proves the binding that exists and nothing else: {to:?}"
+        );
+        assert_eq!(
+            report.unverified, 1,
+            "only a binding that exists is doubted"
+        );
+        let request = out.first().cloned().unwrap_or_default();
+        deliver(&mut agent, &granted(&request, 3_600), t0);
+        assert_eq!(agent.lifecycle(), LifecycleState::Running);
+
+        let tunnel = Network::new(Link::Tunnel)
+            .address(address("192.0.2.1"))
+            .interface("en0");
+        assert_eq!(
+            agent.network_changed(&wifi(), &tunnel, t0),
+            Recovery::Reregister
+        );
+        let out = transmits(&mut agent);
+        let to = registering(&out);
+        assert!(
+            to.len() == 1 && to.iter().all(|to| to.contains("alice")),
+            "a roam re-registers the binding that exists and nothing else: {to:?}"
+        );
+        let request = out.first().cloned().unwrap_or_default();
+        deliver(&mut agent, &granted(&request, 3_600), t0);
+
+        // and a resolver that goes and never comes back, to the end of its
+        // ladder
+        agent.name_resolution_lost(t0);
+        let mut out = transmits(&mut agent);
+        let mut at = t0;
+        for _ in 0..5 {
+            at += RUNG;
+            agent.handle_timeout(at);
+            out.extend(transmits(&mut agent));
+        }
+        let to = registering(&out);
+        assert!(
+            !to.is_empty() && to.iter().all(|to| to.contains("alice")),
+            "only the account whose registrar is a name is tried again: {to:?}"
+        );
+        assert_eq!(
+            agent.registration_state(pbx),
+            Some(RegistrationState::NotRegistering),
+            "nothing that happened to the network is news about an account with no binding"
+        );
+    }
+
+    #[test]
+    fn a_stack_whose_only_account_never_registers_sends_nothing_on_a_wake() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let pbx = agent.add_account(trunk());
+        let report = agent.suspending(t0);
+        agent.resumed(t0);
+        let mut at = t0;
+        for _ in 0..4 {
+            at += RUNG;
+            agent.handle_timeout(at);
+        }
+        assert!(
+            transmits(&mut agent).is_empty(),
+            "a wake put something on the wire for an account with no registrar"
+        );
+        assert_eq!(report.unverified, 0, "there was no binding to doubt");
+        let seen = events(&mut agent);
+        assert!(
+            !seen.iter().any(|event| matches!(
+                *event,
+                UaEvent::Registering { .. } | UaEvent::RegistrationFailed { .. }
+            )),
+            "{seen:?}"
+        );
+        // nothing it holds can be answered by a registrar, so the ladder runs
+        // out the way it does for a stack with no accounts at all, and says
+        // that nothing was left unproved
+        assert!(
+            seen.iter()
+                .any(|event| matches!(*event, UaEvent::RecoveryGaveUp { unverified: 0, .. })),
+            "{seen:?}"
+        );
+        assert_eq!(
+            agent.registration_state(pbx),
+            Some(RegistrationState::NotRegistering)
+        );
     }
 
     // -- what a refresh over a dead transport does ---------------------------

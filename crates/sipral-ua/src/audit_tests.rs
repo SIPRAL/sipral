@@ -12,6 +12,7 @@ use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
 
 use crate::account::Account;
 use crate::agent::UserAgent;
+use crate::call::OutgoingCall;
 use crate::event::RegistrationState;
 use crate::subscription::Subscribe;
 use crate::{EndpointConfig, Input, TransportId, TransportProtocol, Uri};
@@ -487,5 +488,155 @@ fn the_pre_warm_is_swallowed_by_a_transaction_the_sleep_left_behind() {
     assert_eq!(
         reg.transaction, None,
         "the REGISTER whose 200 already arrived still reads as in flight"
+    );
+}
+
+// -- 4. a session timer pre-armed across a 422, before any dialog exists -----
+
+#[test]
+fn a_session_timer_that_cannot_refresh_moves_off_the_instant_it_fired() {
+    // on_session_too_brief (RFC 4028 §7.3) arms a session timer -- with a
+    // `due` of its own -- the moment a 422 comes back to the initial INVITE,
+    // to have one ready for whenever the eventual 2xx settles it for real.
+    // Nothing about that retried INVITE is confirmed yet, and until a
+    // provisional response gives it a dialog, it has none either.
+    // fire_session_timers picks every call whose timer is due, and
+    // send_refresh (timers.rs) used to return without touching `due` on
+    // exactly those two grounds: no dialog to refresh in, or not confirmed.
+    // A deadline in the past that nothing moves is a deadline poll_timeout
+    // keeps handing back, which is an event loop that never sleeps.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = transmits(&mut agent)
+        .into_iter()
+        .next()
+        .expect("the INVITE");
+    deliver(
+        &mut agent,
+        &reply(
+            &invite,
+            422,
+            "Session Interval Too Small",
+            "Min-SE: 120\r\n",
+        ),
+        t0,
+    );
+    let retry = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the retried INVITE, asked again per RFC 4028 §7.3");
+    drop_events(&mut agent);
+
+    // one 180 is enough to take the retry's own transaction out of the state
+    // Timer B could still end it from, so what is left running down is the
+    // session timer and nothing else -- and then the far end goes silent
+    let mut ringing = b"SIP/2.0 180 Ringing\r\n".to_vec();
+    for (name, value) in [
+        ("Via", header(&retry, HeaderName::Via)),
+        ("From", header(&retry, HeaderName::From)),
+        (
+            "To",
+            format!("{};tag=desk", text(&retry, HeaderName::To)).into_bytes(),
+        ),
+        ("Call-ID", header(&retry, HeaderName::CallId)),
+        ("CSeq", header(&retry, HeaderName::CSeq)),
+    ] {
+        ringing.extend_from_slice(name.as_bytes());
+        ringing.extend_from_slice(b": ");
+        ringing.extend_from_slice(&value);
+        ringing.extend_from_slice(b"\r\n");
+    }
+    ringing.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+    deliver(&mut agent, &ringing, t0);
+    let _ = transmits(&mut agent);
+    drop_events(&mut agent);
+
+    // Min-SE: 120 floors the retried interval at 120s, so the timer this end
+    // pre-armed as the (still hypothetical) refresher comes due at half that
+    let due = t0 + Duration::from_secs(60);
+    agent.handle_timeout(due);
+    let _ = transmits(&mut agent);
+    drop_events(&mut agent);
+
+    assert!(
+        agent.poll_timeout().is_none_or(|at| at > due),
+        "the timer is still due at the instant that already fired: the loop spins"
+    );
+}
+
+// -- 5. a session timer pre-armed across a 422, with an early dialog already
+//       open but nothing confirmed yet -----------------------------------
+
+#[test]
+fn a_session_timer_with_a_dialog_but_not_confirmed_moves_off_the_instant_it_fired() {
+    // The other early return in send_refresh with the same shape as the one
+    // above: the retry's tagged 180 this time also names a Contact, so it
+    // opens a real early dialog instead of being dropped for naming no
+    // remote target. `state.dialog` is `Some`, but nothing is confirmed --
+    // no 2xx has arrived -- so fire_session_timers reaches the *other*
+    // ground send_refresh (timers.rs) used to return from without touching
+    // `due`. Same past deadline, same spinning loop.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = transmits(&mut agent)
+        .into_iter()
+        .next()
+        .expect("the INVITE");
+    deliver(
+        &mut agent,
+        &reply(
+            &invite,
+            422,
+            "Session Interval Too Small",
+            "Min-SE: 120\r\n",
+        ),
+        t0,
+    );
+    let retry = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the retried INVITE, asked again per RFC 4028 §7.3");
+    drop_events(&mut agent);
+
+    let mut ringing = b"SIP/2.0 180 Ringing\r\n".to_vec();
+    for (name, value) in [
+        ("Via", header(&retry, HeaderName::Via)),
+        ("From", header(&retry, HeaderName::From)),
+        (
+            "To",
+            format!("{};tag=desk", text(&retry, HeaderName::To)).into_bytes(),
+        ),
+        ("Call-ID", header(&retry, HeaderName::CallId)),
+        ("CSeq", header(&retry, HeaderName::CSeq)),
+    ] {
+        ringing.extend_from_slice(name.as_bytes());
+        ringing.extend_from_slice(b": ");
+        ringing.extend_from_slice(&value);
+        ringing.extend_from_slice(b"\r\n");
+    }
+    ringing.extend_from_slice(b"Contact: <sip:bob@192.0.2.9>\r\n");
+    ringing.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+    deliver(&mut agent, &ringing, t0);
+    let _ = transmits(&mut agent);
+    drop_events(&mut agent);
+
+    // Min-SE: 120 floors the retried interval at 120s, so the timer this end
+    // pre-armed as the (still hypothetical) refresher comes due at half that
+    let due = t0 + Duration::from_secs(60);
+    agent.handle_timeout(due);
+    let _ = transmits(&mut agent);
+    drop_events(&mut agent);
+
+    assert!(
+        agent.poll_timeout().is_none_or(|at| at > due),
+        "the timer is still due at the instant that already fired: the loop spins"
     );
 }

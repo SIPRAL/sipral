@@ -3,13 +3,15 @@
 
 //! What it takes to be reachable at an address of record.
 //!
-//! An account is the configuration of one relationship with one registrar, and
-//! several of them coexist in one user agent without sharing anything — not a
-//! `Call-ID`, not a sequence number, not a set of credentials. A softphone with
-//! a work line and a personal line has two, and neither can affect the other.
+//! An account is the configuration of one identity — usually a relationship
+//! with one registrar, and sometimes with none, for a trunk that knows this end
+//! by the address its requests come from. Several of them coexist in one user
+//! agent without sharing anything — not a `Call-ID`, not a sequence number, not
+//! a set of credentials. A softphone with a work line and a personal line has
+//! two, and neither can affect the other.
 //!
 //! Two things here are the caller's and not this crate's. The address and the
-//! transport, because resolving the registrar's name is I/O and belongs to
+//! transport, because resolving a server's name is I/O and belongs to
 //! whoever owns the sockets; and the instance identifier, because RFC 5626
 //! §4.1 requires it to survive a power cycle, and a library with no storage
 //! cannot promise that.
@@ -198,14 +200,17 @@ const fn hex(nibble: u8) -> u8 {
     }
 }
 
-/// A registrar, an identity, and how to prove it.
+/// An identity, where its requests go, how to prove it — and, for every
+/// account but a trunk, the registrar that keeps it reachable.
 #[derive(Clone, Debug)]
 pub struct Account {
     /// The address of record: `sip:alice@example.com`. Goes in `To` and
     /// `From` (§10.2).
     pub(crate) aor: Uri,
     /// Where the REGISTER is addressed: `sip:example.com`, no user part.
-    pub(crate) registrar: Uri,
+    ///
+    /// `None` for an account that never registers ([`Account::unregistered`]).
+    pub(crate) registrar: Option<Uri>,
     /// Where this endpoint can be reached, as it goes in `Contact`.
     pub(crate) contact: Uri,
     pub(crate) display_name: Option<Box<str>>,
@@ -218,6 +223,9 @@ pub struct Account {
     pub(crate) session_interval: Option<Duration>,
     pub(crate) instance_id: Option<Box<str>>,
     pub(crate) transport: TransportId,
+    /// Where this account's requests go when they name nowhere more specific:
+    /// the registrar's address for an account that registers, and the
+    /// outbound proxy for one that does not.
     pub(crate) remote: SocketAddr,
     pub(crate) extra: Vec<Extra>,
     pub(crate) push: Option<Push>,
@@ -227,13 +235,50 @@ impl Account {
     /// An account at `aor`, registering with `registrar`, reachable at
     /// `contact`.
     ///
-    /// `transport` and `remote` say where the REGISTER actually goes. Nothing
+    /// `transport` and `remote` say where the REGISTER actually goes, and
+    /// where a call goes when it names no destination of its own. Nothing
     /// here resolves a name: RFC 3263 is I/O, and the platform's resolver is
     /// better than a protocol library's.
     #[must_use]
     pub fn new(
         aor: Uri,
         registrar: Uri,
+        contact: Uri,
+        transport: TransportId,
+        remote: SocketAddr,
+    ) -> Self {
+        Self::with(aor, Some(registrar), contact, transport, remote)
+    }
+
+    /// An account at `aor` that never registers, reachable at `contact`,
+    /// whose requests go to `outbound_proxy`.
+    ///
+    /// A trunk, in the usual case: the far end knows this end by the address
+    /// its packets come from, so there is no binding to create and none to
+    /// keep alive. What exists to protect a binding — the refresh, the
+    /// back-off, the recovery ladder after a wake or a move, the refresh a
+    /// push asks for, the snapshot — has nothing to do here, and asking this
+    /// account to register is refused with
+    /// [`UaError::NoRegistrar`](crate::UaError::NoRegistrar) rather than sent
+    /// somewhere.
+    ///
+    /// Everything else is what any account does. A call or a subscription
+    /// leaves on `transport` for `outbound_proxy` unless it names a
+    /// destination of its own, and a challenge from the proxy is answered
+    /// from [`Account::credentials`].
+    #[must_use]
+    pub fn unregistered(
+        aor: Uri,
+        contact: Uri,
+        transport: TransportId,
+        outbound_proxy: SocketAddr,
+    ) -> Self {
+        Self::with(aor, None, contact, transport, outbound_proxy)
+    }
+
+    fn with(
+        aor: Uri,
+        registrar: Option<Uri>,
         contact: Uri,
         transport: TransportId,
         remote: SocketAddr,
@@ -346,10 +391,11 @@ impl Account {
         &self.aor
     }
 
-    /// The registrar this account registers with.
+    /// The registrar this account registers with, or `None` for one that
+    /// never registers.
     #[must_use]
-    pub const fn registrar(&self) -> &Uri {
-        &self.registrar
+    pub const fn registrar(&self) -> Option<&Uri> {
+        self.registrar.as_ref()
     }
 
     /// Where this endpoint says it can be reached.

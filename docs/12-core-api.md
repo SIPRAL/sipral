@@ -699,6 +699,7 @@ pub struct EndpointConfig {
     pub timers: TimerConfig,
     pub parse_mode: ParseMode,                 // Lenient
     pub limits: Limits,                        // the parser's bounds, above
+    pub sdp_limits: sdp::Limits,               // the same, for an SDP body
     pub datagram_limit: DatagramLimit,
     pub always_request_rport: bool,            // true, RFC 3581 (a MAY, chosen)
     /// Double-CRLF keepalive on stream transports (RFC 5626 §4.4.1), emitted

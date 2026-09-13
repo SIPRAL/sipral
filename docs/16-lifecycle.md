@@ -70,6 +70,17 @@ account that still fails against a working path is a registrar problem and it
 has its own RFC 5626 §4.5 schedule for that — which is the reason the two
 back-offs are in different layers and neither doubles the other's wait.
 
+**An account without a registrar takes no part in it.** A trunk
+(`Account::unregistered`) has no binding, so `Distrust` has nothing of its to
+demote and `Reregister` nothing of its to send, and it is never counted as
+unverified; its subscriptions are not a binding, and are demoted and sent again
+like anybody's. It cannot prove the path either. A stack whose every account is
+one of these climbs a ladder the way a stack with no accounts does: it still
+asks for a transport or an address, which its calls need as much as any
+registration would, and when the rungs run out it reports `RecoveryGaveUp` with
+nothing unverified, because nothing it holds is something a registrar can
+answer.
+
 ## The state a wake produces
 
 `RegistrationState::Unverified`: a binding the registrar really did grant, over
@@ -219,7 +230,8 @@ may now stand for somewhere else, or for nothing.
 **It distinguishes accounts.** Only bindings whose registrar was written as a
 name needed a resolver to become an address at all; an account pointed at a
 literal `sip:192.0.2.9` never did, and is left running, refreshing, and
-believed. That distinction is the whole reason this is not just a flavour of
+believed — as is an account with no registrar, whose outbound proxy is an
+address and never a name. That distinction is the whole reason this is not just a flavour of
 `interface_lost`.
 
 | Rung | What it does | Then |
@@ -359,7 +371,7 @@ application asks for something.
 | Registration refresh | one wake per account per binding lifetime, at 0.85 of what the registrar granted. An hour granted is **one wake per hour**, at 3060 s | not without losing the binding |
 | Subscription refresh | the same fraction of the same default hour: **one wake per subscription per hour**. Thirty lamps are thirty wakes an hour, and they land near the registration's because both ask for an hour | yes, by unsubscribing |
 | Transaction timers | only while a transaction is running. A non-INVITE over UDP holds Timer K for 5 s after its final response and then there is nothing | no, and there is nothing to stop |
-| Session timer (RFC 4028) | only while a call is up. 1800 s negotiated means the refresher wakes at 900 s and the other end at 1768 s | no; a call with no timer is a line billed for nothing |
+| Session timer (RFC 4028) | only while a call has one. 1800 s negotiated means the refresher wakes at 900 s and the other end at 1768 s. A call that is not up by the refresh time (a retry after a 422 still ringing, a 2xx still waiting for its ACK) wakes once every quarter of the interval until it is up or over | no; a call with no timer is a line billed for nothing |
 | Stream keepalive | a 4-byte ping every 25 s per **stream** transport, jittered. Datagram transports have none | yes: `EndpointConfig::keepalive_interval = None`. It exists to keep a NAT binding open, so stopping it costs reachability on that flow |
 | Reference loop tick | 200 ms by default, so 5 turns a second on a line where nothing happens | yes: `Runtime::idle_cap(None)`, and then a turn waits for a deadline or a packet |
 

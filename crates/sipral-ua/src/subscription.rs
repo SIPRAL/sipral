@@ -287,9 +287,11 @@ impl Subscribe {
     /// `presence` (RFC 3856 §6.1). §8.2.1 compares it byte for byte, so it
     /// goes out exactly as written here.
     ///
-    /// It leaves on the account's transport, for the address the account
-    /// registers with — the outbound proxy for a registered line, which is why
-    /// a softphone behind a NAT works at all.
+    /// It leaves on the account's transport, for the account's address: the
+    /// one it registers with — the outbound proxy for a registered line, which
+    /// is why a softphone behind a NAT works at all — or, for an account that
+    /// never registers, the outbound proxy it was given
+    /// ([`crate::Account::unregistered`]).
     #[must_use]
     pub fn new(target: Uri, package: &str) -> Self {
         Self {
@@ -327,7 +329,7 @@ impl Subscribe {
         self
     }
 
-    /// Send it somewhere other than where the account registers.
+    /// Send it somewhere other than the account's address.
     ///
     /// Resolving a name is the caller's, here as everywhere: this takes the
     /// answer, not the question.

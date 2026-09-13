@@ -26,7 +26,8 @@ codes! {
         /// A pointer was null where one is required, a length disagreed with what
         /// it describes, or a value was outside what the call accepts.
         InvalidArgument = 1,
-        /// The handle never came from this library.
+        /// The handle never came from this library, or it came from a stack
+        /// other than the one it was used with.
         InvalidHandle = 2,
         /// The handle came from this library and what it named is gone: a use
         /// after free, or a second free.

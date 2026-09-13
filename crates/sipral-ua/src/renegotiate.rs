@@ -134,7 +134,7 @@ impl UserAgent {
     /// As [`UserAgent::hold`], plus [`UaError::Sdp`] when the description
     /// cannot be read.
     pub fn reoffer(&mut self, call: CallHandle, sdp: &[u8], now: Instant) -> Result<(), UaError> {
-        let mut description = sdp::parse(sdp).map_err(UaError::Sdp)?;
+        let mut description = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
         let held = {
             let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             state.session.stamp(&mut description);
@@ -168,7 +168,8 @@ impl UserAgent {
             .header(HeaderName::Allow, ALLOW);
         let written = match sdp {
             Some(bytes) => {
-                let parsed = sdp::parse(bytes).map_err(UaError::Sdp)?;
+                let parsed =
+                    sdp::parse_with_limits(bytes, self.sdp_limits).map_err(UaError::Sdp)?;
                 response = response.body(b"application/sdp", Arc::from(bytes.to_vec()));
                 Some(parsed)
             }
@@ -551,7 +552,7 @@ impl UserAgent {
             held.session.set_local(description);
         }
         held.session.hold.local = offer.held;
-        if let Ok(described) = sdp::parse(answer) {
+        if let Ok(described) = sdp::parse_with_limits(answer, self.sdp_limits) {
             held.session.set_remote(described);
         }
         self.report_session(call);
@@ -786,7 +787,7 @@ impl UserAgent {
         // RFC 4028 §7.4: any request inside the dialog that carries a
         // Session-Expires is a refresh, whatever else it is doing
         self.on_refresh_in(call, &raw, now);
-        let arriving = arriving(&raw);
+        let arriving = arriving(&raw, self.sdp_limits);
         let invite = matches!(transaction, AnyTransactionId::InviteServer(_));
 
         // an UPDATE with no description only refreshes the target: there is
@@ -973,7 +974,7 @@ impl UserAgent {
         // arrive a second time, and leaving the flag set would have the next
         // ACK on this dialog read as one
         held.session.answer_owed = false;
-        let Ok(answer) = sdp::parse(body) else {
+        let Ok(answer) = sdp::parse_with_limits(body, self.sdp_limits) else {
             return;
         };
         held.session.set_remote(answer);
@@ -993,13 +994,13 @@ enum Arriving {
     Foreign,
 }
 
-fn arriving(request: &RawMessage<'_>) -> Arriving {
+fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
     let body = request.body();
     if body.is_empty() {
         return Arriving::Nothing;
     }
     match request.content_type() {
-        Ok(kind) if kind.is("application", "sdp") => sdp::parse(body)
+        Ok(kind) if kind.is("application", "sdp") => sdp::parse_with_limits(body, limits)
             .map_or(Arriving::Unreadable, |offer| {
                 Arriving::Offer(Box::new(offer))
             }),

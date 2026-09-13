@@ -29,7 +29,8 @@ public enum SipralStatus : int
     /// </summary>
     InvalidArgument = 1,
     /// <summary>
-    /// The handle never came from this library.
+    /// The handle never came from this library, or it came from a stack
+    /// other than the one it was used with.
     /// </summary>
     InvalidHandle = 2,
     /// <summary>
@@ -615,6 +616,13 @@ public enum SipralRegistrationState : uint
     /// process. It has not been proved either.
     /// </summary>
     Restored = 9,
+    /// <summary>
+    /// The account was configured with no registrar and never registers:
+    /// a trunk that knows this end by its address. It starts here and
+    /// stays here, and `sipral_account_register` refuses it. Not idle,
+    /// which is one `sipral_account_register` away from a binding.
+    /// </summary>
+    NotRegistering = 10,
 }
 
 /// <summary>
@@ -1295,6 +1303,11 @@ public struct SipralAccountConfig
     public nuint AorLen;
     /// <summary>
     /// Where the REGISTER is addressed, `sip:example.com`, no user part.
+    ///
+    /// A `registrar_len` of zero makes an account that never registers: a
+    /// trunk that knows this end by the address its requests come from.
+    /// Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` for as long
+    /// as it exists, and `sipral_account_register` refuses it.
     /// </summary>
     public IntPtr Registrar;
     /// <summary>
@@ -1310,8 +1323,11 @@ public struct SipralAccountConfig
     /// </summary>
     public nuint ContactLen;
     /// <summary>
-    /// Where the REGISTER actually goes, as `host:port`. An address, not a
-    /// name: RFC 3263 resolution is the caller's.
+    /// Where this account's requests go, as `host:port`: the registrar's
+    /// address for an account that registers, and the outbound proxy for
+    /// one configured with no registrar. A call that names no destination
+    /// of its own goes here either way, so it is required either way. An
+    /// address, not a name: RFC 3263 resolution is the caller's.
     /// </summary>
     public IntPtr RegistrarAddress;
     /// <summary>
@@ -2636,6 +2652,10 @@ public static class Sipral
     /// The handle is written only if this returns `SIPRAL_STATUS_OK`. A stack
     /// that is created must be destroyed with sipral_stack_destroy.
     ///
+    /// A process holds 256 stacks at once. The next is
+    /// `SIPRAL_STATUS_EXHAUSTED` until one of them is destroyed and no poll is
+    /// still running on it.
+    ///
     /// Safety
     ///
     /// `config` must point at a `sipral_stack_config_t` whose `size` member
@@ -2781,6 +2801,9 @@ public static class Sipral
     /// sipral_account_unregister, or a refusal that trying again cannot
     /// fix. Every step of it arrives as a `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`.
     ///
+    /// An account configured with no registrar never registers, and this
+    /// answers `SIPRAL_STATUS_INVALID_ARGUMENT` for it with nothing sent.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle values.
@@ -2797,6 +2820,9 @@ public static class Sipral
     /// the address of record has, including the one belonging to the desk
     /// phone somebody else is holding.
     ///
+    /// An account configured with no registrar has no binding to give up, and
+    /// is refused the way `sipral_account_register` refuses it.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle values.
@@ -2808,6 +2834,9 @@ public static class Sipral
 
     /// <summary>
     /// Where an account's registration is, as a `SipralRegistrationState`.
+    ///
+    /// An account configured with no registrar answers
+    /// `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, always.
     ///
     /// Safety
     ///

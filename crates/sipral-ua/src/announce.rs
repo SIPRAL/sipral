@@ -158,6 +158,10 @@ impl UserAgent {
     /// [`Announced::Arrived`] with the call that is already ringing, and
     /// nothing is recorded.
     ///
+    /// An account with no registrar has no binding to refresh, so for one of
+    /// those only the second half happens: matching the INVITE that follows
+    /// is about the account and the caller, not about a binding.
+    ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
     pub fn announce(
@@ -204,10 +208,19 @@ impl UserAgent {
     /// an account gets locked out, and a push does not change that.
     ///
     /// # Errors
-    /// [`UaError::NoSuchAccount`], or [`UaError::Send`] when there is no
-    /// transport yet. The second is not fatal: the refresh is remembered and
-    /// sent when a transport is bound.
+    /// [`UaError::NoSuchAccount`]; [`UaError::NoRegistrar`] for an account
+    /// that never registers, which has no binding to refresh and is owed
+    /// nothing; or [`UaError::Send`] when there is no transport yet. The last
+    /// is not fatal: the refresh is remembered and sent when a transport is
+    /// bound.
     pub fn refresh_binding(&mut self, account: AccountId, now: Instant) -> Result<(), UaError> {
+        let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        // turned away before the refresh can be remembered as owed: one owed
+        // to an account with no registrar would be tried again, and refused
+        // again, on every transport the application ever binds
+        if config.registrar.is_none() {
+            return Err(UaError::NoRegistrar);
+        }
         let reg = self
             .registrations
             .get_mut(&account)
@@ -558,6 +571,17 @@ mod tests {
             uri("sip:alice@192.0.2.1"),
             UDP,
             registrar(),
+        )
+    }
+
+    /// The same address of record with no registrar, whose requests go to a
+    /// proxy.
+    fn trunk() -> Account {
+        Account::unregistered(
+            uri("sip:alice@example.com"),
+            uri("sip:alice@192.0.2.1"),
+            UDP,
+            "198.51.100.20:5060".parse().expect("the proxy's address"),
         )
     }
 
@@ -1333,6 +1357,65 @@ Content-Length: 0\r\n\r\n"
             other.registration_state(elsewhere),
             Some(RegistrationState::Idle),
             "and the account it was offered to is untouched"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_not_restored_onto_an_account_that_never_registers() {
+        let t0 = Instant::now();
+        let (agent, id) = registered(t0);
+        let snapshot = agent.freeze_registration(id, t0).expect("a binding");
+
+        let mut other = awake(t0);
+        let line = other.add_account(trunk());
+        assert_eq!(
+            other.thaw_registration(line, &snapshot, Duration::ZERO, t0),
+            Err(crate::SnapshotError::NotRegistering)
+        );
+        assert_eq!(
+            other.registration_state(line),
+            Some(RegistrationState::NotRegistering)
+        );
+        assert_eq!(
+            other.poll_timeout(),
+            None,
+            "a refresh was booked that can never be sent"
+        );
+        other.handle_timeout(t0 + Duration::from_secs(3_600));
+        assert!(transmits(&mut other).is_empty());
+        assert!(
+            events(&mut other).is_empty(),
+            "a refusal was retried on the back-off"
+        );
+        assert!(
+            other.freeze_registration(line, t0).is_none(),
+            "and there is nothing to write down either"
+        );
+    }
+
+    #[test]
+    fn a_push_for_an_account_that_never_registers_refreshes_nothing_and_owes_nothing() {
+        let t0 = Instant::now();
+        let mut agent = asleep(11);
+        let id = agent.add_account(trunk());
+        let answer = agent
+            .announce(id, uri("sip:bob@example.com"), t0)
+            .expect("an account that exists");
+        waiting(answer);
+        assert_eq!(agent.refresh_binding(id, t0), Err(UaError::NoRegistrar));
+        assert!(
+            agent.registrations.get(&id).is_some_and(|reg| !reg.owed),
+            "a refresh was remembered for an account with no binding"
+        );
+
+        bind(&mut agent, t0);
+        assert!(
+            transmits(&mut agent).is_empty(),
+            "the transport arriving sent something for an account with no registrar"
+        );
+        assert_eq!(
+            agent.registration_state(id),
+            Some(RegistrationState::NotRegistering)
         );
     }
 

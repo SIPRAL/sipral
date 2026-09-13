@@ -425,6 +425,10 @@ pub enum SnapshotError {
     /// one identity, and restoring somebody else's would register this device
     /// as them.
     AnotherAccount,
+    /// The account never registers
+    /// ([`Account::unregistered`](crate::Account::unregistered)), so there is
+    /// no binding for a snapshot to continue.
+    NotRegistering,
 }
 
 impl fmt::Display for SnapshotError {
@@ -437,6 +441,9 @@ impl fmt::Display for SnapshotError {
             Self::Malformed => f.write_str("the snapshot is truncated or has trailing bytes"),
             Self::AnotherAccount => {
                 f.write_str("the snapshot belongs to another address of record")
+            }
+            Self::NotRegistering => {
+                f.write_str("the account never registers, so there is no binding to restore")
             }
         }
     }
@@ -564,8 +571,8 @@ impl UserAgent {
     /// Write an account's registration down, so a later start can continue it.
     ///
     /// `None` when there is nothing worth keeping: an account that has never
-    /// registered, or one whose registration failed, has no binding for a
-    /// snapshot to be about.
+    /// registered, one that never will, or one whose registration failed, has
+    /// no binding for a snapshot to be about.
     ///
     /// What comes back is opaque bytes with a version in them. Storing them is
     /// the application's, and so is protecting them — a snapshot names an
@@ -621,6 +628,11 @@ impl UserAgent {
             .accounts
             .get(&account)
             .ok_or(SnapshotError::AnotherAccount)?;
+        // restored, it would book a refresh that can never be sent, and the
+        // back-off would retry that refusal for the life of the process
+        if config.registrar.is_none() {
+            return Err(SnapshotError::NotRegistering);
+        }
         if !config.aor.equivalent(&thawed.aor) {
             return Err(SnapshotError::AnotherAccount);
         }
@@ -682,8 +694,10 @@ impl UserAgent {
     /// This is the number a queue needs. How long it rings each agent before
     /// giving up and trying the next one has to be longer than this, or a
     /// phone that was asleep is skipped every time and its owner is told the
-    /// queue was quiet. `None` until an account has registered, and `None`
-    /// always if no cold start was ever declared.
+    /// queue was quiet. `None` until an account has registered; `None` always
+    /// for an account that never registers, because nothing marks the moment
+    /// one of those became reachable; and `None` always if no cold start was
+    /// ever declared.
     #[must_use]
     pub fn time_to_ready(&self, account: AccountId) -> Option<Duration> {
         self.registrations.get(&account)?.ready

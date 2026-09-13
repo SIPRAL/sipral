@@ -26,27 +26,70 @@ use super::session::{Attribute, Connection, Origin, SessionDescription, Timing};
 /// A body arrives from a stranger, inside a message that a proxy may have
 /// grown on the way, and every line of it turns into an allocation. The header
 /// parser has had bounds since it was written ([`crate::msg::Limits`]); this is
-/// the same idea one layer down.
+/// the same idea one layer down, plus two shapes a header list does not have:
+/// a section can nest inside the description (an `m=` block), and one line
+/// can itself be a list (the format tokens after `m=`'s three fixed fields).
+///
+/// `e=`, `p=`, `b=`, `t=` and the `r=` lines under a `t=` get no bound of
+/// their own. Each is one allocation per line, exactly like an `a=` line, but
+/// none of them is where an extension puts attacker-shaped structure — a peer
+/// gains nothing sending a thousand `e=` lines that `a=` does not already give
+/// it more cheaply — so `max_body_bytes` and `max_line_bytes` already bound
+/// their count and their cost together, the way they would for any line kind
+/// nobody has singled out.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Largest body accepted.
     pub max_body_bytes: u32,
+    /// Longest single line accepted.
+    pub max_line_bytes: u32,
     /// Most `m=` blocks accepted.
     pub max_media: u16,
     /// Most `a=` lines accepted in the whole description, session level and
     /// media level together — the product of two per-block bounds is not a
     /// bound.
     pub max_attributes: u16,
+    /// Most `a=` lines accepted in one section alone — the session level
+    /// before the first `m=`, or one `m=` block.
+    pub max_attributes_per_section: u16,
+    /// Most format tokens accepted on one `m=` line.
+    pub max_formats: u16,
 }
 
 impl Limits {
-    /// The defaults: 16 KiB, 16 streams, 256 attributes. Room for a
-    /// description carrying ICE candidates on a handful of streams, and
-    /// nothing like room for a megabyte of `a=` lines.
+    /// The defaults: 16 KiB total, 2 KiB per line, 16 streams, 256 attributes
+    /// overall and 64 per section, 64 formats on one `m=` line.
+    ///
+    /// Sized against what a real call carries, ICE and SRTP included, not
+    /// against RFC 4566's grammar, which puts no ceiling on any of this at
+    /// all. The body bound is a quarter of the 65,535 octets
+    /// [`crate::msg::Limits::DEFAULT`] lets the whole message around it be:
+    /// room for a description carrying ICE candidates on a handful of
+    /// streams, and nothing like room for a megabyte of `a=` lines. The
+    /// stream bound is several times the handful of `m=` lines one offer
+    /// puts side by side — audio, video, and whatever a conferencing peer
+    /// adds next to them — and it is what keeps the per-section bound from
+    /// being multiplied without end. The attribute bound on the whole
+    /// description is four sections filled to the per-section bound: a peer
+    /// can load a few streams to the brim, not all sixteen of them.
+    /// The per-line bound is longer than the longest line this stack
+    /// writes or expects to read: a base64-encoded 256-bit `a=crypto` master
+    /// key is under 200 bytes, and the longest `a=candidate` line RFC 8839
+    /// describes is under 150, so one line cannot spend the whole body budget
+    /// by itself. The per-section attribute bound is room for every codec,
+    /// `fmtp`, `rtcp-fb` line and every candidate a dual-stack host with a
+    /// relay gathers for one stream, while stopping a single stream from
+    /// claiming the whole description's attribute budget by itself. The
+    /// format bound is more than twice the widest codec list a real offer
+    /// writes, well short of the 128 payload type numbers RFC 3551 leaves
+    /// room for if every one of them were listed on one line.
     pub const DEFAULT: Self = Self {
         max_body_bytes: 16_384,
+        max_line_bytes: 2_048,
         max_media: 16,
         max_attributes: 256,
+        max_attributes_per_section: 64,
+        max_formats: 64,
     };
 }
 
@@ -119,6 +162,10 @@ struct Parser {
     media: Vec<MediaDescription>,
     rank: u8,
     attributes: usize,
+    /// `a=` lines seen since the current section started — the session level
+    /// before the first `m=`, or the current `m=` block — reset at every
+    /// `m=` line.
+    section_attributes: usize,
 }
 
 #[derive(Default)]
@@ -156,6 +203,7 @@ impl Parser {
             media: Vec::new(),
             rank: 0,
             attributes: 0,
+            section_attributes: 0,
         }
     }
 
@@ -171,12 +219,24 @@ impl Parser {
             if line.is_empty() {
                 continue;
             }
+            if line.len() > limits.max_line_bytes as usize {
+                return Err(SdpError::LineTooLong {
+                    line: number,
+                    limit: limits.max_line_bytes,
+                });
+            }
             let (kind, value) = split_line(line, number)?;
             if kind == 'a' {
                 self.attributes += 1;
                 if self.attributes > limits.max_attributes as usize {
                     return Err(SdpError::TooManyAttributes {
                         limit: limits.max_attributes,
+                    });
+                }
+                self.section_attributes += 1;
+                if self.section_attributes > limits.max_attributes_per_section as usize {
+                    return Err(SdpError::TooManyAttributesInSection {
+                        limit: limits.max_attributes_per_section,
                     });
                 }
             }
@@ -187,7 +247,8 @@ impl Parser {
                     });
                 }
                 self.rank = 0;
-                self.media.push(media_line(value, number)?);
+                self.section_attributes = 0;
+                self.media.push(media_line(value, number, limits)?);
                 continue;
             }
             match self.media.last_mut() {
@@ -335,7 +396,7 @@ fn timing_line(value: &str, line: usize) -> Result<Timing, SdpError> {
     })
 }
 
-fn media_line(value: &str, line: usize) -> Result<MediaDescription, SdpError> {
+fn media_line(value: &str, line: usize, limits: Limits) -> Result<MediaDescription, SdpError> {
     let mut parts = value.split_ascii_whitespace();
     let mut next = || parts.next().ok_or(SdpError::Incomplete { line });
     let media = next()?.to_owned();
@@ -345,12 +406,18 @@ fn media_line(value: &str, line: usize) -> Result<MediaDescription, SdpError> {
         Some((port, count)) => (number16(port, line)?, Some(number16(count, line)?)),
         None => (number16(written, line)?, None),
     };
+    let formats: Vec<String> = parts.map(str::to_owned).collect();
+    if formats.len() > limits.max_formats as usize {
+        return Err(SdpError::TooManyFormats {
+            limit: limits.max_formats,
+        });
+    }
     Ok(MediaDescription {
         media,
         port,
         port_count,
         proto,
-        formats: parts.map(str::to_owned).collect(),
+        formats,
         information: None,
         connection: None,
         bandwidth: Vec::new(),
@@ -382,6 +449,8 @@ fn number16(value: &str, line: usize) -> Result<u16, SdpError> {
 
 #[cfg(test)]
 mod tests {
+    use core::fmt::Write as _;
+
     use super::{Limits, parse, parse_with_limits};
     use crate::sdp::{Direction, SdpError};
 
@@ -602,6 +671,122 @@ m=audio 49170 RTP/AVP 0\r\n";
     }
 
     #[test]
+    fn a_body_at_the_size_limit_is_accepted_and_one_byte_more_is_refused() {
+        let size = u32::try_from(OFFER.len()).expect("a short offer");
+        let exact = Limits {
+            max_body_bytes: size,
+            ..Limits::DEFAULT
+        };
+        assert!(parse_with_limits(OFFER.as_bytes(), exact).is_ok());
+        let one_short = Limits {
+            max_body_bytes: size - 1,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(OFFER.as_bytes(), one_short).unwrap_err(),
+            SdpError::BodyTooLarge { limit: size - 1 }
+        );
+    }
+
+    #[test]
+    fn the_session_level_is_a_section_of_its_own() {
+        // three attributes before the first m= and none after it: nowhere
+        // near the bound on the whole description, and the session level
+        // alone still has to answer to the bound on one section
+        let body = "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+a=sendrecv\r\n\
+a=tool:x\r\n\
+a=type:call\r\n\
+m=audio 5000 RTP/AVP 0\r\n";
+        let three = Limits {
+            max_attributes_per_section: 3,
+            ..Limits::DEFAULT
+        };
+        assert!(parse_with_limits(body.as_bytes(), three).is_ok());
+        let two = Limits {
+            max_attributes_per_section: 2,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(body.as_bytes(), two).unwrap_err(),
+            SdpError::TooManyAttributesInSection { limit: 2 }
+        );
+    }
+
+    #[test]
+    fn a_line_at_the_limit_is_accepted_and_one_byte_more_is_refused() {
+        let limits = Limits {
+            max_line_bytes: 40,
+            ..Limits::DEFAULT
+        };
+        // the appended line is "a=" plus filler: 40 bytes fits, 41 does not
+        let at_the_limit = format!("{OFFER}a={}\r\n", "x".repeat(38));
+        assert!(parse_with_limits(at_the_limit.as_bytes(), limits).is_ok());
+        let one_more = format!("{OFFER}a={}\r\n", "x".repeat(39));
+        assert_eq!(
+            parse_with_limits(one_more.as_bytes(), limits).unwrap_err(),
+            SdpError::LineTooLong {
+                line: OFFER.lines().count() + 1,
+                limit: 40,
+            }
+        );
+    }
+
+    #[test]
+    fn the_per_section_bound_resets_at_the_session_line_and_at_each_m() {
+        // one attribute at session level, two on each of two streams: no
+        // section holds more than two, even though the total is five
+        let body = "v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+a=sendrecv\r\n\
+m=audio 5000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n\
+m=audio 5002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n";
+        let two = Limits {
+            max_attributes_per_section: 2,
+            ..Limits::DEFAULT
+        };
+        assert!(parse_with_limits(body.as_bytes(), two).is_ok(), "two fits");
+        let one = Limits {
+            max_attributes_per_section: 1,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with_limits(body.as_bytes(), one).unwrap_err(),
+            SdpError::TooManyAttributesInSection { limit: 1 }
+        );
+    }
+
+    #[test]
+    fn a_format_list_at_the_limit_is_accepted_and_one_more_is_refused() {
+        fn with_formats(count: usize) -> String {
+            let mut formats = String::new();
+            for n in 0..count {
+                let _ = write!(formats, " {n}");
+            }
+            format!(
+                "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+                 m=audio 49170 RTP/AVP{formats}\r\n"
+            )
+        }
+        let limits = Limits {
+            max_formats: 3,
+            ..Limits::DEFAULT
+        };
+        assert!(parse_with_limits(with_formats(3).as_bytes(), limits).is_ok());
+        assert_eq!(
+            parse_with_limits(with_formats(4).as_bytes(), limits).unwrap_err(),
+            SdpError::TooManyFormats { limit: 3 }
+        );
+    }
+
+    #[test]
     fn the_attribute_bound_counts_the_whole_description_not_one_block() {
         // one attribute at session level and two on each of four streams
         let body = "v=0\r\n\
@@ -632,8 +817,15 @@ m=audio 5006 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\n";
     #[test]
     fn the_default_bounds_take_what_a_call_actually_carries() {
         assert!(parse(OFFER.as_bytes()).is_ok());
-        // and refuse what no call carries: a body of nothing but attributes
-        let flood = format!("{OFFER}{}", "a=x\r\n".repeat(1000));
+        // and refuse what no call carries: many streams, each within the
+        // per-section budget on its own, that together are still too many
+        // attributes for one description
+        let mut extra = String::new();
+        for n in 0..5 {
+            let _ = write!(extra, "m=audio {} RTP/AVP 0\r\n", 5000 + n * 2);
+            extra.push_str(&"a=x\r\n".repeat(60));
+        }
+        let flood = format!("{OFFER}{extra}");
         assert_eq!(
             parse(flood.as_bytes()).unwrap_err(),
             SdpError::TooManyAttributes { limit: 256 }

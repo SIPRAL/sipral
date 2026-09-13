@@ -72,13 +72,32 @@ pub enum SdpError {
         /// The bound that was exceeded.
         limit: u32,
     },
+    /// A line longer than the configured bound.
+    LineTooLong {
+        /// Which line, counted from one.
+        line: usize,
+        /// The bound that was exceeded.
+        limit: u32,
+    },
     /// More `m=` blocks than the configured bound.
     TooManyStreams {
         /// The bound that was exceeded.
         limit: u16,
     },
-    /// More `a=` lines than the configured bound.
+    /// More `a=` lines than the configured bound, session level and media
+    /// level together.
     TooManyAttributes {
+        /// The bound that was exceeded.
+        limit: u16,
+    },
+    /// More `a=` lines than the configured bound in one section alone — the
+    /// session level, or one `m=` block.
+    TooManyAttributesInSection {
+        /// The bound that was exceeded.
+        limit: u16,
+    },
+    /// More format tokens on one `m=` line than the configured bound.
+    TooManyFormats {
         /// The bound that was exceeded.
         limit: u16,
     },
@@ -159,8 +178,17 @@ impl fmt::Display for SdpError {
                 write!(f, "stream {stream} was accepted with no offered format")
             }
             Self::BodyTooLarge { limit } => write!(f, "body exceeds {limit} bytes"),
+            Self::LineTooLong { line, limit } => {
+                write!(f, "line {line} exceeds {limit} bytes")
+            }
             Self::TooManyStreams { limit } => write!(f, "more than {limit} media descriptions"),
             Self::TooManyAttributes { limit } => write!(f, "more than {limit} attributes"),
+            Self::TooManyAttributesInSection { limit } => {
+                write!(f, "more than {limit} attributes in one section")
+            }
+            Self::TooManyFormats { limit } => {
+                write!(f, "more than {limit} formats on one m= line")
+            }
             Self::NoSuchStream { stream } => write!(f, "there is no stream {stream}"),
             Self::StreamMismatch { local, remote } => {
                 write!(f, "we describe {local} streams and the peer {remote}")

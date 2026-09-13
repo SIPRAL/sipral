@@ -254,8 +254,6 @@ shape is permanent once published:
   `SIPRAL_STATUS_BUSY` at the moments a user listens hardest; events are
   delivered after the lock is released and a call's media has a lock of its
   own;
-- handles are minted per stack and carry no stack, so one call's handle names
-  another call on a second stack; the handle carries its stack;
 - one monotonic clock per stack is advanced by every entry point, including
   the ones the network thread calls; media entry points stop advancing it;
 - A1 subscriptions, A7 and D4 lifecycle (suspend, resume, network change,
@@ -275,7 +273,9 @@ shape is permanent once published:
 - one transport per stack, and a registrar that cannot be re-pointed: a
   transport per account and per call, `sipral_account_retarget`, and the
   resolve request as an event with its answer;
-- an account without a registrar, for trunks authenticated by address;
+- an account without a registrar, for trunks authenticated by address.
+  *Built*: `registrar_len` zero, with `registrar_address` as the outbound proxy
+  and `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` as its state;
 - the size-versioning constants pin the oldest published size rather than the
   current one, and every binding calls `sipral_abi_check` at load.
 

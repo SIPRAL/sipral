@@ -120,7 +120,10 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         | UaError::NoSession
         | UaError::ChangeInProgress
         | UaError::CannotRenegotiate => SipralStatus::WrongState,
-        UaError::Sdp(_) => SipralStatus::InvalidArgument,
+        // an account configured without a registrar is the wrong account to
+        // register rather than the wrong moment: a corrected configuration
+        // would be taken, and no amount of waiting will change this one
+        UaError::Sdp(_) | UaError::NoRegistrar => SipralStatus::InvalidArgument,
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())
@@ -959,11 +962,11 @@ pub(crate) mod tests {
         sipral_call_reject_session, sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf,
         sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
-    use crate::account::{SipralAccountConfig, sipral_account_add};
+    use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::error::last_error_text;
     use crate::event::{SipralCallState, SipralEventKind};
-    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
-    use crate::stack::tests::{Observed, config, create, poll, record, stack};
+    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags, split};
+    use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
     use crate::stack::{sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
     use sipral_core::endpoint::Input;
@@ -2089,17 +2092,96 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_call_handle_from_one_stack_does_not_open_another() {
+        // tags of its own, so both stacks start at the first generation the way
+        // every stack did before a handle carried one; tags from the process's
+        // own set come back carrying whatever other tests minted, and can refuse
+        // the handle for a reason that has nothing to do with its stack
+        static TAGS: StackTags = StackTags::new();
         let mut first_observed = Observed::default();
         let mut second_observed = Observed::default();
-        let (first, account) = line(&mut first_observed);
-        let (second, _) = line(&mut second_observed);
-        let (_, call) = place(first, account, &call_config(), 0);
+        let first = stack_on(&TAGS, &mut first_observed);
+        let second = stack_on(&TAGS, &mut second_observed);
+        let first_account = account_on(first);
+        let second_account = account_on(second);
+        let (status, foreign) = place(first, first_account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (status, own) = place(second, second_account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = one(second);
+        // both stacks number their calls from the same first slot, so the two
+        // handles differ in nothing but the stack they carry
+        assert_ne!(foreign, own);
         assert_eq!(
-            unsafe { sipral_call_hangup(second, call, 0) },
-            SipralStatus::InvalidHandle
+            unsafe { sipral_call_hangup(second, foreign, 1_000) },
+            SipralStatus::InvalidHandle,
+            "the handle hung up the second stack's own call"
         );
+        let message = last_error_text();
+        assert!(
+            message.contains("minted by another stack"),
+            "the refusal does not say why: {message}"
+        );
+        assert!(
+            sent(second).is_empty(),
+            "the second stack sent something for its own call"
+        );
+        assert_eq!(state_of(second, own), SipralCallState::Calling as u32);
         assert_eq!(unsafe { sipral_stack_destroy(first) }, SipralStatus::Ok);
         assert_eq!(unsafe { sipral_stack_destroy(second) }, SipralStatus::Ok);
+    }
+
+    /// The tag is given back when a stack goes and taken by the next one, so
+    /// the handles an application kept from the first stack carry the tag the
+    /// second one mints with. They still name nothing there.
+    #[test]
+    fn a_handle_kept_from_a_destroyed_stack_names_nothing_on_the_stack_that_took_its_tag() {
+        static TAGS: StackTags = StackTags::new();
+        let mut gone_observed = Observed::default();
+        let gone = stack_on(&TAGS, &mut gone_observed);
+        let kept_account = account_on(gone);
+        let (status, kept_call) = place(gone, kept_account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(unsafe { sipral_stack_destroy(gone) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let taken = stack_on(&TAGS, &mut observed);
+        let tag_of = |handle| split(handle).expect("a handle").tag;
+        assert_eq!(
+            tag_of(taken),
+            tag_of(gone),
+            "the second stack has another tag, so this proves nothing"
+        );
+        let account = account_on(taken);
+        let (status, call) = place(taken, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = one(taken);
+
+        assert_eq!(
+            unsafe { sipral_call_hangup(taken, kept_call, 1_000) },
+            SipralStatus::InvalidHandle,
+            "the kept call handle hung up the new stack's call"
+        );
+        let message = last_error_text();
+        assert!(
+            message.contains("minted by another stack"),
+            "the refusal does not say why: {message}"
+        );
+        assert_eq!(
+            unsafe { sipral_account_register(taken, kept_account, 1_000) },
+            SipralStatus::InvalidHandle,
+            "the kept account handle registered the new stack's account"
+        );
+        let message = last_error_text();
+        assert!(
+            message.contains("minted by another stack"),
+            "the refusal does not say why: {message}"
+        );
+        assert!(
+            sent(taken).is_empty(),
+            "the new stack sent something for what the old handles matched"
+        );
+        assert_eq!(state_of(taken, call), SipralCallState::Calling as u32);
+        assert_eq!(unsafe { sipral_stack_destroy(taken) }, SipralStatus::Ok);
     }
 
     #[test]
