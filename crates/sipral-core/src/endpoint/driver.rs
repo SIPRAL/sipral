@@ -598,9 +598,18 @@ impl Endpoint {
     /// belongs to the dialog: every retransmitted 2xx is answered with the
     /// same bytes, and the caller hears nothing more about it.
     ///
+    /// The ACK is held to §18.1.1 like any other request, and one too large
+    /// for a datagram goes on a stream to the same address. Every
+    /// retransmission of the 2xx is answered on that same flow while it is
+    /// open, not on the one the 2xx came in on; once it has closed, on another
+    /// stream to that address, or not until the caller has opened one.
+    ///
     /// # Errors
     /// [`AckError`] when the dialog is unknown, has no 2xx to acknowledge, or
-    /// has already been acknowledged.
+    /// has already been acknowledged. [`AckError::Build`] carrying
+    /// [`SendError::NeedsStreamTransport`] when the ACK does not fit a
+    /// datagram and no stream is open: nothing is kept, and the same call
+    /// sends it once the transport is bound.
     pub fn ack_2xx(
         &mut self,
         dialog: DialogId,
@@ -624,10 +633,8 @@ impl Endpoint {
             return Err(AckError::AlreadyAcknowledged);
         }
         let plan = branches.ack_2xx(&key).map_err(|_| AckError::NotAnswered)?;
-        let ack = self.build_in_dialog(&plan, flow, None, answer)?;
-        if let Some(branches) = self.dialogs.set_mut(set) {
-            branches.keep_ack(&key, ack.clone()).ok();
-        }
+        let (ack, flow) = self.build_in_dialog(&plan, flow, None, answer)?;
+        self.dialogs.keep_ack(dialog, ack.clone(), flow);
         self.note_wire(
             &ack.as_raw(),
             Reason::RequestSent,
@@ -641,7 +648,10 @@ impl Endpoint {
     /// Hang up (§15.1.1).
     ///
     /// # Errors
-    /// As [`Endpoint::request_in_dialog`].
+    /// As [`Endpoint::request_in_dialog`]. A BYE refused with
+    /// [`SendError::NeedsStreamTransport`] has not been passed to a
+    /// transaction, so the dialog is not over and the same call hangs it up
+    /// once the transport is bound.
     pub fn bye(
         &mut self,
         dialog: DialogId,
@@ -668,7 +678,8 @@ impl Endpoint {
     ///
     /// # Errors
     /// [`SendError`] when the dialog is unknown or the request cannot be
-    /// built.
+    /// built, and [`SendError::NeedsStreamTransport`] when it is too large for
+    /// a datagram with no stream open to the dialog's next hop (§18.1.1).
     pub fn request_in_dialog(
         &mut self,
         dialog: DialogId,
@@ -689,7 +700,8 @@ impl Endpoint {
             .ok_or(SendError::NoSuchDialog)?
             .next_request(request.method())
             .map_err(SendError::Dialog)?;
-        let message = self.build_in_dialog(&plan, flow, Some(request), request.body.as_deref())?;
+        let (message, flow) =
+            self.build_in_dialog(&plan, flow, Some(request), request.body.as_deref())?;
         let (id, effects) =
             self.transactions
                 .start_non_invite_client(message, flow, self.config.timers, now)?;
@@ -739,7 +751,8 @@ impl Endpoint {
             .ok_or(SendError::NoSuchDialog)?
             .next_request(Method::Invite)
             .map_err(SendError::Dialog)?;
-        let message = self.build_in_dialog(&plan, flow, Some(request), request.body.as_deref())?;
+        let (message, flow) =
+            self.build_in_dialog(&plan, flow, Some(request), request.body.as_deref())?;
         let (id, effects) = self.transactions.start_invite_client(
             message.clone(),
             flow,
@@ -1091,6 +1104,31 @@ impl Endpoint {
         Ok(Some((promoted, local)))
     }
 
+    /// The flow a kept ACK is passed to again when its 2xx is retransmitted
+    /// (§13.2.2.4).
+    ///
+    /// The one it first left on, for as long as that transport is open:
+    /// §18.1.1 may have made it a stream the 2xx does not arrive on. Once that
+    /// transport has gone, the flow the 2xx arrived on, held to §18.1.1 as the
+    /// first ACK was — a stream to the same address when one is open, and
+    /// `None` when none is and the caller has been asked for one.
+    pub(super) fn flow_for_kept_ack(
+        &mut self,
+        went_on: Flow,
+        arrived_on: Flow,
+        ack: &OwnedMessage,
+    ) -> Option<Flow> {
+        if self.transports.get(went_on.transport).is_some() {
+            return Some(went_on);
+        }
+        let call = ack.as_raw().call_id().ok();
+        match self.promote_if_too_big(arrived_on, ack.len(), call) {
+            Ok(None) => Some(arrived_on),
+            Ok(Some((stream, _))) => Some(stream),
+            Err(_) => None,
+        }
+    }
+
     /// §18.1.1 moved a request off the datagram it did not fit in.
     ///
     /// The size and the limit go down together, because either on its own is
@@ -1203,24 +1241,64 @@ impl Endpoint {
         Ok(builder.build()?)
     }
 
-    /// Finish a request the dialog has already decided everything about.
+    /// Finish a request the dialog has already decided everything about, and
+    /// decide what carries it.
+    ///
+    /// §18.1.1 is applied here because this is the one path every request
+    /// inside a dialog is built on, the ACK to a 2xx included — and that one
+    /// no transaction carries, so nothing further down would ever look at its
+    /// size. The flow that comes back is the one to send on: the dialog's own,
+    /// or a stream to the same address when the request outgrew the datagram.
+    /// The dialog keeps its flow either way. The rule is about the size of one
+    /// request, and the next one may fit.
+    ///
+    /// With no stream to move to, the caller has been asked for one and
+    /// nothing is kept. The sequence number the dialog drew for the attempt,
+    /// for anything but an ACK, is not given back: §12.2.2 lets the far end
+    /// see a gap, and a number reused after a request that went out in the
+    /// meantime would reach it out of order.
     pub(super) fn build_in_dialog(
         &mut self,
         plan: &InDialogRequest,
         flow: Flow,
         extra: Option<&OutgoingInDialogRequest>,
         body: Option<&[u8]>,
-    ) -> Result<OwnedMessage, SendError> {
-        let bound = self
+    ) -> Result<(OwnedMessage, Flow), SendError> {
+        let local = self
             .transports
             .get(flow.transport)
-            .ok_or(SendError::UnknownTransport)?;
-        let local = bound.local;
+            .ok_or(SendError::UnknownTransport)?
+            .local;
         let branch = self.tokens.branch();
+        let message = self.assemble_in_dialog(plan, flow, local, &branch, extra, body)?;
+        let promoted = {
+            let call = message.as_raw().call_id().ok();
+            self.promote_if_too_big(flow, message.len(), call)?
+        };
+        match promoted {
+            None => Ok((message, flow)),
+            Some((stream, local)) => {
+                let message = self.assemble_in_dialog(plan, stream, local, &branch, extra, body)?;
+                Ok((message, stream))
+            }
+        }
+    }
+
+    /// The bytes of one request inside a dialog, with the `Via` the flow it
+    /// leaves on has to name.
+    fn assemble_in_dialog(
+        &self,
+        plan: &InDialogRequest,
+        flow: Flow,
+        local: SocketAddr,
+        branch: &[u8],
+        extra: Option<&OutgoingInDialogRequest>,
+        body: Option<&[u8]>,
+    ) -> Result<OwnedMessage, SendError> {
         let via = via::local_via(
             flow.protocol,
             local,
-            &branch,
+            branch,
             self.config.always_request_rport,
         );
 

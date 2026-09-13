@@ -77,10 +77,14 @@ pub enum SendError {
     ///
     /// Who holds the request until then depends on which door it came out
     /// of. From `request` or `invite` the caller still owns it and sends it
-    /// again itself once the transport is bound. From
-    /// `retry_with_credentials` the endpoint is the one holding it: the
-    /// challenge stays in the store, and the caller asks again with the same
-    /// handle.
+    /// again itself once the transport is bound. The same goes for every
+    /// request inside a dialog — `request_in_dialog`, `bye`, `reinvite`, and
+    /// `prack` and the two ACKs, which carry it inside `PrackError::Send` and
+    /// `AckError::Build`: nothing was started, a BYE that was refused has not
+    /// ended its dialog, and a provisional response that was not acknowledged
+    /// keeps its handle. From `retry_with_credentials` the endpoint is the
+    /// one holding it: the challenge stays in the store, and the caller asks
+    /// again with the same handle.
     NeedsStreamTransport,
     /// The handle names a dialog that has ended, or never existed.
     NoSuchDialog,
@@ -233,7 +237,9 @@ pub enum AckError {
     /// It has already been acknowledged. Retransmissions of the 2xx are
     /// answered by the endpoint from the stored bytes (§13.2.2.4).
     AlreadyAcknowledged,
-    /// The ACK could not be assembled.
+    /// The ACK could not be assembled, or could not go:
+    /// [`SendError::NeedsStreamTransport`] when §18.1.1 refused it a datagram
+    /// and there is no stream to move it to.
     Build(SendError),
 }
 

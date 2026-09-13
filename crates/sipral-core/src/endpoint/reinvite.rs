@@ -68,8 +68,10 @@ struct Sent {
     /// transaction is "completed or terminated", and a refusal completes it —
     /// the ACK for a non-2xx is the transaction's own, not the dialog's.
     settled: bool,
-    /// The ACK once the caller has built it, kept for the retransmissions.
-    ack: Option<OwnedMessage>,
+    /// The ACK once the caller has built it, kept for the retransmissions
+    /// with the flow it left on — which §18.1.1 may have made a stream while
+    /// the 2xx keeps arriving over a datagram.
+    ack: Option<(OwnedMessage, Flow)>,
 }
 
 /// The INVITEs and UPDATEs running inside dialogs, in both directions.
@@ -154,14 +156,17 @@ impl Reinvites {
         self.ours.get(&id).is_some_and(|sent| sent.answered)
     }
 
-    /// The ACK, once there is one.
-    fn ack_for(&self, id: TransactionId<InviteClient>) -> Option<&OwnedMessage> {
-        self.ours.get(&id).and_then(|sent| sent.ack.as_ref())
+    /// The ACK and the flow it left on, once there is one.
+    fn ack_for(&self, id: TransactionId<InviteClient>) -> Option<(&OwnedMessage, Flow)> {
+        self.ours
+            .get(&id)
+            .and_then(|sent| sent.ack.as_ref())
+            .map(|(ack, flow)| (ack, *flow))
     }
 
-    fn keep_ack(&mut self, id: TransactionId<InviteClient>, ack: OwnedMessage) {
+    fn keep_ack(&mut self, id: TransactionId<InviteClient>, ack: OwnedMessage, flow: Flow) {
         if let Some(sent) = self.ours.get_mut(&id) {
-            sent.ack = Some(ack);
+            sent.ack = Some((ack, flow));
         }
     }
 
@@ -240,12 +245,14 @@ impl Endpoint {
     /// caller builds it and the endpoint cannot know when it is ready.
     ///
     /// Afterwards the ACK belongs to the dialog: every retransmission of the
-    /// 2xx is answered with the same bytes and the caller hears nothing more.
+    /// 2xx is answered with the same bytes, on the flow the first one left on
+    /// for as long as it is open, and the caller hears nothing more.
     ///
     /// # Errors
     /// [`AckError`] when the handle names no re-INVITE this endpoint is
     /// following, when no 2xx has arrived for it, or when it has already been
-    /// acknowledged.
+    /// acknowledged. As [`Endpoint::ack_2xx`] when §18.1.1 refuses it a
+    /// datagram with no stream to move to.
     pub fn ack_reinvite(
         &mut self,
         invite: TransactionId<InviteClient>,
@@ -275,8 +282,8 @@ impl Endpoint {
             .ok_or(AckError::NoSuchDialog)?
             .ack_2xx(&request.as_raw())
             .map_err(|_| AckError::NotAnswered)?;
-        let ack = self.build_in_dialog(&plan, flow, None, answer)?;
-        self.reinvites.keep_ack(invite, ack.clone());
+        let (ack, flow) = self.build_in_dialog(&plan, flow, None, answer)?;
+        self.reinvites.keep_ack(invite, ack.clone(), flow);
         self.note_wire(
             &ack.as_raw(),
             Reason::RequestSent,
@@ -353,17 +360,25 @@ impl Endpoint {
 
         // §13.2.2.4: "The ACK MUST be passed to the client transport every
         // time a retransmission of the 2xx final response that triggered the
-        // ACK arrives." The caller heard about the answer once
+        // ACK arrives." The caller heard about the answer once. It goes where
+        // the first one went, which is not the flow the 2xx came in on when
+        // §18.1.1 moved the ACK onto a stream, and never to a stream that has
+        // since closed
         if status.is_success()
-            && let Some(ack) = self.reinvites.ack_for(id).cloned()
+            && let Some((ack, went_on)) = self
+                .reinvites
+                .ack_for(id)
+                .map(|(ack, went_on)| (ack.clone(), went_on))
         {
-            self.note_wire(
-                &ack.as_raw(),
-                Reason::RequestRetransmitted,
-                Direction::Outbound,
-                flow,
-            );
-            self.queue(flow.transmit(ack.bytes()));
+            if let Some(went_on) = self.flow_for_kept_ack(went_on, flow, &ack) {
+                self.note_wire(
+                    &ack.as_raw(),
+                    Reason::RequestRetransmitted,
+                    Direction::Outbound,
+                    went_on,
+                );
+                self.queue(went_on.transmit(ack.bytes()));
+            }
             return;
         }
 

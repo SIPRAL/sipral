@@ -776,6 +776,16 @@ impl Endpoint {
     /// the caller decides when media is ready. After that the endpoint keeps
     /// the ACK and resends it itself on every retransmitted 2xx for as long as
     /// the dialog lives.
+    ///
+    /// No transaction carries it, and §18.1.1 applies to it all the same: an
+    /// ACK too large for a datagram goes on a stream to the same address, and
+    /// every retransmitted 2xx is answered on that stream rather than on the
+    /// flow the 2xx came in on, for as long as the stream is open. Once it has
+    /// closed, the ACK goes on another stream to that address, or waits for
+    /// the one `Event::TransportWanted` asks for. With no stream open the call
+    /// itself is refused with
+    /// `AckError::Build(SendError::NeedsStreamTransport)`, nothing is kept, and
+    /// the same call sends it once one is bound.
     pub fn ack_2xx(&mut self, dialog: DialogId, answer: Option<&[u8]>, now: Instant)
         -> Result<(), AckError>;
 
@@ -792,6 +802,12 @@ impl Endpoint {
     /// Anything but an INVITE: BYE, INFO, NOTIFY, UPDATE, REFER. An INVITE is
     /// refused with `SendError::WrongMethod`, because it needs an INVITE
     /// client transaction and an ACK of its own.
+    ///
+    /// §18.1.1 is applied here exactly as on the first send, and to
+    /// `reinvite`, `prack` and both ACKs with it: a request too large for a
+    /// datagram goes on a stream open to the dialog's next hop, or is refused
+    /// with `SendError::NeedsStreamTransport`. The dialog keeps its own flow,
+    /// because the rule is about one request's size and the next may fit.
     pub fn request_in_dialog(&mut self, dialog: DialogId, request: &OutgoingInDialogRequest, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
 
@@ -813,12 +829,14 @@ impl Endpoint {
     /// acknowledge different things: that one names which of several forked
     /// dialogs answered, this one is a request inside a dialog that already
     /// exists, and its `CSeq` is the re-INVITE's rather than the original
-    /// INVITE's. Kept and resent on every retransmission of the 2xx, as above.
+    /// INVITE's. Kept and resent on every retransmission of the 2xx, on the
+    /// flow it first left on while that is open, as above.
     pub fn ack_reinvite(&mut self, invite: TransactionId<InviteClient>, answer: Option<&[u8]>, now: Instant)
         -> Result<(), AckError>;
     /// §15.1.1: the dialog is over as soon as the BYE is passed to the
     /// transaction, whatever the far end answers, so this also emits
-    /// `Event::DialogTerminated`.
+    /// `Event::DialogTerminated`. A BYE refused for want of a stream has not
+    /// been passed to one, and the dialog stays up.
     pub fn bye(&mut self, dialog: DialogId, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
 
@@ -1015,7 +1033,8 @@ pub enum Event {
     /// thing that survives a NAT.
     ResolveNeeded { dialog: DialogId, host: Host, port: Option<u16>, protocol: Option<TransportProtocol> },
     /// A request is too large for a datagram (§18.1.1) and no stream transport
-    /// is open to move it to. Opening one is the caller's; the request is not
+    /// is open to move it to — any request, inside a dialog or out of one, the
+    /// ACK to a 2xx included. Opening one is the caller's; the request is not
     /// held, and goes when it is sent again. Both sizes travel with it,
     /// because a request that fragments and is dropped by a NAT looks from
     /// above like nothing happening at all.
@@ -1162,6 +1181,15 @@ non-100 provisional, `NotProvisional` for anything outside 101-199,
 
 `CancelError` has no "too early" variant. The only ways to fail are an unknown
 or already-final transaction.
+
+`SendError::NeedsStreamTransport` is the one refusal that asks the caller to
+act, and every door a request leaves by can return it: `request`, `invite`,
+`request_in_dialog`, `bye` and `reinvite` as it is, `prack` inside
+`PrackError::Send`, both ACKs inside `AckError::Build`, and
+`retry_with_credentials` inside `AuthRetryError::Unsendable`. Nothing goes out
+and nothing is started; the caller binds the stream `Event::TransportWanted`
+names and asks again. A request inside a dialog leaves the sequence number it
+drew unused, which §12.2.2 allows.
 
 ## Walkthrough: register
 

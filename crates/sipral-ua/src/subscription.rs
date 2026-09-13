@@ -74,6 +74,7 @@ use crate::agent::UserAgent;
 use crate::dialoginfo::{Applied, DialogInfo, DialogInfoTable};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::parked::{Parked, call_needs_a_stream};
 use crate::registration::{backoff_delay, refresh_after, retry_after};
 
 /// How long a subscription asks for when nothing says otherwise.
@@ -826,7 +827,7 @@ impl UserAgent {
             .min()
     }
 
-    fn refresh_subscription(&mut self, subscription: SubscriptionHandle, now: Instant) {
+    pub(crate) fn refresh_subscription(&mut self, subscription: SubscriptionHandle, now: Instant) {
         let Some(held) = self.subscriptions.get(&subscription) else {
             return;
         };
@@ -836,12 +837,18 @@ impl UserAgent {
             return;
         };
         // a failure here is reported the same way one on the wire is: the
-        // transport can have gone since the refresh was scheduled
-        if self
-            .send_in_dialog(subscription, dialog, expires, now)
-            .is_err()
-        {
-            self.unsendable(subscription);
+        // transport can have gone since the refresh was scheduled. One that
+        // §18.1.1 holds back for a stream is not a failure yet, and goes when
+        // the stream is bound
+        match self.send_in_dialog(subscription, dialog, expires, now) {
+            Ok(()) => {}
+            Err(ref error) if call_needs_a_stream(error) => {
+                self.park(Parked::Refresh {
+                    subscription,
+                    dialog,
+                });
+            }
+            Err(_) => self.unsendable(subscription),
         }
     }
 }

@@ -293,7 +293,9 @@ pub(crate) struct Call {
     pub(crate) dialog: Option<DialogId>,
     /// What to do with the siblings this branch may acquire.
     pub(crate) forks: ForkPolicy,
-    /// Whether the 2xx has been acknowledged.
+    /// Whether the 2xx has been acknowledged, or its ACK is this layer's and
+    /// waiting for the stream RFC 3261 §18.1.1 asked for. Either way the
+    /// application owes it nothing.
     pub(crate) acknowledged: bool,
     /// A hangup was asked for and could not go yet: a CANCEL may not leave
     /// before the first provisional response (§9.1), and the endpoint holds it

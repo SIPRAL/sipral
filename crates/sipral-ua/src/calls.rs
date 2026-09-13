@@ -32,7 +32,8 @@ use std::time::Instant;
 
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
-    DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse, TerminationReason,
+    DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse, PrackError,
+    TerminationReason,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp;
@@ -48,6 +49,7 @@ use crate::call::{
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::parked::needs_a_stream;
 use crate::renegotiate::ALLOW;
 use crate::timers::FLOOR;
 
@@ -331,7 +333,10 @@ impl UserAgent {
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing is
-    /// waiting for one, or [`UaError::Sdp`].
+    /// waiting for one, or [`UaError::Sdp`]. [`UaError::Send`] when the PRACK
+    /// is too large for a datagram and no stream is open (RFC 3261 §18.1.1):
+    /// the answer is still owed, and the same call sends it once the stream
+    /// the endpoint asked for is bound.
     pub fn answer_early(
         &mut self,
         call: CallHandle,
@@ -340,24 +345,34 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let described = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
         let (provisional, state) = {
-            let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
-            let state = held.state;
+            let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             (
-                held.owed_prack.take().ok_or(UaError::WrongState(state))?,
-                state,
+                held.owed_prack.ok_or(UaError::WrongState(held.state))?,
+                held.state,
             )
         };
-        let _ = state;
-        let prack = self
+        let prack = match self
             .endpoint
             .prack(provisional, Some(Arc::from(sdp.to_vec())), now)
-            .map_err(|_| UaError::WrongState(state))?;
+        {
+            Ok(prack) => prack,
+            Err(PrackError::Send(error)) if needs_a_stream(&error) => {
+                return Err(UaError::Send(error));
+            }
+            Err(_) => {
+                if let Some(held) = self.calls.get_mut(&call) {
+                    held.owed_prack = None;
+                }
+                return Err(UaError::WrongState(state));
+            }
+        };
         self.remember_request(
             call,
             AnyTransactionId::NonInviteClient(prack),
             Method::Prack,
         );
         if let Some(held) = self.calls.get_mut(&call) {
+            held.owed_prack = None;
             held.session.set_local(described);
         }
         self.drain(now);
@@ -677,7 +692,11 @@ impl UserAgent {
             | Event::IncomingCancel { .. }
             | Event::IncomingAck { .. }
             | Event::IncomingBye { .. } => self.on_incoming(event, now),
-            Event::DialogTerminated { dialog, reason } => self.on_dialog_over(dialog, reason, now),
+            Event::DialogTerminated { dialog, reason } => {
+                // whatever was waiting for a stream to go out in it will not
+                self.forget_parked_in(dialog);
+                self.on_dialog_over(dialog, reason, now)
+            }
             Event::Challenged { transaction, .. } => {
                 if self.on_challenge_in_call(transaction, now) {
                     None
@@ -756,12 +775,8 @@ impl UserAgent {
             if let Some(held) = self.calls.get_mut(&call) {
                 held.owed_prack = Some(provisional);
             }
-        } else if let Ok(prack) = self.endpoint.prack(provisional, None, now) {
-            self.remember_request(
-                call,
-                AnyTransactionId::NonInviteClient(prack),
-                Method::Prack,
-            );
+        } else {
+            self.prack_by_itself(call, provisional, now);
         }
     }
 
@@ -778,12 +793,18 @@ impl UserAgent {
         let Some(call) = self.branch(invite, Some(dialog)) else {
             return;
         };
-        self.endpoint.ack_2xx(dialog, None, now).ok();
+        // the same 2xx again, retransmitted while its ACK and the hangup after
+        // it wait for a stream: both are already held, and asking again would
+        // ask for another connection per retransmission
+        if self.ack_parked_in(dialog) {
+            return;
+        }
+        self.ack_by_itself(dialog, now);
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = true;
             held.state = CallState::Confirmed;
         }
-        self.hangup(call, now).ok();
+        self.hang_up_by_itself(call, now);
     }
 
     /// A request the far end sent inside a call, or one that starts one.
@@ -1140,6 +1161,12 @@ impl UserAgent {
         response: &OwnedMessage,
         now: Instant,
     ) {
+        // the same 2xx again, retransmitted while its ACK waits for a stream:
+        // the call was reported up the first time, and the ACK goes when the
+        // stream does
+        if self.ack_parked_in(dialog) {
+            return;
+        }
         self.note_session(call, response);
         self.on_timer_answer(call, &response.as_raw(), now);
         let Some(held) = self.calls.get(&call) else {
@@ -1153,8 +1180,10 @@ impl UserAgent {
 
         // §13.2.2.4: the ACK goes now unless it has to carry an answer that
         // only the application has. A 2xx nobody acknowledges is retransmitted
-        // for 64*T1 and then hung up at the other end
-        let acknowledged = offered && self.endpoint.ack_2xx(dialog, None, now).is_ok();
+        // for 64*T1 and then hung up at the other end. One that §18.1.1 holds
+        // back for a stream is still this layer's to send, not an answer the
+        // application owes
+        let acknowledged = offered && self.ack_by_itself(dialog, now);
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = acknowledged;
             held.state = held.up();
@@ -1169,7 +1198,7 @@ impl UserAgent {
                 answer_wanted: !acknowledged,
             });
             if acknowledged {
-                self.hangup(call, now).ok();
+                self.hang_up_by_itself(call, now);
             } else {
                 self.finish(call, CallEndReason::ForkLost, None, None, now);
             }
@@ -1185,7 +1214,7 @@ impl UserAgent {
         self.report_transfer(call, StatusCode::OK, now);
         // a CANCEL that lost its race leaves the call up and the wish to end it
         if self.calls.get(&call).is_some_and(|held| held.hangup_wanted) {
-            self.hangup(call, now).ok();
+            self.hang_up_by_itself(call, now);
         }
     }
 
@@ -1571,7 +1600,7 @@ impl UserAgent {
             held.awaiting_ack = None;
         }
         if let Some(dialog) = dialog {
-            self.endpoint.bye(dialog, now).ok();
+            self.bye_by_itself(dialog, now);
         }
         // reported before the BYE's own dialog event arrives, so the reason
         // says what happened rather than who sent the last message

@@ -98,6 +98,54 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   refused the same way. A process holds 256 live stacks; the next
   `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED`.
 
+- **A request inside a dialog could leave as a datagram it did not fit in.**
+  RFC 3261 §18.1.1 was applied to the first send and the challenge retry but
+  not to the path every re-INVITE, UPDATE, PRACK, INFO, REFER, NOTIFY, BYE and
+  2xx-ACK is built on, so a re-INVITE whose body pushed it past the datagram
+  limit still went out over UDP, to be fragmented or dropped on the way. That
+  path now promotes such a request onto a stream open to the same address or
+  refuses it with `SendError::NeedsStreamTransport` and
+  `Event::TransportWanted`, written down as the first send is; the ACKs carry
+  the refusal in `AckError::Build`, a refused BYE leaves the dialog up, and a
+  retransmitted 2xx is answered on the stream its ACK went on while that
+  stream is open. `sipral-ua` returns the refusal from what the application
+  asked for — `answer_early` no longer turns it into `WrongState` and loses
+  the answer it owed — and holds what it sends by itself until a transport is
+  bound.
+
+- **No binding called `sipral_abi_check` on its own, so a caller compiled
+  against an older header found out at whichever entry point happened to
+  run first, unnamed, rather than up front.** The pinned lengths landed;
+  the load-time check did not. .NET's `Sipral` now has a static
+  constructor, printed by `tools/abi-gen`'s C# back end rather than
+  written by hand, so it exists for exactly as long as the class it
+  guards and runs before that class's first use; a mismatch stops the
+  class before anything else in it runs, as a `TypeInitializationException`
+  whose inner exception is the `SipralException` naming both versions —
+  the runtime wraps what a static constructor throws, and every later use
+  of the class throws the same wrapper again. The call in it, and the one
+  Swift's documentation gives, are spelled from the declarations of
+  `sipral_abi_check` and the two version constants, and a surface that
+  lacks them is refused rather than printed calling names it does not
+  have. Swift has no load hook a library can hang a check on — no module
+  initializer, nothing a namespace `enum` runs before first use — so
+  `SipralAbi.swift` now says so on `Sipral` itself, with the exact call and
+  when: once, before the application creates a stack or touches anything
+  else in the module. `bindings/c/smoke.c` gained the test that was still
+  owed: every struct a caller declares is handed to an entry point that
+  takes one, at the oldest length `bindings/c/abi-sizes.txt` pins and at
+  one byte short of it, and the first is accepted while the second is
+  refused with `SIPRAL_STATUS_UNSUPPORTED_VERSION`. The pins are read from
+  that file, not asked of `sipral_abi_struct_size`, which answers with the
+  length a struct has now — the number the pin replaced, and the one that
+  parts company with it the day a member is appended. The file is held to
+  the library before any number in it is used: its current lengths are the
+  ones the library reports, it lists as many structs as
+  `sipral_abi_versioned_count` counts, and a pinned struct with no entry
+  point in the test, or an entry point with no pin, fails by name.
+  Kotlin's binding does not call the check at load yet: its `init` loads
+  the JNI shim and nothing more.
+
 - **The lab's outage profile could pass without the outage touching the
   call.** `interop/impairment/blackout.sh` cut the link five seconds after its
   container started and then checked only that the qdisc said `loss`. On a

@@ -94,6 +94,7 @@ internal object SipralNative {
         System.loadLibrary("sipral_jni")
     }
 
+    external fun sipral_abi_check(major: Long, minor: Long): Int
     external fun sipral_last_error_message(buffer: ByteArray, needed: LongArray): Int
     external fun sipral_status_name(code: Long): String?
     external fun sipral_stack_create(config: Long, stack: LongArray): Int
@@ -126,6 +127,16 @@ object Sipral {
     const val MESSAGE_BYTES: Long = 65535
 
     /**
+     * Nothing built against another major works against this one.
+     */
+    const val ABI_VERSION_MAJOR: Long = 0
+
+    /**
+     * Raised by anything the header gains.
+     */
+    const val ABI_VERSION_MINOR: Long = 8
+
+    /**
      * The calling thread's last error, or an empty string when it has
      * none. Read the way C reads it: ask for the length, then for the
      * bytes.
@@ -150,6 +161,13 @@ object Sipral {
         if (status != SipralStatus.OK.value) {
             throw SipralException(SipralStatus.of(status), lastErrorMessage())
         }
+    }
+
+    /**
+     * Whether this library can serve a binding generated against `major`.`minor`.
+     */
+    fun abiCheck(major: Long, minor: Long) {
+        check(SipralNative.sipral_abi_check(major, minor))
     }
 
     /**

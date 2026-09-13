@@ -457,9 +457,7 @@ impl UserAgent {
             .header(HeaderName::Event, &event)
             .header(HeaderName::SubscriptionState, state)
             .body(b"message/sipfrag;version=2.0", Arc::from(sipfrag.to_vec()));
-        if let Ok(id) = self.endpoint.request_in_dialog(dialog, &request, now) {
-            self.remember_request(call, AnyTransactionId::NonInviteClient(id), Method::Notify);
-        }
+        self.notify_by_itself(call, dialog, event, request, now);
     }
 
     /// The referred call reached a final answer, so the subscription is over.
@@ -683,7 +681,7 @@ impl UserAgent {
         // failed one leaves it exactly where it was, which is the point of
         // waiting for the answer rather than hanging up when the REFER went
         if status.is_success() && over {
-            self.hangup(call, now).ok();
+            self.hang_up_by_itself(call, now);
         }
     }
 }
@@ -808,7 +806,7 @@ impl UserAgent {
             .push_back(UaEvent::CallReplaced { call, replaced });
         // a confirmed dialog goes with a BYE and an early one of ours with a
         // CANCEL; hanging up is the one call that already knows which
-        self.hangup(replaced, now).ok();
+        self.hang_up_by_itself(replaced, now);
     }
 
     /// Refuse an INVITE whose `Replaces` names nothing this end can give up,

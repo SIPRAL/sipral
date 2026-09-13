@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use super::table::Flow;
 use crate::dialog::{Dialog, DialogKey, DialogSet};
+use crate::msg::OwnedMessage;
 use crate::transaction::{DialogId, InviteClient, Raw, TransactionId, slab::Slab};
 
 /// Which of the two shapes a dialog is in.
@@ -39,6 +40,11 @@ struct Entry {
     /// Where in-dialog requests leave from. The route set says which hop
     /// first, but not which socket, and the socket is the caller's.
     flow: Flow,
+    /// Where the ACK to the 2xx that confirmed this dialog left from, for a
+    /// dialog of an INVITE we sent. Not always `flow`: §18.1.1 moves an ACK
+    /// too large for a datagram onto a stream, and every retransmission of
+    /// the 2xx has to be answered on that stream too.
+    acked_on: Option<Flow>,
 }
 
 /// The dialogs one INVITE produced, and the transaction that produced them.
@@ -115,6 +121,7 @@ impl Dialogs {
             key: key.clone(),
             home: Home::Branch(set),
             flow,
+            acked_on: None,
         });
         let id = DialogId::new(raw);
         self.by_key.insert(key, id);
@@ -131,6 +138,7 @@ impl Dialogs {
             key: key.clone(),
             home: Home::Answered(Box::new(dialog)),
             flow,
+            acked_on: None,
         });
         let id = DialogId::new(raw);
         self.by_key.insert(key, id);
@@ -171,6 +179,33 @@ impl Dialogs {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.flow = flow;
         }
+    }
+
+    /// Keep the ACK to the 2xx that confirmed a dialog of ours, and the flow
+    /// it left on, for every retransmission of that 2xx (§13.2.2.4).
+    pub(crate) fn keep_ack(&mut self, id: DialogId, ack: OwnedMessage, flow: Flow) {
+        let Some(entry) = self.entries.get_mut(id.raw) else {
+            return;
+        };
+        let Home::Branch(set) = entry.home else {
+            return;
+        };
+        let Some(branches) = self.sets.get_mut(set) else {
+            return;
+        };
+        if branches.set.keep_ack(&entry.key, ack).is_ok() {
+            entry.acked_on = Some(flow);
+        }
+    }
+
+    /// That ACK and its flow, once both are kept.
+    pub(crate) fn kept_ack(&self, id: DialogId) -> Option<(&OwnedMessage, Flow)> {
+        let entry = self.entries.get(id.raw)?;
+        let Home::Branch(set) = entry.home else {
+            return None;
+        };
+        let ack = self.sets.get(set)?.set.ack_for(&entry.key)?;
+        Some((ack, entry.acked_on?))
     }
 
     /// The dialog this message belongs to, by its identifier (§12.2).

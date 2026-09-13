@@ -539,7 +539,7 @@ impl UserAgent {
         }
         let dialog = self.calls.get(&call).and_then(|held| held.dialog);
         if let Some(dialog) = dialog {
-            self.endpoint.bye(dialog, now).ok();
+            self.bye_by_itself(dialog, now);
         }
         self.finish_expired(call, now);
     }

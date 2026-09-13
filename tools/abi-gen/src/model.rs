@@ -10,7 +10,7 @@
 //! language back end asks "is this a pointer to bytes" rather than matching on
 //! a string.
 
-use sipral_ffi::abi::{Function, Member, Record, Surface};
+use sipral_ffi::abi::{Function, Member, Record, Surface, Value};
 // the rule for turning `SipralStackConfig` into `sipral_stack_config` is the
 // library's, because the library answers questions about the C names too
 pub(crate) use sipral_ffi::abi::snake;
@@ -29,6 +29,84 @@ impl std::fmt::Display for Refused {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         out.write_str(&self.0)
     }
+}
+
+/// What a binding checks itself against at load, as the surface declares it:
+/// the entry point that says whether this library can serve a binding
+/// generated against a version, the two parameters it takes that version in,
+/// and the two constants that are that version.
+///
+/// A back end prints the call from these rather than writing it out, because
+/// a call written out names whatever the declarations were called the day it
+/// was written: rename the entry point or a constant and the binding calls
+/// something it no longer has, which nothing notices until somebody compiles
+/// it. A surface without all of them is refused, since a binding that cannot
+/// check the ABI at load is not one to print.
+pub(crate) struct LoadCheck<'a> {
+    /// The entry point.
+    pub(crate) function: &'a Function,
+    /// Its parameter for the major version.
+    pub(crate) major_parameter: &'a Member,
+    /// Its parameter for the minor version.
+    pub(crate) minor_parameter: &'a Member,
+    /// The major version the surface is.
+    pub(crate) major: &'a Value,
+    /// The minor version the surface is.
+    pub(crate) minor: &'a Value,
+}
+
+/// The load check a surface declares, or which part of it is missing.
+pub(crate) fn load_check<'a>(
+    surface: &'a Surface,
+    language: &str,
+) -> Result<LoadCheck<'a>, Refused> {
+    const CHECK: &str = "sipral_abi_check";
+    let Some(function) = surface
+        .functions
+        .iter()
+        .find(|function| function.name == CHECK)
+    else {
+        return Err(Refused::about(&format!(
+            "the surface declares no {CHECK}, so the {language} binding has nothing to check \
+             the ABI with at load"
+        )));
+    };
+    let version = Type::read("u32")?;
+    let [major_parameter, minor_parameter] = function.parameters else {
+        return Err(Refused::about(&format!(
+            "{CHECK} takes a major and a minor version, and its declaration has {} parameters",
+            function.parameters.len()
+        )));
+    };
+    if Type::read(major_parameter.rust_type)? != version
+        || Type::read(minor_parameter.rust_type)? != version
+    {
+        return Err(Refused::about(&format!(
+            "{CHECK} takes a major and a minor version as two u32, and its declaration takes \
+             {} and {}",
+            major_parameter.rust_type, minor_parameter.rust_type
+        )));
+    }
+    let constant = |name: &str| {
+        surface
+            .constants
+            .iter()
+            .flat_map(|group| group.iter())
+            .find(|value| value.name == name)
+            .ok_or_else(|| {
+                Refused::about(&format!(
+                    "the surface declares no {name}, which the {language} binding hands to \
+                     {CHECK} at load"
+                ))
+            })
+    };
+    Ok(LoadCheck {
+        function,
+        major_parameter,
+        minor_parameter,
+        major: constant("SIPRAL_ABI_VERSION_MAJOR")?,
+        minor: constant("SIPRAL_ABI_VERSION_MINOR")?,
+    })
 }
 
 /// A type that crosses the boundary, with the pointer separated from what it

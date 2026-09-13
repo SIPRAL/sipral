@@ -266,6 +266,9 @@ internal static class NativeMethods
     internal const string Library = "sipral";
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_abi_check(uint major, uint minor);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_last_error_message(sbyte[] buffer, nuint capacity, out nuint needed);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -308,6 +311,26 @@ internal static class NativeMethods
 public static class Sipral
 {
     /// <summary>
+    /// Fails fast, before any of the rest of this class can be used,
+    /// if the native library loaded under this assembly cannot serve
+    /// the ABI it was generated against. A static constructor is
+    /// guaranteed by the runtime to run before this type's first use,
+    /// which is the closest a managed assembly has to "at load"
+    /// without asking every caller to remember it themselves.
+    ///
+    /// The runtime wraps what a static constructor throws, so a
+    /// mismatch does not arrive as a SipralException: the first use
+    /// of this class throws TypeInitializationException, whose
+    /// InnerException is the SipralException naming both versions,
+    /// and every later use throws that TypeInitializationException
+    /// again without running the check a second time.
+    /// </summary>
+    static Sipral()
+    {
+        AbiCheck(AbiVersionMajor, AbiVersionMinor);
+    }
+
+    /// <summary>
     /// The handle that names nothing.
     /// </summary>
     public const ulong HandleNone = 0;
@@ -321,6 +344,16 @@ public static class Sipral
     /// The longest message that crosses.
     /// </summary>
     public static readonly nuint MessageBytes = 65535;
+
+    /// <summary>
+    /// Nothing built against another major works against this one.
+    /// </summary>
+    public const uint AbiVersionMajor = 0;
+
+    /// <summary>
+    /// Raised by anything the header gains.
+    /// </summary>
+    public const uint AbiVersionMinor = 8;
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -356,6 +389,14 @@ public static class Sipral
         }
 
         throw new SipralException(status, LastErrorMessage());
+    }
+
+    /// <summary>
+    /// Whether this library can serve a binding generated against `major`.`minor`.
+    /// </summary>
+    public static void AbiCheck(uint major, uint minor)
+    {
+        Check(NativeMethods.sipral_abi_check(major, minor));
     }
 
     /// <summary>

@@ -618,6 +618,27 @@ public extension sipral_event_t {
 }
 
 /// Everything the library does, with the C conventions read off it.
+///
+/// Swift gives a namespace `enum` like this one no load hook: there is
+/// no module initializer and nothing else the runtime guarantees to run
+/// before first use, the way a static constructor does for the .NET
+/// binding. Nothing here calls `abiCheck` for you. The application
+/// calls it itself, once, as the first thing it does with this module —
+/// before creating a stack or calling anything else here:
+///
+/// ```swift
+/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
+/// ```
+///
+/// Skipping it is not safe. The `size` every struct here carries
+/// settles how long a struct is, not what is in it: a header and a
+/// library that disagree about the order or the meaning of members can
+/// still agree about the length, and then every size rule passes while
+/// the library reads a pointer out of whatever was put in its place.
+/// No entry point can catch that, because whether a pointer is
+/// readable is the caller's promise, not something the library can
+/// check. This call is the one that finds the disagreement before
+/// anything is read.
 public enum Sipral {
     /// The value no live handle ever takes.
     public static let handleNone: SipralHandle = 0
@@ -771,7 +792,10 @@ public enum Sipral {
     }
 
     /// Whether this library can serve a binding generated against
-    /// `major`.`minor`. Every binding calls this once, at load.
+    /// `major`.`minor`. Called once, at load, before anything else: by the
+    /// binding itself where its language gives it somewhere to call from, and
+    /// by the application where it does not. The Versioning section of
+    /// `docs/08-ffi.md` says which binding is which.
     ///
     /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
     /// naming both versions, which is what the binding should put in the

@@ -338,6 +338,7 @@ const COUNTERS: Record = Record {
 };
 
 const FUNCTIONS: &[Function] = &[
+    ABI_CHECK,
     Function {
         name: "sipral_last_error_message",
         doc: &[" The calling thread's last error."],
@@ -517,9 +518,36 @@ const SYNTHETIC: Surface = Surface {
                 value: 65_535,
             },
         ],
+        VERSION,
     ],
     functions: FUNCTIONS,
 };
+
+/// What a binding checks itself against at load. The back ends that print a
+/// load check read it from the surface, so a surface they print declares it
+/// the way the real one does.
+const ABI_CHECK: Function = Function {
+    name: "sipral_abi_check",
+    doc: &[" Whether this library can serve a binding generated against `major`.`minor`."],
+    parameters: &[member("major", "u32"), member("minor", "u32")],
+    returns: "SipralStatus",
+};
+
+/// The version a surface is, in the two constants a load check hands over.
+const VERSION: &[Value] = &[
+    Value {
+        name: "SIPRAL_ABI_VERSION_MAJOR",
+        doc: &[" Nothing built against another major works against this one."],
+        rust_type: "u32",
+        value: 0,
+    },
+    Value {
+        name: "SIPRAL_ABI_VERSION_MINOR",
+        doc: &[" Raised by anything the header gains."],
+        rust_type: "u32",
+        value: 8,
+    },
+];
 
 #[test]
 fn the_header_is_what_it_was() {
@@ -544,6 +572,150 @@ fn the_kotlin_binding_is_what_it_was() {
 #[test]
 fn the_jni_shim_is_what_it_was() {
     golden("synthetic_jni.c", &kotlin::shim(&SYNTHETIC).unwrap());
+}
+
+/// The .NET static constructor and the call Swift's documentation gives are
+/// read from the declarations, not written into the back end. Written in,
+/// they named `AbiCheck`, `AbiVersionMajor` and `AbiVersionMinor` whatever the
+/// surface declared, and `golden/synthetic.cs`, printed from a surface that
+/// declared none of the three, stopped compiling.
+#[test]
+fn the_load_check_is_read_from_the_declarations() {
+    for (language, printed) in [
+        ("C#", csharp::binding(&NOTHING)),
+        ("Swift", swift::binding(&NOTHING)),
+    ] {
+        match printed {
+            Ok(text) => {
+                panic!("{language} printed a load check for a surface that declares none:\n{text}")
+            }
+            Err(why) => assert!(
+                why.to_string().contains("sipral_abi_check"),
+                "{language} refused for another reason: {why}"
+            ),
+        }
+    }
+
+    let printed = csharp::binding(&SYNTHETIC).unwrap();
+    assert!(
+        printed.contains(
+            "    static Sipral()\n    {\n        AbiCheck(AbiVersionMajor, AbiVersionMinor);\n    }\n"
+        ),
+        "{printed}"
+    );
+    for declared in [
+        "public static void AbiCheck(uint major, uint minor)",
+        "public const uint AbiVersionMajor = 0;",
+        "public const uint AbiVersionMinor = 8;",
+    ] {
+        assert!(
+            printed.contains(declared),
+            "C# calls what it does not declare: {declared}"
+        );
+    }
+
+    let printed = swift::binding(&SYNTHETIC).unwrap();
+    assert!(
+        printed.contains(
+            "/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)\n"
+        ),
+        "{printed}"
+    );
+    for declared in [
+        "public static func abiCheck(major: UInt32, minor: UInt32) throws {",
+        "public static let abiVersionMajor: UInt32 = 0",
+        "public static let abiVersionMinor: UInt32 = 8",
+    ] {
+        assert!(
+            printed.contains(declared),
+            "Swift documents a call it does not declare: {declared}"
+        );
+    }
+}
+
+/// `sipral_abi_check` with only one parameter, which is not a major and a
+/// minor version.
+const CHECK_WRONG_ARITY: Function = Function {
+    name: "sipral_abi_check",
+    doc: &[" Whether this library can serve a binding generated against `major`.`minor`."],
+    parameters: &[member("major", "u32")],
+    returns: "SipralStatus",
+};
+
+/// `sipral_abi_check` with two parameters that are not `u32`.
+const CHECK_WRONG_TYPES: Function = Function {
+    name: "sipral_abi_check",
+    doc: &[" Whether this library can serve a binding generated against `major`.`minor`."],
+    parameters: &[member("major", "u64"), member("minor", "u64")],
+    returns: "SipralStatus",
+};
+
+/// The major version alone, with no minor beside it.
+const MAJOR_ONLY: &[Value] = &[Value {
+    name: "SIPRAL_ABI_VERSION_MAJOR",
+    doc: &[" Nothing built against another major works against this one."],
+    rust_type: "u32",
+    value: 0,
+}];
+
+/// The minor version alone, with no major beside it.
+const MINOR_ONLY: &[Value] = &[Value {
+    name: "SIPRAL_ABI_VERSION_MINOR",
+    doc: &[" Raised by anything the header gains."],
+    rust_type: "u32",
+    value: 8,
+}];
+
+/// Every way a load check can be shaped wrong short of missing
+/// `sipral_abi_check` entirely -- which
+/// [`the_load_check_is_read_from_the_declarations`] already covers -- is
+/// refused by name, not printed as a call to parameters or constants the
+/// surface does not declare the way the back end assumes.
+#[test]
+fn a_load_check_shaped_wrong_is_refused() {
+    let wrong_arity = Surface {
+        functions: &[CHECK_WRONG_ARITY],
+        constants: &[VERSION],
+        ..NOTHING
+    };
+    let wrong_types = Surface {
+        functions: &[CHECK_WRONG_TYPES],
+        constants: &[VERSION],
+        ..NOTHING
+    };
+    let missing_minor = Surface {
+        functions: &[ABI_CHECK],
+        constants: &[MAJOR_ONLY],
+        ..NOTHING
+    };
+    let missing_major = Surface {
+        functions: &[ABI_CHECK],
+        constants: &[MINOR_ONLY],
+        ..NOTHING
+    };
+
+    for (surface, expect) in [
+        (&wrong_arity, "1 parameters"),
+        (&wrong_types, "u64 and u64"),
+        (&missing_minor, "SIPRAL_ABI_VERSION_MINOR"),
+        (&missing_major, "SIPRAL_ABI_VERSION_MAJOR"),
+    ] {
+        for (language, printed) in [
+            ("C#", csharp::binding(surface)),
+            ("Swift", swift::binding(surface)),
+        ] {
+            match printed {
+                Ok(text) => panic!(
+                    "{language} printed a load check for a surface shaped wrong \
+                     ({expect}):\n{text}"
+                ),
+                Err(why) => assert!(
+                    why.to_string().contains(expect),
+                    "{language} refused for another reason: {why}"
+                ),
+            }
+        }
+    }
 }
 
 /// The smallest surface there is, for a case that wants only one thing in it.
@@ -1064,6 +1236,9 @@ const CALLBACK_KEYWORD: Surface = Surface {
             member("class", "*mut c_void"),
         ]),
     }],
+    // C# prints this one, so it declares what C# checks the ABI with at load
+    constants: &[VERSION],
+    functions: &[ABI_CHECK],
     ..NOTHING
 };
 

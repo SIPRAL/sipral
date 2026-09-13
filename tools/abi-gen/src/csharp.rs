@@ -565,6 +565,48 @@ fn declarations(surface: &Surface) -> Result<String, Refused> {
     Ok(out)
 }
 
+/// The opening of `Sipral`, with the static constructor that checks the ABI
+/// at load. The call in it is spelled the way the wrapper and the constants
+/// printed after it are spelled, from the declarations they are printed from.
+fn class_opening(surface: &Surface) -> Result<String, Refused> {
+    let check = crate::model::load_check(surface, "C#")?;
+    let constant =
+        |value: &Value| upper_camel(value.name.strip_prefix("SIPRAL_").unwrap_or(value.name));
+    Ok(format!(
+        "/// <summary>Everything the library does, with the C conventions read\n\
+         /// off it.</summary>\n\
+         public static class Sipral\n{{\n\
+         \x20   /// <summary>\n\
+         \x20   /// Fails fast, before any of the rest of this class can be used,\n\
+         \x20   /// if the native library loaded under this assembly cannot serve\n\
+         \x20   /// the ABI it was generated against. A static constructor is\n\
+         \x20   /// guaranteed by the runtime to run before this type's first use,\n\
+         \x20   /// which is the closest a managed assembly has to \"at load\"\n\
+         \x20   /// without asking every caller to remember it themselves.\n\
+         \x20   ///\n\
+         \x20   /// The runtime wraps what a static constructor throws, so a\n\
+         \x20   /// mismatch does not arrive as a SipralException: the first use\n\
+         \x20   /// of this class throws TypeInitializationException, whose\n\
+         \x20   /// InnerException is the SipralException naming both versions,\n\
+         \x20   /// and every later use throws that TypeInitializationException\n\
+         \x20   /// again without running the check a second time.\n\
+         \x20   /// </summary>\n\
+         \x20   static Sipral()\n\
+         \x20   {{\n\
+         \x20       {}({}, {});\n\
+         \x20   }}\n\n",
+        upper_camel(
+            check
+                .function
+                .name
+                .strip_prefix("sipral_")
+                .unwrap_or(check.function.name),
+        ),
+        constant(check.major),
+        constant(check.minor),
+    ))
+}
+
 /// Print the .NET binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     audit(surface, &Names)?;
@@ -601,11 +643,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(&native(surface)?);
 
-    out.push_str(
-        "/// <summary>Everything the library does, with the C conventions read\n\
-         /// off it.</summary>\n\
-         public static class Sipral\n{\n",
-    );
+    out.push_str(&class_opening(surface)?);
 
     for group in surface.constants {
         for value in *group {

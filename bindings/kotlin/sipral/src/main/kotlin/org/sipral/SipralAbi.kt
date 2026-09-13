@@ -1727,7 +1727,10 @@ object Sipral {
 
     /**
      * Whether this library can serve a binding generated against
-     * `major`.`minor`. Every binding calls this once, at load.
+     * `major`.`minor`. Called once, at load, before anything else: by the
+     * binding itself where its language gives it somewhere to call from, and
+     * by the application where it does not. The Versioning section of
+     * `docs/08-ffi.md` says which binding is which.
      *
      * `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
      * naming both versions, which is what the binding should put in the

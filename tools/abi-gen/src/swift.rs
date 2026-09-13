@@ -492,9 +492,45 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(&sized(surface));
 
-    out.push_str(
+    // the call the application is told to make, spelled the way the method
+    // and the constants below are spelled, from the declarations they are
+    // printed from
+    let check = crate::model::load_check(surface, "Swift")?;
+    let constant = |value: &Value| {
+        safe(&lower_camel(
+            value.name.strip_prefix("SIPRAL_").unwrap_or(value.name),
+        ))
+    };
+    let _ = write!(
+        out,
         "/// Everything the library does, with the C conventions read off it.\n\
-         public enum Sipral {\n",
+         ///\n\
+         /// Swift gives a namespace `enum` like this one no load hook: there is\n\
+         /// no module initializer and nothing else the runtime guarantees to run\n\
+         /// before first use, the way a static constructor does for the .NET\n\
+         /// binding. Nothing here calls `{method}` for you. The application\n\
+         /// calls it itself, once, as the first thing it does with this module —\n\
+         /// before creating a stack or calling anything else here:\n\
+         ///\n\
+         /// ```swift\n\
+         /// try Sipral.{method}({major_label}: Sipral.{major}, {minor_label}: Sipral.{minor})\n\
+         /// ```\n\
+         ///\n\
+         /// Skipping it is not safe. The `size` every struct here carries\n\
+         /// settles how long a struct is, not what is in it: a header and a\n\
+         /// library that disagree about the order or the meaning of members can\n\
+         /// still agree about the length, and then every size rule passes while\n\
+         /// the library reads a pointer out of whatever was put in its place.\n\
+         /// No entry point can catch that, because whether a pointer is\n\
+         /// readable is the caller's promise, not something the library can\n\
+         /// check. This call is the one that finds the disagreement before\n\
+         /// anything is read.\n\
+         public enum Sipral {{\n",
+        method = called(check.function),
+        major_label = safe(&lower_camel(check.major_parameter.name)),
+        major = constant(check.major),
+        minor_label = safe(&lower_camel(check.minor_parameter.name)),
+        minor = constant(check.minor),
     );
 
     for group in surface.constants {

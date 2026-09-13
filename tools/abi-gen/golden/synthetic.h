@@ -45,6 +45,16 @@ typedef uint64_t sipral_handle_t;
  */
 #define SIPRAL_MESSAGE_BYTES ((size_t)65535)
 
+/**
+ * Nothing built against another major works against this one.
+ */
+#define SIPRAL_ABI_VERSION_MAJOR ((uint32_t)0)
+
+/**
+ * Raised by anything the header gains.
+ */
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)8)
+
 /* Every record, named before any of them is defined, so that a
  * declaration never has to come before the one it mentions. */
 typedef struct sipral_counters sipral_counters_t;
@@ -227,6 +237,11 @@ struct sipral_event {
      */
     sipral_event_payload_t payload;
 };
+
+/**
+ * Whether this library can serve a binding generated against `major`.`minor`.
+ */
+sipral_status_t sipral_abi_check(uint32_t major, uint32_t minor);
 
 /**
  * The calling thread's last error.

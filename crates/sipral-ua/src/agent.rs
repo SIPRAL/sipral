@@ -41,6 +41,7 @@ use crate::call::{Call, CallHandle, Refusal, RequestRefusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::lifecycle::Machine;
+use crate::parked::Parked;
 use crate::registration::{
     Registration, backoff_delay, echoed, granted_expiry, min_expires, retry_after,
 };
@@ -112,6 +113,9 @@ pub struct UserAgent {
     /// The SUBSCRIBE each one has in flight. One entry per subscription,
     /// replaced when it sends the next, so a refresh an hour does not grow it.
     pub(crate) by_subscribe: HashMap<AnyTransactionId, SubscriptionHandle>,
+    /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
+    /// would not let out over a datagram, waiting for a stream.
+    pub(crate) parked: Vec<Parked>,
     pub(crate) events: VecDeque<UaEvent>,
     /// What an incoming INVITE meets before anything else here does, and the
     /// count of what it turned away.
@@ -169,6 +173,7 @@ impl UserAgent {
             challenged_offers: HashMap::new(),
             subscriptions: HashMap::new(),
             by_subscribe: HashMap::new(),
+            parked: Vec::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
             timer_n,

@@ -47,6 +47,7 @@ use crate::agent::UserAgent;
 use crate::call::{Answering, CallHandle, CallState, Direction, Offer};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::parked::{Parked, call_needs_a_stream};
 use crate::registration::spread;
 use crate::session::Hold;
 
@@ -285,7 +286,11 @@ impl UserAgent {
     }
 
     /// A change that was told to wait is offered again (§14.1).
-    fn retry_offer(&mut self, call: CallHandle, now: Instant) {
+    ///
+    /// Or held back again, when §18.1.1 wants a stream for it: that retry has
+    /// not been sent rather than refused, so it is not reported as a change
+    /// that failed, and it goes once the stream is bound.
+    pub(crate) fn retry_offer(&mut self, call: CallHandle, now: Instant) {
         let Some(offer) = self
             .calls
             .get_mut(&call)
@@ -296,16 +301,29 @@ impl UserAgent {
         let Some(description) = offer.description else {
             return;
         };
-        if self
-            .send_offer(call, description, offer.held, true, now)
-            .is_err()
-        {
-            self.events.push_back(UaEvent::SessionChangeFailed {
-                call,
-                status: None,
-                retry_in: None,
-                response: None,
-            });
+        match self.send_offer(call, description.clone(), offer.held, true, now) {
+            Ok(()) => {}
+            Err(ref error) if call_needs_a_stream(error) => {
+                let dialog = self.calls.get_mut(&call).and_then(|held| {
+                    held.offering = Some(Offer {
+                        transaction: None,
+                        description: Some(description),
+                        ..offer
+                    });
+                    held.dialog
+                });
+                if let Some(dialog) = dialog {
+                    self.park(Parked::Offer { call, dialog });
+                }
+            }
+            Err(_) => {
+                self.events.push_back(UaEvent::SessionChangeFailed {
+                    call,
+                    status: None,
+                    retry_in: None,
+                    response: None,
+                });
+            }
         }
     }
 
@@ -413,6 +431,7 @@ impl UserAgent {
             }
             Event::ReinviteAnswered {
                 invite,
+                dialog,
                 ref response,
                 ..
             } => {
@@ -423,7 +442,7 @@ impl UserAgent {
                 // this end offered, so §13.2.2.4 leaves the ACK nothing to
                 // carry — but it still has to go, and go again for every
                 // retransmission of the 2xx
-                self.endpoint.ack_reinvite(invite, None, now).ok();
+                self.ack_reinvite_by_itself(invite, dialog, now);
                 let answer = response.as_raw().body().to_vec();
                 self.on_offer_taken(call, id, &answer);
                 None

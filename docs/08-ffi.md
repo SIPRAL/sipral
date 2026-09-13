@@ -501,8 +501,9 @@ foreground service for the call lifetime are all still ahead.
 ## Versioning
 
 The C ABI carries its own version, independent of the crate version. It is
-reported by a function, checked by every binding at load, and a mismatch is a
-hard failure with a legible message rather than a crash later.
+reported by a function, `sipral_abi_check`, and a mismatch is a hard failure
+with a legible message naming both versions, rather than a crash at whichever
+call happens to hit the difference first.
 
 Which number moves is a rule about the printed surface and not about the Rust
 behind it. `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH` in
@@ -562,3 +563,39 @@ inferred from the constant. Within one block of surface work the bump is
 taken **once, at the end**: nothing is published, so no build in the world is
 on an intermediate minor, and a bump per task costs a full gate run and a
 regenerated binding set for a version nobody can have.
+
+**Checked at load is a promise three runtimes keep three different ways, not
+one mechanism.** .NET's `Sipral` gets a static constructor, printed by
+`tools/abi-gen`'s C# back end rather than written into `SipralAbi.cs` by
+hand — the CLR guarantees it runs before the class's first use, which is the
+nearest a managed assembly has to "at load" without asking every caller to
+remember it. It calls `AbiCheck(AbiVersionMajor, AbiVersionMinor)`, and a
+mismatch stops the class before anything else in it runs — but not as a
+`SipralException` a caller can catch by that name. The runtime wraps whatever
+a static constructor throws, so the first use of `Sipral` throws
+`TypeInitializationException`, whose `InnerException` is the `SipralException`
+with both versions in its message, and every later use throws that same
+`TypeInitializationException` again without running the check a second time.
+An application that wants the sentence reads the inner exception.
+Kotlin's `SipralNative.init {}` block is where the same call belongs, and it
+is not there yet: today that block loads the JNI shim and checks nothing.
+
+Swift has neither a module initializer nor anything else the language
+guarantees to run before a namespace `enum`'s first use, so it has no load
+hook to print one into. `SipralAbi.swift` says so directly, on `Sipral`
+itself, and the application calls the check itself, once, before it creates a
+stack or calls anything else in the module:
+
+```swift
+try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
+```
+
+Skipping it is not safe on any binding. The `size` every versioned struct
+carries settles how long a struct is, not what is in it: a header and a
+library that disagree about the order or the meaning of members can still
+agree about the length, and then every size rule passes while the library
+reads a pointer out of whatever the caller put in its place. No entry point
+can catch that, because whether a pointer is readable for the length beside
+it is the caller's promise in every Safety section, not something the library
+can check. The version check is the one call that finds the disagreement
+before anything is read.

@@ -51,6 +51,7 @@ mod error;
 mod event;
 mod lifecycle;
 mod options;
+mod parked;
 mod registration;
 mod reliable;
 mod renegotiate;

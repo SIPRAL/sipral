@@ -369,20 +369,24 @@ impl Endpoint {
                     // 13.2.2.4: "The ACK MUST be passed to the client
                     // transport every time a retransmission of the 2xx final
                     // response that triggered the ACK arrives." The caller
-                    // heard about this call once and does not hear again
-                    if let Some(ack) = self
+                    // heard about this call once and does not hear again. It
+                    // goes where the first one went, which is not the flow
+                    // the 2xx came in on when §18.1.1 moved the ACK onto a
+                    // stream, and never to a stream that has since closed
+                    if let Some((ack, went_on)) = self
                         .dialogs
-                        .set(set)
-                        .and_then(|branches| branches.ack_for(&key))
-                        .cloned()
+                        .kept_ack(dialog)
+                        .map(|(ack, went_on)| (ack.clone(), went_on))
                     {
-                        self.note_wire(
-                            &ack.as_raw(),
-                            Reason::RequestRetransmitted,
-                            Direction::Outbound,
-                            flow,
-                        );
-                        self.queue(flow.transmit(ack.bytes()));
+                        if let Some(went_on) = self.flow_for_kept_ack(went_on, flow, &ack) {
+                            self.note_wire(
+                                &ack.as_raw(),
+                                Reason::RequestRetransmitted,
+                                Direction::Outbound,
+                                went_on,
+                            );
+                            self.queue(went_on.transmit(ack.bytes()));
+                        }
                         return;
                     }
                     if self.was_cancelled(id) {

@@ -3,18 +3,21 @@
  *
  * What an integrator does on the first afternoon, compiled and run by
  * scripts/check.sh: ask the library whether it speaks this header's ABI and
- * whether it agrees about the length of every struct in it, build a stack
- * with a callback of its own, add an account, place one call, have another
- * refused, retire the transport and watch a third come back as not sent,
- * poll once, and dispose of the stack from inside the event callback --
- * which docs/08-ffi.md says is the one re-entrant call and which nothing
- * else proves from C.
+ * whether it agrees about the length of every struct in it, hand every struct
+ * a caller declares to an entry point that takes it at the oldest length
+ * abi-sizes.txt pins and one byte short of it, build a stack with a callback
+ * of its own, add an account, place one call, have another refused, retire
+ * the transport and watch a third come back as not sent, poll once, and
+ * dispose of the stack from inside the event callback -- which
+ * docs/08-ffi.md says is the one re-entrant call and which nothing else
+ * proves from C.
  *
  * It links the shared library rather than the archive, because that is
  * what a packaged binding loads.
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "include/sipral.h"
@@ -74,6 +77,502 @@ static void on_event(const sipral_event_t *event, void *user_data)
     if (seen->events == 1) {
         seen->destroyed = sipral_stack_destroy(event->stack);
     }
+}
+
+/* The same, about one named struct. */
+static void expect_about(const char *what, const char *about, int held)
+{
+    if (!held) {
+        printf("  smoke.c: %s: %s\n", about, what);
+        failures++;
+    }
+}
+
+/* -- the oldest lengths -----------------------------------------------------
+ *
+ * A caller compiled against the first published header declared its structs
+ * at the lengths that header had, and appending a member to a released struct
+ * is the one change allowed -- so those lengths have to keep working after
+ * the struct grows, and one byte short of each has to be a status this
+ * library defines rather than whatever reading past a declared end would do.
+ *
+ * The length tried is the pinned one, never the one the library compiled the
+ * struct to. The day a member is appended the two part company, and a test
+ * that asks for the current length is testing the rule the pin replaced.
+ * `sipral_abi_struct_size` answers with the current length and nothing across
+ * the ABI answers with the pinned one, so the pins are read from
+ * abi-sizes.txt beside this file, which tools/abi-gen prints from them and
+ * the gate diffs. The file is held to the library before any number in it is
+ * used: every current length in it is the one the library reports, and it
+ * lists exactly as many structs as `sipral_abi_versioned_count` says there
+ * are. Every pinned struct then has to find the entry point below that takes
+ * one, and every entry point below has to find its struct pinned, so a struct
+ * the ABI gains, or one that stops being pinned, fails here by name. */
+
+/* A stack, an account and a call of this test's own, so that what it does to
+ * them -- an account added and a call placed per length tried -- stays out of
+ * the stack main() walks through. */
+struct fixture {
+    sipral_handle_t stack;
+    sipral_handle_t account;
+    sipral_handle_t call;
+};
+
+static uint8_t message_buffer[SIPRAL_MESSAGE_BYTES];
+static uint8_t packet_buffer[SIPRAL_MEDIA_PACKET_BYTES];
+static char destination_buffer[SIPRAL_ADDRESS_BYTES];
+static char source_buffer[SIPRAL_ADDRESS_BYTES];
+
+static const char fixture_bind[] = "192.0.2.30:5060";
+static const char fixture_aor[] = "sip:carol@example.com";
+static const char fixture_registrar[] = "sip:example.com";
+static const char fixture_contact[] = "sip:carol@192.0.2.30:5060";
+static const char fixture_registrar_address[] = "203.0.113.5:5060";
+static const char fixture_target[] = "sip:dave@example.com";
+static const char fixture_media[] = "192.0.2.30:40000";
+static const char fixture_peer[] = "203.0.113.5:5060";
+
+/* A call that comes in with an offer and is answered with media of this
+ * stack's own, because two of the structs describe a call's media and a call
+ * that was only placed has none yet. */
+static const char fixture_invite[] =
+    "INVITE sip:carol@192.0.2.30:5060 SIP/2.0\r\n"
+    "Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-smoke-oldest\r\n"
+    "Max-Forwards: 70\r\n"
+    "From: <sip:dave@example.com>;tag=smoke\r\n"
+    "To: <sip:carol@example.com>\r\n"
+    "Call-ID: smoke-oldest@203.0.113.5\r\n"
+    "CSeq: 1 INVITE\r\n"
+    "Contact: <sip:dave@203.0.113.5:5060>\r\n"
+    "Content-Type: application/sdp\r\n";
+static const char fixture_offer[] =
+    "v=0\r\n"
+    "o=dave 1 1 IN IP4 203.0.113.5\r\n"
+    "s=-\r\n"
+    "c=IN IP4 203.0.113.5\r\n"
+    "t=0 0\r\n"
+    "m=audio 41000 RTP/AVP 0\r\n"
+    "a=rtpmap:0 PCMU/8000\r\n"
+    "a=sendrecv\r\n";
+
+/* Stacks built only to be refused or thrown away never report anything that
+ * is read. */
+static void on_event_ignored(const sipral_event_t *event, void *user_data)
+{
+    (void)event;
+    (void)user_data;
+}
+
+/* The one thing the fixture's own stack reports that it keeps: the call that
+ * came in. */
+static void on_fixture_event(const sipral_event_t *event, void *user_data)
+{
+    struct fixture *fixture = (struct fixture *)user_data;
+    if (event->kind == SIPRAL_EVENT_KIND_INCOMING_CALL) {
+        fixture->call = event->call;
+    }
+}
+
+/* Fresh bytes per stack: two stacks must never be handed the same ones. */
+static int draw(uint8_t *into, size_t len)
+{
+    FILE *urandom = fopen("/dev/urandom", "rb");
+    if (urandom == NULL) {
+        return 0;
+    }
+    size_t taken = fread(into, 1, len, urandom);
+    fclose(urandom);
+    return taken == len;
+}
+
+static sipral_stack_config_t fixture_stack_config(size_t declared, const uint8_t *entropy,
+                                                  const uint8_t *media_seed)
+{
+    sipral_stack_config_t config = { 0 };
+    config.size = declared;
+    config.event_callback = on_event_ignored;
+    config.transport = SIPRAL_TRANSPORT_UDP;
+    config.bind_address = fixture_bind;
+    config.bind_address_len = strlen(fixture_bind);
+    config.entropy = entropy;
+    config.entropy_len = 32;
+    config.media_seed = media_seed;
+    config.media_seed_len = 32;
+    return config;
+}
+
+static sipral_account_config_t fixture_account_config(size_t declared)
+{
+    sipral_account_config_t config = { 0 };
+    config.size = declared;
+    config.aor = fixture_aor;
+    config.aor_len = strlen(fixture_aor);
+    config.registrar = fixture_registrar;
+    config.registrar_len = strlen(fixture_registrar);
+    config.contact = fixture_contact;
+    config.contact_len = strlen(fixture_contact);
+    config.registrar_address = fixture_registrar_address;
+    config.registrar_address_len = strlen(fixture_registrar_address);
+    return config;
+}
+
+static sipral_call_config_t fixture_call_config(size_t declared)
+{
+    sipral_call_config_t config = { 0 };
+    config.size = declared;
+    config.target = fixture_target;
+    config.target_len = strlen(fixture_target);
+    config.media_address = fixture_media;
+    config.media_address_len = strlen(fixture_media);
+    return config;
+}
+
+static int fixture_up(struct fixture *fixture)
+{
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    fixture->stack = SIPRAL_HANDLE_NONE;
+    fixture->account = SIPRAL_HANDLE_NONE;
+    fixture->call = SIPRAL_HANDLE_NONE;
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the stack the oldest lengths are tried on", 0);
+        return 0;
+    }
+    sipral_stack_config_t stack = fixture_stack_config(sizeof stack, entropy, media_seed);
+    stack.event_callback = on_fixture_event;
+    stack.event_user_data = fixture;
+    sipral_account_config_t account = fixture_account_config(sizeof account);
+    expect("the stack the oldest lengths are tried on would not start",
+           sipral_stack_create(&stack, &fixture->stack) == SIPRAL_STATUS_OK);
+    expect("the account the oldest lengths are tried on was refused",
+           sipral_account_add(fixture->stack, &account, &fixture->account) == SIPRAL_STATUS_OK);
+
+    char invite[1024];
+    int length = snprintf(invite, sizeof invite, "%sContent-Length: %zu\r\n\r\n%s",
+                          fixture_invite, strlen(fixture_offer), fixture_offer);
+    if (length <= 0 || (size_t)length >= sizeof invite) {
+        expect("the INVITE the oldest lengths are tried on does not fit its buffer", 0);
+        return 0;
+    }
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    expect("the INVITE the oldest lengths are tried on was not taken",
+           sipral_stack_receive_datagram(fixture->stack, SIPRAL_TRANSPORT_MAIN,
+                                         (const uint8_t *)invite, (size_t)length, fixture_peer,
+                                         strlen(fixture_peer), fixture_bind, strlen(fixture_bind),
+                                         0) == SIPRAL_STATUS_OK);
+    expect("the stack the oldest lengths are tried on would not poll",
+           sipral_stack_poll(fixture->stack, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the call the oldest lengths are tried on never came in",
+           fixture->call != SIPRAL_HANDLE_NONE);
+    if (fixture->call == SIPRAL_HANDLE_NONE) {
+        return 0;
+    }
+    sipral_status_t answered = sipral_call_answer_media(
+        fixture->stack, fixture->call, fixture_media, strlen(fixture_media), 0);
+    expect("the call the oldest lengths are tried on could not be answered with media",
+           answered == SIPRAL_STATUS_OK);
+    if (answered != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+
+    /* The stream opens when the 200 is acknowledged, and the ACK has to carry
+     * the To tag this end chose, so it is copied out of the 200 the stack
+     * wrote. */
+    char to[256] = { 0 };
+    for (int drained = 0; drained < 8 && to[0] == '\0'; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(fixture->stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+        message_buffer[transmit.len] = '\0';
+        const char *text = (const char *)message_buffer;
+        if (strncmp(text, "SIP/2.0 200", strlen("SIP/2.0 200")) != 0) {
+            continue;
+        }
+        const char *field = strstr(text, "\r\nTo: ");
+        const char *end = field == NULL ? NULL : strstr(field + 6, "\r\n");
+        if (end == NULL || (size_t)(end - (field + 6)) >= sizeof to) {
+            break;
+        }
+        memcpy(to, field + 6, (size_t)(end - (field + 6)));
+    }
+    expect("the 200 for the call the oldest lengths are tried on never went out with a To",
+           to[0] != '\0');
+    if (to[0] == '\0') {
+        return 0;
+    }
+    char ack[512];
+    length = snprintf(ack, sizeof ack,
+                      "ACK %s SIP/2.0\r\n"
+                      "Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-smoke-oldest-ack\r\n"
+                      "Max-Forwards: 70\r\n"
+                      "From: <sip:dave@example.com>;tag=smoke\r\n"
+                      "To: %s\r\n"
+                      "Call-ID: smoke-oldest@203.0.113.5\r\n"
+                      "CSeq: 1 ACK\r\n"
+                      "Content-Length: 0\r\n\r\n",
+                      fixture_contact, to);
+    if (length <= 0 || (size_t)length >= sizeof ack) {
+        expect("the ACK the oldest lengths are tried on does not fit its buffer", 0);
+        return 0;
+    }
+    expect("the ACK for the call the oldest lengths are tried on was not taken",
+           sipral_stack_receive_datagram(fixture->stack, SIPRAL_TRANSPORT_MAIN,
+                                         (const uint8_t *)ack, (size_t)length, fixture_peer,
+                                         strlen(fixture_peer), fixture_bind, strlen(fixture_bind),
+                                         0) == SIPRAL_STATUS_OK);
+    expect("the stack the oldest lengths are tried on would not poll after the ACK",
+           sipral_stack_poll(fixture->stack, 0, &poll) == SIPRAL_STATUS_OK);
+    return 1;
+}
+
+/* One entry point per struct, each handed that struct declared at the length
+ * it is given. */
+
+static sipral_status_t abi_version_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    sipral_abi_version_t version = { 0 };
+    version.size = declared;
+    return sipral_abi_version(&version);
+}
+
+static sipral_status_t capabilities_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    sipral_capabilities_t capabilities = { 0 };
+    capabilities.size = declared;
+    return sipral_capabilities(&capabilities);
+}
+
+static sipral_status_t counters_at(struct fixture *fixture, size_t declared)
+{
+    sipral_counters_t counters = { 0 };
+    counters.size = declared;
+    return sipral_stack_counters(fixture->stack, &counters);
+}
+
+static sipral_status_t stack_config_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for a stack declared at an old length", 0);
+        return SIPRAL_STATUS_PANIC;
+    }
+    sipral_stack_config_t config = fixture_stack_config(declared, entropy, media_seed);
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    sipral_status_t status = sipral_stack_create(&config, &stack);
+    expect("a refused stack construction handed back a handle anyway",
+           status == SIPRAL_STATUS_OK || stack == SIPRAL_HANDLE_NONE);
+    if (stack != SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(stack);
+    }
+    return status;
+}
+
+static sipral_status_t poll_result_at(struct fixture *fixture, size_t declared)
+{
+    sipral_poll_result_t result = { 0 };
+    result.size = declared;
+    return sipral_stack_poll(fixture->stack, 0, &result);
+}
+
+static sipral_status_t stack_settings_at(struct fixture *fixture, size_t declared)
+{
+    sipral_stack_settings_t settings = { 0 };
+    settings.size = declared;
+    return sipral_stack_settings(fixture->stack, &settings);
+}
+
+static sipral_status_t account_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_account_config_t config = fixture_account_config(declared);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    sipral_status_t status = sipral_account_add(fixture->stack, &config, &account);
+    expect("a refused account handed back a handle anyway",
+           status == SIPRAL_STATUS_OK || account == SIPRAL_HANDLE_NONE);
+    if (account != SIPRAL_HANDLE_NONE) {
+        sipral_account_remove(fixture->stack, account);
+    }
+    return status;
+}
+
+static sipral_status_t call_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_call_config_t config = fixture_call_config(declared);
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    sipral_status_t status =
+        sipral_call_place(fixture->stack, fixture->account, &config, &call, 0);
+    expect("a refused call handed back a handle anyway",
+           status == SIPRAL_STATUS_OK || call == SIPRAL_HANDLE_NONE);
+    return status;
+}
+
+static sipral_status_t codec_info_at(struct fixture *fixture, size_t declared)
+{
+    (void)fixture;
+    sipral_codec_info_t info = { 0 };
+    info.size = declared;
+    return sipral_codec_at(0, &info);
+}
+
+static sipral_status_t media_info_at(struct fixture *fixture, size_t declared)
+{
+    sipral_media_info_t info = { 0 };
+    info.size = declared;
+    return sipral_call_media_info(fixture->stack, fixture->call, &info);
+}
+
+static sipral_status_t stream_stats_at(struct fixture *fixture, size_t declared)
+{
+    sipral_stream_stats_t stats = { 0 };
+    stats.size = declared;
+    return sipral_call_statistics(fixture->stack, fixture->call, 0, &stats);
+}
+
+static sipral_status_t media_packet_at(struct fixture *fixture, size_t declared)
+{
+    sipral_media_packet_t packet = { 0 };
+    packet.size = declared;
+    packet.data = packet_buffer;
+    packet.capacity = sizeof packet_buffer;
+    packet.destination = destination_buffer;
+    packet.destination_capacity = sizeof destination_buffer;
+    return sipral_stack_poll_rtcp(fixture->stack, 0, NULL, &packet);
+}
+
+static sipral_status_t transmit_at(struct fixture *fixture, size_t declared)
+{
+    sipral_transmit_t transmit = { 0 };
+    transmit.size = declared;
+    transmit.data = message_buffer;
+    transmit.capacity = sizeof message_buffer;
+    transmit.destination = destination_buffer;
+    transmit.destination_capacity = sizeof destination_buffer;
+    transmit.source = source_buffer;
+    transmit.source_capacity = sizeof source_buffer;
+    return sipral_stack_poll_transmit(fixture->stack, &transmit);
+}
+
+static const struct {
+    const char *name;
+    sipral_status_t (*at)(struct fixture *fixture, size_t declared);
+} handovers[] = {
+    { "sipral_abi_version_t", abi_version_at },
+    { "sipral_capabilities_t", capabilities_at },
+    { "sipral_counters_t", counters_at },
+    { "sipral_stack_config_t", stack_config_at },
+    { "sipral_poll_result_t", poll_result_at },
+    { "sipral_stack_settings_t", stack_settings_at },
+    { "sipral_account_config_t", account_config_at },
+    { "sipral_call_config_t", call_config_at },
+    { "sipral_codec_info_t", codec_info_at },
+    { "sipral_media_info_t", media_info_at },
+    { "sipral_stream_stats_t", stream_stats_at },
+    { "sipral_media_packet_t", media_packet_at },
+    { "sipral_transmit_t", transmit_at },
+};
+
+#define HANDOVERS (sizeof handovers / sizeof handovers[0])
+
+/* abi-sizes.txt sits beside this file, and check.sh compiles and runs this
+ * file from the repository root, which is where __FILE__ is relative to. */
+static FILE *beside_this_file(const char *name)
+{
+    const char *slash = strrchr(__FILE__, '/');
+    size_t directory = slash == NULL ? 0 : (size_t)(slash - __FILE__) + 1;
+    char path[4096];
+    if (directory + strlen(name) + 1 > sizeof path) {
+        return NULL;
+    }
+    memcpy(path, __FILE__, directory);
+    memcpy(path + directory, name, strlen(name) + 1);
+    return fopen(path, "r");
+}
+
+static void oldest_lengths_still_work(void)
+{
+    FILE *sizes = beside_this_file("abi-sizes.txt");
+    expect("abi-sizes.txt could not be read from beside smoke.c, and a length test that "
+           "reads nothing proves nothing",
+           sizes != NULL);
+    if (sizes == NULL) {
+        return;
+    }
+    struct fixture fixture;
+    if (!fixture_up(&fixture)) {
+        fclose(sizes);
+        return;
+    }
+
+    size_t listed = 0;
+    unsigned tried[HANDOVERS] = { 0 };
+    char line[256];
+    while (fgets(line, sizeof line, sizes) != NULL) {
+        if (line[0] == '#' || line[0] == '\n') {
+            continue;
+        }
+        char name[64];
+        char pinned_text[32];
+        size_t current = 0;
+        if (sscanf(line, "%63s %31s %zu", name, pinned_text, &current) != 3) {
+            expect("abi-sizes.txt has a line smoke.c cannot read", 0);
+            continue;
+        }
+        listed++;
+
+        size_t reported = 0;
+        expect_about("abi-sizes.txt and the library disagree about how long it is now", name,
+                     sipral_abi_struct_size(name, strlen(name), &reported) == SIPRAL_STATUS_OK &&
+                         reported == current);
+        if (strcmp(pinned_text, "-") == 0) {
+            continue;
+        }
+        char *end = NULL;
+        unsigned long long pinned = strtoull(pinned_text, &end, 10);
+        if (end == pinned_text || *end != '\0' || pinned == 0 || pinned > current) {
+            expect_about("abi-sizes.txt pins it at something that is not a length", name, 0);
+            continue;
+        }
+        size_t which = 0;
+        while (which < HANDOVERS && strcmp(handovers[which].name, name) != 0) {
+            which++;
+        }
+        if (which == HANDOVERS) {
+            expect_about("abi-sizes.txt pins it and smoke.c has no entry point to hand one to",
+                         name, 0);
+            continue;
+        }
+        tried[which]++;
+        expect_about("declared at its oldest published length, it was refused", name,
+                     handovers[which].at(&fixture, (size_t)pinned) == SIPRAL_STATUS_OK);
+        expect_about("declared one byte short of its oldest published length, it was not "
+                     "refused as a version",
+                     name,
+                     handovers[which].at(&fixture, (size_t)pinned - 1) ==
+                         SIPRAL_STATUS_UNSUPPORTED_VERSION);
+    }
+    fclose(sizes);
+
+    size_t carried = 0;
+    expect("abi-sizes.txt does not list every struct the library says carries a size",
+           sipral_abi_versioned_count(&carried) == SIPRAL_STATUS_OK && carried == listed);
+    for (size_t which = 0; which < HANDOVERS; which++) {
+        expect_about("smoke.c hands it over and abi-sizes.txt does not pin it exactly once",
+                     handovers[which].name, tried[which] == 1);
+    }
+    sipral_stack_destroy(fixture.stack);
 }
 
 static void sizes_agree(void)
@@ -159,6 +658,7 @@ int main(void)
         return 1;
     }
     sizes_agree();
+    oldest_lengths_still_work();
 
     config.size = sizeof config;
     config.event_callback = on_event;

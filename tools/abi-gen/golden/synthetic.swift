@@ -86,6 +86,27 @@ public extension sipral_event_t {
 }
 
 /// Everything the library does, with the C conventions read off it.
+///
+/// Swift gives a namespace `enum` like this one no load hook: there is
+/// no module initializer and nothing else the runtime guarantees to run
+/// before first use, the way a static constructor does for the .NET
+/// binding. Nothing here calls `abiCheck` for you. The application
+/// calls it itself, once, as the first thing it does with this module —
+/// before creating a stack or calling anything else here:
+///
+/// ```swift
+/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
+/// ```
+///
+/// Skipping it is not safe. The `size` every struct here carries
+/// settles how long a struct is, not what is in it: a header and a
+/// library that disagree about the order or the meaning of members can
+/// still agree about the length, and then every size rule passes while
+/// the library reads a pointer out of whatever was put in its place.
+/// No entry point can catch that, because whether a pointer is
+/// readable is the caller's promise, not something the library can
+/// check. This call is the one that finds the disagreement before
+/// anything is read.
 public enum Sipral {
     /// The handle that names nothing.
     public static let handleNone: SipralHandle = 0
@@ -95,6 +116,12 @@ public enum Sipral {
 
     /// The longest message that crosses.
     public static let messageBytes: Int = 65535
+
+    /// Nothing built against another major works against this one.
+    public static let abiVersionMajor: UInt32 = 0
+
+    /// Raised by anything the header gains.
+    public static let abiVersionMinor: UInt32 = 8
 
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
@@ -118,6 +145,12 @@ public enum Sipral {
             status: SipralStatus(rawValue: status) ?? .panic,
             message: lastErrorMessage()
         )
+    }
+
+    /// Whether this library can serve a binding generated against `major`.`minor`.
+    public static func abiCheck(major: UInt32, minor: UInt32) throws {
+        let status = sipral_abi_check(major, minor)
+        try check(status)
     }
 
     /// The name of one SipralStatus, for a log line.

@@ -2354,6 +2354,26 @@ internal static class NativeMethods
 public static class Sipral
 {
     /// <summary>
+    /// Fails fast, before any of the rest of this class can be used,
+    /// if the native library loaded under this assembly cannot serve
+    /// the ABI it was generated against. A static constructor is
+    /// guaranteed by the runtime to run before this type's first use,
+    /// which is the closest a managed assembly has to "at load"
+    /// without asking every caller to remember it themselves.
+    ///
+    /// The runtime wraps what a static constructor throws, so a
+    /// mismatch does not arrive as a SipralException: the first use
+    /// of this class throws TypeInitializationException, whose
+    /// InnerException is the SipralException naming both versions,
+    /// and every later use throws that TypeInitializationException
+    /// again without running the check a second time.
+    /// </summary>
+    static Sipral()
+    {
+        AbiCheck(AbiVersionMajor, AbiVersionMinor);
+    }
+
+    /// <summary>
     /// The value no live handle ever takes.
     /// </summary>
     public const ulong HandleNone = 0;
@@ -2560,7 +2580,10 @@ public static class Sipral
 
     /// <summary>
     /// Whether this library can serve a binding generated against
-    /// `major`.`minor`. Every binding calls this once, at load.
+    /// `major`.`minor`. Called once, at load, before anything else: by the
+    /// binding itself where its language gives it somewhere to call from, and
+    /// by the application where it does not. The Versioning section of
+    /// `docs/08-ffi.md` says which binding is which.
     ///
     /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
     /// naming both versions, which is what the binding should put in the

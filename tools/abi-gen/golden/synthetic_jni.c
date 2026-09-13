@@ -16,6 +16,15 @@
 #include "sipral.h"
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1abi_1check(JNIEnv *env, jobject self, jlong major, jlong minor)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_abi_check((uint32_t)major, (uint32_t)minor);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1last_1error_1message(JNIEnv *env, jobject self, jbyteArray buffer, jlongArray needed)
 {
     (void)env;

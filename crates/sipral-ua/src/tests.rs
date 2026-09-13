@@ -7312,3 +7312,683 @@ fn a_second_refer_on_one_call_waits_rather_than_replacing_the_first() {
         "the application was asked to take a transfer it cannot hold"
     );
 }
+
+// -- §18.1.1 on what this layer sends inside a dialog ------------------------
+
+/// The same message from a far end whose URI alone is more than a datagram may
+/// carry, at the same address, so that every request in the dialog it opens
+/// or refreshes outgrows the datagram and nothing about the next hop changes.
+fn from_afar(message: &[u8]) -> Vec<u8> {
+    let padding = "y".repeat(1_400);
+    let mut moved = String::from_utf8_lossy(message).into_owned();
+    for user in ["bob", "notifier"] {
+        moved = moved.replace(
+            &format!("Contact: <sip:{user}@192.0.2.9>"),
+            &format!("Contact: <sip:{user}@192.0.2.9;x={padding}>"),
+        );
+    }
+    assert_ne!(moved.as_bytes(), message, "a Contact to move");
+    moved.into_bytes()
+}
+
+/// The stream the endpoint asked for, open to the far end.
+fn open_the_stream(agent: &mut UserAgent, now: Instant) {
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(registrar()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+}
+
+/// Everything the agent wants written, with the transport each goes on.
+fn written(agent: &mut UserAgent) -> Vec<(TransportId, Vec<u8>)> {
+    let mut out = Vec::new();
+    while let Some(transmit) = agent.poll_transmit() {
+        out.push((transmit.transport, transmit.payload.to_vec()));
+    }
+    out
+}
+
+/// What went out, the way a failing assertion should say it.
+fn listed(out: &[(TransportId, Vec<u8>)]) -> Vec<String> {
+    out.iter()
+        .map(|(transport, bytes)| {
+            format!(
+                "{} bytes on {transport:?}: {}",
+                bytes.len(),
+                String::from_utf8_lossy(bytes.get(..16).unwrap_or_default())
+            )
+        })
+        .collect()
+}
+
+/// Nothing of this method went out, over anything.
+fn not_written(out: &[(TransportId, Vec<u8>)], method: &str) {
+    assert!(
+        !out.iter()
+            .any(|(_, bytes)| bytes.starts_with(method.as_bytes())),
+        "{:?}",
+        listed(out)
+    );
+}
+
+/// The one message of this method, which has to have gone on the stream.
+fn on_the_stream(out: &[(TransportId, Vec<u8>)], method: &str) -> Vec<u8> {
+    let found: Vec<&(TransportId, Vec<u8>)> = out
+        .iter()
+        .filter(|(_, bytes)| bytes.starts_with(method.as_bytes()))
+        .collect();
+    assert_eq!(found.len(), 1, "one {method:?} in {:?}", listed(out));
+    let (transport, bytes) = found[0];
+    assert_eq!(*transport, TCP, "{method:?} went on {transport:?}");
+    bytes.clone()
+}
+
+#[test]
+fn an_ack_too_big_for_a_datagram_waits_for_the_stream_and_the_call_is_up_meanwhile() {
+    // §13.2.2.4 makes the ACK this layer's to send, so when §18.1.1 refuses it
+    // a datagram there is nobody to hand the refusal to. Dropped, it left the
+    // far end retransmitting its 200 until it hung up
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let ok = from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER)));
+    deliver(&mut agent, &ok, t0);
+
+    let out = written(&mut agent);
+    assert!(out.is_empty(), "{:?}", listed(&out));
+    let confirmed: Vec<bool> = events(&mut agent)
+        .iter()
+        .filter_map(|event| match *event {
+            UaEvent::CallConfirmed { answer_wanted, .. } => Some(answer_wanted),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        confirmed,
+        vec![false],
+        "the call is up, and its ACK owes the application nothing"
+    );
+
+    // the far end repeats its 200 while it waits, and it is the same answer
+    let later = t0 + Duration::from_millis(500);
+    deliver(&mut agent, &ok, later);
+    let out = written(&mut agent);
+    assert!(out.is_empty(), "{:?}", listed(&out));
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::CallConfirmed { .. })),
+        "one call, confirmed once"
+    );
+
+    // what the application asks for meanwhile is refused back to it the way
+    // a first send is, and changes nothing
+    assert_eq!(
+        agent.hangup(call, later),
+        Err(UaError::Send(
+            sipral_core::endpoint::SendError::NeedsStreamTransport
+        ))
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+
+    open_the_stream(&mut agent, later);
+    let ack = on_the_stream(&written(&mut agent), "ACK ");
+    assert_eq!(header(&ack, HeaderName::CSeq), b"1 ACK");
+
+    agent.hangup(call, later).expect("the BYE goes");
+    on_the_stream(&written(&mut agent), "BYE ");
+}
+
+#[test]
+fn an_answer_owed_in_a_prack_is_still_owed_when_the_prack_needs_a_stream() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &from_afar(&plus(
+            &answered(&invite, 183, "Session Progress", "desk", Some(ANSWER)),
+            "Require: 100rel\r\nRSeq: 314\r\n",
+        )),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    assert_eq!(
+        agent.answer_early(call, OFFER, t0),
+        Err(UaError::Send(
+            sipral_core::endpoint::SendError::NeedsStreamTransport
+        )),
+        "the refusal the application can act on, not a call in the wrong state"
+    );
+    let out = written(&mut agent);
+    assert!(out.is_empty(), "{:?}", listed(&out));
+
+    open_the_stream(&mut agent, t0);
+    agent
+        .answer_early(call, OFFER, t0)
+        .expect("the same answer goes once it can");
+    let prack = on_the_stream(&written(&mut agent), "PRACK ");
+    assert!(body_of(&prack).contains("m=audio 8000 RTP/AVP 0\r\n"));
+}
+
+#[test]
+fn a_prack_this_layer_owes_waits_for_the_stream_rather_than_being_dropped() {
+    // RFC 3262 §3: the far end retransmits the provisional until it is
+    // acknowledged, and then refuses the INVITE with a 5xx
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &from_afar(&plus(
+            &answered(&invite, 183, "Session Progress", "desk", None),
+            "Require: 100rel\r\nRSeq: 7\r\n",
+        )),
+        t0,
+    );
+    not_written(&written(&mut agent), "PRACK ");
+    events(&mut agent);
+
+    open_the_stream(&mut agent, t0);
+    let prack = on_the_stream(&written(&mut agent), "PRACK ");
+    assert_eq!(header(&prack, HeaderName::RAck), b"7 1 INVITE");
+}
+
+#[test]
+fn the_ack_to_a_session_change_waits_for_the_stream_rather_than_being_dropped() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_, reinvite) = on_hold(&mut agent, id, t0);
+    // the 200 refreshes the target (§12.2.1.2), and its ACK is the first
+    // request to carry the new one
+    deliver(
+        &mut agent,
+        &from_afar(&answered(
+            &reinvite,
+            200,
+            "OK",
+            "desk",
+            Some(THEIR_RECVONLY),
+        )),
+        t0,
+    );
+    not_written(&written(&mut agent), "ACK ");
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: true,
+            remote: false
+        }),
+        "the change was taken"
+    );
+
+    open_the_stream(&mut agent, t0);
+    let ack = on_the_stream(&written(&mut agent), "ACK ");
+    assert_eq!(header(&ack, HeaderName::CSeq), b"2 ACK");
+}
+
+#[test]
+fn a_transfer_report_waits_for_the_stream_rather_than_being_dropped() {
+    // RFC 3515 §2.4.4 owes the referrer the report, and nothing but this layer
+    // knows that it is owed
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(
+        &mut agent,
+        &from_afar(&incoming_invite("far", Some(OFFER))),
+        t0,
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "farack", 1), t0);
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "farrefer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the transfer is taken");
+    let out = written(&mut agent);
+    assert!(
+        out.iter()
+            .any(|(_, bytes)| bytes.starts_with(b"INVITE sip:carol")),
+        "the call it asked for is placed: {:?}",
+        listed(&out)
+    );
+    not_written(&out, "NOTIFY ");
+
+    open_the_stream(&mut agent, t0);
+    let notify = on_the_stream(&written(&mut agent), "NOTIFY ");
+    assert!(body_of(&notify).starts_with("SIP/2.0 100"));
+}
+
+#[test]
+fn the_bye_for_a_2xx_nobody_acknowledged_waits_for_the_stream() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(
+        &mut agent,
+        &from_afar(&incoming_invite("farnoack", Some(OFFER))),
+        t0,
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 goes");
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    not_written(&written(&mut agent), "BYE ");
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Unreachable)
+    );
+
+    open_the_stream(&mut agent, t0 + Duration::from_secs(34));
+    on_the_stream(&written(&mut agent), "BYE ");
+}
+
+#[test]
+fn the_bye_for_a_session_that_ran_out_waits_for_the_stream() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &from_afar(&timed(&invite, Some(ANSWER), "600;refresher=uas")),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(568));
+    not_written(&written(&mut agent), "BYE ");
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Expired)
+    );
+
+    // the ACK was waiting too, and goes first
+    open_the_stream(&mut agent, t0 + Duration::from_secs(569));
+    let out = written(&mut agent);
+    on_the_stream(&out, "ACK ");
+    on_the_stream(&out, "BYE ");
+    let order: Vec<bool> = out
+        .iter()
+        .map(|(_, bytes)| bytes.starts_with(b"ACK "))
+        .collect();
+    assert_eq!(order, vec![true, false], "{:?}", listed(&out));
+}
+
+#[test]
+fn a_hangup_this_layer_decided_on_waits_for_the_stream() {
+    // the 200 crossed the CANCEL: §13.2.2.4 still wants the ACK, and the call
+    // is ended after it, both on the stream once there is one
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    events(&mut agent);
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    transmits(&mut agent);
+
+    deliver(
+        &mut agent,
+        &from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER))),
+        t0,
+    );
+    let out = written(&mut agent);
+    not_written(&out, "ACK ");
+    not_written(&out, "BYE ");
+    assert_eq!(ended(&mut agent), None, "not over until the BYE has gone");
+
+    open_the_stream(&mut agent, t0);
+    let out = written(&mut agent);
+    on_the_stream(&out, "ACK ");
+    on_the_stream(&out, "BYE ");
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::LocalHangup)
+    );
+}
+
+#[test]
+fn a_change_offered_again_after_491_waits_for_the_stream_rather_than_failing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    open_the_stream(&mut agent, t0);
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER))),
+        t0,
+    );
+    on_the_stream(&written(&mut agent), "ACK ");
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = on_the_stream(&written(&mut agent), "INVITE ");
+    stream(
+        &mut agent,
+        &answered(&reinvite, 491, "Request Pending", "desk", None),
+        t0,
+    );
+    written(&mut agent);
+    events(&mut agent);
+
+    // the connection goes before §14.1's wait is over
+    agent
+        .receive(Input::StreamClosed { transport: TCP }, t0)
+        .expect("the stream closes");
+    written(&mut agent);
+    events(&mut agent);
+
+    let retry = t0 + Duration::from_secs(5);
+    agent.handle_timeout(retry);
+    not_written(&written(&mut agent), "INVITE ");
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SessionChangeFailed { .. })),
+        "a change not sent yet is not a change that failed"
+    );
+
+    open_the_stream(&mut agent, retry);
+    let again = on_the_stream(&written(&mut agent), "INVITE ");
+    assert!(body_of(&again).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn a_refresh_too_big_for_a_datagram_waits_for_the_stream_and_the_subscription_stands() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(id, &watching("201"), t0)
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    deliver(
+        &mut agent,
+        &from_afar(&notification(
+            &subscribe,
+            1,
+            "notifier",
+            "active;expires=3600",
+            None,
+        )),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let due = t0 + Duration::from_secs(3_060);
+    agent.handle_timeout(due);
+    not_written(&written(&mut agent), "SUBSCRIBE ");
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::SubscriptionEnded { .. })),
+        "a refresh not sent yet has not failed"
+    );
+    assert!(agent.subscription_state(handle).is_some());
+
+    open_the_stream(&mut agent, due);
+    on_the_stream(&written(&mut agent), "SUBSCRIBE ");
+}
+
+#[test]
+fn a_dialog_that_ends_takes_what_was_waiting_to_be_sent_in_it() {
+    // with no stream ever bound — a build that binds one transport and no
+    // other — every call whose ACK outgrew the datagram would otherwise leave
+    // one behind for the life of the process
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let ok = from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER)));
+    deliver(&mut agent, &ok, t0);
+    events(&mut agent);
+    assert_eq!(agent.parked.len(), 1, "the ACK is waiting");
+
+    // the far end gives up on it and hangs up
+    let later = t0 + Duration::from_secs(32);
+    deliver(&mut agent, &reversed(&ok, "BYE", "farbye", 2, None), later);
+    assert_eq!(ended(&mut agent), Some((call, CallEndReason::RemoteHangup)));
+    assert!(agent.parked.is_empty(), "{:?}", agent.parked);
+
+    open_the_stream(&mut agent, later);
+    not_written(&written(&mut agent), "ACK ");
+}
+
+/// How many times the endpoint asked for a connection.
+fn connections_asked_for(seen: &[UaEvent]) -> usize {
+    seen.iter()
+        .filter(|event| {
+            matches!(
+                **event,
+                UaEvent::Unclaimed(sipral_core::endpoint::Event::TransportWanted { .. })
+            )
+        })
+        .count()
+}
+
+#[test]
+fn a_2xx_repeated_after_a_lost_cancel_race_asks_for_no_second_connection() {
+    // §13.2.2.4: the far end repeats its 200 until the ACK arrives, and the
+    // endpoint reports each repeat for as long as no ACK is kept. The ACK and
+    // the BYE that ends the call are already waiting for the stream; asking
+    // for them again opens a connection per repeat
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    events(&mut agent);
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    transmits(&mut agent);
+
+    let ok = from_afar(&answered(&invite, 200, "OK", "desk", Some(ANSWER)));
+    deliver(&mut agent, &ok, t0);
+    not_written(&written(&mut agent), "ACK ");
+    assert_eq!(
+        connections_asked_for(&events(&mut agent)),
+        2,
+        "one for the ACK, one for the BYE"
+    );
+
+    let later = t0 + Duration::from_millis(500);
+    deliver(&mut agent, &ok, later);
+    let out = written(&mut agent);
+    not_written(&out, "ACK ");
+    not_written(&out, "BYE ");
+    assert_eq!(
+        connections_asked_for(&events(&mut agent)),
+        0,
+        "both are already waiting for the connection asked for"
+    );
+
+    open_the_stream(&mut agent, later);
+    let out = written(&mut agent);
+    on_the_stream(&out, "ACK ");
+    on_the_stream(&out, "BYE ");
+}
+
+#[test]
+fn transfer_reports_waiting_for_a_stream_do_not_pile_up_behind_each_other() {
+    // RFC 3515 §2.4.5: each NOTIFY body "provides a complete statement of the
+    // status of the referred action", with no deltas, so one written later
+    // says everything one still waiting would have. The referred call's far
+    // end decides how many provisional responses there are, and none of them
+    // may leave a report behind that nothing ever sends
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(
+        &mut agent,
+        &from_afar(&incoming_invite("far", Some(OFFER))),
+        t0,
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "farack", 1), t0);
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "farrefer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the transfer is taken");
+    let out = written(&mut agent);
+    let placed = out
+        .iter()
+        .find(|(_, bytes)| bytes.starts_with(b"INVITE sip:carol"))
+        .map(|(_, bytes)| bytes.clone())
+        .expect("the call the transfer asked for");
+    not_written(&out, "NOTIFY ");
+
+    let ringing = answered(&placed, 180, "Ringing", "carol", None);
+    for _ in 0..50 {
+        deliver(&mut agent, &ringing, t0);
+    }
+    not_written(&written(&mut agent), "NOTIFY ");
+    events(&mut agent);
+    assert_eq!(agent.parked.len(), 1, "{:?}", agent.parked);
+
+    open_the_stream(&mut agent, t0);
+    let notify = on_the_stream(&written(&mut agent), "NOTIFY ");
+    assert!(
+        body_of(&notify).starts_with("SIP/2.0 180"),
+        "the latest word on the transfer: {}",
+        body_of(&notify)
+    );
+}
+
+#[test]
+fn a_second_transfers_report_waiting_for_a_stream_leaves_the_first_transfers_last_word() {
+    // RFC 3515 §2.4.6: two REFERs in one dialog are two subscriptions, told
+    // apart by the `id` on `Event`. A report on the second says nothing about
+    // the first, whose closing NOTIFY (§2.4.7) is still owed
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(
+        &mut agent,
+        &from_afar(&incoming_invite("far", Some(OFFER))),
+        t0,
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "farack", 1), t0);
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "farrefer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the first transfer is taken");
+    let placed = written(&mut agent)
+        .into_iter()
+        .find(|(_, bytes)| bytes.starts_with(b"INVITE sip:carol"))
+        .map(|(_, bytes)| bytes)
+        .expect("the call the first transfer asked for");
+    deliver(
+        &mut agent,
+        &answered(&placed, 486, "Busy Here", "carol", None),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "farrefer2", 3),
+            "Refer-To: <sip:dave@example.com>\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the second transfer is taken");
+    not_written(&written(&mut agent), "NOTIFY ");
+
+    open_the_stream(&mut agent, t0);
+    let bodies: Vec<String> = written(&mut agent)
+        .iter()
+        .filter(|(_, bytes)| bytes.starts_with(b"NOTIFY "))
+        .map(|(_, bytes)| body_of(bytes))
+        .collect();
+    assert!(
+        bodies.iter().any(|body| body.starts_with("SIP/2.0 486")),
+        "the first transfer's last word: {bodies:?}"
+    );
+    assert!(
+        bodies.iter().any(|body| body.starts_with("SIP/2.0 100")),
+        "the second transfer's first: {bodies:?}"
+    );
+}

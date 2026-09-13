@@ -115,8 +115,8 @@ production says is missing from it:
 - **B1** — the path size limit as a constraint: promotion to a stream
   transport or a specific refusal, never a silent send, per RFC 3261 §18.1.1,
   with the on-wire size readable by the application. *Built* for the first
-  send and the authenticated retry; the in-dialog path skipped it, and it is
-  closed with phase 1's last criterion.
+  send, the authenticated retry and every request inside a dialog, the ACK to
+  a 2xx included; phase 1's last criterion is the lab showing it.
 - **B5** — a media stall detected by the engine and reported, with an optional
   recovery attempt. *Built.*
 - **B6** — a documented default profile for the deployment actually shipped
@@ -276,8 +276,9 @@ shape is permanent once published:
 - an account without a registrar, for trunks authenticated by address.
   *Built*: `registrar_len` zero, with `registrar_address` as the outbound proxy
   and `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` as its state;
-- the size-versioning constants pin the oldest published size rather than the
-  current one, and every binding calls `sipral_abi_check` at load.
+- the Kotlin binding does not call `sipral_abi_check` at load; the .NET one
+  does, from a static constructor, and Swift, which has no load hook, documents
+  the call the application makes before anything else.
 
 **The layers a developer actually adopts**, above the printed bindings:
 

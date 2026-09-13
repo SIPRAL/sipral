@@ -4,11 +4,15 @@
 //! RFC 3261 §14 driven from both ends: hold, resume, and the moment both ends
 //! ask at once.
 
-use super::tests::{deliver, endpoint, events, header, incoming, invite_request, sent, transmits};
-use super::{
-    DialogEndReason, Endpoint, Event, FailureReason, OutgoingInDialogRequest, OutgoingResponse,
-    SendError,
+use super::tests::{
+    deliver, endpoint, events, header, incoming, invite_request, local, peer, sent, transmits,
 };
+use super::{
+    AckError, DialogEndReason, Endpoint, Event, FailureReason, Input, OutgoingInDialogRequest,
+    OutgoingResponse, PrackError, SendError, Transmit, TransportId, TransportProtocol,
+};
+use crate::diag::Decision;
+use crate::dialog::CallId;
 use crate::msg::{HeaderName, Method, StatusCode};
 use crate::transaction::{DialogId, InviteClient, InviteServer, TransactionId};
 use std::sync::Arc;
@@ -954,4 +958,468 @@ fn an_incoming_target_refresh_asks_the_caller_to_resolve() {
             .any(|event| matches!(*event, Event::ResolveNeeded { .. })),
         "the next hop moved and nothing said so: {seen:?}"
     );
+}
+
+// -- §18.1.1 inside a dialog -------------------------------------------------
+
+const TCP: TransportId = TransportId(2);
+
+/// A far end whose URI alone is more than a datagram may carry, at the same
+/// address as the peer so that nothing about the next hop changes.
+fn distant_target() -> String {
+    format!("<sip:bob@192.0.2.9;x={}>", "y".repeat(1_400))
+}
+
+/// The stream §18.1.1 asks for, connected to the peer.
+fn bind_stream(endpoint: &mut Endpoint, now: Instant) {
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            now,
+        )
+        .expect("binding TCP");
+    transmits(endpoint);
+}
+
+/// Whether the caller was asked for a stream to the peer.
+fn asked_for_a_stream(seen: &[Event]) -> bool {
+    seen.iter().any(|event| {
+        matches!(
+            *event,
+            Event::TransportWanted {
+                protocol: TransportProtocol::Tcp,
+                destination,
+                ..
+            } if destination == peer()
+        )
+    })
+}
+
+/// Nothing may have gone out; the message says what did.
+fn nothing_went(endpoint: &mut Endpoint) {
+    let wire = transmits(endpoint);
+    assert!(
+        wire.is_empty(),
+        "{}",
+        wire.iter()
+            .map(|out| format!(
+                "{} bytes went out on {:?}: {}",
+                out.payload.len(),
+                out.protocol,
+                String::from_utf8_lossy(out.payload.get(..16).unwrap_or_default())
+            ))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+/// The one message out, which has to be on the stream and say so in its Via.
+fn on_the_stream(endpoint: &mut Endpoint) -> Transmit {
+    let mut wire = transmits(endpoint);
+    assert_eq!(wire.len(), 1, "one message out");
+    let out = wire.pop().expect("one message");
+    assert_eq!(
+        (out.transport, out.protocol),
+        (TCP, TransportProtocol::Tcp),
+        "{} bytes went out on {:?}",
+        out.payload.len(),
+        out.protocol
+    );
+    assert!(
+        String::from_utf8_lossy(&header(&out.payload, HeaderName::Via)).starts_with("SIP/2.0/TCP"),
+        "§18.1.1: the top Via has to name the transport it went over"
+    );
+    out
+}
+
+/// Place a call the far end answers from a target no datagram can carry,
+/// and stop short of the ACK. Returns the dialog and the 200.
+fn answered_from_afar(endpoint: &mut Endpoint, now: Instant) -> (DialogId, Vec<u8>) {
+    endpoint
+        .invite(&invite_request(), now)
+        .expect("the INVITE goes");
+    let invite = sent(endpoint);
+    let ok = reply(&invite, 200, "OK", "desk", Some(&distant_target()));
+    deliver(endpoint, &ok, now);
+    let dialog = events(endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Established { dialog, .. } => Some(dialog),
+            _ => None,
+        })
+        .expect("the call connected");
+    (dialog, ok)
+}
+
+#[test]
+fn a_reinvite_too_big_for_a_datagram_is_treated_like_any_other_request() {
+    // §18.1.1: a request within 200 bytes of the path MTU "MUST be sent using
+    // an RFC 2914 congestion controlled transport protocol". The first send
+    // and the challenge retry applied it; the path every request inside a
+    // dialog is built on did not, and wrote a 2388 byte re-INVITE as one
+    // datagram.
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+
+    // the same body out of dialog is refused for want of a stream transport
+    let big: Arc<[u8]> = Arc::from(vec![b'x'; 2_000]);
+    let out_of_dialog = endpoint.invite(
+        &invite_request().body(b"application/sdp", Arc::clone(&big)),
+        t0,
+    );
+    assert_eq!(
+        out_of_dialog,
+        Err(SendError::NeedsStreamTransport),
+        "the out-of-dialog path applies §18.1.1"
+    );
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    let (dialog, ack) = call_up(&mut endpoint, t0);
+    let inside = endpoint.reinvite(
+        dialog,
+        &renegotiation().body(b"application/sdp", Arc::clone(&big)),
+        t0,
+    );
+    nothing_went(&mut endpoint);
+    assert_eq!(inside, Err(SendError::NeedsStreamTransport));
+    let seen = events(&mut endpoint);
+    assert!(asked_for_a_stream(&seen), "{seen:?}");
+
+    // nothing was started, so the dialog is free for the next one. The number
+    // the refused one drew is not handed out again: §12.2.2 allows a gap,
+    // and a number reused after a request that went out meanwhile would not
+    assert_eq!(cseq(&ack), b"1 ACK");
+    let (_, next) = renegotiate(&mut endpoint, dialog, t0);
+    assert_eq!(cseq(&next), b"3 INVITE");
+}
+
+#[test]
+fn a_reinvite_too_big_for_a_datagram_goes_on_the_stream_open_to_the_peer() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    bind_stream(&mut endpoint, t0);
+
+    let big: Arc<[u8]> = Arc::from(vec![b'x'; 2_000]);
+    endpoint
+        .reinvite(dialog, &renegotiation().body(b"application/sdp", big), t0)
+        .expect("the re-INVITE goes");
+    let reinvite = on_the_stream(&mut endpoint);
+    assert!(reinvite.payload.starts_with(b"INVITE "));
+
+    // the transaction is the stream's too: §17.1.1.2 retransmits over a
+    // datagram only
+    endpoint.handle_timeout(t0 + T1);
+    nothing_went(&mut endpoint);
+}
+
+#[test]
+fn an_ack_too_big_for_a_datagram_waits_for_a_stream_and_is_repeated_on_it() {
+    // The ACK to a 2xx is the one request of a call no transaction carries:
+    // the endpoint writes it straight to the wire, and writes it again for
+    // every retransmission of the 2xx. Both writes have to leave on the stream
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, ok) = answered_from_afar(&mut endpoint, t0);
+
+    let refused = endpoint.ack_2xx(dialog, None, t0);
+    nothing_went(&mut endpoint);
+    assert_eq!(
+        refused,
+        Err(AckError::Build(SendError::NeedsStreamTransport))
+    );
+    let seen = events(&mut endpoint);
+    assert!(asked_for_a_stream(&seen), "{seen:?}");
+
+    bind_stream(&mut endpoint, t0);
+    endpoint
+        .ack_2xx(dialog, None, t0)
+        .expect("nothing was kept, so the same call works again");
+    let ack = on_the_stream(&mut endpoint);
+    assert!(ack.payload.starts_with(b"ACK "));
+
+    // the far end repeats its 200 over the datagram until the ACK arrives
+    deliver(&mut endpoint, &ok, t0 + T1);
+    let again = on_the_stream(&mut endpoint);
+    assert_eq!(again.payload, ack.payload, "the same ACK again");
+}
+
+#[test]
+fn the_ack_to_a_reinvite_too_big_for_a_datagram_waits_for_a_stream_and_is_repeated_on_it() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (id, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+    // a target refresh that lengthens the Request-URI of everything after it
+    let ok = reply(&reinvite, 200, "OK", "desk", Some(&distant_target()));
+    deliver(&mut endpoint, &ok, t0);
+    events(&mut endpoint);
+
+    let refused = endpoint.ack_reinvite(id, None, t0);
+    nothing_went(&mut endpoint);
+    assert_eq!(
+        refused,
+        Err(AckError::Build(SendError::NeedsStreamTransport))
+    );
+    let seen = events(&mut endpoint);
+    assert!(asked_for_a_stream(&seen), "{seen:?}");
+
+    bind_stream(&mut endpoint, t0);
+    endpoint
+        .ack_reinvite(id, None, t0)
+        .expect("nothing was kept, so the same call works again");
+    let ack = on_the_stream(&mut endpoint);
+    assert!(ack.payload.starts_with(b"ACK "));
+
+    deliver(&mut endpoint, &ok, t0 + T1);
+    let again = on_the_stream(&mut endpoint);
+    assert_eq!(again.payload, ack.payload, "the same ACK again");
+}
+
+#[test]
+fn a_bye_too_big_for_a_datagram_leaves_the_call_up_until_it_can_go() {
+    // §15.1.1 ends the session "as soon as the BYE request is passed to the
+    // client transaction". One §18.1.1 would not pass anywhere has not been,
+    // and a dialog forgotten here would be a call left standing there
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = answered_from_afar(&mut endpoint, t0);
+
+    let refused = endpoint.bye(dialog, t0);
+    nothing_went(&mut endpoint);
+    assert_eq!(refused, Err(SendError::NeedsStreamTransport));
+    let seen = events(&mut endpoint);
+    assert!(asked_for_a_stream(&seen), "{seen:?}");
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, Event::DialogTerminated { .. })),
+        "{seen:?}"
+    );
+    assert!(
+        endpoint.dialog(dialog).is_some(),
+        "the dialog is still there to hang up"
+    );
+
+    bind_stream(&mut endpoint, t0);
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let bye = on_the_stream(&mut endpoint);
+    assert!(bye.payload.starts_with(b"BYE "));
+    assert!(events(&mut endpoint).iter().any(|event| matches!(
+        *event,
+        Event::DialogTerminated {
+            reason: DialogEndReason::LocalBye,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_prack_too_big_for_a_datagram_keeps_its_handle_until_it_can_go() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .invite(&invite_request(), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &reply_with(
+            &invite,
+            183,
+            "Session Progress",
+            "desk",
+            Some(&distant_target()),
+            "Require: 100rel\r\nRSeq: 1\r\n",
+        ),
+        t0,
+    );
+    let provisional = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ReliableProvisional { provisional, .. } => Some(provisional),
+            _ => None,
+        })
+        .expect("a reliable provisional");
+
+    let refused = endpoint.prack(provisional, None, t0);
+    nothing_went(&mut endpoint);
+    assert_eq!(
+        refused,
+        Err(PrackError::Send(SendError::NeedsStreamTransport))
+    );
+
+    bind_stream(&mut endpoint, t0);
+    endpoint
+        .prack(provisional, None, t0)
+        .expect("the same handle acknowledges it once there is a stream");
+    let prack = on_the_stream(&mut endpoint);
+    assert!(prack.payload.starts_with(b"PRACK "));
+}
+
+#[test]
+fn a_request_inside_a_dialog_that_did_not_fit_is_written_down_as_the_first_send_is() {
+    // the same two entries, with the same two numbers, as a request that did
+    // not fit out of dialog: refused over the datagram, promoted onto the
+    // stream, each with the size and the limit it was decided on
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, ok) = answered_from_afar(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).ok();
+    bind_stream(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let ack = on_the_stream(&mut endpoint);
+
+    let call = CallId::new(&header(&ok, HeaderName::CallId));
+    let decisions: Vec<Decision> = endpoint
+        .call_record(&call)
+        .expect("the call's record")
+        .decisions()
+        .cloned()
+        .collect();
+    let find = |reason: &str| {
+        decisions
+            .iter()
+            .find(|decision| decision.reason.as_str() == reason)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {reason} in {:?}",
+                    decisions
+                        .iter()
+                        .map(|decision| decision.reason.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+
+    let refused = find("transport.refused.size");
+    let measure = refused.measure.expect("a size and a limit");
+    assert_eq!(measure.limit, 1_300);
+    assert_eq!(measure.size, ack.payload.len(), "the size of the ACK");
+    assert_eq!(refused.address, Some(peer()));
+    assert_eq!(refused.protocol, Some(TransportProtocol::Udp));
+
+    let promoted = find("transport.promoted.size");
+    assert_eq!(promoted.measure, Some(measure));
+    assert_eq!(promoted.address, Some(peer()));
+    assert_eq!(promoted.protocol, Some(TransportProtocol::Tcp));
+}
+
+#[test]
+fn a_kept_ack_repeated_on_the_stream_still_open_is_not_promoted_again() {
+    // the stream the first ACK left on is still open, so every retransmission
+    // of the 2xx has to reuse it without re-deciding anything: a repeat is not
+    // a second promotion, and the record stays the size of the one call it
+    // took
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, ok) = answered_from_afar(&mut endpoint, t0);
+    bind_stream(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let ack = on_the_stream(&mut endpoint);
+
+    for round in 1_u32..=3 {
+        deliver(&mut endpoint, &ok, t0 + T1 * round);
+        let again = on_the_stream(&mut endpoint);
+        assert_eq!(again.payload, ack.payload, "the same ACK again");
+    }
+
+    let call = CallId::new(&header(&ok, HeaderName::CallId));
+    let promotions = endpoint
+        .call_record(&call)
+        .expect("the call's record")
+        .decisions()
+        .filter(|decision| decision.reason.as_str() == "transport.promoted.size")
+        .count();
+    assert_eq!(
+        promotions, 1,
+        "the stream never closed, so the ACK was promoted onto it once"
+    );
+}
+
+/// A second stream to the peer, opened after the first one closed.
+const AGAIN: TransportId = TransportId(3);
+
+/// The stream a kept ACK went on closes, and the far end, which never read
+/// it, repeats its 200. Nothing may be written to the closed stream, a stream
+/// is asked for again, and the next repeat goes on the one that answers it.
+fn repeated_after_its_stream_closed(
+    endpoint: &mut Endpoint,
+    ok: &[u8],
+    ack: &Transmit,
+    t0: Instant,
+) {
+    endpoint
+        .receive(Input::StreamClosed { transport: TCP }, t0)
+        .expect("the stream closes");
+    transmits(endpoint);
+    events(endpoint);
+
+    deliver(endpoint, ok, t0 + T1);
+    let wire = transmits(endpoint);
+    assert!(
+        wire.is_empty(),
+        "written after the stream closed: {:?}",
+        wire.iter()
+            .map(|out| (out.transport, out.protocol, out.payload.len()))
+            .collect::<Vec<_>>()
+    );
+    let seen = events(endpoint);
+    assert!(asked_for_a_stream(&seen), "{seen:?}");
+
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: AGAIN,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0 + T1,
+        )
+        .expect("binding TCP again");
+    transmits(endpoint);
+    deliver(endpoint, ok, t0 + T1 * 3);
+    let mut wire = transmits(endpoint);
+    assert_eq!(wire.len(), 1, "one message out");
+    let again = wire.pop().expect("one message");
+    assert_eq!(again.transport, AGAIN, "on the stream that is open");
+    assert_eq!(again.payload, ack.payload, "the same ACK again");
+}
+
+#[test]
+fn an_ack_repeated_after_its_stream_closed_is_not_written_to_the_closed_stream() {
+    // §13.2.2.4 passes the kept ACK to the transport again for every
+    // retransmission of the 2xx. A transmit naming a stream that is gone is
+    // the ACK dropped without a word, and the far end hangs up once it has
+    // retransmitted for 64*T1
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, ok) = answered_from_afar(&mut endpoint, t0);
+    bind_stream(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let ack = on_the_stream(&mut endpoint);
+    repeated_after_its_stream_closed(&mut endpoint, &ok, &ack, t0);
+}
+
+#[test]
+fn the_ack_to_a_reinvite_repeated_after_its_stream_closed_is_not_written_to_the_closed_stream() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (dialog, _) = call_up(&mut endpoint, t0);
+    let (id, reinvite) = renegotiate(&mut endpoint, dialog, t0);
+    let ok = reply(&reinvite, 200, "OK", "desk", Some(&distant_target()));
+    deliver(&mut endpoint, &ok, t0);
+    events(&mut endpoint);
+    bind_stream(&mut endpoint, t0);
+    endpoint.ack_reinvite(id, None, t0).expect("the ACK goes");
+    let ack = on_the_stream(&mut endpoint);
+    repeated_after_its_stream_closed(&mut endpoint, &ok, &ack, t0);
 }
