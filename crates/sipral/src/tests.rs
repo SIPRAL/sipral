@@ -2645,3 +2645,116 @@ fn printing_a_live_secured_stack_prints_no_key_material() {
         );
     }
 }
+
+/// And the way back out, which is the half that was missing. The watchdog
+/// measures from the last packet that arrived; during a hold none do. A
+/// resume keeps the media address — only the direction attribute moves — so
+/// the mark stayed where the hold began, and the first timer tick after
+/// resuming read the whole length of the hold as silence.
+#[test]
+fn a_resume_after_a_long_hold_is_not_reported_as_a_stalled_stream() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let _ = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    pair.callee.agent.hold(remote, pair.now).expect("the hold");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+
+    // a hold long enough that the whole of it is silence by any measure
+    pair.now += Duration::from_secs(600);
+    pair.callee
+        .agent
+        .resume(remote, pair.now)
+        .expect("the resume");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .is_some_and(|session| session.is_receiving()),
+        "the resume never reached the media"
+    );
+    pair.callee.media_events();
+
+    // the first tick after resuming, before any packet could have arrived
+    pair.callee.engine.handle_timeout(pair.now);
+    pair.callee.drain(pair.now, false);
+    let stalled: Vec<Duration> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::Stalled { silent_for } => Some(*silent_for),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        stalled.is_empty(),
+        "the hold itself was reported as silence the moment it ended: {stalled:?}"
+    );
+}
+
+/// RFC 3550 §6.6: a participant that leaves says so. It is the last thing a
+/// stream owes the far end and the only moment it can be said — the session
+/// is out of the engine in the same breath as the event that reports the end,
+/// so a packet still inside it is one nobody can reach.
+#[test]
+fn a_call_that_ends_leaves_an_rtcp_goodbye_behind_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    // one packet each way, so the control destination is latched
+    let tone = vec![100_i16; 160];
+    pair.exchange(call, remote, &tone);
+    pair.advance();
+
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the hangup");
+    pair.settle();
+    pair.caller.drain(pair.now, false);
+
+    let farewells: Vec<(CallHandle, Vec<u8>)> = std::iter::from_fn(|| {
+        pair.caller
+            .engine
+            .poll_farewell()
+            .map(|(call, _, payload)| (call, payload))
+    })
+    .collect();
+    assert_eq!(farewells.len(), 1, "{farewells:?}");
+    let (named, payload) = farewells.into_iter().next().expect("one goodbye");
+    assert_eq!(named, call, "the goodbye named another call");
+    assert!(
+        carries_bye(&payload),
+        "the datagram carries no BYE: {:?}",
+        payload.get(..8)
+    );
+}
+
+/// Whether a compound RTCP packet carries a BYE (§6.6, packet type 203).
+///
+/// Walked rather than searched: §6.1 requires a compound packet to begin with
+/// a report, so the BYE is never the first header, and the length field of
+/// each packet is what says where the next one starts — "the length of this
+/// RTCP packet in 32-bit words minus one".
+fn carries_bye(compound: &[u8]) -> bool {
+    let mut at = 0;
+    while let (Some(&kind), Some(&high), Some(&low)) = (
+        compound.get(at + 1),
+        compound.get(at + 2),
+        compound.get(at + 3),
+    ) {
+        if kind == 203 {
+            return true;
+        }
+        let words = usize::from(u16::from_be_bytes([high, low]));
+        at += words.saturating_add(1) * 4;
+    }
+    false
+}

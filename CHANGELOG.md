@@ -62,6 +62,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **Resuming a call that was held for a while no longer reports the stream as
+  stalled.** The watchdog measures from the last packet that arrived, and
+  during a hold none do. A resume keeps the media address — only the direction
+  attribute moves — so nothing reset that mark, and the first timer tick after
+  resuming read the entire length of the hold as silence and raised
+  `MediaEvent::Stalled` before the far end's first resumed packet could
+  possibly have arrived. Reception starting up now resets the watchdog, which
+  is the mirror of the guard that already silenced it going in.
+
+- **A call that ends now says goodbye.** RFC 3550 §6.6 has a participant that
+  leaves send an RTCP BYE, and this stack could not: `MediaEngine` takes the
+  session out in the same breath as the event reporting the end, so by the
+  time an application heard about the call it had no way to reach the session
+  that would have produced the packet, and the engine never produced one
+  itself. The far end was left to wait out its own timeout on every call.
+  `MediaEngine::poll_farewell` hands over the goodbye of a call that has
+  ended, drained like every other poll.
+
 - **A target refresh inside a dialog is now reported.** §12.2.1.2 and §12.2.2
   both replace the dialog's remote target on a target refresh — a re-INVITE's
   2xx, or an incoming one — but nothing compared the new target to the flow

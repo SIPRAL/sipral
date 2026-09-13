@@ -364,6 +364,17 @@ one re-INVITE gets an answer RFC 3264 §6.1 would not have written. It cannot
 happen under *required*, where the offer is refused before an answer is
 composed; under the other two it is a shape nothing has been seen to send.
 
+## What the end of a call sends
+
+RFC 3550 §6.6 has a participant that leaves send an RTCP BYE, and the engine
+produces it at the moment the call ends rather than leaving it to the
+application. It has to be that moment: a call that ends is taken out of the
+engine in the same breath as the event reporting it, so a packet still held in
+its session is one nobody can reach afterwards. The bytes are copied out and
+wait in `MediaEngine::poll_farewell`, which hands over one at a time like every
+other poll here, alongside the handle of the call that has ended. A goodbye
+that is never polled is a far end left to wait out its own timeout.
+
 ## What a re-negotiation keeps
 
 A re-INVITE settles on a plan, and one of two things happens to the media.

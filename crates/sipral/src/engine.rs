@@ -152,6 +152,11 @@ pub struct MediaEngine {
     sessions: BTreeMap<CallHandle, MediaSession>,
     calls: BTreeMap<CallHandle, Managed>,
     events: VecDeque<(CallHandle, MediaEvent)>,
+    /// The RTCP goodbyes of calls that have ended, waiting to be polled.
+    ///
+    /// Owned bytes rather than a borrow of a session's scratch buffer,
+    /// because the session they came from is gone by the time anyone asks.
+    farewells: VecDeque<(CallHandle, SocketAddr, Vec<u8>)>,
     /// D3's health counters, fed from the same drain that hands events to
     /// the application — see `crate::counters`.
     counters: Counters,
@@ -191,6 +196,7 @@ impl MediaEngine {
             sessions: BTreeMap::new(),
             calls: BTreeMap::new(),
             events: VecDeque::new(),
+            farewells: VecDeque::new(),
             counters: Counters::default(),
             keys: KeySource::new(media_seed),
         }
@@ -429,6 +435,26 @@ impl MediaEngine {
             .min()
     }
 
+    /// The RTCP goodbye of a call that has ended (RFC 3550 §6.6).
+    ///
+    /// Separate from [`MediaEngine::poll_rtcp`] because by the time there is
+    /// one to send there is no session left to ask: a call that ends is taken
+    /// out of the engine in the same breath as the event that reports it, and
+    /// a packet held in a session that no longer exists is a packet nobody can
+    /// reach. So it is copied out at that moment and waits here.
+    ///
+    /// The handle it comes with names a call that has already ended. It is
+    /// there so an application that keeps its own sockets per call knows which
+    /// one to send from, not because anything else can still be done with it.
+    ///
+    /// One at a time, like every other poll here. A caller loops until it
+    /// answers `None`, and should do so after draining events — a goodbye that
+    /// is never polled is a far end left waiting out its own timeout.
+    #[must_use]
+    pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        self.farewells.pop_front()
+    }
+
     /// A control datagram that is due, and the call to send it for.
     ///
     /// One at a time, like every other poll here. A caller loops until it
@@ -635,6 +661,17 @@ impl MediaEngine {
             && !matches!(error, MediaError::NotRecording)
         {
             self.events.push_back((call, MediaEvent::Failed(error)));
+        }
+        // RFC 3550 §6.6: "If a BYE packet is received ... the participant
+        // SHOULD be removed". Saying so is the last thing this stream owes the
+        // far end, and the only moment it can: the session is already out of
+        // the map, so nothing an application does afterwards can reach it.
+        // Before this the packet could not be produced at all — `session` is
+        // dropped at the end of this function and `MediaEngine::session` stops
+        // resolving the handle on the line above.
+        if let Some(datagram) = session.goodbye(now) {
+            self.farewells
+                .push_back((call, datagram.destination, datagram.payload.to_vec()));
         }
         self.events
             .push_back((call, MediaEvent::Ended(session.statistics(now))));

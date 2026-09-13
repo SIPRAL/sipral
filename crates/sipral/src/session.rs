@@ -962,12 +962,24 @@ impl MediaSession {
         {
             self.rtp.rekey_remote(policy, master, what);
         }
+        let was_receiving = self.is_receiving();
         self.plan = plan.clone();
         self.codec_candidates = candidates;
         // a stream that has just been told to stop receiving must not be
         // reported as stalled for having done so
         if !self.is_receiving() {
             self.stalled = false;
+        }
+        // and the mirror, which is the half that was missing. The watchdog
+        // measures from the last packet that arrived, and during a hold none
+        // do; a resume that kept the media address — which is nearly every
+        // resume, since only the direction attribute moved — left that mark
+        // where the hold began. The first timer tick after resuming then read
+        // the whole length of the hold as silence and reported a stalled
+        // stream, before the far end's first resumed packet could possibly
+        // have arrived.
+        if !was_receiving && self.is_receiving() {
+            self.last_inbound = now;
         }
         Ok(())
     }
