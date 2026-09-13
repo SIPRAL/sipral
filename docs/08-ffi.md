@@ -35,21 +35,105 @@ Rules for the ABI:
 - **Errors are integer codes** plus a thread-local last-error string. No
   errno-style globals shared between handles.
 - **Events arrive on one callback**, registered per stack handle, carrying a
-  tagged union. The callback may be invoked from the caller's own polling
-  thread only, so the language side never has to reason about which thread it
-  is on.
-- **The library is not re-entered from inside that callback, except to destroy
-  the stack.** Every call naming the stack being polled returns
-  `SIPRAL_STATUS_BUSY` while its callback is running, so a binding can neither
-  deadlock itself by answering an event with a request nor see a stack halfway
-  through delivering one; what it does with an event is copy what it needs and
-  act after poll returns. `sipral_stack_destroy` is the exception and always
-  will be — it takes nothing but the handle table, and what the poll is
-  holding stays alive until that poll returns — so a binding whose event
-  handler is where its object gets disposed needs no queue of deferred frees
-  to be correct. The reasoning behind both is the module documentation of
-  `crates/sipral-ffi/src/stack.rs`, and the generated header puts the rule in
-  two sentences at the top, so a binding author meets it wherever they start.
+  tagged union. It is called from inside `sipral_stack_poll`, on the thread
+  that polled, and never on two threads at once for one stack, so the language
+  side never has to reason about which thread it is on.
+- **Nothing is held while the callback runs, so the library may be re-entered
+  from inside it.** A poll does the stack's work under the stack's lock, takes
+  what the stack has to say out into a queue that owns every byte the events
+  point at, and lets the lock go before the first event is delivered.
+  Answering an event with a request — hanging up, minting a media handle,
+  polling again — is an ordinary call rather than `SIPRAL_STATUS_BUSY`, and a
+  device thread that asks for the frame that is due while the callback runs is
+  not refused either. `sipral_stack_destroy` works from inside the callback as
+  it always has: the poll that is delivering holds its share of the stack until
+  it returns, so the rest of the queue still arrives and nothing is freed
+  underneath it.
+
+  The queue belongs to the stack, not to one poll. A poll made from inside the
+  callback, or from a second thread while another poll is delivering, still
+  does the stack's work, and leaves what it raised to the delivery already
+  under way — so events arrive in the order they were raised and one at a time,
+  and such a poll returns before its own events have been heard. The other
+  price is that the stack may have moved past an event by the time it is read:
+  a call whose media started and ended inside one poll is already gone when its
+  first event arrives, and asking about it then answers
+  `SIPRAL_STATUS_STALE_HANDLE`.
+- **Signalling on one stack is one thread at a time, and a second thread is
+  told so rather than made to wait.** Every entry point that names a stack
+  takes its lock without blocking; one that finds it taken answers
+  `SIPRAL_STATUS_BUSY` and does nothing. The lock is held for the work of the
+  call that took it and no longer — never across the callback and never for a
+  frame of audio — so Busy means two threads that really did arrive together,
+  or a frame calling out into its own stack, as the next rule says.
+  The reasoning is the module documentation of
+  `crates/sipral-ffi/src/stack.rs`, and the generated header puts the rules in
+  a few sentences at the top, so a binding author meets them wherever they
+  start.
+- **A call's media has a handle of its own, and never takes the stack's
+  lock.** `sipral_call_media(stack, call, out_media)` mints one once the
+  negotiation has settled — `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment,
+  and minting from inside that event's callback is allowed — and every entry
+  point that works on one call's media takes it in place of the stack and the
+  call: `sipral_media_receive`, `sipral_media_playback`,
+  `sipral_media_capture`, `sipral_media_poll_rtcp`, `sipral_media_info`,
+  `sipral_media_statistics`, `sipral_media_dialling`,
+  `sipral_media_stop_dialling`, `sipral_media_record_start`,
+  `sipral_media_record_stop` and `sipral_media_record_state`. A handle costs
+  the stack's lock once, when it is minted, and never on the path that runs
+  fifty times a second.
+
+  Each session has a lock of its own, and that lock waits. Two threads on one
+  call's media — a render thread and a capture thread, or the poll thread
+  applying a re-negotiation while a frame is being encoded — wait for each
+  other for the length of one frame's work, and that work waits for nothing
+  else; a recording adds its write to the frame of the call being recorded and
+  to no other. No call waits on another call's media, and none waits on
+  signalling or on the callback. So `SIPRAL_STATUS_BUSY` from a media entry
+  point means one thing: the thread is already inside that same call's media
+  further down its own stack — which only code run during a frame, such as a
+  processor, can arrange — and answering it is how re-entry stays a status
+  rather than a deadlock. The same code calling into the call's stack instead
+  — hanging up, polling, destroying it — is answered `SIPRAL_STATUS_BUSY` by
+  that entry point too, even with no other thread inside: the stack's work can
+  need the very session the frame is holding.
+
+  A media handle outlives its call, and says so. Once the call has ended, or
+  its stack has been destroyed, every media entry point answers
+  `SIPRAL_STATUS_WRONG_STATE`, and the session behind the handle has already
+  been let go, with its recording closed. A hold, a resume or a change of codec
+  keeps the handle. `sipral_media_release` is its one matching free, whether or
+  not the call and the stack are still there, and a released handle is
+  `SIPRAL_STATUS_STALE_HANDLE`; minting twice gives two handles, each released
+  once.
+
+  `now_ms` means what it means everywhere else — the caller's milliseconds from
+  the stack's origin — but a media entry point neither moves the stack's clock
+  nor is checked against it. It runs on a thread that reads the clock apart
+  from the one that polls, and a reading a millisecond behind the last poll is
+  not a caller bug.
+
+  **Why a handle, and not a lock per session found through the stack.**
+  Finding the session through `stack` and `call` means taking the stack's lock
+  on every frame, however briefly, and a frame that can meet the stack's lock
+  can meet whatever is holding it. The handle is the one shape in which a frame
+  never does. What it costs is a second handle a binding keeps beside its call,
+  fetched when media starts rather than when the call is placed.
+
+  **Why `Processor` is `Send`.** A session is now reached from the threads that
+  carry its audio as well as from the one that polls, and an echo canceller
+  attached to it goes where it goes. The alternative was the library declaring
+  in an `unsafe` block that an object it did not write may cross threads — a
+  promise about somebody else's code that nothing here can keep. Every serious
+  audio API already asks a processing object to move from the thread that
+  builds it to the one that runs it.
+
+  **What is still shared.** Media handles live in one table for the process,
+  and resolving one takes that table's own lock for an index and a reference
+  count — never for a frame, and never while waiting for anything else. That is
+  the whole of what hundreds of calls in one process have in common on the
+  media path; if it ever shows up in a measurement, the table can be split
+  without a signature changing.
 - **Nothing is added to a released ABI except at the end of a struct**, guarded
   by the `size` field, or as a new function. Nothing is removed or reordered.
   Ever. `sipral_abi_struct_size` answers what this build compiled a named struct to,
@@ -240,22 +324,25 @@ the same codec order, inside the poll that saw the request — so
 `sipral_call_accept_session` on it is `SIPRAL_STATUS_WRONG_STATE`. The
 application hears the outcome as `SIPRAL_EVENT_KIND_MEDIA_CHANGED`.
 
-**Four calls carry the packets**, and none of them opens a socket or touches a
-device: `sipral_call_media_receive` for a datagram that arrived,
-`sipral_call_playback` for the frame due for the earpiece, `sipral_call_capture`
-for one from the microphone, and `sipral_stack_poll_rtcp` for the control
-traffic RFC 3550 §6.3 schedules. Samples are 16-bit mono at
-`sipral_media_info_t::sample_rate`, a frame is exactly `frame_samples` of them,
-and outgoing packets are written into buffers the caller brings — checked before
-anything is built, so a frame is never encoded and then dropped for want of
-somewhere to put it.
+**Four calls carry the packets**, each on a call's media handle, and none of
+them opens a socket or touches a device: `sipral_media_receive` for a datagram
+that arrived, `sipral_media_playback` for the frame due for the earpiece,
+`sipral_media_capture` for one from the microphone, and
+`sipral_media_poll_rtcp` for the control traffic RFC 3550 §6.3 schedules. The
+last asks one call rather than the stack, so the thread that sends a call's
+audio sends its reports too: it is called after every captured frame, and
+whenever `sipral_stack_poll` reports a deadline for a call that is not
+capturing. Samples are 16-bit mono at `sipral_media_info_t::sample_rate`, a
+frame is exactly `frame_samples` of them, and outgoing packets are written into
+buffers the caller brings — checked before anything is built, so a frame is
+never encoded and then dropped for want of somewhere to put it.
 
 **Recording is where a path becomes a file**, and the file belongs to the media
-session from then on. C never sees the handle, so it cannot leak it or close it
-underneath the stack. The one thing that had to be arranged rather than
+session from then on. C never sees the file handle, so it cannot leak it or
+close it underneath the stack. The one thing that had to be arranged rather than
 inherited is the WAVE header: it carries two lengths that are not known until
 the recording stops, so every way a recording can end closes it properly —
-`sipral_call_record_stop`, the call ending, and the stack being destroyed,
+`sipral_media_record_stop`, the call ending, and the stack being destroyed,
 including from inside its own event callback. Destroying a stack mid-recording
 leaves a playable file, not a repair job.
 

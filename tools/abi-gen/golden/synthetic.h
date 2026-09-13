@@ -8,10 +8,11 @@
  * Every function here returns a sipral_status_t except where its own
  * comment says otherwise, sets the calling thread's last error on
  * failure, and catches any panic rather than letting one reach C. A
- * stack may be used from any thread but only one at a time, and may not
- * be re-entered from inside its own event callback; both are
- * SIPRAL_STATUS_BUSY rather than a deadlock. sipral_stack_destroy is the
- * one exception, and works from inside the callback.
+ * stack may be used from any thread but only one at a time: a second
+ * thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback
+ * runs with nothing held, so the library may be called from inside it.
+ * A call's media is reached through a handle of its own, from
+ * sipral_call_media, and never waits on the stack.
  */
 
 #ifndef SIPRAL_H

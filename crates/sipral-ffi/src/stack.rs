@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! A stack: made, polled, destroyed — and the two rules a binding author will
+//! A stack: made, polled, destroyed — and the rules a binding author will
 //! otherwise have to guess.
 //!
 //! Everything the library has to tell the application arrives on one callback,
@@ -20,41 +20,64 @@
 //!
 //! # May one stack be used from two threads at once?
 //!
-//! No. A stack may be used from *any* thread, and from a different thread on
-//! every call, but only from one thread at a time: the second concurrent call
-//! gets `SIPRAL_STATUS_BUSY` and does nothing. It does not block, and it does
-//! not queue.
+//! For signalling, one thread at a time. A stack may be used from *any*
+//! thread, and from a different thread on every call, but a call that arrives
+//! while another thread is inside gets `SIPRAL_STATUS_BUSY` and does nothing.
+//! It does not block, and it does not queue.
 //!
 //! That is the conservative answer, and it is chosen because it is the one
-//! that stays true. A library that promised safe concurrent use would owe that
-//! promise to every future member of every future state; one that blocked
-//! would owe the caller a guarantee about how long, which nothing here can
-//! give while a callback is running on the other thread. Busy costs a binding
-//! one lock it was going to take anyway, and a binding written against Busy
-//! keeps working if the answer is ever widened. One written against a promise
-//! of concurrency cannot be made to work if it is not.
+//! that stays true. A library that promised safe concurrent signalling would
+//! owe that promise to every future member of every future state; one that
+//! blocked would owe the caller a guarantee about how long. Busy costs a
+//! binding one lock it was going to take anyway, and what keeps it rare is how
+//! little the stack's lock is held for: the work of the call that took it, and
+//! never the callback or a frame of audio. A binding that meets Busy has met a
+//! second thread that really was inside at that moment.
+//!
+//! A call's media is outside this answer on purpose. It is reached through a
+//! handle of its own ([`crate::media`]), each call's session has a lock of its
+//! own, and no media entry point takes this one — so the thread that carries a
+//! call's audio never waits on signalling, on the callback or on another call.
+//!
+//! The other way round is refused. Code run inside a frame of a call — a
+//! processor — that calls into that call's stack gets `SIPRAL_STATUS_BUSY`,
+//! even with nobody else inside: the stack's work can need the session the
+//! frame is holding, and a thread that waited for it would be waiting for
+//! itself, with this lock held.
 //!
 //! # May the library be re-entered from inside the event callback?
 //!
-//! No, with one exception. The callback runs while the stack is held, so every
-//! call naming that stack from inside it returns `SIPRAL_STATUS_BUSY` — a
-//! binding cannot deadlock itself by answering an event with a request, and it
-//! cannot see a stack halfway through delivering one. What a binding does with
-//! an event is copy what it needs and act after poll returns.
+//! Yes. A poll does the stack's work under the lock, takes what the stack has
+//! to say out into a queue that owns everything the events point at, and lets
+//! the lock go before it delivers the first one. Nothing is held while the
+//! callback runs, so answering an event with a request, minting a call's media
+//! handle or polling again from inside it is an ordinary call.
 //!
-//! The exception is [`sipral_stack_destroy`], which works from inside the
-//! callback and always will. It takes nothing but the handle table, and what
-//! the poll is holding stays alive until that poll returns, so a binding whose
-//! event handler is where its object gets disposed does not need a queue of
-//! deferred frees to be correct.
+//! The queue is the stack's rather than one poll's, and one poll at a time
+//! delivers from it. A poll made from inside the callback, or from another
+//! thread while one is delivering, does the stack's work and leaves what it
+//! raised to the delivery already under way, so events arrive in the order
+//! they were raised and never on two threads at once. Such a poll returns
+//! before its own events are heard. And because the whole poll runs before the
+//! first event is read, an event can describe something the stack has since
+//! moved past: a call that ended inside the same poll has a stale handle by
+//! the time its first event arrives.
+//!
+//! [`sipral_stack_destroy`] works from inside the callback as it always has.
+//! It takes nothing but the handle table, and the poll that is delivering
+//! holds its share of the stack until it returns, so the rest of the queue is
+//! still delivered and a binding whose event handler is where its object gets
+//! disposed does not need a queue of deferred frees to be correct.
 //!
 //! Everything that names no stack — the last error, the status and event-kind
 //! names, the ABI version — is callable from anywhere at any time, including
 //! from inside the callback and from any number of threads.
 
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::ptr;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
@@ -66,7 +89,7 @@ use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{HandleTable, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
-use crate::media::{catalog_of, stream_stats, toggle_of, toggled};
+use crate::media::{SipralStreamStats, catalog_of, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -394,12 +417,125 @@ unsafe impl Versioned for SipralStackSettings {
     }
 }
 
-/// One stack. The lock is what makes a call from inside the callback an error
-/// code instead of a deadlock, and a call from a second thread an error code
-/// instead of a wait.
+/// One stack.
+///
+/// Its lock is taken without waiting, which is what makes a call from a second
+/// thread an error code instead of a wait. The outbox beside it is how what a
+/// poll raised reaches the callback once that lock has been let go.
 struct StackEntry {
     state: Mutex<StackState>,
+    outbox: Mutex<Outbox>,
 }
+
+impl StackEntry {
+    /// Queue what one poll raised behind whatever is still waiting, and say
+    /// whether the poll that raised it is the one to deliver.
+    ///
+    /// Called with the stack still held, so two polls queue in the order they
+    /// ran. One poll delivers at a time: a poll that arrives while another is
+    /// delivering — from inside that one's callback, or on a thread of its
+    /// own — leaves its events to it, which is what keeps them in order and
+    /// the callback on one thread.
+    fn post(&self, raised: Vec<Delivery>) -> bool {
+        let mut outbox = self.outbox();
+        outbox.waiting.extend(raised);
+        if outbox.delivering {
+            return false;
+        }
+        outbox.delivering = true;
+        true
+    }
+
+    /// Hand what is waiting to the callback one event at a time, with nothing
+    /// held while it runs, until nothing is left; and say how many that was.
+    fn deliver(&self, speaker: Speaker) -> usize {
+        let mut delivered = 0_usize;
+        loop {
+            let next = {
+                let mut outbox = self.outbox();
+                let next = outbox.waiting.pop_front();
+                // cleared under the same lock that found the queue empty, so
+                // a poll that posts a moment later finds nobody delivering and
+                // delivers its own
+                if next.is_none() {
+                    outbox.delivering = false;
+                }
+                next
+            };
+            let Some(delivery) = next else {
+                return delivered;
+            };
+            unsafe { (speaker.callback)(ptr::from_ref(&delivery.event), speaker.user_data) };
+            delivered = delivered.saturating_add(1);
+        }
+    }
+
+    fn outbox(&self) -> MutexGuard<'_, Outbox> {
+        // a panic was caught while this was held, and what is behind it is a
+        // queue and a flag, whole between statements
+        self.outbox.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// What polls have taken out of one stack and not yet delivered.
+#[derive(Default)]
+struct Outbox {
+    waiting: VecDeque<Delivery>,
+    /// Whether a poll is delivering them now.
+    delivering: bool,
+}
+
+/// Where a stack's events go, copied out while the stack is held so that
+/// they can be delivered once it is not.
+#[derive(Clone, Copy)]
+struct Speaker {
+    callback: unsafe extern "C" fn(event: *const SipralEvent, user_data: *mut c_void),
+    user_data: *mut c_void,
+}
+
+/// One event on its way to the callback, with what its pointers point into.
+///
+/// An event is translated while the stack is held and read after the lock is
+/// gone, so nothing it points at may be borrowed from the stack or from a
+/// local of the poll that raised it. Every pointer in it points into one of
+/// the three owners beside it, and all three reach their bytes through a
+/// reference count or a heap buffer, which stay where they are when a
+/// delivery is moved into the outbox and out of it again.
+struct Delivery {
+    event: SipralEvent,
+    /// Never read: the signalling event the message, the descriptions and the
+    /// transfer target in `event` are borrowed from.
+    _raised: Option<Arc<UaEvent>>,
+    /// Never read: the sentence a media event points at.
+    _reason: Option<String>,
+    /// Never read: the record a statistics event points at.
+    _record: Option<Arc<SipralStreamStats>>,
+}
+
+impl Delivery {
+    /// An event that points at nothing.
+    const fn bare(event: SipralEvent) -> Self {
+        Self {
+            event,
+            _raised: None,
+            _reason: None,
+            _record: None,
+        }
+    }
+}
+
+// Safety: the pointers in `event` point into the three owners beside it and
+// nowhere else, and each of those may move to another thread and be read from
+// one: a `String` and a record of plain numbers can, and `UaEvent` is `Send`
+// and `Sync` — asserted just below, so a member that ever stops being either
+// fails the build here rather than making this a lie. A delivery is read by
+// one thread, the one delivering it, and dropped by that thread.
+unsafe impl Send for Delivery {}
+
+const _: () = {
+    const fn crosses_threads<T: Send + Sync>() {}
+    crosses_threads::<UaEvent>();
+};
 
 /// Everything one stack is.
 pub(crate) struct StackState {
@@ -425,7 +561,7 @@ pub(crate) struct StackState {
     /// and can still name a call, and a tag handed to a new stack before that
     /// poll returned would start the new stack below a handle the old one had
     /// yet to mint. Nothing reads it; holding it is the whole of its job.
-    _tag: StackTag,
+    pub(crate) tag: StackTag,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
     /// The transport every account and every call uses. There is one.
@@ -465,17 +601,29 @@ pub(crate) struct StackState {
 // library reads none of it. Everything else in here is `Send` on its own.
 unsafe impl Send for StackState {}
 
+/// The caller's clock, as an instant the layers below can use: `now_ms`
+/// milliseconds after `origin`.
+pub(crate) fn instant_at(origin: Instant, now_ms: u64) -> Result<Instant, Fail> {
+    origin
+        .checked_add(Duration::from_millis(now_ms))
+        .ok_or_else(|| {
+            fail(
+                SipralStatus::InvalidArgument,
+                format!("now_ms is {now_ms}, which is further ahead than a clock reaches"),
+            )
+        })
+}
+
 impl StackState {
     /// The caller's clock, as an instant the layers below can use.
     pub(crate) fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
+        instant_at(self.origin, now_ms)
+    }
+
+    /// What `now_ms` of zero means on this stack, for a media handle that
+    /// has to read the same clock without reaching the stack again.
+    pub(crate) const fn origin(&self) -> Instant {
         self.origin
-            .checked_add(Duration::from_millis(now_ms))
-            .ok_or_else(|| {
-                fail(
-                    SipralStatus::InvalidArgument,
-                    format!("now_ms is {now_ms}, which is further ahead than a clock reaches"),
-                )
-            })
     }
 
     /// Move the stack's clock to `now_ms`, refusing one that went backwards.
@@ -495,13 +643,6 @@ impl StackState {
         Ok(now)
     }
 
-    /// Hand one event to the callback, on this thread, with the stack held.
-    fn deliver(&self, event: &SipralEvent) {
-        // still holding this stack's lock, which is what turns a call back
-        // into it from in here into SIPRAL_STATUS_BUSY
-        unsafe { (self.callback)(std::ptr::from_ref(event), self.user_data) };
-    }
-
     /// Say that this stack writes the descriptions for a call.
     pub(crate) fn manage(&mut self, call: CallHandle) {
         if !self.manages(call) {
@@ -516,28 +657,6 @@ impl StackState {
 
     fn unmanage(&mut self, call: CallHandle) {
         self.managed.retain(|managed| *managed != call);
-    }
-}
-
-impl Drop for StackState {
-    /// Close every recording that is still open.
-    ///
-    /// A WAVE header carries two lengths that are only known when the recording
-    /// stops, so a file whose recorder was dropped rather than closed is one a
-    /// player calls corrupt. This is the last moment anything can patch them,
-    /// and it is reached however the stack goes: destroyed from the
-    /// application, destroyed from inside its own event callback — where what
-    /// the poll is holding is dropped after the poll returns — or let go at the
-    /// end of a process that is shutting down tidily.
-    fn drop(&mut self) {
-        let recording: Vec<CallHandle> = self.engine.active().collect();
-        for call in recording {
-            if let Some(session) = self.engine.session(call) {
-                // there is nobody left to tell, and a failure here means the
-                // sink was already refusing the audio it was given
-                let _ = session.stop_recording();
-            }
-        }
     }
 }
 
@@ -562,9 +681,30 @@ pub(crate) fn with_stack<R>(
     stack: SipralHandle,
     act: impl FnOnce(&mut StackState) -> Result<R, Fail>,
 ) -> Result<R, Fail> {
-    let entry = STACKS.get(stack).map_err(handle_failed)?;
+    let entry = entry_of(stack)?;
     let mut held = lock(&entry)?;
     act(&mut held)
+}
+
+/// The stack a handle names, for an entry point about to take its lock.
+///
+/// Refused to a thread that is inside a frame of a call on this stack: the
+/// stack's work can need that call's session, which the same thread is
+/// holding, and it would wait for itself with the stack's lock held and every
+/// other thread shut out behind it.
+fn entry_of(stack: SipralHandle) -> Result<Arc<StackEntry>, Fail> {
+    if crate::media::inside_media_of(stack) {
+        return Err(inside_media());
+    }
+    STACKS.get(stack).map_err(handle_failed)
+}
+
+fn inside_media() -> Fail {
+    fail(
+        SipralStatus::Busy,
+        "this thread is inside a frame of a call on this stack, and the stack's work may need that \
+         call's media: call into the stack once the frame is done",
+    )
 }
 
 /// The same, for something that happens at a time the caller names.
@@ -587,7 +727,7 @@ fn lock(entry: &Arc<StackEntry>) -> Result<MutexGuard<'_, StackState>, Fail> {
         Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
         Err(TryLockError::WouldBlock) => Err(fail(
             SipralStatus::Busy,
-            "this stack is in use by another call, which may be one further down this call stack",
+            "this stack is in use by a call on another thread",
         )),
     }
 }
@@ -849,7 +989,7 @@ pub(crate) unsafe fn create_on(
             managed: Vec::new(),
             accounts: Names::new(&tag),
             calls: Names::new(&tag),
-            _tag: tag,
+            tag,
             transport: TRANSPORT,
             speaks,
             local,
@@ -861,6 +1001,7 @@ pub(crate) unsafe fn create_on(
             polled_at_ms: 0,
             started: false,
         }),
+        outbox: Mutex::new(Outbox::default()),
     };
     STACKS
         .insert(stamp, entry)
@@ -932,13 +1073,19 @@ entry! {
     /// The handle is dead the moment this returns, and a second destroy is
     /// `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
     /// inside the callback it is still safe: what the poll is holding stays
-    /// alive until that poll returns. No account is de-registered and no call
-    /// is hung up; a stack that has to leave politely does that first.
+    /// alive until that poll returns. Called from inside a frame of one of its
+    /// calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
+    /// because freeing the stack ends that call's media and the frame is
+    /// holding it. No account is de-registered and no call is hung up; a stack
+    /// that has to leave politely does that first.
     ///
     /// # Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     fn sipral_stack_destroy(stack: SipralHandle) {
+        if crate::media::inside_media_of(stack) {
+            return Err(inside_media());
+        }
         // dropping the last share of the entry here is what frees it; a poll
         // running on another thread holds one of its own until it is done
         STACKS.remove(stack).map_err(handle_failed)?;
@@ -954,9 +1101,13 @@ entry! {
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
     ///
     /// The event callback is called from inside this function, on this
-    /// thread. A call back into the same stack from the callback returns
-    /// `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
-    /// itself by answering an event with a request.
+    /// thread, and with nothing held: the stack's work is done and its lock
+    /// let go before the first event is handed over, so the callback may call
+    /// back into the library, this stack included. A poll that finds another
+    /// poll of the same stack already delivering — which is what a poll from
+    /// inside the callback always finds — does the stack's work and leaves its
+    /// events to that one, so they arrive in the order they were raised and
+    /// never on two threads at once.
     ///
     /// `result` may be null for a caller that does not want the counts.
     ///
@@ -971,15 +1122,31 @@ entry! {
     /// `result` must be null or point at a `sipral_poll_result_t` whose `size`
     /// member says how long it is.
     fn sipral_stack_poll(stack: SipralHandle, now_ms: u64, result: *mut SipralPollResult) {
-        let counted = with_stack(stack, |state| {
+        // held until this poll returns, delivery included, so a stack
+        // destroyed from inside its own callback is freed afterwards rather
+        // than underneath the queue being read
+        let entry = entry_of(stack)?;
+        let (mut counted, speaker) = {
+            let mut state = lock(&entry)?;
             let now = state.advance(now_ms)?;
             // the result struct is checked before anything is delivered: a
             // caller that got its size wrong should not also lose the events
             if !result.is_null() {
                 unsafe { declared_size(result.cast_const()) }?;
             }
-            Ok(run(stack, state, now))
-        })?;
+            let mut raised = Vec::new();
+            let counted = run(stack, &mut state, now, &mut raised);
+            // posted with the stack still held, so that a poll on another
+            // thread cannot queue what it raised in front of this
+            let speaker = entry.post(raised).then_some(Speaker {
+                callback: state.callback,
+                user_data: state.user_data,
+            });
+            (counted, speaker)
+        };
+        if let Some(speaker) = speaker {
+            counted.events_delivered = entry.deliver(speaker);
+        }
 
         if !result.is_null() {
             unsafe { write_versioned(result, counted) }?;
@@ -988,36 +1155,25 @@ entry! {
     }
 }
 
-/// What one drain of the engine came to.
-#[derive(Clone, Copy, Default)]
-struct Counted {
-    delivered: usize,
-    unclaimed: usize,
-}
-
-impl Counted {
-    fn delivered(&mut self) {
-        self.delivered = self.delivered.saturating_add(1);
-    }
-
-    fn unclaimed(&mut self) {
-        self.unclaimed = self.unclaimed.saturating_add(1);
-    }
-}
-
-/// One poll: time passes, events go out, output is counted.
-fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollResult {
+/// One poll: time passes, and what the stack has to say is taken out of it.
+///
+/// `events_delivered` is left at zero for whichever poll delivers to fill in,
+/// which is this one or one already under way.
+fn run(
+    stack: SipralHandle,
+    state: &mut StackState,
+    now: Instant,
+    raised: &mut Vec<Delivery>,
+) -> SipralPollResult {
     state.agent.handle_timeout(now);
     state.engine.handle_timeout(now);
 
-    let mut counted = Counted::default();
+    let mut unclaimed = 0_usize;
     if !state.started {
         state.started = true;
-        let event = crate::event::started(stack);
-        state.deliver(&event);
-        counted.delivered();
+        raised.push(Delivery::bare(crate::event::started(stack)));
     }
-    drain(stack, state, now, &mut counted);
+    drain(stack, state, now, raised, &mut unclaimed);
 
     let deadline = match (state.agent.poll_timeout(), state.engine.poll_timeout()) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -1025,8 +1181,8 @@ fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollR
     };
     SipralPollResult {
         size: size_of::<SipralPollResult>(),
-        events_delivered: counted.delivered,
-        events_unclaimed: counted.unclaimed,
+        events_delivered: 0,
+        events_unclaimed: unclaimed,
         transmits_discarded: 0,
         has_deadline: u32::from(deadline.is_some()),
         next_poll_in_ms: deadline.map_or(0, |at| {
@@ -1035,33 +1191,39 @@ fn run(stack: SipralHandle, state: &mut StackState, now: Instant) -> SipralPollR
     }
 }
 
-/// Take everything the engine has and hand it to the callback.
+/// Take everything the engine has, translated for the callback.
 ///
-/// Calls that ended are forgotten at the end rather than as their news goes
-/// out: the media of a call is reported after the signalling that ended it, and
-/// a handle retired in between would leave the last word about a call naming
-/// nothing.
-fn drain(stack: SipralHandle, state: &mut StackState, now: Instant, counted: &mut Counted) {
+/// Calls that ended are forgotten at the end rather than as their news is
+/// translated: the media of a call is reported after the signalling that ended
+/// it, and a handle retired in between would leave the last word about a call
+/// naming nothing.
+fn drain(
+    stack: SipralHandle,
+    state: &mut StackState,
+    now: Instant,
+    raised: &mut Vec<Delivery>,
+    unclaimed: &mut usize,
+) {
     let mut ended: Vec<CallHandle> = Vec::new();
     while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
         match event {
-            Event::Signalling(raised) => {
-                if let UaEvent::CallEnded { call, .. } = raised {
+            Event::Signalling(said) => {
+                if let UaEvent::CallEnded { call, .. } = said {
                     ended.push(call);
                 }
-                if let UaEvent::CallForked { call, sibling } = raised
+                if let UaEvent::CallForked { call, sibling } = said
                     && state.manages(call)
                 {
                     // the branch was offered exactly what its parent was, and
                     // the engine has already given it a stream of its own
                     state.manage(sibling);
                 }
-                signalling(stack, state, &raised, counted);
+                signalling(stack, state, said, raised, unclaimed);
             }
-            Event::Media { call, event } => media(stack, state, call, &event, counted),
+            Event::Media { call, event } => media(stack, state, call, &event, raised, unclaimed),
             // the facade is free to grow a vocabulary faster than this ABI,
             // and a number counted is more honest than a kind invented
-            _ => counted.unclaimed(),
+            _ => *unclaimed = unclaimed.saturating_add(1),
         }
     }
     for call in ended {
@@ -1073,45 +1235,55 @@ fn drain(stack: SipralHandle, state: &mut StackState, now: Instant, counted: &mu
 fn signalling(
     stack: SipralHandle,
     state: &mut StackState,
-    raised: &UaEvent,
-    counted: &mut Counted,
+    said: UaEvent,
+    raised: &mut Vec<Delivery>,
+    unclaimed: &mut usize,
 ) {
     // a re-offer on a call this stack describes has already been answered by
     // the engine, inside the poll that produced this. Handing it to the
     // application would be asking for an answer that is already on the wire,
     // and the application hears the outcome as a media event instead.
-    if let UaEvent::Reoffer { call, .. } = *raised
+    if let UaEvent::Reoffer { call, .. } = said
         && state.manages(call)
     {
         return;
     }
+    // shared rather than owned outright, so that the bytes the translation
+    // points into stay where they are however often the delivery moves
+    let said = Arc::new(said);
     let mut known = Vocabulary {
         stack,
         agent: &state.agent,
         accounts: &mut state.accounts,
         calls: &mut state.calls,
     };
-    let Some(event) = crate::event::translate(&mut known, raised) else {
-        counted.unclaimed();
+    let Some(event) = crate::event::translate(&mut known, &said) else {
+        *unclaimed = unclaimed.saturating_add(1);
         return;
     };
-    state.deliver(&event);
-    counted.delivered();
+    raised.push(Delivery {
+        event,
+        _raised: Some(said),
+        _reason: None,
+        _record: None,
+    });
 }
 
 fn media(
     stack: SipralHandle,
     state: &mut StackState,
     call: CallHandle,
-    raised: &MediaEvent,
-    counted: &mut Counted,
+    said: &MediaEvent,
+    raised: &mut Vec<Delivery>,
+    unclaimed: &mut usize,
 ) {
-    // both of these outlive the delivery and neither can be borrowed from the
-    // event: a sentence has to be formatted and a record has to be converted
-    // before either has a shape C can read
-    let reason = crate::event::media_reason(raised);
-    let record = match *raised {
-        MediaEvent::Ended(ref cost) => Some(stream_stats(cost)),
+    // neither of these can be borrowed from the event: a sentence has to be
+    // formatted and a record converted before either has a shape C can read,
+    // and both travel with the delivery because they are read after this poll
+    // has let the stack go
+    let reason = crate::event::media_reason(said);
+    let record = match *said {
+        MediaEvent::Ended(ref cost) => Some(Arc::new(stream_stats(cost))),
         _ => None,
     };
     let mut known = Vocabulary {
@@ -1121,13 +1293,17 @@ fn media(
         calls: &mut state.calls,
     };
     let Some(event) =
-        crate::event::media(&mut known, call, raised, reason.as_deref(), record.as_ref())
+        crate::event::media(&mut known, call, said, reason.as_deref(), record.as_deref())
     else {
-        counted.unclaimed();
+        *unclaimed = unclaimed.saturating_add(1);
         return;
     };
-    state.deliver(&event);
-    counted.delivered();
+    raised.push(Delivery {
+        event,
+        _raised: None,
+        _reason: reason,
+        _record: record,
+    });
 }
 
 #[cfg(test)]
@@ -1142,6 +1318,7 @@ pub(crate) mod tests {
     use crate::media::SipralToggle;
     use crate::status::SipralStatus;
     use sipral::Codec;
+    use std::cell::{Cell, RefCell};
     use std::ffi::{c_char, c_void};
     use std::ptr;
 
@@ -1959,8 +2136,11 @@ pub(crate) mod tests {
         );
     }
 
+    /// Nothing is held while the callback runs, so calling back into the
+    /// stack from inside it is an ordinary call: neither refused nor a
+    /// deadlock.
     #[test]
-    fn calling_back_into_a_stack_from_its_own_callback_is_busy_and_not_a_deadlock() {
+    fn calling_back_into_a_stack_from_its_own_callback_is_an_ordinary_call() {
         let mut observed = Observed::default();
         let (status, handle) = create(&config(poll_again, &mut observed));
         assert_eq!(status, SipralStatus::Ok);
@@ -1968,20 +2148,50 @@ pub(crate) mod tests {
             unsafe { sipral_stack_poll(handle, 0, ptr::null_mut()) },
             SipralStatus::Ok
         );
-        assert_eq!(observed.reentrant_status, Some(SipralStatus::Busy));
+        assert_eq!(
+            observed.reentrant_status,
+            Some(SipralStatus::Ok),
+            "the poll made from inside the callback was refused: {}",
+            last_error_text()
+        );
         assert!(
             last_error_text().is_empty(),
-            "the poll succeeded, so what failed inside it is not this thread's last error"
+            "both polls succeeded, so nothing is this thread's last error"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The half of the promise a binding author will actually hit: any thread
+    /// may call, one at a time, and the one that arrives while another is
+    /// inside gets a status rather than a wait, a deadlock or a fault.
     #[test]
     fn a_second_thread_calling_in_while_the_stack_is_held_is_told_so() {
-        // The test above covers one thread re-entering itself. This is the
-        // other half of the same promise, and the half a binding author will
-        // actually hit: any thread may call, one at a time, and the one that
-        // loses gets a status rather than a deadlock or a fault.
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let refused =
+            super::with_stack(handle, |_| {
+                // the stack is held for as long as this runs, which is the whole
+                // of the window its lock is still held for
+                Ok(std::thread::spawn(move || unsafe {
+                    sipral_stack_poll(handle, 0, ptr::null_mut())
+                })
+                .join()
+                .expect("the thread finished"))
+            })
+            .expect("the stack is live");
+        assert_eq!(refused, SipralStatus::Busy);
+        assert_eq!(
+            unsafe { sipral_stack_poll(handle, 0, ptr::null_mut()) },
+            SipralStatus::Ok,
+            "and the stack is free again once the first call is done"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// While the callback runs the stack is not held, so a second thread that
+    /// polls at that moment is not refused either.
+    #[test]
+    fn a_second_thread_polling_while_the_callback_runs_is_not_refused() {
         let mut observed = Observed::default();
         let (status, handle) = create(&config(poll_from_another_thread, &mut observed));
         assert_eq!(status, SipralStatus::Ok);
@@ -1989,7 +2199,85 @@ pub(crate) mod tests {
             unsafe { sipral_stack_poll(handle, 0, ptr::null_mut()) },
             SipralStatus::Ok
         );
-        assert_eq!(observed.reentrant_status, Some(SipralStatus::Busy));
+        assert_eq!(observed.reentrant_status, Some(SipralStatus::Ok));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What a callback that polls from inside itself saw. Cells, because the
+    /// callback may be entered again while an earlier call of it is still
+    /// running, and two mutable borrows of one value would be a test that is
+    /// unsound in exactly the case it exists to catch.
+    #[derive(Default)]
+    struct Nested {
+        depth: Cell<usize>,
+        deepest: Cell<usize>,
+        account: Cell<SipralHandle>,
+        kinds: RefCell<Vec<SipralEventKind>>,
+        registered: Cell<Option<SipralStatus>>,
+        inner: Cell<Option<(SipralStatus, usize)>>,
+    }
+
+    /// On the first event, register an account — which raises an event of its
+    /// own on the next poll — and poll again from inside the callback.
+    unsafe extern "C" fn register_and_poll_from_inside(
+        event: *const SipralEvent,
+        user_data: *mut c_void,
+    ) {
+        let nested = unsafe { &*user_data.cast::<Nested>() };
+        let event = unsafe { &*event };
+        nested.depth.set(nested.depth.get().saturating_add(1));
+        nested
+            .deepest
+            .set(nested.deepest.get().max(nested.depth.get()));
+        nested.kinds.borrow_mut().push(event.kind);
+        if event.kind == SipralEventKind::Started {
+            nested.registered.set(Some(unsafe {
+                crate::account::sipral_account_register(event.stack, nested.account.get(), 0)
+            }));
+            let mut inner = poll_result();
+            let status = unsafe { sipral_stack_poll(event.stack, 0, &raw mut inner) };
+            nested.inner.set(Some((status, inner.events_delivered)));
+        }
+        nested.depth.set(nested.depth.get().saturating_sub(1));
+    }
+
+    /// A poll from inside the callback does the stack's work and leaves what
+    /// it raised to the delivery already under way. Delivered there instead,
+    /// the new event would reach the callback before the one it is still
+    /// handling had returned, and ahead of anything else still queued.
+    #[test]
+    fn what_a_poll_from_inside_the_callback_raises_waits_its_turn() {
+        let mut observed = Observed::default();
+        let nested = Nested::default();
+        let (handle, account) = crate::call::tests::media_line(&mut observed, |config| {
+            config.event_callback = Some(register_and_poll_from_inside);
+            config.event_user_data = ptr::from_ref(&nested).cast_mut().cast::<c_void>();
+        });
+        nested.account.set(account);
+
+        let result = poll(handle, 0);
+        assert_eq!(nested.registered.get(), Some(SipralStatus::Ok));
+        assert_eq!(
+            nested.inner.get(),
+            Some((SipralStatus::Ok, 0)),
+            "the inner poll delivered its own events"
+        );
+        assert_eq!(
+            nested.deepest.get(),
+            1,
+            "the callback was entered again before it had returned"
+        );
+        assert_eq!(
+            *nested.kinds.borrow(),
+            [
+                SipralEventKind::Started,
+                SipralEventKind::RegistrationChanged
+            ]
+        );
+        assert_eq!(
+            result.events_delivered, 2,
+            "the outer poll delivered what the inner one raised"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2087,6 +2375,10 @@ pub(crate) mod tests {
     fn what_the_stack_holds_can_move_between_threads() {
         const fn moves<T: Send>() {}
         moves::<sipral_ua::UserAgent>();
+        // every call's session is inside the engine, and `StackState` asserts
+        // `Send` for all of it; this is what keeps that assertion honest now
+        // that a session is also reached from the threads carrying its audio
+        moves::<sipral::MediaEngine>();
     }
 
     #[test]

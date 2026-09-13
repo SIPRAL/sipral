@@ -332,7 +332,7 @@ impl Pair {
             .expect("the frame encodes")
             .map(|datagram| datagram.payload.to_vec())
             .expect("a frame that is neither held nor suppressed goes out");
-        let session = self
+        let mut session = self
             .callee
             .engine
             .session(remote)
@@ -347,7 +347,7 @@ impl Pair {
     /// One frame of audio each way, and the frame the far end played.
     fn exchange(&mut self, call: CallHandle, remote: CallHandle, tone: &[i16]) -> Vec<i16> {
         let outbound = {
-            let session = self
+            let mut session = self
                 .caller
                 .engine
                 .session(call)
@@ -358,7 +358,7 @@ impl Pair {
                 .map(|datagram| datagram.payload.to_vec())
         };
         if let Some(mut datagram) = outbound {
-            let session = self
+            let mut session = self
                 .callee
                 .engine
                 .session(remote)
@@ -375,7 +375,7 @@ impl Pair {
                 "the far end refused a packet: {arrival:?}"
             );
         }
-        let session = self
+        let mut session = self
             .callee
             .engine
             .session(remote)
@@ -395,15 +395,15 @@ impl Pair {
         let mut sent = 0;
         let mut believed = 0;
         let mut pending = Vec::new();
-        while let Some((_, datagram)) = self.caller.engine.poll_rtcp(self.now) {
-            pending.push((datagram.payload.to_vec(), true));
+        while let Some((_, _, payload)) = self.caller.engine.poll_rtcp(self.now) {
+            pending.push((payload, true));
         }
-        while let Some((_, datagram)) = self.callee.engine.poll_rtcp(self.now) {
-            pending.push((datagram.payload.to_vec(), false));
+        while let Some((_, _, payload)) = self.callee.engine.poll_rtcp(self.now) {
+            pending.push((payload, false));
         }
         for (mut datagram, from_caller) in pending {
             sent += 1;
-            let (session, from) = if from_caller {
+            let (mut session, from) = if from_caller {
                 (
                     self.callee.engine.session(remote).expect("media"),
                     "192.0.2.1:40001".parse().expect("an address"),
@@ -530,14 +530,9 @@ fn a_live_call_says_why_every_other_candidate_was_not_chosen() {
     // the callee cannot do the caller's first choice, so the offer of it goes
     // nowhere; both ends do PCMA and PCMU, and the callee's answer names PCMA
     // first
-    let candidates = pair
-        .caller
-        .engine
-        .session(call)
-        .expect("media")
-        .codec_candidates();
+    let session = pair.caller.engine.session(call).expect("media");
     assert_eq!(
-        candidates,
+        session.codec_candidates(),
         [
             CodecCandidate {
                 codec: UNMATCHED.1,
@@ -554,7 +549,7 @@ fn a_live_call_says_why_every_other_candidate_was_not_chosen() {
         ]
     );
     assert_eq!(
-        pair.caller.engine.session(call).expect("media").codec(),
+        session.codec(),
         Codec::Pcma,
         "the chosen entry has to agree with what the call actually settled on"
     );
@@ -702,8 +697,10 @@ fn spoken(catalog: CodecCatalog) -> Spoken {
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
     let remote = pair.callee.call().expect("the callee knows the call");
-    let session = pair.caller.engine.session(call).expect("media");
-    let (frame, rate) = (session.frame_samples(), session.sample_rate());
+    let (frame, rate) = {
+        let session = pair.caller.engine.session(call).expect("media");
+        (session.frame_samples(), session.sample_rate())
+    };
     let mut samples = vec![0_i16; frame];
     let mut phase = 0_u32;
     let mut first = Vec::new();
@@ -1054,7 +1051,7 @@ fn a_processor_is_handed_the_audio_the_call_played() {
 
     let frames = Arc::new(Mutex::new(Vec::new()));
     let frame = {
-        let session = pair
+        let mut session = pair
             .callee
             .engine
             .session(remote)
@@ -1105,7 +1102,7 @@ fn detaching_says_whether_there_was_anything_to_detach() {
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
 
-    let session = pair
+    let mut session = pair
         .caller
         .engine
         .session(call)
@@ -1129,7 +1126,7 @@ fn a_render_delay_longer_than_any_device_is_refused_rather_than_kept() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
-    let session = pair
+    let mut session = pair
         .caller
         .engine
         .session(call)
@@ -1165,7 +1162,7 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     let remote = pair.callee.call().expect("the callee knows the call");
 
     let frame = {
-        let session = pair
+        let mut session = pair
             .caller
             .engine
             .session(call)
@@ -1229,7 +1226,7 @@ fn a_call_with_no_event_type_refuses_a_digit_instead_of_dropping_it() {
         .with_dtmf(false);
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
-    let session = pair
+    let mut session = pair
         .caller
         .engine
         .session(call)
@@ -1248,7 +1245,7 @@ fn a_dial_string_with_a_bad_character_queues_nothing_at_all() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
-    let session = pair
+    let mut session = pair
         .caller
         .engine
         .session(call)
@@ -1337,7 +1334,7 @@ fn hold_reaches_the_media_and_resume_gives_it_back() {
     pair.caller.drain(pair.now, false);
     pair.settle();
 
-    let held = pair.callee.engine.session(remote).expect("media");
+    let mut held = pair.callee.engine.session(remote).expect("media");
     assert_eq!(held.direction(), Direction::RecvOnly);
     assert!(!held.is_sending(), "the held end is still sending");
     assert!(held.is_receiving(), "the held end has stopped listening");
@@ -1345,6 +1342,7 @@ fn hold_reaches_the_media_and_resume_gives_it_back() {
         held.capture(&[100; 160]).expect("no error").is_none(),
         "a held stream put a packet on the wire"
     );
+    drop(held);
 
     pair.caller
         .agent
@@ -1353,7 +1351,7 @@ fn hold_reaches_the_media_and_resume_gives_it_back() {
     pair.caller.drain(pair.now, false);
     pair.settle();
 
-    let resumed = pair.callee.engine.session(remote).expect("media");
+    let mut resumed = pair.callee.engine.session(remote).expect("media");
     assert_eq!(resumed.direction(), Direction::SendRecv);
     assert!(resumed.capture(&[100; 160]).expect("no error").is_some());
 }
@@ -1385,7 +1383,7 @@ fn the_round_trip_time_comes_back_from_rtcp() {
             .capture(&samples)
             .expect("it encodes")
             .map(|out| out.payload.to_vec());
-        let session = pair.caller.engine.session(call).expect("media");
+        let mut session = pair.caller.engine.session(call).expect("media");
         if let Some(mut datagram) = back {
             session.receive(&mut datagram, callee_media(), pair.now);
         }
@@ -1394,6 +1392,7 @@ fn the_round_trip_time_comes_back_from_rtcp() {
         // would be measured as one here
         let mut played = vec![0_i16; session.frame_samples()];
         session.playback(&mut played);
+        drop(session);
         let (sent, believed) = pair.exchange_control(call, remote);
         assert_eq!(sent, believed, "a report was refused at tick {tick}");
         crossed += sent;
@@ -1623,7 +1622,7 @@ fn a_recording_takes_both_directions_of_a_live_call() {
             .expect("the far end speaks too");
         pair.advance();
     }
-    let session = pair.callee.engine.session(remote).expect("media");
+    let mut session = pair.callee.engine.session(remote).expect("media");
     assert!(session.is_recording());
     assert_eq!(session.recorded(), Some(Duration::from_millis(200)));
     session.stop_recording().expect("the recording stops");
@@ -1656,7 +1655,7 @@ fn a_recording_cannot_be_started_twice_on_one_call() {
     let mut pair = Pair::new(catalog);
     let call = pair.connect();
 
-    let session = pair.caller.engine.session(call).expect("media");
+    let mut session = pair.caller.engine.session(call).expect("media");
     session
         .start_recording(Box::new(Buffer::new()))
         .expect("the first one starts");
@@ -1664,20 +1663,23 @@ fn a_recording_cannot_be_started_twice_on_one_call() {
         session.start_recording(Box::new(Buffer::new())),
         Err(MediaError::AlreadyRecording)
     );
-    assert_eq!(
-        pair.caller
-            .engine
-            .session(call)
-            .expect("media")
-            .stop_recording()
-            .and_then(|()| pair
-                .caller
-                .engine
-                .session(call)
-                .expect("media")
-                .stop_recording()),
-        Err(MediaError::NotRecording)
-    );
+    drop(session);
+    // two statements rather than one expression: a guard lives to the end of
+    // the statement that took it, and a second one taken inside it on the same
+    // thread is refused rather than left waiting for the first
+    let first = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording();
+    let second = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording();
+    assert_eq!(first.and(second), Err(MediaError::NotRecording));
 }
 
 /// A recording that is still running when the call ends has to be closed, or
@@ -2144,7 +2146,7 @@ fn talk(pair: &mut Pair, call: CallHandle, packets: usize) -> Vec<u8> {
     let mut last = Vec::new();
     for _ in 0..packets {
         tone(&mut samples, 8_000, &mut phase);
-        let session = pair.caller.engine.session(call).expect("media");
+        let mut session = pair.caller.engine.session(call).expect("media");
         let frame = vec![0_i16; session.frame_samples()];
         let audio = if samples.len() == frame.len() {
             samples.clone()
@@ -2154,6 +2156,7 @@ fn talk(pair: &mut Pair, call: CallHandle, packets: usize) -> Vec<u8> {
         if let Some(out) = session.capture(&audio).expect("it encodes") {
             last = out.payload.to_vec();
         }
+        drop(session);
         pair.advance();
     }
     last
@@ -2356,7 +2359,7 @@ fn a_codec_change_keeps_the_processor_and_the_render_delay_the_device_reported()
     let remote = pair.callee.call().expect("the callee knows the call");
 
     {
-        let session = pair.caller.engine.session(call).expect("media");
+        let mut session = pair.caller.engine.session(call).expect("media");
         session.attach_processor(Box::new(Heard(Arc::new(Mutex::new(Vec::new())))));
         session
             .set_render_delay(Duration::from_millis(40))
@@ -2402,7 +2405,7 @@ fn a_codec_change_that_moves_the_rate_keeps_the_processor_too() {
 
     re_offer_onto_g722(&mut pair, remote);
 
-    let session = pair.caller.engine.session(call).expect("media");
+    let mut session = pair.caller.engine.session(call).expect("media");
     assert_eq!(session.codec(), Codec::G722);
     assert!(
         session.has_processor(),
@@ -2457,14 +2460,15 @@ fn audio_still_crosses_after_a_codec_change() {
             .expect("it encodes")
             .map(|out| out.payload.to_vec());
         if let Some(mut datagram) = outbound {
-            let session = pair.callee.engine.session(remote).expect("media");
+            let mut session = pair.callee.engine.session(remote).expect("media");
             if session.receive(&mut datagram, caller_media(), pair.now) == Arrival::Queued {
                 queued += 1;
             }
         }
-        let session = pair.callee.engine.session(remote).expect("media");
+        let mut session = pair.callee.engine.session(remote).expect("media");
         heard = vec![0_i16; session.frame_samples()];
         session.playback(&mut heard);
+        drop(session);
         pair.advance();
     }
 

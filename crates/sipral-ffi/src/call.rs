@@ -1115,7 +1115,7 @@ a=recvonly\r\n";
     }
 
     /// Name an account on a stack that already exists.
-    fn account_on(handle: SipralHandle) -> SipralHandle {
+    pub(crate) fn account_on(handle: SipralHandle) -> SipralHandle {
         let config = account_config();
         let mut account = SIPRAL_HANDLE_NONE;
         let status =

@@ -355,7 +355,7 @@ enum class SipralMediaFault(val value: Int) {
 }
 
 /**
- * What a datagram handed to sipral_call_media_receive turned out to be.
+ * What a datagram handed to sipral_media_receive turned out to be.
  */
 enum class SipralArrival(val value: Int) {
     /**
@@ -394,7 +394,7 @@ enum class SipralArrival(val value: Int) {
 }
 
 /**
- * Where the frame sipral_call_playback just produced came from.
+ * Where the frame sipral_media_playback just produced came from.
  */
 enum class SipralPlayback(val value: Int) {
     /**
@@ -563,7 +563,9 @@ enum class SipralEventKind(val value: Int) {
      * Audio is running: the negotiation settled and an RTP session is open.
      *
      * A4's reporting half and the first half of D5: `payload.media.codec` is
-     * what the two ends agreed on, and `sipral_call_media_info` says the rest.
+     * what the two ends agreed on. This is the moment to mint the call's
+     * media handle with `sipral_call_media`, and `sipral_media_info` on it
+     * says the rest.
      */
     MEDIA_STARTED(21),
     /**
@@ -1238,8 +1240,8 @@ data class SipralMediaInfo(
      */
     val frameMs: Long,
     /**
-     * Samples in one frame: exactly what sipral_call_playback fills and
-     * what sipral_call_capture wants.
+     * Samples in one frame: exactly what sipral_media_playback fills and
+     * what sipral_media_capture wants.
      */
     val frameSamples: Long,
     /**
@@ -1508,17 +1510,19 @@ internal object SipralNative {
     external fun sipral_codec_count(count: LongArray): Int
     external fun sipral_codec_at(index: Long, info: LongArray): Int
     external fun sipral_stack_codec_order(stack: Long, outCodecs: IntArray, count: LongArray): Int
-    external fun sipral_call_media_info(stack: Long, call: Long, info: LongArray): Int
-    external fun sipral_call_statistics(stack: Long, call: Long, nowMs: Long, stats: LongArray): Int
-    external fun sipral_call_media_receive(stack: Long, call: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
-    external fun sipral_call_playback(stack: Long, call: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
-    external fun sipral_call_capture(stack: Long, call: Long, samples: ShortArray, packet: Long): Int
-    external fun sipral_stack_poll_rtcp(stack: Long, nowMs: Long, call: LongArray, packet: Long): Int
-    external fun sipral_call_dialling(stack: Long, call: Long, dialling: LongArray, waiting: LongArray): Int
-    external fun sipral_call_stop_dialling(stack: Long, call: Long): Int
-    external fun sipral_call_record_start(stack: Long, call: Long, path: ByteArray): Int
-    external fun sipral_call_record_stop(stack: Long, call: Long): Int
-    external fun sipral_call_record_state(stack: Long, call: Long, recording: LongArray, recordedMs: LongArray): Int
+    external fun sipral_call_media(stack: Long, call: Long, media: LongArray): Int
+    external fun sipral_media_release(media: Long): Int
+    external fun sipral_media_info(media: Long, info: LongArray): Int
+    external fun sipral_media_statistics(media: Long, nowMs: Long, stats: LongArray): Int
+    external fun sipral_media_receive(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
+    external fun sipral_media_playback(media: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
+    external fun sipral_media_capture(media: Long, samples: ShortArray, packet: Long): Int
+    external fun sipral_media_poll_rtcp(media: Long, nowMs: Long, packet: Long): Int
+    external fun sipral_media_dialling(media: Long, dialling: LongArray, waiting: LongArray): Int
+    external fun sipral_media_stop_dialling(media: Long): Int
+    external fun sipral_media_record_start(media: Long, path: ByteArray): Int
+    external fun sipral_media_record_stop(media: Long): Int
+    external fun sipral_media_record_state(media: Long, recording: LongArray, recordedMs: LongArray): Int
     external fun sipral_stack_poll_transmit(stack: Long, transmit: Long): Int
     external fun sipral_stack_receive_datagram(stack: Long, transport: Long, data: ByteArray, from: ByteArray, to: ByteArray, nowMs: Long): Int
     external fun sipral_stack_receive_stream(stack: Long, transport: Long, data: ByteArray, nowMs: Long): Int
@@ -1859,8 +1863,11 @@ object Sipral {
      * The handle is dead the moment this returns, and a second destroy is
      * `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
      * inside the callback it is still safe: what the poll is holding stays
-     * alive until that poll returns. No account is de-registered and no call
-     * is hung up; a stack that has to leave politely does that first.
+     * alive until that poll returns. Called from inside a frame of one of its
+     * calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
+     * because freeing the stack ends that call's media and the frame is
+     * holding it. No account is de-registered and no call is hung up; a stack
+     * that has to leave politely does that first.
      *
      * Safety
      *
@@ -1878,9 +1885,13 @@ object Sipral {
      * `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
      *
      * The event callback is called from inside this function, on this
-     * thread. A call back into the same stack from the callback returns
-     * `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
-     * itself by answering an event with a request.
+     * thread, and with nothing held: the stack's work is done and its lock
+     * let go before the first event is handed over, so the callback may call
+     * back into the library, this stack included. A poll that finds another
+     * poll of the same stack already delivering — which is what a poll from
+     * inside the callback always finds — does the stack's work and leaves its
+     * events to that one, so they arrive in the order they were raised and
+     * never on two threads at once.
      *
      * `result` may be null for a caller that does not want the counts.
      *
@@ -1906,7 +1917,7 @@ object Sipral {
      *
      * Cheap enough to sample on a timer and ship as telemetry: reading this
      * is one struct copy on top of the call itself, the same as
-     * `sipral_call_statistics` and for the same reason — nothing here walks
+     * `sipral_media_statistics` and for the same reason — nothing here walks
      * the call table or a session to answer.
      *
      * Safety
@@ -2398,6 +2409,54 @@ object Sipral {
     }
 
     /**
+     * A handle on one call's media, written to `out_media`.
+     *
+     * Mint it once the call's negotiation has settled —
+     * `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
+     * that event's callback is allowed — and hand it to every `sipral_media_`
+     * entry point in place of the stack and the call. None of those takes the
+     * stack's lock, which is the point: the thread that carries a call's audio
+     * is never refused a frame because signalling, the event callback or
+     * another call is busy.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
+     * description of the caller's own, or one whose negotiation has not
+     * settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+     *
+     * The handle outlives the call. Once the call ends, or its stack is
+     * destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
+     * on it; a hold, a resume or a change of codec keeps it working. Each
+     * handle minted is released once with `sipral_media_release`, and asking
+     * twice for the same call gives two.
+     *
+     * Safety
+     *
+     * `out_media` must point at one `sipral_handle_t`.
+     */
+    fun callMedia(stack: Long, call: Long): Long {
+        val mediaSlot = LongArray(1)
+        check(SipralNative.sipral_call_media(stack, call, mediaSlot))
+        return mediaSlot[0]
+    }
+
+    /**
+     * Let a media handle go.
+     *
+     * Its one matching free, whether or not its call is still up and whether
+     * or not its stack still exists. The session is not touched: it belongs to
+     * the call and ends when the call does, so releasing a handle mid-call
+     * stops nothing but the handle. A handle released twice is
+     * `SIPRAL_STATUS_STALE_HANDLE` the second time.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value. Reads no memory the caller owns.
+     */
+    fun mediaRelease(media: Long) {
+        check(SipralNative.sipral_media_release(media))
+    }
+
+    /**
      * What one call's media settled on.
      *
      * Safety
@@ -2405,9 +2464,9 @@ object Sipral {
      * `out_info` must point at a `sipral_media_info_t` whose `size` member
      * says how long it is.
      */
-    fun callMediaInfo(stack: Long, call: Long): SipralMediaInfo {
+    fun mediaInfo(media: Long): SipralMediaInfo {
         val infoSlots = LongArray(SipralMediaInfo.SLOTS)
-        check(SipralNative.sipral_call_media_info(stack, call, infoSlots))
+        check(SipralNative.sipral_media_info(media, infoSlots))
         return SipralMediaInfo.of(infoSlots)
     }
 
@@ -2416,24 +2475,23 @@ object Sipral {
      *
      * A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
      * else, because "how long since a packet arrived" is a question about the
-     * present and nothing here reads a clock to answer it. Unlike
-     * `sipral_stack_poll`, this does not move the stack's own clock: it is
-     * read at the frame rate of a user interface, often from the thread that
-     * draws one, and a reading a millisecond behind the last poll is not a
-     * caller bug.
+     * present and nothing here reads a clock to answer it. Like every media
+     * entry point, this does not move the stack's own clock: it is read at the
+     * frame rate of a user interface, often from the thread that draws one,
+     * and a reading a millisecond behind the last poll is not a caller bug.
      *
      * The end-of-call record arrives instead as
      * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-     * gone and there is nothing left here to ask.
+     * gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
      *
      * Safety
      *
      * `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
      * says how long it is.
      */
-    fun callStatistics(stack: Long, call: Long, nowMs: Long): SipralStreamStats {
+    fun mediaStatistics(media: Long, nowMs: Long): SipralStreamStats {
         val statsSlots = LongArray(SipralStreamStats.SLOTS)
-        check(SipralNative.sipral_call_statistics(stack, call, nowMs, statsSlots))
+        check(SipralNative.sipral_media_statistics(media, nowMs, statsSlots))
         return SipralStreamStats.of(statsSlots)
     }
 
@@ -2451,16 +2509,20 @@ object Sipral {
      * `out_arrival` may be null for a caller that does not want to know what
      * the datagram turned out to be.
      *
+     * `now_ms` is when it arrived, on the stack's clock. Reading it here moves
+     * nothing: the network thread and the poll thread read that clock apart,
+     * and a datagram a millisecond behind the last poll is not refused.
+     *
      * Safety
      *
      * `data` must be readable and writable for `len` bytes, `from` readable
      * for `from_len`, and `out_arrival` must point at one `uint32_t` or be
      * null.
      */
-    fun callMediaReceive(stack: Long, call: Long, data: ByteArray, from: String, nowMs: Long): Long {
+    fun mediaReceive(media: Long, data: ByteArray, from: String, nowMs: Long): Long {
         val fromBytes = from.toByteArray(Charsets.UTF_8)
         val arrivalSlot = LongArray(1)
-        check(SipralNative.sipral_call_media_receive(stack, call, data, fromBytes, nowMs, arrivalSlot))
+        check(SipralNative.sipral_media_receive(media, data, fromBytes, nowMs, arrivalSlot))
         return arrivalSlot[0]
     }
 
@@ -2480,10 +2542,10 @@ object Sipral {
      * point at one `size_t` or be null, and `out_source` at one `uint32_t` or
      * be null.
      */
-    fun callPlayback(stack: Long, call: Long, samples: ShortArray): Pair<Long, Long> {
+    fun mediaPlayback(media: Long, samples: ShortArray): Pair<Long, Long> {
         val writtenSlot = LongArray(1)
         val sourceSlot = LongArray(1)
-        check(SipralNative.sipral_call_playback(stack, call, samples, writtenSlot, sourceSlot))
+        check(SipralNative.sipral_media_playback(media, samples, writtenSlot, sourceSlot))
         return Pair(writtenSlot[0], sourceSlot[0])
     }
 
@@ -2506,30 +2568,33 @@ object Sipral {
      * long it is and whose buffers are writable for the capacities beside
      * them.
      */
-    fun callCapture(stack: Long, call: Long, samples: ShortArray, packet: Long) {
-        check(SipralNative.sipral_call_capture(stack, call, samples, packet))
+    fun mediaCapture(media: Long, samples: ShortArray, packet: Long) {
+        check(SipralNative.sipral_media_capture(media, samples, packet))
     }
 
     /**
-     * The control traffic that is due, for whichever call is due one.
+     * The control traffic this call has due.
      *
-     * One at a time, like every other poll here: a caller loops until the
-     * packet comes back with a `len` of zero. `out_call` names the call it
-     * belongs to, and therefore the socket it goes out on.
+     * A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
+     * decides when, and at most one report is due at a time, so one call per
+     * frame is enough.
      *
-     * RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
-     * reports a deadline and whenever a frame goes out; on a call that
-     * negotiated no RTCP it answers zero for ever.
+     * It asks one call rather than the whole stack, so the thread that sends
+     * a call's audio sends its reports too, on the same socket and without
+     * reaching the stack: call it after every frame that goes out, and
+     * whenever `sipral_stack_poll` reports a deadline while a call is not
+     * capturing. On a call that negotiated no RTCP it answers zero for ever.
+     *
+     * `now_ms` is read as the stack reads it and moves nothing, as with every
+     * media entry point.
      *
      * Safety
      *
-     * `out_call` must point at one `sipral_handle_t` or be null, and `packet`
-     * at a `sipral_media_packet_t` as sipral_call_capture describes.
+     * `packet` must point at a `sipral_media_packet_t` as
+     * sipral_media_capture describes.
      */
-    fun stackPollRtcp(stack: Long, nowMs: Long, packet: Long): Long {
-        val callSlot = LongArray(1)
-        check(SipralNative.sipral_stack_poll_rtcp(stack, nowMs, callSlot, packet))
-        return callSlot[0]
+    fun mediaPollRtcp(media: Long, nowMs: Long, packet: Long) {
+        check(SipralNative.sipral_media_poll_rtcp(media, nowMs, packet))
     }
 
     /**
@@ -2545,10 +2610,10 @@ object Sipral {
      * `out_dialling` must point at one `uint32_t` or be null, and
      * `out_waiting` at one `size_t` or be null.
      */
-    fun callDialling(stack: Long, call: Long): Pair<Long, Long> {
+    fun mediaDialling(media: Long): Pair<Long, Long> {
         val diallingSlot = LongArray(1)
         val waitingSlot = LongArray(1)
-        check(SipralNative.sipral_call_dialling(stack, call, diallingSlot, waitingSlot))
+        check(SipralNative.sipral_media_dialling(media, diallingSlot, waitingSlot))
         return Pair(diallingSlot[0], waitingSlot[0])
     }
 
@@ -2562,8 +2627,8 @@ object Sipral {
      *
      * Reads no memory the caller owns.
      */
-    fun callStopDialling(stack: Long, call: Long) {
-        check(SipralNative.sipral_call_stop_dialling(stack, call))
+    fun mediaStopDialling(media: Long) {
+        check(SipralNative.sipral_media_stop_dialling(media))
     }
 
     /**
@@ -2573,18 +2638,21 @@ object Sipral {
      * as the person on the phone presses the button, and each recording is a
      * file of its own: a path written to twice would have two headers in it.
      *
-     * `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
-     * being recorded — two writers on one stream would interleave frames into
-     * both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
-     * refuses the path, with what it said in the last error.
+     * `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
+     * already being recorded — two writers on one stream would interleave
+     * frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
+     * system refuses the path, with what it said in the last error.
+     *
+     * The file is made with this call's media held, so this call's audio
+     * waits for the file system to answer and no other call's does.
      *
      * Safety
      *
      * `path` must be readable for `path_len` bytes.
      */
-    fun callRecordStart(stack: Long, call: Long, path: String) {
+    fun mediaRecordStart(media: Long, path: String) {
         val pathBytes = path.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_record_start(stack, call, pathBytes))
+        check(SipralNative.sipral_media_record_start(media, pathBytes))
     }
 
     /**
@@ -2596,10 +2664,10 @@ object Sipral {
      *
      * Safety
      *
-     * Safe to call with any handle values.
+     * Safe to call with any handle value.
      */
-    fun callRecordStop(stack: Long, call: Long) {
-        check(SipralNative.sipral_call_record_stop(stack, call))
+    fun mediaRecordStop(media: Long) {
+        check(SipralNative.sipral_media_record_stop(media))
     }
 
     /**
@@ -2614,10 +2682,10 @@ object Sipral {
      * `out_recording` must point at one `uint32_t` or be null, and
      * `out_recorded_ms` at one `uint64_t` or be null.
      */
-    fun callRecordState(stack: Long, call: Long): Pair<Long, Long> {
+    fun mediaRecordState(media: Long): Pair<Long, Long> {
         val recordingSlot = LongArray(1)
         val recordedMsSlot = LongArray(1)
-        check(SipralNative.sipral_call_record_state(stack, call, recordingSlot, recordedMsSlot))
+        check(SipralNative.sipral_media_record_state(media, recordingSlot, recordedMsSlot))
         return Pair(recordingSlot[0], recordedMsSlot[0])
     }
 

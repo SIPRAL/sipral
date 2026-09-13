@@ -27,7 +27,15 @@
 /// estimate, a noise spectrum, an automatic gain's current level. Nothing
 /// in this crate reads that state; the trait only says how frames go in and
 /// come out.
-pub trait Processor {
+///
+/// `Send`, because the call it belongs to is. Its frames are handed over by
+/// whichever thread carries the call's audio, and the session that owns the
+/// processor is reached from those threads as well as from the one that runs
+/// signalling, so the processor has to be able to move between them. The
+/// alternative was the library asserting that of an implementation somebody
+/// else wrote, which is a promise it has no way to keep; an implementation
+/// that cannot move is one no real audio device API could drive anyway.
+pub trait Processor: Send {
     /// Process one frame of near-end audio in place: the signal captured
     /// from the microphone, about to be encoded and sent.
     ///

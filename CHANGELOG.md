@@ -699,6 +699,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **A call's audio no longer waits on the stack, and the event callback runs
+  with nothing held.** `sipral_stack_poll` holds the stack only while it works
+  and delivers afterwards, from a queue the stack owns, so the callback may call
+  back into the library and events still arrive in order and on one thread at
+  a time. Every per-call media entry point takes a media handle from the new
+  `sipral_call_media` instead of the stack and the call, is renamed
+  `sipral_media_…` to match, and never takes the stack's lock; the handle is
+  freed with `sipral_media_release`, answers `SIPRAL_STATUS_WRONG_STATE` once
+  its call or stack is gone, and `SIPRAL_STATUS_BUSY` only when a thread
+  re-enters its own session — which a processor calling into its call's stack
+  is told as well. `sipral_media_poll_rtcp` asks one call rather than
+  the stack. Underneath, each `MediaSession` has a lock of its own,
+  `Processor` requires `Send`, `MediaEngine::session` hands out a guard,
+  `MediaEngine::share` a `SessionShare`, and `MediaEngine::poll_rtcp` returns
+  the octets rather than a borrow.
+
 - **The derived constant names in two bindings were nonsense, and are not any
   more.** `SIPRAL_FEATURE_OPUS` — the one symbol a hardware customer is told
   to check for — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,

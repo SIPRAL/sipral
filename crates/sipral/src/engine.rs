@@ -70,7 +70,8 @@ use crate::counters::Counters;
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
 use crate::keying::{self, SrtpPolicy};
-use crate::session::{Datagram, MediaConfig, MediaSession, StreamIdentity};
+use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+use crate::share::{self, Held, SessionGuard, SessionShare};
 
 /// The media type this stack negotiates. There is no video, deliberately, and
 /// an offered stream of anything else is refused rather than half-taken.
@@ -149,7 +150,11 @@ pub struct MediaEngine {
     clock: WallClock,
     /// Ordered rather than hashed so that two runs of the same test drain
     /// events in the same order.
-    sessions: BTreeMap<CallHandle, MediaSession>,
+    ///
+    /// Each behind a lock of its own, and this is the one strong reference to
+    /// each: a thread that carries a call's audio reaches it through a
+    /// [`SessionShare`], which works for as long as the entry is here.
+    sessions: BTreeMap<CallHandle, Held>,
     calls: BTreeMap<CallHandle, Managed>,
     events: VecDeque<(CallHandle, MediaEvent)>,
     /// The RTCP goodbyes of calls that have ended, waiting to be polled.
@@ -233,15 +238,69 @@ impl MediaEngine {
         self.counters
     }
 
-    /// One call's media, once there is any.
+    /// One call's media, once there is any, held until the guard is dropped.
+    ///
+    /// Waits for a thread that is working on the session through a
+    /// [`SessionShare`] to finish its frame. `None` as well for a thread that
+    /// is already inside this call's session through a share, which would
+    /// otherwise wait for itself for ever.
+    ///
+    /// The guard keeps the engine borrowed exclusively, so nothing else can be
+    /// asked of the engine while it is alive: every other way into the engine
+    /// may take the same session's lock, and a thread that did so while holding
+    /// the guard would be waiting for itself.
+    ///
+    /// ```compile_fail
+    /// fn next_wake(engine: &mut sipral::MediaEngine, call: sipral::CallHandle) {
+    ///     let session = engine.session(call);
+    ///     let _ = engine.poll_timeout();
+    ///     drop(session);
+    /// }
+    /// ```
     #[must_use]
-    pub fn session(&mut self, call: CallHandle) -> Option<&mut MediaSession> {
-        self.sessions.get_mut(&call)
+    pub fn session(&mut self, call: CallHandle) -> Option<SessionGuard<'_>> {
+        self.sessions.get(&call).and_then(SessionGuard::of)
+    }
+
+    /// A way to one call's media for a thread that does not have this
+    /// engine — the one that carries the call's audio, while signalling runs
+    /// on another.
+    ///
+    /// `None` until the negotiation has settled and the session exists. The
+    /// share stops reaching the session when the call ends or this engine is
+    /// dropped, and a change of codec, a hold or a resume leave it working:
+    /// those change the session rather than replace it.
+    #[must_use]
+    pub fn share(&self, call: CallHandle) -> Option<SessionShare> {
+        self.sessions.get(&call).map(SessionShare::of)
     }
 
     /// The calls that have media running.
     pub fn active(&self) -> impl Iterator<Item = CallHandle> + '_ {
         self.sessions.keys().copied()
+    }
+}
+
+impl Drop for MediaEngine {
+    /// Every session this engine still holds ends with it.
+    ///
+    /// Two things have to happen here and cannot happen later. A WAVE header
+    /// carries two lengths that are only known when a recording stops, so a
+    /// recording whose recorder was dropped rather than closed is a file a
+    /// player calls corrupt, and this is the last moment anything can patch
+    /// them — however the engine goes, including with a stack destroyed from
+    /// inside its own event callback. And a [`SessionShare`] handed to a thread
+    /// that carries audio has to stop reaching its session once the engine
+    /// that ran the call's signalling is gone, including a share already
+    /// waiting for the lock while this runs.
+    fn drop(&mut self) {
+        for held in self.sessions.values() {
+            let mut slot = share::lock(held);
+            slot.ended = true;
+            // there is nobody left to tell, and a failure here means the sink
+            // was already refusing the audio it was given
+            let _ = slot.session.stop_recording();
+        }
     }
 }
 
@@ -419,9 +478,13 @@ impl MediaEngine {
     }
 
     /// Time has passed: every session's stall watchdog gets a look.
+    ///
+    /// One session at a time, each for as long as a look takes, so a thread
+    /// in the middle of a frame on one call holds this up by that frame and
+    /// holds up no other call's.
     pub fn handle_timeout(&mut self, now: Instant) {
-        for session in self.sessions.values_mut() {
-            session.handle_timeout(now);
+        for held in self.sessions.values() {
+            share::lock(held).session.handle_timeout(now);
         }
     }
 
@@ -431,7 +494,7 @@ impl MediaEngine {
     pub fn poll_timeout(&self) -> Option<Instant> {
         self.sessions
             .values()
-            .filter_map(MediaSession::poll_timeout)
+            .filter_map(|held| share::lock(held).session.poll_timeout())
             .min()
     }
 
@@ -455,25 +518,37 @@ impl MediaEngine {
         self.farewells.pop_front()
     }
 
-    /// A control datagram that is due, and the call to send it for.
+    /// A control datagram that is due, the call to send it for, and where it
+    /// goes.
     ///
     /// One at a time, like every other poll here. A caller loops until it
     /// answers `None`.
+    ///
+    /// The octets are copied out rather than lent, because they are written
+    /// into the session's own buffer and the session is only held for as long
+    /// as this call runs. A report is due a few times a minute per call, so
+    /// the copy costs nothing the audio path would notice; a thread that
+    /// carries one call's audio can ask that call alone with
+    /// [`MediaSession::poll_rtcp`] through a [`SessionShare`] instead.
     #[must_use]
-    pub fn poll_rtcp(&mut self, now: Instant) -> Option<(CallHandle, Datagram<'_>)> {
-        let due = self
-            .sessions
-            .iter()
-            .find(|(_, session)| session.rtcp_deadline_passed(now))
-            .map(|(call, _)| *call)?;
-        let session = self.sessions.get_mut(&due)?;
-        session.poll_rtcp(now).map(|datagram| (due, datagram))
+    pub fn poll_rtcp(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        for (call, held) in &self.sessions {
+            let mut slot = share::lock(held);
+            if !slot.session.rtcp_deadline_passed(now) {
+                continue;
+            }
+            return slot
+                .session
+                .poll_rtcp(now)
+                .map(|datagram| (*call, datagram.destination, datagram.payload.to_vec()));
+        }
+        None
     }
 
     /// The first event any session has to report.
-    fn session_event(&mut self) -> Option<(CallHandle, MediaEvent)> {
-        for (call, session) in &mut self.sessions {
-            if let Some(event) = session.poll_event() {
+    fn session_event(&self) -> Option<(CallHandle, MediaEvent)> {
+        for (call, held) in &self.sessions {
+            if let Some(event) = share::lock(held).session.poll_event() {
                 return Some((*call, event));
             }
         }
@@ -652,9 +727,15 @@ impl MediaEngine {
     /// it cost.
     fn release(&mut self, call: CallHandle, now: Instant) {
         self.calls.remove(&call);
-        let Some(mut session) = self.sessions.remove(&call) else {
+        let Some(held) = self.sessions.remove(&call) else {
             return;
         };
+        let mut slot = share::lock(&held);
+        // first, and under the lock: a share that was already waiting for it
+        // finds a call that has ended rather than a stream half taken apart,
+        // and cannot put a frame on the wire after the goodbye below
+        slot.ended = true;
+        let session = &mut slot.session;
         // a recording that is not closed here is a file with zeroes where its
         // two lengths should be
         if let Err(error) = session.stop_recording()
@@ -665,10 +746,9 @@ impl MediaEngine {
         // RFC 3550 §6.6: "If a BYE packet is received ... the participant
         // SHOULD be removed". Saying so is the last thing this stream owes the
         // far end, and the only moment it can: the session is already out of
-        // the map, so nothing an application does afterwards can reach it.
-        // Before this the packet could not be produced at all — `session` is
-        // dropped at the end of this function and `MediaEngine::session` stops
-        // resolving the handle on the line above.
+        // the map and marked ended, so nothing an application does afterwards
+        // can reach it. It is freed when the last reference to it goes, which
+        // is at the end of this function unless a share is mid-frame on it.
         if let Some(datagram) = session.goodbye(now) {
             self.farewells
                 .push_back((call, datagram.destination, datagram.payload.to_vec()));
@@ -720,11 +800,15 @@ impl MediaEngine {
             .media
             .first()
             .map_or_else(Vec::new, |stream| managed.catalog.candidates(stream, codec));
-        match self.sessions.get_mut(&call) {
+        let running = self.sessions.get(&call).map(Arc::clone);
+        if let Some(held) = running {
+            let mut slot = share::lock(&held);
             // the same codec on a session that is already running: a hold, a
             // resume, or a peer that moved its address
-            Some(session) if session.codec() == codec => {
-                match session.adopt(&plan, candidates, now) {
+            if slot.session.codec() == codec {
+                let adopted = slot.session.adopt(&plan, candidates, now);
+                drop(slot);
+                match adopted {
                     Ok(()) => self.events.push_back((
                         call,
                         MediaEvent::Changed {
@@ -737,11 +821,12 @@ impl MediaEngine {
                     // told rather than left to wonder why nothing arrives
                     Err(error) => self.fail(call, error),
                 }
+                return;
             }
-            // a different codec needs a different encoder, a different decoder
-            // and a different frame length, so it needs a different session
-            _ => self.start(call, &plan, codec, candidates, now),
         }
+        // a different codec needs a different encoder, a different decoder
+        // and a different frame length, so it needs a different session
+        self.start(call, &plan, codec, candidates, now);
     }
 
     /// Open the stream for a plan, or carry the one that is running onto a
@@ -765,9 +850,14 @@ impl MediaEngine {
         let frame_length = managed.catalog.frame_length();
         let config = managed.config.clone();
         let identity = managed.identity;
-        let replacing = self.sessions.contains_key(&call);
-        let outcome = match self.sessions.get_mut(&call) {
-            Some(session) => session.reformat(plan, frame_length, &config, candidates, now),
+        let running = self.sessions.get(&call).map(Arc::clone);
+        let replacing = running.is_some();
+        let outcome = match running {
+            Some(held) => {
+                let mut slot = share::lock(&held);
+                slot.session
+                    .reformat(plan, frame_length, &config, candidates, now)
+            }
             None => MediaSession::open(
                 plan,
                 frame_length,
@@ -778,7 +868,7 @@ impl MediaEngine {
                 now,
             )
             .map(|session| {
-                self.sessions.insert(call, session);
+                self.sessions.insert(call, share::hold(session));
             }),
         };
         match outcome {
@@ -1233,6 +1323,7 @@ mod counter_wiring {
     use crate::codec::CodecCatalog;
     use crate::event::{Event, MediaEvent};
     use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+    use crate::share::SessionUnavailable;
 
     const TRANSPORT: TransportId = TransportId(3);
 
@@ -1318,8 +1409,79 @@ mod counter_wiring {
             now,
         )
         .expect("PCMU is always in this build's catalogue");
-        engine.sessions.insert(call, session);
+        engine.sessions.insert(call, crate::share::hold(session));
         (agent, call)
+    }
+
+    /// `MediaEngine::drop` marks every session ended before it lets its own
+    /// reference go. Dropping the map alone already answers `Ended` once
+    /// nothing else keeps a session alive, so that much would pass whether or
+    /// not the flag were ever set; this is the one case the flag actually
+    /// decides — a share that reaches the lock while something else (here,
+    /// this test's own clone, standing in for a thread already inside
+    /// `SessionShare::with`) still holds the session up.
+    #[test]
+    fn a_share_outlives_the_engine_that_minted_it_even_while_something_else_keeps_the_session_alive()
+     {
+        let now = Instant::now();
+        let mut engine = MediaEngine::new(
+            CodecCatalog::new(),
+            MediaConfig::default(),
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            [7; 32],
+        );
+        let (_agent, call) = call_with_a_stalling_session(&mut engine, now);
+        let share = engine.share(call).expect("the session was inserted above");
+        let kept_alive = engine
+            .sessions
+            .get(&call)
+            .cloned()
+            .expect("the session is still in the map");
+
+        drop(engine);
+
+        let mut touched = false;
+        let outcome = share.with(|_session| touched = true);
+        assert_eq!(outcome, Err(SessionUnavailable::Ended));
+        assert!(
+            !touched,
+            "the session was acted on after the engine that ran its signalling was gone"
+        );
+        drop(kept_alive);
+    }
+
+    /// `MediaEngine::release` — the call-ended path, as opposed to the whole
+    /// engine going away — marks the same flag for the same reason: a share
+    /// already on its way to the lock when a call ends must find out rather
+    /// than touch a session mid-teardown, even though something else (again,
+    /// this test's own clone) is still keeping that session allocated.
+    #[test]
+    fn releasing_a_call_ends_its_share_even_while_something_else_keeps_the_session_alive() {
+        let now = Instant::now();
+        let mut engine = MediaEngine::new(
+            CodecCatalog::new(),
+            MediaConfig::default(),
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            [9; 32],
+        );
+        let (_agent, call) = call_with_a_stalling_session(&mut engine, now);
+        let share = engine.share(call).expect("the session was inserted above");
+        let kept_alive = engine
+            .sessions
+            .get(&call)
+            .cloned()
+            .expect("the session is still in the map");
+
+        engine.release(call, now);
+
+        let mut touched = false;
+        let outcome = share.with(|_session| touched = true);
+        assert_eq!(outcome, Err(SessionUnavailable::Ended));
+        assert!(
+            !touched,
+            "the session was acted on after its call had ended"
+        );
+        drop(kept_alive);
     }
 
     #[test]

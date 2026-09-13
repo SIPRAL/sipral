@@ -252,13 +252,10 @@ trusts.
 phase 3 closes before the ABI freezes, because each of these is a shape and a
 shape is permanent once published:
 
-- the real-time media path shares the stack lock that `sipral_stack_poll`
-  holds across the application's callback, so the audio thread is answered
-  `SIPRAL_STATUS_BUSY` at the moments a user listens hardest; events are
-  delivered after the lock is released and a call's media has a lock of its
-  own;
-- one monotonic clock per stack is advanced by every entry point, including
-  the ones the network thread calls; media entry points stop advancing it;
+- one monotonic clock per stack is advanced by every signalling entry point,
+  with no room for two threads reading it a moment apart, and it moves even
+  when the call it gated then fails; a small tolerance, and a clock that
+  moves only on success;
 - A1 subscriptions, A7 and D4 lifecycle (suspend, resume, network change,
   rebind — the two registration states the header publishes cannot be
   produced by any C call today), A8 screening before any effect, C2 and C3

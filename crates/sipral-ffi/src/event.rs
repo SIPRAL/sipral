@@ -235,7 +235,9 @@ event_kinds! {
         /// Audio is running: the negotiation settled and an RTP session is open.
         ///
         /// A4's reporting half and the first half of D5: `payload.media.codec` is
-        /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
+        /// what the two ends agreed on. This is the moment to mint the call's
+        /// media handle with `sipral_call_media`, and `sipral_media_info` on it
+        /// says the rest.
         21 = MediaStarted, c"media started";
         /// The session changed under a live call: a hold, a resume, a peer that
         /// moved its media address, or a re-negotiation onto another codec.
@@ -542,9 +544,10 @@ alias! {
     /// The one callback a stack has.
     ///
     /// It is called from inside `sipral_stack_poll`, on the thread that called
-    /// it, with the `user_data` the stack was created with. It must not
-    /// unwind, and it must not call back into the stack it was given: see
-    /// [`crate::stack`].
+    /// it, with the `user_data` the stack was created with, and never on two
+    /// threads at once for one stack. It must not unwind. Nothing is held
+    /// while it runs, so it may call back into the library, the stack it was
+    /// given included: see [`crate::stack`].
     pub type SipralEventCallback = fn(event: *const SipralEvent, user_data: *mut c_void);
 }
 

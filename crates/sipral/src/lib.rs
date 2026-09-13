@@ -27,6 +27,9 @@
 //! - [`MediaEngine`] — the join. It writes the offers, reads the answers,
 //!   attaches a session to a call that is answered and lets it go when the
 //!   call ends.
+//! - [`SessionShare`] — one call's media, for a thread that carries its audio
+//!   while another runs signalling. Each session has its own lock, so neither
+//!   thread waits on the other for longer than a frame.
 //! - Everything `sipral-ua` exports, re-exported, so that an application
 //!   depends on this crate and nothing else.
 //!
@@ -136,6 +139,7 @@ mod keying;
 mod pipeline;
 mod record;
 mod session;
+mod share;
 mod stats;
 #[cfg(test)]
 mod tests;
@@ -152,6 +156,7 @@ pub use event::{Event, MediaEvent};
 pub use keying::SrtpPolicy;
 pub use record::RecordingSink;
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
+pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 pub use stats::StreamStatistics;
 
 /// What the negotiation produces and consumes, from the layer that owns the

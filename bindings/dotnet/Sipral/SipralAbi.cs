@@ -327,7 +327,7 @@ public enum SipralMediaFault : uint
 }
 
 /// <summary>
-/// What a datagram handed to sipral_call_media_receive turned out to be.
+/// What a datagram handed to sipral_media_receive turned out to be.
 /// </summary>
 public enum SipralArrival : uint
 {
@@ -362,7 +362,7 @@ public enum SipralArrival : uint
 }
 
 /// <summary>
-/// Where the frame sipral_call_playback just produced came from.
+/// Where the frame sipral_media_playback just produced came from.
 /// </summary>
 public enum SipralPlayback : uint
 {
@@ -523,7 +523,9 @@ public enum SipralEventKind : uint
     /// Audio is running: the negotiation settled and an RTP session is open.
     ///
     /// A4's reporting half and the first half of D5: `payload.media.codec` is
-    /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
+    /// what the two ends agreed on. This is the moment to mint the call's
+    /// media handle with `sipral_call_media`, and `sipral_media_info` on it
+    /// says the rest.
     /// </summary>
     MediaStarted = 21,
     /// <summary>
@@ -745,9 +747,10 @@ public enum SipralCallEndReason : uint
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
-/// it, with the `user_data` the stack was created with. It must not
-/// unwind, and it must not call back into the stack it was given: see
-/// crate::stack.
+/// it, with the `user_data` the stack was created with, and never on two
+/// threads at once for one stack. It must not unwind. Nothing is held
+/// while it runs, so it may call back into the library, the stack it was
+/// given included: see crate::stack.
 ///
 /// Hand it over as a function pointer: keep the delegate alive for as
 /// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
@@ -1553,8 +1556,8 @@ public struct SipralMediaInfo
     /// </summary>
     public uint FrameMs;
     /// <summary>
-    /// Samples in one frame: exactly what sipral_call_playback fills and
-    /// what sipral_call_capture wants.
+    /// Samples in one frame: exactly what sipral_media_playback fills and
+    /// what sipral_media_capture wants.
     /// </summary>
     public nuint FrameSamples;
     /// <summary>
@@ -2294,37 +2297,43 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_codec_order(ulong stack, uint[] outCodecs, nuint capacity, out nuint count);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_media_info(ulong stack, ulong call, ref SipralMediaInfo outInfo);
+    internal static extern SipralStatus sipral_call_media(ulong stack, ulong call, out ulong media);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_statistics(ulong stack, ulong call, ulong nowMs, ref SipralStreamStats outStats);
+    internal static extern SipralStatus sipral_media_release(ulong media);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_media_receive(ulong stack, ulong call, byte[] data, nuint len, sbyte[] from, nuint fromLen, ulong nowMs, out uint arrival);
+    internal static extern SipralStatus sipral_media_info(ulong media, ref SipralMediaInfo outInfo);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_playback(ulong stack, ulong call, short[] samples, nuint capacity, out nuint written, out uint source);
+    internal static extern SipralStatus sipral_media_statistics(ulong media, ulong nowMs, ref SipralStreamStats outStats);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_capture(ulong stack, ulong call, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
+    internal static extern SipralStatus sipral_media_receive(ulong media, byte[] data, nuint len, sbyte[] from, nuint fromLen, ulong nowMs, out uint arrival);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_stack_poll_rtcp(ulong stack, ulong nowMs, out ulong call, ref SipralMediaPacket packet);
+    internal static extern SipralStatus sipral_media_playback(ulong media, short[] samples, nuint capacity, out nuint written, out uint source);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_dialling(ulong stack, ulong call, out uint dialling, out nuint waiting);
+    internal static extern SipralStatus sipral_media_capture(ulong media, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_stop_dialling(ulong stack, ulong call);
+    internal static extern SipralStatus sipral_media_poll_rtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_record_start(ulong stack, ulong call, sbyte[] path, nuint pathLen);
+    internal static extern SipralStatus sipral_media_dialling(ulong media, out uint dialling, out nuint waiting);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_record_stop(ulong stack, ulong call);
+    internal static extern SipralStatus sipral_media_stop_dialling(ulong media);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_call_record_state(ulong stack, ulong call, out uint recording, out ulong recordedMs);
+    internal static extern SipralStatus sipral_media_record_start(ulong media, sbyte[] path, nuint pathLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_record_stop(ulong media);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_record_state(ulong media, out uint recording, out ulong recordedMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_poll_transmit(ulong stack, ref SipralTransmit transmit);
@@ -2717,8 +2726,11 @@ public static class Sipral
     /// The handle is dead the moment this returns, and a second destroy is
     /// `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
     /// inside the callback it is still safe: what the poll is holding stays
-    /// alive until that poll returns. No account is de-registered and no call
-    /// is hung up; a stack that has to leave politely does that first.
+    /// alive until that poll returns. Called from inside a frame of one of its
+    /// calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
+    /// because freeing the stack ends that call's media and the frame is
+    /// holding it. No account is de-registered and no call is hung up; a stack
+    /// that has to leave politely does that first.
     ///
     /// Safety
     ///
@@ -2737,9 +2749,13 @@ public static class Sipral
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
     ///
     /// The event callback is called from inside this function, on this
-    /// thread. A call back into the same stack from the callback returns
-    /// `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
-    /// itself by answering an event with a request.
+    /// thread, and with nothing held: the stack's work is done and its lock
+    /// let go before the first event is handed over, so the callback may call
+    /// back into the library, this stack included. A poll that finds another
+    /// poll of the same stack already delivering — which is what a poll from
+    /// inside the callback always finds — does the stack's work and leaves its
+    /// events to that one, so they arrive in the order they were raised and
+    /// never on two threads at once.
     ///
     /// `result` may be null for a caller that does not want the counts.
     ///
@@ -2766,7 +2782,7 @@ public static class Sipral
     ///
     /// Cheap enough to sample on a timer and ship as telemetry: reading this
     /// is one struct copy on top of the call itself, the same as
-    /// `sipral_call_statistics` and for the same reason — nothing here walks
+    /// `sipral_media_statistics` and for the same reason — nothing here walks
     /// the call table or a session to answer.
     ///
     /// Safety
@@ -3281,6 +3297,55 @@ public static class Sipral
     }
 
     /// <summary>
+    /// A handle on one call's media, written to `out_media`.
+    ///
+    /// Mint it once the call's negotiation has settled —
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
+    /// that event's callback is allowed — and hand it to every `sipral_media_`
+    /// entry point in place of the stack and the call. None of those takes the
+    /// stack's lock, which is the point: the thread that carries a call's audio
+    /// is never refused a frame because signalling, the event callback or
+    /// another call is busy.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
+    /// description of the caller's own, or one whose negotiation has not
+    /// settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+    ///
+    /// The handle outlives the call. Once the call ends, or its stack is
+    /// destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
+    /// on it; a hold, a resume or a change of codec keeps it working. Each
+    /// handle minted is released once with `sipral_media_release`, and asking
+    /// twice for the same call gives two.
+    ///
+    /// Safety
+    ///
+    /// `out_media` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static ulong CallMedia(ulong stack, ulong call)
+    {
+        Check(NativeMethods.sipral_call_media(stack, call, out var media));
+        return media;
+    }
+
+    /// <summary>
+    /// Let a media handle go.
+    ///
+    /// Its one matching free, whether or not its call is still up and whether
+    /// or not its stack still exists. The session is not touched: it belongs to
+    /// the call and ends when the call does, so releasing a handle mid-call
+    /// stops nothing but the handle. A handle released twice is
+    /// `SIPRAL_STATUS_STALE_HANDLE` the second time.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value. Reads no memory the caller owns.
+    /// </summary>
+    public static void MediaRelease(ulong media)
+    {
+        Check(NativeMethods.sipral_media_release(media));
+    }
+
+    /// <summary>
     /// What one call's media settled on.
     ///
     /// Safety
@@ -3288,10 +3353,10 @@ public static class Sipral
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
     /// </summary>
-    public static SipralMediaInfo CallMediaInfo(ulong stack, ulong call)
+    public static SipralMediaInfo MediaInfo(ulong media)
     {
         var info = SipralMediaInfo.Sized();
-        Check(NativeMethods.sipral_call_media_info(stack, call, ref info));
+        Check(NativeMethods.sipral_media_info(media, ref info));
         return info;
     }
 
@@ -3300,25 +3365,24 @@ public static class Sipral
     ///
     /// A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
     /// else, because "how long since a packet arrived" is a question about the
-    /// present and nothing here reads a clock to answer it. Unlike
-    /// `sipral_stack_poll`, this does not move the stack's own clock: it is
-    /// read at the frame rate of a user interface, often from the thread that
-    /// draws one, and a reading a millisecond behind the last poll is not a
-    /// caller bug.
+    /// present and nothing here reads a clock to answer it. Like every media
+    /// entry point, this does not move the stack's own clock: it is read at the
+    /// frame rate of a user interface, often from the thread that draws one,
+    /// and a reading a millisecond behind the last poll is not a caller bug.
     ///
     /// The end-of-call record arrives instead as
     /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-    /// gone and there is nothing left here to ask.
+    /// gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// Safety
     ///
     /// `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
     /// says how long it is.
     /// </summary>
-    public static SipralStreamStats CallStatistics(ulong stack, ulong call, ulong nowMs)
+    public static SipralStreamStats MediaStatistics(ulong media, ulong nowMs)
     {
         var stats = SipralStreamStats.Sized();
-        Check(NativeMethods.sipral_call_statistics(stack, call, nowMs, ref stats));
+        Check(NativeMethods.sipral_media_statistics(media, nowMs, ref stats));
         return stats;
     }
 
@@ -3336,18 +3400,22 @@ public static class Sipral
     /// `out_arrival` may be null for a caller that does not want to know what
     /// the datagram turned out to be.
     ///
+    /// `now_ms` is when it arrived, on the stack's clock. Reading it here moves
+    /// nothing: the network thread and the poll thread read that clock apart,
+    /// and a datagram a millisecond behind the last poll is not refused.
+    ///
     /// Safety
     ///
     /// `data` must be readable and writable for `len` bytes, `from` readable
     /// for `from_len`, and `out_arrival` must point at one `uint32_t` or be
     /// null.
     /// </summary>
-    public static uint CallMediaReceive(ulong stack, ulong call, byte[] data, string from, ulong nowMs)
+    public static uint MediaReceive(ulong media, byte[] data, string from, ulong nowMs)
     {
         var fromBytes = Encoding.UTF8.GetBytes(from);
         var fromSigned = new sbyte[fromBytes.Length];
         Buffer.BlockCopy(fromBytes, 0, fromSigned, 0, fromBytes.Length);
-        Check(NativeMethods.sipral_call_media_receive(stack, call, data, (nuint)data.Length, fromSigned, (nuint)fromSigned.Length, nowMs, out var arrival));
+        Check(NativeMethods.sipral_media_receive(media, data, (nuint)data.Length, fromSigned, (nuint)fromSigned.Length, nowMs, out var arrival));
         return arrival;
     }
 
@@ -3367,9 +3435,9 @@ public static class Sipral
     /// point at one `size_t` or be null, and `out_source` at one `uint32_t` or
     /// be null.
     /// </summary>
-    public static (nuint Written, uint Source) CallPlayback(ulong stack, ulong call, short[] samples)
+    public static (nuint Written, uint Source) MediaPlayback(ulong media, short[] samples)
     {
-        Check(NativeMethods.sipral_call_playback(stack, call, samples, (nuint)samples.Length, out var written, out var source));
+        Check(NativeMethods.sipral_media_playback(media, samples, (nuint)samples.Length, out var written, out var source));
         return (written, source);
     }
 
@@ -3392,31 +3460,35 @@ public static class Sipral
     /// long it is and whose buffers are writable for the capacities beside
     /// them.
     /// </summary>
-    public static void CallCapture(ulong stack, ulong call, short[] samples, ref SipralMediaPacket packet)
+    public static void MediaCapture(ulong media, short[] samples, ref SipralMediaPacket packet)
     {
-        Check(NativeMethods.sipral_call_capture(stack, call, samples, (nuint)samples.Length, ref packet));
+        Check(NativeMethods.sipral_media_capture(media, samples, (nuint)samples.Length, ref packet));
     }
 
     /// <summary>
-    /// The control traffic that is due, for whichever call is due one.
+    /// The control traffic this call has due.
     ///
-    /// One at a time, like every other poll here: a caller loops until the
-    /// packet comes back with a `len` of zero. `out_call` names the call it
-    /// belongs to, and therefore the socket it goes out on.
+    /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
+    /// decides when, and at most one report is due at a time, so one call per
+    /// frame is enough.
     ///
-    /// RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
-    /// reports a deadline and whenever a frame goes out; on a call that
-    /// negotiated no RTCP it answers zero for ever.
+    /// It asks one call rather than the whole stack, so the thread that sends
+    /// a call's audio sends its reports too, on the same socket and without
+    /// reaching the stack: call it after every frame that goes out, and
+    /// whenever `sipral_stack_poll` reports a deadline while a call is not
+    /// capturing. On a call that negotiated no RTCP it answers zero for ever.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point.
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t` or be null, and `packet`
-    /// at a `sipral_media_packet_t` as sipral_call_capture describes.
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// sipral_media_capture describes.
     /// </summary>
-    public static ulong StackPollRtcp(ulong stack, ulong nowMs, ref SipralMediaPacket packet)
+    public static void MediaPollRtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet)
     {
-        Check(NativeMethods.sipral_stack_poll_rtcp(stack, nowMs, out var call, ref packet));
-        return call;
+        Check(NativeMethods.sipral_media_poll_rtcp(media, nowMs, ref packet));
     }
 
     /// <summary>
@@ -3432,9 +3504,9 @@ public static class Sipral
     /// `out_dialling` must point at one `uint32_t` or be null, and
     /// `out_waiting` at one `size_t` or be null.
     /// </summary>
-    public static (uint Dialling, nuint Waiting) CallDialling(ulong stack, ulong call)
+    public static (uint Dialling, nuint Waiting) MediaDialling(ulong media)
     {
-        Check(NativeMethods.sipral_call_dialling(stack, call, out var dialling, out var waiting));
+        Check(NativeMethods.sipral_media_dialling(media, out var dialling, out var waiting));
         return (dialling, waiting);
     }
 
@@ -3448,9 +3520,9 @@ public static class Sipral
     ///
     /// Reads no memory the caller owns.
     /// </summary>
-    public static void CallStopDialling(ulong stack, ulong call)
+    public static void MediaStopDialling(ulong media)
     {
-        Check(NativeMethods.sipral_call_stop_dialling(stack, call));
+        Check(NativeMethods.sipral_media_stop_dialling(media));
     }
 
     /// <summary>
@@ -3460,21 +3532,24 @@ public static class Sipral
     /// as the person on the phone presses the button, and each recording is a
     /// file of its own: a path written to twice would have two headers in it.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
-    /// being recorded — two writers on one stream would interleave frames into
-    /// both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
-    /// refuses the path, with what it said in the last error.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
+    /// already being recorded — two writers on one stream would interleave
+    /// frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
+    /// system refuses the path, with what it said in the last error.
+    ///
+    /// The file is made with this call's media held, so this call's audio
+    /// waits for the file system to answer and no other call's does.
     ///
     /// Safety
     ///
     /// `path` must be readable for `path_len` bytes.
     /// </summary>
-    public static void CallRecordStart(ulong stack, ulong call, string path)
+    public static void MediaRecordStart(ulong media, string path)
     {
         var pathBytes = Encoding.UTF8.GetBytes(path);
         var pathSigned = new sbyte[pathBytes.Length];
         Buffer.BlockCopy(pathBytes, 0, pathSigned, 0, pathBytes.Length);
-        Check(NativeMethods.sipral_call_record_start(stack, call, pathSigned, (nuint)pathSigned.Length));
+        Check(NativeMethods.sipral_media_record_start(media, pathSigned, (nuint)pathSigned.Length));
     }
 
     /// <summary>
@@ -3486,11 +3561,11 @@ public static class Sipral
     ///
     /// Safety
     ///
-    /// Safe to call with any handle values.
+    /// Safe to call with any handle value.
     /// </summary>
-    public static void CallRecordStop(ulong stack, ulong call)
+    public static void MediaRecordStop(ulong media)
     {
-        Check(NativeMethods.sipral_call_record_stop(stack, call));
+        Check(NativeMethods.sipral_media_record_stop(media));
     }
 
     /// <summary>
@@ -3505,9 +3580,9 @@ public static class Sipral
     /// `out_recording` must point at one `uint32_t` or be null, and
     /// `out_recorded_ms` at one `uint64_t` or be null.
     /// </summary>
-    public static (uint Recording, ulong RecordedMs) CallRecordState(ulong stack, ulong call)
+    public static (uint Recording, ulong RecordedMs) MediaRecordState(ulong media)
     {
-        Check(NativeMethods.sipral_call_record_state(stack, call, out var recording, out var recordedMs));
+        Check(NativeMethods.sipral_media_record_state(media, out var recording, out var recordedMs));
         return (recording, recordedMs);
     }
 

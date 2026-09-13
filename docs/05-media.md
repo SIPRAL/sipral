@@ -663,6 +663,15 @@ implementation is usually one component: gain control has to run on what
 cancellation left behind, not on the raw capture, and noise suppression the
 same.
 
+A processor is `Send`. The session it is attached to has a lock of its own and
+is reached from the threads that carry the call's audio as well as from the one
+that runs signalling, so whatever the processor owns has to be able to move
+between them; `docs/08-ffi.md` has the reasoning. It runs with that session
+held, so a processor that reaches back into its own call through the C ABI — by
+the call's media handle or by its stack — is refused rather than left waiting
+for itself. Through a `MediaEngine` it can reach, it would wait for itself, and
+must not.
+
 The trait takes two frames covering the same span of time — the microphone's,
 and the far end's audio as it left the loudspeaker while that microphone was
 open. Only the second is hard to produce, and producing it is the work this

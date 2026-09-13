@@ -211,7 +211,7 @@ public enum SipralMediaFault: UInt32, Sendable {
     case other = 8
 }
 
-/// What a datagram handed to sipral_call_media_receive turned out to be.
+/// What a datagram handed to sipral_media_receive turned out to be.
 public enum SipralArrival: UInt32, Sendable {
     /// Something this ABI has no word for.
     case unknown = 0
@@ -231,7 +231,7 @@ public enum SipralArrival: UInt32, Sendable {
     case controlRefused = 5
 }
 
-/// Where the frame sipral_call_playback just produced came from.
+/// Where the frame sipral_media_playback just produced came from.
 public enum SipralPlayback: UInt32, Sendable {
     /// Something this ABI has no word for.
     case unknown = 0
@@ -336,7 +336,9 @@ public enum SipralEventKind: UInt32, Sendable {
     /// Audio is running: the negotiation settled and an RTP session is open.
     ///
     /// A4's reporting half and the first half of D5: `payload.media.codec` is
-    /// what the two ends agreed on, and `sipral_call_media_info` says the rest.
+    /// what the two ends agreed on. This is the moment to mint the call's
+    /// media handle with `sipral_call_media`, and `sipral_media_info` on it
+    /// says the rest.
     case mediaStarted = 21
     /// The session changed under a live call: a hold, a resume, a peer that
     /// moved its media address, or a re-negotiation onto another codec.
@@ -923,8 +925,11 @@ public enum Sipral {
     /// The handle is dead the moment this returns, and a second destroy is
     /// `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
     /// inside the callback it is still safe: what the poll is holding stays
-    /// alive until that poll returns. No account is de-registered and no call
-    /// is hung up; a stack that has to leave politely does that first.
+    /// alive until that poll returns. Called from inside a frame of one of its
+    /// calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
+    /// because freeing the stack ends that call's media and the frame is
+    /// holding it. No account is de-registered and no call is hung up; a stack
+    /// that has to leave politely does that first.
     ///
     /// Safety
     ///
@@ -941,9 +946,13 @@ public enum Sipral {
     /// `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
     ///
     /// The event callback is called from inside this function, on this
-    /// thread. A call back into the same stack from the callback returns
-    /// `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
-    /// itself by answering an event with a request.
+    /// thread, and with nothing held: the stack's work is done and its lock
+    /// let go before the first event is handed over, so the callback may call
+    /// back into the library, this stack included. A poll that finds another
+    /// poll of the same stack already delivering — which is what a poll from
+    /// inside the callback always finds — does the stack's work and leaves its
+    /// events to that one, so they arrive in the order they were raised and
+    /// never on two threads at once.
     ///
     /// `result` may be null for a caller that does not want the counts.
     ///
@@ -968,7 +977,7 @@ public enum Sipral {
     ///
     /// Cheap enough to sample on a timer and ship as telemetry: reading this
     /// is one struct copy on top of the call itself, the same as
-    /// `sipral_call_statistics` and for the same reason — nothing here walks
+    /// `sipral_media_statistics` and for the same reason — nothing here walks
     /// the call table or a session to answer.
     ///
     /// Safety
@@ -1460,15 +1469,61 @@ public enum Sipral {
         return count
     }
 
+    /// A handle on one call's media, written to `out_media`.
+    ///
+    /// Mint it once the call's negotiation has settled —
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
+    /// that event's callback is allowed — and hand it to every `sipral_media_`
+    /// entry point in place of the stack and the call. None of those takes the
+    /// stack's lock, which is the point: the thread that carries a call's audio
+    /// is never refused a frame because signalling, the event callback or
+    /// another call is busy.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
+    /// description of the caller's own, or one whose negotiation has not
+    /// settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+    ///
+    /// The handle outlives the call. Once the call ends, or its stack is
+    /// destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
+    /// on it; a hold, a resume or a change of codec keeps it working. Each
+    /// handle minted is released once with `sipral_media_release`, and asking
+    /// twice for the same call gives two.
+    ///
+    /// Safety
+    ///
+    /// `out_media` must point at one `sipral_handle_t`.
+    public static func callMedia(stack: SipralHandle, call: SipralHandle) throws -> SipralHandle {
+        var media = SipralHandle()
+        let status = sipral_call_media(stack, call, &media)
+        try check(status)
+        return media
+    }
+
+    /// Let a media handle go.
+    ///
+    /// Its one matching free, whether or not its call is still up and whether
+    /// or not its stack still exists. The session is not touched: it belongs to
+    /// the call and ends when the call does, so releasing a handle mid-call
+    /// stops nothing but the handle. A handle released twice is
+    /// `SIPRAL_STATUS_STALE_HANDLE` the second time.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value. Reads no memory the caller owns.
+    public static func mediaRelease(media: SipralHandle) throws {
+        let status = sipral_media_release(media)
+        try check(status)
+    }
+
     /// What one call's media settled on.
     ///
     /// Safety
     ///
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
-    public static func callMediaInfo(stack: SipralHandle, call: SipralHandle) throws -> sipral_media_info_t {
+    public static func mediaInfo(media: SipralHandle) throws -> sipral_media_info_t {
         var info = sipral_media_info_t.sized()
-        let status = sipral_call_media_info(stack, call, &info)
+        let status = sipral_media_info(media, &info)
         try check(status)
         return info
     }
@@ -1477,23 +1532,22 @@ public enum Sipral {
     ///
     /// A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
     /// else, because "how long since a packet arrived" is a question about the
-    /// present and nothing here reads a clock to answer it. Unlike
-    /// `sipral_stack_poll`, this does not move the stack's own clock: it is
-    /// read at the frame rate of a user interface, often from the thread that
-    /// draws one, and a reading a millisecond behind the last poll is not a
-    /// caller bug.
+    /// present and nothing here reads a clock to answer it. Like every media
+    /// entry point, this does not move the stack's own clock: it is read at the
+    /// frame rate of a user interface, often from the thread that draws one,
+    /// and a reading a millisecond behind the last poll is not a caller bug.
     ///
     /// The end-of-call record arrives instead as
     /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-    /// gone and there is nothing left here to ask.
+    /// gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// Safety
     ///
     /// `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
     /// says how long it is.
-    public static func callStatistics(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws -> sipral_stream_stats_t {
+    public static func mediaStatistics(media: SipralHandle, nowMs: UInt64) throws -> sipral_stream_stats_t {
         var stats = sipral_stream_stats_t.sized()
-        let status = sipral_call_statistics(stack, call, nowMs, &stats)
+        let status = sipral_media_statistics(media, nowMs, &stats)
         try check(status)
         return stats
     }
@@ -1511,18 +1565,22 @@ public enum Sipral {
     /// `out_arrival` may be null for a caller that does not want to know what
     /// the datagram turned out to be.
     ///
+    /// `now_ms` is when it arrived, on the stack's clock. Reading it here moves
+    /// nothing: the network thread and the poll thread read that clock apart,
+    /// and a datagram a millisecond behind the last poll is not refused.
+    ///
     /// Safety
     ///
     /// `data` must be readable and writable for `len` bytes, `from` readable
     /// for `from_len`, and `out_arrival` must point at one `uint32_t` or be
     /// null.
-    public static func callMediaReceive(stack: SipralHandle, call: SipralHandle, data: inout [UInt8], from: String, nowMs: UInt64) throws -> UInt32 {
+    public static func mediaReceive(media: SipralHandle, data: inout [UInt8], from: String, nowMs: UInt64) throws -> UInt32 {
         var arrival = UInt32()
         let status =
-            data.withUnsafeMutableBufferPointer { p2 in
-                Array(from.utf8).withUnsafeBufferPointer { raw3 in
-                    raw3.withMemoryRebound(to: CChar.self) { p3 in
-                        sipral_call_media_receive(stack, call, p2.baseAddress, p2.count, p3.baseAddress, p3.count, nowMs, &arrival)
+            data.withUnsafeMutableBufferPointer { p1 in
+                Array(from.utf8).withUnsafeBufferPointer { raw2 in
+                    raw2.withMemoryRebound(to: CChar.self) { p2 in
+                        sipral_media_receive(media, p1.baseAddress, p1.count, p2.baseAddress, p2.count, nowMs, &arrival)
                     }
                 }
             }
@@ -1544,12 +1602,12 @@ public enum Sipral {
     /// `samples` must be writable for `capacity` `int16_t`, `out_written` must
     /// point at one `size_t` or be null, and `out_source` at one `uint32_t` or
     /// be null.
-    public static func callPlayback(stack: SipralHandle, call: SipralHandle, samples: inout [Int16]) throws -> (written: Int, source: UInt32) {
+    public static func mediaPlayback(media: SipralHandle, samples: inout [Int16]) throws -> (written: Int, source: UInt32) {
         var written = Int()
         var source = UInt32()
         let status =
-            samples.withUnsafeMutableBufferPointer { p2 in
-                sipral_call_playback(stack, call, p2.baseAddress, p2.count, &written, &source)
+            samples.withUnsafeMutableBufferPointer { p1 in
+                sipral_media_playback(media, p1.baseAddress, p1.count, &written, &source)
             }
         try check(status)
         return (written: written, source: source)
@@ -1572,33 +1630,36 @@ public enum Sipral {
     /// must point at a `sipral_media_packet_t` whose `size` member says how
     /// long it is and whose buffers are writable for the capacities beside
     /// them.
-    public static func callCapture(stack: SipralHandle, call: SipralHandle, samples: [Int16], packet: inout sipral_media_packet_t) throws {
+    public static func mediaCapture(media: SipralHandle, samples: [Int16], packet: inout sipral_media_packet_t) throws {
         let status =
-            samples.withUnsafeBufferPointer { p2 in
-                sipral_call_capture(stack, call, p2.baseAddress, p2.count, &packet)
+            samples.withUnsafeBufferPointer { p1 in
+                sipral_media_capture(media, p1.baseAddress, p1.count, &packet)
             }
         try check(status)
     }
 
-    /// The control traffic that is due, for whichever call is due one.
+    /// The control traffic this call has due.
     ///
-    /// One at a time, like every other poll here: a caller loops until the
-    /// packet comes back with a `len` of zero. `out_call` names the call it
-    /// belongs to, and therefore the socket it goes out on.
+    /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
+    /// decides when, and at most one report is due at a time, so one call per
+    /// frame is enough.
     ///
-    /// RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
-    /// reports a deadline and whenever a frame goes out; on a call that
-    /// negotiated no RTCP it answers zero for ever.
+    /// It asks one call rather than the whole stack, so the thread that sends
+    /// a call's audio sends its reports too, on the same socket and without
+    /// reaching the stack: call it after every frame that goes out, and
+    /// whenever `sipral_stack_poll` reports a deadline while a call is not
+    /// capturing. On a call that negotiated no RTCP it answers zero for ever.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point.
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t` or be null, and `packet`
-    /// at a `sipral_media_packet_t` as sipral_call_capture describes.
-    public static func stackPollRtcp(stack: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws -> SipralHandle {
-        var call = SipralHandle()
-        let status = sipral_stack_poll_rtcp(stack, nowMs, &call, &packet)
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// sipral_media_capture describes.
+    public static func mediaPollRtcp(media: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws {
+        let status = sipral_media_poll_rtcp(media, nowMs, &packet)
         try check(status)
-        return call
     }
 
     /// Whether a digit is going out or waiting to, and how many have not
@@ -1612,10 +1673,10 @@ public enum Sipral {
     ///
     /// `out_dialling` must point at one `uint32_t` or be null, and
     /// `out_waiting` at one `size_t` or be null.
-    public static func callDialling(stack: SipralHandle, call: SipralHandle) throws -> (dialling: UInt32, waiting: Int) {
+    public static func mediaDialling(media: SipralHandle) throws -> (dialling: UInt32, waiting: Int) {
         var dialling = UInt32()
         var waiting = Int()
-        let status = sipral_call_dialling(stack, call, &dialling, &waiting)
+        let status = sipral_media_dialling(media, &dialling, &waiting)
         try check(status)
         return (dialling: dialling, waiting: waiting)
     }
@@ -1628,8 +1689,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Reads no memory the caller owns.
-    public static func callStopDialling(stack: SipralHandle, call: SipralHandle) throws {
-        let status = sipral_call_stop_dialling(stack, call)
+    public static func mediaStopDialling(media: SipralHandle) throws {
+        let status = sipral_media_stop_dialling(media)
         try check(status)
     }
 
@@ -1639,19 +1700,22 @@ public enum Sipral {
     /// as the person on the phone presses the button, and each recording is a
     /// file of its own: a path written to twice would have two headers in it.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
-    /// being recorded — two writers on one stream would interleave frames into
-    /// both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
-    /// refuses the path, with what it said in the last error.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
+    /// already being recorded — two writers on one stream would interleave
+    /// frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
+    /// system refuses the path, with what it said in the last error.
+    ///
+    /// The file is made with this call's media held, so this call's audio
+    /// waits for the file system to answer and no other call's does.
     ///
     /// Safety
     ///
     /// `path` must be readable for `path_len` bytes.
-    public static func callRecordStart(stack: SipralHandle, call: SipralHandle, path: String) throws {
+    public static func mediaRecordStart(media: SipralHandle, path: String) throws {
         let status =
-            Array(path.utf8).withUnsafeBufferPointer { raw2 in
-                raw2.withMemoryRebound(to: CChar.self) { p2 in
-                    sipral_call_record_start(stack, call, p2.baseAddress, p2.count)
+            Array(path.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_media_record_start(media, p1.baseAddress, p1.count)
                 }
             }
         try check(status)
@@ -1665,9 +1729,9 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// Safe to call with any handle values.
-    public static func callRecordStop(stack: SipralHandle, call: SipralHandle) throws {
-        let status = sipral_call_record_stop(stack, call)
+    /// Safe to call with any handle value.
+    public static func mediaRecordStop(media: SipralHandle) throws {
+        let status = sipral_media_record_stop(media)
         try check(status)
     }
 
@@ -1681,10 +1745,10 @@ public enum Sipral {
     ///
     /// `out_recording` must point at one `uint32_t` or be null, and
     /// `out_recorded_ms` at one `uint64_t` or be null.
-    public static func callRecordState(stack: SipralHandle, call: SipralHandle) throws -> (recording: UInt32, recordedMs: UInt64) {
+    public static func mediaRecordState(media: SipralHandle) throws -> (recording: UInt32, recordedMs: UInt64) {
         var recording = UInt32()
         var recordedMs = UInt64()
-        let status = sipral_call_record_state(stack, call, &recording, &recordedMs)
+        let status = sipral_media_record_state(media, &recording, &recordedMs)
         try check(status)
         return (recording: recording, recordedMs: recordedMs)
     }

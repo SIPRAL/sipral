@@ -122,7 +122,7 @@ entry! {
     ///
     /// Cheap enough to sample on a timer and ship as telemetry: reading this
     /// is one struct copy on top of the call itself, the same as
-    /// `sipral_call_statistics` and for the same reason — nothing here walks
+    /// `sipral_media_statistics` and for the same reason — nothing here walks
     /// the call table or a session to answer.
     ///
     /// # Safety

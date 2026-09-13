@@ -13,12 +13,23 @@
 //! # What crosses, and what does not
 //!
 //! No socket and no device, here as everywhere else in this tree. The
-//! application reads a datagram and hands it over
-//! ([`sipral_call_media_receive`]); it takes a frame of PCM and gives it to
-//! whichever device layer it linked ([`sipral_call_playback`]); it takes one
-//! from the microphone and gets a datagram back ([`sipral_call_capture`]); and
-//! it asks for the control traffic that is due ([`sipral_stack_poll_rtcp`]).
-//! Four calls, and between them the whole media path.
+//! application reads a datagram and hands it over ([`sipral_media_receive`]);
+//! it takes a frame of PCM and gives it to whichever device layer it linked
+//! ([`sipral_media_playback`]); it takes one from the microphone and gets a
+//! datagram back ([`sipral_media_capture`]); and it asks for the control
+//! traffic that is due ([`sipral_media_poll_rtcp`]). Four calls, and between
+//! them the whole media path.
+//!
+//! # A handle of its own
+//!
+//! All four, and every other entry point that works on one call's media, take
+//! a media handle from [`sipral_call_media`] rather than the stack and the
+//! call, and none of them takes the stack's lock. Each call's session has a
+//! lock of its own, which waits for a frame in progress on that call and for
+//! nothing else, so the thread that carries a call's audio is never refused a
+//! frame because signalling, the event callback or another call is busy. The
+//! reasoning, and what the handle answers once its call is gone, is in
+//! `docs/08-ffi.md`.
 //!
 //! Samples are 16-bit, one channel, at [`SipralMediaInfo::sample_rate`], and a
 //! frame is exactly [`SipralMediaInfo::frame_samples`] of them. That is the
@@ -43,6 +54,7 @@
 //! error next to the encoder that produced the frame, and one shape for every
 //! address is worth more than the microseconds.
 
+use std::cell::RefCell;
 use std::ffi::c_char;
 use std::net::SocketAddr;
 use std::slice;
@@ -50,14 +62,14 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Arrival, Codec, CodecCatalog, Direction, MediaError, MediaSession, Playback, RtcpPlan,
-    StreamStatistics,
+    SessionShare, SessionUnavailable, StreamStatistics,
 };
 use sipral_core::sdp::SdpError;
 
 use crate::abi::{codes, constants, record};
 use crate::error::{Fail, entry, fail};
-use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
-use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
+use crate::handle::{HandleTable, SipralHandle};
+use crate::stack::{StackState, handle_failed, instant_at, with_stack};
 use crate::status::SipralStatus;
 use crate::text::required_text;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
@@ -190,7 +202,7 @@ codes! {
 }
 
 codes! {
-    /// What a datagram handed to [`sipral_call_media_receive`] turned out to be.
+    /// What a datagram handed to [`sipral_media_receive`] turned out to be.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralArrival: u32 {
         /// Something this ABI has no word for.
@@ -213,7 +225,7 @@ codes! {
 }
 
 codes! {
-    /// Where the frame [`sipral_call_playback`] just produced came from.
+    /// Where the frame [`sipral_media_playback`] just produced came from.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SipralPlayback: u32 {
         /// Something this ABI has no word for.
@@ -293,8 +305,8 @@ record! {
         pub sample_rate: u32,
         /// How long a frame is, in milliseconds.
         pub frame_ms: u32,
-        /// Samples in one frame: exactly what [`sipral_call_playback`] fills and
-        /// what [`sipral_call_capture`] wants.
+        /// Samples in one frame: exactly what [`sipral_media_playback`] fills and
+        /// what [`sipral_media_capture`] wants.
         pub frame_samples: usize,
         /// A [`SipralDirection`].
         pub direction: u32,
@@ -685,40 +697,175 @@ fn ordered(list: &str) -> Result<CodecCatalog, Fail> {
 
 // -- reaching one call's media -----------------------------------------------
 
-/// Do something with one call's media, or say why there is none.
-fn with_session<R>(
+/// Every media handle this process has handed out.
+///
+/// One table for the process, as the stacks have: a handle is a number, and a
+/// number has to be looked up somewhere. Its lock is held for an index and a
+/// reference count, never for a frame and never while anything else is waited
+/// for.
+static MEDIA: HandleTable<MediaEntry> = HandleTable::new();
+
+/// What a media handle names.
+pub(crate) struct MediaEntry {
+    /// The call's session, for as long as the call has one.
+    share: SessionShare,
+    /// The stack that minted the handle, which a thread inside this call's
+    /// media is kept from calling into.
     stack: SipralHandle,
-    call: SipralHandle,
-    act: impl FnOnce(&mut MediaSession) -> Result<R, Fail>,
-) -> Result<R, Fail> {
-    with_stack(stack, |state| act(session_of(state, call)?))
+    /// What `now_ms` of zero means on the stack that minted the handle, kept
+    /// here because that stack is exactly what a media entry point does not
+    /// touch.
+    origin: Instant,
 }
 
-/// The same, at a time the caller names, for the calls that put something on
-/// the wire.
-fn with_session_at<R>(
-    stack: SipralHandle,
-    call: SipralHandle,
-    now_ms: u64,
-    act: impl FnOnce(&mut MediaSession, Instant) -> Result<R, Fail>,
-) -> Result<R, Fail> {
-    with_stack_at(stack, now_ms, |state, now| {
-        act(session_of(state, call)?, now)
-    })
+impl MediaEntry {
+    /// The caller's clock, as the stack that minted this handle reads it.
+    ///
+    /// Neither checked against the stack's last reading nor written back to
+    /// it: a media entry point runs on a thread that reads the clock apart
+    /// from the one that polls, and a reading a millisecond behind the last
+    /// poll is not a caller bug.
+    fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
+        instant_at(self.origin, now_ms)
+    }
 }
 
-pub(crate) fn session_of(
-    state: &mut StackState,
-    call: SipralHandle,
-) -> Result<&mut MediaSession, Fail> {
-    let id = state.calls.get(call).map_err(handle_failed)?;
-    state.engine.session(id).ok_or_else(|| {
-        fail(
+/// Do something with one call's media, or say why not.
+///
+/// The one way in for every entry point that takes a media handle, and the
+/// reason none of them reaches a stack: the table hands over the entry, the
+/// session's own lock is taken — waiting for a thread that is in the middle of
+/// a frame on this call, and for nothing else — and that is all.
+pub(crate) fn with_media<R>(
+    media: SipralHandle,
+    act: impl FnOnce(&mut MediaSession, &MediaEntry) -> Result<R, Fail>,
+) -> Result<R, Fail> {
+    let entry = MEDIA.get(media).map_err(handle_failed)?;
+    let _inside = Inside::enter(entry.stack);
+    match entry.share.with(|session| act(session, &entry)) {
+        Ok(done) => done,
+        Err(SessionUnavailable::Reentered) => Err(fail(
+            SipralStatus::Busy,
+            "this thread is already inside this call's media, further down its own call stack",
+        )),
+        // ended, and whatever the layer below one day adds beside it: either
+        // way there is no session here to act on
+        Err(_) => Err(fail(
             SipralStatus::WrongState,
-            "this call has no media: it was not placed or answered with a media address of its \
-             own, or its negotiation has not settled yet",
-        )
-    })
+            "this call's media has ended: the call is over or its stack was destroyed, and all \
+             that is left to do with the handle is release it",
+        )),
+    }
+}
+
+thread_local! {
+    /// The stacks whose calls' media this thread is working on, innermost last.
+    static INSIDE: RefCell<Vec<SipralHandle>> = const { RefCell::new(Vec::new()) };
+}
+
+/// This thread's mark on a stack, for as long as it is working on the media
+/// of one of that stack's calls.
+struct Inside {
+    stack: SipralHandle,
+}
+
+impl Inside {
+    fn enter(stack: SipralHandle) -> Self {
+        INSIDE.with_borrow_mut(|inside| inside.push(stack));
+        Self { stack }
+    }
+}
+
+impl Drop for Inside {
+    fn drop(&mut self) {
+        INSIDE.with_borrow_mut(|inside| {
+            if let Some(at) = inside.iter().rposition(|stack| *stack == self.stack) {
+                inside.remove(at);
+            }
+        });
+    }
+}
+
+/// Whether this thread is inside a frame of a call on `stack` — which only
+/// code run during that frame, such as a processor, can be when it calls into
+/// the library.
+pub(crate) fn inside_media_of(stack: SipralHandle) -> bool {
+    INSIDE.with_borrow(|inside| inside.contains(&stack))
+}
+
+/// Why a call has no media to name.
+pub(crate) fn no_media() -> Fail {
+    fail(
+        SipralStatus::WrongState,
+        "this call has no media: it was not placed or answered with a media address of its own, \
+         or its negotiation has not settled yet",
+    )
+}
+
+entry! {
+    /// A handle on one call's media, written to `out_media`.
+    ///
+    /// Mint it once the call's negotiation has settled —
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
+    /// that event's callback is allowed — and hand it to every `sipral_media_`
+    /// entry point in place of the stack and the call. None of those takes the
+    /// stack's lock, which is the point: the thread that carries a call's audio
+    /// is never refused a frame because signalling, the event callback or
+    /// another call is busy.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
+    /// description of the caller's own, or one whose negotiation has not
+    /// settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+    ///
+    /// The handle outlives the call. Once the call ends, or its stack is
+    /// destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
+    /// on it; a hold, a resume or a change of codec keeps it working. Each
+    /// handle minted is released once with `sipral_media_release`, and asking
+    /// twice for the same call gives two.
+    ///
+    /// # Safety
+    ///
+    /// `out_media` must point at one `sipral_handle_t`.
+    fn sipral_call_media(stack: SipralHandle, call: SipralHandle, out_media: *mut SipralHandle) {
+        if out_media.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_media is null"));
+        }
+        // stamped with its stack's tag like every other handle a stack mints,
+        // so a media handle is refused by name when handed to the wrong place
+        let (entry, tag) = with_stack(stack, |state| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            let share = state.engine.share(id).ok_or_else(no_media)?;
+            let entry = MediaEntry {
+                share,
+                stack,
+                origin: state.origin(),
+            };
+            Ok((entry, state.tag.tag()))
+        })?;
+        let handle = MEDIA
+            .insert(tag, entry)
+            .map_err(|status| fail(status, "no room for another media handle"))?;
+        unsafe { out_media.write(handle) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// Let a media handle go.
+    ///
+    /// Its one matching free, whether or not its call is still up and whether
+    /// or not its stack still exists. The session is not touched: it belongs to
+    /// the call and ends when the call does, so releasing a handle mid-call
+    /// stops nothing but the handle. A handle released twice is
+    /// `SIPRAL_STATUS_STALE_HANDLE` the second time.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle value. Reads no memory the caller owns.
+    fn sipral_media_release(media: SipralHandle) {
+        MEDIA.remove(media).map_err(handle_failed)?;
+        Ok(())
+    }
 }
 
 // -- what this build contains ------------------------------------------------
@@ -850,12 +997,8 @@ entry! {
     ///
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
-    fn sipral_call_media_info(
-        stack: SipralHandle,
-        call: SipralHandle,
-        out_info: *mut SipralMediaInfo,
-    ) {
-        let info = with_session(stack, call, |session| {
+    fn sipral_media_info(media: SipralHandle, out_info: *mut SipralMediaInfo) {
+        let info = with_media(media, |session, _| {
             // checked before it is filled in, so a caller that got its size
             // wrong is told that and not something about the call
             unsafe { crate::versioned::declared_size(out_info.cast_const()) }?;
@@ -901,33 +1044,27 @@ entry! {
     ///
     /// A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
     /// else, because "how long since a packet arrived" is a question about the
-    /// present and nothing here reads a clock to answer it. Unlike
-    /// `sipral_stack_poll`, this does not move the stack's own clock: it is
-    /// read at the frame rate of a user interface, often from the thread that
-    /// draws one, and a reading a millisecond behind the last poll is not a
-    /// caller bug.
+    /// present and nothing here reads a clock to answer it. Like every media
+    /// entry point, this does not move the stack's own clock: it is read at the
+    /// frame rate of a user interface, often from the thread that draws one,
+    /// and a reading a millisecond behind the last poll is not a caller bug.
     ///
     /// The end-of-call record arrives instead as
     /// `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
-    /// gone and there is nothing left here to ask.
+    /// gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
     ///
     /// # Safety
     ///
     /// `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
     /// says how long it is.
-    fn sipral_call_statistics(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_statistics(
+        media: SipralHandle,
         now_ms: u64,
         out_stats: *mut SipralStreamStats,
     ) {
-        let stats = with_stack(stack, |state| {
+        let stats = with_media(media, |session, entry| {
             unsafe { crate::versioned::declared_size(out_stats.cast_const()) }?;
-            // `instant` rather than `advance`: reading does not move the
-            // stack's clock, so a figure taken a millisecond behind the last
-            // poll is not refused for going backwards
-            let now = state.instant(now_ms)?;
-            let session = session_of(state, call)?;
+            let now = entry.instant(now_ms)?;
             Ok(stream_stats(&session.statistics(now)))
         })?;
         unsafe { write_versioned(out_stats, stats) }
@@ -950,14 +1087,17 @@ entry! {
     /// `out_arrival` may be null for a caller that does not want to know what
     /// the datagram turned out to be.
     ///
+    /// `now_ms` is when it arrived, on the stack's clock. Reading it here moves
+    /// nothing: the network thread and the poll thread read that clock apart,
+    /// and a datagram a millisecond behind the last poll is not refused.
+    ///
     /// # Safety
     ///
     /// `data` must be readable and writable for `len` bytes, `from` readable
     /// for `from_len`, and `out_arrival` must point at one `uint32_t` or be
     /// null.
-    fn sipral_call_media_receive(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_receive(
+        media: SipralHandle,
         data: *mut u8,
         len: usize,
         from: *const c_char,
@@ -975,7 +1115,8 @@ entry! {
             ));
         }
         let peer = unsafe { address(from, from_len, "from") }?;
-        let arrival = with_session_at(stack, call, now_ms, |session, now| {
+        let arrival = with_media(media, |session, entry| {
+            let now = entry.instant(now_ms)?;
             let datagram = unsafe { slice::from_raw_parts_mut(data, len) };
             Ok(session.receive(datagram, peer, now))
         })?;
@@ -1012,9 +1153,8 @@ entry! {
     /// `samples` must be writable for `capacity` `int16_t`, `out_written` must
     /// point at one `size_t` or be null, and `out_source` at one `uint32_t` or
     /// be null.
-    fn sipral_call_playback(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_playback(
+        media: SipralHandle,
         samples: *mut i16,
         capacity: usize,
         out_written: *mut usize,
@@ -1023,7 +1163,7 @@ entry! {
         if samples.is_null() && capacity != 0 {
             return Err(fail(SipralStatus::InvalidArgument, "samples is null"));
         }
-        let played = with_session(stack, call, |session| {
+        let played = with_media(media, |session, _| {
             let frame = session.frame_samples();
             if !out_written.is_null() {
                 unsafe { out_written.write(frame) };
@@ -1073,9 +1213,8 @@ entry! {
     /// must point at a `sipral_media_packet_t` whose `size` member says how
     /// long it is and whose buffers are writable for the capacities beside
     /// them.
-    fn sipral_call_capture(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_capture(
+        media: SipralHandle,
         samples: *const i16,
         sample_count: usize,
         packet: *mut SipralMediaPacket,
@@ -1085,7 +1224,7 @@ entry! {
         if samples.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "samples is null"));
         }
-        with_session(stack, call, |session| {
+        with_media(media, |session, _| {
             let frame = session.frame_samples();
             if sample_count != frame {
                 return Err(fail(
@@ -1105,38 +1244,35 @@ entry! {
 }
 
 entry! {
-    /// The control traffic that is due, for whichever call is due one.
+    /// The control traffic this call has due.
     ///
-    /// One at a time, like every other poll here: a caller loops until the
-    /// packet comes back with a `len` of zero. `out_call` names the call it
-    /// belongs to, and therefore the socket it goes out on.
+    /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
+    /// decides when, and at most one report is due at a time, so one call per
+    /// frame is enough.
     ///
-    /// RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
-    /// reports a deadline and whenever a frame goes out; on a call that
-    /// negotiated no RTCP it answers zero for ever.
+    /// It asks one call rather than the whole stack, so the thread that sends
+    /// a call's audio sends its reports too, on the same socket and without
+    /// reaching the stack: call it after every frame that goes out, and
+    /// whenever `sipral_stack_poll` reports a deadline while a call is not
+    /// capturing. On a call that negotiated no RTCP it answers zero for ever.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point.
     ///
     /// # Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t` or be null, and `packet`
-    /// at a `sipral_media_packet_t` as [`sipral_call_capture`] describes.
-    fn sipral_stack_poll_rtcp(
-        stack: SipralHandle,
-        now_ms: u64,
-        out_call: *mut SipralHandle,
-        packet: *mut SipralMediaPacket,
-    ) {
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// [`sipral_media_capture`] describes.
+    fn sipral_media_poll_rtcp(media: SipralHandle, now_ms: u64, packet: *mut SipralMediaPacket) {
         let mut out = unsafe { read_versioned(packet) }?;
         prepare(&mut out)?;
-        let named = with_stack_at(stack, now_ms, |state, now| {
-            let Some((call, datagram)) = state.engine.poll_rtcp(now) else {
-                return Ok(SIPRAL_HANDLE_NONE);
-            };
-            unsafe { put(&mut out, datagram.destination, datagram.payload) }?;
-            Ok(state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE))
+        with_media(media, |session, entry| {
+            let now = entry.instant(now_ms)?;
+            match session.poll_rtcp(now) {
+                Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
+                None => Ok(()),
+            }
         })?;
-        if !out_call.is_null() {
-            unsafe { out_call.write(named) };
-        }
         unsafe { write_versioned(packet, out) }
     }
 }
@@ -1243,7 +1379,10 @@ pub(crate) fn dial_in_media(
     keys: &str,
     length: Duration,
 ) -> Result<(), Fail> {
-    let session = state.engine.session(call).ok_or_else(|| {
+    // the one media operation reached through the stack, because choosing
+    // between the media and an INFO is a question about the call; it waits
+    // for a frame in progress on this call like any other holder
+    let mut session = state.engine.session(call).ok_or_else(|| {
         fail(
             SipralStatus::WrongState,
             "this call has no media to put a digit in: it was not placed or answered with a media \
@@ -1268,13 +1407,12 @@ entry! {
     ///
     /// `out_dialling` must point at one `uint32_t` or be null, and
     /// `out_waiting` at one `size_t` or be null.
-    fn sipral_call_dialling(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_dialling(
+        media: SipralHandle,
         out_dialling: *mut u32,
         out_waiting: *mut usize,
     ) {
-        let (busy, waiting) = with_session(stack, call, |session| {
+        let (busy, waiting) = with_media(media, |session, _| {
             Ok((session.is_dialling(), session.digits_waiting()))
         })?;
         if !out_dialling.is_null() {
@@ -1296,8 +1434,8 @@ entry! {
     /// # Safety
     ///
     /// Reads no memory the caller owns.
-    fn sipral_call_stop_dialling(stack: SipralHandle, call: SipralHandle) {
-        with_session(stack, call, |session| {
+    fn sipral_media_stop_dialling(media: SipralHandle) {
+        with_media(media, |session, _| {
             session.stop_dialling();
             Ok(())
         })
@@ -1311,23 +1449,27 @@ pub(crate) mod tests {
         Codec, SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralArrival, SipralCodec,
         SipralCodecInfo, SipralDirection, SipralMediaFault, SipralMediaInfo, SipralMediaPacket,
         SipralPlayback, SipralRtcp, SipralStreamStats, SipralToggle, catalog_of, media_failed,
-        named_codec, ordered, sipral_call_capture, sipral_call_media_info,
-        sipral_call_media_receive, sipral_call_playback, sipral_call_statistics, sipral_codec_at,
-        sipral_codec_count, sipral_codec_name, sipral_stack_codec_order, sipral_stack_poll_rtcp,
+        named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
+        sipral_codec_name, sipral_media_capture, sipral_media_dialling, sipral_media_info,
+        sipral_media_playback, sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
+        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
     };
     use crate::call::tests::{
-        PEER_MEDIA, connected, hangup, media_call, media_call_offering, media_call_refused,
-        media_call_tuned, media_line,
+        PEER_MEDIA, account_on, connected, hangup, media_call, media_call_offering,
+        media_call_refused, media_call_tuned, media_line, sent,
     };
     use crate::error::last_error_text;
-    use crate::event::SipralEventKind;
+    use crate::event::{SipralEvent, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::stack::tests::Observed;
     use crate::status::SipralStatus;
-    use sipral::{Capabilities, MediaError};
-    use std::ffi::{CStr, c_char};
+    use sipral::{Capabilities, MediaError, Processor};
+    use std::ffi::{CStr, c_char, c_void};
     use std::net::SocketAddr;
     use std::ptr;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
 
     /// Samples in one frame of the codec every media fixture negotiates:
     /// G.711 at eight kilohertz, twenty milliseconds.
@@ -1431,15 +1573,34 @@ a=sendrecv\r\n";
         }
     }
 
+    /// The media handle of a call that has audio, minted the way a binding
+    /// mints it on `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
+    pub(crate) fn media_of(stack: SipralHandle, call: SipralHandle) -> SipralHandle {
+        let mut media = SIPRAL_HANDLE_NONE;
+        let status = unsafe { sipral_call_media(stack, call, &raw mut media) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(media, SIPRAL_HANDLE_NONE);
+        media
+    }
+
+    /// Let a media handle go, as every one that is minted has to be.
+    pub(crate) fn release(media: SipralHandle) {
+        assert_eq!(
+            unsafe { sipral_media_release(media) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+    }
+
     /// Take the frame that is due for the earpiece.
-    pub(crate) fn play_one(stack: SipralHandle, call: SipralHandle) -> SipralPlayback {
+    pub(crate) fn play_one(media: SipralHandle) -> SipralPlayback {
         let mut samples = [0_i16; FRAME];
         let mut written = 0_usize;
         let mut source = u32::MAX;
         let status = unsafe {
-            sipral_call_playback(
-                stack,
-                call,
+            sipral_media_playback(
+                media,
                 samples.as_mut_ptr(),
                 samples.len(),
                 &raw mut written,
@@ -1458,36 +1619,26 @@ a=sendrecv\r\n";
     }
 
     /// Put one frame on the wire, and say how long the packet was.
-    pub(crate) fn capture_one(stack: SipralHandle, call: SipralHandle, samples: &[i16]) -> usize {
+    pub(crate) fn capture_one(media: SipralHandle, samples: &[i16]) -> usize {
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
         let status = unsafe {
-            sipral_call_capture(
-                stack,
-                call,
-                samples.as_ptr(),
-                samples.len(),
-                &raw mut packet,
-            )
+            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         packet.len
     }
 
-    pub(crate) fn media_info(stack: SipralHandle, call: SipralHandle) -> SipralMediaInfo {
+    pub(crate) fn media_info(media: SipralHandle) -> SipralMediaInfo {
         let mut info = media_info_zeroed();
-        let status = unsafe { sipral_call_media_info(stack, call, &raw mut info) };
+        let status = unsafe { sipral_media_info(media, &raw mut info) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         info
     }
 
-    pub(crate) fn statistics(
-        stack: SipralHandle,
-        call: SipralHandle,
-        now_ms: u64,
-    ) -> SipralStreamStats {
+    pub(crate) fn statistics(media: SipralHandle, now_ms: u64) -> SipralStreamStats {
         let mut read = empty_stats();
-        let status = unsafe { sipral_call_statistics(stack, call, now_ms, &raw mut read) };
+        let status = unsafe { sipral_media_statistics(media, now_ms, &raw mut read) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         read
     }
@@ -1520,17 +1671,15 @@ a=sendrecv\r\n";
 
     /// Hand a datagram to a call as if it had arrived on the media socket.
     pub(crate) fn arrive(
-        stack: SipralHandle,
-        call: SipralHandle,
+        media: SipralHandle,
         datagram: &mut [u8],
         from: &str,
         now_ms: u64,
     ) -> SipralArrival {
         let mut arrival = u32::MAX;
         let status = unsafe {
-            sipral_call_media_receive(
-                stack,
-                call,
+            sipral_media_receive(
+                media,
                 datagram.as_mut_ptr(),
                 datagram.len(),
                 from.as_ptr().cast::<c_char>(),
@@ -1794,13 +1943,14 @@ a=sendrecv\r\n";
         };
         let mut observed = Observed::default();
         let (stack, call) = media_call_offering(&mut observed, order, answer);
+        let media = media_of(stack, call);
         assert_eq!(
-            media_info(stack, call).codec,
+            media_info(media).codec,
             named_codec(Codec::ALL[0]) as u32,
             "the call did not settle on the codec at the top of this build"
         );
 
-        let refused = super::with_session(stack, call, |session| {
+        let refused = super::with_media(media, |session, _| {
             // loud, so that nothing on the way down mistakes it for silence
             // and swallows the frame before the encoder sees it
             Ok(session
@@ -1885,7 +2035,7 @@ a=sendrecv\r\n";
     fn a_call_reports_what_it_negotiated() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
-        let info = media_info(stack, call);
+        let info = media_info(media_of(stack, call));
         assert_eq!(info.codec, SipralCodec::Pcmu as u32);
         assert_eq!(info.payload_type, 0, "the number on the wire");
         assert_eq!(info.clock_rate, 8_000);
@@ -1971,8 +2121,9 @@ a=sendrecv\r\n";
     fn the_statistics_count_what_went_out_and_what_came_in() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
 
-        let idle = statistics(stack, call, 1_100);
+        let idle = statistics(media, 1_100);
         assert_eq!(idle.codec, SipralCodec::Pcmu as u32);
         assert_eq!(idle.packets_sent, 0);
         assert_eq!(idle.packets_received, 0);
@@ -1981,14 +2132,14 @@ a=sendrecv\r\n";
         assert_eq!(idle.suffering, 0);
 
         for _ in 0..5 {
-            assert_eq!(capture_one(stack, call, &[2_000; FRAME]), FRAME + 12);
+            assert_eq!(capture_one(media, &[2_000; FRAME]), FRAME + 12);
         }
         for (index, sequence) in (100..104_u16).enumerate() {
             let mut packet = rtp(sequence, 8_000 + u32::try_from(index).unwrap_or(0) * 160);
-            arrive(stack, call, &mut packet, PEER_MEDIA, 1_100);
+            arrive(media, &mut packet, PEER_MEDIA, 1_100);
         }
 
-        let after = statistics(stack, call, 1_200);
+        let after = statistics(media, 1_200);
         assert_eq!(after.packets_sent, 5);
         assert_eq!(
             after.octets_sent,
@@ -2007,6 +2158,40 @@ a=sendrecv\r\n";
         );
     }
 
+    /// A media entry point reads the caller's clock through the handle it was
+    /// minted with, not through the stack, so a stack that has since been
+    /// polled far ahead does not make a media reading that lags behind it a
+    /// caller bug. Before the media handle existed, `sipral_call_media_receive`
+    /// resolved through the stack and so refused exactly this: a `now_ms`
+    /// behind the stack's own last-polled time was `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    #[test]
+    fn a_datagram_read_on_a_clock_behind_the_stacks_own_is_not_refused() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+
+        // the poll thread's clock runs far ahead of the network thread's
+        crate::stack::tests::poll(stack, 50_000);
+
+        // RFC 3550 A.1 keeps a new source on probation until it has sent two
+        // in a row, so only the last of these is audio arriving rather than
+        // held for probation
+        let mut arrival = SipralArrival::Unknown;
+        for (index, sequence) in (1..4_u16).enumerate() {
+            let mut packet = rtp(sequence, u32::try_from(index).unwrap_or(0) * 160);
+            arrival = arrive(media, &mut packet, PEER_MEDIA, 1_100);
+        }
+        assert_eq!(
+            arrival,
+            SipralArrival::Queued,
+            "a datagram read on a clock behind the stack's own was refused instead of taken"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
     /// A6's other half: the record has to survive the call it is about. The
     /// stream is gone by the time this arrives, so the numbers travel in the
     /// event rather than behind a lookup that would now fail.
@@ -2014,9 +2199,11 @@ a=sendrecv\r\n";
     fn the_end_of_call_record_arrives_after_the_call_that_it_is_about() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         for _ in 0..3 {
-            capture_one(stack, call, &[1_000; FRAME]);
+            capture_one(media, &[1_000; FRAME]);
         }
+        release(media);
         hangup(stack, call, 5_000);
 
         let kinds = observed.kinds();
@@ -2054,12 +2241,12 @@ a=sendrecv\r\n";
     fn a_call_this_stack_describes_nothing_for_has_no_media_to_ask_about() {
         let mut observed = Observed::default();
         let (stack, call) = connected(&mut observed);
-        let mut stats = empty_stats();
+        let mut media = SIPRAL_HANDLE_NONE;
         assert_eq!(
-            unsafe { sipral_call_statistics(stack, call, 2_000, &raw mut stats) },
+            unsafe { sipral_call_media(stack, call, &raw mut media) },
             SipralStatus::WrongState
         );
-        assert_eq!(stats.packets_sent, u64::MAX, "nothing was written");
+        assert_eq!(media, SIPRAL_HANDLE_NONE, "nothing was written");
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
@@ -2076,6 +2263,7 @@ a=sendrecv\r\n";
         let (stack, call) = media_call_tuned(&mut observed, |config| {
             config.media_stall_ms = 400;
         });
+        let media = media_of(stack, call);
         crate::stack::tests::poll(stack, 1_300);
         assert!(
             observed.of(SipralEventKind::MediaStalled).is_empty(),
@@ -2091,13 +2279,13 @@ a=sendrecv\r\n";
                 .is_some_and(|heard| heard.silent_for_ms >= 400),
             "the event does not say how long: {stalled:?}"
         );
-        assert_eq!(media_info(stack, call).stalled, 1);
+        assert_eq!(media_info(media).stalled, 1);
 
         // RFC 3550 A.1 keeps a new source on probation until it has sent two
         // in a row, so one packet is not yet audio arriving
         for (index, sequence) in (200..203_u16).enumerate() {
             let mut packet = rtp(sequence, 16_000 + u32::try_from(index).unwrap_or(0) * 160);
-            arrive(stack, call, &mut packet, PEER_MEDIA, 1_700);
+            arrive(media, &mut packet, PEER_MEDIA, 1_700);
         }
         crate::stack::tests::poll(stack, 1_700);
         let resumed = observed.of(SipralEventKind::MediaResumed);
@@ -2108,7 +2296,7 @@ a=sendrecv\r\n";
                 .is_some_and(|heard| heard.silent_for_ms >= 400),
             "the recovery does not say how long the gap was: {resumed:?}"
         );
-        assert_eq!(media_info(stack, call).stalled, 0);
+        assert_eq!(media_info(media).stalled, 0);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
@@ -2149,15 +2337,13 @@ a=sendrecv\r\n";
             observed.kinds().contains(&SipralEventKind::CallConfirmed),
             "the call itself is untouched"
         );
-        let mut info = SipralMediaInfo {
-            size: size_of::<SipralMediaInfo>(),
-            ..media_info_zeroed()
-        };
+        let mut media = SIPRAL_HANDLE_NONE;
         assert_eq!(
-            unsafe { sipral_call_media_info(stack, call, &raw mut info) },
+            unsafe { sipral_call_media(stack, call, &raw mut media) },
             SipralStatus::WrongState,
-            "and there is no stream to describe"
+            "and there is no stream to hand out a handle for"
         );
+        assert_eq!(media, SIPRAL_HANDLE_NONE);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
@@ -2170,17 +2356,12 @@ a=sendrecv\r\n";
     fn a_captured_frame_comes_back_addressed_to_where_the_audio_goes() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
         let samples = [3_000_i16; FRAME];
         let status = unsafe {
-            sipral_call_capture(
-                stack,
-                call,
-                samples.as_ptr(),
-                samples.len(),
-                &raw mut packet,
-            )
+            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let (payload, destination) = buffers.taken(&packet);
@@ -2205,16 +2386,16 @@ a=sendrecv\r\n";
     fn a_frame_of_the_wrong_length_is_refused_before_it_is_encoded() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
         let short = [0_i16; 80];
-        let status = unsafe {
-            sipral_call_capture(stack, call, short.as_ptr(), short.len(), &raw mut packet)
-        };
+        let status =
+            unsafe { sipral_media_capture(media, short.as_ptr(), short.len(), &raw mut packet) };
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert!(last_error_text().contains("160"));
         assert_eq!(
-            statistics(stack, call, 1_100).packets_sent,
+            statistics(media, 1_100).packets_sent,
             0,
             "and nothing went out"
         );
@@ -2230,6 +2411,7 @@ a=sendrecv\r\n";
     fn a_packet_buffer_too_small_costs_no_audio() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let mut small = [0_u8; 64];
         let mut packet = SipralMediaPacket {
             size: size_of::<SipralMediaPacket>(),
@@ -2242,21 +2424,15 @@ a=sendrecv\r\n";
         };
         let samples = [1_000_i16; FRAME];
         let status = unsafe {
-            sipral_call_capture(
-                stack,
-                call,
-                samples.as_ptr(),
-                samples.len(),
-                &raw mut packet,
-            )
+            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::BufferTooSmall);
         assert_eq!(
-            statistics(stack, call, 1_100).packets_sent,
+            statistics(media, 1_100).packets_sent,
             0,
             "the frame was not encoded and thrown away"
         );
-        assert_eq!(capture_one(stack, call, &samples), FRAME + 12);
+        assert_eq!(capture_one(media, &samples), FRAME + 12);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
@@ -2269,7 +2445,7 @@ a=sendrecv\r\n";
     fn playback_fills_the_frame_even_when_nothing_has_arrived() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
-        assert_eq!(play_one(stack, call), SipralPlayback::Silence);
+        assert_eq!(play_one(media_of(stack, call)), SipralPlayback::Silence);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
@@ -2280,12 +2456,12 @@ a=sendrecv\r\n";
     fn a_buffer_shorter_than_a_frame_says_how_many_samples_it_needed() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let mut samples = [0_i16; 80];
         let mut written = 0_usize;
         let status = unsafe {
-            sipral_call_playback(
-                stack,
-                call,
+            sipral_media_playback(
+                media,
                 samples.as_mut_ptr(),
                 samples.len(),
                 &raw mut written,
@@ -2306,16 +2482,15 @@ a=sendrecv\r\n";
     fn the_report_that_becomes_due_comes_out_addressed_to_the_control_port() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
-        let mut named = SIPRAL_HANDLE_NONE;
 
         let mut due = None;
         for tick in 1..=120_u64 {
             packet = buffers.packet();
-            let status = unsafe {
-                sipral_stack_poll_rtcp(stack, 1_100 + tick * 500, &raw mut named, &raw mut packet)
-            };
+            let status =
+                unsafe { sipral_media_poll_rtcp(media, 1_100 + tick * 500, &raw mut packet) };
             assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
             if packet.len != 0 {
                 due = Some(tick);
@@ -2323,7 +2498,6 @@ a=sendrecv\r\n";
             }
         }
         assert!(due.is_some(), "no report in a minute of call");
-        assert_eq!(named, call, "the report says which socket it goes out on");
         let (payload, destination) = buffers.taken(&packet);
         assert_eq!(
             payload.first().map(|byte| byte >> 6),
@@ -2364,5 +2538,490 @@ a=sendrecv\r\n";
             .parse()
             .expect("an address");
         assert!(longest.to_string().len() < SIPRAL_ADDRESS_BYTES);
+    }
+
+    // -- a handle of its own -------------------------------------------------
+
+    /// A media handle outlives its call, and says so: every entry point that
+    /// takes one answers that the media has ended, rather than acting on a
+    /// stream that has already said goodbye, and the handle is still released
+    /// exactly once.
+    #[test]
+    fn a_media_handle_whose_call_has_ended_says_so_and_is_released_once() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+        let other = media_of(stack, call);
+        assert_ne!(media, other, "asking twice gives two handles");
+        release(other);
+        assert_eq!(
+            play_one(media),
+            SipralPlayback::Silence,
+            "releasing one handle stops nothing but that handle"
+        );
+
+        hangup(stack, call, 5_000);
+
+        let mut samples = [0x5A5A_i16; FRAME];
+        let mut written = usize::MAX;
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        let mut info = media_info_zeroed();
+        let mut stats = empty_stats();
+        let mut datagram = rtp(1, 160);
+        let mut dialling = u32::MAX;
+        let ended = [
+            ("playback", unsafe {
+                sipral_media_playback(
+                    media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    &raw mut written,
+                    ptr::null_mut(),
+                )
+            }),
+            ("capture", unsafe {
+                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            }),
+            ("receive", unsafe {
+                sipral_media_receive(
+                    media,
+                    datagram.as_mut_ptr(),
+                    datagram.len(),
+                    PEER_MEDIA.as_ptr().cast::<c_char>(),
+                    PEER_MEDIA.len(),
+                    6_000,
+                    ptr::null_mut(),
+                )
+            }),
+            ("poll_rtcp", unsafe {
+                sipral_media_poll_rtcp(media, 6_000, &raw mut packet)
+            }),
+            ("info", unsafe { sipral_media_info(media, &raw mut info) }),
+            ("statistics", unsafe {
+                sipral_media_statistics(media, 6_000, &raw mut stats)
+            }),
+            ("dialling", unsafe {
+                sipral_media_dialling(media, &raw mut dialling, ptr::null_mut())
+            }),
+            ("stop_dialling", unsafe {
+                sipral_media_stop_dialling(media)
+            }),
+        ];
+        for (name, status) in ended {
+            assert_eq!(
+                status,
+                SipralStatus::WrongState,
+                "sipral_media_{name} on a call that ended"
+            );
+        }
+        assert!(last_error_text().contains("ended"), "{}", last_error_text());
+        assert_eq!(written, usize::MAX, "nothing was written");
+        assert_eq!(samples[0], 0x5A5A, "not even silence");
+        assert_eq!(info.codec, u32::MAX);
+        assert_eq!(stats.packets_sent, u64::MAX);
+        assert_eq!(dialling, u32::MAX);
+
+        release(media);
+        assert_eq!(
+            unsafe { sipral_media_release(media) },
+            SipralStatus::StaleHandle
+        );
+        assert_eq!(
+            unsafe { sipral_media_stop_dialling(media) },
+            SipralStatus::StaleHandle,
+            "a released handle is stale rather than ended"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The same when the stack goes first: destroying it ends every call's
+    /// media, and a handle says so rather than keeping a stream running for a
+    /// stack that no longer exists.
+    #[test]
+    fn a_media_handle_outlives_its_stack_and_says_so() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+        let mut samples = [0_i16; FRAME];
+        assert_eq!(
+            unsafe {
+                sipral_media_playback(
+                    media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            SipralStatus::WrongState
+        );
+        release(media);
+    }
+
+    static MINTED: AtomicI32 = AtomicI32::new(-1);
+    static PLAYED: AtomicI32 = AtomicI32::new(-1);
+    static PLAYED_WROTE: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// A binding's own event handler. On the news that audio has started it
+    /// mints the call's media handle from inside the callback, and a device
+    /// thread asks for the frame that is due while the poll thread is still in
+    /// here.
+    unsafe extern "C" fn mint_and_play_from_the_callback(
+        event: *const SipralEvent,
+        user_data: *mut c_void,
+    ) {
+        unsafe { crate::stack::tests::record(event, user_data) };
+        let event = unsafe { &*event };
+        if event.kind != SipralEventKind::MediaStarted {
+            return;
+        }
+        let mut media = SIPRAL_HANDLE_NONE;
+        let minted = unsafe { sipral_call_media(event.stack, event.call, &raw mut media) };
+        MINTED.store(minted as i32, Ordering::SeqCst);
+        let (played, wrote) = std::thread::spawn(move || {
+            let mut samples = [0x5A5A_i16; FRAME];
+            let mut written = usize::MAX;
+            let status = unsafe {
+                sipral_media_playback(
+                    media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    &raw mut written,
+                    ptr::null_mut(),
+                )
+            };
+            (status as i32, written)
+        })
+        .join()
+        .unwrap_or((-2, usize::MAX));
+        PLAYED.store(played, Ordering::SeqCst);
+        PLAYED_WROTE.store(wrote, Ordering::SeqCst);
+        let _ = unsafe { sipral_media_release(media) };
+    }
+
+    /// The re-entry this change exists for, and B5's glitch from the audit that
+    /// found it: a callback that answers an event by calling into the library
+    /// is not refused, and neither is the audio thread that wants its frame at
+    /// the same moment.
+    #[test]
+    fn a_callback_that_mints_the_media_handle_while_a_frame_is_due_is_not_refused() {
+        let mut observed = Observed::default();
+        let (stack, _call) = media_call_tuned(&mut observed, |config| {
+            config.event_callback = Some(mint_and_play_from_the_callback);
+        });
+        assert_eq!(
+            MINTED.load(Ordering::SeqCst),
+            SipralStatus::Ok as i32,
+            "minting the media handle from inside the callback was refused"
+        );
+        assert_eq!(
+            PLAYED.load(Ordering::SeqCst),
+            SipralStatus::Ok as i32,
+            "the device thread was refused its frame while the poll thread was in the callback"
+        );
+        assert_eq!(PLAYED_WROTE.load(Ordering::SeqCst), FRAME);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A processor that asks for the frame that is due from inside the frame it
+    /// is processing: the one way a thread arrives at a call's media it is
+    /// already inside.
+    struct ReachesBack {
+        media: SipralHandle,
+        heard: Arc<Mutex<Option<SipralStatus>>>,
+    }
+
+    impl Processor for ReachesBack {
+        fn process(&mut self, _near_end: &mut [i16], _reference: &[i16]) {
+            let mut samples = [0_i16; FRAME];
+            let status = unsafe {
+                sipral_media_playback(
+                    self.media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if let Ok(mut heard) = self.heard.lock() {
+                *heard = Some(status);
+            }
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    /// Re-entry on one session is the only thing a media entry point answers
+    /// `SIPRAL_STATUS_BUSY` for, and it is answered rather than left as a
+    /// thread waiting for itself.
+    #[test]
+    fn a_thread_that_reaches_back_into_the_media_it_is_inside_is_told_so() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+        let heard = Arc::new(Mutex::new(None));
+        let processor = ReachesBack {
+            media,
+            heard: Arc::clone(&heard),
+        };
+        super::with_media(media, |session, _| {
+            session.attach_processor(Box::new(processor));
+            Ok(())
+        })
+        .expect("the call has media");
+
+        // on a thread of its own, so that a capture waiting for itself is a
+        // test that fails rather than a run that never ends
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffers = Buffers::new();
+            let mut packet = buffers.packet();
+            let samples = [1_000_i16; FRAME];
+            let status = unsafe {
+                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            };
+            let _ = done.send(status);
+        });
+        let captured = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the capture never came back: the processor's call waited for itself");
+        assert_eq!(captured, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            *heard.lock().expect("what the processor heard"),
+            Some(SipralStatus::Busy)
+        );
+        release(media);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A processor that reaches its own call through the stack instead: it
+    /// hangs the call up, polls the stack and destroys it, all from inside the
+    /// frame it is processing. Each of those can need the very session the
+    /// frame is holding.
+    struct ReachesTheStack {
+        stack: SipralHandle,
+        call: SipralHandle,
+        heard: Arc<Mutex<Vec<(&'static str, SipralStatus)>>>,
+    }
+
+    impl Processor for ReachesTheStack {
+        fn process(&mut self, _near_end: &mut [i16], _reference: &[i16]) {
+            let hung_up = unsafe { crate::call::sipral_call_hangup(self.stack, self.call, 1_200) };
+            let polled =
+                unsafe { crate::stack::sipral_stack_poll(self.stack, 1_200, ptr::null_mut()) };
+            let destroyed = unsafe { crate::stack::sipral_stack_destroy(self.stack) };
+            if let Ok(mut heard) = self.heard.lock() {
+                heard.extend([
+                    ("hangup", hung_up),
+                    ("poll", polled),
+                    ("destroy", destroyed),
+                ]);
+            }
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    /// The same re-entry, through the stack: a thread inside a call's media
+    /// that calls into that call's stack is answered, as it was when a frame
+    /// held the stack's lock, rather than left waiting for a session it is
+    /// itself holding — with the stack's own lock held the whole time, so that
+    /// every other thread would be refused for ever after.
+    #[test]
+    fn a_processor_that_calls_into_its_own_stack_is_told_so() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let processor = ReachesTheStack {
+            stack,
+            call,
+            heard: Arc::clone(&heard),
+        };
+        super::with_media(media, |session, _| {
+            session.attach_processor(Box::new(processor));
+            Ok(())
+        })
+        .expect("the call has media");
+
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffers = Buffers::new();
+            let mut packet = buffers.packet();
+            let samples = [1_000_i16; FRAME];
+            let status = unsafe {
+                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            };
+            let _ = done.send(status);
+        });
+        let captured = finished.recv_timeout(Duration::from_secs(10)).expect(
+            "the capture never came back: the processor's call into the stack waited for itself",
+        );
+        assert_eq!(captured, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            *heard.lock().expect("what the processor heard"),
+            [
+                ("hangup", SipralStatus::Busy),
+                ("poll", SipralStatus::Busy),
+                ("destroy", SipralStatus::Busy),
+            ]
+        );
+        crate::stack::tests::poll(stack, 1_300);
+        assert!(
+            observed.of(SipralEventKind::CallEnded).is_empty(),
+            "the call was hung up from inside its own frame"
+        );
+        assert_eq!(
+            play_one(media),
+            SipralPlayback::Silence,
+            "the call's media is still running"
+        );
+        release(media);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok,
+            "and the stack is still there, and still usable"
+        );
+    }
+
+    /// Whether the slow callback below sleeps: off while the fixture builds
+    /// the call, so that setting up is not the slow part of the test.
+    static SLOW: AtomicBool = AtomicBool::new(false);
+
+    /// A binding's event handler that takes its time: fifty milliseconds for
+    /// every event, which is a user interface thread in a layout pass or a log
+    /// line going to a busy disk.
+    unsafe extern "C" fn fifty_milliseconds(event: *const SipralEvent, user_data: *mut c_void) {
+        unsafe { crate::stack::tests::record(event, user_data) };
+        if SLOW.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// B5 for ten seconds. One thread polls a stack whose callback takes fifty
+    /// milliseconds over every event, and hands the same call's packets over as
+    /// a network thread would; another asks for a frame every twenty
+    /// milliseconds, as a device does. While the stack's lock was held across
+    /// the callback and the media path took that lock, a frame that fell due
+    /// during a callback was refused. None may be now.
+    #[test]
+    fn a_frame_every_twenty_milliseconds_is_never_refused_while_a_slow_callback_runs() {
+        const FRAMES: usize = 500;
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_tuned(&mut observed, |config| {
+            config.event_callback = Some(fifty_milliseconds);
+        });
+        let media = media_of(stack, call);
+        SLOW.store(true, Ordering::SeqCst);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let signalling = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let mut refused = Vec::new();
+                let mut delivered = 0_usize;
+                let mut sequence = 1_u16;
+                while !stop.load(Ordering::SeqCst) {
+                    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(0);
+                    let now_ms = 2_000 + elapsed;
+                    // an event for the slow callback to sit on: an account that
+                    // starts registering, taken away again once that is said
+                    let account = account_on(stack);
+                    let registered =
+                        unsafe { crate::account::sipral_account_register(stack, account, now_ms) };
+                    let mut packet = rtp(sequence, u32::from(sequence) * 160);
+                    sequence = sequence.wrapping_add(1);
+                    let received = unsafe {
+                        sipral_media_receive(
+                            media,
+                            packet.as_mut_ptr(),
+                            packet.len(),
+                            PEER_MEDIA.as_ptr().cast::<c_char>(),
+                            PEER_MEDIA.len(),
+                            now_ms,
+                            ptr::null_mut(),
+                        )
+                    };
+                    let mut result = crate::stack::tests::poll_result();
+                    let polled =
+                        unsafe { crate::stack::sipral_stack_poll(stack, now_ms, &raw mut result) };
+                    delivered = delivered.saturating_add(result.events_delivered);
+                    let removed = unsafe { crate::account::sipral_account_remove(stack, account) };
+                    let _ = sent(stack);
+                    for (what, status) in [
+                        ("register", registered),
+                        ("receive", received),
+                        ("poll", polled),
+                        ("remove", removed),
+                    ] {
+                        if status != SipralStatus::Ok {
+                            refused.push((what, status));
+                        }
+                    }
+                }
+                (refused, delivered)
+            })
+        };
+
+        let mut refused = Vec::new();
+        let mut short = 0_usize;
+        for _ in 0..FRAMES {
+            let mut samples = [0_i16; FRAME];
+            let mut written = 0_usize;
+            let status = unsafe {
+                sipral_media_playback(
+                    media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    &raw mut written,
+                    ptr::null_mut(),
+                )
+            };
+            if status != SipralStatus::Ok {
+                refused.push(status);
+            }
+            if written != FRAME {
+                short = short.saturating_add(1);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::SeqCst);
+        let (signalling_refused, delivered) = signalling.join().expect("the poll thread finished");
+        SLOW.store(false, Ordering::SeqCst);
+
+        assert!(
+            refused.is_empty(),
+            "{} of {FRAMES} frames were refused: {refused:?}",
+            refused.len()
+        );
+        assert_eq!(short, 0, "{short} of {FRAMES} frames came back short");
+        assert!(
+            signalling_refused.is_empty(),
+            "the poll thread was refused: {signalling_refused:?}"
+        );
+        assert!(
+            delivered >= 50,
+            "only {delivered} events reached the callback, so it was not slow for most of the run"
+        );
+        release(media);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
     }
 }

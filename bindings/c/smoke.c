@@ -6,11 +6,12 @@
  * whether it agrees about the length of every struct in it, hand every struct
  * a caller declares to an entry point that takes it at the oldest length
  * abi-sizes.txt pins and one byte short of it, build a stack with a callback
- * of its own, add an account, place one call, have another refused, retire
- * the transport and watch a third come back as not sent, poll once, and
- * dispose of the stack from inside the event callback -- which
- * docs/08-ffi.md says is the one re-entrant call and which nothing else
- * proves from C.
+ * of its own, add an account, place one call, ask for its media handle before
+ * it has any media, have another call refused, retire the transport and watch
+ * a third come back as not sent, poll once, call back into the stack from
+ * inside the event callback, and dispose of the stack from in there too --
+ * docs/08-ffi.md says the callback runs with nothing held, and nothing else
+ * proves that from C.
  *
  * It links the shared library rather than the archive, because that is
  * what a packaged binding loads.
@@ -50,9 +51,12 @@ static void expect(const char *what, int held)
 struct seen {
     unsigned marker;
     int events;
-    /* what sipral_stack_destroy answered, or SIPRAL_STATUS_PANIC for a
-     * callback that never ran: a status the entry point cannot return, so
-     * the assertion below fails rather than passes on nothing */
+    /* what a question put to the stack from inside the callback answered,
+     * and what sipral_stack_destroy answered after it -- each
+     * SIPRAL_STATUS_PANIC for a callback that never ran: a status the entry
+     * points cannot return, so the assertions below fail rather than pass on
+     * nothing */
+    sipral_status_t reentered;
     sipral_status_t destroyed;
 };
 
@@ -70,11 +74,16 @@ static void on_event(const sipral_event_t *event, void *user_data)
     }
     expect("event_user_data is not what was passed in", seen->marker == MARKER);
     seen->events++;
-    /* The one call the contract allows from in here, and once. A second
-     * destroy in the same poll answers SIPRAL_STATUS_STALE_HANDLE, which is
-     * correct and is not what the contract is about; recording it would
-     * overwrite what the first call answered. */
+    /* Nothing is held while this runs, so a question put to the stack from in
+     * here is an ordinary call -- and so is disposing of it, which is what a
+     * binding whose object dies in its own event handler does. Once each: a
+     * second destroy in the same poll answers SIPRAL_STATUS_STALE_HANDLE,
+     * which is correct and is not what the contract is about; recording it
+     * would overwrite what the first call answered. */
     if (seen->events == 1) {
+        sipral_stack_settings_t settings = { 0 };
+        settings.size = sizeof settings;
+        seen->reentered = sipral_stack_settings(event->stack, &settings);
         seen->destroyed = sipral_stack_destroy(event->stack);
     }
 }
@@ -427,18 +436,43 @@ static sipral_status_t codec_info_at(struct fixture *fixture, size_t declared)
     return sipral_codec_at(0, &info);
 }
 
+/* The three media structs go through a handle on the fixture's call, minted
+ * for the one question and let go after it. A mint that fails answers
+ * WRONG_STATE, which is neither status either check expects, so both of that
+ * struct's checks fail by name rather than passing on nothing. */
+static sipral_handle_t media_handle_of(struct fixture *fixture)
+{
+    sipral_handle_t media = SIPRAL_HANDLE_NONE;
+    if (sipral_call_media(fixture->stack, fixture->call, &media) != SIPRAL_STATUS_OK) {
+        return SIPRAL_HANDLE_NONE;
+    }
+    return media;
+}
+
 static sipral_status_t media_info_at(struct fixture *fixture, size_t declared)
 {
     sipral_media_info_t info = { 0 };
     info.size = declared;
-    return sipral_call_media_info(fixture->stack, fixture->call, &info);
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_info(media, &info);
+    sipral_media_release(media);
+    return status;
 }
 
 static sipral_status_t stream_stats_at(struct fixture *fixture, size_t declared)
 {
     sipral_stream_stats_t stats = { 0 };
     stats.size = declared;
-    return sipral_call_statistics(fixture->stack, fixture->call, 0, &stats);
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_statistics(media, 0, &stats);
+    sipral_media_release(media);
+    return status;
 }
 
 static sipral_status_t media_packet_at(struct fixture *fixture, size_t declared)
@@ -449,7 +483,13 @@ static sipral_status_t media_packet_at(struct fixture *fixture, size_t declared)
     packet.capacity = sizeof packet_buffer;
     packet.destination = destination_buffer;
     packet.destination_capacity = sizeof destination_buffer;
-    return sipral_stack_poll_rtcp(fixture->stack, 0, NULL, &packet);
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_poll_rtcp(media, 0, &packet);
+    sipral_media_release(media);
+    return status;
 }
 
 static sipral_status_t transmit_at(struct fixture *fixture, size_t declared)
@@ -636,7 +676,7 @@ int main(void)
     static const char nonsense[] = "bob, the one in accounts";
     static const char media[] = "192.0.2.10:40000";
 
-    struct seen seen = { MARKER, 0, SIPRAL_STATUS_PANIC };
+    struct seen seen = { MARKER, 0, SIPRAL_STATUS_PANIC, SIPRAL_STATUS_PANIC };
     sipral_stack_config_t config = { 0 };
     sipral_account_config_t account_config = { 0 };
     sipral_call_config_t call_config = { 0 };
@@ -648,6 +688,8 @@ int main(void)
     sipral_handle_t call = SIPRAL_HANDLE_NONE;
     sipral_handle_t nowhere = SIPRAL_HANDLE_NONE;
     sipral_handle_t unsent = SIPRAL_HANDLE_NONE;
+    sipral_handle_t audio = SIPRAL_HANDLE_NONE;
+    int16_t frame[160] = { 0 };
     char message[512] = { 0 };
 
     /* first, because nothing below means anything if the library was built
@@ -704,6 +746,21 @@ int main(void)
                == SIPRAL_STATUS_OK);
     expect("a call that went out has no handle", call != SIPRAL_HANDLE_NONE);
 
+    /* A call's audio is reached through a handle of its own, minted once the
+     * negotiation has settled, and it never waits on the stack. Nothing has
+     * answered this call, so there is no media yet, and the answer says so
+     * rather than handing out a handle to nothing. */
+    expect("a media handle was handed out for a call that has no media yet",
+           sipral_call_media(stack, call, &audio) == SIPRAL_STATUS_WRONG_STATE);
+    expect("the media handle that was refused was written anyway",
+           audio == SIPRAL_HANDLE_NONE);
+    expect("a media handle nobody minted played a frame",
+           sipral_media_playback(audio, frame, sizeof frame / sizeof frame[0],
+                                 NULL, NULL)
+               == SIPRAL_STATUS_INVALID_HANDLE);
+    expect("a media handle nobody minted was released",
+           sipral_media_release(audio) == SIPRAL_STATUS_INVALID_HANDLE);
+
     /* And the other way: a call this stack cannot make has to come back as a
      * status with a sentence behind it, no handle, and a stack still usable.
      */
@@ -751,6 +808,8 @@ int main(void)
     expect("nothing reached the callback", seen.events > 0);
     expect("the poll and the callback disagree on how many events there were",
            poll.events_delivered == (size_t)seen.events);
+    expect("a question put to the stack from inside its callback was refused",
+           seen.reentered == SIPRAL_STATUS_OK);
     expect("destroying the stack from inside the callback was refused",
            seen.destroyed == SIPRAL_STATUS_OK);
     /* With a real out parameter, so the refusal is about the handle and

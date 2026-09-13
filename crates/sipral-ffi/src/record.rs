@@ -24,15 +24,15 @@
 //!
 //! So there are three ways a recording ends and all three close it properly:
 //!
-//! - [`sipral_call_record_stop`], which is the ordinary one;
+//! - [`sipral_media_record_stop`], which is the ordinary one;
 //! - the call ending, where the engine stops the recording before it lets the
 //!   stream go;
 //! - the stack being destroyed, including from inside the event callback, where
 //!   what the poll is still holding is closed as it is dropped.
 //!
-//! The third is the one that has to be arranged rather than inherited, and
-//! `crate::stack` arranges it: destroying a stack mid-recording leaves a
-//! playable file, not a repair job. Nothing can be done about a process that
+//! The third is the one that has to be arranged rather than inherited, and the
+//! media engine arranges it as it is dropped: destroying a stack mid-recording
+//! leaves a playable file, not a repair job. Nothing can be done about a process that
 //! dies, and nothing here pretends otherwise.
 //!
 //! # What is written
@@ -48,8 +48,7 @@ use std::fs::File;
 
 use crate::error::{entry, fail};
 use crate::handle::SipralHandle;
-use crate::media::{media_failed, session_of};
-use crate::stack::with_stack;
+use crate::media::{media_failed, with_media};
 use crate::status::SipralStatus;
 use crate::text::required_text;
 
@@ -60,25 +59,22 @@ entry! {
     /// as the person on the phone presses the button, and each recording is a
     /// file of its own: a path written to twice would have two headers in it.
     ///
-    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
-    /// being recorded — two writers on one stream would interleave frames into
-    /// both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
-    /// refuses the path, with what it said in the last error.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
+    /// already being recorded — two writers on one stream would interleave
+    /// frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
+    /// system refuses the path, with what it said in the last error.
+    ///
+    /// The file is made with this call's media held, so this call's audio
+    /// waits for the file system to answer and no other call's does.
     ///
     /// # Safety
     ///
     /// `path` must be readable for `path_len` bytes.
-    fn sipral_call_record_start(
-        stack: SipralHandle,
-        call: SipralHandle,
-        path: *const c_char,
-        path_len: usize,
-    ) {
+    fn sipral_media_record_start(media: SipralHandle, path: *const c_char, path_len: usize) {
         let path = unsafe { required_text(path, path_len, "path") }?;
-        with_stack(stack, |state| {
+        with_media(media, |session, _| {
             // the call is looked at before the file is made, so a handle that
             // names nothing does not leave an empty recording behind
-            let session = session_of(state, call)?;
             if session.is_recording() {
                 return Err(fail(
                     SipralStatus::WrongState,
@@ -107,10 +103,10 @@ entry! {
     ///
     /// # Safety
     ///
-    /// Safe to call with any handle values.
-    fn sipral_call_record_stop(stack: SipralHandle, call: SipralHandle) {
-        with_stack(stack, |state| {
-            session_of(state, call)?
+    /// Safe to call with any handle value.
+    fn sipral_media_record_stop(media: SipralHandle) {
+        with_media(media, |session, _| {
+            session
                 .stop_recording()
                 .map_err(|error| media_failed(&error))
         })
@@ -128,14 +124,12 @@ entry! {
     ///
     /// `out_recording` must point at one `uint32_t` or be null, and
     /// `out_recorded_ms` at one `uint64_t` or be null.
-    fn sipral_call_record_state(
-        stack: SipralHandle,
-        call: SipralHandle,
+    fn sipral_media_record_state(
+        media: SipralHandle,
         out_recording: *mut u32,
         out_recorded_ms: *mut u64,
     ) {
-        let (recording, taken) = with_stack(stack, |state| {
-            let session = session_of(state, call)?;
+        let (recording, taken) = with_media(media, |session, _| {
             let taken = session
                 .recorded()
                 .map_or(0, |span| u64::try_from(span.as_millis()).unwrap_or(u64::MAX));
@@ -153,12 +147,13 @@ entry! {
 
 #[cfg(test)]
 mod tests {
-    use super::{sipral_call_record_start, sipral_call_record_state, sipral_call_record_stop};
+    use super::{sipral_media_record_start, sipral_media_record_state, sipral_media_record_stop};
     use crate::call::tests::{connected, hangup, media_call};
     use crate::error::last_error_text;
     use crate::event::SipralEventKind;
-    use crate::handle::SipralHandle;
-    use crate::media::tests::{FRAME, capture_one, play_one};
+    use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+    use crate::media::sipral_call_media;
+    use crate::media::tests::{FRAME, capture_one, media_of, play_one, release};
     use crate::stack::sipral_stack_destroy;
     use crate::stack::tests::Observed;
     use crate::status::SipralStatus;
@@ -178,23 +173,18 @@ mod tests {
         ))
     }
 
-    fn start(stack: SipralHandle, call: SipralHandle, path: &Path) -> SipralStatus {
+    fn start(media: SipralHandle, path: &Path) -> SipralStatus {
         let written = path.to_string_lossy().into_owned();
         unsafe {
-            sipral_call_record_start(
-                stack,
-                call,
-                written.as_ptr().cast::<c_char>(),
-                written.len(),
-            )
+            sipral_media_record_start(media, written.as_ptr().cast::<c_char>(), written.len())
         }
     }
 
-    fn state_of(stack: SipralHandle, call: SipralHandle) -> (u32, u64) {
+    fn state_of(media: SipralHandle) -> (u32, u64) {
         let mut recording = u32::MAX;
         let mut taken = u64::MAX;
         let status =
-            unsafe { sipral_call_record_state(stack, call, &raw mut recording, &raw mut taken) };
+            unsafe { sipral_media_record_state(media, &raw mut recording, &raw mut taken) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         (recording, taken)
     }
@@ -210,10 +200,10 @@ mod tests {
 
     /// Put a few frames of a conversation through the call, so that there is
     /// something in the file to have a length.
-    fn talk(stack: SipralHandle, call: SipralHandle, frames: usize) {
+    fn talk(media: SipralHandle, frames: usize) {
         for _ in 0..frames {
-            play_one(stack, call);
-            capture_one(stack, call, &[4_000; FRAME]);
+            play_one(media);
+            capture_one(media, &[4_000; FRAME]);
         }
     }
 
@@ -221,25 +211,23 @@ mod tests {
     fn a_recording_starts_stops_and_says_so_while_it_runs() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let path = scratch("started");
 
-        assert_eq!(state_of(stack, call), (0, 0), "nothing yet");
+        assert_eq!(state_of(media), (0, 0), "nothing yet");
         assert_eq!(
-            start(stack, call, &path),
+            start(media, &path),
             SipralStatus::Ok,
             "{}",
             last_error_text()
         );
-        talk(stack, call, 50);
-        let (recording, taken) = state_of(stack, call);
+        talk(media, 50);
+        let (recording, taken) = state_of(media);
         assert_eq!(recording, 1);
         assert_eq!(taken, 1_000, "fifty frames of twenty milliseconds");
 
-        assert_eq!(
-            unsafe { sipral_call_record_stop(stack, call) },
-            SipralStatus::Ok
-        );
-        assert_eq!(state_of(stack, call), (0, 0));
+        assert_eq!(unsafe { sipral_media_record_stop(media) }, SipralStatus::Ok);
+        assert_eq!(state_of(media), (0, 0));
         let died = observed.of(SipralEventKind::RecordingStopped);
         assert!(
             died.is_empty(),
@@ -248,6 +236,7 @@ mod tests {
                 .map(|heard| heard.recorded_ms)
                 .collect::<Vec<_>>()
         );
+        release(media);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 
         let wav = std::fs::read(&path).expect("the recording is a file");
@@ -269,11 +258,20 @@ mod tests {
     fn a_call_that_ends_closes_the_recording_it_was_carrying() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let path = scratch("hungup");
-        assert_eq!(start(stack, call, &path), SipralStatus::Ok);
-        talk(stack, call, 10);
+        assert_eq!(start(media, &path), SipralStatus::Ok);
+        talk(media, 10);
 
         hangup(stack, call, 9_000);
+        let mut recording = u32::MAX;
+        assert_eq!(
+            unsafe { sipral_media_record_state(media, &raw mut recording, std::ptr::null_mut()) },
+            SipralStatus::WrongState,
+            "the handle of a call that ended still answered as if it were recording"
+        );
+        assert_eq!(recording, u32::MAX, "nothing was written");
+        release(media);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 
         let wav = std::fs::read(&path).expect("the recording is a file");
@@ -298,11 +296,18 @@ mod tests {
     fn destroying_a_stack_mid_recording_still_leaves_a_playable_file() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let path = scratch("destroyed");
-        assert_eq!(start(stack, call, &path), SipralStatus::Ok);
-        talk(stack, call, 25);
+        assert_eq!(start(media, &path), SipralStatus::Ok);
+        talk(media, 25);
 
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_media_record_stop(media) },
+            SipralStatus::WrongState,
+            "the handle outlived its stack and still reached the session"
+        );
+        release(media);
 
         let wav = std::fs::read(&path).expect("the recording is a file");
         let _ = std::fs::remove_file(&path);
@@ -320,14 +325,16 @@ mod tests {
     fn two_recordings_at_once_are_refused_rather_than_interleaved() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let first = scratch("first");
         let second = scratch("second");
-        assert_eq!(start(stack, call, &first), SipralStatus::Ok);
-        assert_eq!(start(stack, call, &second), SipralStatus::WrongState);
+        assert_eq!(start(media, &first), SipralStatus::Ok);
+        assert_eq!(start(media, &second), SipralStatus::WrongState);
         assert!(
             !second.exists(),
             "the second file was not made, so nothing was left behind"
         );
+        release(media);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
         let _ = std::fs::remove_file(&first);
     }
@@ -336,10 +343,12 @@ mod tests {
     fn stopping_a_recording_that_is_not_running_says_so() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         assert_eq!(
-            unsafe { sipral_call_record_stop(stack, call) },
+            unsafe { sipral_media_record_stop(media) },
             SipralStatus::WrongState
         );
+        release(media);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 
@@ -347,31 +356,40 @@ mod tests {
     fn a_path_the_file_system_refuses_is_said_and_the_call_carries_on() {
         let mut observed = Observed::default();
         let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
         let nowhere = std::env::temp_dir()
             .join("sipral-no-such-directory")
             .join("x.wav");
-        assert_eq!(start(stack, call, &nowhere), SipralStatus::InvalidArgument);
+        assert_eq!(start(media, &nowhere), SipralStatus::InvalidArgument);
         assert!(last_error_text().contains("sipral-no-such-directory"));
-        assert_eq!(state_of(stack, call), (0, 0), "and nothing is recording");
+        assert_eq!(state_of(media), (0, 0), "and nothing is recording");
 
         let path = scratch("after");
         assert_eq!(
-            start(stack, call, &path),
+            start(media, &path),
             SipralStatus::Ok,
             "the call is untouched by a recording that could not start"
         );
+        release(media);
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
         let _ = std::fs::remove_file(&path);
     }
 
     /// Recording is a property of a call's media, so a call this stack
-    /// describes nothing for has nowhere to put a tap.
+    /// describes nothing for has no media handle to put a tap on, and a handle
+    /// nobody minted records nothing.
     #[test]
     fn a_call_with_no_media_cannot_be_recorded() {
         let mut observed = Observed::default();
         let (stack, call) = connected(&mut observed);
         let path = scratch("unmanaged");
-        assert_eq!(start(stack, call, &path), SipralStatus::WrongState);
+        let mut media = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call, &raw mut media) },
+            SipralStatus::WrongState
+        );
+        assert_eq!(media, SIPRAL_HANDLE_NONE, "no handle was written");
+        assert_eq!(start(media, &path), SipralStatus::InvalidHandle);
         assert!(!path.exists());
         assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }

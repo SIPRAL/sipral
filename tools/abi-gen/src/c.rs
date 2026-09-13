@@ -230,10 +230,11 @@ pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
          \x20* Every function here returns a sipral_status_t except where its own\n\
          \x20* comment says otherwise, sets the calling thread's last error on\n\
          \x20* failure, and catches any panic rather than letting one reach C. A\n\
-         \x20* stack may be used from any thread but only one at a time, and may not\n\
-         \x20* be re-entered from inside its own event callback; both are\n\
-         \x20* SIPRAL_STATUS_BUSY rather than a deadlock. sipral_stack_destroy is the\n\
-         \x20* one exception, and works from inside the callback.\n\
+         \x20* stack may be used from any thread but only one at a time: a second\n\
+         \x20* thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback\n\
+         \x20* runs with nothing held, so the library may be called from inside it.\n\
+         \x20* A call's media is reached through a handle of its own, from\n\
+         \x20* sipral_call_media, and never waits on the stack.\n\
          \x20*/\n\n",
     );
     out.push_str("#ifndef SIPRAL_H\n#define SIPRAL_H\n\n");

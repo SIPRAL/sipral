@@ -8,10 +8,11 @@
  * Every function here returns a sipral_status_t except where its own
  * comment says otherwise, sets the calling thread's last error on
  * failure, and catches any panic rather than letting one reach C. A
- * stack may be used from any thread but only one at a time, and may not
- * be re-entered from inside its own event callback; both are
- * SIPRAL_STATUS_BUSY rather than a deadlock. sipral_stack_destroy is the
- * one exception, and works from inside the callback.
+ * stack may be used from any thread but only one at a time: a second
+ * thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback
+ * runs with nothing held, so the library may be called from inside it.
+ * A call's media is reached through a handle of its own, from
+ * sipral_call_media, and never waits on the stack.
  */
 
 #ifndef SIPRAL_H
@@ -516,7 +517,7 @@ enum {
 };
 
 /**
- * What a datagram handed to sipral_call_media_receive turned out to be.
+ * What a datagram handed to sipral_media_receive turned out to be.
  */
 typedef uint32_t sipral_arrival_t;
 enum {
@@ -551,7 +552,7 @@ enum {
 };
 
 /**
- * Where the frame sipral_call_playback just produced came from.
+ * Where the frame sipral_media_playback just produced came from.
  */
 typedef uint32_t sipral_playback_t;
 enum {
@@ -713,7 +714,9 @@ enum {
      * Audio is running: the negotiation settled and an RTP session is open.
      *
      * A4's reporting half and the first half of D5: `payload.media.codec` is
-     * what the two ends agreed on, and `sipral_call_media_info` says the rest.
+     * what the two ends agreed on. This is the moment to mint the call's
+     * media handle with `sipral_call_media`, and `sipral_media_info` on it
+     * says the rest.
      */
     SIPRAL_EVENT_KIND_MEDIA_STARTED = 21,
     /**
@@ -935,9 +938,10 @@ enum {
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
- * it, with the `user_data` the stack was created with. It must not
- * unwind, and it must not call back into the stack it was given: see
- * crate::stack.
+ * it, with the `user_data` the stack was created with, and never on two
+ * threads at once for one stack. It must not unwind. Nothing is held
+ * while it runs, so it may call back into the library, the stack it was
+ * given included: see crate::stack.
  */
 typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_data);
 
@@ -1638,8 +1642,8 @@ struct sipral_media_info {
      */
     uint32_t frame_ms;
     /**
-     * Samples in one frame: exactly what sipral_call_playback fills and
-     * what sipral_call_capture wants.
+     * Samples in one frame: exactly what sipral_media_playback fills and
+     * what sipral_media_capture wants.
      */
     size_t frame_samples;
     /**
@@ -2326,8 +2330,11 @@ sipral_status_t sipral_stack_settings(sipral_handle_t stack, sipral_stack_settin
  * The handle is dead the moment this returns, and a second destroy is
  * `SIPRAL_STATUS_STALE_HANDLE` rather than a corrupted heap. Called from
  * inside the callback it is still safe: what the poll is holding stays
- * alive until that poll returns. No account is de-registered and no call
- * is hung up; a stack that has to leave politely does that first.
+ * alive until that poll returns. Called from inside a frame of one of its
+ * calls — a processor — it is `SIPRAL_STATUS_BUSY` and nothing is freed,
+ * because freeing the stack ends that call's media and the frame is
+ * holding it. No account is de-registered and no call is hung up; a stack
+ * that has to leave politely does that first.
  *
  * Safety
  *
@@ -2343,9 +2350,13 @@ sipral_status_t sipral_stack_destroy(sipral_handle_t stack);
  * `SIPRAL_STATUS_INVALID_ARGUMENT` and nothing is delivered.
  *
  * The event callback is called from inside this function, on this
- * thread. A call back into the same stack from the callback returns
- * `SIPRAL_STATUS_BUSY` and does nothing, so a binding cannot deadlock
- * itself by answering an event with a request.
+ * thread, and with nothing held: the stack's work is done and its lock
+ * let go before the first event is handed over, so the callback may call
+ * back into the library, this stack included. A poll that finds another
+ * poll of the same stack already delivering — which is what a poll from
+ * inside the callback always finds — does the stack's work and leaves its
+ * events to that one, so they arrive in the order they were raised and
+ * never on two threads at once.
  *
  * `result` may be null for a caller that does not want the counts.
  *
@@ -2367,7 +2378,7 @@ sipral_status_t sipral_stack_poll(sipral_handle_t stack, uint64_t now_ms, sipral
  *
  * Cheap enough to sample on a timer and ship as telemetry: reading this
  * is one struct copy on top of the call itself, the same as
- * `sipral_call_statistics` and for the same reason — nothing here walks
+ * `sipral_media_statistics` and for the same reason — nothing here walks
  * the call table or a session to answer.
  *
  * Safety
@@ -2778,6 +2789,48 @@ sipral_status_t sipral_codec_at(size_t index, sipral_codec_info_t *out_info);
 sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, uint32_t *out_codecs, size_t capacity, size_t *out_count);
 
 /**
+ * A handle on one call's media, written to `out_media`.
+ *
+ * Mint it once the call's negotiation has settled —
+ * `SIPRAL_EVENT_KIND_MEDIA_STARTED` is the moment, and minting from inside
+ * that event's callback is allowed — and hand it to every `sipral_media_`
+ * entry point in place of the stack and the call. None of those takes the
+ * stack's lock, which is the point: the thread that carries a call's audio
+ * is never refused a frame because signalling, the event callback or
+ * another call is busy.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a call with no media: one placed with a
+ * description of the caller's own, or one whose negotiation has not
+ * settled. The handle is written only if this returns `SIPRAL_STATUS_OK`.
+ *
+ * The handle outlives the call. Once the call ends, or its stack is
+ * destroyed, every media entry point answers `SIPRAL_STATUS_WRONG_STATE`
+ * on it; a hold, a resume or a change of codec keeps it working. Each
+ * handle minted is released once with `sipral_media_release`, and asking
+ * twice for the same call gives two.
+ *
+ * Safety
+ *
+ * `out_media` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_call_media(sipral_handle_t stack, sipral_handle_t call, sipral_handle_t *out_media);
+
+/**
+ * Let a media handle go.
+ *
+ * Its one matching free, whether or not its call is still up and whether
+ * or not its stack still exists. The session is not touched: it belongs to
+ * the call and ends when the call does, so releasing a handle mid-call
+ * stops nothing but the handle. A handle released twice is
+ * `SIPRAL_STATUS_STALE_HANDLE` the second time.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value. Reads no memory the caller owns.
+ */
+sipral_status_t sipral_media_release(sipral_handle_t media);
+
+/**
  * What one call's media settled on.
  *
  * Safety
@@ -2785,29 +2838,28 @@ sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, uint32_t *out_co
  * `out_info` must point at a `sipral_media_info_t` whose `size` member
  * says how long it is.
  */
-sipral_status_t sipral_call_media_info(sipral_handle_t stack, sipral_handle_t call, sipral_media_info_t *out_info);
+sipral_status_t sipral_media_info(sipral_handle_t media, sipral_media_info_t *out_info);
 
 /**
  * What one call's media has cost, and what it is costing now.
  *
  * A6's live half. `now_ms` is the caller's monotonic clock, as everywhere
  * else, because "how long since a packet arrived" is a question about the
- * present and nothing here reads a clock to answer it. Unlike
- * `sipral_stack_poll`, this does not move the stack's own clock: it is
- * read at the frame rate of a user interface, often from the thread that
- * draws one, and a reading a millisecond behind the last poll is not a
- * caller bug.
+ * present and nothing here reads a clock to answer it. Like every media
+ * entry point, this does not move the stack's own clock: it is read at the
+ * frame rate of a user interface, often from the thread that draws one,
+ * and a reading a millisecond behind the last poll is not a caller bug.
  *
  * The end-of-call record arrives instead as
  * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`, because by then the stream is
- * gone and there is nothing left here to ask.
+ * gone and this answers `SIPRAL_STATUS_WRONG_STATE`.
  *
  * Safety
  *
  * `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
  * says how long it is.
  */
-sipral_status_t sipral_call_statistics(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms, sipral_stream_stats_t *out_stats);
+sipral_status_t sipral_media_statistics(sipral_handle_t media, uint64_t now_ms, sipral_stream_stats_t *out_stats);
 
 /**
  * Take a datagram off the media socket.
@@ -2823,13 +2875,17 @@ sipral_status_t sipral_call_statistics(sipral_handle_t stack, sipral_handle_t ca
  * `out_arrival` may be null for a caller that does not want to know what
  * the datagram turned out to be.
  *
+ * `now_ms` is when it arrived, on the stack's clock. Reading it here moves
+ * nothing: the network thread and the poll thread read that clock apart,
+ * and a datagram a millisecond behind the last poll is not refused.
+ *
  * Safety
  *
  * `data` must be readable and writable for `len` bytes, `from` readable
  * for `from_len`, and `out_arrival` must point at one `uint32_t` or be
  * null.
  */
-sipral_status_t sipral_call_media_receive(sipral_handle_t stack, sipral_handle_t call, uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, uint32_t *out_arrival);
+sipral_status_t sipral_media_receive(sipral_handle_t media, uint8_t *data, size_t len, const char *from, size_t from_len, uint64_t now_ms, uint32_t *out_arrival);
 
 /**
  * Take the frame that is due for the earpiece, and say where it came from.
@@ -2847,7 +2903,7 @@ sipral_status_t sipral_call_media_receive(sipral_handle_t stack, sipral_handle_t
  * point at one `size_t` or be null, and `out_source` at one `uint32_t` or
  * be null.
  */
-sipral_status_t sipral_call_playback(sipral_handle_t stack, sipral_handle_t call, int16_t *samples, size_t capacity, size_t *out_written, uint32_t *out_source);
+sipral_status_t sipral_media_playback(sipral_handle_t media, int16_t *samples, size_t capacity, size_t *out_written, uint32_t *out_source);
 
 /**
  * Put one frame from the microphone on the wire.
@@ -2868,25 +2924,30 @@ sipral_status_t sipral_call_playback(sipral_handle_t stack, sipral_handle_t call
  * long it is and whose buffers are writable for the capacities beside
  * them.
  */
-sipral_status_t sipral_call_capture(sipral_handle_t stack, sipral_handle_t call, const int16_t *samples, size_t sample_count, sipral_media_packet_t *packet);
+sipral_status_t sipral_media_capture(sipral_handle_t media, const int16_t *samples, size_t sample_count, sipral_media_packet_t *packet);
 
 /**
- * The control traffic that is due, for whichever call is due one.
+ * The control traffic this call has due.
  *
- * One at a time, like every other poll here: a caller loops until the
- * packet comes back with a `len` of zero. `out_call` names the call it
- * belongs to, and therefore the socket it goes out on.
+ * A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
+ * decides when, and at most one report is due at a time, so one call per
+ * frame is enough.
  *
- * RFC 3550 §6.3 decides when. Call this whenever `sipral_stack_poll`
- * reports a deadline and whenever a frame goes out; on a call that
- * negotiated no RTCP it answers zero for ever.
+ * It asks one call rather than the whole stack, so the thread that sends
+ * a call's audio sends its reports too, on the same socket and without
+ * reaching the stack: call it after every frame that goes out, and
+ * whenever `sipral_stack_poll` reports a deadline while a call is not
+ * capturing. On a call that negotiated no RTCP it answers zero for ever.
+ *
+ * `now_ms` is read as the stack reads it and moves nothing, as with every
+ * media entry point.
  *
  * Safety
  *
- * `out_call` must point at one `sipral_handle_t` or be null, and `packet`
- * at a `sipral_media_packet_t` as sipral_call_capture describes.
+ * `packet` must point at a `sipral_media_packet_t` as
+ * sipral_media_capture describes.
  */
-sipral_status_t sipral_stack_poll_rtcp(sipral_handle_t stack, uint64_t now_ms, sipral_handle_t *out_call, sipral_media_packet_t *packet);
+sipral_status_t sipral_media_poll_rtcp(sipral_handle_t media, uint64_t now_ms, sipral_media_packet_t *packet);
 
 /**
  * Whether a digit is going out or waiting to, and how many have not
@@ -2901,7 +2962,7 @@ sipral_status_t sipral_stack_poll_rtcp(sipral_handle_t stack, uint64_t now_ms, s
  * `out_dialling` must point at one `uint32_t` or be null, and
  * `out_waiting` at one `size_t` or be null.
  */
-sipral_status_t sipral_call_dialling(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_dialling, size_t *out_waiting);
+sipral_status_t sipral_media_dialling(sipral_handle_t media, uint32_t *out_dialling, size_t *out_waiting);
 
 /**
  * Drop everything queued and stop the digit going out.
@@ -2913,7 +2974,7 @@ sipral_status_t sipral_call_dialling(sipral_handle_t stack, sipral_handle_t call
  *
  * Reads no memory the caller owns.
  */
-sipral_status_t sipral_call_stop_dialling(sipral_handle_t stack, sipral_handle_t call);
+sipral_status_t sipral_media_stop_dialling(sipral_handle_t media);
 
 /**
  * Start recording this call to `path`.
@@ -2922,16 +2983,19 @@ sipral_status_t sipral_call_stop_dialling(sipral_handle_t stack, sipral_handle_t
  * as the person on the phone presses the button, and each recording is a
  * file of its own: a path written to twice would have two headers in it.
  *
- * `SIPRAL_STATUS_WRONG_STATE` for a call with no media and for one already
- * being recorded — two writers on one stream would interleave frames into
- * both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file system
- * refuses the path, with what it said in the last error.
+ * `SIPRAL_STATUS_WRONG_STATE` for a call whose media has ended and for one
+ * already being recorded — two writers on one stream would interleave
+ * frames into both files. `SIPRAL_STATUS_INVALID_ARGUMENT` when the file
+ * system refuses the path, with what it said in the last error.
+ *
+ * The file is made with this call's media held, so this call's audio
+ * waits for the file system to answer and no other call's does.
  *
  * Safety
  *
  * `path` must be readable for `path_len` bytes.
  */
-sipral_status_t sipral_call_record_start(sipral_handle_t stack, sipral_handle_t call, const char *path, size_t path_len);
+sipral_status_t sipral_media_record_start(sipral_handle_t media, const char *path, size_t path_len);
 
 /**
  * Stop it, and close the file.
@@ -2942,9 +3006,9 @@ sipral_status_t sipral_call_record_start(sipral_handle_t stack, sipral_handle_t 
  *
  * Safety
  *
- * Safe to call with any handle values.
+ * Safe to call with any handle value.
  */
-sipral_status_t sipral_call_record_stop(sipral_handle_t stack, sipral_handle_t call);
+sipral_status_t sipral_media_record_stop(sipral_handle_t media);
 
 /**
  * Whether a recording is running on this call, and how much audio it has
@@ -2958,7 +3022,7 @@ sipral_status_t sipral_call_record_stop(sipral_handle_t stack, sipral_handle_t c
  * `out_recording` must point at one `uint32_t` or be null, and
  * `out_recorded_ms` at one `uint64_t` or be null.
  */
-sipral_status_t sipral_call_record_state(sipral_handle_t stack, sipral_handle_t call, uint32_t *out_recording, uint64_t *out_recorded_ms);
+sipral_status_t sipral_media_record_state(sipral_handle_t media, uint32_t *out_recording, uint64_t *out_recorded_ms);
 
 /**
  * Take the next message the stack wants written.
