@@ -147,9 +147,21 @@ impl UserAgent {
         let request = request.clone();
 
         // §5: "If the UAS receives a PRACK with an offer, it MUST place the
-        // answer in the 2xx to the PRACK." Nothing here has an answer to
-        // write, so a PRACK that carries one is handed to the application the
-        // same way any other offer it cannot answer is
+        // answer in the 2xx to the PRACK." An offer this layer can answer —
+        // the same hold or resume `is_same_media` takes anywhere else — gets
+        // its answer in the 2xx below.
+        //
+        // One that it cannot is a gap, and a named one. The 2xx still has to
+        // go (§3: a PRACK "MUST be responded to with a 2xx response"), it goes
+        // without a body, and nothing is adopted: `answer_for` returns before
+        // it touches `set_remote`, so a PRACK carrying a downgrade leaves the
+        // call on the secure description it already had. That is the safe half
+        // and it is not an accident. The unsafe half is that the application
+        // is never told an offer arrived and was dropped, and there is no
+        // event shaped to tell it — the 2xx has already gone, so there is no
+        // transaction left for an application to answer into. Saying so is
+        // what this comment is for, and it is the one thing this path owes
+        // that it does not yet pay.
         let body = request.as_raw().body().to_vec();
         let answer = if body.is_empty() {
             None

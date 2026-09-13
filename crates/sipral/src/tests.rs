@@ -2537,3 +2537,66 @@ fn a_codec_change_on_a_secured_call_does_not_re_open_the_packet_index() {
          key: {arrival:?}"
     );
 }
+
+/// `SrtpPolicy::Required` promises that "a plain re-offer inside a live call
+/// is refused rather than accepted", because "a stack that offers SDES and
+/// then answers a mid-call plain re-offer in the clear has fallen back
+/// silently, which is the worst of the outcomes available".
+///
+/// The re-offer here keeps every format the first negotiation settled and
+/// changes only the profile and the key — which is what a downgrade looks
+/// like, and what a B2BUA that has lost its own SRTP does.
+#[test]
+fn a_plain_re_offer_that_keeps_the_formats_is_refused_too() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+    );
+
+    // the callee's own last description, with the profile taken down to
+    // RTP/AVP and the key removed. Every format stays exactly where it was
+    let mut downgrade = pair
+        .caller
+        .answer_received()
+        .expect("the caller saw the answer");
+    downgrade.origin.version += 5;
+    for stream in &mut downgrade.media {
+        stream.proto = "RTP/AVP".to_owned();
+        stream.attributes.retain(|a| a.name != "crypto");
+    }
+    let bytes = downgrade.to_bytes();
+    pair.callee
+        .agent
+        .reoffer(remote, &bytes, pair.now)
+        .expect("the re-INVITE goes");
+
+    // the re-INVITE reaches the caller, and whatever the caller answers goes
+    // on the wire before anything else happens
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let answered: Vec<String> = pair
+        .caller
+        .outbound()
+        .iter()
+        .map(|datagram| String::from_utf8_lossy(datagram).into_owned())
+        .collect();
+
+    assert!(
+        !answered
+            .iter()
+            .any(|response| response.starts_with("SIP/2.0 2")),
+        "a call that requires SRTP accepted a re-offer that took the keys \
+         away: {answered:?}"
+    );
+}

@@ -322,6 +322,26 @@ user agent's own answer writer, not in the facade, and it is not papered over
 here: carrying the key forward locally would make this end believe a
 negotiation the far end saw fail.
 
+What the user agent no longer answers by itself is a re-offer whose transport
+profile moved, or one where the `a=crypto` line appeared or disappeared. Those
+are a change to the security of a call in progress, and they are handed up, so
+that an account under a *required* policy refuses them with 488 rather than
+finding out afterwards. Only the presence of the line counts, not its value: a
+peer is entitled to re-key on a re-offer, and a re-key reaches the media
+session by its own path.
+
+Two consequences of that, both real and neither hidden. A re-offer that keeps
+`RTP/SAVP` and drops the crypto line is now refused at the stream — port zero
+in the answer — under *every* policy, not only *required*, where before the
+audio limped on under the keys already in use. Such an offer is malformed in
+any case (§5.1.2 requires the attribute on a secure profile), so refusing it is
+the honest answer, but a peer that used to get away with it will now hear
+silence. And the answer this facade writes for a re-offer it was handed is
+always `sendrecv`, so a peer that both holds a stream and moves its profile in
+one re-INVITE gets an answer RFC 3264 §6.1 would not have written. It cannot
+happen under *required*, where the offer is refused before an answer is
+composed; under the other two it is a shape nothing has been seen to send.
+
 ## What a re-negotiation keeps
 
 A re-INVITE settles on a plan, and one of two things happens to the media.

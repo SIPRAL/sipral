@@ -179,10 +179,21 @@ impl Session {
     /// Whether an offer that arrived asks for nothing this layer would have to
     /// hand to the application.
     ///
-    /// Hold, resume, and a peer moving its media address all keep the streams
-    /// and the formats that were negotiated. A codec change, a stream added or
-    /// one taken away do not, and those need a device this layer does not
-    /// have.
+    /// Hold, resume, and a peer moving its media address all keep the streams,
+    /// the formats, the transport profile and the keying that were negotiated.
+    /// A codec change, a stream added or one taken away do not, and those need
+    /// a device this layer does not have.
+    ///
+    /// Neither does a transport profile that moved, or an `a=crypto` that
+    /// appeared or disappeared. Those are a change to the security of a call
+    /// in progress, and answering one here would settle it in a layer that
+    /// has never read a crypto line and holds no policy: `RTP/AVP` where
+    /// `RTP/SAVP` was agreed is the whole of a downgrade, and this is the only
+    /// place that can tell it is happening. So it is handed up, and
+    /// `crates/sipral` — which knows whether the account required encryption —
+    /// decides. Keeping it: the `a=crypto` value, deliberately. A peer is
+    /// entitled to re-key on a re-offer (RFC 4568 §7.1.4) and that reaches the
+    /// media session through its own path; only presence is a change of shape.
     pub(crate) fn is_same_media(&self, offer: &SessionDescription) -> bool {
         let Some(previous) = self.remote.as_ref() else {
             return false;
@@ -192,7 +203,17 @@ impl Session {
                 .media
                 .iter()
                 .zip(&offer.media)
-                .all(|(before, now)| before.media == now.media && before.formats == now.formats)
+                .all(|(before, now)| {
+                    before.media == now.media
+                        && before.formats == now.formats
+                        // folded the way `keying::is_secure` folds it, so that
+                        // a peer writing `rtp/savp` is not pushed off the fast
+                        // path for nothing; it still parts AVP from SAVP,
+                        // which is the whole point
+                        && before.proto.eq_ignore_ascii_case(&now.proto)
+                        && before.attribute("crypto").is_some()
+                            == now.attribute("crypto").is_some()
+                })
     }
 
     /// The bytes of what each end last described.
@@ -323,13 +344,78 @@ mod tests {
 
     /// One audio stream carrying PCMU, plus whatever the caller adds.
     fn description(port: u16, attributes: Vec<Attribute>) -> SessionDescription {
+        secured(port, "RTP/AVP", attributes)
+    }
+
+    /// The same, with the transport profile named rather than assumed.
+    fn secured(port: u16, proto: &str, attributes: Vec<Attribute>) -> SessionDescription {
         let mut description =
             SessionDescription::new(Origin::new(1, 1, address()), Connection::new(address()));
-        let mut media = MediaDescription::new("audio", port, "RTP/AVP", vec!["0".to_owned()]);
+        let mut media = MediaDescription::new("audio", port, proto, vec!["0".to_owned()]);
         media.attributes = attributes;
         set_direction(&mut media, Direction::SendRecv);
         description.media.push(media);
         description
+    }
+
+    fn crypto() -> Vec<Attribute> {
+        vec![Attribute::with_value(
+            "crypto",
+            "1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )]
+    }
+
+    /// Only a session that has heard from the far end can compare anything.
+    fn negotiated(remote: SessionDescription) -> Session {
+        let mut session = Session::default();
+        session.set_remote(remote);
+        session
+    }
+
+    /// A downgrade keeps every format the first negotiation settled and
+    /// changes the profile. It is not "the same media", and this layer holds
+    /// no policy with which to answer it, so it has to go up.
+    ///
+    /// The `a=crypto` line is deliberately left on the offer. Without it the
+    /// keying check below would catch this one too, and then nothing here
+    /// would be testing the profile at all — which is what the first version
+    /// of this test did.
+    #[test]
+    fn a_re_offer_that_takes_the_transport_profile_down_is_not_the_same_media() {
+        let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
+        assert!(!session.is_same_media(&secured(40_000, "RTP/AVP", crypto())));
+    }
+
+    /// The half a profile check alone would miss: `RTP/SAVP` with the key
+    /// taken out. RFC 4568 §5.1.2 requires the attribute on a secure profile,
+    /// so this is not a stream anyone can open — and answering it here would
+    /// settle that in a layer that never read a crypto line.
+    #[test]
+    fn a_re_offer_that_keeps_the_profile_and_drops_the_key_is_not_the_same_media() {
+        let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
+        assert!(!session.is_same_media(&secured(40_000, "RTP/SAVP", Vec::new())));
+    }
+
+    /// And the one the rule must not catch. RFC 4568 §7.1.4 makes a re-offer
+    /// an opportunity to re-key; the key that arrives is a different key, and
+    /// a comparison on the value rather than the presence would push every
+    /// ordinary re-key off the fast path and up to an application that has
+    /// nothing to decide about it.
+    #[test]
+    fn a_peer_that_re_keys_on_a_re_offer_is_still_the_same_media() {
+        let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
+        let fresh = vec![Attribute::with_value(
+            "crypto",
+            "1 AES_CM_128_HMAC_SHA1_80 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        )];
+        assert!(session.is_same_media(&secured(40_000, "RTP/SAVP", fresh)));
+    }
+
+    /// A peer that writes the profile in lower case has not changed it.
+    #[test]
+    fn the_transport_profile_is_compared_without_regard_to_case() {
+        let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
+        assert!(session.is_same_media(&secured(40_000, "rtp/savp", crypto())));
     }
 
     /// The far end putting a call on hold re-offers the session it already

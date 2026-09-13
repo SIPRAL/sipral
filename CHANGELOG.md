@@ -28,6 +28,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   block of `SHA-256(media seed || counter)` rather than two hex tokens, and
   the block is wiped before it leaves the stack.
 
+### Security
+
+- **A mid-call downgrade is no longer answered by a layer that holds no
+  policy.** `SrtpPolicy::Required` promises that a plain re-offer inside a
+  live call is refused rather than accepted, and it was — as long as the
+  re-offer also changed a codec. A re-offer that kept every format the first
+  negotiation settled and moved only the transport profile, or only dropped
+  the `a=crypto` line, read as "the same media" to `sipral-ua`, which answered
+  it itself: 200 OK, from a layer that has never read a crypto line and knows
+  nothing about the account's policy. That is what a B2BUA which has lost its
+  own SRTP sends, and what an attacker in the signalling path would send. The
+  comparison now takes in the transport profile and whether a key is there at
+  all, so both go up to the facade and both are refused with 488 under
+  *required*. The `a=crypto` **value** is deliberately not compared: RFC 4568
+  §7.1.4 makes a re-offer an opportunity to re-key, and a re-key reaches the
+  media session by its own path.
+
 ### Fixed
 
 - **A target refresh inside a dialog is now reported.** §12.2.1.2 and §12.2.2
