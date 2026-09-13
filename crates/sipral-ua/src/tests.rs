@@ -715,6 +715,74 @@ fn the_next_invite_travels_the_service_route_and_names_the_public_gruu() {
 }
 
 #[test]
+fn supported_names_gruu_on_the_invite_and_the_responses_that_answer_one() {
+    // RFC 5627 §4.4 SHOULD: "a UA SHOULD include a Supported header field
+    // with the option tag gruu in requests and responses it generates"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    assert!(
+        String::from_utf8_lossy(&header(&sent(&mut agent), HeaderName::Supported)).contains("gruu"),
+        "the INVITE this end sends"
+    );
+
+    let call = call_arriving(&mut agent, &incoming_invite("gr-sup", Some(OFFER)), t0);
+    agent.ring(call, None, t0).expect("180 goes");
+    assert!(
+        String::from_utf8_lossy(&header(&sent(&mut agent), HeaderName::Supported)).contains("gruu"),
+        "the 180 this end sends"
+    );
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    assert!(
+        String::from_utf8_lossy(&header(&sent(&mut agent), HeaderName::Supported)).contains("gruu"),
+        "the 200 this end sends"
+    );
+}
+
+#[test]
+fn an_account_with_no_instance_does_not_ask_for_gruu_on_a_call() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    assert!(
+        !String::from_utf8_lossy(&header(&sent(&mut agent), HeaderName::Supported))
+            .contains("gruu"),
+        "no instance identifier, nothing to ask a GRUU for"
+    );
+}
+
+#[test]
+fn a_require_of_gruu_is_honoured_once_the_account_has_asked_for_one() {
+    // the negative of this is `a_require_nobody_here_implements_is_refused_with_420`
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &incoming_invite("gr-req", Some(OFFER)),
+            "Require: gruu, 100rel\r\n",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::IncomingCall { .. })),
+        "gruu is understood by this account, so the call reaches the application"
+    );
+}
+
+#[test]
 fn the_refresh_does_not_travel_the_service_route_it_would_replace() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
@@ -1236,6 +1304,100 @@ fn an_anonymous_call_names_a_temporary_gruu_and_never_the_public_one() {
 }
 
 #[test]
+fn a_reinvite_stops_naming_a_gruu_once_its_registration_has_lapsed() {
+    // RFC 5627 §4.4: "MUST NOT reuse a GRUU learned through a previous
+    // registration that has lapsed" -- a re-INVITE sent long into a call must
+    // not keep repeating the Contact the INVITE opened with, unlike a
+    // subscription's refresh, which already reads it fresh
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    // the binding was granted for 3600s and nothing has refreshed it
+    let later = t0 + Duration::from_secs(3_700);
+    agent.hold(call, later).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    assert_eq!(
+        text(&reinvite, HeaderName::Contact),
+        CONFIGURED,
+        "the registration that issued the GRUU has lapsed"
+    );
+}
+
+#[test]
+fn a_call_that_outlives_its_account_still_names_a_contact() {
+    // RFC 3261 §8.1.1.8 and §12.2.1.1: a re-INVITE carries the Contact the
+    // far end retargets to, and an empty one is no URI at all. The account
+    // being removed takes its registration with it, so there is no GRUU left
+    // to name, but the plain contact the call was placed from still is one
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent.remove_account(id);
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    assert_eq!(
+        text(&reinvite, HeaderName::Contact),
+        "<sip:alice@192.0.2.1>",
+        "{}",
+        String::from_utf8_lossy(&reinvite)
+    );
+}
+
+/// Whether any `Supported` field of a message lists `gruu`.
+fn supports_gruu(bytes: &[u8]) -> bool {
+    with(bytes, |message| {
+        message
+            .field_values(HeaderName::Supported)
+            .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"gruu"))
+    })
+}
+
+#[test]
+fn supported_names_gruu_on_a_reinvite_and_on_the_answer_to_one() {
+    // RFC 5627 §4.4 lists "a 2xx or 18x response to an INVITE which contains a
+    // To tag" and asks for `Supported: gruu` on what a UA generates; a
+    // re-INVITE is an INVITE, and so is the one the far end sends
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    assert!(
+        supports_gruu(&reinvite),
+        "the re-INVITE this end sends: {}",
+        String::from_utf8_lossy(&reinvite)
+    );
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "gr-theirs", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert!(
+        supports_gruu(&answer),
+        "the 200 this end sends to the far end's re-INVITE: {}",
+        String::from_utf8_lossy(&answer)
+    );
+}
+
+#[test]
 fn a_call_sent_somewhere_else_takes_neither_the_route_nor_the_gruu() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
@@ -1328,6 +1490,49 @@ fn a_subscription_travels_the_service_route_and_refreshes_from_the_gruu() {
     // dialog's own by now
     assert_eq!(header(&refresh, HeaderName::Contact), angled(PUBLIC_GRUU));
     assert!(routes(&refresh).is_empty());
+}
+
+#[test]
+fn supported_names_gruu_on_the_subscribe_and_its_refresh() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+
+    agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:bob@example.com"), "presence"),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&header(&subscribe, HeaderName::Supported)).contains("gruu"));
+
+    deliver(
+        &mut agent,
+        &answered(&subscribe, 200, "OK", "notifier", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "presence",
+            "active;expires=600",
+            None,
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(590));
+    let refresh = only(&transmits(&mut agent), "SUBSCRIBE ");
+    assert!(String::from_utf8_lossy(&header(&refresh, HeaderName::Supported)).contains("gruu"));
 }
 
 #[test]
@@ -3868,6 +4073,36 @@ fn the_refresher_sends_a_refresh_at_half_the_interval() {
 }
 
 #[test]
+fn a_refresh_sent_as_a_reinvite_names_gruu_in_supported() {
+    // RFC 5627 §4.4: `Supported: gruu` on what a UA generates, and a session
+    // refresh the far end did not allow as an UPDATE goes as a re-INVITE
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(300));
+    let refresh = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the refresh");
+    assert!(
+        supports_gruu(&refresh),
+        "{}",
+        String::from_utf8_lossy(&refresh)
+    );
+}
+
+#[test]
 fn a_refresh_repeats_the_description_it_already_agreed() {
     // 7.4: "a re-INVITE SHOULD contain one, even if the details of the session
     // have not changed. In that case, the offer MUST indicate that it has not
@@ -5140,6 +5375,77 @@ fn a_blind_transfer_refers_the_far_end_and_waits_to_be_told() {
         *event,
         UaEvent::TransferDone { status, .. } if status == StatusCode::OK
     )));
+}
+
+#[test]
+fn the_refer_this_call_sends_names_its_own_from_as_referred_by_not_its_contact() {
+    // RFC 3892 §1: Referred-By identifies the referrer, and the identity a
+    // call's own From already showed the far end discloses nothing new; its
+    // Contact is a different thing, and can now be a GRUU (RFC 5627 §4.4)
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(gruu_account());
+    serviced_registration(&mut agent, id, SERVICES, t0);
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    assert_eq!(
+        header(&refer, HeaderName::Contact),
+        angled(PUBLIC_GRUU),
+        "sanity: the Contact is the GRUU this test is telling Referred-By apart from"
+    );
+    let referred_by = text(&refer, HeaderName::ReferredBy);
+    assert!(
+        referred_by.contains("alice@example.com"),
+        "names the account's own From, not its Contact: {referred_by}"
+    );
+    assert!(
+        !referred_by.contains("gr="),
+        "and never a GRUU: {referred_by}"
+    );
+}
+
+#[test]
+fn the_refer_an_answered_call_sends_names_the_address_it_answered_as() {
+    // RFC 3261 §12.1.1: the local URI of a dialog this end answered is the To
+    // of the INVITE, and every request this end sends in it carries that as
+    // its From. The line was found by its contact, not its address of record,
+    // so the address the call presented is the number that was dialled -- and
+    // the Referred-By that names this end names that, not the account's
+    // address of record the far end was never shown
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let _ = agent.add_account(account());
+    let invite = String::from_utf8(incoming_invite("rb-in", Some(OFFER)))
+        .expect("an INVITE in text")
+        .replace(
+            "To: Alice <sip:alice@example.com>",
+            "To: <sip:+15551234567@example.com;user=phone>",
+        );
+    let call = call_arriving(&mut agent, invite.as_bytes(), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "rb-inack", 1), t0);
+    events(&mut agent);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    assert!(
+        text(&refer, HeaderName::From).starts_with("<sip:+15551234567@example.com;user=phone>"),
+        "sanity: the From this end writes in the dialog: {}",
+        String::from_utf8_lossy(&refer)
+    );
+    assert_eq!(
+        text(&refer, HeaderName::ReferredBy),
+        "<sip:+15551234567@example.com;user=phone>"
+    );
 }
 
 #[test]

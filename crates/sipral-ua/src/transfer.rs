@@ -399,26 +399,32 @@ impl UserAgent {
 
 impl UserAgent {
     fn refer(&mut self, call: CallHandle, refer_to: &[u8], now: Instant) -> Result<(), UaError> {
-        let (dialog, contact, state) = {
+        let (dialog, state, from) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             if held.referring.is_some() {
                 return Err(UaError::WrongState(held.state));
             }
             (
                 held.dialog.ok_or(UaError::WrongState(held.state))?,
-                held.contact.clone(),
                 held.state,
+                held.from.clone(),
             )
         };
         if !state.is_confirmed() {
             return Err(UaError::WrongState(state));
         }
+        let contact = self.current_contact(call, now);
         // §2: "REFER creates a dialog, and MAY be Record-Routed, hence MUST
-        // contain a single Contact header field value."
+        // contain a single Contact header field value." `Referred-By` is not
+        // that Contact: RFC 3892 §1 has it identify the referrer, and this
+        // call's own `From` already did that to the peer it is now asking to
+        // refer -- a GRUU in Contact (RFC 5627 §4.4, or a temporary one on an
+        // anonymous call, §3.3) would otherwise hand out a routable address
+        // the far end never needed just to say who is asking.
         let request = OutgoingInDialogRequest::new(Method::Refer)
             .contact(&contact)
             .header(HeaderName::ReferTo, refer_to)
-            .header(HeaderName::ReferredBy, &contact);
+            .header(HeaderName::ReferredBy, &from);
         let transaction = self.endpoint.request_in_dialog(dialog, &request, now)?;
         // §2: the REFER is what creates the subscription, so it is recorded
         // now rather than when the 202 comes back — §2.4.4 allows a NOTIFY to
@@ -446,7 +452,7 @@ impl UserAgent {
         let Some(held) = self.calls.get(&call) else {
             return;
         };
-        let (Some(dialog), contact) = (held.dialog, held.contact.clone()) else {
+        let Some(dialog) = held.dialog else {
             return;
         };
         // §2.4.6: the `id` names which REFER this reports on. Carrying it on
@@ -457,6 +463,7 @@ impl UserAgent {
             Some(id) => format!("refer;id={id}").into_bytes(),
             None => REFER.to_vec(),
         };
+        let contact = self.current_contact(call, now);
         let request = OutgoingInDialogRequest::new(Method::Notify)
             .contact(&contact)
             .header(HeaderName::Event, &event)

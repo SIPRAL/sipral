@@ -160,12 +160,12 @@ impl UserAgent {
         sdp: Option<&[u8]>,
         now: Instant,
     ) -> Result<(), UaError> {
-        let (answering, contact) = {
+        let answering = {
             let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             let state = held.state;
-            let answering = held.answering.take().ok_or(UaError::WrongState(state))?;
-            (answering, held.contact.clone())
+            held.answering.take().ok_or(UaError::WrongState(state))?
         };
+        let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
@@ -242,7 +242,7 @@ impl UserAgent {
         fields: &[crate::account::Extra],
         now: Instant,
     ) -> Result<(), UaError> {
-        let (state, dialog, contact, allows_update) = {
+        let (state, dialog, allows_update) = {
             let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             if call_state.offering.is_some() || call_state.answering.is_some() {
                 return Err(UaError::ChangeInProgress);
@@ -250,7 +250,6 @@ impl UserAgent {
             (
                 call_state.state,
                 call_state.dialog.ok_or(UaError::CannotRenegotiate)?,
-                call_state.contact.clone(),
                 call_state.update_allowed,
             )
         };
@@ -260,16 +259,23 @@ impl UserAgent {
             _ => return Err(UaError::CannotRenegotiate),
         };
 
+        let contact = self.current_contact(call, now);
         let body: Arc<[u8]> = Arc::from(offer.to_bytes());
         // §8.1.1.8 makes Contact a MUST on anything that can refresh a target,
         // and both of these can
-        let request = onto_request(
+        let mut request = onto_request(
             OutgoingInDialogRequest::new(method)
                 .contact(&contact)
                 .header(HeaderName::Allow, ALLOW),
             fields,
         )
         .body(b"application/sdp", body);
+        if method == Method::Invite && self.wants_gruu(call) {
+            // RFC 5627 §4.4 SHOULD, on a re-INVITE as on the INVITE that
+            // opened the call: "a UA SHOULD include a Supported header field
+            // with the option tag gruu in requests and responses it generates"
+            request = request.header(HeaderName::Supported, b"gruu");
+        }
         let transaction = if method == Method::Invite {
             AnyTransactionId::InviteClient(self.endpoint.reinvite(dialog, &request, now)?)
         } else {
@@ -377,7 +383,12 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         match transaction {
             AnyTransactionId::InviteServer(id) => {
-                self.endpoint.respond_invite(id, response, now)?;
+                // RFC 5627 §4.4 names "a 2xx or 18x response to an INVITE
+                // which contains a To tag", and a 2xx to a re-INVITE is one
+                let with_gruu = (response.status().is_success() && self.wants_gruu(call))
+                    .then(|| response.clone().header(HeaderName::Supported, b"gruu"));
+                self.endpoint
+                    .respond_invite(id, with_gruu.as_ref().unwrap_or(response), now)?;
                 // §13.3.1.4 wants a BYE if this one is never acknowledged
                 if response.status().is_success()
                     && let Some(held) = self.calls.get_mut(&call)
@@ -900,7 +911,7 @@ impl UserAgent {
         offer: &SessionDescription,
         now: Instant,
     ) -> bool {
-        let prepared = {
+        let answer = {
             let Some(held) = self.calls.get_mut(&call) else {
                 return false;
             };
@@ -911,12 +922,13 @@ impl UserAgent {
             let Some(answer) = held.session.answer(offer, wanted) else {
                 return false;
             };
-            (answer, held.contact.clone())
+            answer
         };
+        let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
-            .contact(&prepared.1)
+            .contact(&contact)
             .header(HeaderName::Allow, ALLOW)
-            .body(b"application/sdp", Arc::from(prepared.0.to_bytes()));
+            .body(b"application/sdp", Arc::from(answer.to_bytes()));
         if let Some(value) = self.timer_echo(call) {
             response = response.header(HeaderName::SessionExpires, &value);
         }
@@ -925,7 +937,7 @@ impl UserAgent {
         }
         if let Some(held) = self.calls.get_mut(&call) {
             held.session.set_remote(offer.clone());
-            held.session.set_local(prepared.0);
+            held.session.set_local(answer);
         }
         self.report_session(call);
         true
@@ -933,26 +945,27 @@ impl UserAgent {
 
     /// Answer a re-INVITE that carried no offer with one of our own (§14.1).
     fn offer_in_answer(&mut self, call: CallHandle, transaction: AnyTransactionId, now: Instant) {
-        let prepared = {
+        let offered = {
             let Some(held) = self.calls.get_mut(&call) else {
                 return;
             };
             let wanted = held.session.hold.local;
-            (held.session.offer(wanted), held.contact.clone())
+            held.session.offer(wanted)
         };
+        let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
-            .contact(&prepared.1)
+            .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
         if let Some(value) = self.timer_echo(call) {
             response = response.header(HeaderName::SessionExpires, &value);
         }
-        if let Some(ref description) = prepared.0 {
+        if let Some(ref description) = offered {
             response = response.body(b"application/sdp", Arc::from(description.to_bytes()));
         }
         if self.answer_with(call, transaction, &response, now).is_err() {
             return;
         }
-        if let (Some(held), Some(description)) = (self.calls.get_mut(&call), prepared.0) {
+        if let (Some(held), Some(description)) = (self.calls.get_mut(&call), offered) {
             held.session.set_local(description);
             held.session.answer_owed = true;
         }
@@ -960,11 +973,7 @@ impl UserAgent {
 
     /// Answer a request that only refreshed the target.
     fn acknowledge_only(&mut self, call: CallHandle, transaction: AnyTransactionId, now: Instant) {
-        let contact = self
-            .calls
-            .get(&call)
-            .map(|held| held.contact.clone())
-            .unwrap_or_default();
+        let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);

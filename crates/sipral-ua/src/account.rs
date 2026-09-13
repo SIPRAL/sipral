@@ -413,6 +413,17 @@ impl Account {
         &self.contact
     }
 
+    /// Whether this account asks its registrar for GRUUs (RFC 5627 §4.1).
+    ///
+    /// Only possible with an instance identifier: GRUUs are handed out per
+    /// instance, and a `Contact` naming none cannot carry one. What decides
+    /// whether `Supported: gruu` goes on a REGISTER, an INVITE or a SUBSCRIBE,
+    /// and whether an incoming `Require: gruu` is honoured rather than
+    /// answered 420.
+    pub(crate) const fn wants_gruu(&self) -> bool {
+        self.instance_id.is_some()
+    }
+
     /// `From`, with the display name when there is one. The tag is the
     /// endpoint's to add (§8.1.1.3).
     pub(crate) fn sender_value(&self) -> Box<[u8]> {

@@ -492,7 +492,7 @@ fn build_register(
     // for a contact that names its instance — so the tag goes with the
     // instance identifier and never without it. A `Supported` the application
     // added is folded into the same field rather than written beside it.
-    let wants_gruu = account.instance_id.is_some();
+    let wants_gruu = account.wants_gruu();
     let mut supported: Vec<u8> = Vec::new();
     for extra in &account.extra {
         let Some(name) = HeaderName::from_bytes(&extra.name) else {

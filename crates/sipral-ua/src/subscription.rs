@@ -897,6 +897,11 @@ fn build_subscribe(
     ))
     .header(HeaderName::Event, &held.wanted.package)
     .header(HeaderName::Expires, seconds.as_bytes());
+    // RFC 5627 §4.4 SHOULD: "a UA SHOULD include a Supported header field
+    // with the option tag gruu in requests and responses it generates"
+    if account.wants_gruu() {
+        request = request.header(HeaderName::Supported, b"gruu");
+    }
     // RFC 3608 §6.1: the service route preloaded, in the registrar's order
     for hop in learned.into_iter().flat_map(RegistrarInfo::service_route) {
         request = request.route(hop);
@@ -930,6 +935,9 @@ fn build_refresh(
         ))
         .header(HeaderName::Event, &held.wanted.package)
         .header(HeaderName::Expires, seconds.as_bytes());
+    if account.wants_gruu() {
+        request = request.header(HeaderName::Supported, b"gruu");
+    }
     if let Some(ref accept) = held.wanted.accept {
         request = request.header(HeaderName::Accept, accept);
     }

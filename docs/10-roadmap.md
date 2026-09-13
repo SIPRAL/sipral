@@ -34,11 +34,11 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and four of the eight exit criteria met.** Every line of the
+**Status: written, and five of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
 `sipral-media` — and five flows run against three servers whenever
 `scripts/lab.sh` is run. What is left is one paid carrier account, the 24-hour
-fuzzing run, and the two criteria added after the tree was read end to end: the
+fuzzing run, and the criterion added after the tree was read end to end: the
 lab drove the stack through a media join written for the lab, not through the
 one an application links, so what it proved was the harness. A phase whose
 proof runs on a path no customer uses has not exited.
@@ -65,7 +65,7 @@ unit suite had ever asked.
 - the same flows, plus DTMF in both forms, run through `sipral::MediaEngine` —
   the join an application links — and then through `sipral.h` from a C driver,
   so that the path a customer ships is the path the lab proves;
-- no request the stack can build leaves as an oversized datagram: the
+- **met** — no request the stack can build leaves as an oversized datagram: the
   §18.1.1 promotion applies inside a dialog as it does outside one.
 
 ## Phase 2 — media, and the things that get more expensive by waiting

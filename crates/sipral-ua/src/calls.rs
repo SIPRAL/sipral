@@ -41,7 +41,7 @@ use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
 };
 
-use crate::account::{AccountId, Extra};
+use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
 use crate::call::{
     Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall, Refusal,
@@ -99,10 +99,16 @@ impl UserAgent {
         // before anything is kept or built, so a refused field leaves no call
         // behind and nothing on the wire
         HeadersFor::Call.check_each(&outgoing.extra)?;
-        let learned = self.learned_for(account, outgoing.destination, now);
-        let contact = dialog_contact(config, learned, anonymous(&outgoing.extra));
         let asked = config.session_interval;
-        let mut call = Call::outgoing(account, outgoing.forks, contact);
+        let from = config.sender_value();
+        let mut call = Call::outgoing(
+            account,
+            outgoing.forks,
+            outgoing.destination,
+            anonymous(&outgoing.extra),
+            from,
+            config.contact_value(),
+        );
         // minted here rather than by the endpoint, because §7.3 has a 422
         // asked again on the same Call-ID with the number moved on
         call.id = Some(CallId::new(&self.endpoint.token()));
@@ -138,12 +144,15 @@ impl UserAgent {
             .destination
             .unwrap_or((config.transport, config.remote));
         let from = config.sender_value();
-        // the Contact the call was placed with, which every request of its
-        // dialog repeats, so that a 422 asked again names the same target
-        let (call_id, cseq, asked, contact) = {
+        // read fresh rather than kept from when the call was placed (RFC 5627
+        // §4.4 forbids naming a GRUU once the registration that issued it is
+        // gone), which is why a 422 asked again on the same handle still comes
+        // through here rather than repeating a value from the first attempt
+        let (call_id, cseq, asked) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            (held.id.clone(), held.cseq, held.asked, held.contact.clone())
+            (held.id.clone(), held.cseq, held.asked)
         };
+        let contact = self.current_contact(call, now);
         let mut request =
             OutgoingRequest::new(Method::Invite, outgoing.target.clone(), transport, remote)
                 .to(&bracketed(&outgoing.target))
@@ -164,7 +173,9 @@ impl UserAgent {
                 request = request.route(hop);
             }
         }
-        for (name, value) in &self.asking_for(call, asked) {
+        let mut asked_for = self.asking_for(call, asked);
+        self.fold_gruu(call, &mut asked_for);
+        for (name, value) in &asked_for {
             request = request.header(*name, value);
         }
         if let Some(ref offer) = outgoing.offer {
@@ -208,13 +219,18 @@ impl UserAgent {
         } else {
             StatusCode::RINGING
         };
-        let contact = self.contact_of(call)?;
+        let contact = self.current_contact(call, now);
         let mut response = onto_response(
             OutgoingResponse::new(status)
                 .contact(&contact)
                 .header(HeaderName::Allow, ALLOW),
             &self.application_headers(call),
         );
+        if self.wants_gruu(call) {
+            // RFC 5627 §4.4 SHOULD: "a 2xx or 18x response to an INVITE which
+            // contains a To tag" is among the responses that carry it
+            response = response.header(HeaderName::Supported, b"gruu");
+        }
         let described = early
             .as_deref()
             .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
@@ -273,13 +289,19 @@ impl UserAgent {
         }
         let transaction = self.answerable(call)?;
         let limits = self.sdp_limits;
-        let contact = self.contact_of(call)?;
+        let contact = self.current_contact(call, now);
+        let mut supported: Vec<u8> = b"timer".to_vec();
+        // RFC 5627 §4.4 SHOULD, folded in beside `timer`: "a 2xx ... response
+        // to an INVITE which contains a To tag" is among what carries it
+        if self.wants_gruu(call) {
+            supported.extend_from_slice(b", gruu");
+        }
         // RFC 3311 §4: "a 2xx response SHOULD contain an Allow header field
         // listing the UPDATE method"
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW)
-            .header(HeaderName::Supported, b"timer");
+            .header(HeaderName::Supported, &supported);
         let invited = self.calls.get(&call).and_then(|held| held.invited.clone());
         if let Some(ref invited) = invited
             && let Some((value, demand)) = self.timer_for_answer(call, &invited.as_raw(), now)
@@ -605,11 +627,63 @@ impl UserAgent {
         held.server.ok_or(UaError::WrongState(held.state))
     }
 
-    fn contact_of(&self, call: CallHandle) -> Result<Box<[u8]>, UaError> {
+    /// The `Contact` this call names right now: this account's public GRUU
+    /// while it is registered and issued, its temporary one on an anonymous
+    /// call, or the plain contact when neither is current.
+    ///
+    /// Read fresh on every request and response a call builds rather than
+    /// kept from when the dialog opened, because RFC 5627 §4.4 forbids naming
+    /// a GRUU once the registration that issued it has expired or been
+    /// removed — which a re-INVITE, a session-timer `UPDATE`, a REFER or a
+    /// NOTIFY sent long into a call would otherwise do by repeating the
+    /// `Contact` the INVITE opened with. Subscriptions already read theirs
+    /// this way; this is the same read for a call.
+    pub(crate) fn current_contact(&self, call: CallHandle, now: Instant) -> Box<[u8]> {
+        let Some(held) = self.calls.get(&call) else {
+            return Box::from(&b""[..]);
+        };
+        let Some((account, config)) = held
+            .account
+            .and_then(|id| Some((id, self.accounts.get(&id)?)))
+        else {
+            return held.contact_context.plain.clone();
+        };
+        let learned = self.learned_for(account, held.contact_context.destination, now);
+        dialog_contact(config, learned, held.contact_context.anonymous)
+    }
+
+    /// The headers `asking_for` wrote for an INVITE or a re-INVITE, with
+    /// `gruu` folded into their `Supported` when this call's account has asked
+    /// for GRUUs — RFC 5627 §4.4 SHOULD: "a UA SHOULD include a Supported
+    /// header field with the option tag gruu in requests and responses it
+    /// generates".
+    pub(crate) fn fold_gruu(
+        &self,
+        call: CallHandle,
+        headers: &mut [(HeaderName<'static>, Box<[u8]>)],
+    ) {
+        if !self.wants_gruu(call) {
+            return;
+        }
+        if let Some((_, value)) = headers
+            .iter_mut()
+            .find(|(name, _)| *name == HeaderName::Supported)
+        {
+            let mut merged = value.to_vec();
+            merged.extend_from_slice(b", gruu");
+            *value = merged.into_boxed_slice();
+        }
+    }
+
+    /// Whether the account this call belongs to has asked its registrar for
+    /// GRUUs (RFC 5627 §4.1), which decides whether `Supported: gruu` goes on
+    /// what this call sends and answers.
+    pub(crate) fn wants_gruu(&self, call: CallHandle) -> bool {
         self.calls
             .get(&call)
-            .map(|held| held.contact.clone())
-            .ok_or(UaError::NoSuchCall)
+            .and_then(|held| held.account)
+            .and_then(|id| self.accounts.get(&id))
+            .is_some_and(Account::wants_gruu)
     }
 
     fn mark(&mut self, call: CallHandle, state: CallState) {
@@ -704,7 +778,11 @@ impl UserAgent {
     /// contact; the `To` is the address of record. Either identifies a line.
     /// Neither matching is not a reason to refuse the call — a misrouted INVITE
     /// that vanishes silently is worse than one the application can see.
-    fn line_for(&self, request: &RawMessage<'_>) -> Option<AccountId> {
+    ///
+    /// General enough for any incoming request, not only an INVITE, because
+    /// `reliable::on_require_event` needs the same answer for a request that
+    /// opens no dialog and names no call yet.
+    pub(crate) fn line_for(&self, request: &RawMessage<'_>) -> Option<AccountId> {
         let target = request
             .request_uri_bytes()
             .and_then(|bytes| Uri::parse(bytes).ok());
@@ -924,12 +1002,19 @@ impl UserAgent {
                 transaction,
                 ref request,
             } => {
+                // the line this INVITE is addressed to, found now so the
+                // Require check below can tell whether it has asked its
+                // registrar for GRUUs
+                let account = self.line_for(&request.as_raw());
+                let account_wants_gruu = account
+                    .and_then(|id| self.accounts.get(&id))
+                    .is_some_and(Account::wants_gruu);
                 // RFC 4028 §9: an interval below the floor is refused with the
                 // floor, and the far end asks again. There is no policy in it,
                 // so the application is not troubled with it
                 // §8.2.2.3: a Require this agent cannot honour is refused
                 // before anything else looks at the request
-                let missing = crate::reliable::unsupported(&request.as_raw());
+                let missing = crate::reliable::unsupported(&request.as_raw(), account_wants_gruu);
                 if !missing.is_empty() {
                     self.refuse_extension(transaction, &missing, now);
                     return None;
@@ -951,17 +1036,27 @@ impl UserAgent {
                         .ok();
                     return None;
                 }
-                let account = self.line_for(&request.as_raw());
-                // RFC 5627 §4.4 names "a 2xx or 18x response to an INVITE"
-                // among what carries a GRUU, so the answer's Contact is one too
-                let contact = account
-                    .and_then(|id| Some((self.accounts.get(&id)?, self.learned_for(id, None, now))))
-                    .map_or_else(
-                        || Box::from(&b""[..]),
-                        |(config, learned)| dialog_contact(config, learned, false),
-                    );
+                // the `From` this call answers with, kept for a `Referred-By`
+                // it may write later (RFC 3892 §2.2) — the `Contact` of the
+                // answer itself is read fresh, at the moment it is sent
+                // (`current_contact`), not decided here
+                // which is this dialog's local URI, the To this INVITE came
+                // with (RFC 3261 §12.1.1), and not the account's address of
+                // record: a line found by its contact may have been called on
+                // a number or an alias the far end was never shown the record
+                // behind. The URI alone, since a display name there is the far
+                // end's own writing
+                let from = request
+                    .as_raw()
+                    .to()
+                    .ok()
+                    .and_then(|to| Uri::parse(to.uri_bytes()).ok())
+                    .map_or_else(|| Box::from(&b""[..]), |uri| bracketed(&uri));
+                let plain = account
+                    .and_then(|id| self.accounts.get(&id))
+                    .map_or_else(|| Box::from(&b""[..]), Account::contact_value);
                 let source = self.guard.source();
-                let call = self.keep(Call::incoming(account, transaction, contact));
+                let call = self.keep(Call::incoming(account, transaction, from, plain));
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.invited = Some(request.clone());
                     held.replaces = replaced;

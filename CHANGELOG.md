@@ -10,6 +10,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A call kept naming a GRUU after the registration that issued it had
+  lapsed.** The `Contact` of a re-INVITE, a session-timer `UPDATE`, a REFER and
+  a NOTIFY was the one the dialog opened with, fixed for the life of the call;
+  RFC 5627 §4.4 forbids using a GRUU once its registration is gone. Every
+  request and response a call builds now reads the account's registration
+  state at that moment — the public GRUU while registered and issued, the
+  temporary GRUU on an anonymous call, the plain contact otherwise — the way a
+  subscription already did. `Supported: gruu` now goes on every INVITE and
+  SUBSCRIBE this end sends, a re-INVITE included, and on the 18x and 2xx it
+  sends to an INVITE or a re-INVITE, and an incoming `Require: gruu` is honoured rather than answered 420
+  once the account has asked its own registrar for one. A REFER's
+  `Referred-By` is now the call's own `From`, which RFC 3892 wants for
+  identifying the referrer, rather than its `Contact`, which could name a
+  temporary GRUU an anonymous call had no reason to hand out.
+
 ### Security
 
 - **No binding reads past the header fields it was handed.** The Swift and .NET

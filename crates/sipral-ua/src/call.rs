@@ -305,9 +305,17 @@ pub(crate) struct Call {
     /// for us, but a call that has not even opened a dialog has nothing to
     /// cancel.
     pub(crate) hangup_wanted: bool,
-    /// `Contact`, kept because every request inside the dialog needs it and a
-    /// re-INVITE carries it again to refresh the target.
-    pub(crate) contact: Box<[u8]>,
+    /// What `current_contact` needs to answer for this call besides its
+    /// account, decided once when the call was placed or arrived and read
+    /// again every time a request or response is built.
+    pub(crate) contact_context: ContactContext,
+    /// The `From` this call presented to the peer: the account's own address
+    /// on a call this end placed, and the `To` the INVITE arrived with on one
+    /// it answered, which is the dialog's local URI (RFC 3261 §12.1.1). Read
+    /// once because RFC 3892 §2.2 wants it in a `Referred-By` this call writes
+    /// later — unlike `Contact`, which RFC 5627 §4.4 keeps current rather than
+    /// fixed for the life of the dialog.
+    pub(crate) from: Box<[u8]>,
     /// Where this call's signalling travels: the far end, or the proxy that
     /// carries the line. It is what an INVITE naming this call in a
     /// `Replaces` is measured against (RFC 3891 §3).
@@ -413,6 +421,29 @@ pub(crate) struct Answering {
     pub(crate) offer: Option<SessionDescription>,
 }
 
+/// What `current_contact` (`crate::calls`) needs to answer for a call besides
+/// its account, grouped so the three do not turn into more bare fields beside
+/// the `bool`s [`Call`] already has.
+#[derive(Clone, Debug)]
+pub(crate) struct ContactContext {
+    /// Whether this call was placed, or is being answered, as an anonymous
+    /// request (RFC 3323 §4.2's `Privacy`). Decides between the public and
+    /// the temporary GRUU (RFC 5627 §3.3) every time the account's
+    /// registration state is read fresh.
+    pub(crate) anonymous: bool,
+    /// Where this call's own request was sent, when it named somewhere other
+    /// than the account's own address. Read on every request and response
+    /// this call builds, so a call placed off the account's registrar does
+    /// not start naming a GRUU it never registered through just because a
+    /// later request recomputes its `Contact`.
+    pub(crate) destination: Option<(TransportId, SocketAddr)>,
+    /// The account's plain contact when the call was placed or arrived, which
+    /// is what the call still names if the account is removed while it is up:
+    /// the registration goes with the account, so no GRUU is left to name,
+    /// and an empty `Contact` is no address at all (RFC 3261 §12.2.1.1).
+    pub(crate) plain: Box<[u8]>,
+}
+
 impl Call {
     /// What "up" means for this one: an ordinary call, or the leg an attended
     /// transfer was placed to build.
@@ -424,7 +455,14 @@ impl Call {
         }
     }
 
-    pub(crate) fn outgoing(account: AccountId, forks: ForkPolicy, contact: Box<[u8]>) -> Self {
+    pub(crate) fn outgoing(
+        account: AccountId,
+        forks: ForkPolicy,
+        destination: Option<(TransportId, SocketAddr)>,
+        anonymous: bool,
+        from: Box<[u8]>,
+        plain: Box<[u8]>,
+    ) -> Self {
         Self {
             account: Some(account),
             direction: Direction::Outgoing,
@@ -435,7 +473,12 @@ impl Call {
             forks,
             acknowledged: false,
             hangup_wanted: false,
-            contact,
+            contact_context: ContactContext {
+                anonymous,
+                destination,
+                plain,
+            },
+            from,
             peer: None,
             forked_from: None,
             session: Session::default(),
@@ -467,7 +510,8 @@ impl Call {
     pub(crate) fn incoming(
         account: Option<AccountId>,
         server: TransactionId<InviteServer>,
-        contact: Box<[u8]>,
+        from: Box<[u8]>,
+        plain: Box<[u8]>,
     ) -> Self {
         Self {
             account,
@@ -479,7 +523,15 @@ impl Call {
             forks: ForkPolicy::KeepFirst,
             acknowledged: false,
             hangup_wanted: false,
-            contact,
+            // an incoming call answers as itself, never anonymously, and its
+            // own request travels nowhere `current_contact` has to be told
+            // apart from the account's registrar
+            contact_context: ContactContext {
+                anonymous: false,
+                destination: None,
+                plain,
+            },
+            from,
             peer: None,
             forked_from: None,
             session: Session::default(),
@@ -520,7 +572,8 @@ impl Call {
             forks: other.forks,
             acknowledged: false,
             hangup_wanted: false,
-            contact: other.contact.clone(),
+            contact_context: other.contact_context.clone(),
+            from: other.from.clone(),
             // the branches of one fork all answer the same far end
             peer: other.peer,
             forked_from: Some(forked_from),

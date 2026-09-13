@@ -31,18 +31,23 @@ use std::time::Instant;
 
 use sipral_core::endpoint::{Event, OutgoingResponse};
 use sipral_core::msg::{HeaderName, RawMessage, StatusCode};
-use sipral_core::transaction::{InviteServer, ProvisionalResponseId, TransactionId};
+use sipral_core::transaction::{DialogId, InviteServer, ProvisionalResponseId, TransactionId};
 
+use crate::account::Account;
 use crate::agent::UserAgent;
 use crate::call::CallHandle;
 use crate::renegotiate::ALLOW;
 
-/// Everything this agent will answer `Require` for.
+/// Everything this agent will always answer `Require` for.
 ///
 /// `100rel` because this module implements it, `timer` because
 /// [`crate::timers`] does, `replaces` because [`crate::transfer`] does, and
-/// nothing else. RFC 3261 §8.2.2.3 answers a `Require` outside this list with
-/// a 420 and says which token it was.
+/// nothing else unconditionally. RFC 3261 §8.2.2.3 answers a `Require` outside
+/// this list with a 420 and says which token it was -- except `gruu`, which
+/// [`unsupported`] also accepts once the account the request is addressed to
+/// has asked its own registrar for one (RFC 5627 §4.4 is written from a UA's
+/// own use of GRUUs, but an account that understands the mechanism well
+/// enough to ask for one has no reason to refuse a peer that names it).
 pub(crate) const UNDERSTOOD: [&[u8]; 3] = [b"100rel", b"timer", b"replaces"];
 
 /// §21.4.15, and the only status §8.2.2.3 allows for an option tag this agent
@@ -63,13 +68,18 @@ pub(crate) struct Unacknowledged {
 }
 
 /// The option tags a request demands that this agent does not implement.
-pub(crate) fn unsupported(request: &RawMessage<'_>) -> Vec<Vec<u8>> {
+///
+/// `gruu` is understood too when `gruu` is `true` -- the caller's job to
+/// decide, since it depends on which account the request is addressed to.
+pub(crate) fn unsupported(request: &RawMessage<'_>, gruu: bool) -> Vec<Vec<u8>> {
     request
         .require()
         .filter(|token| {
-            !UNDERSTOOD
+            let known = UNDERSTOOD
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(token))
+                || (gruu && token.eq_ignore_ascii_case(b"gruu"));
+            !known
         })
         .map(<[u8]>::to_vec)
         .collect()
@@ -232,6 +242,10 @@ impl UserAgent {
     /// same reason the screening hook runs before the call layer: by the time
     /// a session change has been applied, refusing it is a second change.
     ///
+    /// `Require: gruu` is the one token whose answer depends on who the
+    /// request is for: honoured for an account that has asked its own
+    /// registrar for GRUUs, 420 for one that has not (RFC 5627 §4.4).
+    ///
     /// CANCEL and ACK are not here and must not be. The same section: "Note
     /// that Require and Proxy-Require MUST NOT be used in a SIP CANCEL
     /// request, or in an ACK request sent for a non-2xx response. These header
@@ -239,9 +253,23 @@ impl UserAgent {
     /// arrives as one of the events below.
     pub(crate) fn on_require_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let missing = match event {
-            Event::IncomingReinvite { ref request, .. }
-            | Event::IncomingInDialog { ref request, .. }
-            | Event::IncomingOutOfDialog { ref request, .. } => unsupported(&request.as_raw()),
+            Event::IncomingReinvite {
+                ref request,
+                dialog,
+                ..
+            }
+            | Event::IncomingInDialog {
+                ref request,
+                dialog,
+                ..
+            } => {
+                let gruu = self.account_wants_gruu(&request.as_raw(), Some(dialog));
+                unsupported(&request.as_raw(), gruu)
+            }
+            Event::IncomingOutOfDialog { ref request, .. } => {
+                let gruu = self.account_wants_gruu(&request.as_raw(), None);
+                unsupported(&request.as_raw(), gruu)
+            }
             _ => return Some(event),
         };
         if missing.is_empty() {
@@ -262,6 +290,24 @@ impl UserAgent {
             _ => return Some(event),
         }
         None
+    }
+
+    /// Whether the account behind a request has asked its registrar for
+    /// GRUUs (RFC 5627 §4.1), which is what lets `unsupported` accept
+    /// `Require: gruu` rather than answer it 420.
+    ///
+    /// In a dialog the account is the call's own; out of one, it is whichever
+    /// line the Request-URI or the `To` names -- the same answer `line_for`
+    /// gives an incoming INVITE before there is a call to ask.
+    fn account_wants_gruu(&self, request: &RawMessage<'_>, dialog: Option<DialogId>) -> bool {
+        let account = dialog
+            .and_then(|dialog| self.by_dialog.get(&dialog))
+            .and_then(|call| self.calls.get(call))
+            .and_then(|held| held.account)
+            .or_else(|| self.line_for(request));
+        account
+            .and_then(|id| self.accounts.get(&id))
+            .is_some_and(Account::wants_gruu)
     }
 
     pub(crate) fn refuse_extension(

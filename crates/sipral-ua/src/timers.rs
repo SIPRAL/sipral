@@ -453,12 +453,12 @@ impl UserAgent {
             }
             return;
         }
-        let (contact, confirmed, allows_update, description) = (
-            state.contact.clone(),
+        let (confirmed, allows_update, description) = (
             state.state.is_confirmed(),
             state.update_allowed,
             state.session.repeat(),
         );
+        let contact = self.current_contact(call, now);
         if !confirmed {
             // not up yet: a retry after a 422 still ringing, or a 2xx this end
             // sent whose ACK has not arrived. §7.2 and §9 run the session
@@ -485,7 +485,13 @@ impl UserAgent {
             Method::Invite
         })
         .contact(&contact);
-        for (name, value) in &self.asking_for(call, Some(timer.interval)) {
+        let mut asked_for = self.asking_for(call, Some(timer.interval));
+        if !over_update {
+            // a refresh sent as a re-INVITE is an INVITE, and carries
+            // `Supported: gruu` the way the one that opened the call did
+            self.fold_gruu(call, &mut asked_for);
+        }
+        for (name, value) in &asked_for {
             request = request.header(*name, value);
         }
         let body = if over_update {
