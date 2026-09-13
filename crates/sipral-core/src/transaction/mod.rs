@@ -35,5 +35,5 @@ pub use handle::{
     ProvisionalResponseId, Role, TransactionId, TransactionKind,
 };
 pub(crate) use store::{Client, Server, Transactions};
-pub use timer::{TimerConfig, TimerName};
+pub use timer::{TimerConfig, TimerConfigError, TimerName};
 pub(crate) use timer::{TimerHandle, Timers};

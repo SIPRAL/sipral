@@ -13,14 +13,14 @@
 //! that writes its own `Via` is a test that passes while the branch is wrong.
 
 use super::{
-    DatagramLimit, DialogEndReason, Endpoint, EndpointConfig, Event, FailureReason, Input,
-    OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse, TerminationReason, Transmit,
+    DatagramLimit, DialogEndReason, DialogSnapshot, Endpoint, EndpointConfig, Event, FailureReason,
+    Input, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse, TerminationReason, Transmit,
     TransportId, TransportProtocol,
 };
 use crate::msg::{HeaderName, Method, ParseMode, ParseScratch, RawMessage, StatusCode, Uri, parse};
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteClientState, NonInviteClientState,
-    TransactionId,
+    NonInviteServerState, TransactionId,
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ pub(super) fn peer() -> SocketAddr {
 
 /// An endpoint with one UDP transport bound, at `t0`.
 pub(super) fn endpoint(now: Instant) -> Endpoint {
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [7; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -902,6 +902,62 @@ Content-Length: 0\r\n\
 }
 
 #[test]
+fn the_same_ack_arriving_twice_is_reported_once() {
+    // §13.2.2.4 has the caller send its ACK again for every copy of the 2xx it
+    // sees, so a 2xx repeated before the first ACK arrived earns a second one;
+    // it acknowledges nothing new
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "twice", ""), t0);
+    transmits(&mut endpoint);
+    let transaction = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingInvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("an incoming call");
+    endpoint
+        .respond_invite(
+            transaction,
+            &OutgoingResponse::new(StatusCode::OK).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("200 goes")
+        .expect("a dialog");
+    let ok = sent(&mut endpoint);
+    let to = String::from_utf8_lossy(&header(&ok, HeaderName::To)).into_owned();
+    let our_tag = to.rsplit(";tag=").next().unwrap_or_default().to_owned();
+    let ack = format!(
+        "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKtwiceack;rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={our_tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    );
+
+    deliver(&mut endpoint, ack.as_bytes(), t0);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingAck { .. })),
+        "the first ACK confirms the call"
+    );
+    deliver(&mut endpoint, ack.as_bytes(), t0 + T1);
+    let again = events(&mut endpoint);
+    assert!(
+        again
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingAck { .. })),
+        "a repeat of the ACK already reported was reported again: {again:?}"
+    );
+}
+
+#[test]
 fn a_cancel_that_arrives_is_answered_and_the_call_is_terminated() {
     // 9.2: 200 for the CANCEL, 487 for the INVITE, both unconditional
     let t0 = Instant::now();
@@ -1008,7 +1064,359 @@ Content-Length: 0\r\n\
     );
 }
 
+#[test]
+fn a_dialog_full_of_non_invite_transactions_is_refused_with_a_retryable_503() {
+    // each dialog's own budget, distinct from the endpoint-wide ceiling a
+    // request inside a dialog is exempt from
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+
+    // sixteen fresh branches fill the dialog's own budget, and every one of
+    // them is handed up rather than refused
+    let mut transactions = Vec::new();
+    for seq in 1..=16_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_info(&snapshot, &format!("full{seq}"), seq).as_bytes(),
+            t0,
+        );
+        let transaction = events(&mut endpoint)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::IncomingInDialog { transaction, .. } => Some(transaction),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("INFO {seq} should have been handed up"));
+        transactions.push(transaction);
+        assert!(
+            transmits(&mut endpoint).is_empty(),
+            "INFO {seq} was refused"
+        );
+    }
+
+    // the seventeenth finds no room in this dialog's own budget and is
+    // answered 503 with a Retry-After, unlike the endpoint-wide ceiling's
+    // refusal, because RFC 5057 has that end only the transaction
+    deliver(
+        &mut endpoint,
+        dialog_info(&snapshot, "over", 17).as_bytes(),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingInDialog { .. })),
+        "the seventeenth should have been refused, not handed up"
+    );
+    let refusal = sent(&mut endpoint);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+    assert_eq!(
+        header(&refusal, HeaderName::RetryAfter),
+        b"1",
+        "the call underneath this refusal is not one to be sent away from"
+    );
+    assert_eq!(
+        endpoint.dialog(dialog).map(|d| d.state),
+        Some(crate::dialog::DialogState::Confirmed),
+        "RFC 5057: a 503 on the transaction leaves the dialog standing"
+    );
+
+    // once the first of the sixteen actually retires - answered, and its
+    // absorbing timer run out - the next fresh branch is accepted
+    endpoint
+        .respond(transactions[0], &OutgoingResponse::new(StatusCode::OK), t0)
+        .expect("the INFO is answered");
+    transmits(&mut endpoint);
+    endpoint.handle_timeout(t0 + T1 * 64);
+    transmits(&mut endpoint);
+
+    deliver(
+        &mut endpoint,
+        dialog_info(&snapshot, "after", 18).as_bytes(),
+        t0 + T1 * 64,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingInDialog { .. })),
+        "a slot given back by retirement should have been accepted"
+    );
+}
+
+/// An in-dialog INFO from `bobtag`, addressed to whichever dialog `snapshot`
+/// names, with a fresh branch and sequence number.
+fn dialog_info(snapshot: &DialogSnapshot, branch: &str, seq: u32) -> String {
+    format!(
+        "INFO sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=desk\r\n\
+To: Alice <sip:alice@example.com>;tag={}\r\n\
+Call-ID: {}\r\n\
+CSeq: {seq} INFO\r\n\
+Content-Length: 0\r\n\
+\r\n",
+        String::from_utf8_lossy(snapshot.local_tag.as_bytes()),
+        String::from_utf8_lossy(snapshot.call_id.as_bytes()),
+    )
+}
+
+#[test]
+fn another_dialogs_budget_is_unaffected_by_a_full_one() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, full) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(full, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(full).expect("a dialog");
+    for seq in 1..=16_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_info(&snapshot, &format!("full{seq}"), seq).as_bytes(),
+            t0,
+        );
+        events(&mut endpoint);
+        transmits(&mut endpoint);
+    }
+
+    let (_, _, other) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(other, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let other_snapshot = endpoint.dialog(other).expect("a dialog");
+    deliver(
+        &mut endpoint,
+        dialog_info(&other_snapshot, "other1", 1).as_bytes(),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingInDialog { .. })),
+        "another dialog must not be affected by the first one's budget"
+    );
+}
+
+#[test]
+fn a_non_invite_request_the_application_never_answers_gets_a_408() {
+    // §17.2.2 gives Trying/Proceeding no timer of its own, so an application
+    // that never answers would otherwise hold the slot for the life of the
+    // process
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("OPTIONS", "unanswered", ""), t0);
+    let transaction = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingOutOfDialog { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("an out-of-dialog OPTIONS");
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "nothing answers it until the application does, or the deadline does"
+    );
+
+    // well before 64*T1 nothing happens: the client itself would still be
+    // retrying at this point
+    endpoint.handle_timeout(t0 + T1 * 63);
+    assert!(transmits(&mut endpoint).is_empty());
+    assert_eq!(
+        endpoint.transaction_state(transaction),
+        Some(NonInviteServerState::Trying)
+    );
+
+    endpoint.handle_timeout(t0 + T1 * 64);
+    let answer = sent(&mut endpoint);
+    assert!(
+        answer.starts_with(b"SIP/2.0 408 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert_eq!(
+        endpoint.transaction_state(transaction),
+        Some(NonInviteServerState::Completed)
+    );
+
+    let record = endpoint
+        .call_record(&crate::dialog::CallId::new(b"incoming-1"))
+        .expect("a record for this call-id");
+    assert!(
+        record
+            .decisions()
+            .any(|decision| decision.reason == crate::diag::Reason::RequestAnsweredByTimeout),
+        "{record:?}"
+    );
+
+    // an application that did answer in time is left alone: firing the same
+    // deadline against an already-completed transaction is a no-op. A
+    // Call-ID of its own, or §8.2.2.2 would take it for a second copy of the
+    // first OPTIONS, whose transaction is still absorbing retransmissions
+    let answered_options = String::from_utf8_lossy(&incoming("OPTIONS", "answered", ""))
+        .replace("Call-ID: incoming-1", "Call-ID: incoming-2");
+    deliver(&mut endpoint, answered_options.as_bytes(), t0);
+    let answered = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingOutOfDialog { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("a second OPTIONS");
+    endpoint
+        .respond(answered, &OutgoingResponse::new(StatusCode::OK), t0)
+        .expect("answered in time");
+    transmits(&mut endpoint);
+    endpoint.handle_timeout(t0 + T1 * 64);
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "an already-answered transaction must not be answered a second time"
+    );
+}
+
 // -- transports --------------------------------------------------------------
+
+#[test]
+fn cancels_that_match_nothing_inside_a_dialog_draw_on_its_budget() {
+    // a CANCEL naming a dialog of ours but no transaction in it is a server
+    // transaction all the same, answered 481 and held for timer J, and a
+    // request inside a dialog is exempt from the endpoint-wide ceiling
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+    for n in 1..=32_u32 {
+        let cancel = format!(
+            "CANCEL sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKstray{n};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=desk\r\n\
+To: Alice <sip:alice@example.com>;tag={}\r\n\
+Call-ID: {}\r\n\
+CSeq: {n} CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n",
+            String::from_utf8_lossy(snapshot.local_tag.as_bytes()),
+            String::from_utf8_lossy(snapshot.call_id.as_bytes()),
+        );
+        deliver(&mut endpoint, cancel.as_bytes(), t0);
+        transmits(&mut endpoint);
+        events(&mut endpoint);
+    }
+    assert!(
+        endpoint.store().servers_len() <= 16,
+        "a peer inside the dialog made the endpoint hold {} server transactions",
+        endpoint.store().servers_len()
+    );
+}
+
+#[test]
+fn a_request_answered_at_once_over_a_stream_leaves_no_deadline_behind() {
+    // timer J is zero on a stream, so a transaction answered at once retires
+    // at once; the 64*T1 deadline hung on it for an application that never
+    // answers has to go with it, or every request the endpoint answers
+    // itself leaves an entry on the schedule for 64*T1, whatever
+    // max_server_transactions says
+    const REQUESTS: u32 = 64;
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    for n in 0..REQUESTS {
+        let prack = format!(
+            "PRACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/TCP 192.0.2.9:5060;branch=z9hG4bKleak{n}\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>\r\n\
+Call-ID: leak-{n}\r\n\
+CSeq: 1 PRACK\r\n\
+RAck: 1 1 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n"
+        );
+        endpoint
+            .receive(
+                Input::StreamData {
+                    transport: TCP,
+                    data: prack.as_bytes(),
+                },
+                t0,
+            )
+            .expect("a well formed request");
+        transmits(&mut endpoint);
+        events(&mut endpoint);
+    }
+    assert_eq!(
+        endpoint.store().servers_len(),
+        0,
+        "every one was answered 481 and retired"
+    );
+
+    let mut left = 0;
+    while let Some(deadline) = endpoint.deadlines.fire(t0 + T1 * 64) {
+        if matches!(deadline, super::driver::Deadline::UnansweredNonInvite(_)) {
+            left += 1;
+        }
+    }
+    assert_eq!(
+        left, 0,
+        "{left} deadlines outlived the transactions they were hung on"
+    );
+}
+
+#[test]
+fn an_endpoint_refuses_a_keepalive_interval_of_zero() {
+    // the hang the next test shows, refused before an endpoint is built on it
+    let broken = EndpointConfig {
+        keepalive_interval: Some(Duration::ZERO),
+        ..EndpointConfig::default()
+    };
+    assert!(Endpoint::new(broken, [23; 32]).is_err());
+    let off = EndpointConfig {
+        keepalive_interval: None,
+        ..EndpointConfig::default()
+    };
+    assert!(
+        Endpoint::new(off, [24; 32]).is_ok(),
+        "no keep-alive is fine"
+    );
+}
+
+#[test]
+fn a_zero_keepalive_interval_would_have_pinged_at_the_same_instant_forever() {
+    // RFC 5626 §4.4.1's next ping is armed at `now` plus a jitter of the
+    // interval, and a jitter of nothing is nothing, so the deadline that just
+    // fired is due again at the same instant. Driven the way handle_timeout
+    // drives its deadlines, for a bounded number of rounds rather than until
+    // it stops, because it never does
+    const ROUNDS: u32 = 1_000;
+    let t0 = Instant::now();
+    let mut endpoint = connected(t0);
+    endpoint.config.keepalive_interval = Some(Duration::ZERO);
+    endpoint.send_keepalive(TCP, t0);
+
+    let mut fired = 0;
+    for _ in 0..ROUNDS {
+        let Some(deadline) = endpoint.deadlines.fire(t0) else {
+            break;
+        };
+        if let super::driver::Deadline::Keepalive(transport) = deadline {
+            endpoint.send_keepalive(transport, t0);
+            fired += 1;
+        }
+    }
+    assert_eq!(
+        fired, ROUNDS,
+        "the keep-alive stopped re-arming at the same instant on its own"
+    );
+}
 
 #[test]
 fn a_request_too_large_for_a_datagram_moves_to_a_stream() {
@@ -1125,7 +1533,7 @@ fn a_known_path_mtu_is_the_limit_that_gets_reported() {
         },
         ..EndpointConfig::default()
     };
-    let mut endpoint = Endpoint::new(config, [7; 32]);
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1190,7 +1598,7 @@ fn a_connection_to_somebody_else_is_not_the_stream_this_request_wanted() {
 #[test]
 fn two_messages_in_one_read_are_both_taken() {
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [3; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [3; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1230,7 +1638,7 @@ fn two_messages_in_one_read_are_both_taken() {
 fn a_ping_on_a_stream_is_answered_with_a_single_crlf() {
     // RFC 5626 4.4.1 makes the pong a MUST
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [4; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [4; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1268,7 +1676,7 @@ fn a_segment_full_of_pings_is_answered_in_one_write() {
     // better amplifier than it is a keep-alive
     const PINGS: usize = 4096;
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [15; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [15; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1297,7 +1705,7 @@ fn a_segment_full_of_pings_is_answered_in_one_write() {
 #[test]
 fn a_stream_transport_is_pinged_on_a_jittered_interval() {
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [5; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [5; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1335,7 +1743,7 @@ fn a_datagram_transport_is_never_pinged() {
 #[test]
 fn a_lost_transport_takes_its_keepalive_deadline_with_it() {
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [6; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [6; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1362,7 +1770,7 @@ fn a_lost_transport_takes_its_keepalive_deadline_with_it() {
 /// An endpoint with one TCP transport bound, and its first keep-alive already
 /// on the wire.
 fn pinged(seed: u8, now: Instant) -> (Endpoint, Instant) {
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [seed; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [seed; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1590,7 +1998,8 @@ fn a_stranger_past_the_transaction_ceiling_is_refused_with_a_503() {
             ..EndpointConfig::DEFAULT
         },
         [13; 32],
-    );
+    )
+    .unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1644,7 +2053,8 @@ fn a_call_past_the_dialog_ceiling_is_refused_before_it_rings() {
             ..EndpointConfig::DEFAULT
         },
         [14; 32],
-    );
+    )
+    .unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1859,7 +2269,7 @@ fn a_stale_handle_answers_to_nothing() {
 
 /// An endpoint whose only transport is a stream to the peer, at `now`.
 pub(super) fn connected(now: Instant) -> Endpoint {
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [13; 32]);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), [13; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -2348,4 +2758,25 @@ fn a_bye_of_the_callers_own_that_is_not_a_bye_is_refused_and_ends_nothing() {
         Some(crate::dialog::DialogState::Confirmed),
         "an INFO handed to the call that hangs up does not hang up"
     );
+}
+
+#[test]
+fn an_endpoint_refuses_timers_that_would_never_stop_rearming() {
+    // t1 zero makes timer A's own interval zero, which is the hang
+    // `TimerConfig::validate` exists to refuse before an endpoint is ever
+    // built on it
+    let broken = EndpointConfig {
+        timers: crate::transaction::TimerConfig {
+            t1: Duration::ZERO,
+            ..crate::transaction::TimerConfig::DEFAULT
+        },
+        ..EndpointConfig::default()
+    };
+    assert_eq!(
+        Endpoint::new(broken, [21; 32]).unwrap_err(),
+        crate::transaction::TimerConfigError::Unarmable
+    );
+
+    // and a config nobody touched stays accepted
+    assert!(Endpoint::new(EndpointConfig::default(), [22; 32]).is_ok());
 }

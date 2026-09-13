@@ -7,7 +7,7 @@
 //! Every test here is one way a message from outside reaches a store: an entry
 //! it creates, an entry it is matched to, or an entry it should have ended.
 
-use super::tests::{deliver, endpoint, events, header, incoming, sent, transmits};
+use super::tests::{deliver, endpoint, events, header, incoming, sent, transmits, with};
 use super::{DialogEndReason, Endpoint, Event, OutgoingResponse};
 use crate::dialog::DialogState;
 use crate::msg::{HeaderName, StatusCode};
@@ -153,14 +153,20 @@ fn calls_that_ring_and_are_cancelled_do_not_use_up_the_dialog_ceiling() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
     endpoint.config.max_dialogs = 2;
-    for branch in ["round1", "round2"] {
-        rung(&mut endpoint, &incoming("INVITE", branch, ""), t0);
-        deliver(&mut endpoint, &incoming("CANCEL", branch, ""), t0);
+    // a distinct Call-ID per round, as a genuine second call would carry one:
+    // §8.2.2.2 answers a request that repeats another ongoing transaction's
+    // From tag, Call-ID and CSeq under a different branch with 482 rather
+    // than a new call, and `incoming`'s fixed Call-ID would make round 2 look
+    // like a forked copy of round 1's still-lingering (cancelled but not yet
+    // timed out) transaction rather than the separate call this test is about
+    for round in 1..=2 {
+        rung(&mut endpoint, &stranger_with(round, "INVITE", ""), t0);
+        deliver(&mut endpoint, &stranger_with(round, "CANCEL", ""), t0);
         transmits(&mut endpoint);
         events(&mut endpoint);
     }
 
-    deliver(&mut endpoint, &incoming("INVITE", "round3", ""), t0);
+    deliver(&mut endpoint, &stranger_with(3, "INVITE", ""), t0);
     assert!(
         events(&mut endpoint)
             .iter()
@@ -529,6 +535,141 @@ fn a_fork_opens_no_more_dialogs_than_the_ceiling_has_room_for() {
 }
 
 #[test]
+fn a_2xx_dropped_at_the_fork_limit_leaves_a_trace() {
+    // §13.3.1.4: this end never acknowledges it, and the far end gives the
+    // call up with a BYE of its own — silent by design, but not untraceable
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint.config.max_dialogs = 1;
+    let invite = placed(&mut endpoint, t0);
+    let call_id = header(&invite, HeaderName::CallId);
+
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&invite, 200, "OK", Some("first")),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(*event, Event::Established { .. })),
+        "the call the caller placed always opens"
+    );
+
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&invite, 200, "OK", Some("second")),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(*event, Event::Established { .. })),
+        "a second branch found no room and must not open a second call"
+    );
+
+    let record = endpoint
+        .call_record(&crate::dialog::CallId::new(&call_id))
+        .expect("a record for this call");
+    assert!(
+        record
+            .decisions()
+            .any(|decision| decision.reason == crate::diag::Reason::ForkDroppedAtLimit),
+        "{record:?}"
+    );
+}
+
+#[test]
+fn a_2xx_that_names_no_dialog_is_not_recorded_as_a_fork_dropped_at_the_limit() {
+    // a 2xx with no To tag is ignored as well, with all the room in the world;
+    // recording it as a fork the ceiling dropped points whoever reads the
+    // record at max_dialogs for a fault that is the far end's
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let invite = placed(&mut endpoint, t0);
+    let call_id = header(&invite, HeaderName::CallId);
+    deliver(
+        &mut endpoint,
+        &super::tests::respond_to(&invite, 200, "OK", None),
+        t0,
+    );
+    let record = endpoint
+        .call_record(&crate::dialog::CallId::new(&call_id))
+        .expect("a record for this call");
+    assert!(
+        record
+            .decisions()
+            .all(|decision| decision.reason != crate::diag::Reason::ForkDroppedAtLimit),
+        "{record:?}"
+    );
+}
+
+#[test]
+fn a_merged_request_that_is_not_an_invite_is_answered_482_and_handed_up_once() {
+    // §8.2.2.2 is about any request with no To tag: a MESSAGE or a SUBSCRIBE
+    // a proxy forked reaches the application twice otherwise
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("MESSAGE", "path1", ""), t0);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingOutOfDialog { .. })),
+        "the first copy is handed up"
+    );
+    transmits(&mut endpoint);
+
+    deliver(&mut endpoint, &incoming("MESSAGE", "path2", ""), t0);
+    let second = events(&mut endpoint);
+    assert!(
+        second
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingOutOfDialog { .. })),
+        "a merged copy was handed up a second time: {second:?}"
+    );
+    let out = transmits(&mut endpoint);
+    assert!(
+        out.iter()
+            .any(|t| status_of(&t.payload) == Some(StatusCode::LOOP_DETECTED)),
+        "{:?}",
+        out.iter()
+            .map(|t| String::from_utf8_lossy(&t.payload).into_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_request_that_carries_a_to_tag_is_not_a_merged_request() {
+    // §8.2.2.2 opens "If the request has no tag in the To header field"; one
+    // whose tag names no dialog here is §12.2.2's to decide, not a copy of a
+    // request already being processed
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "untagged", ""), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    let tagged = String::from_utf8_lossy(&incoming("INVITE", "tagged", "")).replace(
+        "To: Alice <sip:alice@192.0.2.1>\r\n",
+        "To: Alice <sip:alice@192.0.2.1>;tag=elsewhere\r\n",
+    );
+    deliver(&mut endpoint, tagged.as_bytes(), t0);
+    let out = transmits(&mut endpoint);
+    assert!(
+        out.iter()
+            .all(|t| status_of(&t.payload) != Some(StatusCode::LOOP_DETECTED)),
+        "a request with a To tag was answered as a merged copy"
+    );
+}
+
+/// The status of a response on the wire, or `None` for a request.
+fn status_of(bytes: &[u8]) -> Option<StatusCode> {
+    // a bare method reference does not satisfy `with`'s higher-ranked bound
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    with(bytes, |message| message.status())
+}
+
+#[test]
 fn the_call_this_end_placed_opens_its_first_dialog_however_full_the_endpoint_is() {
     // the ceiling bounds what a peer can make the endpoint hold, and the extra
     // branches of a fork are the peer's; the first dialog of an INVITE this
@@ -549,6 +690,55 @@ fn the_call_this_end_placed_opens_its_first_dialog_however_full_the_endpoint_is(
         "the call was answered and this end never heard"
     );
     assert_eq!(endpoint.in_flight().1, 1);
+}
+
+// -- a merged copy of one request is not a second call ------------------------
+
+#[test]
+fn a_merged_invite_is_answered_482_and_opens_no_second_call() {
+    // RFC 3261 §8.2.2.2: the same INVITE, forwarded by a second path
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "path1", ""), t0);
+    let first = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingInvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("the first copy opens a call");
+    transmits(&mut endpoint);
+
+    // same From tag, Call-ID and CSeq as the first, under a different branch
+    deliver(&mut endpoint, &incoming("INVITE", "path2", ""), t0);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingInvite { .. })),
+        "a merged copy must not open a second call"
+    );
+    let out = transmits(&mut endpoint);
+    // a bare method reference does not satisfy `with`'s higher-ranked bound
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    let status_of = |bytes: &[u8]| with(bytes, |message| message.status());
+    assert!(
+        out.iter()
+            .any(|t| status_of(&t.payload) == Some(StatusCode::LOOP_DETECTED)),
+        "{:?}",
+        out.iter()
+            .map(|t| String::from_utf8_lossy(&t.payload).into_owned())
+            .collect::<Vec<_>>()
+    );
+
+    // the first copy is untouched by the second's arrival
+    endpoint
+        .respond_invite(
+            first,
+            &OutgoingResponse::new(StatusCode::RINGING).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("the original call can still be answered");
+    assert_eq!(endpoint.in_flight().1, 1, "one early dialog, not two");
 }
 
 // -- a call counts against the ceiling from the moment it is let in -----------
@@ -985,5 +1175,85 @@ fn ten_thousand_calls_refused_after_ringing_reliably_are_quieted_without_a_quadr
     assert!(
         visits <= 2 * slots,
         "ringing and refusing {CALLS} calls visited {visits} slots"
+    );
+}
+
+#[test]
+fn a_stale_ack_for_an_earlier_re_invite_is_absorbed() {
+    // 13.2.2.4 and 17.1.1.3: the ACK's CSeq number has to be the INVITE it
+    // answers, not merely any INVITE this dialog has ever seen a 2xx to
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (transaction, _, tag) = rung(&mut endpoint, &incoming("INVITE", "1", ""), t0);
+    endpoint
+        .respond_invite(
+            transaction,
+            &OutgoingResponse::new(StatusCode::OK).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("the 200 goes");
+    sent(&mut endpoint);
+
+    let reinvite = format!(
+        "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKreinvite;rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: 2 INVITE\r\n\
+Contact: <sip:bob@192.0.2.9>\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    );
+    deliver(&mut endpoint, reinvite.as_bytes(), t0);
+    transmits(&mut endpoint);
+    let re_transaction = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingReinvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("the re-INVITE");
+    endpoint
+        .respond_invite(
+            re_transaction,
+            &OutgoingResponse::new(StatusCode::OK).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("the 200 goes");
+    sent(&mut endpoint);
+
+    let ack = |cseq: u32, branch: &str| {
+        format!(
+            "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: {cseq} ACK\r\n\
+Content-Length: 0\r\n\
+\r\n"
+        )
+    };
+
+    // the original INVITE's number, not the re-INVITE's: stale, or a repeat
+    // of the ACK the first 2xx already had
+    deliver(&mut endpoint, ack(1, "ack1").as_bytes(), t0);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingAck { .. })),
+        "an ACK for an earlier INVITE must not be reported as this one's"
+    );
+
+    // the re-INVITE's own number is still answered
+    deliver(&mut endpoint, ack(2, "ack2").as_bytes(), t0);
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingAck { .. })),
+        "the ACK that actually answers the re-INVITE must still be reported"
     );
 }

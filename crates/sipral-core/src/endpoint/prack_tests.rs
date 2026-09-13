@@ -374,14 +374,94 @@ Content-Length: 0\r\n\
     assert_eq!(reported.1.dialog(), provisional.dialog());
     assert_eq!(
         endpoint.poll_timeout(),
-        None,
-        "the retransmissions should have stopped"
+        Some(t0 + T1 * 64),
+        "the reliable retransmissions should have stopped, leaving only the \
+         PRACK's own transaction's 64*T1 deadline for an application that \
+         never answers it"
     );
 
     endpoint
         .respond(reported.0, &OutgoingResponse::new(StatusCode::OK), t0)
         .expect("the 200 for the PRACK goes");
     assert!(sent(&mut endpoint).starts_with(b"SIP/2.0 200 OK"));
+}
+
+#[test]
+fn the_ack_for_a_call_that_was_pracked_before_it_was_answered_is_reported() {
+    // the PRACK takes the dialog's next number from the caller, so by the
+    // time the 2xx is acknowledged the dialog has seen CSeq 2; the ACK still
+    // carries the INVITE's own 1 (§13.2.2.4), and it is the one that says the
+    // call is up
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let transaction = incoming_call(&mut endpoint, t0);
+    endpoint
+        .respond_reliable(transaction, &OutgoingResponse::new(StatusCode::RINGING), t0)
+        .expect("180 goes reliably");
+    let ringing = sent(&mut endpoint);
+    let rseq = String::from_utf8_lossy(&header(&ringing, HeaderName::RSeq)).into_owned();
+    let tag = String::from_utf8_lossy(&header(&ringing, HeaderName::To))
+        .rsplit(";tag=")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+
+    let prack = format!(
+        "PRACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKprack3;rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: 2 PRACK\r\n\
+RAck: {rseq} 1 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    );
+    deliver(&mut endpoint, prack.as_bytes(), t0);
+    let pracked = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingPrack { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("the PRACK");
+    endpoint
+        .respond(pracked, &OutgoingResponse::new(StatusCode::OK), t0)
+        .expect("the 200 for the PRACK goes");
+    transmits(&mut endpoint);
+
+    let dialog = endpoint
+        .respond_invite(
+            transaction,
+            &OutgoingResponse::new(StatusCode::OK).contact(b"<sip:alice@192.0.2.1>"),
+            t0,
+        )
+        .expect("the 200 goes")
+        .expect("the dialog");
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+
+    let ack = format!(
+        "ACK sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKrelack;rport\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag=bobtag\r\n\
+To: Alice <sip:alice@192.0.2.1>;tag={tag}\r\n\
+Call-ID: incoming-1\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\
+\r\n"
+    );
+    deliver(&mut endpoint, ack.as_bytes(), t0);
+    let heard = events(&mut endpoint);
+    assert!(
+        heard.iter().any(|event| matches!(
+            event,
+            Event::IncomingAck { dialog: acked, .. } if *acked == dialog
+        )),
+        "the ACK for the INVITE's 2xx was absorbed because a PRACK came first: {heard:?}"
+    );
 }
 
 #[test]

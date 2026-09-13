@@ -145,7 +145,7 @@ impl Trace {
 /// three quarters spent.
 fn record() -> (Recording, Trace) {
     let t0 = Instant::now();
-    let mut agent = UserAgent::new(EndpointConfig::default(), SEED);
+    let mut agent = UserAgent::new(EndpointConfig::default(), SEED).unwrap();
     let mut recorder = Recorder::new(SEED)
         .about("a registrar that challenges, a binding granted for an hour, one refresh");
     let mut trace = Trace::default();
@@ -202,7 +202,7 @@ fn record() -> (Recording, Trace) {
 /// The same session, fed back into an agent that has never seen it.
 fn replay(recording: &Recording) -> (Trace, UserAgent) {
     let origin = Instant::now();
-    let mut agent = UserAgent::new(EndpointConfig::default(), recording.seed());
+    let mut agent = UserAgent::new(EndpointConfig::default(), recording.seed()).unwrap();
     let mut trace = Trace::default();
     let mut replay = Replay::new(recording, origin);
 
@@ -327,7 +327,7 @@ fn a_recording_of_one_layer_replays_into_the_layer_below_it() {
     // endpoint's answer to it: none, because a REGISTER is the layer above
     let recording = Recording::parse(FIXTURE).expect("the recording in fixtures/replay");
     let mut endpoint =
-        sipral_core::endpoint::Endpoint::new(EndpointConfig::default(), recording.seed());
+        sipral_core::endpoint::Endpoint::new(EndpointConfig::default(), recording.seed()).unwrap();
     let mut replay = Replay::new(&recording, Instant::now());
     let mut cues = 0;
     while let Some(played) = replay.step(&mut endpoint).expect("the bytes read") {

@@ -871,7 +871,7 @@ fn cramped(now: Instant) -> Endpoint {
         },
         ..EndpointConfig::default()
     };
-    let mut endpoint = Endpoint::new(config, [7; 32]);
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {

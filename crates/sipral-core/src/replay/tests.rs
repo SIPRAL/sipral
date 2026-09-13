@@ -151,7 +151,7 @@ impl Trace {
 /// every call into the stack.
 fn record() -> (Recording, Trace) {
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), SEED);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), SEED).unwrap();
     let mut recorder = Recorder::new(SEED).about("an OPTIONS retransmitted once, then answered");
     let mut trace = Trace::default();
 
@@ -188,7 +188,7 @@ fn record() -> (Recording, Trace) {
 /// The same session, fed back into an endpoint that has never seen it.
 fn replay(recording: &Recording) -> Trace {
     let origin = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed());
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed()).unwrap();
     let mut trace = Trace::default();
     let mut replay = Replay::new(recording, origin);
 
@@ -245,7 +245,7 @@ fn a_replay_that_ignores_its_cues_is_a_replay_of_a_different_session() {
     // caller that steps past a cue gets a stack with nothing to answer
     let (recording, _) = record();
     let origin = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed());
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed()).unwrap();
     let mut replay = Replay::new(&recording, origin);
     while replay
         .step(&mut endpoint)
@@ -270,7 +270,7 @@ fn a_replay_that_ignores_its_cues_is_a_replay_of_a_different_session() {
 fn a_resolved_answer_is_captured_and_a_replay_repeats_it_unasked() {
     let elsewhere: SocketAddr = "198.51.100.7:5060".parse().expect("another address");
     let t0 = Instant::now();
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), SEED);
+    let mut endpoint = Endpoint::new(EndpointConfig::default(), SEED).unwrap();
     let mut recorder =
         Recorder::new(SEED).about("a call whose dialog is re-resolved after it connects");
 
@@ -327,7 +327,7 @@ fn a_resolved_answer_is_captured_and_a_replay_repeats_it_unasked() {
     // fed back into an endpoint that never saw the call, and nobody here
     // calls `resolved` a second time
     let origin = Instant::now();
-    let mut replayed = Endpoint::new(EndpointConfig::default(), recording.seed());
+    let mut replayed = Endpoint::new(EndpointConfig::default(), recording.seed()).unwrap();
     let mut dialog_replayed = None;
     let mut replay = Replay::new(&recording, origin);
     while let Some(now) = replay.next_at() {

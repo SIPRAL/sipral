@@ -63,6 +63,12 @@ pub enum Reason {
     /// A peer's request was refused with a 503 because this endpoint is
     /// holding as many transactions or dialogs as it is configured to.
     RequestRefusedWhenFull,
+    /// A peer already inside a dialog was refused with a 503 because that one
+    /// dialog is already holding as many non-INVITE server transactions as it
+    /// may at once — a ceiling of its own, distinct from
+    /// [`Self::RequestRefusedWhenFull`], because a request inside a dialog is
+    /// never refused for the endpoint-wide one.
+    RequestRefusedByDialog,
     /// A response went on the wire.
     ResponseSent,
     /// A retransmission timer fired and the same response went again, which
@@ -71,6 +77,15 @@ pub enum Reason {
     /// A final response was retransmitted for 64·T1 and never acknowledged
     /// (RFC 3261 §17.2.1, timer H).
     TransactionUnacknowledged,
+    /// A non-INVITE server transaction's application never sent a final
+    /// response within 64·T1, so the endpoint answered 408 on its behalf
+    /// (RFC 3261 §17.2.2 gives that state no timer of its own).
+    RequestAnsweredByTimeout,
+    /// A 2xx to a forked INVITE found no room under `max_dialogs` for the
+    /// dialog it would have opened, so it was neither reported nor
+    /// acknowledged (§13.3.1.4 has the far end give the call up with a BYE of
+    /// its own).
+    ForkDroppedAtLimit,
     /// A refusal arrived carrying a challenge this stack can answer
     /// (§22, RFC 8760).
     ChallengeReceived,
@@ -113,9 +128,12 @@ impl Reason {
             Self::RequestSent => "request.sent",
             Self::RequestRetransmitted => "request.retransmitted",
             Self::RequestRefusedWhenFull => "request.refused.overload",
+            Self::RequestRefusedByDialog => "request.refused.dialog",
             Self::ResponseSent => "response.sent",
             Self::ResponseRetransmitted => "response.retransmitted",
             Self::TransactionUnacknowledged => "transaction.unacknowledged",
+            Self::RequestAnsweredByTimeout => "request.answered.timeout",
+            Self::ForkDroppedAtLimit => "dialog.fork.dropped",
             Self::ChallengeReceived => "auth.challenge.received",
             Self::ChallengeAnswered => "auth.challenge.answered",
             Self::DialogCreated => "dialog.created",
@@ -142,7 +160,7 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 21] = [
+    const ALL: [Reason; 24] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
@@ -151,9 +169,12 @@ mod tests {
         Reason::RequestSent,
         Reason::RequestRetransmitted,
         Reason::RequestRefusedWhenFull,
+        Reason::RequestRefusedByDialog,
         Reason::ResponseSent,
         Reason::ResponseRetransmitted,
         Reason::TransactionUnacknowledged,
+        Reason::RequestAnsweredByTimeout,
+        Reason::ForkDroppedAtLimit,
         Reason::ChallengeReceived,
         Reason::ChallengeAnswered,
         Reason::DialogCreated,
@@ -206,6 +227,11 @@ mod tests {
             "auth.challenge.answered"
         );
         assert_eq!(Reason::RequestSent.to_string(), "request.sent");
+        assert_eq!(
+            Reason::RequestAnsweredByTimeout.as_str(),
+            "request.answered.timeout"
+        );
+        assert_eq!(Reason::ForkDroppedAtLimit.as_str(), "dialog.fork.dropped");
         assert_eq!(Reason::FailedRefused.as_str(), "failure.refused");
         assert_eq!(
             Reason::ServiceRouteIgnored.as_str(),

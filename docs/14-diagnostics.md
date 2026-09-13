@@ -63,7 +63,7 @@ table below. Nothing else moves, and nothing that already exists is touched.
 
 ## The vocabulary `sipral-core` emits
 
-Eighteen codes, and every one of them is written at a decision site that
+Twenty-one codes, and every one of them is written at a decision site that
 existed before this document did.
 
 | Code | The decision |
@@ -76,9 +76,12 @@ existed before this document did.
 | `request.sent` | A request went on the wire, at the size the caller writes. |
 | `request.retransmitted` | A timer fired and the identical bytes went again. |
 | `request.refused.overload` | A stranger's request was answered 503 for want of room. |
+| `request.refused.dialog` | A peer already inside a dialog was answered 503 for want of room in that one dialog's own, smaller ceiling — distinct from `request.refused.overload`, which a request inside a dialog is never refused with. |
 | `response.sent` | A response went on the wire. |
 | `response.retransmitted` | A timer fired and the same response went again — which means the acknowledgement is not arriving. |
 | `transaction.unacknowledged` | §17.2.1, timer H: a final response was repeated for 64·T1 and never acknowledged. Nothing above hears about this; the record is the only place it exists. |
+| `request.answered.timeout` | A non-INVITE server transaction's application never answered within 64·T1, so the endpoint answered 408 in its place. §17.2.2 gives that state no timer of its own; nothing above hears about this either. |
+| `dialog.fork.dropped` | A 2xx to a forked INVITE found no room under `max_dialogs`, so it was silently neither reported nor acknowledged — the far end gives the call up with a `BYE` of its own. |
 | `auth.challenge.received` | A refusal arrived carrying a challenge this stack can answer. |
 | `auth.challenge.answered` | The request went again with credentials — the send that is certain to have grown, and the one that fragmented in the field. |
 | `dialog.created` | A dialog was created (§12.1). |

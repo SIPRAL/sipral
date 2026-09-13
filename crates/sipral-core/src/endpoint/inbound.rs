@@ -30,11 +30,12 @@ use super::via;
 use crate::diag::{Decision, Direction, Reason, WireEvent};
 use crate::dialog::{CallId, Dialog, DialogKey, DialogState, Fork, Incoming};
 use crate::msg::{
-    Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder, StatusCode, parse_with_limits,
+    HeaderName, Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder, StatusCode,
+    parse_with_limits,
 };
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
-    Notify, Raw, Role, Server, TimerName, TransactionId, cancel_for_request,
+    NonInviteServerState, Notify, Raw, Role, Server, TimerName, TransactionId, cancel_for_request,
 };
 
 /// A single CRLF, the answer a double-CRLF ping is owed (RFC 5626 §4.4.1).
@@ -49,6 +50,25 @@ const PING: &[u8] = b"\r\n\r\n";
 /// let it be turned up would be a stack that can be configured out of
 /// conformance.
 const PONG_DUE: core::time::Duration = core::time::Duration::from_secs(10);
+
+/// The most non-INVITE server transactions one dialog may have open at once.
+///
+/// A request inside a dialog we hold is exempt from
+/// [`super::EndpointConfig::max_server_transactions`] — docs/03 says why: a
+/// stranger's flood must not starve a call that is up. That exemption has no
+/// ceiling of its own unless something gives it one, and a peer already
+/// inside the dialog — including one that has since gone hostile, or a bug on
+/// the far end that never stops sending INFO — could otherwise open as many
+/// of these as it likes, which is the endpoint-wide flood again with a
+/// friendlier address on it. Sixteen is well past what a real exchange inside
+/// one call needs live at once (DTMF, a PRACK or two, an UPDATE) and well
+/// short of turning one noisy dialog into an unbounded one.
+const MAX_DIALOG_NON_INVITE_TRANSACTIONS: usize = 16;
+/// `Retry-After` on the 503 [`Endpoint::refuse_when_dialog_full`] answers
+/// with. RFC 5057 does not name a value for this refusal; one second is
+/// short because the load it answers is a burst inside a call that is
+/// otherwise healthy, not a stranger to be sent away.
+const DIALOG_BUSY_RETRY_AFTER_SECONDS: u32 = 1;
 
 impl Endpoint {
     pub(super) fn on_datagram(
@@ -448,8 +468,10 @@ impl Endpoint {
                     });
                 }
             }
-            // a 100, or a response with no tag to name a dialog by
+            // a 100, a response with no tag to name a dialog by, or one that
+            // found no room for the dialog it would have opened
             Fork::Ignored => {
+                let names_a_dialog = response.to().ok().is_some_and(|to| to.tag().is_some());
                 if status.is_provisional() {
                     self.push(Event::Provisional {
                         invite: id,
@@ -457,6 +479,17 @@ impl Endpoint {
                         status,
                         response: response.to_owned(),
                     });
+                } else if status.is_success() && !room && names_a_dialog {
+                    // §13.3.1.4 has the far end give this up with a BYE of its
+                    // own; nothing here is wrong enough to report upward, but
+                    // a call that vanishes without a trace is exactly what
+                    // this record exists to replace
+                    self.note_wire(
+                        response,
+                        Reason::ForkDroppedAtLimit,
+                        Direction::Inbound,
+                        flow,
+                    );
                 }
             }
         }
@@ -494,31 +527,36 @@ impl Endpoint {
 
     /// The ceiling on what a stranger may make this endpoint hold.
     ///
-    /// A request inside a dialog we already have is never refused, whatever the
-    /// count says: it manages state that exists, and a BYE turned away leaves
-    /// the call standing for the life of the process. Nor is a CANCEL that
-    /// matches a transaction of ours, for the same reason and because §9.2 makes
-    /// answering it a MUST. A stranger's request is the other case, and past
-    /// the ceiling it gets §21.5.4's 503 — "temporarily unable to process the
-    /// request due to a temporary overloading" — written straight to the flow,
-    /// because the point of refusing is not to keep anything. No `Retry-After`
-    /// goes with it: §21.5.4 has a client that gets none treat it as a 500 and
-    /// try somewhere else, which is what should happen, while one that names a
-    /// delay asks a proxy to stop sending here for that long.
+    /// A request inside a dialog we already have is never refused *for this*,
+    /// whatever the count says: it manages state that exists, and a BYE
+    /// turned away leaves the call standing for the life of the process. It
+    /// is held to [`Endpoint::refuse_when_dialog_full`] instead, which is its
+    /// own, smaller ceiling. Nor is a CANCEL that matches a transaction of
+    /// ours, for the same reason and because §9.2 makes answering it a MUST,
+    /// in or out of a dialog. A stranger's request is the remaining case, and
+    /// past the ceiling it gets §21.5.4's 503 — "temporarily unable to
+    /// process the request due to a temporary overloading" — written straight
+    /// to the flow, because the point of refusing is not to keep anything. No
+    /// `Retry-After` goes with it: §21.5.4 has a client that gets none treat
+    /// it as a 500 and try somewhere else, which is what should happen, while
+    /// one that names a delay asks a proxy to stop sending here for that
+    /// long.
     fn refuse_when_full(&mut self, request: &RawMessage<'_>, flow: Flow) -> bool {
-        let ours = DialogKey::as_uas(request)
-            .ok()
-            .is_some_and(|key| self.dialogs.find(&key).is_some());
-        if ours {
-            return false;
-        }
         // and neither is a CANCEL that matches something: §9.2 makes answering
         // one a MUST, and it ends a transaction rather than starting one worth
-        // counting. A CANCEL that matches nothing is a stranger like any other
+        // counting. A CANCEL that matches nothing is held to the same ceiling
+        // as any other request: the endpoint's outside a dialog, and inside
+        // one the dialog's own, which `on_cancel` counts it against
         if request.method() == Some(Method::Cancel)
             && self.transactions.cancelled_by(request).is_some()
         {
             return false;
+        }
+        let dialog = DialogKey::as_uas(request)
+            .ok()
+            .and_then(|key| self.dialogs.find(&key));
+        if let Some(dialog) = dialog {
+            return self.refuse_when_dialog_full(dialog, request, flow);
         }
         let transactions = self.transactions.servers_len() >= self.config.max_server_transactions;
         // a call is refused before it rings rather than after it is answered:
@@ -556,6 +594,54 @@ impl Endpoint {
         let tag = self.mint_tag();
         let built = ResponseBuilder::for_request(request, StatusCode::SERVICE_UNAVAILABLE)
             .to_tag(&tag)
+            .build();
+        if let Ok(message) = built {
+            self.queue(flow.transmit(message.bytes()));
+        }
+        true
+    }
+
+    /// [`MAX_DIALOG_NON_INVITE_TRANSACTIONS`]: the ceiling a dialog we hold
+    /// gets in place of the endpoint-wide one, which never applies to it.
+    ///
+    /// A re-INVITE is an INVITE server transaction and is held to
+    /// `max_dialogs` like any other INVITE — §14.1 refuses a second one in
+    /// the same dialog anyway while one is outstanding — so only a
+    /// non-INVITE request draws from this budget. Past it the request is
+    /// answered 503, statelessly exactly as the endpoint-wide ceiling is, but
+    /// *with* a `Retry-After`: RFC 5057 classes a 503 as ending only the
+    /// transaction it answers, so the call underneath it is untouched, and
+    /// `Retry-After` tells this one peer's own client transaction to slow
+    /// down rather than read the refusal as a reason to give the call up.
+    fn refuse_when_dialog_full(
+        &mut self,
+        dialog: DialogId,
+        request: &RawMessage<'_>,
+        flow: Flow,
+    ) -> bool {
+        if request.method() == Some(Method::Invite)
+            || self.dialogs.non_invite_transactions(dialog) < MAX_DIALOG_NON_INVITE_TRANSACTIONS
+        {
+            return false;
+        }
+
+        let call = self.call_of_dialog(dialog);
+        let mut decision =
+            Decision::of(Reason::RequestRefusedByDialog).at_address(flow.destination);
+        if let Some(method) = request.method() {
+            decision = decision.caused_by(WireEvent::request(
+                method,
+                Direction::Inbound,
+                request.as_bytes().len(),
+            ));
+        }
+        self.note(call.as_ref().map(CallId::as_bytes), decision);
+
+        let tag = self.mint_tag();
+        let seconds = DIALOG_BUSY_RETRY_AFTER_SECONDS.to_string();
+        let built = ResponseBuilder::for_request(request, StatusCode::SERVICE_UNAVAILABLE)
+            .to_tag(&tag)
+            .header(HeaderName::RetryAfter, seconds.as_bytes())
             .build();
         if let Ok(message) = built {
             self.queue(flow.transmit(message.bytes()));
@@ -605,13 +691,29 @@ impl Endpoint {
         let Some(dialog) = self.dialogs.find(&key) else {
             return;
         };
+        let Some(state) = self.dialogs.get(dialog) else {
+            return;
+        };
         // §13.3.1.4: the ACK is the one "for the response", and a dialog only
         // a provisional has opened has had no 2xx to acknowledge. Its tag went
         // out in that provisional, so whoever saw the 180 can write this ACK,
         // and taking it would report a call that is still ringing as up. Every
         // 2xx this end sends confirms its dialog on the way out
         // (`open_uas_dialog`), so an ACK is never what confirms one.
-        if self.dialogs.get(dialog).map(Dialog::state) != Some(DialogState::Confirmed) {
+        if state.state() != DialogState::Confirmed {
+            return;
+        }
+        // §13.2.2.4 and §17.1.1.3: "The sequence number of the CSeq header
+        // field MUST be the same as the INVITE being acknowledged." That is
+        // the INVITE whose 2xx this end sent last, not the dialog's remote
+        // sequence number, which a PRACK or an UPDATE arriving before the ACK
+        // has already moved past it. An ACK naming an earlier INVITE is stale,
+        // and one naming an INVITE whose ACK was already reported is a repeat;
+        // both are absorbed.
+        let Ok(cseq) = request.cseq() else {
+            return;
+        };
+        if !self.dialogs.take_ack(dialog, cseq.seq) {
             return;
         }
         self.push(Event::IncomingAck {
@@ -624,6 +726,18 @@ impl Endpoint {
         let existing = DialogKey::as_uas(request)
             .ok()
             .and_then(|key| self.dialogs.find(&key));
+
+        // §8.2.2.2: a request with no To tag whose From tag, Call-ID and CSeq
+        // already belong to an ongoing server transaction, under a branch
+        // that does not itself match it, has reached this end by a second
+        // path — almost always a fork. It is answered 482 on a transaction of
+        // its own, and the call the first copy is opening is not touched by
+        // it. A To tag, even one naming no dialog here, makes it §12.2.2's
+        // case instead
+        if existing.is_none() && self.transactions.merged_with(request) {
+            self.refuse_merged_invite(request, flow, now);
+            return;
+        }
 
         let timers = self.config.timers;
         let Ok((id, effects)) = self
@@ -664,6 +778,30 @@ impl Endpoint {
         });
     }
 
+    /// §8.2.2.2: answer a merged INVITE with 482, on a transaction of its
+    /// own, without ever naming the call the first copy already opened.
+    fn refuse_merged_invite(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
+        let timers = self.config.timers;
+        let Ok((id, effects)) = self
+            .transactions
+            .start_invite_server(request, flow, timers, now)
+        else {
+            return;
+        };
+        self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+        let tag = self.mint_tag();
+        self.remember_tag(AnyTransactionId::InviteServer(id), tag.clone());
+        let owned = request.to_owned();
+        let Ok(message) = assemble_response(&owned, StatusCode::LOOP_DETECTED, Some(&tag)) else {
+            return;
+        };
+        let Some(entry) = self.transactions.invite_server_mut(id) else {
+            return;
+        };
+        let effects = entry.machine.respond(message, now);
+        self.apply(effects, flow, AnyTransactionId::InviteServer(id));
+    }
+
     fn on_cancel(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
         let timers = self.config.timers;
         let Ok(cancel) = self
@@ -672,6 +810,16 @@ impl Endpoint {
         else {
             return;
         };
+        // a CANCEL inside a dialog is one of that dialog's non-INVITE server
+        // transactions like any other, and holds a place in its budget until
+        // it retires, which on a stream is the answer just below
+        if let Some(dialog) = DialogKey::as_uas(request)
+            .ok()
+            .and_then(|key| self.dialogs.find(&key))
+        {
+            self.dialogs.reserve_non_invite_transaction(dialog);
+            self.remember_dialog(AnyTransactionId::NonInviteServer(cancel), dialog);
+        }
 
         // §9.2 keeps the 200 for a CANCEL that "matched an existing
         // transaction", "regardless of the method of the original request":
@@ -805,6 +953,9 @@ impl Endpoint {
         let dialog = DialogKey::as_uas(request)
             .ok()
             .and_then(|key| self.dialogs.find(&key));
+        // §8.2.2.2 for every method, as `on_invite` asks it for an INVITE:
+        // read before this request's own transaction joins the index
+        let merged = dialog.is_none() && self.transactions.merged_with(request);
 
         let timers = self.config.timers;
         let Ok(id) = self
@@ -813,6 +964,25 @@ impl Endpoint {
         else {
             return;
         };
+        // §17.2.2 gives Trying/Proceeding no timer of its own; this is the
+        // endpoint's, `non_invite_app_timeout` is a no-op against whatever
+        // already answered it by the time it fires, and retiring the
+        // transaction first takes it off the schedule
+        let deadline = self.schedule(
+            now + timers.sixty_four_t1(),
+            Deadline::UnansweredNonInvite(id),
+        );
+        self.unanswered.insert(id, deadline);
+        if let Some(dialog) = dialog {
+            self.dialogs.reserve_non_invite_transaction(dialog);
+            self.remember_dialog(AnyTransactionId::NonInviteServer(id), dialog);
+        }
+        // a second copy of a request already being processed is answered
+        // here, on a transaction of its own, and never handed up
+        if merged {
+            self.answer(id, &request.to_owned(), StatusCode::LOOP_DETECTED, now);
+            return;
+        }
 
         let Some(dialog) = dialog else {
             let tag = self.mint_tag();
@@ -1052,6 +1222,56 @@ impl Endpoint {
         self.deadlines.cancel(handle);
     }
 
+    /// 64·T1 after a non-INVITE server transaction was created, still with no
+    /// final response of its own: §17.2.2 gives `Trying`/`Proceeding` no timer
+    /// at all, so an application that never answers would otherwise hold the
+    /// slot forever, and past `max_server_transactions` of those every
+    /// stranger gets 503 for it. The client gave this request up by now
+    /// anyway — its own Timer F is the same 64·T1 (§17.1.2.2) — so the
+    /// endpoint answers 408 on the application's behalf and lets the
+    /// transaction retire the ordinary way.
+    ///
+    /// A no-op against a transaction that already has a final response, by
+    /// the application or by this endpoint on some other path. Retiring the
+    /// transaction takes the deadline off the schedule, but one answered on a
+    /// datagram transport is still live, in `Completed`, when it fires.
+    pub(super) fn non_invite_app_timeout(
+        &mut self,
+        id: TransactionId<NonInviteServer>,
+        now: Instant,
+    ) {
+        // the deadline that brought this here is off the schedule already
+        self.unanswered.remove(&id);
+        let Some(entry) = self.transactions.non_invite_server(id) else {
+            return;
+        };
+        if !matches!(
+            entry.machine.state(),
+            NonInviteServerState::Trying | NonInviteServerState::Proceeding
+        ) {
+            return;
+        }
+        let flow = entry.flow;
+        let request = entry.request.clone();
+        let call = request.as_raw().call_id().ok().map(CallId::new);
+        let tag = self.tag_or_mint(AnyTransactionId::NonInviteServer(id));
+        let Ok(message) = assemble_response(&request, StatusCode::REQUEST_TIMEOUT, Some(&tag))
+        else {
+            return;
+        };
+        let Some(entry) = self.transactions.non_invite_server_mut(id) else {
+            return;
+        };
+        let effects = entry.machine.respond(message, now);
+        self.apply(effects, flow, AnyTransactionId::NonInviteServer(id));
+        self.note(
+            call.as_ref().map(CallId::as_bytes),
+            Decision::of(Reason::RequestAnsweredByTimeout)
+                .at_address(flow.destination)
+                .over(flow.protocol),
+        );
+    }
+
     /// Ten seconds without a pong: §4.4.1 makes this a dead flow, and a dead
     /// flow is taken down rather than kept and hoped for.
     pub(super) fn flow_failed(&mut self, transport: super::TransportId) {
@@ -1257,10 +1477,22 @@ impl Endpoint {
                 // a call that ends unanswered gives its room back too
                 self.admitted.remove(&inner);
                 self.end_refused_early(inner, early);
+                self.transactions.release_invite_merge(inner);
                 self.transactions.drop_invite_server(inner);
             }
             AnyTransactionId::NonInviteServer(inner) => {
+                // give the per-dialog budget its place back, for a
+                // transaction that was ever admitted into one
+                if let Some(dialog) = self.dialog_of(id) {
+                    self.dialogs.release_non_invite_transaction(dialog);
+                }
+                // and the schedule the deadline an unanswered one would have
+                // been given its 408 by
+                if let Some(deadline) = self.unanswered.remove(&inner) {
+                    self.deadlines.cancel(deadline);
+                }
                 self.reinvites.answered_theirs(id);
+                self.transactions.release_non_invite_merge(inner);
                 self.transactions.drop_non_invite_server(inner);
             }
         }

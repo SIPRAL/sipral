@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     fn agent(now: Instant) -> UserAgent {
-        let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]);
+        let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]).unwrap();
         agent
             .receive(
                 Input::TransportBound {

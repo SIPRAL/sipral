@@ -86,7 +86,8 @@ impl Stack {
         catalog: CodecCatalog,
         now: Instant,
     ) -> Self {
-        let mut agent = UserAgent::new(EndpointConfig::default(), [seed; 32]);
+        let mut agent =
+            UserAgent::new(EndpointConfig::default(), [seed; 32]).expect("a user agent");
         agent
             .receive(
                 Input::TransportBound {

@@ -115,7 +115,58 @@ impl TimerConfig {
             self.sixty_four_t1()
         }
     }
+
+    /// Whether timers A, E and G can ever move: refused otherwise.
+    ///
+    /// [`Self::retransmit`] is `t1 * 2^attempt`, capped at `t2` for E and G.
+    /// `t1` zero makes attempt 0 already zero — the interval A, E and G are
+    /// first armed with — and `t2` zero clamps every attempt of E and G down
+    /// to zero the moment it is capped, whatever `t1` is. Either way the timer
+    /// re-arms at the exact instant it just fired: `Endpoint::handle_timeout`
+    /// asks its transactions what is due at `now` in a loop that stops only
+    /// when nothing is, and a timer that is always due at `now` again never
+    /// lets it stop.
+    ///
+    /// # Errors
+    /// [`TimerConfigError::Unarmable`] when `t1` or `t2` is zero.
+    pub const fn validate(&self) -> Result<(), TimerConfigError> {
+        if self.t1.is_zero() || self.t2.is_zero() {
+            return Err(TimerConfigError::Unarmable);
+        }
+        Ok(())
+    }
 }
+
+/// Why an [`TimerConfig`] was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimerConfigError {
+    /// `t1` or `t2` is zero, which [`TimerConfig::validate`]'s doc explains.
+    Unarmable,
+    /// The endpoint's keep-alive interval is zero. RFC 5626 §4.4.1's next
+    /// ping is armed at the instant the last one went plus a jitter of that
+    /// interval, which is then nothing, so `Endpoint::handle_timeout` would
+    /// send pings at one instant forever. No interval at all is how
+    /// keep-alives are turned off.
+    KeepaliveUnarmable,
+}
+
+impl core::fmt::Display for TimerConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unarmable => f.write_str(
+                "timers.t1 and timers.t2 must both be greater than zero, or a \
+                 retransmit timer re-arms at the same instant forever",
+            ),
+            Self::KeepaliveUnarmable => f.write_str(
+                "keepalive_interval must be greater than zero, or None for no \
+                 keep-alives, or a ping re-arms at the same instant forever",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for TimerConfigError {}
 
 /// Which timer a firing belongs to, by its RFC 3261 letter.
 ///
@@ -369,5 +420,81 @@ mod tests {
     fn the_letters_read_the_way_the_rfc_writes_them() {
         assert_eq!(TimerName::B.to_string(), "timer B");
         assert_eq!(TimerName::M.to_string(), "timer M");
+    }
+
+    #[test]
+    fn a_config_with_zero_t1_or_t2_is_refused() {
+        assert!(TimerConfig::DEFAULT.validate().is_ok());
+        assert_eq!(
+            TimerConfig {
+                t1: Duration::ZERO,
+                ..TimerConfig::DEFAULT
+            }
+            .validate(),
+            Err(super::TimerConfigError::Unarmable)
+        );
+        assert_eq!(
+            TimerConfig {
+                t2: Duration::ZERO,
+                ..TimerConfig::DEFAULT
+            }
+            .validate(),
+            Err(super::TimerConfigError::Unarmable)
+        );
+    }
+
+    #[test]
+    fn a_zero_t1_would_have_timer_a_re_arm_at_the_same_instant_forever() {
+        // the hang `TimerConfig::validate` exists to refuse, shown without a
+        // wall clock: an unreliable INVITE client transaction's timer A,
+        // driven the way `Endpoint::handle_timeout` drives every transaction's
+        // timers — fire whatever is due at `now`, feed the result back in,
+        // stop only once nothing is due — for a bounded number of rounds
+        // rather than a real one, because a config that is actually broken
+        // must not be given the chance to hang the test that proves it
+        use crate::msg::{Method, RequestBuilder};
+        use crate::transaction::invite_client::InviteClientMachine;
+        // bounded rather than "until it stops", because a config that is
+        // genuinely broken must not be given the chance to hang the test
+        // that proves it: a thousand rounds at the same `now`, all still
+        // finding timer A due, is the hang `TimerConfig::validate` exists to
+        // refuse — `Endpoint::handle_timeout`'s own loop has nothing else
+        // to tell it to stop
+        const ROUNDS: u32 = 1_000;
+
+        let broken = TimerConfig {
+            t1: Duration::ZERO,
+            ..TimerConfig::DEFAULT
+        };
+        assert!(
+            broken.validate().is_err(),
+            "the config under test is invalid"
+        );
+
+        let request = RequestBuilder::new(Method::Invite, b"sip:bob@example.com")
+            .via(b"SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1")
+            .from(b"<sip:alice@example.com>;tag=1")
+            .to(b"<sip:bob@example.com>")
+            .call_id(b"a84b4c76e66710")
+            .cseq(1)
+            .max_forwards(70)
+            .build()
+            .unwrap();
+        let now = Instant::now();
+        let (mut machine, _) = InviteClientMachine::start(request, false, broken, now);
+
+        let mut fired = 0;
+        for _ in 0..ROUNDS {
+            let Some((_, effects)) = machine.handle_timeout(now) else {
+                break;
+            };
+            assert!(!effects.terminated, "timer A does not end the transaction");
+            fired += 1;
+        }
+        assert_eq!(
+            fired, ROUNDS,
+            "timer A stopped re-arming at the same instant on its own; the \
+             hang this config was refused for no longer reproduces"
+        );
     }
 }

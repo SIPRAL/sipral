@@ -376,7 +376,8 @@ mod tests {
     /// A user agent with a transport already bound, which is what
     /// [`UserAgent::call`] needs in order to know where an INVITE goes.
     fn agent(now: Instant) -> UserAgent {
-        let mut agent = UserAgent::new(sipral_ua::EndpointConfig::default(), [11; 32]);
+        let mut agent =
+            UserAgent::new(sipral_ua::EndpointConfig::default(), [11; 32]).expect("a user agent");
         agent
             .receive(
                 Input::TransportBound {

@@ -139,15 +139,19 @@ impl Runtime {
     /// module. `seed` is the endpoint's thirty-two bytes of entropy.
     ///
     /// # Errors
-    /// Whatever binding the socket returns.
+    /// Whatever binding the socket returns, and
+    /// [`io::ErrorKind::InvalidInput`] when a timer in `config` cannot be armed —
+    /// see [`UserAgent::new`].
     pub fn bind(config: EndpointConfig, seed: [u8; 32], local: SocketAddr) -> io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(local)?);
         let local = socket.local_addr()?;
         let (postbox, inbox) = channel();
         let udp = TransportId(1);
+        let agent = UserAgent::new(config, seed)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
         let mut runtime = Self {
-            agent: UserAgent::new(config, seed),
+            agent,
             links: HashMap::new(),
             inbox,
             postbox,

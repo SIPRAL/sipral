@@ -15,14 +15,35 @@
 //! from different clients".
 //!
 //! A peer that predates RFC 3261 sends no magic cookie and its branch is not
-//! unique, so §17.2.3 falls back to matching on the Request-URI, the From tag,
-//! the `Call-ID`, the `CSeq` number — not its method, so that an ACK matches
-//! the INVITE — and the top `Via`. That is implemented here, with one omission
-//! written down rather than hidden: the RFC also compares an ACK's To tag
-//! against the tag in the response the server sent, to tell an ACK for a 2xx
-//! from an ACK for something else. Doing that needs the transaction's own
-//! response rather than a key, and it only matters when a proxy forked and
-//! then crashed. RFC 6026's `Accepted` state covers the 2xx side of it.
+//! unique, so §17.2.3 falls back to a rule stated for three groups by name:
+//! the INVITE that created the transaction, the ACK that follows it, and "all
+//! other request methods". All three compare the Request-URI, the `Call-ID`,
+//! the `CSeq` and the top `Via`; the INVITE and every other method also
+//! compare the To tag, and the ACK does not — its `CSeq` compares by number
+//! only, "not the method", so that it still finds the INVITE that created the
+//! transaction rather than a transaction of its own. That three-way split is
+//! implemented here, with two simplifications written down rather than
+//! hidden:
+//!
+//! - The RFC has the ACK's To tag compared against the tag *in the response
+//!   the server sent*, to tell an ACK for a 2xx from an ACK for something else
+//!   at a proxy that forked and then crashed. A key built from a request does
+//!   not hold that response, so an ACK is looked up twice (`server_for` in
+//!   the store): without a To tag, which finds the INVITE that opened a
+//!   dialog and carried none, and with its own, which finds a re-INVITE,
+//!   whose every response carries the tag the re-INVITE does. The first of
+//!   the two does not check the ACK's tag against the one this end wrote into
+//!   its responses; an ACK that agrees on the Request-URI, the From tag, the
+//!   `Call-ID`, the `CSeq` number and the whole top `Via` of that INVITE is
+//!   taken to be for it.
+//! - The Request-URI and the top `Via` are compared as the bytes that arrived
+//!   rather than through each field's own equivalence rule (RFC 3261 §19.1.4
+//!   for a SIP URI, case-insensitive `sent-by` for `Via`, as the RFC 3261
+//!   branch below already applies). A genuine retransmission, ACK or CANCEL
+//!   from the same UAC repeats both byte for byte; a peer that re-encoded an
+//!   equivalent URI or `Via` between one request and the next is not the case
+//!   this fallback exists for, which is a branch that carries no identity of
+//!   its own, not a UAC that respells itself mid-dialog.
 
 use super::super::msg::HostRef;
 use super::super::msg::{HeaderError, HeaderName, Method, RawMessage, ViaRef};
@@ -83,6 +104,10 @@ pub(crate) enum ServerKey {
         cseq: u32,
         method: Box<[u8]>,
         top_via: Box<[u8]>,
+        /// §17.2.3: the request's own To tag, for the INVITE that created the
+        /// transaction and for every other method. An ACK is keyed without
+        /// it and looked up with it a second time — see the module doc.
+        to_tag: Option<Box<[u8]>>,
     },
 }
 
@@ -124,6 +149,11 @@ impl ServerKey {
     /// acknowledges and never names a transaction of its own, which leaves a
     /// CANCEL as the one method to rule out: without that, the CANCEL's own
     /// transaction would be what it cancelled.
+    ///
+    /// A `Legacy` key's To tag is compared along with the rest: the rule §9.2
+    /// applies is §17.2.3's for "all other request methods", which names it,
+    /// and §9.1 has a CANCEL copy the `To` of the request it cancels, tag
+    /// included.
     pub(crate) fn is_cancelled_by(&self, cancel: &Self) -> bool {
         let not_a_cancel = |method: &[u8]| method != Method::Cancel.as_str().as_bytes();
         match (self, cancel) {
@@ -147,6 +177,7 @@ impl ServerKey {
                     cseq,
                     method,
                     top_via,
+                    to_tag,
                 },
                 Self::Legacy {
                     request_uri: aimed_uri,
@@ -154,6 +185,7 @@ impl ServerKey {
                     call_id: aimed_call_id,
                     cseq: aimed_cseq,
                     top_via: aimed_top_via,
+                    to_tag: aimed_to_tag,
                     ..
                 },
             ) => {
@@ -162,10 +194,46 @@ impl ServerKey {
                     && call_id == aimed_call_id
                     && cseq == aimed_cseq
                     && top_via == aimed_top_via
+                    && to_tag == aimed_to_tag
                     && not_a_cancel(method)
             }
             _ => false,
         }
+    }
+
+    /// This key with the To tag of `ack` in it, for the second lookup of a
+    /// legacy ACK (§17.2.3): keyed without a tag, an ACK finds the INVITE that
+    /// opened a dialog and carried none; keyed with its own, it finds a
+    /// re-INVITE, whose responses all carry the tag the re-INVITE does.
+    ///
+    /// `None` for an RFC 3261 key, for a request that is not an ACK, and for
+    /// an ACK with no To tag, none of which has a second place to look.
+    pub(crate) fn with_ack_to_tag(&self, ack: &RawMessage<'_>) -> Option<Self> {
+        let Self::Legacy {
+            request_uri,
+            from_tag,
+            call_id,
+            cseq,
+            method,
+            top_via,
+            to_tag: None,
+        } = self
+        else {
+            return None;
+        };
+        if ack.method() != Some(Method::Ack) {
+            return None;
+        }
+        let tag = ack.to().ok()?.tag()?;
+        Some(Self::Legacy {
+            request_uri: request_uri.clone(),
+            from_tag: from_tag.clone(),
+            call_id: call_id.clone(),
+            cseq: *cseq,
+            method: method.clone(),
+            top_via: top_via.clone(),
+            to_tag: Some(tag.into_owned().into()),
+        })
     }
 
     fn with_method(request: &RawMessage<'_>, method: Method<'_>) -> Result<Self, HeaderError> {
@@ -182,6 +250,14 @@ impl ServerKey {
 
         let cseq = request.cseq()?;
         let from = request.from()?;
+        // the INVITE that created the transaction and every other method
+        // compare the To tag against the request that created it; an ACK
+        // does not, and the module doc says why
+        let to_tag = if request.method() == Some(Method::Ack) {
+            None
+        } else {
+            request.to()?.tag().map(|tag| tag.into_owned().into())
+        };
         Ok(Self::Legacy {
             request_uri: request
                 .request_uri_bytes()
@@ -201,6 +277,7 @@ impl ServerKey {
                 .header(HeaderName::Via)
                 .ok_or(HeaderError::Missing)?
                 .into(),
+            to_tag,
         })
     }
 }
@@ -528,6 +605,117 @@ Content-Length: 0\r\n\
         assert!(
             !legacy.is_cancelled_by(&with(with_cookie, ServerKey::for_cancelled).expect("a key")),
             "a legacy transaction must not be cancelled by an RFC 3261-keyed CANCEL"
+        );
+    }
+
+    #[test]
+    fn a_legacy_in_dialog_request_is_told_apart_by_its_to_tag() {
+        // §17.2.3's "all other request methods" compares the To tag along
+        // with the rest; two INFOs that agree on everything else but the
+        // dialog they are inside of must not collide on one transaction
+        let one = b"INFO sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=aaa\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 INFO\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let other = b"INFO sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=bbb\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 INFO\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert_ne!(
+            with(one, ServerKey::for_request).expect("a key"),
+            with(other, ServerKey::for_request).expect("a key"),
+            "two dialogs must not share a transaction because a legacy peer's \
+             branch says nothing"
+        );
+        // and a genuine retransmission, which repeats the To tag along with
+        // everything else, still matches
+        assert_eq!(
+            with(one, ServerKey::for_request).expect("a key"),
+            with(one, ServerKey::for_request).expect("a key")
+        );
+    }
+
+    #[test]
+    fn a_legacy_cancel_matches_only_inside_the_dialog_it_names() {
+        // §9.2 finds what a CANCEL cancels by §17.2.3 "assuming that the
+        // request method is anything but CANCEL or ACK", and that rule
+        // compares the To tag; §9.1 has the CANCEL copy To, tag included
+        let info = b"INFO sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=aaa\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 INFO\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let same_dialog = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=aaa\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let other_dialog = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=bbb\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let transaction = with(info, ServerKey::for_request).expect("a key");
+        assert!(
+            transaction
+                .is_cancelled_by(&with(same_dialog, ServerKey::for_cancelled).expect("a key"))
+        );
+        assert!(
+            !transaction
+                .is_cancelled_by(&with(other_dialog, ServerKey::for_cancelled).expect("a key")),
+            "a CANCEL naming another dialog must not match this one's transaction"
+        );
+    }
+
+    #[test]
+    fn an_ack_matches_its_invite_however_the_to_tags_disagree() {
+        // the INVITE that created the transaction carries no To tag; the ACK
+        // that follows a response to it always carries one. §17.2.3 compares
+        // the ACK's To tag against the response, not the request, and this
+        // fallback leaves that comparison out rather than let it always fail
+        let invite = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let ack = b"ACK sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=a6c85cf\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 ACK\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert_eq!(
+            with(invite, ServerKey::for_request).expect("a key"),
+            with(ack, ServerKey::for_request).expect("a key")
         );
     }
 

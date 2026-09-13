@@ -151,6 +151,13 @@ impl StatusCode {
     /// 481, which answers a request naming a dialog or a transaction that is
     /// not there (§12.2.2, RFC 3262 §3).
     pub const CALL_DOES_NOT_EXIST: Self = Self(481);
+    /// 482, which §8.2.2.2 answers a request that reached this end twice, by
+    /// two different paths — most often a proxy's fork.
+    pub const LOOP_DETECTED: Self = Self(482);
+    /// 408, which the endpoint answers a non-INVITE server transaction with,
+    /// on the application's behalf, when 64·T1 passes with no final response
+    /// of its own (§17.2.2 gives that state no timer at all).
+    pub const REQUEST_TIMEOUT: Self = Self(408);
     /// 420, which §8.2.2.3 makes the only answer to a `Require` naming an
     /// extension this end has not implemented.
     pub const BAD_EXTENSION: Self = Self(420);

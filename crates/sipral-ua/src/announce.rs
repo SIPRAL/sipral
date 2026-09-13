@@ -591,7 +591,7 @@ mod tests {
     /// A user agent with nothing bound yet, which is what a phone woken by a
     /// push actually has.
     fn asleep(seed: u8) -> UserAgent {
-        UserAgent::new(EndpointConfig::default(), [seed; 32])
+        UserAgent::new(EndpointConfig::default(), [seed; 32]).unwrap()
     }
 
     fn bind(agent: &mut UserAgent, now: Instant) {

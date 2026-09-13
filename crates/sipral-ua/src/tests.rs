@@ -48,7 +48,7 @@ fn uri(text: &str) -> Uri {
 
 /// A user agent with one UDP transport bound.
 fn agent(now: Instant) -> UserAgent {
-    let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]);
+    let mut agent = UserAgent::new(EndpointConfig::default(), [11; 32]).unwrap();
     agent
         .receive(
             Input::TransportBound {
@@ -66,7 +66,7 @@ fn agent(now: Instant) -> UserAgent {
 /// As [`agent`], with a configuration of the caller's own rather than
 /// [`EndpointConfig::default`].
 fn agent_with(config: EndpointConfig, now: Instant) -> UserAgent {
-    let mut agent = UserAgent::new(config, [11; 32]);
+    let mut agent = UserAgent::new(config, [11; 32]).unwrap();
     agent
         .receive(
             Input::TransportBound {
@@ -173,7 +173,7 @@ fn deliver(agent: &mut UserAgent, bytes: &[u8], now: Instant) {
 /// A user agent whose account registers over a byte stream, which is the only
 /// kind of transport RFC 5626 §4.4.1 keep-alives run on.
 fn over_tcp(now: Instant) -> (UserAgent, AccountId) {
-    let mut agent = UserAgent::new(EndpointConfig::default(), [12; 32]);
+    let mut agent = UserAgent::new(EndpointConfig::default(), [12; 32]).unwrap();
     agent
         .receive(
             Input::TransportBound {
@@ -4402,7 +4402,7 @@ fn a_refresh_that_fell_due_before_the_ack_still_goes_before_the_session_expires(
     let t0 = Instant::now();
     let mut config = EndpointConfig::default();
     config.timers.t1 = Duration::from_secs(2);
-    let mut agent = UserAgent::new(config, [11; 32]);
+    let mut agent = UserAgent::new(config, [11; 32]).unwrap();
     agent
         .receive(
             Input::TransportBound {

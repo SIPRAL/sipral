@@ -1346,7 +1346,7 @@ mod counter_wiring {
         engine: &mut MediaEngine,
         now: Instant,
     ) -> (UserAgent, CallHandle) {
-        let mut agent = UserAgent::new(EndpointConfig::default(), [5; 32]);
+        let mut agent = UserAgent::new(EndpointConfig::default(), [5; 32]).expect("a user agent");
         agent
             .receive(
                 Input::TransportBound {

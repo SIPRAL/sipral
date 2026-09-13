@@ -32,7 +32,8 @@ use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
 use sipral_core::replay::Driven;
 use sipral_core::sdp;
 use sipral_core::transaction::{
-    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
+    AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TimerConfigError,
+    TransactionId,
 };
 
 use crate::account::{Account, AccountId};
@@ -154,12 +155,18 @@ impl UserAgent {
     /// `seed` is the endpoint's: thirty-two bytes of entropy from which every
     /// branch, tag, `Call-ID` and back-off interval is derived. Two agents must
     /// never be given the same one.
-    #[must_use]
-    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self {
+    ///
+    /// # Errors
+    /// [`TimerConfigError`] when a timer in `config` cannot be armed at all:
+    /// `timers.t1` or `timers.t2` zero, which
+    /// [`sipral_core::transaction::TimerConfig::validate`] refuses, or a
+    /// `keepalive_interval` of zero. Either would make a timer re-arm at the
+    /// instant it just fired and hang `handle_timeout` forever.
+    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Result<Self, TimerConfigError> {
         let timer_n = config.timers.sixty_four_t1();
         let sdp_limits = config.sdp_limits;
-        Self {
-            endpoint: Endpoint::new(config, seed),
+        Ok(Self {
+            endpoint: Endpoint::new(config, seed)?,
             accounts: HashMap::new(),
             registrations: HashMap::new(),
             owners: HashMap::new(),
@@ -189,7 +196,7 @@ impl UserAgent {
             next_call: 0,
             next_subscription: 0,
             next_announcement: 0,
-        }
+        })
     }
 
     /// Bytes, or news about a transport.

@@ -109,6 +109,41 @@ impl From<Server> for AnyTransactionId {
     }
 }
 
+/// §8.2.2.2's own three fields — the `From` tag, the `Call-ID` and the
+/// `CSeq`, number and method — normalised the way each compares: the tag
+/// case-insensitively (§7.3.1), the other two as they are (§20.8, §20.16).
+/// Every server transaction is indexed by one, whatever its method: the
+/// section is about any request that arrives twice, not only an INVITE.
+type MergeKey = (Box<[u8]>, Box<[u8]>, u32, Box<[u8]>);
+
+/// The key `request` would be found under in the merge index, when it carries
+/// the fields one needs.
+fn merge_key(request: &RawMessage<'_>) -> Option<MergeKey> {
+    let from_tag = request.from().ok()?.tag()?;
+    let call_id = request.call_id().ok()?;
+    let cseq = request.cseq().ok()?;
+    let lowered: Box<[u8]> = from_tag.iter().map(u8::to_ascii_lowercase).collect();
+    Some((
+        lowered,
+        call_id.into(),
+        cseq.seq,
+        cseq.method.as_str().as_bytes().into(),
+    ))
+}
+
+/// Give back the place `request` held in the merge index.
+fn forget_merge_key(merge: &mut HashMap<MergeKey, usize>, request: &OwnedMessage) {
+    let Some(key) = merge_key(&request.as_raw()) else {
+        return;
+    };
+    if let Some(count) = merge.get_mut(&key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            merge.remove(&key);
+        }
+    }
+}
+
 /// Every live transaction of one endpoint.
 #[derive(Debug)]
 pub(crate) struct Transactions {
@@ -118,6 +153,15 @@ pub(crate) struct Transactions {
     non_invite_servers: Slab<ServerEntry<NonInviteServerMachine>>,
     clients: HashMap<ClientKey, Client>,
     servers: HashMap<ServerKey, Server>,
+    /// How many live server transactions share each (`From` tag, `Call-ID`,
+    /// `CSeq`) — RFC 3261 §8.2.2.2's merged-request check, kept as a count
+    /// rather than a set of handles because the check only ever asks "is
+    /// there already one of these", never "which". Raised when a server
+    /// transaction starts and lowered by [`Transactions::release_invite_merge`]
+    /// and [`Transactions::release_non_invite_merge`], so it never outlives
+    /// the transactions it counts and is exactly as bounded as the two server
+    /// arenas are.
+    merge: HashMap<MergeKey, usize>,
 }
 
 impl Transactions {
@@ -130,6 +174,7 @@ impl Transactions {
             non_invite_servers: Slab::new(),
             clients: HashMap::new(),
             servers: HashMap::new(),
+            merge: HashMap::new(),
         }
     }
 
@@ -217,6 +262,9 @@ impl Transactions {
         });
         let id = TransactionId::new(raw);
         self.servers.insert(key, Server::Invite(id));
+        if let Some(counted) = merge_key(request) {
+            *self.merge.entry(counted).or_insert(0) += 1;
+        }
         Ok((id, effects))
     }
 
@@ -241,6 +289,9 @@ impl Transactions {
         });
         let id = TransactionId::new(raw);
         self.servers.insert(key, Server::NonInvite(id));
+        if let Some(counted) = merge_key(request) {
+            *self.merge.entry(counted).or_insert(0) += 1;
+        }
         Ok(id)
     }
 
@@ -263,10 +314,17 @@ impl Transactions {
     /// The server transaction a request belongs to (§17.2.3).
     ///
     /// An ACK is keyed as the INVITE it answers, which is what puts it on the
-    /// transaction that sent the response being acknowledged.
+    /// transaction that sent the response being acknowledged. A legacy ACK
+    /// that finds nothing is looked up once more with its To tag in the key,
+    /// which is where a re-INVITE it acknowledges is (§17.2.3,
+    /// [`ServerKey::with_ack_to_tag`]).
     pub(crate) fn server_for(&self, request: &RawMessage<'_>) -> Option<Server> {
         let key = ServerKey::for_request(request).ok()?;
-        self.servers.get(&key).copied()
+        if let Some(found) = self.servers.get(&key) {
+            return Some(*found);
+        }
+        let tagged = key.with_ack_to_tag(request)?;
+        self.servers.get(&tagged).copied()
     }
 
     /// Every transaction with a deadline at or before `now`, in no particular
@@ -292,6 +350,42 @@ impl Transactions {
             if entry.machine.next_deadline().is_some_and(|at| at <= now) {
                 out.push(AnyTransactionId::NonInviteServer(TransactionId::new(raw)));
             }
+        }
+    }
+
+    /// Whether `request` is a merged request (RFC 3261 §8.2.2.2): one with no
+    /// To tag whose From tag, `Call-ID` and `CSeq` already belong to a server
+    /// transaction this store is running, under a branch that does not itself
+    /// match that transaction (§17.2.3) — the same request, arrived by a
+    /// second path, almost always a fork.
+    ///
+    /// The caller only calls this once `request` has already failed to match
+    /// anything through [`Transactions::server_for`], and before it creates a
+    /// transaction of its own, so a hit here is necessarily a different
+    /// transaction sharing the same fields, never the request comparing equal
+    /// to itself; and `O(1)` through [`Transactions::merge`] rather than a
+    /// visit per slot, because it is asked of every request that opens a
+    /// transaction, unlike [`Transactions::cancelled_by`]'s scan.
+    pub(crate) fn merged_with(&self, request: &RawMessage<'_>) -> bool {
+        let untagged = request.to().is_ok_and(|to| to.tag().is_none());
+        untagged && merge_key(request).is_some_and(|key| self.merge.contains_key(&key))
+    }
+
+    /// Give a retiring INVITE server transaction's place in the §8.2.2.2
+    /// merge index back. A no-op once the id no longer resolves to anything,
+    /// which is why this has to be called before
+    /// [`Transactions::drop_invite_server`], not after.
+    pub(crate) fn release_invite_merge(&mut self, id: TransactionId<InviteServer>) {
+        if let Some(entry) = self.invite_servers.get(id.raw) {
+            forget_merge_key(&mut self.merge, &entry.request);
+        }
+    }
+
+    /// The same for a non-INVITE server transaction, called before
+    /// [`Transactions::drop_non_invite_server`].
+    pub(crate) fn release_non_invite_merge(&mut self, id: TransactionId<NonInviteServer>) {
+        if let Some(entry) = self.non_invite_servers.get(id.raw) {
+            forget_merge_key(&mut self.merge, &entry.request);
         }
     }
 
@@ -561,6 +655,47 @@ mod tests {
         assert_eq!(
             with(&ack, |raw| store.server_for(raw)),
             Some(Server::Invite(id))
+        );
+    }
+
+    #[test]
+    fn a_legacy_ack_finds_the_re_invite_it_acknowledges() {
+        // §17.2.3 matches a legacy ACK by "the To tag of the response sent by
+        // the server transaction", and every response to a re-INVITE carries
+        // the To tag the re-INVITE itself does
+        let reinvite = b"INVITE sip:bob@192.0.2.9 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=bobs\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 2 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let ack = b"ACK sip:bob@192.0.2.9 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>;tag=bobs\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 2 ACK\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let mut store = Transactions::new();
+        let now = Instant::now();
+        let mut scratch = ParseScratch::new();
+        let parsed = parse(reinvite, &mut scratch, ParseMode::Strict).unwrap();
+        let (id, _) = store
+            .start_invite_server(&parsed, flow(1), TimerConfig::DEFAULT, now)
+            .unwrap();
+
+        let mut scratch = ParseScratch::new();
+        let acked = parse(ack, &mut scratch, ParseMode::Strict).unwrap();
+        assert_eq!(
+            store.server_for(&acked),
+            Some(Server::Invite(id)),
+            "the ACK for a refused legacy re-INVITE has to reach its transaction, \
+             or timer G retransmits the refusal until timer H"
         );
     }
 

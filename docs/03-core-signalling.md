@@ -117,10 +117,18 @@ the socket.
   cannot all be let in and then answered past the ceiling. A fork is held to
   it as well: past the first dialog of an INVITE this end sent and the first
   2xx to it, a branch that finds no room is reported without a dialog, and its
-  2xx is not acknowledged here — the far end gives it up with a BYE of its own.
+  2xx is not acknowledged here — the far end gives it up with a BYE of its own,
+  and the drop leaves a `dialog.fork.dropped` entry in the diagnostic record
+  (`docs/14-diagnostics.md`) — a call that vanishes leaves no other trace.
   A request inside a
   dialog that exists is never refused, whatever the count says: a BYE turned
-  away leaves the call standing for the life of the process.
+  away leaves the call standing for the life of the process. That exemption
+  has a ceiling of its own instead: at most sixteen non-INVITE server
+  transactions per dialog at once, past which the request is answered 503
+  with a `Retry-After` rather than left to grow without bound — a peer
+  already inside a dialog must not be able to reproduce the same flood from a
+  friendlier address. RFC 5057 classes that 503 as ending only the
+  transaction, so the dialog underneath it stands.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 
@@ -136,11 +144,29 @@ Four state machines from RFC 3261 §17, implemented from the diagrams in the RFC
 | non-INVITE server | J |
 
 `T1 = 500 ms`, `T2 = 4 s`, `T4 = 5 s`, all configurable, because carriers exist
-where they must be.
+where they must be. `t1` and `t2` are the two the endpoint refuses to be
+built on at zero: §17.1.1.2's retransmit interval is `t1` doubled, capped at
+`t2`, and either at zero makes it re-arm at the instant it just fired, which
+would never let `handle_timeout` return. `Endpoint::new` returns
+`Err(TimerConfigError)` rather than build one that would hang, and does the
+same for a `keepalive_interval` of zero, whose next ping would fall due at the
+instant the last one went.
 
 The layer owns retransmission, absorbs duplicate requests, and matches responses
 to requests by `branch`. It reports timeouts and transport failures upward as
 events, never as an error return from an unrelated call.
+
+§17.2.2 gives a non-INVITE server transaction's `Trying`/`Proceeding` states
+no timer at all, on the assumption that the application answers. One that
+never does would hold its slot for the life of the process, and enough of
+them exhaust `max_server_transactions` for every stranger after. So the
+endpoint keeps a deadline of its own, outside the RFC's machine: 64·T1 after
+the request arrived — by when the client's own Timer F has given it up
+anyway — an application that has not sent a final response gets 408 written
+on its behalf, and the transaction retires the ordinary way from there. An
+INVITE server transaction gets no such deadline: it already counts against
+`max_dialogs` from the moment its INVITE is let in, which is the ceiling for
+exactly this failure mode.
 
 Two cases that must be right from the first version because they are the ones
 that break in production:
@@ -149,6 +175,20 @@ that break in production:
   `To` tags. Each becomes its own early dialog. The stack must not confuse them.
 - **`CANCEL` racing a `200 OK`.** The RFC prescribes the answer; the test suite
   contains it as a scripted scenario from day one.
+
+A request without the RFC 3261 magic cookie — a peer that predates it —
+falls back to §17.2.3's field-by-field match, one rule for the INVITE that
+created the transaction, one for the ACK that follows it, one for every
+other method; `crates/sipral-core/src/transaction/matching.rs` documents
+which fields each of the three compares and the two simplifications made
+deliberately rather than silently. §8.2.2.2 is the other side of the same
+fallback's absence: a request with no `To` tag whose `From` tag, `Call-ID`
+and `CSeq` already belong to a transaction it does not itself match by
+§17.2.3 has reached this end by a second path, almost always a fork, and is
+answered 482 on a transaction of its own rather than handed up a second
+time — a second call for an INVITE, a second request for any other method. A
+request whose `To` carries a tag, even one naming no dialog here, is
+§12.2.2's case rather than this one.
 
 ### PRACK
 
@@ -185,6 +225,13 @@ A dialog is Call-ID plus both tags. The layer maintains:
   because the caller decides when media is ready; after that the dialog layer
   keeps it and answers every retransmitted 2xx itself. The ACK for a non-2xx
   is the transaction's own business (§17.1.1.3) and never reaches the caller.
+  An incoming ACK is matched to the dialog by its `To`/`From` tags and then
+  by its `CSeq` number against the INVITE whose 2xx this end sent last
+  (§13.2.2.4, §17.1.1.3: "the same CSeq as the INVITE being acknowledged") —
+  not against the dialog's remote sequence number, which a PRACK or an UPDATE
+  sent before the ACK has already moved on. It is reported once: an ACK that
+  names an earlier INVITE, a stale one for a re-INVITE this dialog has since
+  moved past most often, and a repeat of one already reported are absorbed.
 
 A re-INVITE (§14) is an INVITE inside a dialog and is handled apart from one
 that opens a call, because "unlike an INVITE, which can fork, a re-INVITE will

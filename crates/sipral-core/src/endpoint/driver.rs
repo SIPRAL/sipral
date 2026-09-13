@@ -44,7 +44,7 @@ use crate::msg::{
 };
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
-    TransactionId, TransactionKind, Transactions,
+    TimerConfigError, TransactionId, TransactionKind, Transactions,
 };
 use crate::transaction::{Raw, TimerHandle, Timers};
 
@@ -58,6 +58,13 @@ pub(super) enum Deadline {
     PongOverdue(TransportId),
     /// A reliable provisional response has to go out again (RFC 3262 §3).
     Reliable(Raw),
+    /// 64·T1 after a non-INVITE server transaction was created, RFC 3261
+    /// §17.2.2 gives its `Trying`/`Proceeding` states no timer of their own,
+    /// so an application that never answers holds the slot forever. This is
+    /// the endpoint's own: a no-op when it fires against a transaction that
+    /// already has a final response, and taken off the schedule when the
+    /// transaction retires before it fires.
+    UnansweredNonInvite(TransactionId<NonInviteServer>),
 }
 
 /// One SIP endpoint: everything in flight, and nothing that does I/O.
@@ -110,6 +117,13 @@ pub struct Endpoint {
     /// the room its dialog will take from the moment it is admitted until a
     /// response opens the dialog or a refusal says there will be none.
     pub(super) admitted: HashSet<TransactionId<InviteServer>>,
+    /// The deadline `Deadline::UnansweredNonInvite` hung on each non-INVITE
+    /// server transaction still live, so that retiring one takes its deadline
+    /// with it. A transaction answered at once on a stream retires at once,
+    /// and a deadline left behind would outlive it by 64·T1: the schedule
+    /// would then grow with the rate requests arrive rather than stay within
+    /// what `max_server_transactions` lets a peer hold.
+    pub(super) unanswered: HashMap<TransactionId<NonInviteServer>, TimerHandle>,
     /// What this endpoint decided, per call and for itself
     /// (`docs/14-diagnostics.md`).
     pub(super) diag: Records,
@@ -124,9 +138,20 @@ impl Endpoint {
     /// sockets are: a library that reaches for `/dev/urandom` on its own is a
     /// library that cannot be run where the caller needs it. Two endpoints
     /// must never be given the same seed.
-    #[must_use]
-    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// [`TimerConfigError`] when `config.timers` cannot be armed at all —
+    /// [`crate::transaction::TimerConfig::validate`]'s doc says which values
+    /// and why — and [`TimerConfigError::KeepaliveUnarmable`] for a
+    /// `keepalive_interval` of zero. Accepting one of those would not fail
+    /// later; it would make timer A, E or G, or the next keep-alive, re-arm at
+    /// the instant it just fired, and `handle_timeout` would never return.
+    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Result<Self, TimerConfigError> {
+        config.timers.validate()?;
+        if config.keepalive_interval == Some(core::time::Duration::ZERO) {
+            return Err(TimerConfigError::KeepaliveUnarmable);
+        }
+        Ok(Self {
             config,
             tokens: Tokens::new(seed),
             transports: Transports::new(),
@@ -146,8 +171,9 @@ impl Endpoint {
             known: Known::new(),
             refused: 0,
             admitted: HashSet::new(),
+            unanswered: HashMap::new(),
             diag: Records::new(config.diagnostics),
-        }
+        })
     }
 
     /// Bytes, or news about a transport.
@@ -208,6 +234,7 @@ impl Endpoint {
                 Deadline::Keepalive(transport) => self.send_keepalive(transport, now),
                 Deadline::PongOverdue(transport) => self.flow_failed(transport),
                 Deadline::Reliable(raw) => self.retransmit_reliable(raw, now),
+                Deadline::UnansweredNonInvite(id) => self.non_invite_app_timeout(id, now),
             }
         }
 
@@ -980,6 +1007,14 @@ impl Endpoint {
             return Err(RespondError::TooLate);
         }
         self.apply(effects, flow, AnyTransactionId::InviteServer(transaction));
+        // §13.2.2.4: the ACK this 2xx is owed carries this INVITE's own
+        // number, whatever the dialog has seen from the far end since
+        if status.is_success()
+            && let Some(dialog) = dialog
+            && let Ok(seq) = request.as_raw().cseq().map(|cseq| cseq.seq)
+        {
+            self.dialogs.answer_invite(dialog, seq);
+        }
         self.end_refused_early(transaction, early);
         // a dialog opened, or a final response said there will be none: the
         // call holds no room of its own any more either way

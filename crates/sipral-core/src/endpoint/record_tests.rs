@@ -445,7 +445,7 @@ fn a_flood_of_strangers_cannot_push_a_call_out_of_the_set() {
         max_server_transactions: 0,
         ..EndpointConfig::default()
     };
-    let mut endpoint = Endpoint::new(config, [7; 32]);
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -493,7 +493,7 @@ fn a_record_evicted_for_want_of_room_is_counted_rather_than_forgotten() {
         },
         ..EndpointConfig::default()
     };
-    let mut endpoint = Endpoint::new(config, [7; 32]);
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {

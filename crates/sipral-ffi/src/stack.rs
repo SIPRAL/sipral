@@ -1013,7 +1013,8 @@ pub(crate) unsafe fn create_on(
 
     let origin = Instant::now();
     let engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
-    let mut agent = UserAgent::new(endpoint, seed);
+    let mut agent = UserAgent::new(endpoint, seed)
+        .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
     // the socket is the caller's; what the stack is told is the address
     // the far end will answer to, which is what goes in every Via
     let bound = agent.receive(

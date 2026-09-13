@@ -106,6 +106,14 @@ app thinks it failed" in the field.
 ```rust
 pub struct TimerConfig { pub t1: Duration, pub t2: Duration, pub t4: Duration }
 impl Default for TimerConfig {}   // 500 ms, 4 s, 5 s, RFC 3261 §17.1.1.1
+impl TimerConfig {
+    // `t1` or `t2` zero makes timer A, E or G re-arm at the instant it
+    // fired; `Endpoint::new` refuses a config that fails this.
+    pub fn validate(&self) -> Result<(), TimerConfigError>;
+}
+// the second is `EndpointConfig::keepalive_interval` at zero, which
+// `Endpoint::new` refuses for the same reason
+pub enum TimerConfigError { Unarmable, KeepaliveUnarmable }
 ```
 
 ## Messages: zero-copy with one copy seam
@@ -791,8 +799,10 @@ impl Endpoint {
     /// `Call-ID` and `cnonce` this endpoint writes is `SHA-256(seed ||
     /// counter)`. The caller supplies it for the same reason it supplies the
     /// clock and the sockets — and a test that supplies a fixed one can
-    /// assert on bytes.
-    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Self;
+    /// assert on bytes. Refuses `config.timers` with `t1` or `t2` at zero, and
+    /// a `keepalive_interval` of zero, either of which would make a timer
+    /// re-arm at the instant it fired and hang `handle_timeout` forever.
+    pub fn new(config: EndpointConfig, seed: [u8; 32]) -> Result<Self, TimerConfigError>;
 
     // -- UAC ------------------------------------------------------------------
     pub fn invite(&mut self, request: &OutgoingRequest, now: Instant)
@@ -1319,7 +1329,7 @@ first and BYE the second, or keep both.
 ## Fake clock
 
 ```rust
-let mut ep = Endpoint::new(EndpointConfig::default(), [7; 32]);   // a fixed seed
+let mut ep = Endpoint::new(EndpointConfig::default(), [7; 32]).unwrap();   // a fixed seed
 let t0 = Instant::now();               // any fixed instant; never read again
 ep.receive(Input::TransportBound { transport: T, protocol: Udp, local, remote: None }, t0).unwrap();
 let inv = ep.invite(&invite_to("sip:bob@example.com"), t0).unwrap();

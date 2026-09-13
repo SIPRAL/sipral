@@ -82,7 +82,7 @@
 //! let now = Instant::now();
 //! // two independent draws, never the same bytes: the first is written into
 //! // a replay recording in clear, the second derives every SRTP key
-//! let mut agent = UserAgent::new(config, seed);
+//! let mut agent = UserAgent::new(config, seed).expect("timers that can be armed");
 //! let mut engine = MediaEngine::new(
 //!     CodecCatalog::new(),
 //!     MediaConfig::default(),

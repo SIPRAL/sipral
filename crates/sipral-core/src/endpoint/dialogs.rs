@@ -45,6 +45,23 @@ struct Entry {
     /// too large for a datagram onto a stream, and every retransmission of
     /// the 2xx has to be answered on that stream too.
     acked_on: Option<Flow>,
+    /// How many non-INVITE server transactions this dialog has open right
+    /// now — the budget `endpoint::inbound::MAX_DIALOG_NON_INVITE_TRANSACTIONS`
+    /// counts against. A dialog is exempt from the endpoint-wide ceiling, but
+    /// not from having a ceiling of its own: this is the count that ceiling
+    /// reads, raised at every server transaction this dialog admits and
+    /// lowered when it retires, on every transport and in an early dialog
+    /// exactly as in a confirmed one.
+    non_invite_transactions: usize,
+    /// The `CSeq` number of the INVITE whose 2xx this end sent last in this
+    /// dialog, which is the number the ACK it is owed carries (§13.2.2.4).
+    /// Not the dialog's remote sequence number: a PRACK or an UPDATE the far
+    /// end sends before its ACK moves that one on.
+    answered_invite: Option<u32>,
+    /// The `CSeq` number of the last ACK reported for such a 2xx, so that a
+    /// repeat of it, sent for a retransmission of the 2xx, is not reported
+    /// again.
+    acknowledged_invite: Option<u32>,
 }
 
 /// The dialogs one INVITE produced, and the transaction that produced them.
@@ -122,6 +139,9 @@ impl Dialogs {
             home: Home::Branch(set),
             flow,
             acked_on: None,
+            non_invite_transactions: 0,
+            answered_invite: None,
+            acknowledged_invite: None,
         });
         let id = DialogId::new(raw);
         self.by_key.insert(key, id);
@@ -139,6 +159,9 @@ impl Dialogs {
             home: Home::Answered(Box::new(dialog)),
             flow,
             acked_on: None,
+            non_invite_transactions: 0,
+            answered_invite: None,
+            acknowledged_invite: None,
         });
         let id = DialogId::new(raw);
         self.by_key.insert(key, id);
@@ -179,6 +202,54 @@ impl Dialogs {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.flow = flow;
         }
+    }
+
+    /// How many non-INVITE server transactions this dialog holds right now.
+    pub(crate) fn non_invite_transactions(&self, id: DialogId) -> usize {
+        self.entries
+            .get(id.raw)
+            .map_or(0, |entry| entry.non_invite_transactions)
+    }
+
+    /// A non-INVITE server transaction was admitted into this dialog: count
+    /// it against the budget until it retires.
+    pub(crate) fn reserve_non_invite_transaction(&mut self, id: DialogId) {
+        if let Some(entry) = self.entries.get_mut(id.raw) {
+            entry.non_invite_transactions += 1;
+        }
+    }
+
+    /// The transaction [`Dialogs::reserve_non_invite_transaction`] counted has
+    /// retired; give its place back. A no-op for a dialog already forgotten —
+    /// nothing can match it any more either, so its budget stops mattering the
+    /// same instant.
+    pub(crate) fn release_non_invite_transaction(&mut self, id: DialogId) {
+        if let Some(entry) = self.entries.get_mut(id.raw) {
+            entry.non_invite_transactions = entry.non_invite_transactions.saturating_sub(1);
+        }
+    }
+
+    /// A 2xx to the INVITE numbered `seq` has gone out in this dialog, so the
+    /// ACK it is owed carries that number (§13.2.2.4).
+    pub(crate) fn answer_invite(&mut self, id: DialogId, seq: u32) {
+        if let Some(entry) = self.entries.get_mut(id.raw) {
+            entry.answered_invite = Some(seq);
+        }
+    }
+
+    /// Whether an ACK numbered `seq` is the one the last 2xx this end sent in
+    /// the dialog is still owed, taking it when it is. An ACK for an earlier
+    /// INVITE is stale, and one for an INVITE already acknowledged is a repeat
+    /// (§17.1.1.3): neither is.
+    pub(crate) fn take_ack(&mut self, id: DialogId, seq: u32) -> bool {
+        let Some(entry) = self.entries.get_mut(id.raw) else {
+            return false;
+        };
+        if entry.answered_invite != Some(seq) || entry.acknowledged_invite == Some(seq) {
+            return false;
+        }
+        entry.acknowledged_invite = Some(seq);
+        true
     }
 
     /// Keep the ACK to the 2xx that confirmed a dialog of ours, and the flow

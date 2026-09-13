@@ -52,7 +52,7 @@
 //! use std::time::Instant;
 //!
 //! fn record(seed: [u8; 32], now: Instant) -> Result<Recording, Box<dyn core::error::Error>> {
-//!     let mut endpoint = Endpoint::new(EndpointConfig::default(), seed);
+//!     let mut endpoint = Endpoint::new(EndpointConfig::default(), seed)?;
 //!     let mut recorder = Recorder::new(seed).about("a registrar that challenges");
 //!
 //!     let bound = Input::TransportBound {
@@ -70,7 +70,7 @@
 //! }
 //!
 //! fn play(recording: &Recording, origin: Instant) -> Result<(), Box<dyn core::error::Error>> {
-//!     let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed());
+//!     let mut endpoint = Endpoint::new(EndpointConfig::default(), recording.seed())?;
 //!     let mut replay = Replay::new(recording, origin);
 //!     while let Some(played) = replay.step(&mut endpoint)? {
 //!         assert_eq!(played, Played::Fed);

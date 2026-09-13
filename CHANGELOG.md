@@ -12,6 +12,35 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A
+  request inside a dialog was wholly exempt from `max_server_transactions`,
+  so a peer already inside a live call could open non-INVITE server
+  transactions without limit; each dialog now has a ceiling of its own —
+  sixteen at once — past which the request is answered 503 with a
+  `Retry-After`, RFC 5057 leaving the dialog itself untouched. A non-INVITE
+  server transaction an application never answered held its slot forever,
+  because §17.2.2 gives `Trying`/`Proceeding` no timer; the endpoint now
+  answers 408 on the application's behalf 64·T1 after the request arrived,
+  the same point its own Timer F would have given the client up. The RFC
+  2543 fallback key (§17.2.3, a peer with no magic cookie) compared every
+  method without the `To` tag the INVITE and every other method are matched
+  on, leaving only the ACK's documented exception; it now follows the
+  section as written. An ACK for a 2xx was accepted onto a confirmed dialog
+  on tags alone; it is now also matched by `CSeq` against the INVITE whose 2xx
+  this end sent last, and reported once, so a stale ACK for an earlier
+  re-INVITE or a repeat of one already reported is absorbed, while the ACK of
+  a call whose PRACK or UPDATE came first is still the one that confirms it. A 2xx a fork had no room left
+  for was silently neither reported nor acknowledged; that drop now leaves a
+  `dialog.fork.dropped` diagnostic entry. And a merged request (RFC 3261
+  §8.2.2.2) — a request with no `To` tag reaching this end a second time by
+  another path, almost always a fork — is now answered 482 on a transaction
+  of its own rather than handed up again, as a second call for an INVITE or
+  a second request for any other method. `EndpointConfig::timers` built with
+  `t1` or `t2` at zero, or a `keepalive_interval` of zero, either of which
+  would make a timer re-arm at the instant it fired and hang `handle_timeout`
+  forever, is refused at `Endpoint::new` rather than accepted and left to
+  hang.
+
 - **A stack handle could reach a call, an account or a call's media through
   `sipral_call_hangup`, `sipral_account_remove`, `sipral_media_release` and
   every other entry point that names one of those, because the first stack of
