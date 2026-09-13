@@ -516,6 +516,21 @@ impl UserAgent {
             status,
             response,
         });
+        // §2.4.7 makes the closing NOTIFY the last word on a transfer, and
+        // that is owed whether the referred call was answered or not: a
+        // refusal reports the status that refused it, and one that never got
+        // an answer at all -- Timer B, a transport failure, this end giving
+        // up on its own -- has none to report, so it is the 408 a transaction
+        // that gave up on itself would have carried (RFC 3261 §21.4.9).
+        // `report_transfer` is a no-op for a call nothing REFERred, so this
+        // runs unconditionally rather than only after `on_call_failed`.
+        // Before `forget`: that call removes the record `report_transfer`
+        // reads to find who is owed the NOTIFY.
+        let reported = status.unwrap_or(match StatusCode::new(408) {
+            Ok(timeout) => timeout,
+            Err(_) => StatusCode::SERVER_ERROR,
+        });
+        self.report_transfer(call, reported, now);
         self.forget(call);
     }
 
@@ -1299,19 +1314,23 @@ impl UserAgent {
         }
     }
 
-    /// A REFER has been answered, so the call is free to ask again.
+    /// A REFER that will never open a subscription has been answered, so the
+    /// call is free to ask again.
     ///
-    /// Without this the seat taken when the REFER went out is never given
-    /// back, and every later transfer on that call is refused by this end
-    /// before anything is sent.
-    ///
-    /// `accepted` says whether the answer was a 2xx, which is the one that
-    /// leaves something behind: RFC 3515 §2.4.2 has a 2xx oblige the far end
-    /// to "create a subscription and send notifications of the status of the
-    /// refer", and nothing else does. A REFER that was refused opened no
-    /// subscription, so a NOTIFY reporting on one afterwards is reporting on
-    /// nothing.
+    /// `accepted` says whether the answer was a 2xx, which is the one case
+    /// this function has nothing to do for: RFC 3515 §2.4.2 has a 2xx oblige
+    /// the far end to "create a subscription and send notifications of the
+    /// status of the refer", so the seat it took stays taken — a second
+    /// REFER while the first's subscription is still open would leave a
+    /// NOTIFY with nothing to say which one it is about. `on_notify` gives it
+    /// back when the terminating NOTIFY says the subscription itself is over
+    /// (§2.4.7), which is the only event that actually frees this call to
+    /// ask again. A REFER that was refused opened no subscription, so there
+    /// is nothing left to wait for and the seat is given back here instead.
     fn release_refer(&mut self, id: AnyTransactionId, accepted: bool) {
+        if accepted {
+            return;
+        }
         let Some(call) = self.by_request.get(&id).map(|(call, _)| *call) else {
             return;
         };
@@ -1319,9 +1338,7 @@ impl UserAgent {
             && held.referring == Some(id)
         {
             held.referring = None;
-            if !accepted {
-                held.refer_subscription = None;
-            }
+            held.refer_subscription = None;
         }
     }
 

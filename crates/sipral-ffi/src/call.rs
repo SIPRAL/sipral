@@ -847,9 +847,12 @@ entry! {
         }
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            // No offer travels through this entry point yet -- it has no
+            // parameter to carry one -- so the INVITE goes out offerless and
+            // the answer is expected in the 2xx, exactly as it always has.
             let placed = state
                 .agent
-                .accept_transfer(id, now)
+                .accept_transfer(id, None, now)
                 .map_err(|error| ua_failed(&error))?;
             state
                 .calls

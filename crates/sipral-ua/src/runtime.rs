@@ -208,7 +208,8 @@ impl Runtime {
     /// Round the loop until the handler says to stop.
     ///
     /// # Errors
-    /// A socket that cannot be written to.
+    /// Always `Ok`. A transmit that a socket refuses is not this loop's to
+    /// stop over: see [`Runtime::turn`].
     pub fn run(&mut self, handler: &mut impl Handler) -> io::Result<()> {
         while self.turn(handler, Instant::now())? == Control::Continue {}
         Ok(())
@@ -221,7 +222,10 @@ impl Runtime {
     /// time and say what the clock reads.
     ///
     /// # Errors
-    /// A socket that cannot be written to.
+    /// Always `Ok`. A datagram one destination refuses is not the socket's
+    /// fault and does not end the loop; a stream that fails closes itself,
+    /// reported the same way a read that found nothing on the wire is.
+    /// Kept as a `Result` so a caller already matching on one need not change.
     pub fn turn(&mut self, handler: &mut impl Handler, now: Instant) -> io::Result<Control> {
         self.flush()?;
         self.report(handler, now);
@@ -241,6 +245,15 @@ impl Runtime {
 // -- what goes out -----------------------------------------------------------
 
 impl Runtime {
+    // no transmit failure reaches a caller from here any more: a datagram
+    // is swallowed and a stream closes itself through the ordinary
+    // `Input::StreamClosed` path, so nothing is left for `Result` to carry.
+    // `Runtime::turn` and `Runtime::run` keep their `io::Result` regardless,
+    // so that nobody who already matches on it has to change
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Result stays so turn/run's public signature does not have to move"
+    )]
     fn flush(&mut self) -> io::Result<()> {
         while let Some(transmit) = self.agent.poll_transmit() {
             let Some(link) = self.links.get(&transmit.transport) else {
@@ -249,11 +262,24 @@ impl Runtime {
                 continue;
             };
             match *link {
+                // one destination refusing a datagram says nothing about the
+                // others sharing this socket -- a broadcast that needs a
+                // permission this process was never given, or a route that
+                // does not exist for one peer, does not make the socket
+                // itself bad. Silence and a transaction's own §17 timeout is
+                // how the failure is noticed, same as the missing link above
                 Link::Datagram(ref socket, _) => {
-                    socket.send_to(&transmit.payload, transmit.destination)?;
+                    socket.send_to(&transmit.payload, transmit.destination).ok();
                 }
+                // a stream is one connection to one peer, so a write that
+                // fails means that connection, and nothing else, is over --
+                // the same ending a closed read reports through `arrived`
                 Link::Stream(ref socket) => {
-                    io::Write::write_all(&mut socket.as_ref(), &transmit.payload)?;
+                    if io::Write::write_all(&mut socket.as_ref(), &transmit.payload).is_err() {
+                        let transport = transmit.transport;
+                        self.links.remove(&transport);
+                        self.tell(Input::StreamClosed { transport });
+                    }
                 }
             }
         }
@@ -329,7 +355,17 @@ impl Runtime {
             None => self.inbox.recv().ok(),
         };
         match arrived {
-            Some(arrival) => self.arrived(arrival),
+            Some(arrival) => {
+                self.arrived(arrival);
+                // a socket that always has something waiting is what a UDP
+                // port on the open internet looks like, and `arrived` never
+                // runs a timer -- a deadline already due when this turn
+                // started otherwise never fires as long as datagrams keep
+                // coming
+                if self.agent.poll_timeout().is_some_and(|due| due <= now) {
+                    self.agent.handle_timeout(now);
+                }
+            }
             // nothing came, or every reader thread is gone. Either way the
             // timers still have to run: that is how a transaction finds out
             None => self.agent.handle_timeout(Instant::now()),
@@ -463,10 +499,10 @@ fn look_up(host: &Host, port: Option<u16>, protocol: Option<TransportProtocol>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{Control, Handler, IDLE, Runtime, sleep_for};
+    use super::{Control, Handler, IDLE, Link, Runtime, sleep_for};
     use crate::UserAgent;
     use crate::event::UaEvent;
-    use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest};
+    use sipral_core::endpoint::{EndpointConfig, Event, OutgoingRequest, TransportProtocol};
     use sipral_core::msg::{HeaderName, Method, Uri};
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
@@ -575,5 +611,161 @@ mod tests {
         assert_eq!(runtime.cap, None);
         runtime.idle_cap(Some(Duration::from_secs(5)));
         assert_eq!(runtime.cap, Some(Duration::from_secs(5)));
+    }
+
+    /// A handler that keeps the loop going and does nothing else.
+    #[derive(Debug)]
+    struct Busy;
+
+    impl Handler for Busy {
+        fn on_event(&mut self, _agent: &mut UserAgent, _event: UaEvent, _now: Instant) {}
+        fn on_tick(&mut self, _agent: &mut UserAgent, _now: Instant) -> Control {
+            Control::Continue
+        }
+    }
+
+    #[test]
+    fn timers_still_run_while_datagrams_keep_arriving() {
+        // one datagram waiting on every turn is what a UDP port on the public
+        // internet looks like, and `wait` ran the timers only when nothing
+        // came
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let peer: SocketAddr = "127.0.0.1:9".parse().expect("a peer address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [13; 32], local).expect("a loopback socket");
+        let transport = runtime.transport();
+        let t0 = Instant::now();
+        let request = OutgoingRequest::new(
+            Method::Options,
+            Uri::parse_str("sip:bob@example.com").expect("a URI"),
+            transport,
+            peer,
+        )
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@127.0.0.1>");
+        runtime
+            .agent()
+            .endpoint()
+            .request(&request, t0)
+            .expect("the OPTIONS goes");
+        let deadline = runtime
+            .agent()
+            .poll_timeout()
+            .expect("a transaction that has just been sent has a deadline");
+
+        let mut busy = Busy;
+        let late = deadline + Duration::from_secs(600);
+        for _ in 0..8 {
+            runtime
+                .postbox
+                .send(super::Arrival::Datagram {
+                    transport,
+                    remote: peer,
+                    data: b"this is not a SIP message\r\n\r\n".to_vec(),
+                })
+                .expect("the channel is open");
+            runtime.turn(&mut busy, late).expect("a turn");
+        }
+
+        let after = runtime.agent().poll_timeout();
+        assert!(
+            after.is_none_or(|at| at > late),
+            "a deadline ten minutes past is still not run: {:?} behind",
+            after.map(|at| late.saturating_duration_since(at))
+        );
+    }
+
+    #[test]
+    fn a_send_that_failed_does_not_end_the_loop() {
+        // `flush` used `?`, so one datagram the kernel refused came out of
+        // `run` as an io::Error with every call, registration and
+        // subscription frozen behind it -- and the datagram it had already
+        // taken off the queue was gone
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [15; 32], local).expect("a loopback socket");
+        let transport = runtime.transport();
+        let refused: SocketAddr = "255.255.255.255:9".parse().expect("an address");
+        let now = Instant::now();
+        let request = OutgoingRequest::new(
+            Method::Options,
+            Uri::parse_str("sip:bob@example.com").expect("a URI"),
+            transport,
+            refused,
+        )
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@127.0.0.1>");
+        runtime
+            .agent()
+            .endpoint()
+            .request(&request, now)
+            .expect("the OPTIONS goes");
+
+        let mut busy = Busy;
+        let outcome = runtime.turn(&mut busy, now);
+        assert!(
+            outcome.is_ok(),
+            "one datagram that would not go ends the whole user agent: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_will_not_take_a_write_is_the_one_thing_that_ends() {
+        // the other half of the same repair, and the half that is not
+        // symmetric with it: a datagram socket serves every peer, so one
+        // refusal says nothing about the rest, but a stream is one connection
+        // to one peer. A write that fails means that connection is over and
+        // nothing else is
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let peer = listener.local_addr().expect("its address");
+        let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+        let mut runtime =
+            Runtime::bind(EndpointConfig::default(), [16; 32], local).expect("a loopback socket");
+
+        runtime.open(TransportProtocol::Tcp, peer);
+        let _peer_stays = listener.accept().expect("the connection arrives");
+        let stream = runtime
+            .links
+            .iter()
+            .find(|(_, link)| matches!(link, Link::Stream(_)))
+            .map(|(transport, _)| *transport)
+            .expect("the stream was linked");
+
+        // only this end's write half, and the peer is deliberately kept
+        // alive: shutting the whole socket would have the reader thread see
+        // the end of the stream and report it, and then this test would pass
+        // on the read path while the write path it names went untested. It
+        // did, the first time it was written.
+        if let Some(Link::Stream(socket)) = runtime.links.get(&stream) {
+            socket
+                .shutdown(std::net::Shutdown::Write)
+                .expect("the write half shuts down");
+        }
+
+        let now = Instant::now();
+        let request = OutgoingRequest::new(
+            Method::Options,
+            Uri::parse_str("sip:bob@example.com").expect("a URI"),
+            stream,
+            peer,
+        )
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@127.0.0.1>");
+        runtime
+            .agent()
+            .endpoint()
+            .request(&request, now)
+            .expect("the OPTIONS goes");
+
+        let mut busy = Busy;
+        let outcome = runtime.turn(&mut busy, now);
+        assert!(
+            outcome.is_ok(),
+            "a write that failed ended the whole user agent: {outcome:?}"
+        );
+        assert!(
+            !runtime.links.contains_key(&stream),
+            "the connection that refused the write is still linked"
+        );
     }
 }

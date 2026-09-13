@@ -258,6 +258,30 @@ fn a_call_the_far_end_refused_is_recorded_with_the_status_that_refused_it() {
 }
 
 #[test]
+fn a_request_the_far_end_refused_is_recorded_with_the_status_that_refused_it() {
+    // the same sentence the call above gets, for a request that never opens
+    // a dialog -- a REGISTER a registrar turned away for want of room
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .request(&register_request(), t0)
+        .expect("the REGISTER goes");
+    let bytes = sent(&mut endpoint);
+    let refusal = answer(&bytes, 503, "registrar");
+    deliver(&mut endpoint, &refusal, t0);
+
+    let decisions = record_of(&endpoint, &bytes);
+    let failed = only(&decisions, "failure.refused");
+    let wire = failed.wire.expect("the refusal that caused it");
+    assert_eq!(
+        wire.message,
+        Wire::Response(StatusCode::SERVICE_UNAVAILABLE)
+    );
+    assert_eq!(wire.direction, Direction::Inbound);
+    assert_eq!(wire.bytes, refusal.len());
+}
+
+#[test]
 fn a_dialog_is_written_down_when_it_opens_and_when_it_is_over() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);

@@ -134,8 +134,8 @@ do find out — RFC 4028's session timer and the media stall watchdog of
 
 | Rung | What it does | Then |
 |---|---|---|
-| `Distrust` | every live binding becomes `Unverified`, every live subscription stops being evidence, nothing stays scheduled | at once |
-| `Reregister` | a REGISTER for each unverified binding, on the transport the account already has | 64·T1 if one went out, at once if none could be sent |
+| `Distrust` | every live or restored binding becomes `Unverified`, forgetting any transaction from before the sleep too; every live subscription stops being evidence and its own timers go with it; nothing stays scheduled | at once |
+| `Reregister` | a REGISTER for each unverified binding and a SUBSCRIBE for each subscription `Distrust` demoted, both out of dialog with a fresh `Call-ID`, on the transport the account already has | 64·T1 if one went out, at once if none could be sent |
 | `WantTransport` | an event: the transport cannot be written to and nothing here opens a socket | 64·T1, or at once when `rebind` is called |
 | `Reregister` | again, on whatever the application bound | 64·T1 |
 | `GiveUp` | `UaEvent::RecoveryGaveUp` with a reason code and the count of bindings left unproved | — |
@@ -154,8 +154,10 @@ What is believed on the way out of it:
 - **subscriptions** — nothing about the resource. A live one is demoted, so
   `dialog_info` answers `None` from the instant of the wake: a lamp showing a
   colleague as free because a NOTIFY said so an hour and one suspend ago is the
-  one wrong answer a busy lamp field must never give. The subscription itself is
-  left to its own machine, and see the limits section below for what that costs;
+  one wrong answer a busy lamp field must never give. Its own deadlines go with
+  it, the same as a registration's — `suspending` still sends nothing, so
+  re-proving it waits for whatever calls `resumed` next, and the next section
+  says how bounded that wait now is;
 - **dialogs and calls** — kept. See above;
 - **timers** — this layer's are cleared and rearmed by what follows. The
   endpoint's transaction timers are not touched, because a transaction that was
@@ -222,11 +224,11 @@ believed. That distinction is the whole reason this is not just a flavour of
 
 | Rung | What it does | Then |
 |---|---|---|
-| `Distrust` | bindings and subscriptions that needed a name stop being evidence | at once |
+| `Distrust` | bindings and subscriptions that needed a name stop being evidence, timers included | at once |
 | `WantAddress` | an event: the address held was learned from a name, and the application owns the resolver | 64·T1, or at once on `rebind` |
-| `Reregister` | try the address already held | 64·T1 |
+| `Reregister` | try the address already held, and resubscribe whatever `Distrust` demoted | 64·T1 |
 | `WantAddress` | ask again | 64·T1 |
-| `Reregister` | try again | 64·T1 |
+| `Reregister` | try again, and resubscribe whatever is still owed one | 64·T1 |
 | `GiveUp` | `RecoveryFailure::Unresolved` when nothing was ever supplied | — |
 
 The cached address is asked about before it is used, and used before the ladder
@@ -296,24 +298,32 @@ edges is worse than none:
   registration comes back. It promises that every attempt and every failure is
   an event with a reason code, and that the stack ends in a state that can be
   asked about. `GaveUp` is a documented outcome, not a bug.
-- **A subscription that has to be re-proved sooner than its own refresh.** See
-  the next section.
+- **A subscription is dark, not wrong, for up to one `Reregister` rung-wait
+  after a wake.** See the next section.
 
-### The limit worth knowing about
+### Re-proving a subscription after a wake
 
 `Distrust` demotes a live subscription so that `dialog_info` stops being
-evidence at once, which is the safety-critical half. Re-proving it is left to
-the subscription's own machine: its refresh, its lapse, or the failure of
-either, each of which is already an event. If the platform's clock stopped while
-the machine slept, that refresh is late by however long the sleep was, and the
-lamp stays dark rather than wrong for that long.
+evidence at once, which is the safety-critical half, and clears its own
+`due`, `lapses_at` and `forks_until` in the same pass — a refresh or a lapse
+scheduled against a clock that stopped while the machine slept is not
+evidence of anything either, and left alone it would fire against a
+wall-clock reading it was never measured for. `Reregister` is what re-proves
+it: a fresh, out-of-dialog SUBSCRIBE with a new `Call-ID`, for every
+subscription `Distrust` demoted and nothing has touched since, on the same
+rung and the same 64·T1 bound as the registrations climbing beside it.
 
-Dark rather than wrong is the correct direction to fail in, and it is the reason
-this is a limit rather than a bug. An application that wants its lamps back at
-the instant of the wake calls `unsubscribe` and `subscribe` for the handles it
-cares about, which is two calls and no round trips on the way out. Making the
-lifecycle do it would need `crates/sipral-ua/src/subscription.rs` to expose a
-re-arm of its own schedule. That is where it belongs if it is ever wanted.
+Dark rather than wrong is still the failure direction while that SUBSCRIBE is
+in flight — nothing here claims a lamp state a moment before the notifier
+confirms it. What changed is how long dark can last: bounded by the rung
+wait now, not by whatever the subscription's own refresh interval happened
+to be when the machine went to sleep. An application that wants its lamps
+back sooner than that still has `unsubscribe` and `subscribe` for the
+handles it cares about, which cost two calls and no round trips on the way
+out; the rung above reaches for the same mechanism internally, through
+`crates/sipral-ua/src/subscription.rs`'s own re-arm rather than the
+application's pair of calls, which is why it costs nothing extra on the
+wire.
 
 ## C5 — cheap when idle
 

@@ -62,6 +62,114 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A registration restored from a snapshot, or one whose REGISTER answer
+  arrived just before a suspend, could come back from a wake with nothing
+  that would ever register it again.** `distrust()` — the first rung of
+  every recovery ladder, and the only thing `suspending` does — left
+  `Restored` out of the states it promotes to `Unverified`, so `reregister()`
+  never saw a thawed binding: the ladder climbed straight to `GiveUp` with
+  the account still `Restored` and no REGISTER ever sent. The same loop left
+  `reg.transaction` untouched, so a REGISTER whose 200 arrived a moment
+  before the sleep still read as in flight after the wake, and
+  `refresh_binding` (RFC 8599 §4.1.3's pre-warm) treats anything in flight as
+  reason enough to send nothing — so a push landed on a binding that never
+  got its refresh. `distrust()` now promotes `Restored` the same as
+  `Registering`/`Registered`/`Refreshing`/`Retrying`, and clears
+  `reg.transaction` for every registration it touches, so a stale in-flight
+  id from before the sleep is never mistaken for a real one.
+
+- **A wake left a busy lamp field's subscriptions either retrying against a
+  schedule the sleep had already made stale, or not retrying at all.**
+  `distrust()` demoted a live subscription's state to `Retrying` but never
+  touched its `due`, `lapses_at` or `forks_until` — deadlines that an
+  `Instant` frozen across a real suspend still reads as ahead of `now`, so a
+  suspended stack still had a deadline `poll_timeout()` would report, and
+  once that stale deadline eventually fired nothing had re-armed the
+  subscription for it: a refresh went out against a schedule from before the
+  sleep, or a lapse ended the subscription outright.
+  `Subscription::stop_timers` now clears all three alongside the state
+  change, and the `Reregister` rung of every recovery ladder calls a new
+  `UserAgent::resubscribe`, sending a fresh out-of-dialog SUBSCRIBE for every
+  subscription `distrust` demoted — on the same rung, and the same 64·T1
+  bound, as the registrations recovering beside it. Each of those goes out
+  under a fresh `Call-ID` and `From` tag: RFC 6665 §4.1.2.4 identifies a
+  subscription by the dialog those name, and re-using them would offer the
+  notifier a second subscription under a name it already holds one for, then
+  leave it to guess which of the two the next NOTIFY belongs to. And every
+  subscription is demoted, not only the live ones — one waiting on its first
+  NOTIFY has a Timer N scheduled and one already retrying has a retry
+  scheduled, both measured against the clock that stopped.
+
+- **A transfer that was refused, or never answered at all, now closes the
+  subscription it opened.** RFC 3515 §2.4.7 makes a NOTIFY marked
+  `terminated;reason=noresource` the last word on a REFER's subscription, but
+  that NOTIFY was only ever sent on success — a call the far end refused, or
+  never answered before this end gave up, left the transferor holding a
+  subscription that could never close. The call's own ending now reports the
+  refusal's status, or a synthesized 408 when the call never got one at all
+  (a `408 Request Timeout` is what the transaction's own giving-up would have
+  carried, RFC 3261 §21.4.9), before the record of who to tell is forgotten.
+
+- **A call could not be transferred a second time until the first transfer's
+  REFER got its 202, even though the first was still going.** RFC 3515
+  §2.4.2 has a 2xx oblige the far end to open a subscription and report on
+  it — it is not the last word, the closing NOTIFY is (§2.4.7) — but the seat
+  a REFER takes on its call was freed as soon as that 2xx arrived, before any
+  NOTIFY could possibly have been. A second transfer offered while the first
+  was still being tried would open a second implicit subscription in the same
+  dialog with no way to tell a report on one from a report on the other. The
+  seat is now freed only when the REFER is refused (which opens no
+  subscription at all) or when the closing NOTIFY says the first is over.
+  Outgoing NOTIFYs about an accepted REFER now also carry the `id` parameter
+  §2.4.6 names — the accepted REFER's own `CSeq` — so a report is never
+  ambiguous about which REFER it belongs to. A second REFER arriving on a
+  call whose first has not finished is answered `491 Request Pending` rather
+  than taken: this end keeps one transfer per call, and taking the second
+  would throw away the first's transaction, the call it placed and the `id`
+  its own NOTIFYs are tagged with.
+
+- **Taking a transfer placed the new call with no media at all.**
+  `accept_transfer` built the outgoing INVITE itself and never gave it
+  anything to offer, so an application taking a transfer got a call it could
+  place but never hear or be heard on. It now takes the same session
+  description a call or a consultation would, and places an offerless INVITE
+  only when none is given — the answer then travels in the 2xx, exactly as it
+  does for either of those.
+
+- **The reference loop stopped running timers on a socket that was never
+  quiet.** `Runtime::wait` called `UserAgent::handle_timeout` only when a turn
+  found nothing waiting on the inbox; a peer that always has a datagram in
+  flight — any UDP port reachable from the open internet — kept `wait`
+  in its other branch forever, so a deadline already due (a retransmit, timer
+  B giving up on a call, a registration's refresh) never fired as long as
+  packets kept arriving. `wait` now checks `poll_timeout()` against the clock
+  after handling an arrival too, not only when the inbox came back empty.
+
+- **A datagram one destination refused could end the whole reference loop.**
+  `Runtime::flush` used `?` on `send_to`, so one `EPERM` or `ENETUNREACH` on
+  one transmit propagated out of `flush`, out of `turn`, and out of `run` as
+  an `io::Error` — freezing every other call, registration and subscription
+  behind it, and losing the transmit that failed along with them. A single
+  UDP socket in this loop carries every destination an application talks to,
+  so a failure on one of them is not grounds to retire it the way a broken
+  transport is elsewhere in this stack; `flush` now lets a refused datagram
+  go unsent and relies on the transaction layer's own §17 timeout to notice,
+  the same way it already does for a transport that has gone away entirely.
+  A stream write that fails is a different case — one connection serves one
+  peer — so it still closes the connection, through the same
+  `Input::StreamClosed` path a read finding nothing already used.
+
+- **A non-INVITE request a server refused left no trace in the call's
+  record.** `Endpoint::note_failure_for(_, FailureReason::Refused)` ran for
+  every INVITE a dialog set gave up on, but `on_non_invite_response` never
+  called it, so a REGISTER answered 403 or an OPTIONS answered 503 went out,
+  came back, and the diagnostics record showed nothing past the initial send
+  — even though `docs/14-diagnostics.md` already documented `failure.refused`
+  as covering a request as well as a call. A final response of 300 or above
+  is now recorded the same way for both, except for a 401 or 407: those stay
+  the sole business of the challenge/answer bookkeeping right below it, which
+  already says what happened to them.
+
 - **Resuming a call that was held for a while no longer reports the stream as
   stalled.** The watchdog measures from the last packet that arrived, and
   during a hold none do. A resume keeps the media address — only the direction

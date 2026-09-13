@@ -42,6 +42,8 @@
 mod account;
 mod agent;
 mod announce;
+#[cfg(test)]
+mod audit_tests;
 mod call;
 mod calls;
 mod dialoginfo;

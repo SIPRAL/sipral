@@ -258,6 +258,18 @@ impl Endpoint {
                         status,
                         response: response.to_owned(),
                     });
+                    // a challenge is not a refusal: `on_challenge`, below,
+                    // is what decides whether this one is answered, and its
+                    // own entries (`auth.challenge.received` and
+                    // `auth.challenge.answered`) already say what happened
+                    // to it
+                    if status.is_final()
+                        && !status.is_success()
+                        && status != StatusCode::UNAUTHORIZED
+                        && status != StatusCode::PROXY_AUTH_REQUIRED
+                    {
+                        self.note_failure_for(response, FailureReason::Refused);
+                    }
                 }
                 self.on_challenge(AnyTransactionId::NonInviteClient(id), response, sent, flow);
             }
@@ -397,7 +409,13 @@ impl Endpoint {
             }
             Fork::Refused => {
                 self.end_branches(set, DialogEndReason::Refused);
-                self.note_failure_for(response, FailureReason::Refused);
+                // the same carve-out the non-INVITE path makes, for the same
+                // reason and so that one counter does not mean two things
+                // depending on the method: a challenge is not a refusal, and
+                // `auth.challenge.received` already says one arrived
+                if status != StatusCode::UNAUTHORIZED && status != StatusCode::PROXY_AUTH_REQUIRED {
+                    self.note_failure_for(response, FailureReason::Refused);
+                }
                 if status.get() == 487 && self.was_cancelled(id) {
                     self.push(Event::Cancelled { invite: id });
                 } else {

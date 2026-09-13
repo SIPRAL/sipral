@@ -106,6 +106,11 @@ pub(crate) struct Referred {
     pub(crate) placed: Option<CallHandle>,
     /// Whether the closing NOTIFY has gone.
     pub(crate) finished: bool,
+    /// The `CSeq` of the REFER that asked for this, put on every NOTIFY this
+    /// end sends about it as `Event: refer;id=<n>` (§2.4.6). Required from
+    /// the second REFER a dialog carries onward; carrying it from the first
+    /// too is legal and one fewer thing to get right per dialog.
+    pub(crate) id: Option<u32>,
 }
 
 /// The implicit subscription a REFER of this end's opened (RFC 3515 §2:
@@ -281,12 +286,21 @@ impl UserAgent {
 
     /// Take a transfer that was asked for, and place the call it names.
     ///
+    /// The target, `Replaces` and `Referred-By` are not the caller's to give —
+    /// they come from the REFER that was accepted, and this places the call
+    /// exactly where it asked. `offer` is: what to describe in the INVITE, as
+    /// [`UserAgent::ring`] and [`UserAgent::answer`] take one for the call
+    /// this REFER arrived on. With none the INVITE carries no offer and the
+    /// answer travels in the 2xx instead (§14.1), exactly as for a call
+    /// placed with [`UserAgent::call`] the same way.
+    ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing was
     /// asked, [`UaError::NoSuchAccount`], or [`UaError::Send`].
     pub fn accept_transfer(
         &mut self,
         call: CallHandle,
+        offer: Option<Arc<[u8]>>,
         now: Instant,
     ) -> Result<CallHandle, UaError> {
         let (transaction, wanted, account) = {
@@ -318,6 +332,9 @@ impl UserAgent {
         self.notify(call, TRYING, RUNNING, now);
 
         let mut placed = OutgoingCall::new(wanted.target.clone());
+        if let Some(offer) = offer {
+            placed = placed.offer(offer);
+        }
         if let Some(ref replaces) = wanted.replaces {
             placed = placed.header(HeaderName::Replaces, replaces);
         }
@@ -427,9 +444,17 @@ impl UserAgent {
         let (Some(dialog), contact) = (held.dialog, held.contact.clone()) else {
             return;
         };
+        // §2.4.6: the `id` names which REFER this reports on. Carrying it on
+        // every NOTIFY rather than only the second REFER onward is legal --
+        // the section MAYs it for the first -- and needs no counter of how
+        // many REFERs this dialog has seen.
+        let event = match held.referred.and_then(|referred| referred.id) {
+            Some(id) => format!("refer;id={id}").into_bytes(),
+            None => REFER.to_vec(),
+        };
         let request = OutgoingInDialogRequest::new(Method::Notify)
             .contact(&contact)
-            .header(HeaderName::Event, REFER)
+            .header(HeaderName::Event, &event)
             .header(HeaderName::SubscriptionState, state)
             .body(b"message/sipfrag;version=2.0", Arc::from(sipfrag.to_vec()));
         if let Ok(id) = self.endpoint.request_in_dialog(dialog, &request, now) {
@@ -556,11 +581,35 @@ impl UserAgent {
                 .ok();
             return;
         };
+        // One at a time. A dialog may carry a second REFER before the first
+        // has finished — §2.4.6's whole reason for the `id` parameter is that
+        // it can — but this end keeps one `Referred` per call, so taking the
+        // second would throw away the first's transaction, the call it placed
+        // and the `id` its own NOTIFYs are tagged with, and the transferor
+        // would be told about the wrong one. 491 is the honest answer: the
+        // request is not refused on its merits, it is pending behind another.
+        let outstanding = self
+            .calls
+            .get(&call)
+            .and_then(|held| held.referred.as_ref())
+            .is_some_and(|referred| !referred.finished);
+        if outstanding {
+            if let Ok(pending) = StatusCode::new(491) {
+                self.endpoint
+                    .respond(transaction, &OutgoingResponse::new(pending), now)
+                    .ok();
+            }
+            return;
+        }
+        // §2.4.6: the `id` a NOTIFY about this REFER carries is its own
+        // `CSeq`, not the dialog's next outgoing one
+        let id = raw.cseq().ok().map(|cseq| cseq.seq);
         if let Some(held) = self.calls.get_mut(&call) {
             held.referred = Some(Referred {
                 transaction: Some(transaction),
                 placed: None,
                 finished: false,
+                id,
             });
             held.asked_to_refer = Some(wanted.clone());
         }

@@ -769,13 +769,12 @@ impl UserAgent {
             }
             // a REGISTER that never reached a transport leaves nothing in
             // flight, and waiting out a transaction that does not exist is
-            // half a minute of a wake spent on nothing
+            // half a minute of a wake spent on nothing. A demoted
+            // subscription rides the same rung, for the same reason it was
+            // demoted alongside the registrations in the first place
             Rung::Reregister => {
-                if self.reregister(now) {
-                    After::Wait
-                } else {
-                    After::Now
-                }
+                let reached = self.reregister(now) | self.resubscribe(now);
+                if reached { After::Wait } else { After::Now }
             }
             // an event and nothing else. Whoever owns the socket and whoever
             // owns the resolver is the application, and this is the only way
@@ -812,12 +811,14 @@ impl UserAgent {
                 continue;
             }
             reg.due = None;
+            reg.transaction = None;
             if matches!(
                 reg.state,
                 RegistrationState::Registering
                     | RegistrationState::Registered
                     | RegistrationState::Refreshing
                     | RegistrationState::Retrying
+                    | RegistrationState::Restored
             ) {
                 reg.state = RegistrationState::Unverified;
                 unverified = unverified.saturating_add(1);
@@ -826,18 +827,26 @@ impl UserAgent {
 
         // a lamp showing what a notifier said before the machine slept is the
         // one wrong answer a busy lamp field must never give, so the table
-        // stops answering the moment there is any doubt. The subscription
-        // itself is left to its own machine: its refresh is what proves it,
-        // and a refresh that cannot be sent is already an event
+        // stops answering the moment there is any doubt. Its own deadlines go
+        // with it -- an `Instant` frozen across the suspend would otherwise
+        // read a stale refresh or a stale lapse as still ahead, which is not
+        // evidence of anything either. `Rung::Reregister` is what re-proves it
         let mut subscriptions = 0_usize;
         for held in self.subscriptions.values_mut() {
             if only_named && !named.contains(&held.account) {
                 continue;
             }
-            if held.state.is_live() {
-                held.state = SubscriptionState::Retrying;
-                subscriptions = subscriptions.saturating_add(1);
-            }
+            // every one of them, not only the live ones. A subscription
+            // waiting on its first NOTIFY has a Timer N scheduled and is not
+            // live; one already retrying has a retry scheduled and is not
+            // live either. Both of those deadlines were measured against a
+            // clock that has since stopped, which is what this rung exists to
+            // disbelieve — and a subscription that has ended for good has no
+            // record here at all, so there is nothing in this table that
+            // should keep what it had scheduled
+            held.state = SubscriptionState::Retrying;
+            held.stop_timers();
+            subscriptions = subscriptions.saturating_add(1);
         }
 
         Suspending {

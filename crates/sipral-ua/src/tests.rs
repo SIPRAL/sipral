@@ -3947,7 +3947,7 @@ fn a_refer_that_arrives_is_the_applications_to_take_or_refuse() {
     );
 
     let placed = agent
-        .accept_transfer(call, t0)
+        .accept_transfer(call, None, t0)
         .expect("the transfer is taken");
     let written = transmits(&mut agent);
     assert!(
@@ -4626,7 +4626,7 @@ fn the_invite_a_transfer_places_carries_the_referred_by_that_asked_for_it() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, t0)
+        .accept_transfer(call, None, t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -4665,7 +4665,7 @@ fn a_folded_referred_by_still_reaches_the_invite_the_transfer_places() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, t0)
+        .accept_transfer(call, None, t0)
         .expect("a folded header field is not a reason to refuse the transfer");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -4701,7 +4701,7 @@ fn two_referred_by_values_on_one_line_are_two_values() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, t0)
+        .accept_transfer(call, None, t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -4737,7 +4737,7 @@ fn a_refer_with_two_referred_by_fields_passes_none_of_them_on() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, t0)
+        .accept_transfer(call, None, t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert!(
@@ -6720,5 +6720,256 @@ fn printing_an_agent_prints_no_push_token() {
     assert!(
         !printed.contains(PARAM),
         "the push parameter reached a debug print"
+    );
+}
+
+/// Every NOTIFY that went out, as its subscription state and its body.
+fn notifies(out: &[Vec<u8>]) -> Vec<(String, String)> {
+    out.iter()
+        .filter(|bytes| bytes.starts_with(b"NOTIFY "))
+        .map(|bytes| {
+            (
+                String::from_utf8_lossy(&header(bytes, HeaderName::SubscriptionState)).into_owned(),
+                body_of(bytes),
+            )
+        })
+        .collect()
+}
+
+/// Take a REFER and place the call it asked for.
+fn refer_taken(agent: &mut UserAgent, now: Instant) -> (CallHandle, CallHandle, Vec<u8>) {
+    let call = call_arriving(agent, &incoming_invite("prb", Some(OFFER)), now);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), now)
+        .expect("200 goes");
+    let ok = sent(agent);
+    deliver(agent, &in_dialog(&ok, "ACK", "prback", 1), now);
+    events(agent);
+    deliver(
+        agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "prbrefer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        now,
+    );
+    events(agent);
+    let placed = agent
+        .accept_transfer(call, None, now)
+        .expect("the transfer is taken");
+    let written = transmits(agent);
+    let invite = only(&written, "INVITE ");
+    assert_eq!(
+        notifies(&written).len(),
+        1,
+        "2.4.5's 100 Trying goes when the transfer is taken"
+    );
+    events(agent);
+    (call, placed, invite)
+}
+
+#[test]
+fn a_referred_call_that_was_refused_still_says_so() {
+    // RFC 3515 2.4.4 has the transferee report the result, and 2.4.7 makes the
+    // last NOTIFY of the subscription say it is over
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_call, _placed, invite) = refer_taken(&mut agent, t0);
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 486, "Busy Here", "carol", None),
+        t0,
+    );
+    let after = transmits(&mut agent);
+    let said = notifies(&after);
+    assert!(
+        said.iter()
+            .any(|(state, body)| body.starts_with("SIP/2.0 486") && state.starts_with("terminated")),
+        "the transferor is never told the target was busy: {said:?}"
+    );
+}
+
+#[test]
+fn a_referred_call_that_was_never_answered_still_says_so() {
+    // the same, with nothing coming back at all: Timer B, and the transferor
+    // is left holding a subscription that is never closed
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let (_call, _placed, _invite) = refer_taken(&mut agent, t0);
+
+    agent.handle_timeout(t0 + Duration::from_secs(40));
+    let after = transmits(&mut agent);
+    let said = notifies(&after);
+    assert!(
+        said.iter()
+            .any(|(state, _)| state.starts_with("terminated")),
+        "the subscription the REFER opened is never closed: {said:?}"
+    );
+}
+
+#[test]
+fn one_call_cannot_be_transferred_twice_at_once() {
+    // `transfer` documents UaError::WrongState "for a call that is ... already
+    // transferring", and the seat exists to enforce it. A 202 Accepted is a
+    // final answer to the REFER, but RFC 3515 2.4.2 has it open a
+    // subscription rather than close the matter, so it must not free the seat.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the first REFER goes");
+    let first = only(&transmits(&mut agent), "REFER ");
+    deliver(&mut agent, &reply(&first, 202, "Accepted", ""), t0);
+    events(&mut agent);
+
+    let second = agent.transfer(call, &uri("sip:dave@example.com"), t0);
+    let written = transmits(&mut agent);
+    let refers: Vec<Vec<u8>> = written
+        .iter()
+        .filter(|bytes| bytes.starts_with(b"REFER "))
+        .cloned()
+        .collect();
+    assert!(
+        second.is_err() && refers.is_empty(),
+        "a second transfer opens a second implicit subscription in the same \
+         dialog while the first has not said it is done: {second:?}"
+    );
+}
+
+#[test]
+fn a_notify_about_a_transfer_names_which_refer_it_reports_on() {
+    // §2.4.6: "for the second and subsequent REFER requests a UA receives in
+    // a given dialog, it MUST include an id parameter in the Event header
+    // field of each NOTIFY... This id parameter MAY be included in NOTIFYs to
+    // the first REFER." Carried always, so the transferor never has to guess
+    // which REFER a report is about.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("idcall", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "idack", 1), t0);
+    events(&mut agent);
+    let refer = plus(
+        &in_dialog(&ok, "REFER", "idrefer", 7),
+        "Refer-To: <sip:carol@example.com>\r\n",
+    );
+    deliver(&mut agent, &refer, t0);
+    events(&mut agent);
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the transfer is taken");
+    let notify = only(&transmits(&mut agent), "NOTIFY ");
+    assert_eq!(
+        header(&notify, HeaderName::Event),
+        b"refer;id=7",
+        "the NOTIFY does not say which REFER it reports on: {}",
+        String::from_utf8_lossy(&header(&notify, HeaderName::Event))
+    );
+}
+
+#[test]
+fn accepting_a_transfer_places_the_call_with_the_offer_given() {
+    // the transfer target has to be told something to answer, exactly as any
+    // other call this end places; accept_transfer used to place the INVITE
+    // with nothing at all, whatever the application gave it here
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("medcall", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "medack", 1), t0);
+    events(&mut agent);
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "medrefer", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    events(&mut agent);
+
+    agent
+        .accept_transfer(call, Some(Arc::from(OFFER)), t0)
+        .expect("the transfer is taken");
+    let invite = only(&transmits(&mut agent), "INVITE ");
+    assert!(
+        body_of(&invite).contains("m=audio"),
+        "the INVITE a transfer places carries no offer: {}",
+        body_of(&invite)
+    );
+}
+
+/// §2.4.6 gives every NOTIFY an `id` precisely because a dialog may carry
+/// more than one REFER. This end keeps one transfer per call, so the second
+/// has to be refused rather than taken over the first: taking it would throw
+/// away the first's transaction, the call it placed and the `id` its own
+/// NOTIFYs are tagged with, and the transferor would be told about the wrong
+/// transfer.
+#[test]
+fn a_second_refer_on_one_call_waits_rather_than_replacing_the_first() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("two1", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "two1ack", 1), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "two1ref", 2),
+            "Refer-To: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    events(&mut agent);
+    agent
+        .accept_transfer(call, None, t0)
+        .expect("the first transfer is taken");
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // a second one, while the first is still running
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "two2ref", 3),
+            "Refer-To: <sip:dave@example.com>\r\n",
+        ),
+        t0,
+    );
+    let answered = transmits(&mut agent);
+    assert!(
+        answered
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 491 ")),
+        "the second REFER was not told to wait: {:?}",
+        answered
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes.get(..16).unwrap_or_default()).into_owned())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !events(&mut agent)
+            .into_iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. })),
+        "the application was asked to take a transfer it cannot hold"
     );
 }

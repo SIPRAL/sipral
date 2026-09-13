@@ -470,6 +470,19 @@ impl Subscription {
             (left, right) => left.or(right),
         }
     }
+
+    /// Forget every deadline this layer scheduled.
+    ///
+    /// Called only from `distrust`, on a subscription it is about to demote:
+    /// once `dialog_info` stops being evidence, a refresh or a lapse due
+    /// against a clock that stopped while the machine slept is not evidence
+    /// either, and left alone it would fire against a wall-clock reading it
+    /// was never measured for. `UserAgent::resubscribe` is what re-arms it.
+    pub(crate) fn stop_timers(&mut self) {
+        self.due = None;
+        self.lapses_at = None;
+        self.forks_until = None;
+    }
 }
 
 // -- what the application asks for -------------------------------------------
@@ -666,6 +679,47 @@ impl UserAgent {
             subscription,
             account,
         });
+    }
+
+    /// A fresh SUBSCRIBE for every subscription `distrust` demoted and
+    /// nothing has touched since.
+    ///
+    /// `due.is_none()` is that signature: `stop_timers` is the only thing
+    /// that puts a subscription in `Retrying` without also scheduling
+    /// something for it, because the sole other writer of `Retrying`,
+    /// `retry_subscription`, always sets `due` in the same statement. `true`
+    /// when at least one reached a transport, which mirrors `reregister` and
+    /// is what decides whether the ladder has anything left to wait for.
+    pub(crate) fn resubscribe(&mut self, now: Instant) -> bool {
+        let waiting: Vec<SubscriptionHandle> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, held)| held.state == SubscriptionState::Retrying && held.due.is_none())
+            .map(|(handle, _)| *handle)
+            .collect();
+        let mut sent = false;
+        for subscription in waiting {
+            // a new subscription, not a refresh of the old one: the dialog it
+            // had is gone, and RFC 6665 §4.1.2.4 identifies a subscription by
+            // the dialog its Call-ID and tags name. Re-using them would offer
+            // the notifier a second subscription under a name it already has
+            // one for, and leave it to decide which of the two the next
+            // NOTIFY belongs to
+            let call_id = CallId::new(&self.endpoint.token());
+            let local_tag = self.endpoint.token();
+            if let Some(held) = self.subscriptions.get_mut(&subscription) {
+                held.call_id = call_id;
+                held.local_tag = local_tag;
+                held.cseq = 0;
+            }
+            self.start_subscription(subscription, now);
+            // a send that fails ends the subscription outright here, the same
+            // as it does for `UserAgent::subscribe` -- `start_subscription`
+            // does not know it was called from the ladder rather than the
+            // application, and that is not this method's to change
+            sent |= self.subscriptions.contains_key(&subscription);
+        }
+        sent
     }
 
     /// A refresh or an unsubscribe, inside the dialog the NOTIFY opened
