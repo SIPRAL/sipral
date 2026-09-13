@@ -57,6 +57,17 @@ byte for byte a clean run, and it passes. That is worse than no run, so the
 runner refuses to report a pass when what the profile asked for is not in the
 qdisc, and says the run proves nothing instead.
 
+For the outage, reading the qdisc back is not enough, and it was the only check
+until a run on a 6.12 kernel passed without the outage touching the call. The
+eight seconds were timed from the container starting; that host took longer to
+get the call sending, so they fell on the REGISTER and the INVITE, whose
+retransmissions outlasted them, and the call ran clean. The qdisc said `loss`
+throughout, because the loss was applied — to nothing. So the outage now waits
+until audio is visibly leaving through the qdisc before it cuts the link, and
+afterwards netem's own drop counter has to show that it took at least four
+seconds of the call's packets. A run where it did not says so and proves
+nothing; it is never reported as a pass.
+
 ## Layers of testing
 
 **Unit, with a fake clock.** Every transaction and dialog state machine is

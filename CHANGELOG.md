@@ -28,8 +28,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   block of `SHA-256(media seed || counter)` rather than two hex tokens, and
   the block is wiped before it leaves the stack.
 
-### Security
-
 - **A debug print of a live stack no longer carries the keys.** `{:?}` on a
   user agent printed every `a=crypto` line of every call with its master key
   on it, and every RFC 8599 push token every account held — the one that wakes
@@ -61,6 +59,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   media session by its own path.
 
 ### Fixed
+
+- **The lab's outage profile could pass without the outage touching the
+  call.** `interop/impairment/blackout.sh` cut the link five seconds after its
+  container started and then checked only that the qdisc said `loss`. On a
+  host where the call took longer than that to begin sending, the eight seconds
+  fell on the REGISTER and the INVITE, whose retransmissions outlasted them, and
+  the call ran clean from start to finish — a run on a 6.12 kernel reported
+  "audio survived it" with no packet of the call lost. The outage now waits
+  until audio is visibly leaving through the qdisc, and afterwards netem's own
+  drop counter has to show that it took at least four seconds of the call's
+  packets; a run where it did not is reported as proving nothing, never as a
+  pass. Checked both ways: the profile passes with the outage landing in the
+  call, and a copy cut before the call starts is refused. `lab.sh`'s note for a
+  run that proves nothing no longer blames the kernel for every cause.
 
 - **The mechanism that makes appending a struct member safe did the opposite
   of what it promised.** `Versioned::MIN_SIZE`'s own contract says it is the

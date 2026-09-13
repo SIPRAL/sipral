@@ -209,10 +209,13 @@ if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
         bad_network "$profile"
         case $? in
             0) pass "$profile: audio survived it" ;;
-            3) printf '  note  %s: this kernel took what it liked and dropped the\n' "$profile"
-               printf '        rest in silence, so the impairment did not happen and\n'
-               printf '        the run proves nothing. netem needs a kernel newer\n'
-               printf '        than 3.10 for this profile.\n' ;;
+            # not a pass and not a failure: what the profile needed did not
+            # happen, and the profile's own lines above say which part. On a
+            # 3.10 kernel it is usually tc dropping a setting in silence; for
+            # the outage it can also be the cut missing the call
+            3) printf '  note  %s: the impairment did not happen the way the\n' "$profile"
+               printf '        profile needs, so the run proves nothing. What it\n'
+               printf '        found is printed above.\n' ;;
             *) fail "$profile" ;;
         esac
     done

@@ -43,7 +43,13 @@ A shell fragment, sourced by the runner. Four names, of which two are optional:
 - `DURING` — a shell fragment run in the background while the call is up, for a
   profile that changes the link mid-call rather than setting it once. `$link`
   is the interface. It must do its own read-back and echo
-  `IMPAIRMENT-NOT-APPLIED` if the kernel dropped what it asked for.
+  `IMPAIRMENT-NOT-APPLIED` if what it asked for did not happen — and "did not
+  happen" includes a change that was applied but landed on nothing. A qdisc
+  that reads `loss 100%` for eight seconds before the call starts sending is
+  exactly as useless as one that never read it. `blackout.sh` is the worked
+  example: it waits until audio is visibly leaving through the qdisc, and
+  afterwards reads netem's own drop counter to show the outage took the call's
+  packets. Whatever it echoes before the marker is printed with the note.
 
 ## Reading the numbers
 
