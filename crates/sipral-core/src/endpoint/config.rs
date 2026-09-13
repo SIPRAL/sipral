@@ -133,6 +133,20 @@ pub struct EndpointConfig {
     /// A transaction lasts seconds and a dialog lasts as long as the call, so
     /// this is the one a slow flood reaches: a thousand INVITEs that are all
     /// answered leave a thousand calls standing.
+    ///
+    /// An incoming call counts from the moment its INVITE is let in, not from
+    /// the 180 or 2xx of this end's that makes its dialog: counted any later,
+    /// every INVITE that arrived before the first of them was answered would
+    /// be let in, and answering them would pass the ceiling.
+    ///
+    /// A fork is held to it too. The first dialog of an INVITE this end sent
+    /// always opens, and so does the first 2xx to it, since between them they
+    /// are the call the application placed: a forking proxy can ring one
+    /// phone and have another answer. Each further branch opens only while
+    /// there is room. One that finds none is
+    /// reported as a provisional without a dialog, or, when it is a 2xx, is
+    /// not acknowledged here, and the far end gives it up with a BYE of its own
+    /// (RFC 3261 §13.3.1.4).
     pub max_dialogs: usize,
     /// How much of what the endpoint decided it keeps
     /// ([`crate::diag`]).

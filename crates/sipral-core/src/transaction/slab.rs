@@ -14,6 +14,28 @@
 
 use super::handle::Raw;
 
+// Every slot an arena on this thread has looked at while iterating. A test
+// holds a sweep to the number of slots it had to see by counting them, which
+// no load on the machine running it can change.
+#[cfg(test)]
+thread_local! {
+    static VISITED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// How many slots arenas on this thread have visited since the last call.
+#[cfg(test)]
+pub(crate) fn take_visits() -> u64 {
+    VISITED.with(|visited| visited.replace(0))
+}
+
+#[cfg(test)]
+fn count_visit() {
+    VISITED.with(|visited| visited.set(visited.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+const fn count_visit() {}
+
 /// A generational arena.
 #[derive(Debug)]
 pub(crate) struct Slab<T> {
@@ -111,8 +133,12 @@ impl<T> Slab<T> {
     }
 
     /// Every live value with its handle, in slot order.
+    ///
+    /// Visits every slot the arena has ever grown to, vacated ones included,
+    /// since the arena does not shrink.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (Raw, &T)> {
         self.entries.iter().enumerate().filter_map(|(slot, entry)| {
+            count_visit();
             let value = entry.value.as_ref()?;
             let slot = u32::try_from(slot).ok()?;
             Some((

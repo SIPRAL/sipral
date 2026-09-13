@@ -375,29 +375,69 @@ commercial licence. An application that already runs DTLS of its own can
 still export its keys per RFC 5705 and hand them to the engine through the
 seam SDES uses, which costs one function and keeps the gateway case cheap.
 
-**The foundation exists, and no call reaches it yet.** `crates/sipral-dtls`
-holds what the handshake will stand on, each piece tested on its own: the TLS
-1.2 PRF with SHA-256, the master secret and RFC 7627's extended master secret,
-the Finished `verify_data` and the record key block; the RFC 5705 exporter and
-the key layout of RFC 5764 §4.2 for `SRTP_AES128_CM_HMAC_SHA1_80` and `_32`;
-the record layer with its epoch and 48-bit sequence number, AES-128-GCM
-protection per RFC 5288 and the anti-replay window of RFC 6347 §4.1.2.6;
-handshake fragmentation to a path MTU and reassembly bounded in message length,
-pieces and memory; strict codecs for every message of an
-`ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake, with HelloVerifyRequest
-cookies and the `use_srtp`, `supported_groups`, `ec_point_formats`,
-`signature_algorithms`, `extended_master_secret` and `renegotiation_info`
-extensions; P-256 keys made from randomness the caller supplies; and a
-self-signed certificate written in DER, the key read out of a peer's, and
-fingerprints — `sha-256` written, `sha-1` also read — compared in constant
-time. The client and server state machines, retransmission, alerts and the
-join to `MediaSession` are the next step, so everything above and below about
-what the engine does without DTLS still holds. One choice made in the
-foundation shapes that step: the exporter refuses a master secret derived
-without the extended master secret, because RFC 7627 §5.4 requires a session
-without it to disable RFC 5705. RFC 5764 and RFC 8827 never mention the
-extension, so a peer whose TLS library predates RFC 7627 is one this crate will
-not key SRTP with.
+**The handshake exists, and no call reaches it yet.** `crates/sipral-dtls`
+holds DTLS 1.2 for either end of a DTLS-SRTP call. Underneath, each piece
+tested on its own: the TLS 1.2 PRF with SHA-256, the master secret and RFC
+7627's extended master secret, the Finished `verify_data` and the record key
+block; the RFC 5705 exporter and the key layout of RFC 5764 §4.2 for
+`SRTP_AES128_CM_HMAC_SHA1_80` and `_32`; the record layer with its epoch and
+48-bit sequence number, AES-128-GCM protection per RFC 5288 and the
+anti-replay window of RFC 6347 §4.1.2.6; handshake fragmentation to a path MTU
+and reassembly bounded in message length, pieces and memory; strict codecs for
+every message of an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake, with
+HelloVerifyRequest cookies and the `use_srtp`, `supported_groups`,
+`ec_point_formats`, `signature_algorithms`, `extended_master_secret` and
+`renegotiation_info` extensions; P-256 keys made from randomness the caller
+supplies; and a self-signed certificate written in DER, the key read out of a
+peer's, and fingerprints — `sha-256` written, `sha-1` also read — compared in
+constant time.
+
+On top of that, `Connection`: the client and server state machines, sans-I/O
+in the shape of the rest of the tree — datagrams and the time in; datagrams, a
+timeout and events out. It does what DTLS-SRTP needs and nothing more. Both
+ends present a certificate (RFC 5763 §5): a server always asks for the
+client's, a client refuses a server that does not ask, and each checks the
+other's against the fingerprints its signalling carried — those under the
+most preferred hash offered, as RFC 8122 §5.1 has it — and against nothing
+else. A server exchanges a stateless HelloVerifyRequest cookie before doing
+any work, and until the cookie comes back reads nothing but a whole
+ClientHello and answers nothing that does not parse. `use_srtp` is required in
+both hellos; the server chooses, in its own order of preference, from the
+client's list, and no MKI is ever agreed. Flights go out again on RFC 6347
+§4.2.4.1's timer — one second, doubled, capped at sixty, six attempts — and a
+peer that sends its previous flight again is answered with the last flight
+sent, never by processing its flight a second time. Finished is the only
+handshake message accepted protected and the only one not accepted in the
+clear, so it can only come from whoever holds the keys, and the SRTP keys and
+any application data are released only once the peer's Finished has been
+verified against the transcript. A failure sends one fatal alert naming why;
+`close_notify` is answered; renegotiation is refused with `no_renegotiation`,
+as RFC 8827 §6.5 requires; an invalid record is dropped without a word. Which
+end is the client comes from `a=setup` through `setup::dtls_role`, a pure
+function of RFC 4145's table: the active end sends the ClientHello.
+
+What is not there is the join: the `a=fingerprint` and `a=setup` lines, the
+RFC 7983 demultiplexing, `SrtpPolicy` and `MediaSession`, and the lab against
+FreeSWITCH and Asterisk. So everything above and below about what the engine
+does without DTLS still holds. One choice shapes every peer the join will
+meet: the extended master secret is required, because RFC 7627 §5.4 requires
+a session without it to disable RFC 5705, the exporter every DTLS-SRTP key
+comes out of. RFC 5764 and RFC 8827 never mention the extension, so a peer
+whose TLS library predates RFC 7627 is one this crate will not key SRTP with.
+
+Two choices in the layers below the handshake go the way a reader might not
+expect. When two fragments of one handshake message disagree — and in epoch 0
+neither is authenticated — the later one replaces what was held: keeping the
+first would let one forged fragment arriving ahead of the genuine message
+refuse that message and every retransmission of it, whereas now an injector
+has to keep pace with every retransmission instead of winning once. For the
+same reason, when the octets reassembly holds run out, a message takes its
+room from messages held further ahead, the furthest first: two forged
+fragments announcing the longest message allowed, numbered past the flight,
+would otherwise fill the budget and refuse the genuine flight for good. And a
+hello's extensions are checked for a duplicate type by sorting the types
+once, not by searching the list per extension, which on a 64 KiB block of
+empty extensions was a hundred million comparisons for one datagram.
 
 ### SRTP through the facade
 
@@ -525,8 +565,8 @@ replay window, then tag, then decrypt — and a change that decrypted first
 would break this without any test noticing.
 
 **What it deliberately does not do.** DTLS-SRTP. `sipral-core` reads an
-`a=fingerprint` and carries it through, and there is no DTLS in this tree at
-all, so an offer arriving on `UDP/TLS/RTP/SAVP` has its stream refused rather
+`a=fingerprint` and carries it through, and the handshake in `sipral-dtls` is
+not joined to a call, so an offer arriving on `UDP/TLS/RTP/SAVP` has its stream refused rather
 than answered, and a plan that comes back keyed that way is refused with
 `MediaError::NoDtlsSrtp` rather than opened in the clear on a secure profile.
 `Capabilities::srtp_keying` names SDES and not DTLS-SRTP, so an application

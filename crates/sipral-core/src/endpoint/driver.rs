@@ -101,6 +101,14 @@ pub struct Endpoint {
     /// because the number an operator wants is "how often has this happened",
     /// not "how often since somebody last looked".
     pub(super) refused: u64,
+    /// Calls let in under [`EndpointConfig::max_dialogs`] that have not opened
+    /// their dialog yet.
+    ///
+    /// The dialog of an incoming call is made by this end's own 180 or 2xx,
+    /// long after the ceiling was applied to its INVITE, so each call holds
+    /// the room its dialog will take from the moment it is admitted until a
+    /// response opens the dialog or a refusal says there will be none.
+    pub(super) admitted: HashSet<TransactionId<InviteServer>>,
     /// What this endpoint decided, per call and for itself
     /// (`docs/14-diagnostics.md`).
     pub(super) diag: Records,
@@ -136,6 +144,7 @@ impl Endpoint {
             dialogs_of: HashMap::new(),
             known: Known::new(),
             refused: 0,
+            admitted: HashSet::new(),
             diag: Records::new(config.diagnostics),
         }
     }
@@ -570,6 +579,8 @@ impl Endpoint {
     /// receive it before the INVITE and have nothing to cancel — so one asked
     /// for too early is held and released at the first provisional. The caller
     /// never has to time that itself; [`Event::CancelSent`] says when it went.
+    /// Asking again while that CANCEL is still running sends nothing more: it
+    /// is a transaction of its own, and retransmits itself.
     ///
     /// # Errors
     /// [`CancelError`] when the transaction is unknown, or has already been
@@ -935,6 +946,10 @@ impl Endpoint {
         let dialog = opens
             .then(|| self.open_uas_dialog(&request, &tag, status, flow))
             .flatten();
+        // §12.3: a refusal ends what a provisional of this INVITE opened
+        let early = (status.is_final() && !status.is_success())
+            .then(|| self.early_dialog_of(transaction))
+            .flatten();
 
         let entry = self
             .transactions
@@ -945,6 +960,12 @@ impl Endpoint {
             return Err(RespondError::TooLate);
         }
         self.apply(effects, flow, AnyTransactionId::InviteServer(transaction));
+        self.end_refused_early(transaction, early);
+        // a dialog opened, or a final response said there will be none: the
+        // call holds no room of its own any more either way
+        if dialog.is_some() || status.is_final() {
+            self.admitted.remove(&transaction);
+        }
         // §14.2's rule is about "a second INVITE before it sends the final
         // response to a first", so the dialog is free for another one here
         if status.is_final() {

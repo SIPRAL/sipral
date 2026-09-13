@@ -66,6 +66,40 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `?Call-ID=abc` matched `?Call-ID=ABC`, although RFC 3261 §20 compares both
   with case; header names still ignore it.
 
+- **A fork opens no more dialogs than `max_dialogs` has room for.** Every
+  distinct `To` tag answering one INVITE of ours opened a dialog, with no
+  bound at all, and each one was looked up by a linear scan of the INVITE's
+  branches, so whoever could answer the INVITE decided how much the endpoint
+  held and how long each response took. The first dialog of an INVITE, and
+  the first 2xx to it, still always open, since a forking proxy can ring one
+  phone and have another answer; each further branch opens only while there
+  is room, and one
+  that finds none is reported without a dialog, or, as a 2xx, is not
+  acknowledged here.
+
+- **`max_dialogs` holds for calls that arrive faster than they are answered.**
+  The ceiling was measured against the dialogs that existed when an INVITE
+  arrived, and an incoming call's dialog is made later, by this end's own 180
+  or 2xx; every INVITE that came in ahead of the first answer was let in, and
+  answering them all took the store past the ceiling by up to
+  `max_server_transactions`. A call now counts from the moment it is let in.
+
+- **An incoming call that rang and was then refused no longer leaves its early
+  dialog behind.** The 487 to a CANCEL, a refusal the application sent, and
+  the 500 after an unacknowledged reliable 180 all left the dialog the 180 had
+  opened standing for the life of the process, so a peer repeating INVITE and
+  CANCEL filled `max_dialogs` and had every later call refused with a 503. The
+  refusal now ends it with `DialogTerminated { Refused }` (RFC 3261 §12.3),
+  including for an INVITE that carried a `To` tag naming no dialog. While a
+  reliable provisional response is still unacknowledged the dialog ends with
+  the INVITE transaction instead, so that a PRACK crossing the refusal is still
+  answered (RFC 3262 §3).
+
+- **An ACK no longer confirms a dialog that no 2xx has confirmed.** An ACK
+  naming the tag of a 180 moved the early dialog to confirmed and was reported
+  as `IncomingAck`, so anyone who saw the ringing could make a call nobody had
+  answered read as up; it is now dropped (RFC 3261 §13.3.1.4).
+
 - **`sdp::parse` had no bound on a session description's size, `m=` count or
   attribute lists — the message parser has had one since it was written, this
   did not.** A body arrives inside a message a proxy may have grown on the
@@ -292,6 +326,72 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the other URI, so `?Route=a&Route=b` failed against itself, and `?Route=a`
   matched `?Route=a&Route=a`. The n-th field of a name is now held against the
   n-th of that name, in order (RFC 3261 §7.3.1).
+
+- **Calls given up on at the same instant for want of a PRACK no longer cost
+  the square of their number.** Ending a dialog, matching a PRACK and
+  refusing a call whose reliable provisional response went unacknowledged
+  each found the responses they were about by visiting every one the endpoint
+  had held, so ten thousand calls ringing reliably and refused together cost
+  a hundred million visits. They are now found through the dialog and the
+  INVITE they belong to.
+
+- **Quieting a reliable provisional response after a refusal had no test
+  proving it does not cost the square of the calls refused.** `on_invite`,
+  the third of the three lookups `of_invite` was added for, could regress to
+  the full scan it replaced and every test in the suite would still pass —
+  the other two (ending a dialog, refusing on timeout) were already held to
+  ten thousand by a counted sweep. A third such test now holds `on_invite` to
+  the same bound.
+
+- **A reliable provisional response stops being retransmitted once a CANCEL
+  has refused its call.** The 487 went out and the 180 kept going out after
+  it until 64*T1, where RFC 3262 §3 says it "SHOULD NOT"; the 487 now quiets
+  it, as a refusal the application sends already did.
+
+- **A CANCEL that matches no transaction is answered 481, not 200.** The 200
+  went to every CANCEL, telling its sender that something had been cancelled
+  when nothing had; RFC 3261 §9.2 keeps the 200 for a CANCEL that matched an
+  existing transaction, whatever that transaction's method, and answers the
+  rest 481.
+
+- **`ServerKey::is_cancelled_by`'s legacy branch (§17.2.3's fallback for a
+  peer with no magic cookie) had no test at all.** Only the RFC 3261 branch,
+  matched by branch and sent-by, was exercised; dropping the Request-URI,
+  From tag or `CSeq` number from the legacy comparison passed every test in
+  the suite. A unit test now checks a legacy CANCEL against the transaction
+  it cancels, and against one sharing its branch but not its `Call-ID` or
+  `CSeq` number — which a legacy peer's branch, being untrustworthy, can do.
+
+- **`ServerKey::is_cancelled_by` had no test for the one case its two
+  field-by-field branches cannot check: a CANCEL keyed the other way than
+  the transaction it names.** The fall-through arm carries that whole
+  answer on its own, and flipping it from `false` to `true` — an RFC
+  3261-keyed transaction "cancelled" by a legacy CANCEL naming the same
+  call, or the reverse — passed every test in the suite. A CANCEL forged
+  without the magic cookie its INVITE carried, or with one its INVITE never
+  had, is exactly what that arm exists to refuse. A unit test now checks
+  both directions never match.
+
+- **A CANCEL that crosses the answer to a call no longer reports the call as
+  cancelled.** It got its 200, the INVITE's 487 was rightly not sent, and
+  `IncomingCancel` went up anyway, so the layer above ended a call that was up
+  and left its dialog confirmed with nobody to hang it up. RFC 3261 §9.2 gives
+  such a CANCEL no effect on any session state; nothing is reported for it.
+
+- **Calls whose timer M fires at the same instant no longer cost the square of
+  their number.** Retiring an INVITE transaction found the dialogs of its fork
+  by walking every dialog the endpoint held, so ten thousand answered calls
+  ending their transactions together cost a hundred million slot visits. It
+  now reads them off the fork's own branches, and a test holds the timers to
+  their bound by counting visits: one per transaction slot to find the next
+  deadline, and at most two sweeps per `handle_timeout`.
+
+- **Asking to cancel a call twice puts one CANCEL on the wire.**
+  `Endpoint::cancel` sent a second CANCEL with the first one's branch and
+  method, the key RFC 3261 §17.1.3 finds a response's transaction by, so two
+  transactions stood under one name: the 200 reached the second, and the first
+  retransmitted until timer F reported an answered CANCEL as failed. A CANCEL
+  already running is now left to finish.
 
 - **A session timer that could not be refreshed yet stayed due at the instant
   that had already fired, forever.** `send_refresh` returned without moving
@@ -753,6 +853,34 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   against this instance already tolerated both forms and needed no change.
 
 ### Added
+
+- **The DTLS-SRTP handshake, both roles, in a crate no call reaches yet.**
+  `sipral-dtls` gains `Connection`, the client and server state machines of
+  RFC 6347 for DTLS-SRTP, sans-I/O like the rest of the tree: the server's
+  stateless HelloVerifyRequest cookie exchange; a certificate from both ends,
+  each checked against the fingerprints the signalling carried and against
+  nothing else (RFC 5763 §5, RFC 8122 §5.1); ServerKeyExchange and
+  CertificateVerify signatures; the extended master secret and `use_srtp`
+  required in both hellos, the profile chosen by the server from the client's
+  list; Finished verified over the transcript and accepted only protected.
+  Flights go out again on RFC 6347 §4.2.4.1's timer — one second, doubled,
+  capped at sixty, six attempts — and a peer's retransmitted flight is answered
+  with the last flight rather than processed a second time. A failure sends one
+  fatal alert saying why; `close_notify` is answered; renegotiation is refused
+  with `no_renegotiation`. The SRTP keys, arranged per direction in the shape
+  `sipral-rtp` takes them, and any application data come out only after the
+  peer's Finished is verified. `setup::dtls_role` maps `a=setup` to the role.
+  Two findings of the foundation's review go with it: a hello's extensions
+  were checked for a duplicate by searching the list once per extension, a
+  hundred million comparisons for one 64 KiB block, and are now sorted once;
+  and reassembly kept the first of two fragments that disagree, so one forged
+  fragment ahead of a genuine message locked that message out for good, where
+  now the later one replaces what was held (`Offered::Replaced`), and a message
+  short of room takes it from messages held further ahead, so two forged
+  fragments numbered past the flight cannot fill the budget instead. Two fuzz
+  targets, `dtls_record` and `dtls_handshake`, seeded from a real handshake.
+  The join to a call — the SDP lines, RFC 7983 demultiplexing, `MediaSession`
+  — is the next part.
 
 - **An account can have no registrar.** A trunk that knows this end by its
   address could not be configured: `sipral_account_add` refused an empty

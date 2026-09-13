@@ -486,6 +486,7 @@ name = "sipral-fuzz-seeds"
 version = "0.0.1"
 dependencies = [
  "sipral-core",
+ "sipral-dtls",
  "sipral-headless",
  "sipral-nat",
  "sipral-rtp",

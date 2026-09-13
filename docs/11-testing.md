@@ -104,7 +104,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Thirteen targets, one per door an attacker's bytes come through.
+Fifteen targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -145,6 +145,21 @@ through the message parser and every accessor a binding client or an ICE
 agent calls, since STUN and media share a port by design. `turn` takes the stream framer
 and ChannelData both ways they arrive, delimited and self-delimiting.
 
+Two for DTLS, whose peer's bytes are read before anything in them is
+authenticated. `dtls_record` takes a run of datagrams, two octets of length in
+front of each, through the record reader, the handshake fragment reader and
+one reassembler kept across the run, through AES-GCM open behind one replay
+window, and into a server and a client `Connection` built from fixed keys —
+the server without a cookie exchange, so a ClientHello the fuzzer finds
+reaches the handshake. Its seeds are the two sides of a real handshake between
+those same two ends, so a seed takes the server, or the client, to its
+Finished before the fuzzer has changed an octet. `dtls_handshake` takes a
+message type and a body through the message parser and asserts that a body
+which parses writes back as the same octets, since a handshake signs a hash of
+what it received; then through what a handshake reads next from that message:
+the cookie check, the certificate's key and fingerprint, the key exchange
+point, the signatures.
+
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
 ./scripts/fuzz.sh 600              # every target, ten minutes each
@@ -164,14 +179,15 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than thirteen runs beginning at
+targets with something to start from rather than fifteen runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
-an unprotector holding the target's own key — so a seed that is not what it
-claims to be fails the generator rather than sitting in the corpus doing
-nothing. Twelve of the thirteen families go through that check; the
-thirteenth is `builder`, whose input is not a message but the five field
+an unprotector holding the target's own key, the DTLS runs through ends built
+as the target builds them — so a seed that is not what it claims to be fails
+the generator rather than sitting in the corpus doing nothing. Fourteen of the
+fifteen families go through that check; the one that does not is `builder`,
+whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
 a seed dropped from the generator and left on disk would otherwise pass a
@@ -196,7 +212,7 @@ The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
 five minutes each by default — before a release and overnight, not before
 every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all thirteen, under the nightly that `fuzz/` pins, so
+do on every run is **build** all fifteen, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -294,7 +310,7 @@ in the C library that build produces, `bindings/c/smoke.c` compiled against the
 header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all thirteen fuzz targets under their own nightly — which nothing else
+over all fifteen fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

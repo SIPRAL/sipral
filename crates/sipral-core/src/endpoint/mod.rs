@@ -37,6 +37,8 @@ mod reinvite;
 mod reinvite_tests;
 mod reliable;
 mod resolve;
+#[cfg(test)]
+mod store_tests;
 mod table;
 #[cfg(test)]
 mod tests;

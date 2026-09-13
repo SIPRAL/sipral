@@ -5,7 +5,7 @@
 
 One directory per fuzz target, holding the inputs a run starts from. They are
 committed, which the rest of a fuzzing corpus is not, for one reason: a clone
-that gets thirteen targets and no corpus gets thirteen targets that begin from
+that gets fifteen targets and no corpus gets fifteen targets that begin from
 the empty input, and a coverage-guided fuzzer then spends its first hours
 rediscovering that a SIP message starts with a method name.
 
@@ -16,13 +16,14 @@ traffic, and nothing came from another codebase.
 
 - **Written by `tools/fuzz-seeds`**, which builds each seed with the library's
   own builders and encoders — `RequestBuilder`, `CompoundBuilder`,
-  `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector` — or
-  writes it out as text in that file, from the RFC. A seed is then handed to
-  the same reader its target hands it to before it is written out, so one
-  that is not the thing it claims to be fails the generator instead of
-  sitting here doing nothing: the framer seeds go through the framer, the
-  control-channel seeds through the frame decoder and the JSON, the protected
-  runs through an unprotector holding the target's own key.
+  `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector`,
+  `Connection` — or writes it out as text in that file, from the RFC. A seed
+  is then handed to the same reader its target hands it to before it is
+  written out, so one that is not the thing it claims to be fails the
+  generator instead of sitting here doing nothing: the framer seeds go through
+  the framer, the control-channel seeds through the frame decoder and the
+  JSON, the protected runs through an unprotector holding the target's own
+  key, the DTLS runs through ends built as the target builds them.
 - **One family is not read that way, and it is `builder`.** Its target does
   not parse its input at all: it cuts it into the five field values a caller
   controls and hands them to `RequestBuilder`. So what the generator checks
@@ -36,7 +37,10 @@ traffic, and nothing came from another codebase.
 Addresses and names come from the ranges reserved for documentation:
 `192.0.2.0/24` (RFC 5737) and `example.com` (RFC 2606). No key material here
 is a secret: the SRTP seeds are protected with the same fixed key the
-`srtp_unprotect` target unprotects with, which is in the target's source.
+`srtp_unprotect` target unprotects with, which is in the target's source. The
+DTLS seeds are a handshake between two ends whose keys and random octets are
+fixed, in `tools/fuzz-seeds` and in the `dtls_record` target alike, so every
+secret in them can be computed again from this tree.
 
 ```sh
 cargo run -p sipral-fuzz-seeds     # write this directory again

@@ -139,7 +139,7 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
 }
 
 # The other place bytes of no obvious origin could land. fuzz/corpus/ is
-# committed -- a clone that gets thirteen targets and no corpus gets thirteen
+# committed -- a clone that gets fifteen targets and no corpus gets fifteen
 # targets that start from the empty input -- and two things keep it from
 # becoming somewhere unvetted material is dropped. Both are checked here.
 #
@@ -180,7 +180,7 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
 # committed and never will be.
 #
 # The declared names are read out of the manifest rather than written here:
-# a list of thirteen kept by hand beside a list of thirteen kept by cargo is
+# a list of fifteen kept by hand beside a list of fifteen kept by cargo is
 # two lists, and they drift.
 # One ASCII letter on at least one side of a Romanian letter. Written as an
 # alternation rather than a bracket because under LC_ALL=C a bracket over
@@ -344,7 +344,7 @@ done)
 # loop over real sockets, which is where the clock belongs.
 step "no clock read in the protocol crates"
 clock=$(find crates/sipral-core/src crates/sipral-ua/src crates/sipral-rtp/src \
-    crates/sipral-media/src crates/sipral-nat/src -name '*.rs' \
+    crates/sipral-media/src crates/sipral-nat/src crates/sipral-dtls/src -name '*.rs' \
     ! -name 'tests.rs' ! -name '*_tests.rs' ! -name 'runtime.rs' 2>/dev/null \
     | sort | while read -r f; do
     awk '/^#\[cfg\(test\)\]/ { exit } { print FILENAME ":" FNR ": " $0 }' "$f"
@@ -740,13 +740,13 @@ else
     printf '%s\n' "$printed" | sed 's/^/        /'
 fi
 
-# Thirteen fuzz targets in a workspace of its own, on a nightly pin of its
+# Fifteen fuzz targets in a workspace of its own, on a nightly pin of its
 # own, and nothing else here reads them: `cargo test --workspace`, `cargo
 # fmt --all` and the clippy run above all stop at the workspace boundary. A
 # target that stops building, or drifts out of the format the rest of the
 # tree keeps, is then found the next time somebody fuzzes -- which is before
 # a release, which is the worst moment to find it. So the gate formats,
-# lints and builds them. It does not run them: thirteen targets at five
+# lints and builds them. It does not run them: fifteen targets at five
 # minutes each is an hour, and that is what scripts/fuzz.sh is for.
 #
 # The toolchain is named out of fuzz/rust-toolchain.toml and passed
@@ -779,7 +779,7 @@ else
         # Where on disk is cargo's answer and not a guess: cargo-fuzz builds
         # with plain `cargo build`, which honours CARGO_TARGET_DIR, so a
         # machine that sets it puts the binaries somewhere fuzz/target/ is
-        # not -- and a step that looks in fuzz/target/ then reports thirteen
+        # not -- and a step that looks in fuzz/target/ then reports fifteen
         # targets missing, or worse finds yesterday's.
         targets=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" fuzz list 2>/dev/null)
         built_into=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" metadata --no-deps --format-version 1 \

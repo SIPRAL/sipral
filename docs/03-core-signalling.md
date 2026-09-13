@@ -111,9 +111,16 @@ the socket.
   order of magnitude past what a softphone reaches (256 and 128), and past
   either one a request that belongs to no dialog we already hold is answered
   §21.5.4's 503 — statelessly, so that refusing costs nothing — and counted, so
-  that an operator can watch the number climb. A request inside a dialog that
-  exists is never refused, whatever the count says: a BYE turned away leaves the
-  call standing for the life of the process.
+  that an operator can watch the number climb. An incoming call counts against
+  `max_dialogs` from the moment its INVITE is let in, not from the 180 or 2xx
+  that makes its dialog, so INVITEs that arrive faster than they are answered
+  cannot all be let in and then answered past the ceiling. A fork is held to
+  it as well: past the first dialog of an INVITE this end sent and the first
+  2xx to it, a branch that finds no room is reported without a dialog, and its
+  2xx is not acknowledged here — the far end gives it up with a BYE of its own.
+  A request inside a
+  dialog that exists is never refused, whatever the count says: a BYE turned
+  away leaves the call standing for the life of the process.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 

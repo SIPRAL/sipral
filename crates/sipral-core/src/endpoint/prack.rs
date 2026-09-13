@@ -97,6 +97,8 @@ impl Endpoint {
                 .ok_or(RespondError::Build(crate::msg::BuildError::MissingField(
                     "Contact",
                 )))?;
+        // the dialog exists now and counts against the ceiling on its own
+        self.admitted.remove(&transaction);
 
         let entry = self
             .transactions
@@ -383,9 +385,15 @@ impl Endpoint {
         else {
             return;
         };
+        // the refusal ends the early dialog the unacknowledged response opened
+        let early = self.early_dialog_of(invite);
         if let Some(entry) = self.transactions.invite_server_mut(invite) {
             let effects = entry.machine.respond(message, now);
+            let refused = effects.send.is_some();
             self.apply(effects, flow, AnyTransactionId::InviteServer(invite));
+            if refused {
+                self.end_refused_early(invite, early);
+            }
         }
     }
 

@@ -150,12 +150,12 @@ Detail in [05-media.md](05-media.md) and [06-nat.md](06-nat.md).
 
 ### sipral-dtls
 
-DTLS 1.2, for the SRTP keys of a DTLS-SRTP handshake (RFC 5764): the record
-layer, the handshake framing and messages, the key derivation and the
-exporter, and the self-signed certificate a peer checks against
-`a=fingerprint`. Like `sipral-rtp` it names no Sipral crate. It is not in the
-picture above because nothing depends on it yet: what is written is the
-foundation the handshake stands on, not the handshake, and no call reaches it.
+DTLS 1.2, for the SRTP keys of a DTLS-SRTP handshake (RFC 5764): the client
+and server handshake, sans-I/O like the core, over the record layer, the
+handshake framing and messages, the key derivation and the exporter, and the
+self-signed certificate a peer checks against `a=fingerprint`. Like
+`sipral-rtp` it names no Sipral crate. It is not in the picture above because
+nothing depends on it yet: the handshake is written, and no call reaches it.
 
 Detail in [05-media.md](05-media.md).
 

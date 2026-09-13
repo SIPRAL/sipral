@@ -373,18 +373,26 @@ impl Extensions {
     /// prefix already taken off.
     pub(crate) fn parse(block: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(block);
-        let mut extensions = Self::new();
+        let mut list = Vec::new();
         while !r.is_empty() {
             let extension_type = ExtensionType(r.u16()?);
             let data = r.vec16(0, DATA_MAX)?;
-            if extensions.get(extension_type).is_some() {
-                return Err(Error::DuplicateExtension);
-            }
-            extensions
-                .list
-                .push(Extension::parse(extension_type, data)?);
+            list.push(Extension::parse(extension_type, data)?);
         }
-        Ok(extensions)
+        // "There MUST NOT be more than one extension of the same type": one
+        // pass over the types sorted, not a search of the list per extension.
+        // A block of 2^16 - 1 octets holds 16383 empty extensions, and a
+        // search per extension compares every pair of them — a hundred
+        // million comparisons for one unauthenticated datagram's worth.
+        let mut types: Vec<ExtensionType> = list.iter().map(Extension::extension_type).collect();
+        types.sort_unstable();
+        if types
+            .windows(2)
+            .any(|pair| matches!(pair, [a, b] if a == b))
+        {
+            return Err(Error::DuplicateExtension);
+        }
+        Ok(Self { list })
     }
 
     /// Write `Extension extensions<0..2^16-1>`, length prefix included.
@@ -590,6 +598,56 @@ mod tests {
             Err(Error::DuplicateExtension)
         );
         assert_eq!(Extensions::parse(&[]), Ok(Extensions::new()));
+    }
+
+    /// `count` distinct extensions of no data, none of them one of the six
+    /// typed ones.
+    fn distinct(count: u16) -> Vec<u8> {
+        (0..count)
+            .flat_map(|i| {
+                let [high, low] = (0x1000 + i).to_be_bytes();
+                [high, low, 0, 0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_duplicate_is_found_wherever_it_sits_in_a_full_block() {
+        // the most four-octet extensions a 2^16 - 1 octet block holds
+        let mut block = distinct(16_383);
+        assert_eq!(Extensions::parse(&block).map(|e| e.len()), Ok(16_383));
+        // the last one given the first one's type
+        let first = [block[0], block[1]];
+        let at = block.len() - 4;
+        block[at..at + 2].copy_from_slice(&first);
+        assert_eq!(Extensions::parse(&block), Err(Error::DuplicateExtension));
+    }
+
+    #[test]
+    fn a_full_block_costs_in_proportion_to_its_size_not_to_its_square() {
+        use std::time::{Duration, Instant};
+        let fastest = |block: &[u8]| {
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    let parsed = Extensions::parse(block);
+                    let took = start.elapsed();
+                    assert!(parsed.is_ok());
+                    took
+                })
+                .min()
+                .unwrap_or(Duration::MAX)
+        };
+        let small = fastest(&distinct(1023));
+        let large = fastest(&distinct(16_383));
+        // sixteen times the extensions: roughly sixteen times the work when
+        // duplicates are found in one pass over the sorted types, roughly 256
+        // when each extension is looked for among all those before it. The
+        // fastest of five runs, so a descheduled run does not decide it.
+        assert!(
+            large < small * 64,
+            "1023 extensions in {small:?}, 16383 in {large:?}"
+        );
     }
 
     #[test]

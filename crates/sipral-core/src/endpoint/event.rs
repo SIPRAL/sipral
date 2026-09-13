@@ -125,7 +125,9 @@ pub enum Event {
     Provisional {
         /// The transaction that sent the INVITE.
         invite: TransactionId<InviteClient>,
-        /// The early dialog it opened, if it carried a tag to name one by.
+        /// The early dialog it opened, if it carried a tag to name one by and
+        /// there was room for another branch
+        /// ([`super::EndpointConfig::max_dialogs`]).
         dialog: Option<DialogId>,
         /// The status.
         status: StatusCode,
@@ -298,9 +300,18 @@ pub enum Event {
     },
     /// The caller gave up before we answered.
     ///
+    /// Only reported when the CANCEL ended the call. One that crosses a final
+    /// response this end has already sent changes nothing (§9.2): it gets its
+    /// 200, and nothing is reported.
+    ///
     /// The endpoint has already answered the CANCEL with a 200 and the INVITE
     /// with a 487, both of which §9.2 makes unconditional. What is left is to
-    /// stop ringing.
+    /// stop ringing. When a provisional response had opened an early dialog,
+    /// a [`Event::DialogTerminated`] with [`DialogEndReason::Refused`] follows
+    /// this event: §12.3 ends that dialog with the 487. While a reliable
+    /// provisional response of that INVITE is still unacknowledged it follows
+    /// the end of the INVITE transaction instead, because RFC 3262 §3 still
+    /// answers a PRACK for it.
     IncomingCancel {
         /// The INVITE that was cancelled.
         invite: TransactionId<InviteServer>,

@@ -115,6 +115,59 @@ impl ServerKey {
         Self::with_method(request, Method::Invite)
     }
 
+    /// Whether this key, a transaction's, is the one a CANCEL is aimed at.
+    ///
+    /// `cancel` is the key [`ServerKey::for_cancelled`] built. §9.2 matches a
+    /// CANCEL "assuming that the request method is anything but CANCEL or
+    /// ACK", so every field but the method has to agree, and the method only
+    /// has to be neither of those. An ACK is keyed as the INVITE it
+    /// acknowledges and never names a transaction of its own, which leaves a
+    /// CANCEL as the one method to rule out: without that, the CANCEL's own
+    /// transaction would be what it cancelled.
+    pub(crate) fn is_cancelled_by(&self, cancel: &Self) -> bool {
+        let not_a_cancel = |method: &[u8]| method != Method::Cancel.as_str().as_bytes();
+        match (self, cancel) {
+            (
+                Self::Rfc3261 {
+                    branch,
+                    sent_by,
+                    method,
+                },
+                Self::Rfc3261 {
+                    branch: aimed_branch,
+                    sent_by: aimed_sent_by,
+                    ..
+                },
+            ) => branch == aimed_branch && sent_by == aimed_sent_by && not_a_cancel(method),
+            (
+                Self::Legacy {
+                    request_uri,
+                    from_tag,
+                    call_id,
+                    cseq,
+                    method,
+                    top_via,
+                },
+                Self::Legacy {
+                    request_uri: aimed_uri,
+                    from_tag: aimed_from_tag,
+                    call_id: aimed_call_id,
+                    cseq: aimed_cseq,
+                    top_via: aimed_top_via,
+                    ..
+                },
+            ) => {
+                request_uri == aimed_uri
+                    && from_tag == aimed_from_tag
+                    && call_id == aimed_call_id
+                    && cseq == aimed_cseq
+                    && top_via == aimed_top_via
+                    && not_a_cancel(method)
+            }
+            _ => false,
+        }
+    }
+
     fn with_method(request: &RawMessage<'_>, method: Method<'_>) -> Result<Self, HeaderError> {
         let via = request.top_via()?;
         let method: Box<[u8]> = method.as_str().as_bytes().into();
@@ -368,6 +421,113 @@ Content-Length: 0\r\n\
             with(INVITE, ServerKey::for_request).expect("a key"),
             key,
             "a peer with the cookie is not keyed the old way"
+        );
+    }
+
+    #[test]
+    fn a_legacy_cancel_still_finds_the_transaction_it_cancels() {
+        // §9.2's match still has to work for a peer keyed the old way, where
+        // the branch is not trusted to be unique on its own (§17.2.3): the
+        // fallback compares the whole Via line along with the other four
+        // fields, and `is_cancelled_by` is what the endpoint calls for every
+        // non-INVITE server transaction when a CANCEL names no method.
+        let options = b"OPTIONS sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 OPTIONS\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let cancel = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let transaction = with(options, ServerKey::for_request).expect("a key");
+        let aimed = with(cancel, ServerKey::for_cancelled).expect("a key");
+        assert!(
+            transaction.is_cancelled_by(&aimed),
+            "the same five fields, without a trustworthy branch, still match"
+        );
+
+        // the same branch a different call happens to share, since a legacy
+        // peer's branch says nothing on its own
+        let elsewhere = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a-different-call\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert!(
+            !transaction
+                .is_cancelled_by(&with(elsewhere, ServerKey::for_cancelled).expect("a key")),
+            "a shared legacy branch alone must not be enough to match"
+        );
+
+        // the same branch and Call-ID, but a CSeq number that names a
+        // different request on that call
+        let wrong_cseq = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 2 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert!(
+            !transaction
+                .is_cancelled_by(&with(wrong_cseq, ServerKey::for_cancelled).expect("a key")),
+            "a CANCEL for a different CSeq number on the same call must not match"
+        );
+    }
+
+    #[test]
+    fn a_cancel_keyed_the_other_way_than_its_transaction_never_matches() {
+        // `is_cancelled_by` only ever compares a key against one built the
+        // same way (§17.2.3's two schemes do not mix), and the two variants
+        // share nothing a `match` arm could accidentally read from the other,
+        // so the fall-through arm carries the whole answer for a CANCEL whose
+        // magic cookie disagrees with the transaction it names — the one
+        // shape a forged CANCEL can take that neither field-by-field branch
+        // above ever inspects.
+        let cookie = with(INVITE, ServerKey::for_request).expect("a key");
+        let no_cookie = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=0ae4be1c\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert!(
+            !cookie.is_cancelled_by(&with(no_cookie, ServerKey::for_cancelled).expect("a key")),
+            "an RFC 3261 transaction must not be cancelled by a legacy-keyed CANCEL"
+        );
+
+        let legacy = with(no_cookie, ServerKey::for_request).expect("a key");
+        let with_cookie = b"CANCEL sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKnashds8\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 CANCEL\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        assert!(
+            !legacy.is_cancelled_by(&with(with_cookie, ServerKey::for_cancelled).expect("a key")),
+            "a legacy transaction must not be cancelled by an RFC 3261-keyed CANCEL"
         );
     }
 

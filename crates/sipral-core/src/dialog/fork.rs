@@ -34,8 +34,9 @@ pub enum Fork {
     /// 2xx from another branch is left alone — it is a call in progress, not
     /// an attempt that failed.
     Refused,
-    /// Nothing: a 100, a response with no tag to name a dialog by, or one
-    /// that arrived after the set was finished with.
+    /// Nothing: a 100, a response with no tag to name a dialog by, one that
+    /// arrived after the set was finished with, or one that would have opened
+    /// a branch when the caller had no room for another dialog.
     Ignored,
 }
 
@@ -117,6 +118,24 @@ impl DialogSet {
     /// [`DialogError::WrongKind`] for a request, and [`DialogError::Field`]
     /// or [`DialogError::Uri`] for a field the dialog needs and cannot read.
     pub fn on_response(&mut self, response: &RawMessage<'_>) -> Result<Fork, DialogError> {
+        self.on_response_with_room(response, true)
+    }
+
+    /// [`DialogSet::on_response`], for a caller that holds its dialogs to a
+    /// ceiling.
+    ///
+    /// With `room` false, a response that would open a branch the set does
+    /// not have yet opens nothing and is [`Fork::Ignored`]. Every branch that
+    /// is already open goes on taking its own responses, and a refusal still
+    /// ends the early ones, because neither makes anything new to hold.
+    ///
+    /// # Errors
+    /// As [`DialogSet::on_response`].
+    pub(crate) fn on_response_with_room(
+        &mut self,
+        response: &RawMessage<'_>,
+        room: bool,
+    ) -> Result<Fork, DialogError> {
         let status = response.status().ok_or(DialogError::WrongKind)?;
         // §13.2.2.4 gives the answer window an end: 64*T1 after the first 2xx
         // "no more new 2xx responses are expected to arrive"
@@ -163,6 +182,9 @@ impl DialogSet {
         {
             branch.dialog.on_response(response)?;
             return Ok(Fork::Advanced(key));
+        }
+        if !room {
+            return Ok(Fork::Ignored);
         }
 
         let dialog = {

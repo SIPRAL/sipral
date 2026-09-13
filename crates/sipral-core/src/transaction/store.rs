@@ -20,8 +20,13 @@
 //! fires once, and lives in a [`super::timer::Timers`] queue; a transaction's
 //! deadline moves on nearly every message it sees, so an index would spend
 //! more time being cancelled and rebuilt than it would ever save. What is
-//! scanned is the live transactions of one endpoint, which for a user agent is
-//! tens.
+//! scanned is the transaction slots of one endpoint, which for a user agent
+//! are tens: finding the next deadline visits each slot once, and a call to
+//! the endpoint's `handle_timeout` sweeps them at most twice. A slot a
+//! transaction has left is still visited, because the arenas never shrink, so
+//! the cost follows the most transactions ever live at once rather than the
+//! number live now. `endpoint::store_tests` holds ten thousand of them to that
+//! bound by counting the slots visited.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -239,6 +244,16 @@ impl Transactions {
         Ok(id)
     }
 
+    /// Whether a client transaction is already running under the key this
+    /// request would be indexed by.
+    ///
+    /// The index holds one transaction per key, so a second one started under
+    /// a key in use would take the first one's responses and leave it
+    /// retransmitting into silence until its timer gave up.
+    pub(crate) fn has_client_for(&self, request: &RawMessage<'_>) -> bool {
+        ClientKey::for_request(request).is_ok_and(|key| self.clients.contains_key(&key))
+    }
+
     /// The client transaction a response belongs to (§17.1.3).
     pub(crate) fn client_for(&self, response: &RawMessage<'_>) -> Option<Client> {
         let key = ClientKey::for_response(response).ok()?;
@@ -280,12 +295,24 @@ impl Transactions {
         }
     }
 
-    /// The server transaction indexed under this key, if there is one.
+    /// The server transaction a CANCEL is aimed at (§9.2), if there is one.
     ///
-    /// Used for the one lookup that is not a message's own key: §9.2 matches
-    /// a CANCEL to the INVITE it cancels.
-    pub(crate) fn server_by_key(&self, key: &ServerKey) -> Option<Server> {
-        self.servers.get(key).copied()
+    /// An INVITE is found through the index, by the CANCEL's own branch and
+    /// sent-by with the method taken as INVITE, since that is what a CANCEL is
+    /// nearly always for. A transaction of any other method is found by
+    /// visiting the non-INVITE server slots: the CANCEL does not say which
+    /// method it cancels, and the index is keyed on one. That is a visit per
+    /// slot, which is what finding the next deadline already costs after every
+    /// message.
+    pub(crate) fn cancelled_by(&self, cancel: &RawMessage<'_>) -> Option<Server> {
+        let key = ServerKey::for_cancelled(cancel).ok()?;
+        if let Some(found) = self.servers.get(&key) {
+            return Some(*found);
+        }
+        self.non_invite_servers
+            .iter()
+            .find(|(_, entry)| entry.key.is_cancelled_by(&key))
+            .map(|(raw, _)| Server::NonInvite(TransactionId::new(raw)))
     }
 
     /// Every transaction whose messages went out over `transport`.

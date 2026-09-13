@@ -260,11 +260,26 @@ impl Dialogs {
         Some(entry.key)
     }
 
-    /// Every dialog, for the sweeps that have to visit all of them.
-    pub(crate) fn ids(&self) -> Vec<DialogId> {
-        self.entries
-            .iter()
-            .map(|(raw, _)| DialogId::new(raw))
+    /// Every dialog a set has named, found through the set's own branches.
+    ///
+    /// Retiring an INVITE transaction ends what its set is still holding, and
+    /// that happens on the timer path, for every call whose timer M fires at
+    /// the same instant. Visiting every dialog the endpoint holds on each
+    /// retirement made that quadratic in the number of calls; this visits the
+    /// branches of one INVITE and nothing else.
+    pub(crate) fn branches_of(&self, set: Raw) -> Vec<DialogId> {
+        let Some(branches) = self.sets.get(set) else {
+            return Vec::new();
+        };
+        branches
+            .set
+            .dialogs()
+            .filter_map(|dialog| self.by_key.get(dialog.key()).copied())
+            .filter(|id| {
+                self.entries
+                    .get(id.raw)
+                    .is_some_and(|entry| matches!(entry.home, Home::Branch(home) if home == set))
+            })
             .collect()
     }
 }

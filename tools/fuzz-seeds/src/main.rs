@@ -4,7 +4,7 @@
 //! The seed corpus the fuzz targets start from, written out of this
 //! repository's own writers.
 //!
-//! A public clone that gets thirteen targets and no corpus gets thirteen
+//! A public clone that gets fifteen targets and no corpus gets fifteen
 //! targets that begin from the empty input, and a coverage-guided fuzzer
 //! spends its first hours rediscovering that a SIP message starts with a
 //! method name. So the seeds are committed -- and because they are committed
@@ -43,6 +43,7 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use sipral_core::msg::{
     HeaderName, Method, ParseMode, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
@@ -50,6 +51,13 @@ use sipral_core::msg::{
 };
 use sipral_core::replay::Recording;
 use sipral_core::sdp::{self, Crypto};
+use sipral_dtls::handshake::{
+    HandshakeMessage, HandshakeType, HelloVerifyRequest, fragments as dtls_fragments,
+};
+use sipral_dtls::keys::EcdsaKey;
+use sipral_dtls::record::{ContentType, ProtocolVersion, records as dtls_records};
+use sipral_dtls::x509::{Certificate as DtlsCertificate, CertificateParams};
+use sipral_dtls::{Config as DtlsConfig, Connection, Random, Role, State};
 use sipral_headless::{ControlMessage, FrameDecoder, write_frame};
 use sipral_nat::stun::{
     AttributeType, Class, Message, MessageBuilder, Method as StunMethod, TransactionId,
@@ -986,6 +994,253 @@ fn through_stream_framing(name: &str, seed: &[u8], expected: usize) -> Result<()
     )))
 }
 
+// ---------------------------------------------------------------- DTLS
+
+/// The seeds of the two ends' random sources, as `dtls_record` has them.
+const DTLS_SERVER_SEED: u64 = 0x5E;
+const DTLS_CLIENT_SEED: u64 = 0xC1;
+
+/// The random source `fuzz_targets/dtls_record.rs` builds its two ends from,
+/// octet for octet. The seeds below are recorded from ends built from it, and
+/// an end built from anything else would answer them with other keys.
+struct DtlsFixed(u64);
+
+impl Random for DtlsFixed {
+    fn fill(&mut self, dest: &mut [u8]) {
+        for octet in dest {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let [top, ..] = self.0.to_be_bytes();
+            *octet = top;
+        }
+    }
+}
+
+fn dtls_identity(scalar: u8, seed: u64) -> Result<(EcdsaKey, DtlsCertificate), Wrong> {
+    let params = CertificateParams {
+        common_name: "sipral-fuzz",
+        not_before: 1_785_542_400,
+        not_after: 1_788_134_400,
+    };
+    let key = EcdsaKey::from_scalar(&[scalar; 32])
+        .map_err(|why| Wrong(format!("the DTLS key does not build: {why:?}")))?;
+    let certificate = DtlsCertificate::self_signed(&key, &params, &mut DtlsFixed(seed))
+        .map_err(|why| Wrong(format!("the DTLS certificate does not build: {why:?}")))?;
+    Ok((key, certificate))
+}
+
+/// The server and the client `dtls_record` builds, in that order.
+fn dtls_ends(now: Instant) -> Result<(Connection, Connection), Wrong> {
+    let (server_key, server_certificate) = dtls_identity(0x5E, DTLS_SERVER_SEED)?;
+    let (client_key, client_certificate) = dtls_identity(0xC1, DTLS_CLIENT_SEED)?;
+    let mut server = DtlsConfig::new(
+        Role::Server,
+        server_key,
+        server_certificate.clone(),
+        vec![client_certificate.fingerprint()],
+    );
+    server.cookie_exchange = false;
+    let client = DtlsConfig::new(
+        Role::Client,
+        client_key,
+        client_certificate,
+        vec![server_certificate.fingerprint()],
+    );
+    let server = Connection::new(server, &mut DtlsFixed(DTLS_SERVER_SEED), now)
+        .map_err(|why| Wrong(format!("the DTLS server does not build: {why:?}")))?;
+    let client = Connection::new(client, &mut DtlsFixed(DTLS_CLIENT_SEED), now)
+        .map_err(|why| Wrong(format!("the DTLS client does not build: {why:?}")))?;
+    Ok((server, client))
+}
+
+/// The datagrams one end sent, in the order it sent them.
+type Datagrams = Vec<Vec<u8>>;
+
+/// A handshake between those two ends over a path that loses nothing: every
+/// datagram the client sent, and every datagram the server sent.
+fn dtls_handshake_run() -> Result<(Datagrams, Datagrams), Wrong> {
+    let now = Instant::now();
+    let (mut server, mut client) = dtls_ends(now)?;
+    let mut from_client = Vec::new();
+    let mut from_server = Vec::new();
+    // flights 1 and 4, then 5 and 6, then a round that must carry nothing
+    for _ in 0..3 {
+        let sent: Vec<Vec<u8>> = std::iter::from_fn(|| client.poll_transmit()).collect();
+        for datagram in &sent {
+            server.handle_datagram(datagram, now);
+        }
+        from_client.extend(sent);
+        let sent: Vec<Vec<u8>> = std::iter::from_fn(|| server.poll_transmit()).collect();
+        for datagram in &sent {
+            client.handle_datagram(datagram, now);
+        }
+        from_server.extend(sent);
+    }
+    if server.state() != State::Connected || client.state() != State::Connected {
+        return Err(Wrong(format!(
+            "the DTLS handshake the seeds are cut from did not complete: the server is {:?}, \
+             the client {:?}",
+            server.state(),
+            client.state()
+        )));
+    }
+    Ok((from_client, from_server))
+}
+
+/// The two-octet length in front of a datagram, which is how `dtls_record`
+/// cuts its input up.
+fn push_long_datagram(out: &mut Vec<u8>, datagram: &[u8]) -> Result<(), Wrong> {
+    let len = u16::try_from(datagram.len()).map_err(|_| {
+        Wrong(format!(
+            "a datagram of {} octets cannot be length-prefixed with two",
+            datagram.len()
+        ))
+    })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(datagram);
+    Ok(())
+}
+
+/// Each side of a real handshake as a run of datagrams: the client's flights,
+/// which take the target's server to its Finished, and the server's, which
+/// take the target's client to its own.
+fn dtls_record_seeds() -> Result<Vec<Seed>, Wrong> {
+    let (from_client, from_server) = dtls_handshake_run()?;
+    let mut out = Vec::new();
+    for (name, datagrams, finishes) in [
+        ("client-flights", &from_client, Role::Server),
+        ("server-flights", &from_server, Role::Client),
+    ] {
+        let mut run = Vec::new();
+        for datagram in datagrams {
+            push_long_datagram(&mut run, datagram)?;
+        }
+        through_dtls_ends(name, &run, finishes)?;
+        out.push((name, run));
+    }
+    Ok(out)
+}
+
+/// One run, through both ends the target puts it through, cut the way the
+/// target cuts it: the end the run was written for has to complete its
+/// handshake on it.
+fn through_dtls_ends(name: &str, run: &[u8], finishes: Role) -> Result<(), Wrong> {
+    let now = Instant::now();
+    let (mut server, mut client) = dtls_ends(now)?;
+    let mut rest = run;
+    while let Some((length, tail)) = rest.split_first_chunk::<2>() {
+        let take = usize::from(u16::from_be_bytes(*length)).min(tail.len());
+        let (datagram, tail) = tail.split_at(take);
+        rest = tail;
+        server.handle_datagram(datagram, now);
+        client.handle_datagram(datagram, now);
+    }
+    let end = match finishes {
+        Role::Server => &server,
+        Role::Client => &client,
+    };
+    if end.state() == State::Connected {
+        return Ok(());
+    }
+    Err(Wrong(format!(
+        "the {name} seed leaves the target's {finishes:?} {:?} rather than connected",
+        end.state()
+    )))
+}
+
+/// Every message of a real handshake the way `dtls_handshake` takes one: the
+/// type, then the body. The two Finished messages travel protected, so a
+/// Finished is written out by hand instead, and so is a HelloVerifyRequest,
+/// which a server without a cookie exchange never sends.
+fn dtls_handshake_seeds() -> Result<Vec<Seed>, Wrong> {
+    let (from_client, from_server) = dtls_handshake_run()?;
+    let mut out: Vec<Seed> = Vec::new();
+    for (side, datagrams) in [("client", &from_client), ("server", &from_server)] {
+        for datagram in datagrams {
+            for record in dtls_records(datagram) {
+                let record = record
+                    .map_err(|why| Wrong(format!("a {side} datagram does not read: {why:?}")))?;
+                if record.header.epoch != 0 || record.header.content_type != ContentType::HANDSHAKE
+                {
+                    continue;
+                }
+                for fragment in dtls_fragments(record.fragment) {
+                    let fragment = fragment.map_err(|why| {
+                        Wrong(format!("a {side} fragment does not read: {why:?}"))
+                    })?;
+                    let header = fragment.header;
+                    if header.fragment_length != header.length {
+                        return Err(Wrong(format!(
+                            "the {side} sent a {:?} in pieces, and a seed is a whole message",
+                            header.msg_type
+                        )));
+                    }
+                    let name = dtls_seed_name(side, header.msg_type).ok_or_else(|| {
+                        Wrong(format!(
+                            "the {side} sent a {:?}, which no seed is named for",
+                            header.msg_type
+                        ))
+                    })?;
+                    let mut seed = vec![header.msg_type.0];
+                    seed.extend_from_slice(fragment.body);
+                    out.push((name, seed));
+                }
+            }
+        }
+    }
+
+    let mut request = vec![HandshakeType::HELLO_VERIFY_REQUEST.0];
+    HelloVerifyRequest {
+        server_version: ProtocolVersion::DTLS_1_0,
+        cookie: vec![0xC0; 32],
+    }
+    .encode(&mut request)
+    .map_err(|why| {
+        Wrong(format!(
+            "the HelloVerifyRequest seed does not encode: {why:?}"
+        ))
+    })?;
+    out.push(("hello-verify-request", request));
+    let mut finished = vec![HandshakeType::FINISHED.0];
+    finished.extend_from_slice(&[0xF1; 12]);
+    out.push(("finished", finished));
+
+    for (name, seed) in &out {
+        let Some((&msg_type, body)) = seed.split_first() else {
+            return Err(Wrong(format!("the {name} seed has no message type")));
+        };
+        let message = HandshakeMessage::parse(HandshakeType(msg_type), body)
+            .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
+        let mut written = Vec::new();
+        message
+            .encode_body(&mut written)
+            .map_err(|why| Wrong(format!("the {name} seed does not write back: {why:?}")))?;
+        if written != body {
+            return Err(Wrong(format!(
+                "the {name} seed writes back as other octets than it was read from"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+fn dtls_seed_name(side: &str, msg_type: HandshakeType) -> Option<&'static str> {
+    Some(match (side, msg_type) {
+        ("client", HandshakeType::CLIENT_HELLO) => "client-hello",
+        ("client", HandshakeType::CERTIFICATE) => "client-certificate",
+        ("client", HandshakeType::CLIENT_KEY_EXCHANGE) => "client-key-exchange",
+        ("client", HandshakeType::CERTIFICATE_VERIFY) => "certificate-verify",
+        ("server", HandshakeType::SERVER_HELLO) => "server-hello",
+        ("server", HandshakeType::CERTIFICATE) => "server-certificate",
+        ("server", HandshakeType::SERVER_KEY_EXCHANGE) => "server-key-exchange",
+        ("server", HandshakeType::CERTIFICATE_REQUEST) => "certificate-request",
+        ("server", HandshakeType::SERVER_HELLO_DONE) => "server-hello-done",
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------- writing
 
 /// Every target, and the seeds it starts from.
@@ -994,6 +1249,8 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("builder", builder_seeds()?),
         ("crypto", crypto_seeds()?),
         ("dialoginfo", dialoginfo_seeds()?),
+        ("dtls_handshake", dtls_handshake_seeds()?),
+        ("dtls_record", dtls_record_seeds()?),
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
         ("parse", sip_seeds()?),

@@ -274,6 +274,26 @@ impl WriteEpoch {
         Self { epoch: 0, next: 0 }
     }
 
+    /// Epoch 0, its next record taking `sequence`.
+    ///
+    /// For a server that kept no state across a cookie exchange: RFC 6347
+    /// §4.2.1 has it "use the record sequence number in the ClientHello as
+    /// the record sequence number in its initial ServerHello", and count on
+    /// from there.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SequenceExhausted`] for a sequence number wider than 48 bits.
+    pub const fn starting_at(sequence: u64) -> Result<Self, Error> {
+        if sequence > MAX_SEQUENCE {
+            return Err(Error::SequenceExhausted);
+        }
+        Ok(Self {
+            epoch: 0,
+            next: sequence,
+        })
+    }
+
     /// The epoch records are sent in.
     #[must_use]
     pub const fn epoch(&self) -> u16 {
@@ -480,5 +500,20 @@ mod tests {
             next: 7,
         };
         assert_eq!(last.advance(), Err(Error::SequenceExhausted));
+    }
+
+    #[test]
+    fn a_stateless_server_counts_on_from_the_client_hellos_sequence_number() {
+        let mut epoch = WriteEpoch::starting_at(41).unwrap();
+        assert_eq!(epoch.epoch(), 0);
+        assert_eq!(epoch.next_sequence(), Ok(41));
+        assert_eq!(epoch.next_sequence(), Ok(42));
+        let mut last = WriteEpoch::starting_at(MAX_SEQUENCE).unwrap();
+        assert_eq!(last.next_sequence(), Ok(MAX_SEQUENCE));
+        assert_eq!(last.next_sequence(), Err(Error::SequenceExhausted));
+        assert_eq!(
+            WriteEpoch::starting_at(MAX_SEQUENCE + 1),
+            Err(Error::SequenceExhausted)
+        );
     }
 }

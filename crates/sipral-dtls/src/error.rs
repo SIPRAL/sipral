@@ -29,10 +29,9 @@ pub enum Error {
     /// A record, a message, a certificate or a reassembly buffer would exceed
     /// a limit — the specification's or this crate's.
     TooLarge,
-    /// A handshake fragment disagrees with fragments of the same message
-    /// already held: another type, another total length, or other bytes in
-    /// the part they share.
-    InconsistentFragment,
+    /// Application data was offered to a connection whose handshake has not
+    /// completed, or that has failed or closed.
+    NotConnected,
     /// The path MTU leaves no room for a single octet of handshake body.
     MtuTooSmall,
     /// A protected record did not authenticate. RFC 5288 §3 reports every
@@ -76,7 +75,7 @@ impl fmt::Display for Error {
             Self::IllegalValue => "value not allowed in this field",
             Self::DuplicateExtension => "extension type appears twice",
             Self::TooLarge => "exceeds a size limit",
-            Self::InconsistentFragment => "fragment disagrees with the message already held",
+            Self::NotConnected => "the connection is not established",
             Self::MtuTooSmall => "path MTU leaves no room for handshake data",
             Self::BadRecordMac => "record did not authenticate",
             Self::Replayed => "record sequence number replayed or too old",
@@ -109,7 +108,7 @@ mod tests {
             Error::IllegalValue => "value not allowed in this field",
             Error::DuplicateExtension => "extension type appears twice",
             Error::TooLarge => "exceeds a size limit",
-            Error::InconsistentFragment => "fragment disagrees with the message already held",
+            Error::NotConnected => "the connection is not established",
             Error::MtuTooSmall => "path MTU leaves no room for handshake data",
             Error::BadRecordMac => "record did not authenticate",
             Error::Replayed => "record sequence number replayed or too old",
@@ -134,7 +133,7 @@ mod tests {
             Error::IllegalValue,
             Error::DuplicateExtension,
             Error::TooLarge,
-            Error::InconsistentFragment,
+            Error::NotConnected,
             Error::MtuTooSmall,
             Error::BadRecordMac,
             Error::Replayed,

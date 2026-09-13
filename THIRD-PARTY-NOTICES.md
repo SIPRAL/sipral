@@ -166,8 +166,9 @@ constant-time elliptic curve is the one place an implementation of our own
 would be a risk rather than a virtue. SHA-1, used only to read an old
 certificate fingerprint, is written in-tree like the other two copies.
 
-Nothing in the tree depends on `sipral-dtls` yet, so none of this is in a
-binary built from the facade today. It is listed now because it is in the
+Nothing that ships depends on `sipral-dtls` yet — only the fuzz targets and
+the seed generator do — so none of this is in a binary built from the facade
+today. It is listed now because it is in the
 lockfile now, and the rule is the same commit.
 
 The crate names four of them — `p256`, `aes-gcm`, `sha2`, `hmac` — and

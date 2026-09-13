@@ -11,8 +11,18 @@
 //!
 //! # What is here
 //!
-//! The ground the handshake state machines stand on, each piece complete and
-//! tested on its own:
+//! The handshake, for either end:
+//!
+//! - [`connection`]: the client and server state machines of RFC 6347 with
+//!   the server's stateless cookie exchange, flight retransmission, alerts
+//!   and closure, `use_srtp` negotiation, mutual authentication checked
+//!   against the peer's signalled fingerprint, and the SRTP keys exported
+//!   once both Finished messages are verified;
+//! - [`setup`]: which end is the client, from `a=setup` (RFC 4145, RFC 5763
+//!   §5);
+//! - [`alert`]: the alert codec.
+//!
+//! And the ground they stand on, each piece complete and tested on its own:
 //!
 //! - [`prf`]: the TLS 1.2 PRF with SHA-256, the master secret and the extended
 //!   master secret, the Finished `verify_data`, the record key block;
@@ -30,9 +40,10 @@
 //!
 //! # What is not here yet
 //!
-//! The handshake itself: the client and server state machines, flight
-//! retransmission, alerts and closure, and the connection that joins them to
-//! a media session. Nothing in the tree calls this crate yet.
+//! What joins a connection to a call: the `a=fingerprint` and `a=setup` lines
+//! of a session description, telling DTLS apart from STUN and RTP on one
+//! socket (RFC 7983), and keying a media session with what a connection
+//! exports. Nothing outside the fuzz targets calls this crate yet.
 //!
 //! # What is not written here at all
 //!
@@ -60,11 +71,13 @@
 //!
 //! Like the rest of the tree, nothing here opens a socket, reads a clock or
 //! draws a random number. Datagrams, the current time for a certificate's
-//! validity, and every random octet ([`Random`]) come from the caller.
+//! validity and for a retransmission, and every random octet ([`Random`])
+//! come from the caller.
 //!
 //! Written from RFC 6347, RFC 5246, RFC 5288, RFC 5289, RFC 5705, RFC 5746,
-//! RFC 5764, RFC 7627, RFC 8422, RFC 5280, RFC 5480, RFC 5758, RFC 3279 and
-//! RFC 8122; see `docs/02-clean-room.md` for why that matters here.
+//! RFC 5763, RFC 5764, RFC 4145, RFC 7627, RFC 8422, RFC 8827, RFC 5280, RFC
+//! 5480, RFC 5758, RFC 3279 and RFC 8122; see `docs/02-clean-room.md` for why
+//! that matters here.
 //!
 //! [`MasterSecret::export`]: prf::MasterSecret::export
 
@@ -83,6 +96,8 @@
     )
 )]
 
+pub mod alert;
+pub mod connection;
 mod ct;
 mod error;
 pub mod exporter;
@@ -91,9 +106,11 @@ pub mod keys;
 pub mod prf;
 mod random;
 pub mod record;
+pub mod setup;
 mod wire;
 pub mod x509;
 
+pub use connection::{Config, Connection, Event, Failure, Retransmission, SrtpKeying, State};
 pub use error::Error;
 pub use random::Random;
 

@@ -731,7 +731,11 @@ pub struct EndpointConfig {
     /// The ceiling on what a peer can make this endpoint hold. Past either
     /// one, a request from outside every dialog we already have is answered
     /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so. Defaults
-    /// 256 and 128 — an order of magnitude past what a softphone reaches.
+    /// 256 and 128 — an order of magnitude past what a softphone reaches. An
+    /// incoming call counts against `max_dialogs` from the moment its INVITE
+    /// is let in, not from the response of ours that makes its dialog; each
+    /// branch of a fork past the first dialog of our own INVITE, and past the
+    /// first 2xx to it, opens only while there is room.
     pub max_server_transactions: usize,
     pub max_dialogs: usize,
     /// How much of the diagnostic record to keep: entries per call, and calls
@@ -980,12 +984,23 @@ the layer above decide which to keep. Baking "ACK and BYE the loser" into the
 core would forbid a legal and occasionally wanted sequence (keep both), and
 would put policy in the layer that is supposed to have none.
 
+The one limit it applies is `max_dialogs`, and only past the first dialog of
+the INVITE and the first 2xx to it, which between them are the call the
+application placed: a forking proxy can ring the desk phone and have the
+mobile answer. A further branch that
+finds no room opens nothing: its provisional is reported with no dialog, and
+its 2xx is not reported or acknowledged, so the far end gives it up with a BYE
+of its own (§13.3.1.4). Acknowledging and hanging it up from here would turn
+every forged 2xx into two requests, retransmitted, to a Contact its sender
+chose.
+
 ## Events
 
 ```rust
 #[non_exhaustive]
 pub enum Event {
-    // UAC, fork-aware: one early dialog per distinct To-tag
+    // UAC, fork-aware: one early dialog per distinct To-tag, while
+    // `max_dialogs` has room past the INVITE's first dialog and first 2xx
     /// `dialog: None` for a 100, and for a provisional with no tag to name a
     /// dialog by; neither of those opens one.
     Provisional { invite: TransactionId<InviteClient>, dialog: Option<DialogId>, status: StatusCode, response: OwnedMessage },
@@ -1033,7 +1048,13 @@ pub enum Event {
     IncomingInvite { transaction: TransactionId<InviteServer>, request: OwnedMessage },
     /// The caller gave up. The 200 for the CANCEL and the 487 for the INVITE
     /// have already gone out — §9.2 makes both unconditional — so what is left
-    /// is to stop ringing.
+    /// is to stop ringing. An early dialog a provisional had opened ends with
+    /// the 487 (§12.3): `DialogTerminated { Refused }` follows this event, as
+    /// it follows any refusal of an INVITE that had rung. While a reliable
+    /// provisional of that INVITE is still unacknowledged it follows the end
+    /// of the INVITE transaction instead, because a PRACK for it is still
+    /// answered (RFC 3262 §3). A CANCEL that crosses a final response already
+    /// sent changes nothing and is not reported.
     IncomingCancel { invite: TransactionId<InviteServer> },
     IncomingPrack { transaction: TransactionId<NonInviteServer>, provisional: ProvisionalResponseId, request: OwnedMessage },
     IncomingAck { dialog: DialogId, request: OwnedMessage },

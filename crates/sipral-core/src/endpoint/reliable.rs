@@ -96,6 +96,15 @@ impl Reliable {
 #[derive(Debug, Default)]
 pub(super) struct Reliables {
     entries: Slab<Reliable>,
+    /// Every entry, by the dialog it belongs to.
+    ///
+    /// Ending a dialog, matching a PRACK and refusing a call whose response
+    /// went unacknowledged each ask about one dialog or one INVITE. Answered
+    /// by visiting every entry, a burst of calls given up on at the same
+    /// instant cost the square of their number.
+    of_dialog: HashMap<DialogId, Vec<Raw>>,
+    /// Every entry this end sent, by the INVITE it answers.
+    of_invite: HashMap<TransactionId<InviteServer>, Vec<Raw>>,
     /// The highest `RSeq` received in order, per dialog.
     ///
     /// §4 keeps this "for the initial request", which predates a clean answer
@@ -115,6 +124,8 @@ impl Reliables {
     pub(super) fn new() -> Self {
         Self {
             entries: Slab::new(),
+            of_dialog: HashMap::new(),
+            of_invite: HashMap::new(),
             heard: HashMap::new(),
             series: HashMap::new(),
         }
@@ -122,7 +133,14 @@ impl Reliables {
 
     /// Keep one, and name it.
     pub(super) fn keep(&mut self, reliable: Reliable) -> Raw {
-        self.entries.insert(reliable)
+        let dialog = reliable.dialog;
+        let invite = reliable.sent.as_ref().map(|sent| sent.invite);
+        let raw = self.entries.insert(reliable);
+        self.of_dialog.entry(dialog).or_default().push(raw);
+        if let Some(invite) = invite {
+            self.of_invite.entry(invite).or_default().push(raw);
+        }
+        raw
     }
 
     /// What is known about one.
@@ -137,7 +155,12 @@ impl Reliables {
 
     /// Forget one, acknowledged or given up on.
     pub(super) fn forget(&mut self, raw: Raw) -> Option<Reliable> {
-        self.entries.remove(raw)
+        let reliable = self.entries.remove(raw)?;
+        unlink(&mut self.of_dialog, &reliable.dialog, raw);
+        if let Some(sent) = reliable.sent.as_ref() {
+            unlink(&mut self.of_invite, &sent.invite, raw);
+        }
+        Some(reliable)
     }
 
     /// The response a PRACK acknowledges, if it is one we are still holding.
@@ -145,10 +168,11 @@ impl Reliables {
     /// §3: a PRACK that matches nothing "MUST be responded to with a 481", so
     /// `None` here is an answer rather than a shrug.
     pub(super) fn answered_by(&self, dialog: DialogId, rack: &RAck<'_>) -> Option<Raw> {
-        self.entries
-            .iter()
-            .find(|(_, reliable)| reliable.answered_by(dialog, rack))
-            .map(|(raw, _)| raw)
+        self.of_dialog.get(&dialog)?.iter().copied().find(|raw| {
+            self.entries
+                .get(*raw)
+                .is_some_and(|reliable| reliable.answered_by(dialog, rack))
+        })
     }
 
     /// Whether this INVITE already has one waiting to be acknowledged.
@@ -156,12 +180,7 @@ impl Reliables {
     /// §3: "The UAS MUST NOT send a second reliable provisional response until
     /// the first is acknowledged."
     pub(super) fn outstanding_on(&self, invite: TransactionId<InviteServer>) -> bool {
-        self.entries.iter().any(|(_, reliable)| {
-            reliable
-                .sent
-                .as_ref()
-                .is_some_and(|sent| sent.invite == invite)
-        })
+        self.of_invite.contains_key(&invite)
     }
 
     /// The next number in this INVITE's series.
@@ -178,16 +197,7 @@ impl Reliables {
 
     /// Everything this INVITE is still holding, for when it ends.
     pub(super) fn on_invite(&self, invite: TransactionId<InviteServer>) -> Vec<Raw> {
-        self.entries
-            .iter()
-            .filter(|(_, reliable)| {
-                reliable
-                    .sent
-                    .as_ref()
-                    .is_some_and(|sent| sent.invite == invite)
-            })
-            .map(|(raw, _)| raw)
-            .collect()
+        self.of_invite.get(&invite).cloned().unwrap_or_default()
     }
 
     /// This INVITE is over: forget its series.
@@ -223,11 +233,17 @@ impl Reliables {
 
     /// Everything held for a dialog, for when it ends.
     pub(super) fn on_dialog(&self, dialog: DialogId) -> Vec<Raw> {
-        self.entries
-            .iter()
-            .filter(|(_, reliable)| reliable.dialog == dialog)
-            .map(|(raw, _)| raw)
-            .collect()
+        self.of_dialog.get(&dialog).cloned().unwrap_or_default()
+    }
+}
+
+/// Take one entry out of an index, and its key with it once nothing is left.
+fn unlink<K: Eq + core::hash::Hash>(index: &mut HashMap<K, Vec<Raw>>, key: &K, raw: Raw) {
+    if let Some(held) = index.get_mut(key) {
+        held.retain(|known| *known != raw);
+        if held.is_empty() {
+            index.remove(key);
+        }
     }
 }
 

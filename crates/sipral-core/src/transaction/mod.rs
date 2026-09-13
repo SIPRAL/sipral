@@ -34,7 +34,6 @@ pub use handle::{
     NonInviteClient, NonInviteClientState, NonInviteServer, NonInviteServerState,
     ProvisionalResponseId, Role, TransactionId, TransactionKind,
 };
-pub(crate) use matching::ServerKey;
 pub(crate) use store::{Client, Server, Transactions};
 pub use timer::{TimerConfig, TimerName};
 pub(crate) use timer::{TimerHandle, Timers};

@@ -121,7 +121,7 @@ pub(super) fn header(bytes: &[u8], name: HeaderName<'_>) -> Vec<u8> {
 
 /// A response to a request the endpoint wrote, echoing the fields §8.2.6.2
 /// requires and nothing else.
-fn respond_to(request: &[u8], status: u16, reason: &str, tag: Option<&str>) -> Vec<u8> {
+pub(super) fn respond_to(request: &[u8], status: u16, reason: &str, tag: Option<&str>) -> Vec<u8> {
     respond_with(request, status, reason, tag, "")
 }
 

@@ -62,7 +62,7 @@ you pick, or replace, or leave out entirely.
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
 | `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
-| `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the record layer, handshake framing and messages, key derivation and the SRTP key export, self-signed certificates and their fingerprints. The foundation is written and tested; the handshake state machines are not, and no call reaches it |
+| `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the client and server handshake with retransmission, the stateless cookie exchange, alerts and the SRTP key export, over the record layer, handshake framing and messages, key derivation, and self-signed certificates checked by fingerprint. Written and tested; no call reaches it yet |
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 follows in phase 2, written the same way, for the carrier that insists |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
@@ -77,7 +77,8 @@ which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
 Core set: RFC 3261, 3262, 3263, 3264, 3311, 3515, 3581, 4028, 6026, 6665, 8760
 for signalling; 3550, 3551, 4733, 6716 and 7587 for media; 3711 with 4568 for
 SRTP and its SDES keying; 8445, 8489 and 8656 for NAT. DTLS-SRTP (5764) is
-phase 2: the SDP plumbing is there, the handshake is not.
+phase 2: the SDP plumbing is there and so is the handshake, and the two are
+not joined yet.
 
 ## Not trusting the input
 
@@ -88,10 +89,11 @@ here treats them as exceptional.
   lints across the workspace, and `scripts/check.sh` runs with `-D warnings`.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
   128 header fields, 4 KiB per header value, all three lower on request.
-- **Fuzzing** since the twenty-sixth commit — thirteen `cargo-fuzz` targets,
+- **Fuzzing** since the twenty-sixth commit — fifteen `cargo-fuzz` targets,
   over the parser, the builder, the stream framer, SDP and its `a=crypto`
   lines, the recording format, the dialog-info body, the headless control
-  channel, RTCP, RTP named events, SRTP unprotect, STUN and TURN. Run by
+  channel, RTCP, RTP named events, SRTP unprotect, STUN, TURN, and the DTLS
+  record layer and handshake messages. Run by
   `scripts/fuzz.sh`; built by `scripts/check.sh` on every run so none of them
   can rot uncompiled. The seeds are committed under `fuzz/corpus/`, written by
   `tools/fuzz-seeds` out of the library's own encoders, so a clone starts with
