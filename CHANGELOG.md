@@ -73,6 +73,80 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **On Windows, a saved device choice now falls back when the headset is
+  unplugged, not only when the machine has never seen it.**
+  `DeviceChoice::Preferred` fell back only when `GetDevice` said the identifier
+  was unknown, but Windows keeps unplugged, disabled and absent endpoints in its
+  registry, so recovering from a pulled headset failed at `Activate` instead of
+  landing on the system's route; it now asks `IMMDevice::GetState`. Three more
+  corrections in `sipral-io-wasapi`, whose tests now run on Windows:
+  `Start`, `Stop` and `Reset` answering `AUDCLNT_E_DEVICE_INVALIDATED` now
+  report `StreamEvent::DeviceLost` and end the audio thread, so a headset
+  pulled while the stream was stopped is reported at the next start, and a
+  start or stop asked once a loss is written down answers `Error::NoDevice` at
+  once instead of waiting two seconds on a loop already left; a
+  `start`/`stop` now takes only the answer sent under its own ticket, so the
+  late answer to a command that timed out is not reported as its own; and a
+  device format whose extension is longer than `WAVEFORMATEXTENSIBLE`'s is
+  copied with `cbSize` cut to the 22 octets actually copied, rather than
+  telling `IAudioClient::Initialize` to read past a stack value.
+
+- **A CoreAudio stream took its render-to-capture delay and its device-loss
+  check off one device object, while the voice-processing unit plays to one and
+  captures from another.** The capture half was read off the speaker's absent
+  input side at the speaker's rate, and an unplugged microphone went
+  unreported. Each half is now asked of the device the unit reports for it
+  (`Stream::capture_device` is new), losing either is `DeviceLost`, the silence
+  flag goes only on buffers that were zeroed, and a ragged
+  `kAudioDevicePropertyStreams` size is no longer cut short.
+
+- **The SDP fuzz target could report a crash that was not one.** It wrote a
+  parsed description back out and asserted the result read back in under the
+  same `sdp::Limits::DEFAULT` it started from, but `to_bytes` always closes a
+  line with CRLF while `parse` tolerates a bare LF — so a description close
+  to the 16 KiB body limit and built with bare LF grows by one octet per line
+  once every line gets its `\r` back, and the re-parse failed with
+  `BodyTooLarge` on an input the real parser had already accepted. The
+  target now re-parses under a body limit doubled plus one, which is always
+  enough for that growth since it cannot exceed the input's own length, and
+  every other bound is left at the default: the property under test is that
+  writing a description does not change what it means, not that its
+  canonical form obeys the size cap a wire policy puts on a stranger's bytes.
+  The answer the target builds to that offer was read back under the default
+  limits too, and it is not a copy of the offer: it repeats the offer's `t=`
+  and `r=` lines, media types, transports and kept formats, adds an origin, a
+  connection and a direction line of its own, and writes a four-digit port
+  where the offer's `m=` line may have had one digit. So an offer within the
+  limits could be answered past the body limit or past the line limit, CRLF
+  or not. The answer is now read back under three times the body limit and
+  four octets more per line, each shown enough in the target, with every
+  count left at the default.
+  `crypto` and `replay` round-trip the same way but enforce no size limit of
+  their own, so neither is exposed to this; `builder` re-parses the exact
+  bytes its own `build()` already checked, so there is nothing left to grow.
+  Three regression seeds are committed to `fuzz/corpus/sdp/`: a bare-LF
+  offer at the body limit, and two offers whose answers cross the body and
+  the line limit.
+
+- **A repeated RTCP BYE could pull the group below the local participant, and
+  the first RTCP report was never actually randomised.** (a) `RtpSession`'s
+  BYE handling called `IntervalTimer::remove_member` and `remove_sender`
+  again for a source it had already removed, because nothing recorded that
+  it had left; a peer repeating its BYE — a retransmission, or a duplicate
+  the network made — drove `members` to zero, and reverse reconsideration
+  (RFC 3550 §6.3.4) pulled the next report to the instant the repeat arrived.
+  `Inbound::departed` now marks a source gone on its first BYE, so a repeat
+  is still reported as `Arrival::Goodbye` but removes nothing a second time,
+  and `IntervalTimer::remove_member` never counts below the local participant,
+  which also covers a far end's BYE crossing the one `send_bye` sent.
+  (b) `MediaSession::open` built every stream's `RtpSession` with a fixed
+  `unit_interval` of `0.5`, so the first deadline always sat at the midpoint
+  of the `[0.5, 1.5)` scaling RFC 3550 §6.2 asks to be drawn at random, and
+  the first report could only land in [2.05 s, 3.08 s] rather than across
+  [1.03 s, 3.08 s]. It now draws that factor
+  from the call's own seeded generator before the session exists — the same
+  generator every later report already drew from.
+
 - **A session timer that could not be refreshed yet stayed due at the instant
   that had already fired, forever.** `send_refresh` returned without moving
   `due` when the call had no dialog to send a refresh in, and when it was not
@@ -143,8 +217,49 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   ones the library reports, it lists as many structs as
   `sipral_abi_versioned_count` counts, and a pinned struct with no entry
   point in the test, or an entry point with no pin, fails by name.
-  Kotlin's binding does not call the check at load yet: its `init` loads
-  the JNI shim and nothing more.
+  Kotlin's binding calls it as its native object initialises.
+
+- **A stream whose ICE checklist had Failed could still carry data and select
+  a pair.** `IceAgent::send` kept routing data on a Failed stream — on a
+  component selected before another component's nomination failed, on a pair
+  kept from before a restart, or on the best valid pair — although RFC 8445
+  §12.1 forbids sending on any component of a stream that cannot produce a
+  selected pair for all of them. A success arriving afterwards, for a check
+  cancelled when the checklist failed, still selected a pair and started
+  consent checks on it. A Failed stream now refuses to send with `NoRoute`, and
+  a late success selects nothing.
+
+- **The ICE pair limit could discard the pair a nomination needed.** When
+  `IceAgent::set_remote` was called again with the same credentials and a
+  better candidate while the checklist set was at `max_pairs`, the lowest
+  pairs were discarded whatever their state. A pair whose check had already
+  succeeded went with them, and so did the only way to repeat that check with
+  USE-CANDIDATE: the controlling agent skipped the valid pair on every pass and
+  never nominated, which RFC 8445 §8.1.1 requires it eventually to do. The
+  limit now discards only pairs no check has touched; a pair that is
+  In-Progress, has finished, is queued for a triggered check or carries a
+  nomination stays.
+
+- **An ICE agent configured below the default Ta kept it against a peer that
+  proposed none.** RFC 8445 §14.2 has both agents use the higher of the two
+  proposed values, and counts an agent that proposes nothing as proposing the
+  default 50 ms. `IceAgent::set_remote` raised Ta only when the peer wrote
+  `a=ice-pacing`, so an agent set to 20 ms paced its checks at 20 ms against
+  every lite peer, which never writes one, and against any full peer that
+  left it out. A peer without `a=ice-pacing` now counts as 50 ms.
+
+- **A controlled ICE agent accepted nominations it then dropped.** When the
+  source of a USE-CANDIDATE check did not fit under `max_remote_candidates`, or
+  its pair did not fit under `max_pairs`, `IceAgent` still answered with a
+  success and then did nothing with the nomination: the controlling side
+  completed and the controlled side stayed Running with nothing selected. RFC
+  8445 §7.3.1.5 requires a nomination the controlled agent does not accept to
+  be refused with an error, so it now gets a signed 400, which fails the
+  nominating check on the other side as §7.2.5.3.4 prescribes. A nomination
+  that arrives before the answer and finds the queue of early checks full is
+  refused the same way, and so is one on a stream whose checklist has Failed,
+  one naming a peer fragment the stream does not hold, and one on a component
+  the stream was reduced away from: each was also answered and then dropped.
 
 - **The lab's outage profile could pass without the outage touching the
   call.** `interop/impairment/blackout.sh` cut the link five seconds after its
@@ -480,6 +595,35 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   of what opens a dialog; P-Associated-URI (RFC 7315) is reported. Every value
   is parsed strictly and bounded, and one that is not is left out and written
   into the REGISTER's diagnostic record under three new codes.
+
+- **ICE in the full role, written and not yet reached from a call.**
+  `sipral_nat::ice::IceAgent` gathers host, server-reflexive and relayed
+  candidates, forms and paces checklists, resolves role conflicts, nominates,
+  restarts, and keeps consent on the pair it selects (RFC 8445, RFC 7675), in
+  the sans-I/O shape of the STUN and TURN clients. No trickle, deliberately, and
+  RTP and RTCP multiplexed. The SDP side gains `a=ice-pacing`, `a=ice-mismatch`
+  and a mismatch check that reads `a=rtcp`; the lite agent now authenticates a
+  check through the same code as the full one. Tested over a simulated network
+  with the NAT behaviours that decide which pair works, role conflicts from
+  both starting roles, a restart, consent lost and revoked, and a lossy path;
+  `docs/06-nat.md` says what it does and what it does not do yet.
+
+- **Kotlin can build a stack and hear its events.** The generated binding took
+  every struct a caller fills in — `sipral_stack_config_t`,
+  `sipral_account_config_t`, `sipral_call_config_t` — as a `Long` holding its
+  address, which nothing on the JVM can produce, and had no way to be called
+  back. Each of those structs is now a Kotlin class the JNI shim copies into a
+  zeroed C struct with its size set, and the event callback is a
+  `SipralEventListener`: the listener stays on the Kotlin side under a key, and
+  the C function the shim prints for the callback to land in attaches the
+  polling thread only when it is not attached, detaches only what it attached,
+  and deletes the array it made for each event before the next one arrives.
+  `SipralNative` calls `sipral_abi_check` as it loads and throws naming both
+  versions. `scripts/check.sh` now links the shim against the shared library
+  and runs `BindingCheck.kt` on a JVM under `-Xcheck:jni`, including a poll
+  from a thread no JVM made. The event payload union is not carried yet:
+  nothing in the declarations says which kind writes which arm. A
+  `stackCreate` that throws instead of answering lets its listener go too.
 
 - **Nine more fuzz targets, and the gate builds all thirteen.**
   `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
@@ -1206,9 +1350,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   one property; CoreAudio has four per direction across two kinds of object,
   and a rate to convert them by, so `sipral-io-coreaudio` assembles it and both
   crates now answer the same question in the same shape. On a laptop's own
-  speakers and microphone that comes to a hundred milliseconds — most of it the
-  devices' own processing rather than buffering — and about half that through
-  the voice-processing unit. Measured on real hardware, not estimated.
+  speakers and microphone, with a stream open, that comes to a little over a
+  hundred milliseconds. It is what the devices report, not an estimate, and
+  `docs/05-media.md` gives the readings and the conditions they were taken
+  under.
 
   On Windows the stream is now opened as a communications stream, which is what
   puts the operating system's own capture-side processing in the path. What it

@@ -23,17 +23,12 @@ use crate::abi::hardware::{
     PROPERTY_STREAM_LATENCY, PROPERTY_STREAMS, PROPERTY_UID, PropertyAddress, SCOPE_GLOBAL,
     SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
 };
-use crate::abi::{BAD_PROPERTY_SIZE, Buffer, BufferList};
+use crate::abi::{BAD_PROPERTY_SIZE, BUFFERS_AT, Buffer};
 use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending};
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
 use crate::latency::{Latency, RenderDelay};
 use crate::status::{Error, OsStatus};
 use crate::sys;
-
-/// Where the buffers begin inside an `AudioBufferList`: after the count and
-/// the padding the pointer alignment forces. A list the framework allocated is
-/// longer than the declared structure, so it is walked by offset.
-const BUFFERS_AT: usize = core::mem::offset_of!(BufferList, buffers);
 
 /// Every device the machine has, at this instant.
 ///
@@ -47,10 +42,7 @@ const BUFFERS_AT: usize = core::mem::offset_of!(BufferList, buffers);
 pub fn devices() -> Result<Vec<Device>, Error> {
     let address = PropertyAddress::new(PROPERTY_DEVICES, SCOPE_GLOBAL);
     let bytes = property_size(SYSTEM_OBJECT, &address)?;
-    // rounded up, never down: the size handed over below is what the layer is
-    // allowed to write, so the allocation has to cover it even if the property
-    // is somehow not a whole number of identifiers
-    let mut ids: Vec<u32> = vec![0; bytes.div_ceil(size_of::<u32>())];
+    let mut ids = identifiers(bytes);
     let mut size = u32::try_from(bytes).unwrap_or(0);
     // SAFETY: the buffer holds at least `size` octets, which is the most the
     // call will write.
@@ -160,9 +152,11 @@ pub fn latency(device: DeviceId, direction: Direction) -> Latency {
 /// The whole loop: out of `playback` and back in through `capture`.
 ///
 /// Two devices rather than one, because on a Mac they usually are: the
-/// built-in microphone and a pair of headphones are two device objects with
-/// two rates and two buffer sizes. A stream that has both on one device passes
-/// the same identifier twice, which is what [`Stream::render_delay`] does.
+/// built-in microphone and the built-in speakers are two device objects, and
+/// so are the built-in microphone and a pair of headphones, each with its own
+/// rate and buffer size. A duplex device, such as a USB headset, is passed
+/// twice. [`Stream::render_delay`] is this, for the two objects the unit
+/// reports it is on.
 ///
 /// [`Stream::render_delay`]: crate::Stream::render_delay
 #[must_use]
@@ -209,7 +203,7 @@ fn first_stream(device: u32, scope: u32) -> Option<u32> {
         // a device with nothing on this side, which is most of them
         return None;
     }
-    let mut ids: Vec<u32> = vec![0; bytes / size_of::<u32>()];
+    let mut ids = identifiers(bytes);
     let mut size = u32::try_from(bytes).unwrap_or(0);
     // SAFETY: the buffer holds at least `size` octets, which is the most the
     // call will write.
@@ -227,6 +221,17 @@ fn first_stream(device: u32, scope: u32) -> Option<u32> {
         return None;
     }
     ids.first().copied()
+}
+
+/// Room for a property that is a list of object identifiers `bytes` long.
+///
+/// Rounded up, never down: the size handed to the call alongside this buffer
+/// is what the layer is allowed to write, so the allocation has to cover it
+/// even when a driver reports a size that is not a whole number of
+/// identifiers. What such a size means is not this function's to guess; the
+/// callers read only the whole identifiers that came back.
+fn identifiers(bytes: usize) -> Vec<u32> {
+    vec![0; bytes.div_ceil(size_of::<u32>())]
 }
 
 /// The device a choice names, or `None` for the system route.
@@ -598,8 +603,8 @@ fn property_words(object: u32, address: &PropertyAddress) -> Result<Vec<u64>, Er
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceMonitor, choose, default_device, device_with_uid, devices, is_alive, latency,
-        render_delay,
+        DeviceMonitor, choose, default_device, device_with_uid, devices, identifiers, is_alive,
+        latency, render_delay,
     };
     use crate::device::{DeviceChoice, DeviceId, Direction};
     use crate::latency::Latency;
@@ -770,6 +775,20 @@ mod tests {
                 }
                 println!("{device} {direction}: {leg}");
             }
+        }
+    }
+
+    #[test]
+    fn a_ragged_property_size_is_given_room_for_all_of_it() {
+        // A driver may report any size at all, and whatever it reports is
+        // what the layer is then allowed to write into the room made for it.
+        for bytes in 0..=64 {
+            let room = identifiers(bytes).len() * size_of::<u32>();
+            assert!(room >= bytes, "{bytes} octets were given {room}");
+            assert!(
+                room < bytes + size_of::<u32>(),
+                "{bytes} octets were given {room}, a whole identifier more than needed"
+            );
         }
     }
 

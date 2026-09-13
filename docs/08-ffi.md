@@ -490,9 +490,11 @@ C linker could collide with.
 
 **Nothing compiles the output but the C.** There is no Swift, Kotlin or .NET
 toolchain in `scripts/check.sh`, so a generated file in one of those three that
-will not compile passes the gate. The JNI shim is never compiled by anything
-here, which is why it is printed as casts and array handling and nothing
-cleverer. The header is the exception, and no longer only just:
+will not compile passes the gate. Kotlin is the exception on a machine with a
+JDK and `kotlinc`: there the JNI shim is linked against the shared library and
+the Kotlin binding runs against it on a JVM, and without them the step says
+`skip` and names what is missing. The header is the other exception, and no
+longer only just:
 `bindings/c/smoke.c` includes it, compiles under `-std=c11 -Wall -Wextra
 -Werror`, links the shared library and runs, in the gate; `bindings/c/sipral.c`
 compiles it a second time as the Swift package's own translation unit.
@@ -564,26 +566,82 @@ than a crash.
 
 Two printed files, because Android has no way to call C but JNI:
 `SipralAbi.kt`, one `external fun` per entry point plus the enumerations, the
-constants, the exception and a layer that turns a status into a throw; and
-`sipral_jni.c`, the C that implements them. They are printed from the same walk
-over the same declarations, which is the only reason it is safe for them to be
-two files.
+constants, the exception, the classes a caller builds, the listener, and a
+layer that turns a status into a throw; and `sipral_jni.c`, the C that
+implements them. They are printed from the same walk over the same
+declarations, which is the only reason it is safe for them to be two files.
 
-Structs are what JNI makes awkward, and the way out is not to let one cross. A
-struct the library fills in whole comes back a member at a time in a `long[]`
-the shim writes, with a float carried as its own bits, so nothing on the Kotlin
-side has to know a field offset — which it could not, since Android builds for
-two pointer widths. What is left over is a struct the caller part-fills, and it
-crosses as an address.
+**No struct's layout crosses.** A struct the library fills in whole comes back
+a member at a time in a `long[]` the shim writes, with a float carried as its
+own bits, so nothing on the Kotlin side has to know a field offset — which it
+could not, since Android builds for two pointer widths. A struct the caller
+fills in and the library only reads — `sipral_stack_config_t`,
+`sipral_account_config_t`, `sipral_call_config_t` — is a Kotlin class with one
+field per member, every field defaulting to the zero the C struct would hold:
+a pointer and its `_len` are one `String` or array, and the callback with the
+user pointer after it is one listener. The wrapper hands the fields over one
+argument each, and the shim copies them into a zeroed struct whose `size` it
+sets from its own header. A member those conventions do not cover — a pointer
+with no `_len` after it, a struct or a union held by value — stops the
+generator, rather than crossing as an address nobody on the Kotlin side has a
+way to make.
 
-Two things are therefore missing from the Kotlin binding and are not missing
-from the other two: a way to build a `sipral_stack_config_t` without an address,
-and the event callback, which needs a C function that attaches the calling
-thread to the JVM and builds a Java object out of the event struct. Until those
-are printed as well, Kotlin has every declaration and not every ergonomic — the
-gate binds on the first and says nothing about the second. The AAR, coroutines
-and `Flow` for events, `ConnectionService` for the system dialer and the
-foreground service for the call lifetime are all still ahead.
+**The listener never leaves the JVM.** `SipralEventListeners` keeps each
+listener under a key, and the key is all C sees, as `event_user_data`, beside a
+C function the shim prints for the callback to land in. That function attaches
+the polling thread to the JVM for the length of the call when it is not
+attached already, and detaches only a thread it attached: a thread that called
+`stackPoll` from Kotlin is attached, and detaching it would pull it out from
+under its caller. It hands over the event and deletes the array it made for the
+message before the next event arrives, because a poll delivers all its events
+inside one native call and a local reference lives until that call returns. The
+class and method it calls are looked up in `JNI_OnLoad`, because a thread
+attached later looks classes up through the system class loader, which on
+Android cannot see the application's. The listener is let go of by
+`stackDestroy`, whatever that answers — a handle destroy refuses names no stack
+that could still call back — so an event from a poll still running when its
+stack went away finds no listener rather than a freed one. The cost is that a
+Kotlin listener, unlike a C callback, hears nothing from its stack after the
+destroy. A `stackCreate` that makes no stack lets its listener go as well, and
+that includes one that throws rather than answers — a native library that did
+not load, or one that serves another ABI — because the listener is kept as the
+last thing before the call and settled in a `finally` around it.
+
+What a listener throws goes to the uncaught exception handler of the thread it
+was called on, and the poll carries on once that handler returns. Android's
+default handler never does: it ends the process, as it would for a throw
+anywhere else in the application. The C contract is that the callback does not
+unwind; a throw carried out through the poll instead would leave a Java
+exception pending across every JNI call the shim makes on the way out.
+
+**A listener is handed the head of the event** — the size, the handles, the
+kind and the message — and not the payload union. Which arm the library wrote
+is named by `kind`, and nothing in the declarations says which kind writes
+which arm, so a generated reader would be guessing, and a wrong guess reads a
+pointer out of bytes that were written as a number. Carrying the payload needs
+the descriptors to say it first.
+
+**The binding checks the ABI as it loads.** `SipralNative`'s initialiser calls
+`sipral_abi_check` with the version the file was printed from, and throws a
+`SipralException` naming both versions when the library disagrees, which the
+first touch of the binding surfaces as the cause of an
+`ExceptionInInitializerError`.
+
+**What still crosses as an address.** `sipral_media_packet_t` and
+`sipral_transmit_t`, the structs a caller part-fills with buffers the library
+writes into, cross as a `Long`, so `callCapture`, `stackPollRtcp` and
+`stackPollTransmit` cannot be called from Kotlin alone yet. The AAR — with the
+keep rule R8 needs for `SipralEventListeners.deliver`, which nothing but native
+code calls — coroutines and `Flow` for events, `ConnectionService` for the
+system dialer and the foreground service for the call lifetime are all still
+ahead.
+
+`bindings/kotlin/sipral/src/test/kotlin/org/sipral/BindingCheck.kt` is what
+holds the rest to account. `scripts/check.sh` links the printed shim against
+the shared library and runs it on a JVM with `-Xcheck:jni`: a stack built from
+a class, its first event heard on a native thread the shim attached and let go
+of, a poll's worth of messages none of which the shim still holds when the next
+event arrives, a listener that throws, and one that destroys its own stack.
 
 ## Versioning
 

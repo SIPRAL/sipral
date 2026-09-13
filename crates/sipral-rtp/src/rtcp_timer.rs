@@ -141,7 +141,15 @@ impl IntervalTimer {
     /// deadline was last set, "reverse reconsideration" pulls `tp` and
     /// `tn` forward so the group learns of the departure without waiting
     /// out an interval sized for the larger group.
+    ///
+    /// The count never falls below one: this participant is in its own
+    /// member table for the life of the session (§6.3.2), and a BYE from
+    /// someone else cannot remove it — including one that arrives after
+    /// [`IntervalTimer::leaving`] has already reset the count to that one.
     pub(crate) fn remove_member(&mut self, now: Duration) {
+        if self.members <= 1 {
+            return;
+        }
         self.members = self.members.saturating_sub(1);
         if self.members >= self.pmembers || self.pmembers == 0 {
             return;

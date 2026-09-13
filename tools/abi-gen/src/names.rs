@@ -156,6 +156,25 @@ pub(crate) trait Spelling {
         read: &[Read<'_>],
         parts: &[Role<'_>],
     ) -> Result<Vec<Named>, Refused>;
+
+    /// Every identifier this language writes inside something of its own,
+    /// each with the whole of the scope it sits in.
+    ///
+    /// Some of what a back end prints is neither an entry point, nor a record
+    /// laid out member for member, nor the callback's signature, but is built
+    /// out of them: the Kotlin class a struct going in is written as, the
+    /// object the listeners are kept in, the C function a callback lands in.
+    /// What those hold depends on how the rest of the surface uses a record,
+    /// which [`Spelling::members`] is not asked about, so they are answered
+    /// here, with the surface. The scope is the back end's to name in full,
+    /// because a type it prints of its own sits at the top of the file beside
+    /// the ones [`Spelling::types`] reports and has to collide with them. The
+    /// default is nothing, which is the answer of every back end that writes
+    /// no such thing.
+    fn own(&self, surface: &Surface) -> Result<Vec<(String, Named)>, Refused> {
+        let _ = surface;
+        Ok(Vec::new())
+    }
 }
 
 /// An escaped keyword is the same name as the unescaped one, so the two have
@@ -272,6 +291,9 @@ pub(crate) fn audit(surface: &Surface, how: &dyn Spelling) -> Result<(), Refused
             let scope = format!("{}, {}", function.name, named.place);
             pass.claim(&scope, named.place, &named.emitted, &named.from)?;
         }
+    }
+    for (scope, named) in how.own(surface)? {
+        pass.claim(&scope, named.place, &named.emitted, &named.from)?;
     }
     Ok(())
 }

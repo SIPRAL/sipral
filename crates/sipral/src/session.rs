@@ -330,13 +330,19 @@ impl MediaSession {
                 .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
             rtcp_bandwidth: config.rtcp_bandwidth,
         };
+        // the first RTCP report's random factor draws from this call's own
+        // seeded randomness like every later one does (RFC 3550 §6.2, §6.3.2)
+        // rather than a fixed number, or every call opened from the same
+        // catalogue of codecs would schedule its first report at the same
+        // point in its interval
+        let mut draws = Draws::new(identity.seed);
         // the keys the negotiation produced, if it produced any. Everything
         // the protected session builds goes out encrypted and everything
         // arriving is verified before any of it is believed, so this is the
         // last point at which the two shapes of stream differ
         let rtp = match keying::security(plan)? {
-            Some(security) => RtpSession::protected(&stream, 0.5, security),
-            None => RtpSession::new(&stream, 0.5),
+            Some(security) => RtpSession::protected(&stream, draws.unit(), security),
+            None => RtpSession::new(&stream, draws.unit()),
         };
         Ok(Self {
             rtp,
@@ -344,7 +350,7 @@ impl MediaSession {
             plan: plan.clone(),
             origin: now,
             clock,
-            draws: Draws::new(identity.seed),
+            draws,
             frame_ms,
             frame_ticks,
             rtp_out: vec![0; DATAGRAM],

@@ -127,13 +127,18 @@ impl fmt::Display for DeviceEvent {
 ///
 /// The difference between the last two is the whole of what a saved selection
 /// needs. [`DeviceChoice::Device`] opens that endpoint or nothing;
-/// [`DeviceChoice::Preferred`] opens it if the machine has it and falls back
-/// to the system's route for calls when it does not, which is what a
-/// preference read out of a configuration file at start-up means.
+/// [`DeviceChoice::Preferred`] opens it if the machine has it and it can carry
+/// audio, and falls back to the system's route for calls when it cannot, which
+/// is what a preference read out of a configuration file at start-up means.
+///
+/// "Cannot" covers more than an identifier the machine has never seen.
+/// Windows keeps an unplugged, disabled or absent endpoint in its registry
+/// under the same identifier, and a headset pulled out five seconds ago is one
+/// of those — which is exactly the endpoint a preference is for.
 ///
 /// Both carry the same string, because on Windows the identity a stream is
 /// opened by is already the one that survives a replug and a reboot. What
-/// differs is only what happens when the machine has no such endpoint.
+/// differs is only what happens when that endpoint cannot be played through.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum DeviceChoice {
     /// Whatever Windows is routing calls to at the moment the stream opens.
@@ -141,7 +146,8 @@ pub enum DeviceChoice {
     System,
     /// This endpoint, and no other.
     Device(DeviceId),
-    /// This endpoint if the machine has it, and the system's route otherwise.
+    /// This endpoint if the machine has it plugged in, enabled and present,
+    /// and the system's route otherwise.
     Preferred(DeviceId),
 }
 

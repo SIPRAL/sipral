@@ -207,6 +207,16 @@ struct Inbound {
     /// Whether the remote side has been heard sending RTP, for the sender
     /// count §6.3.1's interval calculation splits out from members.
     sender_known: bool,
+    /// Whether a BYE naming the remote source has already been taken in.
+    ///
+    /// §6.2.1: "Entries MAY be deleted from the table when an RTCP BYE
+    /// packet with the corresponding SSRC identifier is received... the
+    /// entry SHOULD be marked as having received a BYE". §6.3.4 removes a
+    /// table entry, and the count with it, only "if present" — so a second
+    /// BYE for a source already gone finds no entry left to remove and must
+    /// leave `members` and `senders` alone rather than repeat the departure
+    /// against a group that no longer includes it.
+    departed: bool,
 }
 
 impl RtpSession {
@@ -263,6 +273,7 @@ impl RtpSession {
                 rtcp: ReceptionTracker::new(),
                 member_known: false,
                 sender_known: false,
+                departed: false,
             },
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
@@ -936,9 +947,20 @@ impl RtpSession {
                 RtcpPacket::ReceiverReport(rr) => self.note_round_trip(rr.reports(), ntp),
                 RtcpPacket::Goodbye(bye) => {
                     if bye.sources().any(|ssrc| Some(ssrc) == self.inbound.source) {
-                        self.timer.remove_member(now);
-                        if self.inbound.sender_known {
-                            self.timer.remove_sender();
+                        // §6.3.4 removes the member (and sender) table entry
+                        // "if present"; a source already marked departed has
+                        // no entry left, so a repeated BYE — a retransmission
+                        // or a duplicate on the wire — must not remove one a
+                        // second time. Left unguarded, a peer that repeats
+                        // its BYE would drive `members` past the local
+                        // participant and reverse reconsideration would pull
+                        // the next report to the instant the repeat arrived.
+                        if !self.inbound.departed {
+                            self.inbound.departed = true;
+                            self.timer.remove_member(now);
+                            if self.inbound.sender_known {
+                                self.timer.remove_sender();
+                            }
                         }
                         goodbye = Some(bye.reason().unwrap_or_default());
                     }
@@ -1153,6 +1175,23 @@ mod tests {
             chunks: &[cname_chunk(ssrc)],
         };
         CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .write(out)
+            .expect("room")
+    }
+
+    /// A compound RTCP packet from `ssrc`, carrying only its own CNAME and a
+    /// BYE naming `ssrc`, the shape a hangup produces.
+    fn goodbye_packet(out: &mut [u8], ssrc: u32, reason: &[u8]) -> usize {
+        let rr = ReceiverReportBuilder { ssrc, reports: &[] };
+        let sdes = SourceDescriptionBuilder {
+            chunks: &[cname_chunk(ssrc)],
+        };
+        let bye = GoodbyeBuilder {
+            sources: &[ssrc],
+            reason,
+        };
+        CompoundBuilder::new(SenderOrReceiver::Receiver(rr), sdes)
+            .with_bye(bye)
             .write(out)
             .expect("room")
     }
@@ -1876,6 +1915,169 @@ mod tests {
             RtcpReceived::Goodbye {
                 reason: b"call ended"
             }
+        );
+    }
+
+    /// §6.3.4 removes a member (and sender) table entry "if present"; a
+    /// second BYE for a source already marked departed (§6.2.1: "the entry
+    /// SHOULD be marked as having received a BYE") has no entry left to
+    /// remove.
+    ///
+    /// `members` alone cannot prove this: [`IntervalTimer::remove_member`]
+    /// floors the count at the local participant regardless of `departed`,
+    /// since a two-party session never has a third member to lose. Sending
+    /// on the call too gives the far end's repeat something the floor does
+    /// not also guard — this end's own sender entry — so a bandwidth low
+    /// enough for §6.3.1's size-derived interval to set the cadence (rather
+    /// than the 2.5s/5s floor) turns a second, wrongly-taken sender entry
+    /// into a schedule that moves again.
+    #[test]
+    fn a_repeated_bye_for_the_same_source_does_not_leave_the_group_twice() {
+        let mut session = RtpSession::new(
+            &StreamConfig {
+                rtcp_bandwidth: 1.0,
+                ..config()
+            },
+            0.5,
+        );
+        establish(&mut session, 7, addr(PEER));
+        let mut out = [0_u8; 64];
+        session.send(&[0_u8; 20], 160, &mut out).expect("room");
+
+        let mut first = [0_u8; 256];
+        let n = goodbye_packet(&mut first, 7, b"call ended");
+        assert_eq!(
+            session.rtcp_receive(&mut first[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended"
+            }
+        );
+        let Due::Wait(after_first) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        let mut second = [0_u8; 256];
+        let n = goodbye_packet(&mut second, 7, b"call ended again");
+        assert_eq!(
+            session.rtcp_receive(&mut second[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended again"
+            },
+            "the far end saying goodbye twice is still goodbye, reason and all"
+        );
+        let Due::Wait(after_second) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+        // the repeat still folds its size into the average (§6.3.3), which
+        // moves the interval by a sixteenth of the difference at most;
+        // losing this end's own sender entry a second time would cut it to
+        // the 2.5s floor instead
+        assert!(
+            after_second * 2 > after_first,
+            "a repeated BYE moved the schedule again: {after_first:?} became {after_second:?}"
+        );
+
+        // a third repeat has to be just as idempotent as the second — the
+        // guard is "has this source departed", not "has it departed exactly
+        // once already"
+        let mut third = [0_u8; 256];
+        let n = goodbye_packet(&mut third, 7, b"call ended a third time");
+        assert_eq!(
+            session.rtcp_receive(&mut third[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended a third time"
+            }
+        );
+        let Due::Wait(after_third) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+        assert!(
+            after_third * 2 > after_second,
+            "a third repeated BYE moved the schedule again: {after_second:?} became {after_third:?}"
+        );
+    }
+
+    /// The same repeated BYE on a call this end is sending on: §6.3.4 takes
+    /// the far end out of the sender table once, and a second pass would take
+    /// this end's own entry with it. With an RTCP bandwidth low enough that
+    /// §6.3.1's size-derived interval rather than the floor sets the cadence,
+    /// one sender left against none is the whole budget against a quarter of
+    /// it spent on nobody — the interval collapses to the floor.
+    #[test]
+    fn a_repeated_bye_does_not_take_this_ends_own_sending_with_it() {
+        let mut session = RtpSession::new(
+            &StreamConfig {
+                rtcp_bandwidth: 1.0,
+                ..config()
+            },
+            0.5,
+        );
+        let mut out = [0_u8; 64];
+        session.send(&[0_u8; 20], 160, &mut out).expect("room");
+        establish(&mut session, 7, addr(PEER));
+
+        let mut first = [0_u8; 256];
+        let n = goodbye_packet(&mut first, 7, b"call ended");
+        assert_eq!(
+            session.rtcp_receive(&mut first[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended"
+            }
+        );
+        let Due::Wait(after_first) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        let mut second = [0_u8; 256];
+        let n = goodbye_packet(&mut second, 7, b"call ended");
+        assert_eq!(
+            session.rtcp_receive(&mut second[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"call ended"
+            }
+        );
+        let Due::Wait(after_second) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+        // the repeat still folds its size into the average (§6.3.3), which
+        // moves the interval by a sixteenth of the difference at most; losing
+        // this end's own sender entry would cut it to the 2.5 s floor
+        assert!(
+            after_second * 2 > after_first,
+            "a repeated BYE removed this end's own sender entry: {after_first:?} became {after_second:?}"
+        );
+    }
+
+    /// §6.3.2 puts this participant in its own member table for as long as
+    /// the session lasts, and no BYE from anyone else takes it out. Saying
+    /// goodbye first resets the count to that one member (§6.3.7), so the far
+    /// end's own BYE crossing ours on the wire has nobody left to remove: if
+    /// it took the count to zero, reverse reconsideration would pull the next
+    /// deadline to the instant it arrived.
+    #[test]
+    fn a_goodbye_crossing_our_own_leaves_the_local_participant_counted() {
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+
+        let mut out = [0_u8; 256];
+        session
+            .send_bye(&mut out, Duration::from_secs(10), b"hanging up", 0.5)
+            .expect("room");
+        let scheduled = session.next_rtcp_deadline();
+
+        let mut incoming = [0_u8; 256];
+        let n = goodbye_packet(&mut incoming, 7, b"hanging up too");
+        let arrived = Duration::from_millis(10_100);
+        assert_eq!(
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), arrived, 0),
+            RtcpReceived::Goodbye {
+                reason: b"hanging up too"
+            }
+        );
+        assert_eq!(
+            session.next_rtcp_deadline(),
+            scheduled,
+            "the far end's goodbye removed this participant from its own session"
         );
     }
 

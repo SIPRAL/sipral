@@ -1467,6 +1467,53 @@ fn a_stream_that_is_ending_says_goodbye() {
     assert_eq!(arrival, Arrival::Goodbye);
 }
 
+/// RFC 3550 §6.2: "The first RTCP packet sent after joining a session is
+/// also delayed by a random variation of half the minimum RTCP interval" —
+/// the same random factor every later report draws, not a fixed point in
+/// it. Two sessions opened from the same plan and clock, differing only in
+/// the caller's seed, have to schedule their first report differently, or
+/// that factor never came from the seed at all.
+#[test]
+fn the_first_rtcp_report_is_scheduled_from_this_calls_own_seed() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+    );
+    let plan = ours
+        .media_plan(&theirs, 0)
+        .expect("a plan")
+        .expect("a stream");
+
+    let scheduled = |seed: u64| {
+        MediaSession::open(
+            &plan,
+            20,
+            &MediaConfig::default(),
+            StreamIdentity {
+                ssrc: 1,
+                sequence: 1,
+                timestamp: 0,
+                seed,
+            },
+            WallClock::from_unix(now, 1_700_000_000, 0),
+            Vec::new(),
+            now,
+        )
+        .expect("the session opens")
+        .poll_timeout()
+        .expect("RTCP was negotiated, so a first report is scheduled")
+    };
+
+    assert_ne!(
+        scheduled(7),
+        scheduled(0xC0FF_EE00_1234_5678),
+        "two different seeds scheduled the same first report"
+    );
+}
+
 // -- the watchdog ------------------------------------------------------------
 
 /// B5: inbound audio that stops while signalling stays perfectly happy is the

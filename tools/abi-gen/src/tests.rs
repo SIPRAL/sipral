@@ -1265,10 +1265,16 @@ fn a_callback_parameter_a_language_cannot_spell_is_refused() {
     let printed = csharp::binding(&CALLBACK_KEYWORD).unwrap();
     assert!(printed.contains("IntPtr @class"), "{printed}");
 
-    // Kotlin and Swift print no signature for the callback at all -- Swift
-    // imports the C one and Kotlin never spells it -- so they have nothing
-    // to claim and nothing to refuse
-    assert!(audit(&CALLBACK_KEYWORD, &kotlin::Names).is_ok());
+    // Kotlin spells them too, in the C function the JNI shim prints for the
+    // callback to land in -- C, with no escape -- so it refuses the same
+    // word for the same reason, naming the same declaration
+    let why = refusal(&CALLBACK_KEYWORD, &kotlin::Names);
+    assert!(why.contains("`class` is a keyword in C or in C++"), "{why}");
+    assert!(why.contains("SipralEventCallback"), "{why}");
+    assert!(kotlin::shim(&CALLBACK_KEYWORD).is_err());
+
+    // Swift prints no signature for the callback at all -- it imports the C
+    // one -- so it has nothing to claim and nothing to refuse
     assert!(audit(&CALLBACK_KEYWORD, &swift::Names).is_ok());
 }
 
@@ -1345,6 +1351,762 @@ const SHIM_KEYWORD_AND_LOCAL: Surface = Surface {
     }],
     ..NOTHING
 };
+
+// ------------------------------------------------------------ Kotlin and JNI
+
+#[test]
+fn a_struct_going_in_is_a_kotlin_class_the_shim_copies_in() {
+    let printed = kotlin::binding(&SYNTHETIC).unwrap();
+    // one field per member: the buffer and its length as one, the callback
+    // and its user pointer as one listener, and the size member nowhere
+    for field in [
+        "class SipralStackConfig(",
+        "    val eventListener: SipralEventListener? = null,",
+        "    val bindAddress: String? = null,",
+        "    val echo: Long = 0,",
+    ] {
+        assert!(printed.contains(field), "no `{field}` in:\n{printed}");
+    }
+    assert!(
+        printed.contains("    fun stackCreate(config: SipralStackConfig): Long {"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "external fun sipral_stack_create(configEventCallback: Long, configBindAddress: \
+             ByteArray?, configEcho: Long, stack: LongArray): Int"
+        ),
+        "{printed}"
+    );
+
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    for line in [
+        "    sipral_stack_config_t config_value;\n",
+        "    memset(&config_value, 0, sizeof config_value);\n",
+        "    config_value.size = sizeof config_value;\n",
+        "    config_value.bind_address = (const char *)configBindAddress_data;\n",
+        "    config_value.bind_address_len = (size_t)configBindAddress_size;\n",
+        "    config_value.echo = (sipral_toggle_t)configEcho;\n",
+        "sipral_stack_create(&config_value, &stack_value);",
+    ] {
+        assert!(shim.contains(line), "no `{line}` in:\n{shim}");
+    }
+    assert!(
+        !shim.contains("(const sipral_stack_config_t *)(intptr_t)config"),
+        "the struct still crosses as an address:\n{shim}"
+    );
+}
+
+#[test]
+fn the_callback_lands_in_a_kotlin_listener() {
+    let printed = kotlin::binding(&SYNTHETIC).unwrap();
+    assert!(
+        printed.contains(
+            "fun interface SipralEventListener {\n    fun onEvent(event: SipralEvent)\n}"
+        ),
+        "{printed}"
+    );
+    // the head of the event is handed over, and the union whose arm nothing
+    // in the declarations names is not
+    assert!(
+        printed.contains(
+            "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?) {"
+        ),
+        "{printed}"
+    );
+    // kept by the wrapper, tied to the handle the call made, and let go of
+    // where that handle is destroyed
+    for line in [
+        "        val configEventCallback = SipralEventListeners.register(config.eventListener)\n",
+        "        SipralEventListeners.made(configEventCallback, status, stackSlot[0])\n",
+        "    fun stackDestroy(stack: Long) {\n        val status = \
+         SipralNative.sipral_stack_destroy(stack)\n        SipralEventListeners.gone(stack)\n",
+    ] {
+        assert!(printed.contains(line), "no `{line}` in:\n{printed}");
+    }
+
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    assert!(
+        shim.contains(
+            "(*env)->GetStaticMethodID(env, jni_event_callback_class, \"deliver\", \"(JJJJ[B)V\")"
+        ),
+        "the descriptor the shim looks deliver up by is not the one Kotlin declares:\n{shim}"
+    );
+    assert!(
+        shim.contains("    config_value.event_callback = configEventCallback != 0 ? jni_event_callback : NULL;\n"),
+        "{shim}"
+    );
+    assert!(
+        shim.contains(
+            "    config_value.event_user_data = (void *)(intptr_t)configEventCallback;\n"
+        ),
+        "{shim}"
+    );
+    let landing = shim
+        .split("static void\njni_event_callback(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("no landing function in:\n{shim}"));
+    // attach a thread only when it is not attached, and detach only what was
+    // attached here: detaching a thread the JVM made would pull it out from
+    // under the Kotlin that called the poll
+    assert!(
+        landing.contains("if (found == JNI_EDETACHED) {"),
+        "{landing}"
+    );
+    assert_eq!(
+        landing.matches("DetachCurrentThread").count(),
+        1,
+        "{landing}"
+    );
+    assert!(
+        landing.contains(
+            "    if (attached) {\n        (*jni_vm)->DetachCurrentThread(jni_vm);\n    }"
+        ),
+        "{landing}"
+    );
+    // and the array made for each event is deleted before the next one: a
+    // poll delivers all of them inside one native call
+    let checked = landing.find("ExceptionCheck").unwrap_or(usize::MAX);
+    let deleted = landing
+        .find("(*env)->DeleteLocalRef(env, message);")
+        .unwrap_or_else(|| panic!("the array made for an event is never deleted:\n{landing}"));
+    assert!(
+        checked < deleted,
+        "a JNI call is made with a Java exception possibly pending:\n{landing}"
+    );
+}
+
+#[test]
+fn a_listener_kept_for_a_call_that_throws_is_let_go_of() {
+    // A call can throw rather than answer -- a native library that did not
+    // load, one that serves another ABI, an array the JVM could not make --
+    // and a listener kept for it would then be kept for ever, with whatever
+    // it holds. So it is kept as the last thing before the call, and let go
+    // of in a finally around the call, which sees no status when there was
+    // none.
+    let printed = kotlin::binding(&SYNTHETIC).unwrap();
+    let wrapper = printed
+        .split("    fun stackCreate(config: SipralStackConfig): Long {\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .unwrap_or_else(|| panic!("no stackCreate in:\n{printed}"));
+    let kept = wrapper
+        .find("        val configEventCallback = SipralEventListeners.register(config.eventListener)\n")
+        .unwrap_or_else(|| panic!("the listener is never kept:\n{wrapper}"));
+    let tried = wrapper
+        .find("        try {\n            status = SipralNative.sipral_stack_create(")
+        .unwrap_or_else(|| panic!("the call that keeps a listener is not tried:\n{wrapper}"));
+    let settled = wrapper
+        .find(
+            "        } finally {\n            \
+             SipralEventListeners.made(configEventCallback, status, stackSlot[0])\n        }\n",
+        )
+        .unwrap_or_else(|| panic!("the listener is not settled in a finally:\n{wrapper}"));
+    assert!(kept < tried && tried < settled, "{wrapper}");
+    let between = &wrapper[kept..tried];
+    assert_eq!(
+        between.lines().count(),
+        2,
+        "something that can throw sits between keeping the listener and trying the call:\n{wrapper}"
+    );
+    assert!(between.contains("        var status = -1\n"), "{wrapper}");
+}
+
+/// The one entry point a binding asks at load, and nothing else.
+const ABI_CHECKED: Surface = Surface {
+    version: (0, 9, 0),
+    enumerations: &[STATUS],
+    functions: &[Function {
+        name: "sipral_abi_check",
+        doc: &[" Whether this library serves a binding of this version."],
+        parameters: &[member("major", "u32"), member("minor", "u32")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+/// The same entry point in a shape the binding cannot ask it with.
+const ABI_UNCHECKABLE: Surface = Surface {
+    functions: &[Function {
+        name: "sipral_abi_check",
+        doc: &[],
+        parameters: &[
+            member("version", "*const u8"),
+            member("version_len", "usize"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..ABI_CHECKED
+};
+
+#[test]
+fn the_kotlin_binding_checks_the_abi_as_it_loads() {
+    let printed = kotlin::binding(&ABI_CHECKED).unwrap();
+    assert!(
+        printed
+            .contains("        System.loadLibrary(\"sipral_jni\")\n        agree(0, 9)\n    }\n"),
+        "{printed}"
+    );
+    for line in [
+        "        val status = sipral_abi_check(major, minor)\n",
+        "            throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())\n",
+    ] {
+        assert!(printed.contains(line), "no `{line}` in:\n{printed}");
+    }
+    // the binding that ships asks with the version it was printed from
+    let real = kotlin::binding(&sipral_ffi::abi::SURFACE).unwrap();
+    let (major, minor, _) = sipral_ffi::abi::SURFACE.version;
+    assert!(
+        real.contains(&format!(
+            "        System.loadLibrary(\"sipral_jni\")\n        agree({major}, {minor})\n"
+        )),
+        "the Kotlin binding no longer checks the ABI as it loads"
+    );
+    // and a check it could not call is refused rather than left out
+    let why = kotlin::binding(&ABI_UNCHECKABLE).unwrap_err().to_string();
+    assert!(why.contains("sipral_abi_check"), "{why}");
+}
+
+/// A struct going in with a pointer the conventions do not pair with a
+/// length.
+const UNBUILDABLE: Surface = Surface {
+    aliases: &[Alias {
+        name: "SipralHandle",
+        doc: &[],
+        stands: Stands::For("u64"),
+    }],
+    records: &[Record {
+        name: "SipralOddConfig",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[
+            member("size", "usize"),
+            member("blob", "*const u8"),
+            member("blob_size", "usize"),
+        ],
+        size: 24,
+    }],
+    functions: &[Function {
+        name: "sipral_odd_create",
+        doc: &[],
+        parameters: &[
+            member("config", "*const SipralOddConfig"),
+            member("out_odd", "*mut SipralHandle"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+/// A struct going in that holds a listener, handed to an entry point with
+/// nothing to undo what it made.
+const UNRELEASED: Surface = Surface {
+    aliases: &[
+        Alias {
+            name: "SipralHandle",
+            doc: &[],
+            stands: Stands::For("u64"),
+        },
+        Alias {
+            name: "SipralEventCallback",
+            doc: &[],
+            stands: Stands::Callback(&[
+                member("event", "*const SipralEvent"),
+                member("user_data", "*mut c_void"),
+            ]),
+        },
+    ],
+    records: &[
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("size", "usize"), member("stack", "SipralHandle")],
+            size: 16,
+        },
+        Record {
+            name: "SipralStackConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[Function {
+        name: "sipral_stack_create",
+        doc: &[],
+        parameters: &[
+            member("config", "*const SipralStackConfig"),
+            member("out_stack", "*mut SipralHandle"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_struct_going_in_that_kotlin_cannot_build_is_refused() {
+    // a pointer and a `blob_size` is not the buffer convention, and guessing
+    // that it is would hand the library a length it never asked for
+    let why = refusal(&UNBUILDABLE, &kotlin::Names);
+    assert!(
+        why.contains("SipralOddConfig::blob") && why.contains("blob_len"),
+        "{why}"
+    );
+    // a listener nothing lets go of is a listener kept for ever
+    let why = refusal(&UNRELEASED, &kotlin::Names);
+    assert!(
+        why.contains("sipral_stack_create") && why.contains("_destroy"),
+        "{why}"
+    );
+    // the other three have no class to build and no listener to keep
+    for how in [&c::Names as &dyn Spelling, &csharp::Names, &swift::Names] {
+        if let Err(why) = audit(&UNRELEASED, how) {
+            panic!("{}: {why}", how.language());
+        }
+    }
+}
+
+/// A struct going in that holds a listener, handed to an entry point that
+/// writes back no handle at all: nothing to tie the listener to, and no
+/// `_destroy` either. The missing destroyer is the reason named, because it
+/// is the more fundamental problem and is checked first.
+const ORPHANED: Surface = Surface {
+    aliases: &[Alias {
+        name: "SipralEventCallback",
+        doc: &[],
+        stands: Stands::Callback(&[
+            member("event", "*const SipralEvent"),
+            member("user_data", "*mut c_void"),
+        ]),
+    }],
+    records: &[
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("size", "usize")],
+            size: 8,
+        },
+        Record {
+            name: "SipralWatchConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[Function {
+        name: "sipral_watch_arm",
+        doc: &[],
+        parameters: &[member("config", "*const SipralWatchConfig")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_listener_with_no_handle_and_no_destroyer_is_refused_for_the_destroyer() {
+    // sipral_watch_arm keeps a listener, writes back no handle, and the
+    // surface has no sipral_watch_destroy: both are wrong, and the missing
+    // destroyer is named rather than the missing handle, because a caller
+    // fixes the surface one problem at a time and the destroyer is the one
+    // this generator can point at first.
+    let why = refusal(&ORPHANED, &kotlin::Names);
+    assert!(
+        why.contains("sipral_watch_arm") && why.contains("_destroy"),
+        "{why}"
+    );
+    assert!(
+        !why.contains("writes back no handle"),
+        "the destroyer check did not run first:\n{why}"
+    );
+}
+
+/// A struct going in with no size member for the shim to set as it copies
+/// the class across.
+const UNVERSIONED_CONFIG: Surface = Surface {
+    records: &[Record {
+        name: "SipralPlainConfig",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[member("echo", "u32")],
+        size: 4,
+    }],
+    functions: &[Function {
+        name: "sipral_plain_create",
+        doc: &[],
+        parameters: &[member("config", "*const SipralPlainConfig")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+/// A struct going in that holds nothing but numbers and is versioned: the
+/// shape a struct handed back reads, printed as a data class already.
+const NUMERIC_CONFIG: Surface = Surface {
+    records: &[Record {
+        name: "SipralNumericConfig",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[member("size", "usize"), member("echo", "u32")],
+        size: 16,
+    }],
+    functions: &[Function {
+        name: "sipral_numeric_create",
+        doc: &[],
+        parameters: &[member("config", "*const SipralNumericConfig")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_struct_going_in_with_no_shape_of_its_own_is_refused() {
+    // no size member for the shim to fill in as it copies the class across
+    let why = refusal(&UNVERSIONED_CONFIG, &kotlin::Names);
+    assert!(
+        why.contains("SipralPlainConfig") && why.contains("no size member"),
+        "{why}"
+    );
+    // all-numeric and versioned is the one shape a struct handed back reads;
+    // building it as a class too would print the same record twice
+    let why = refusal(&NUMERIC_CONFIG, &kotlin::Names);
+    assert!(
+        why.contains("SipralNumericConfig") && why.contains("printed twice"),
+        "{why}"
+    );
+}
+
+/// A struct going in that holds a union by value, which a caller has no way
+/// to set the live arm of.
+const CONFIG_WITH_UNION: Surface = Surface {
+    records: &[
+        Record {
+            name: "SipralArm",
+            doc: &[],
+            shape: Shape::Union,
+            fields: &[member("a", "u32"), member("b", "u32")],
+            size: 4,
+        },
+        Record {
+            name: "SipralUnionConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                Member {
+                    name: "arm",
+                    rust_type: "SipralArm",
+                    doc: &[],
+                },
+            ],
+            size: 8,
+        },
+    ],
+    functions: &[Function {
+        name: "sipral_union_create",
+        doc: &[],
+        parameters: &[member("config", "*const SipralUnionConfig")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_struct_going_in_that_holds_a_union_is_refused() {
+    let why = refusal(&CONFIG_WITH_UNION, &kotlin::Names);
+    assert!(
+        why.contains("SipralUnionConfig::arm")
+            && why.contains("is a union inside a struct a caller builds"),
+        "{why}"
+    );
+}
+
+/// A struct going in that holds another struct by value, which the buffer
+/// and listener conventions do not cover either.
+const CONFIG_WITH_NESTED_STRUCT: Surface = Surface {
+    records: &[
+        Record {
+            name: "SipralNestedStruct",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("value", "u32")],
+            size: 4,
+        },
+        Record {
+            name: "SipralNestedConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                Member {
+                    name: "nested",
+                    rust_type: "SipralNestedStruct",
+                    doc: &[],
+                },
+            ],
+            size: 8,
+        },
+    ],
+    functions: &[Function {
+        name: "sipral_nested_create",
+        doc: &[],
+        parameters: &[member("config", "*const SipralNestedConfig")],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_struct_going_in_that_holds_a_struct_by_value_is_refused() {
+    let why = refusal(&CONFIG_WITH_NESTED_STRUCT, &kotlin::Names);
+    assert!(
+        why.contains("SipralNestedConfig::nested") && why.contains("holds a struct by value"),
+        "{why}"
+    );
+}
+
+/// A struct handed to a listener that itself holds a callback: a listener
+/// has nothing to call it with.
+const EVENT_WITH_CALLBACK: Surface = Surface {
+    aliases: &[
+        Alias {
+            name: "SipralHandle",
+            doc: &[],
+            stands: Stands::For("u64"),
+        },
+        Alias {
+            name: "SipralEventCallback",
+            doc: &[],
+            stands: Stands::Callback(&[
+                member("event", "*const SipralEvent"),
+                member("user_data", "*mut c_void"),
+            ]),
+        },
+        Alias {
+            name: "SipralNestedCallback",
+            doc: &[],
+            stands: Stands::Callback(&[
+                member("event", "*const SipralNestedEvent"),
+                member("user_data", "*mut c_void"),
+            ]),
+        },
+    ],
+    records: &[
+        Record {
+            name: "SipralNestedEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("size", "usize")],
+            size: 8,
+        },
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                Member {
+                    name: "nested_callback",
+                    rust_type: "SipralNestedCallback",
+                    doc: &[],
+                },
+                member("nested_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+        Record {
+            name: "SipralStackConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[
+        Function {
+            name: "sipral_stack_create",
+            doc: &[],
+            parameters: &[
+                member("config", "*const SipralStackConfig"),
+                member("out_stack", "*mut SipralHandle"),
+            ],
+            returns: "SipralStatus",
+        },
+        Function {
+            name: "sipral_stack_destroy",
+            doc: &[],
+            parameters: &[member("stack", "SipralHandle")],
+            returns: "SipralStatus",
+        },
+    ],
+    ..NOTHING
+};
+
+#[test]
+fn a_struct_handed_to_a_listener_that_holds_a_callback_is_refused() {
+    let why = refusal(&EVENT_WITH_CALLBACK, &kotlin::Names);
+    assert!(
+        why.contains("SipralEvent::nested_callback")
+            && why.contains("is a callback inside a struct the library hands to a listener"),
+        "{why}"
+    );
+}
+
+/// A struct handed to a listener with a member named for the map the
+/// listeners are kept in, beside everything else a listener needs.
+const SHADOWING: Surface = Surface {
+    records: &[
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("size", "usize"), member("listening", "u32")],
+            size: 16,
+        },
+        Record {
+            name: "SipralStackConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[
+        Function {
+            name: "sipral_stack_create",
+            doc: &[],
+            parameters: &[
+                member("config", "*const SipralStackConfig"),
+                member("out_stack", "*mut SipralHandle"),
+            ],
+            returns: "SipralStatus",
+        },
+        Function {
+            name: "sipral_stack_destroy",
+            doc: &[],
+            parameters: &[member("stack", "SipralHandle")],
+            returns: "SipralStatus",
+        },
+    ],
+    ..UNRELEASED
+};
+
+/// A struct handed to a listener that carries a length-prefixed buffer of
+/// characters rather than raw bytes: text, not an array.
+const EVENT_WITH_TEXT: Surface = Surface {
+    records: &[
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                Member {
+                    name: "reason",
+                    rust_type: "*const c_char",
+                    doc: &[],
+                },
+                member("reason_len", "usize"),
+            ],
+            size: 24,
+        },
+        Record {
+            name: "SipralStackConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[
+        Function {
+            name: "sipral_stack_create",
+            doc: &[],
+            parameters: &[
+                member("config", "*const SipralStackConfig"),
+                member("out_stack", "*mut SipralHandle"),
+            ],
+            returns: "SipralStatus",
+        },
+        Function {
+            name: "sipral_stack_destroy",
+            doc: &[],
+            parameters: &[member("stack", "SipralHandle")],
+            returns: "SipralStatus",
+        },
+    ],
+    ..UNRELEASED
+};
+
+#[test]
+fn a_struct_handed_to_a_listener_with_a_text_buffer_reads_as_a_string() {
+    // the buffer convention on a struct going in reads bytes as a String
+    // when they point at characters; a struct handed to a listener follows
+    // the same rule rather than always handing over an array
+    let printed = kotlin::binding(&EVENT_WITH_TEXT).unwrap();
+    assert!(printed.contains("val reason: String?"), "{printed}");
+    assert!(
+        printed.contains("reason?.let { String(it, Charsets.UTF_8) }"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_member_that_hides_the_listeners_from_deliver_is_refused() {
+    // deliver looks the listener up as `listening[key]`, so a member handed
+    // over under that name is what the lookup would read, and the Kotlin
+    // would not compile
+    let why = refusal(&SHADOWING, &kotlin::Names);
+    assert!(
+        why.contains("SipralEvent::listening") && why.contains("`listening`"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_listener_that_throws_is_not_promised_that_the_poll_goes_on() {
+    // What a listener throws goes to the thread's uncaught exception handler,
+    // and whether the poll carries on is that handler's to decide: the one
+    // Android installs ends the process. The listener's documentation says
+    // so rather than promising a poll that carries on regardless.
+    let printed = kotlin::binding(&SYNTHETIC).unwrap();
+    let about = printed
+        .split("fun interface SipralEventListener {")
+        .next()
+        .and_then(|before| before.rsplit("/**").next())
+        .unwrap_or_else(|| panic!("no listener in:\n{printed}"));
+    assert!(
+        about.contains("Android's default handler does not return"),
+        "{about}"
+    );
+    assert!(
+        !about.contains("handler, and the poll carries on.\n"),
+        "{about}"
+    );
+}
 
 // ------------------------------------------------------------ the two derivations
 

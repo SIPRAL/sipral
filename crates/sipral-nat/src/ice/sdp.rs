@@ -10,10 +10,14 @@
 //! [`sipral_core::sdp::SessionDescription`], so a caller never sees them as
 //! strings assembled by hand.
 
-use sipral_core::sdp::{Attribute, MediaDescription, SessionDescription};
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use sipral_core::sdp::{Attribute, Connection, MediaDescription, SessionDescription};
 
 use super::agent::LiteAgent;
-use super::candidate::Candidate;
+use super::candidate::{Candidate, ComponentId};
+use super::full::Credentials;
 
 /// Mark the session as a lite implementation (RFC 8839 §4.2.1.4: "An
 /// ICE-lite implementation MUST include an SDP 'ice-lite' attribute").
@@ -32,18 +36,125 @@ pub fn write_session(session: &mut SessionDescription) {
 /// value the one that wins when both are present, which this simply never
 /// leaves ambiguous.
 pub fn write_media(media: &mut MediaDescription, agent: &LiteAgent, candidates: &[Candidate]) {
+    write_lines(media, agent.local_ufrag(), agent.local_pwd(), candidates);
+}
+
+/// Write a full agent's stream: the same four kinds of line as
+/// [`write_media`], with credentials from [`super::IceAgent::local_credentials`]
+/// and candidates from [`super::IceAgent::local_candidates`].
+pub fn write_stream(
+    media: &mut MediaDescription,
+    credentials: &Credentials,
+    candidates: &[Candidate],
+) {
+    write_lines(media, credentials.ufrag(), credentials.pwd(), candidates);
+}
+
+fn write_lines(media: &mut MediaDescription, ufrag: &str, pwd: &str, candidates: &[Candidate]) {
     media
         .attributes
-        .push(Attribute::with_value("ice-ufrag", agent.local_ufrag()));
-    media
-        .attributes
-        .push(Attribute::with_value("ice-pwd", agent.local_pwd()));
+        .push(Attribute::with_value("ice-ufrag", ufrag));
+    media.attributes.push(Attribute::with_value("ice-pwd", pwd));
     media
         .attributes
         .push(Attribute::with_value("ice-options", "ice2"));
     for candidate in candidates {
         media.attributes.push(candidate.to_attribute());
     }
+}
+
+/// Write a full agent's pacing, in milliseconds (RFC 8839 §5.5). Session-level
+/// only; "If the offerer is a full ICE implementation, it SHOULD include an
+/// 'ice-pacing' attribute", and a lite one "MUST NOT" (§4.3.1), which is why
+/// [`write_session`] does not.
+pub fn write_pacing(session: &mut SessionDescription, ta: Duration) {
+    session.attributes.push(Attribute::with_value(
+        "ice-pacing",
+        &ta.as_millis().to_string(),
+    ));
+}
+
+/// Whether a stream's default destinations are missing from its candidate
+/// lines — an ICE mismatch, which RFC 8839 §4.2.5 makes the condition for
+/// not using ICE on the stream: an ALG somewhere rewrote the addresses.
+///
+/// The RTP destination is `c=` and the `m=` port. `rtcp_muxed` says whether
+/// RTP and RTCP were negotiated onto one port; if so RTCP has no destination
+/// of its own to look for (RFC 5761 §5.1.3). If not, and the stream does not
+/// switch RTCP off with `b=RS:0` and `b=RR:0`, the RTCP destination is the one
+/// `a=rtcp` names (RFC 3605) or, without it, the port after RTP's, and it has
+/// to appear as a component-2 candidate. The two exceptions §4.2.5 lists are
+/// honoured: `0.0.0.0` or `::` with port 9, and a `c=` address that is a
+/// name rather than an address.
+#[must_use]
+pub fn ice_mismatch(
+    session: &SessionDescription,
+    media: &MediaDescription,
+    remote: &RemoteIce,
+    rtcp_muxed: bool,
+) -> bool {
+    let Some(ip) = session.connection_of(media).and_then(Connection::ip) else {
+        return false;
+    };
+    let rtp = SocketAddr::new(ip, media.port);
+    if !listed(remote, ComponentId::RTP, rtp) {
+        return true;
+    }
+    if rtcp_muxed || rtcp_switched_off(session, media) {
+        return false;
+    }
+    match rtcp_destination(media, rtp) {
+        Some(control) => !listed(remote, ComponentId::RTCP, control),
+        None => false,
+    }
+}
+
+fn listed(remote: &RemoteIce, component: ComponentId, destination: SocketAddr) -> bool {
+    (destination.ip().is_unspecified() && destination.port() == 9)
+        || remote
+            .candidates
+            .iter()
+            .any(|candidate| candidate.component == component && candidate.address == destination)
+}
+
+/// "If the agent does not utilize RTCP, it indicates that by including 'RS:0'
+/// and 'RR:0' SDP attributes" (RFC 8839 §4.2.2).
+fn rtcp_switched_off(session: &SessionDescription, media: &MediaDescription) -> bool {
+    let zero = |modifier: &str| {
+        media
+            .bandwidth
+            .iter()
+            .chain(&session.bandwidth)
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                (name == modifier).then(|| value.trim() == "0")
+            })
+            .unwrap_or(false)
+    };
+    zero("RS") && zero("RR")
+}
+
+/// `a=rtcp:<port> [<nettype> <addrtype> <address>]` (RFC 3605 §2.1), or the
+/// port after RTP's when the attribute is absent.
+fn rtcp_destination(media: &MediaDescription, rtp: SocketAddr) -> Option<SocketAddr> {
+    let Some(value) = media
+        .attribute("rtcp")
+        .and_then(|attribute| attribute.value.as_deref())
+    else {
+        return Some(SocketAddr::new(rtp.ip(), rtp.port().checked_add(1)?));
+    };
+    let mut parts = value.split_ascii_whitespace();
+    let port = parts.next()?.parse().ok()?;
+    let ip = match (parts.next(), parts.next(), parts.next()) {
+        (Some(network), Some(address_type), Some(address)) => Connection {
+            network: network.to_owned(),
+            address_type: address_type.to_owned(),
+            address: address.to_owned(),
+        }
+        .ip()?,
+        _ => rtp.ip(),
+    };
+    Some(SocketAddr::new(ip, port))
 }
 
 /// What the peer said about ICE for one data stream, read out of its offer
@@ -64,6 +175,13 @@ pub struct RemoteIce {
     /// parse. A line it could not — an FQDN, a transport that is not UDP, a
     /// type it does not know — is simply absent, per RFC 8839 §5.1.
     pub candidates: Vec<Candidate>,
+    /// The pacing the peer asked for with the session-level `a=ice-pacing`
+    /// (RFC 8839 §5.5), when it wrote one that parses: one to ten digits of
+    /// milliseconds.
+    pub pacing: Option<Duration>,
+    /// Whether the stream carries `a=ice-mismatch` (RFC 8839 §5.3): the peer
+    /// does ICE, just not on this stream.
+    pub mismatch: bool,
 }
 
 /// Read one stream's ICE parameters, falling back to the session level for
@@ -87,13 +205,27 @@ pub fn parse_remote(session: &SessionDescription, media: &MediaDescription) -> O
         .filter_map(|attribute| attribute.value.as_deref())
         .filter_map(Candidate::parse)
         .collect();
+    let pacing = session
+        .attribute("ice-pacing")
+        .and_then(|attribute| attribute.value.as_deref())
+        .and_then(parse_pacing);
     Some(RemoteIce {
         ufrag,
         pwd,
         lite,
         ice2,
         candidates,
+        pacing,
+        mismatch: media.has_flag("ice-mismatch"),
     })
+}
+
+/// `pacing-value = 1*10DIGIT` (RFC 8839 §5.5), in milliseconds.
+fn parse_pacing(value: &str) -> Option<Duration> {
+    if value.is_empty() || value.len() > 10 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok().map(Duration::from_millis)
 }
 
 fn attribute_value(
@@ -115,11 +247,16 @@ fn declares_option(attribute: Option<&Attribute>, option: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_remote, write_media, write_session};
+    use super::{
+        RemoteIce, ice_mismatch, parse_remote, write_media, write_pacing, write_session,
+        write_stream,
+    };
     use crate::ice::agent::{LiteAgent, Role};
     use crate::ice::candidate::{ComponentId, HostAddresses, gather};
+    use crate::ice::full::Credentials;
     use sipral_core::sdp::{Attribute, Connection, MediaDescription, Origin, SessionDescription};
     use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
 
     fn session() -> SessionDescription {
         let address = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
@@ -295,5 +432,231 @@ mod tests {
 
         let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
         assert!(!remote.lite);
+    }
+
+    fn with_credentials(description: &mut SessionDescription) {
+        description
+            .attributes
+            .push(Attribute::with_value("ice-ufrag", "8hhY"));
+        description
+            .attributes
+            .push(Attribute::with_value("ice-pwd", "asd88fgpdd777uzjYhagZg"));
+    }
+
+    #[test]
+    fn ice_pacing_is_written_and_read_at_the_session_level_in_milliseconds() {
+        let mut description = session();
+        with_credentials(&mut description);
+        write_pacing(&mut description, Duration::from_millis(80));
+        description.media.push(audio_media());
+        assert_eq!(
+            description
+                .attribute("ice-pacing")
+                .and_then(|attribute| attribute.value.as_deref()),
+            Some("80")
+        );
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert_eq!(remote.pacing, Some(Duration::from_millis(80)));
+    }
+
+    #[test]
+    fn a_pacing_value_that_is_not_one_to_ten_digits_is_ignored() {
+        for bad in ["", "12345678901", "50ms", "-5", " 5"] {
+            let mut description = session();
+            with_credentials(&mut description);
+            description
+                .attributes
+                .push(Attribute::with_value("ice-pacing", bad));
+            description.media.push(audio_media());
+            let remote =
+                parse_remote(&description, &description.media[0]).expect("ICE is declared");
+            assert_eq!(remote.pacing, None, "{bad:?}");
+        }
+        let mut description = session();
+        with_credentials(&mut description);
+        description.media.push(audio_media());
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert_eq!(remote.pacing, None);
+    }
+
+    #[test]
+    fn an_ice_mismatch_flag_on_the_stream_is_read() {
+        let mut description = session();
+        with_credentials(&mut description);
+        let mut media = audio_media();
+        media.attributes.push(Attribute::flag("ice-mismatch"));
+        description.media.push(media);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert!(remote.mismatch);
+    }
+
+    /// A description at 198.51.100.7, RTP on port 9000, with these candidate
+    /// lines and whatever else `extra` adds to the stream.
+    fn described(
+        candidates: &[&str],
+        extra: impl FnOnce(&mut MediaDescription),
+    ) -> (SessionDescription, RemoteIce) {
+        let mut description = session();
+        with_credentials(&mut description);
+        let mut media = audio_media();
+        for line in candidates {
+            media
+                .attributes
+                .push(Attribute::with_value("candidate", line));
+        }
+        extra(&mut media);
+        description.media.push(media);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        (description, remote)
+    }
+
+    const RTP_LINE: &str = "1 1 UDP 2130706431 198.51.100.7 9000 typ host";
+    const RTCP_LINE: &str = "1 2 UDP 2130706430 198.51.100.7 9001 typ host";
+
+    #[test]
+    fn a_default_destination_that_is_not_a_candidate_is_a_mismatch() {
+        let (description, remote) = described(&[RTP_LINE], |_| {});
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            true
+        ));
+
+        // what an ALG that rewrote c= would leave behind
+        let (description, remote) =
+            described(&["1 1 UDP 2130706431 10.0.0.2 9000 typ host"], |_| {});
+        assert!(ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            true
+        ));
+    }
+
+    #[test]
+    fn without_rtcp_mux_the_rtcp_destination_has_to_be_a_candidate_too() {
+        // the port after RTP's, when there is no a=rtcp
+        let (description, remote) = described(&[RTP_LINE, RTCP_LINE], |_| {});
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+        let (description, remote) = described(&[RTP_LINE], |_| {});
+        assert!(ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+        // multiplexed, RTCP has no destination of its own to look for
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            true
+        ));
+    }
+
+    #[test]
+    fn the_rtcp_attribute_names_the_rtcp_destination() {
+        let port_only = |media: &mut MediaDescription| {
+            media.attributes.push(Attribute::with_value("rtcp", "9500"));
+        };
+        let listed = "1 2 UDP 2130706430 198.51.100.7 9500 typ host";
+        let (description, remote) = described(&[RTP_LINE, listed], port_only);
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+        let (description, remote) = described(&[RTP_LINE, RTCP_LINE], port_only);
+        assert!(ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+
+        let elsewhere = |media: &mut MediaDescription| {
+            media
+                .attributes
+                .push(Attribute::with_value("rtcp", "9500 IN IP4 198.51.100.8"));
+        };
+        let there = "1 2 UDP 2130706430 198.51.100.8 9500 typ host";
+        let (description, remote) = described(&[RTP_LINE, there], elsewhere);
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+        let (description, remote) = described(&[RTP_LINE, listed], elsewhere);
+        assert!(ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_stream_that_switches_rtcp_off_needs_no_rtcp_candidate() {
+        let (description, remote) = described(&[RTP_LINE], |media| {
+            media.bandwidth.push("RS:0".to_owned());
+            media.bandwidth.push("RR:0".to_owned());
+        });
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            false
+        ));
+    }
+
+    #[test]
+    fn the_unspecified_address_with_port_nine_is_not_a_mismatch() {
+        let address = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let mut description =
+            SessionDescription::new(Origin::new(1, 1, address), Connection::new(address));
+        with_credentials(&mut description);
+        description.media.push(MediaDescription::new(
+            "audio",
+            9,
+            "RTP/AVP",
+            vec!["0".to_owned()],
+        ));
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert!(!ice_mismatch(
+            &description,
+            &description.media[0],
+            &remote,
+            true
+        ));
+    }
+
+    #[test]
+    fn a_full_agent_stream_round_trips_through_parse_remote() {
+        let credentials = Credentials::new("8hhY", "asd88fgpdd777uzjYhagZg").expect("shape");
+        let candidates = gather(&[(
+            ComponentId::RTP,
+            HostAddresses {
+                v4: Some(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 7), 9000)),
+                v6: None,
+            },
+        )]);
+        let mut description = session();
+        let mut media = audio_media();
+        write_stream(&mut media, &credentials, &candidates);
+        description.media.push(media);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+        assert_eq!(remote.ufrag, "8hhY");
+        assert_eq!(remote.pwd, "asd88fgpdd777uzjYhagZg");
+        assert!(remote.ice2);
+        assert!(!remote.lite);
+        assert_eq!(remote.candidates, candidates);
     }
 }

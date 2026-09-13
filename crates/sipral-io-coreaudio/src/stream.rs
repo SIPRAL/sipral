@@ -8,10 +8,14 @@
 //! is not a preference. It brings the system's own echo canceller, and
 //! `docs/05-media.md` says in as many words that we attach an echo canceller
 //! rather than write one; on iOS it is also what makes the audio session
-//! behave the way a call should. The cost is that it is one unit driving one
-//! device in both directions, so a caller wanting the microphone of one device
-//! and the speaker of another has to build an aggregate device first, and that
-//! is the operating system's business rather than ours.
+//! behave the way a call should.
+//!
+//! One unit is not one device. On macOS it plays to one device object and
+//! captures from another whenever the machine has them as two, which on a Mac
+//! is the usual case: the built-in speakers and the built-in microphone are
+//! separate objects, with separate rates, buffers and delays. The unit says
+//! which object each half is on, and the stream asks it for both rather than
+//! letting either stand for the other.
 //!
 //! Two threads meet here. The framework's realtime thread runs [`play`] and
 //! [`record`]; everything else runs on whatever thread the caller is on. They
@@ -30,10 +34,12 @@ use crate::abi;
 use crate::counters::Counters;
 // choosing a device is a macOS notion; on iOS the route is the session's
 #[cfg(target_os = "macos")]
-use crate::device::DeviceChoice;
+use crate::device::{DeviceChoice, Direction};
 use crate::device::{DeviceId, StreamEvent};
 use crate::format::StreamFormat;
 use crate::gate::{Gate, TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS};
+#[cfg(target_os = "macos")]
+use crate::latency::Latency;
 use crate::latency::RenderDelay;
 use crate::level::{Channel, Controls, window_samples};
 use crate::ring::Ring;
@@ -46,6 +52,13 @@ use crate::sys;
 /// to be decided before the stream opens rather than discovered. Apple's own
 /// advice for iOS is this number, because a smaller one starts failing when
 /// the screen locks.
+///
+/// On macOS it is not free. The voice-processing unit takes it as the
+/// microphone's IO buffer: on an Intel MacBook Pro the built-in microphone
+/// went from 512 frames to 4,096 once a unit with this limit was initialised,
+/// and stayed at 512 under a limit of 512 or none, which is 81 ms more capture
+/// delay at 44.1 kHz. [`Stream::render_delay`] counts it, because the device
+/// reports it.
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
 
 /// Frames each ring holds unless the caller says otherwise: enough to ride out
@@ -202,30 +215,34 @@ impl Shared {
 
     /// Fill the unit's buffer from the playback ring. Realtime thread.
     ///
-    /// Returns whether what went out was silence, which is what the silence
-    /// flag on the way back is for.
+    /// Returns whether the silence flag may go on the way back, which is only
+    /// ever when every buffer in the list has just been zeroed: the header
+    /// calls the flag a hint, and holds whoever sets it to having made the
+    /// buffer silent.
     ///
     /// # Safety
-    /// `buffers` is whatever the framework passed, so it may be null; when it
-    /// is not, its first buffer describes memory of `byte_size` octets that
-    /// this callback owns for the length of the call.
+    /// As [`silence`].
     unsafe fn play(&self, frames: u32, buffers: *mut abi::BufferList) -> bool {
         // SAFETY: the caller's pointer, checked for null by `as_mut`.
         let Some(list) = (unsafe { buffers.as_mut() }) else {
-            return true;
+            // SAFETY: as above; null is handled inside.
+            return unsafe { silence(buffers) };
         };
         // one channel interleaved is what the stream format asks for, so the
         // unit hands back exactly one buffer; anything else is not our format
         let Some(buffer) = list.buffers.first_mut() else {
-            return true;
+            // SAFETY: the caller's list.
+            return unsafe { silence(buffers) };
         };
         if list.count != 1 || buffer.data.is_null() {
-            return true;
+            // SAFETY: the caller's list, walked by its own count.
+            return unsafe { silence(buffers) };
         }
         let room = usize::try_from(buffer.byte_size).unwrap_or(0) / 2;
         let wanted = usize::try_from(frames).unwrap_or(0).min(room);
         if wanted == 0 {
-            return true;
+            // SAFETY: the caller's list.
+            return unsafe { silence(buffers) };
         }
         // SAFETY: `wanted` samples fit in the octets the buffer declares, and
         // the unit hands over memory aligned for the format it was given.
@@ -244,7 +261,13 @@ impl Shared {
         }
         Meters::add(&self.meters.played, taken);
         Meters::add(&self.meters.playback_starved, wanted - taken);
-        taken == 0
+        if taken > 0 {
+            return false;
+        }
+        // Only the frames asked for were zeroed above, and a buffer can
+        // declare more octets than that; the flag speaks for all of them.
+        // SAFETY: the caller's list, and `out` is not used past this point.
+        unsafe { silence(buffers) }
     }
 
     /// Pull what the microphone heard and put it in the capture ring.
@@ -331,26 +354,49 @@ unsafe fn mark_silent(flags: *mut u32) {
     }
 }
 
-/// Zero whatever the unit was going to play, without doing anything that could
-/// itself go wrong. Reached only after a panic has already been caught.
+/// Zero every buffer the unit was going to play, and say whether that left
+/// nothing unzeroed — which is the only condition under which the silence flag
+/// may be set.
+///
+/// Walked by the list's own count and by offset, not through the declared
+/// structure, because a list of more than one buffer is longer than that
+/// structure. A null list has no octets to zero and is silent; a buffer that
+/// declares octets behind a null pointer cannot be zeroed, and the answer is
+/// then no. Nothing here can panic, which is what lets the panic path use it.
 ///
 /// # Safety
-/// As [`Shared::play`].
-unsafe fn blank(buffers: *mut abi::BufferList) {
-    // SAFETY: checked for null.
-    let Some(list) = (unsafe { buffers.as_mut() }) else {
-        return;
-    };
-    let Some(buffer) = list.buffers.first_mut() else {
-        return;
-    };
-    if buffer.data.is_null() {
-        return;
+/// `buffers` is whatever the framework passed, so it may be null; when it is
+/// not, it is an `AudioBufferList` whose `count` buffers lie end to end from
+/// [`abi::BUFFERS_AT`], each describing `byte_size` octets that this callback
+/// owns for the length of the call, or a null pointer.
+unsafe fn silence(buffers: *mut abi::BufferList) -> bool {
+    if buffers.is_null() {
+        return true;
     }
-    let bytes = usize::try_from(buffer.byte_size).unwrap_or(0);
-    // SAFETY: the buffer declares that many octets and nothing else is reading
-    // them while this callback runs.
-    unsafe { ptr::write_bytes(buffer.data.cast::<u8>(), 0, bytes) };
+    // SAFETY: not null, and the count is the list's first field.
+    let count = unsafe { (*buffers).count };
+    let mut zeroed = true;
+    for index in 0..usize::try_from(count).unwrap_or(0) {
+        let Some(offset) = index
+            .checked_mul(size_of::<abi::Buffer>())
+            .and_then(|at| at.checked_add(abi::BUFFERS_AT))
+        else {
+            return false;
+        };
+        // SAFETY: the list carries `count` buffers from `BUFFERS_AT` on, so
+        // this one is inside it, and a list aligned for its pointer field is
+        // aligned for every buffer in it.
+        let buffer = unsafe { ptr::read(buffers.byte_add(offset).cast::<abi::Buffer>()) };
+        if buffer.data.is_null() {
+            zeroed &= buffer.byte_size == 0;
+            continue;
+        }
+        let bytes = usize::try_from(buffer.byte_size).unwrap_or(0);
+        // SAFETY: the buffer declares that many octets and nothing else is
+        // reading them while this callback runs.
+        unsafe { ptr::write_bytes(buffer.data.cast::<u8>(), 0, bytes) };
+    }
+    zeroed
 }
 
 /// The render callback the unit calls when it wants something to play.
@@ -376,9 +422,10 @@ unsafe extern "C" fn play(
         // teardown has begun: play silence and touch nothing it may be about
         // to take away
         // SAFETY: the framework's buffers, not ours; checked for null inside.
-        unsafe { blank(buffers) };
-        // SAFETY: as above.
-        unsafe { mark_silent(flags) };
+        if unsafe { silence(buffers) } {
+            // SAFETY: as above.
+            unsafe { mark_silent(flags) };
+        }
         return 0;
     };
 
@@ -386,8 +433,7 @@ unsafe extern "C" fn play(
     let silent = outcome.unwrap_or_else(|_| {
         Meters::add(&shared.meters.panics, 1);
         // SAFETY: as in `play`; nothing here can panic a second time.
-        unsafe { blank(buffers) };
-        true
+        unsafe { silence(buffers) }
     });
     if silent {
         // SAFETY: the framework's pointer, checked inside.
@@ -442,19 +488,33 @@ pub struct Stream {
     /// them under a caller who is mid-call.
     microphone: Arc<Channel>,
     speaker: Arc<Channel>,
-    /// Which device the unit settled on, read once at open. Reading it later
-    /// would be a call into a unit whose device may have gone, and the answer
-    /// is wanted precisely when that has happened. `None` on iOS, where the
-    /// route belongs to the audio session rather than to this crate.
-    opened_on: Option<DeviceId>,
-    /// What that device said about its own delay, read at the same moment and
-    /// for the same reason.
+    /// Which device each half of the unit settled on, read once at open.
+    /// Reading them later would be a call into a unit whose device may have
+    /// gone, and the answer is wanted precisely when that has happened. Empty
+    /// on iOS, where the route belongs to the audio session rather than to
+    /// this crate.
+    route: Route,
+    /// What those two devices said about their own delay, read at the same
+    /// moment and for the same reason.
     delay: RenderDelay,
     health: Health,
     closed: bool,
     /// Set when teardown could not prove the callbacks were out. Nothing is
     /// then freed, ever.
     leak: bool,
+}
+
+/// The device object under each half of a stream.
+///
+/// Two fields rather than one because the unit reports two, and on a Mac they
+/// are usually different objects. Either is `None` where the unit named no
+/// device for that half.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Route {
+    /// The speaker's: what the unit reports on its output element.
+    playback: Option<DeviceId>,
+    /// The microphone's: what the unit reports on its input element.
+    capture: Option<DeviceId>,
 }
 
 /// Where the device under a stream is.
@@ -546,27 +606,32 @@ impl Stream {
             config,
             microphone,
             speaker,
-            opened_on: None,
+            route: Route::default(),
             delay: RenderDelay::default(),
             health: Health::Stopped,
             closed: false,
             leak: false,
         };
         configure(unit, &stream.config, &stream.shared)?;
-        stream.opened_on = stream.current_device();
+        stream.route = route_of(unit);
         stream.delay = stream.current_delay();
         Ok(stream)
     }
 
-    /// What the device the unit landed on says its two directions cost.
+    /// What the two devices the unit landed on say their halves cost: the
+    /// speaker's output side at the speaker's rate, and the microphone's
+    /// input side at the microphone's.
     #[cfg(target_os = "macos")]
     fn current_delay(&self) -> RenderDelay {
-        // One device for both halves: the voice-processing unit drives one,
-        // and a caller wanting the microphone of one device and the speaker of
-        // another builds an aggregate, which is again one device.
-        self.opened_on.map_or_else(RenderDelay::default, |device| {
-            crate::hal::render_delay(device, device)
-        })
+        let leg = |device: Option<DeviceId>, direction| {
+            device.map_or_else(Latency::default, |device| {
+                crate::hal::latency(device, direction)
+            })
+        };
+        RenderDelay {
+            playback: leg(self.route.playback, Direction::Output),
+            capture: leg(self.route.capture, Direction::Input),
+        }
     }
 
     /// On iOS the numbers live in `AVAudioSession` — `inputLatency`,
@@ -575,33 +640,24 @@ impl Stream {
     #[cfg(target_os = "ios")]
     #[expect(
         clippy::unused_self,
-        reason = "as `current_device`: the answer is the platform's, not this stream's"
+        reason = "the answer is the platform's rather than this stream's, and staying a method keeps the caller free of a cfg"
     )]
     fn current_delay(&self) -> RenderDelay {
         RenderDelay::default()
     }
 
-    /// Which device the unit landed on, where a platform has such a thing.
-    #[cfg(target_os = "macos")]
-    fn current_device(&self) -> Option<DeviceId> {
-        self.device().ok()
-    }
-
-    /// On iOS the route is the audio session's, and there is no device
-    /// identifier to be had from the unit.
-    #[cfg(target_os = "ios")]
-    #[expect(
-        clippy::unused_self,
-        reason = "it answers for the platform rather than for this stream, and staying a method is what keeps the caller free of a cfg"
-    )]
-    fn current_device(&self) -> Option<DeviceId> {
-        None
-    }
-
-    /// Whether the device the stream opened on is still attached.
+    /// Whether both devices the stream opened on are still attached.
+    ///
+    /// Either one going is the stream's device going: a call that has lost
+    /// its microphone is as broken as one that has lost its speaker, and on a
+    /// Mac the two are usually different objects, so asking about one says
+    /// nothing about the other.
     #[cfg(target_os = "macos")]
     fn device_present(&self) -> bool {
-        self.opened_on.is_none_or(crate::hal::is_alive)
+        [self.route.playback, self.route.capture]
+            .into_iter()
+            .flatten()
+            .all(crate::hal::is_alive)
     }
 
     /// On iOS a route change arrives through `AVAudioSession`, which belongs
@@ -609,7 +665,7 @@ impl Stream {
     #[cfg(target_os = "ios")]
     #[expect(
         clippy::unused_self,
-        reason = "as `current_device`: the answer is the platform's, not this stream's"
+        reason = "the answer is the platform's rather than this stream's, and staying a method keeps the caller free of a cfg"
     )]
     fn device_present(&self) -> bool {
         true
@@ -627,14 +683,15 @@ impl Stream {
     /// This is the number an echo canceller is told to look back by, and the
     /// one line to write is the same on Windows: what
     /// `sipral_io_wasapi::CaptureStream::latency` reports for its endpoint,
-    /// this reports for both halves of the device, because the unit here is
-    /// duplex and a WASAPI client is not.
+    /// this reports for both halves at once, because the unit here is duplex
+    /// and a WASAPI client is not. Each half is asked of the device object
+    /// the unit reports for it, and converted at that device's own rate.
     ///
-    /// Read once, when the stream opened. Asking the device again later would
-    /// be a property read on hardware that may have gone, and the parts that
-    /// can move — the IO buffer another process resized — move by less than
-    /// the delay of asking. [`Stream::recover`] reads it again for the device
-    /// it lands on.
+    /// Read once, when the stream opened. Asking the devices again later
+    /// would be a property read on hardware that may have gone, and the parts
+    /// that can move — the IO buffer another process resized — move by less
+    /// than the delay of asking. [`Stream::recover`] reads it again for the
+    /// devices it lands on.
     ///
     /// Zero on iOS, and zero from a device that answered nothing.
     /// [`Stream::render_delay`] is the same number with the parts still
@@ -726,10 +783,12 @@ impl Stream {
     /// it is not.
     ///
     /// What it proves differs by platform, and the difference is worth
-    /// knowing. On macOS the hardware layer is asked outright whether the
-    /// device object the stream opened is still alive, so an unplugged headset
-    /// is reported whether or not anything was flowing through it. On iOS it
-    /// always answers `None`: the route belongs to `AVAudioSession`, and
+    /// knowing. On macOS the hardware layer is asked outright whether each of
+    /// the two device objects the stream opened — the speaker's and the
+    /// microphone's, which are often not the same object — is still alive, so
+    /// an unplugged headset or microphone is reported whether or not anything
+    /// was flowing through it, and losing either half is losing the stream.
+    /// On iOS it always answers `None`: the route belongs to `AVAudioSession`, and
     /// interruptions and route changes are delivered to the application rather
     /// than to this crate, so anything said here would be a guess dressed as a
     /// fact.
@@ -739,7 +798,7 @@ impl Stream {
     /// and the speaker ring fills and takes no more. [`Stream::recover`] is
     /// what puts a device back under it.
     ///
-    /// The macOS answer costs one property read, so it belongs beside
+    /// The macOS answer costs two property reads, so it belongs beside
     /// [`DeviceMonitor::poll`] a few times a second rather than beside
     /// [`Controls::level`] on every drawn frame. Once the loss has been
     /// reported it costs a comparison: every answer after the first is `None`,
@@ -810,11 +869,12 @@ impl Stream {
         Ok(stream)
     }
 
-    /// Which device the stream actually landed on.
+    /// Which device the speaker half of the stream actually landed on.
     ///
     /// Worth asking after a [`DeviceEvent::DefaultChanged`] arrives: a stream
     /// opened without naming a device follows the system route, and this is
-    /// how to find out where that went.
+    /// how to find out where that went. The microphone half is
+    /// [`Stream::capture_device`], and on a Mac it is usually another device.
     ///
     /// [`DeviceEvent::DefaultChanged`]: crate::DeviceEvent::DefaultChanged
     ///
@@ -822,14 +882,17 @@ impl Stream {
     /// [`Error::Call`] from `AudioUnitGetProperty`.
     #[cfg(target_os = "macos")]
     pub fn device(&self) -> Result<DeviceId, Error> {
-        let id: u32 = get(
-            self.unit,
-            "AudioUnitGetProperty (CurrentDevice)",
-            abi::PROPERTY_CURRENT_DEVICE,
-            abi::SCOPE_GLOBAL,
-            0,
-        )?;
-        Ok(DeviceId::new(id))
+        device_on(self.unit, abi::BUS_OUTPUT)
+    }
+
+    /// Which device the microphone half of the stream actually landed on, as
+    /// [`Stream::device`] is for the speaker.
+    ///
+    /// # Errors
+    /// [`Error::Call`] from `AudioUnitGetProperty`.
+    #[cfg(target_os = "macos")]
+    pub fn capture_device(&self) -> Result<DeviceId, Error> {
+        device_on(self.unit, abi::BUS_INPUT)
     }
 
     /// The two directions, so that a capture thread and a playback thread can
@@ -1000,10 +1063,13 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
         &enabled,
     )?;
 
-    // Global scope, element zero, and before initialising: for this unit the
-    // device is one property covering both directions, and it is only settable
-    // while the unit is uninitialised. That last part is why a device cannot
+    // Global scope, element zero, and before initialising: the device is only
+    // settable while the unit is uninitialised, which is why a device cannot
     // be changed under a running stream and why `Stream::recover` reopens.
+    // Element zero is the speaker's half. On an uninitialised unit, naming a
+    // device here was seen to leave element one, the microphone's, on the
+    // system's default input, so what each half is on is read back from the
+    // unit once it is initialised rather than assumed from this choice.
     #[cfg(target_os = "macos")]
     if let Some(device) = crate::hal::choose(&config.device)? {
         let id = device.get();
@@ -1100,6 +1166,48 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
     Ok(())
 }
 
+/// The device one element of the unit is on: element zero is the speaker's
+/// half and element one the microphone's, the same numbers the two buses
+/// carry.
+///
+/// The header documents the property on the global scope without saying what
+/// its elements are. The voice-processing unit answers on both, with the
+/// default output on element zero and the default input on element one when
+/// no device is named, which is what this relies on.
+#[cfg(target_os = "macos")]
+fn device_on(unit: sys::Unit, element: u32) -> Result<DeviceId, Error> {
+    let id: u32 = get(
+        unit,
+        "AudioUnitGetProperty (CurrentDevice)",
+        abi::PROPERTY_CURRENT_DEVICE,
+        abi::SCOPE_GLOBAL,
+        element,
+    )?;
+    Ok(DeviceId::new(id))
+}
+
+/// Both halves' devices, where the unit names one. Zero is
+/// `kAudioObjectUnknown`, which names nothing and is not a device to watch.
+#[cfg(target_os = "macos")]
+fn route_of(unit: sys::Unit) -> Route {
+    let on = |element| {
+        device_on(unit, element)
+            .ok()
+            .filter(|device| device.get() != 0)
+    };
+    Route {
+        playback: on(abi::BUS_OUTPUT),
+        capture: on(abi::BUS_INPUT),
+    }
+}
+
+/// On iOS the route is the audio session's, and there is no device identifier
+/// to be had from the unit.
+#[cfg(target_os = "ios")]
+fn route_of(_unit: sys::Unit) -> Route {
+    Route::default()
+}
+
 /// Read a property back, and insist it came back the size it was asked for.
 fn get<T: Copy + Default>(
     unit: sys::Unit,
@@ -1159,8 +1267,8 @@ fn set<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DEPTH_FRAMES, Health, MAX_FRAMES_PER_SLICE, Shared, Stream, StreamConfig, play,
-        record,
+        DEFAULT_DEPTH_FRAMES, Health, MAX_FRAMES_PER_SLICE, Route, Shared, Stream, StreamConfig,
+        play, record,
     };
     use crate::abi;
     use crate::format::StreamFormat;
@@ -1456,6 +1564,149 @@ mod tests {
         assert_eq!(controls.gain(), Gain::from_ratio(0.25));
     }
 
+    /// A route onto a number no machine has handed out, so the hardware layer
+    /// will not say either half is alive.
+    #[cfg(target_os = "macos")]
+    fn gone() -> Route {
+        Route {
+            playback: Some(DeviceId::new(u32::MAX)),
+            capture: Some(DeviceId::new(u32::MAX)),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn losing_either_half_is_losing_the_stream() {
+        let Some(alive) = crate::hal::devices()
+            .ok()
+            .and_then(|list| list.first().map(|device| device.id))
+        else {
+            return;
+        };
+        let dead = Some(DeviceId::new(u32::MAX));
+        for (route, lost) in [
+            // the microphone unplugged while the speaker it was not part of
+            // plays on, which is what a USB microphone on a Mac does
+            (
+                Route {
+                    playback: Some(alive),
+                    capture: dead,
+                },
+                true,
+            ),
+            (
+                Route {
+                    playback: dead,
+                    capture: Some(alive),
+                },
+                true,
+            ),
+            (
+                Route {
+                    playback: Some(alive),
+                    capture: Some(alive),
+                },
+                false,
+            ),
+        ] {
+            let mut stream = detached();
+            stream.health = Health::Running;
+            stream.route = route;
+            assert_eq!(
+                stream.poll(),
+                lost.then_some(crate::device::StreamEvent::DeviceLost),
+                "{route:?}"
+            );
+            assert_eq!(stream.is_running(), !lost, "{route:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_half_of_the_delay_is_asked_of_its_own_device() {
+        use crate::device::Direction;
+        use crate::hal::{default_device, latency};
+
+        let (Ok(Some(speaker)), Ok(Some(microphone))) = (
+            default_device(Direction::Output),
+            default_device(Direction::Input),
+        ) else {
+            return;
+        };
+        let mut stream = detached();
+        stream.route = Route {
+            playback: Some(speaker),
+            capture: Some(microphone),
+        };
+        let delay = stream.current_delay();
+        // The microphone's side of the microphone, at the microphone's rate.
+        // Asked of the speaker instead, a Mac answers for an input side the
+        // speaker does not have, at the speaker's rate.
+        assert_eq!(delay.capture, latency(microphone, Direction::Input));
+        assert_eq!(delay.playback, latency(speaker, Direction::Output));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_unit_says_which_device_each_half_is_on() {
+        use crate::device::Direction;
+        use crate::hal::default_device;
+        use crate::sys;
+
+        let (Ok(Some(speaker)), Ok(Some(microphone))) = (
+            default_device(Direction::Output),
+            default_device(Direction::Input),
+        ) else {
+            return;
+        };
+        let wanted = abi::ComponentDescription {
+            component_type: abi::UNIT_TYPE_OUTPUT,
+            subtype: abi::UNIT_SUBTYPE_VOICE_PROCESSING,
+            manufacturer: abi::MANUFACTURER_APPLE,
+            flags: 0,
+            flags_mask: 0,
+        };
+        let component = unsafe { sys::find_component(ptr::null_mut(), &raw const wanted) };
+        if component.is_null() {
+            return;
+        }
+        let mut unit: sys::Unit = ptr::null_mut();
+        assert_eq!(unsafe { sys::open_component(component, &raw mut unit) }, 0);
+        // What `configure` does first, and nothing after it: the unit is never
+        // initialised, so no microphone is opened and nothing is played.
+        let enabled: u32 = 1;
+        let input = super::set(
+            unit,
+            "AudioUnitSetProperty (EnableIO, input)",
+            abi::PROPERTY_ENABLE_IO,
+            abi::SCOPE_INPUT,
+            abi::BUS_INPUT,
+            &enabled,
+        );
+        let output = super::set(
+            unit,
+            "AudioUnitSetProperty (EnableIO, output)",
+            abi::PROPERTY_ENABLE_IO,
+            abi::SCOPE_OUTPUT,
+            abi::BUS_OUTPUT,
+            &enabled,
+        );
+        let route = super::route_of(unit);
+        assert_eq!(unsafe { sys::dispose_component(unit) }, 0);
+
+        assert_eq!(input, Ok(()));
+        assert_eq!(output, Ok(()));
+        // the system route: the default output for one half, and the default
+        // input for the other, which on a Mac is another object
+        assert_eq!(
+            route,
+            Route {
+                playback: Some(speaker),
+                capture: Some(microphone),
+            }
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_device_that_has_gone_is_reported_once_and_stops_the_stream() {
@@ -1463,7 +1714,7 @@ mod tests {
         stream.health = Health::Running;
         // no machine has handed this number out, so the hardware layer will
         // not say it is alive
-        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        stream.route = gone();
         let mut loud = [20_000i16; 100];
         stream.shared.microphone.apply(&mut loud, 100);
         assert_ne!(stream.capture_controls().level(), Level::SILENT);
@@ -1482,7 +1733,7 @@ mod tests {
     fn a_stream_that_was_running_when_the_device_went_is_one_to_put_back() {
         let mut stream = detached();
         stream.health = Health::Running;
-        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        stream.route = gone();
         assert_eq!(stream.poll(), Some(crate::device::StreamEvent::DeviceLost));
         // what `recover` reads to decide whether to start what it opens: a
         // device that went mid-call has to come back mid-call, and `Lost` is
@@ -1494,7 +1745,7 @@ mod tests {
     #[test]
     fn a_stream_nobody_started_has_had_nothing_taken_away() {
         let mut stream = detached();
-        stream.opened_on = Some(DeviceId::new(u32::MAX));
+        stream.route = gone();
         assert_eq!(stream.poll(), None);
         assert_eq!(stream.health, Health::Stopped);
     }
@@ -1564,6 +1815,43 @@ mod tests {
         assert_eq!(controls.level(), Level::SILENT);
     }
 
+    /// What an initialised stream on the system route has to be on: the
+    /// default output for one half and the default input for the other, with
+    /// the delay theirs.
+    #[cfg(target_os = "macos")]
+    fn on_the_system_route(stream: &Stream) {
+        use crate::device::Direction;
+        use crate::hal::{default_device, render_delay};
+
+        println!(
+            "landed on {:?} for the speaker and {:?} for the microphone",
+            stream.device(),
+            stream.capture_device()
+        );
+        let (Ok(Some(speaker)), Ok(Some(microphone))) = (
+            default_device(Direction::Output),
+            default_device(Direction::Input),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            stream.route,
+            Route {
+                playback: Some(speaker),
+                capture: Some(microphone),
+            }
+        );
+        // the live property read agrees with what was read back at open, for
+        // both halves
+        assert_eq!(stream.device(), Ok(speaker));
+        assert_eq!(stream.capture_device(), Ok(microphone));
+        assert_eq!(
+            stream.render_delay(),
+            render_delay(speaker, microphone),
+            "the stream is reporting a delay that is not its devices'"
+        );
+    }
+
     /// The only test here that touches hardware, and everything it checks is
     /// in the one function on purpose: two voice-processing units open at once
     /// in one process block inside the framework, and the test harness runs
@@ -1591,8 +1879,6 @@ mod tests {
         let format = StreamFormat::narrowband();
         let mut stream = Stream::open(StreamConfig::new(format)).expect("open the default device");
         println!("opened at {format}");
-        #[cfg(target_os = "macos")]
-        println!("landed on {:?}", stream.device());
         println!("{}", stream.render_delay());
         assert!(
             stream.latency() < Duration::from_millis(500),
@@ -1600,13 +1886,7 @@ mod tests {
             stream.latency()
         );
         #[cfg(target_os = "macos")]
-        if let Ok(device) = stream.device() {
-            assert_eq!(
-                stream.render_delay(),
-                crate::hal::render_delay(device, device),
-                "the stream is reporting a delay that is not its device's"
-            );
-        }
+        on_the_system_route(&stream);
         stream.start().expect("start the device");
 
         // a quiet sawtooth, so that what goes to the speaker is not silence
@@ -1690,6 +1970,72 @@ mod tests {
         stream.close().expect("close the device");
     }
 
+    /// The loss of a device in the middle of a call, end to end: reported,
+    /// the stream stopped, and a reopen onto whatever the machine has left.
+    ///
+    /// A person has to do the unplugging, which is why it is ignored. Plug a
+    /// USB headset in, let the system make it the default input and output,
+    /// run this, and pull the headset out when it says so.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a person to unplug a headset while it waits"]
+    fn a_headset_unplugged_mid_call_is_reported_and_the_stream_recovers_onto_what_is_left() {
+        use super::{Stream, StreamConfig};
+        use crate::device::StreamEvent;
+        use std::thread;
+        use std::time::Instant;
+
+        const WAIT: Duration = Duration::from_secs(30);
+
+        let format = StreamFormat::narrowband();
+        let mut stream = Stream::open(StreamConfig::new(format)).expect("open the system route");
+        stream.start().expect("start the device");
+        println!(
+            "speaker on {:?}, microphone on {:?}: unplug the headset within {WAIT:?}",
+            stream.route.playback, stream.route.capture
+        );
+
+        // nothing is written for the speaker, so the call is silent; the
+        // microphone is drained the way a call would drain it
+        let mut frame = vec![0i16; format.frame_samples()];
+        let until = Instant::now() + WAIT;
+        let mut event = None;
+        while event.is_none() && Instant::now() < until {
+            while stream.read(&mut frame) {}
+            event = stream.poll();
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            event,
+            Some(StreamEvent::DeviceLost),
+            "no loss was reported within {WAIT:?}"
+        );
+        assert!(!stream.is_running(), "a lost device is not a running one");
+
+        let mut stream = stream
+            .recover()
+            .expect("reopen on what the machine has left");
+        println!(
+            "recovered: speaker on {:?}, microphone on {:?}",
+            stream.route.playback, stream.route.capture
+        );
+        assert!(
+            stream.is_running(),
+            "a call that lost its device comes back running"
+        );
+        thread::sleep(Duration::from_millis(500));
+        let mut arrived = 0usize;
+        while stream.read(&mut frame) {
+            arrived += 1;
+        }
+        assert!(
+            arrived > 0,
+            "nothing arrived from the microphone it recovered onto"
+        );
+        assert_eq!(stream.poll(), None, "what it recovered onto is there");
+        stream.close().expect("close the device");
+    }
+
     /// A stream around a null unit.
     ///
     /// The framework refuses all three teardown calls on one with `paramErr`
@@ -1705,7 +2051,7 @@ mod tests {
             microphone: Arc::clone(&shared.microphone),
             speaker: Arc::clone(&shared.speaker),
             shared,
-            opened_on: None,
+            route: Route::default(),
             delay: super::RenderDelay::default(),
             health: Health::Stopped,
             closed: false,
@@ -1788,33 +2134,39 @@ mod tests {
         assert!(shared.playback.write_frame(&[5, 5, 5, 5]));
         shared.gate.close();
 
-        let mut samples = [-1i16; 4];
+        let mut left = [-1i16; 4];
+        let mut right = [-1i16; 4];
+        let mut list = two_buffers(&mut left, &mut right);
+        let flags = render(&shared, 4, (&raw mut list).cast::<abi::BufferList>());
+
+        // zeroed rather than filled, every buffer of it, and the ring was not
+        // touched
+        assert_eq!(left, [0, 0, 0, 0]);
+        assert_eq!(right, [0, 0, 0, 0]);
+        assert_eq!(flags, abi::RENDER_ACTION_OUTPUT_IS_SILENCE);
+        assert_eq!(shared.playback.filled(), 4);
+        assert_eq!(shared.meters.read().played, 0);
+    }
+
+    #[test]
+    fn a_render_during_teardown_that_cannot_be_zeroed_is_not_called_silence() {
+        // teardown never touches the ring, but the buffer itself may still be
+        // one this callback cannot write into
+        let shared = shared();
+        shared.gate.close();
+
         let mut list = abi::BufferList {
             count: 1,
             buffers: [abi::Buffer {
                 channels: 1,
                 byte_size: 8,
-                data: samples.as_mut_ptr().cast::<c_void>(),
+                data: ptr::null_mut(),
             }],
         };
-        let mut flags = 0u32;
-        let status = unsafe {
-            play(
-                context(&shared),
-                &raw mut flags,
-                ptr::null(),
-                abi::BUS_OUTPUT,
-                4,
-                &raw mut list,
-            )
-        };
+        let flags = render(&shared, 4, &raw mut list);
 
-        assert_eq!(status, 0);
-        // zeroed rather than filled, and the ring was not touched
-        assert_eq!(samples, [0, 0, 0, 0]);
-        assert_eq!(flags, abi::RENDER_ACTION_OUTPUT_IS_SILENCE);
-        assert_eq!(shared.playback.filled(), 4);
-        assert_eq!(shared.meters.read().played, 0);
+        // nothing reachable was zeroed, so the flag is not teardown's to set
+        assert_eq!(flags, 0);
     }
 
     #[test]
@@ -1843,35 +2195,122 @@ mod tests {
         assert_eq!(counters.render_failures, 0);
     }
 
+    /// An `AudioBufferList` of two buffers, laid out the way the framework
+    /// lays out a list longer than the declared structure.
+    #[repr(C)]
+    struct TwoBuffers {
+        count: u32,
+        buffers: [abi::Buffer; 2],
+    }
+
+    fn two_buffers(left: &mut [i16; 4], right: &mut [i16; 4]) -> TwoBuffers {
+        let buffer = |samples: &mut [i16; 4]| abi::Buffer {
+            channels: 1,
+            byte_size: 8,
+            data: samples.as_mut_ptr().cast::<c_void>(),
+        };
+        TwoBuffers {
+            count: 2,
+            buffers: [buffer(left), buffer(right)],
+        }
+    }
+
+    /// Call the render callback for `frames` into `list`, and say what flags
+    /// came back.
+    fn render(shared: &Arc<Shared>, frames: u32, list: *mut abi::BufferList) -> u32 {
+        let mut flags = 0u32;
+        let status = unsafe {
+            play(
+                context(shared),
+                &raw mut flags,
+                ptr::null(),
+                abi::BUS_OUTPUT,
+                frames,
+                list,
+            )
+        };
+        assert_eq!(status, 0);
+        flags
+    }
+
     #[test]
-    fn a_buffer_list_the_format_does_not_match_is_left_alone() {
+    fn a_buffer_list_the_format_does_not_match_is_zeroed_before_it_is_called_silence() {
+        let shared = shared();
+        assert!(shared.playback.write_frame(&[7, 7, 7, 7]));
+
+        let mut left = [-1i16; 4];
+        let mut right = [-1i16; 4];
+        let mut list = two_buffers(&mut left, &mut right);
+        let flags = render(&shared, 4, (&raw mut list).cast::<abi::BufferList>());
+
+        // Not our format, so nothing from the ring goes into it. The flag
+        // still says silence, and the header holds whoever sets it to having
+        // made every buffer silent.
+        assert_eq!(left, [0, 0, 0, 0]);
+        assert_eq!(right, [0, 0, 0, 0]);
+        assert_eq!(flags, abi::RENDER_ACTION_OUTPUT_IS_SILENCE);
+        assert_eq!(shared.playback.filled(), 4);
+        assert_eq!(shared.meters.read().played, 0);
+    }
+
+    #[test]
+    fn a_render_asking_for_no_frames_zeroes_what_it_calls_silence() {
         let shared = shared();
         assert!(shared.playback.write_frame(&[7, 7, 7, 7]));
 
         let mut samples = [-1i16; 4];
         let mut list = abi::BufferList {
-            count: 2,
+            count: 1,
             buffers: [abi::Buffer {
-                channels: 2,
+                channels: 1,
                 byte_size: 8,
                 data: samples.as_mut_ptr().cast::<c_void>(),
             }],
         };
-        let mut flags = 0u32;
-        let status = unsafe {
-            play(
-                context(&shared),
-                &raw mut flags,
-                ptr::null(),
-                abi::BUS_OUTPUT,
-                4,
-                &raw mut list,
-            )
-        };
+        let flags = render(&shared, 0, &raw mut list);
 
-        assert_eq!(status, 0);
-        assert_eq!(samples, [-1, -1, -1, -1]);
+        assert_eq!(samples, [0, 0, 0, 0]);
         assert_eq!(flags, abi::RENDER_ACTION_OUTPUT_IS_SILENCE);
+        assert_eq!(shared.playback.filled(), 4);
+    }
+
+    #[test]
+    fn a_starved_render_zeroes_every_octet_it_calls_silence() {
+        // nothing queued, and a buffer declaring more than the frames asked
+        // for: the flag is about the buffer, not about the frames
+        let shared = shared();
+        let mut samples = [-1i16; 4];
+        let mut list = abi::BufferList {
+            count: 1,
+            buffers: [abi::Buffer {
+                channels: 1,
+                byte_size: 8,
+                data: samples.as_mut_ptr().cast::<c_void>(),
+            }],
+        };
+        let flags = render(&shared, 2, &raw mut list);
+
+        assert_eq!(samples, [0, 0, 0, 0]);
+        assert_eq!(flags, abi::RENDER_ACTION_OUTPUT_IS_SILENCE);
+        assert_eq!(shared.meters.read().playback_starved, 2);
+    }
+
+    #[test]
+    fn a_buffer_with_nowhere_to_write_is_not_called_silence() {
+        let shared = shared();
+        let mut list = abi::BufferList {
+            count: 1,
+            buffers: [abi::Buffer {
+                channels: 1,
+                byte_size: 8,
+                data: ptr::null_mut(),
+            }],
+        };
+        let flags = render(&shared, 4, &raw mut list);
+
+        // eight octets declared and none of them reachable, so none of them
+        // were zeroed, and the flag is not ours to set
+        assert_eq!(flags, 0);
         assert_eq!(shared.meters.read().played, 0);
     }
 }

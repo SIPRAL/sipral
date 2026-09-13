@@ -330,12 +330,14 @@ after it. What is left is platform work, and platform work needs the platform.
   `sipral-io-*` crates for iOS and Android that do not exist yet, and a device
   to run them on.
 - **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
-  ICE-lite already written in `sipral-nat`: gathering, pairing, checks,
-  nomination, role conflicts, restarts, consent freshness (RFC 7675). Off by
-  default for a desktop softphone, where it only adds setup time; on for a
-  phone on a carrier-grade NAT, and lite on a public server. Proven in the lab
-  with a TURN server and two stacks behind two simulated NATs, and against
-  Asterisk with ICE enabled.
+  ICE-lite in `sipral-nat`: gathering, pairing, checks, nomination, role
+  conflicts, restarts, consent freshness (RFC 7675). *The agent is written* and
+  tested over a simulated network; what is left is reaching it from a call —
+  the facade, `MediaConfig` and the C ABI — and proving it in the lab with a
+  TURN server and two stacks behind two simulated NATs, and against Asterisk
+  with ICE enabled. Off by default for a desktop softphone, where it only adds
+  setup time; on for a phone on a carrier-grade NAT, and lite on a public
+  server.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a

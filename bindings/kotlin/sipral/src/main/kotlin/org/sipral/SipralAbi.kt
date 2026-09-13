@@ -1453,6 +1453,411 @@ data class SipralStreamStats(
 }
 
 /**
+ * What a stack is created with.
+ *
+ * Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
+ * filling anything in. Four members have to be filled: the callback, the
+ * transport, the address this end is reachable at, and the entropy. Nothing
+ * here can be guessed on the caller's behalf.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralStackConfig(
+    /**
+     * Where events go. Required: a stack with nowhere to report to is a
+     * stack whose failures are invisible.
+     */
+    val eventListener: SipralEventListener? = null,
+    /**
+     * A SipralTransport.
+     */
+    val transport: Long = 0,
+    /**
+     * The address the far end reaches this one at, as `host:port`, UTF-8 and
+     * not NUL-terminated.
+     *
+     * It goes in every `Via`, so it is the address a response has to come
+     * back to rather than whatever a wildcard socket was bound to. Nothing
+     * here opens a socket or resolves a name.
+     */
+    val bindAddress: String? = null,
+    /**
+     * What to put in `User-Agent` on every request this stack originates —
+     * REGISTER and INVITE — or null for none.
+     *
+     * Not on responses, and not on a request sent inside a dialog: those are
+     * written a layer below this one, which has no opinion about product
+     * names. The field is optional on every method — §20 Table 3 marks it `o`
+     * throughout — so a message that goes out without it is still well formed.
+     */
+    val userAgent: String? = null,
+    /**
+     * Thirty-two bytes of entropy, from the platform's own generator.
+     *
+     * Every branch parameter, tag and `Call-ID` is derived from it, and
+     * §19.3 wants a tag unguessable — cryptographically random, not a
+     * counter or a clock. Two stacks must never be given the same bytes.
+     *
+     * Not the media keys: those come from `media_seed`, and the reason
+     * they are a separate draw is that a replay recording carries this
+     * one in clear.
+     */
+    val entropy: ByteArray? = null,
+    /**
+     * T1 in milliseconds, or zero for the 500 ms of §17.1.1.1.
+     *
+     * In force on every transport: 64·T1 is how long a transaction has to
+     * finish, whether or not anything retransmits.
+     */
+    val timerT1Ms: Long = 0,
+    /**
+     * T2 in milliseconds, or zero for four seconds.
+     *
+     * The cap on the doubling that starts at T1, and therefore only a figure
+     * on a transport that retransmits. Setting it on anything but UDP is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+     */
+    val timerT2Ms: Long = 0,
+    /**
+     * T4 in milliseconds, or zero for five seconds.
+     *
+     * How long a message lingers in the network, which is what timers I and K
+     * wait out. Zero on a transport that delivers for us, so it is refused
+     * there the same way T2 is.
+     */
+    val timerT4Ms: Long = 0,
+    /**
+     * The codecs to offer, in the order to offer them: their names, separated
+     * by commas, as UTF-8 and not NUL-terminated. Null for everything this
+     * build contains, quality first.
+     *
+     * A4. The order is the whole of the negotiation's outcome — RFC 3264 §6.1
+     * has the peer's preference decide among what both ends list — and it is
+     * configured per site rather than fixed, because a carrier that bills by
+     * the minute wants the narrowband codec first and a company on its own
+     * network wants the wideband one.
+     *
+     * A name this build has no encoder for is `SIPRAL_STATUS_NOT_SUPPORTED`
+     * here, with the names it does have in the last error. It is never taken
+     * and ignored: a setting that is accepted and then quietly dropped is the
+     * failure neither end can see.
+     */
+    val codecs: String? = null,
+    /**
+     * How long a frame is, in milliseconds, or zero for twenty.
+     *
+     * Twenty is what every peer expects and what every codec here cuts
+     * cleanly. Opus has a fixed set of frame durations and encodes nothing
+     * else, so an interval it has no size for is refused while Opus is one of
+     * the codecs offered.
+     */
+    val frameMs: Long = 0,
+    /**
+     * Whether to offer RFC 4733 named events, as a `SipralToggle`. On by
+     * default: a phone that cannot send a digit cannot navigate a menu.
+     */
+    val offerDtmf: Long = 0,
+    /**
+     * Whether to ask for RFC 5761 multiplexing, as a `SipralToggle`.
+     *
+     * Off by default. §5.1.1 only permits it where both ends asked, and the
+     * equipment this stack is deployed against does not; asking unasked costs
+     * a line in every offer and buys a port on the calls where nobody answers.
+     */
+    val offerRtcpMux: Long = 0,
+    /**
+     * Whether to stop sending during silence, as a `SipralToggle`.
+     *
+     * Off by default. It halves the bandwidth of a call in which one person is
+     * listening, and it costs the far end's own stall watchdog a reason to
+     * fire — this stack sends no comfort noise of its own to say the silence
+     * is deliberate, so a gap looks the same from there as a stream that died.
+     */
+    val silenceSuppression: Long = 0,
+    /**
+     * Whether inbound audio that stops is reported, as a `SipralToggle`. On by
+     * default; this is B5.
+     */
+    val mediaStallWatchdog: Long = 0,
+    /**
+     * How long inbound audio may stop before that is reported, in
+     * milliseconds, or zero for this build's own figure.
+     *
+     * Setting it with the watchdog switched off is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` rather than a value nothing reads.
+     */
+    val mediaStallMs: Long = 0,
+    /**
+     * What the wall clock read when the stack was created, as seconds since
+     * 1 January 1970, or zero.
+     *
+     * The one number a stack that reads no clock cannot work out: RFC 3550
+     * §6.4.1 has a sender report carry "the wall clock time when this report
+     * was sent", and a monotonic instant is not one. Zero means the reports
+     * count from the Unix epoch, which costs nothing a caller is likely to
+     * miss — the round trip the far end computes is a difference, not an
+     * absolute — and costs the correlation of this call's media with anything
+     * else's.
+     */
+    val mediaClockUnixSeconds: Long = 0,
+    /**
+     * Thirty-two more bytes of entropy, for the media keys, and **not
+     * the same bytes as `entropy`**.
+     *
+     * Every SRTP master key this stack offers or answers with is derived
+     * from these and from nothing else. They are a second draw rather
+     * than a slice of the first because a replay recording writes
+     * `entropy` into the file in clear: one generator for both would put
+     * every key the stack will ever offer into every recording it makes.
+     *
+     * Handing the same bytes twice is refused rather than accepted
+     * quietly. This is the only place in the library that can see both.
+     */
+    val mediaSeed: ByteArray? = null,
+)
+
+/**
+ * What an account is configured with.
+ *
+ * Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
+ * filling anything in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralAccountConfig(
+    /**
+     * The address of record, `sip:alice@example.com`. UTF-8, not
+     * NUL-terminated.
+     */
+    val aor: String? = null,
+    /**
+     * Where the REGISTER is addressed, `sip:example.com`, no user part.
+     *
+     * A `registrar_len` of zero makes an account that never registers: a
+     * trunk that knows this end by the address its requests come from.
+     * Its state is `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` for as long
+     * as it exists, and `sipral_account_register` refuses it.
+     */
+    val registrar: String? = null,
+    /**
+     * Where this endpoint can be reached, as it goes in `Contact`.
+     */
+    val contact: String? = null,
+    /**
+     * Where this account's requests go, as `host:port`: the registrar's
+     * address for an account that registers, and the outbound proxy for
+     * one configured with no registrar. A call that names no destination
+     * of its own goes here either way, so it is required either way. An
+     * address, not a name: RFC 3263 resolution is the caller's.
+     */
+    val registrarAddress: String? = null,
+    /**
+     * The display name that goes in `From`, or null for none.
+     */
+    val displayName: String? = null,
+    /**
+     * The user name to answer a challenge with, or null for an account that
+     * answers none.
+     */
+    val authUser: String? = null,
+    /**
+     * The password that goes with it. Copied out of the caller's memory; what
+     * happens to the caller's copy is the caller's.
+     */
+    val authPassword: String? = null,
+    /**
+     * The `+sip.instance` URN of RFC 5626 §4.1, or null for none.
+     */
+    val instanceId: String? = null,
+    /**
+     * How long a binding to ask for, or zero for an hour.
+     *
+     * A `delta-seconds`, so §20.19 bounds it at 2³²−1 and anything above that
+     * is refused rather than sent as a number no registrar will read. What the
+     * registrar grants wins over the request either way, and the granted
+     * figure is what `sipral_registration_event_t::expires_ms` carries — that
+     * is where the effective value is read back, not here.
+     */
+    val expiresSeconds: Long = 0,
+)
+
+/**
+ * What a call is placed with.
+ *
+ * Set `size` to `sizeof(sipral_call_config_t)` and zero the rest before
+ * filling anything in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralCallConfig(
+    /**
+     * Who to call, as a URI. UTF-8, not NUL-terminated.
+     */
+    val target: String? = null,
+    /**
+     * The session description to offer, for a call this stack manages no
+     * audio for.
+     *
+     * Exactly one of this and `media_address` is set. Two descriptions of one
+     * session is one too many, and neither is a call whose answer would have
+     * to be written into the ACK.
+     */
+    val sdp: ByteArray? = null,
+    /**
+     * Where to send the INVITE, as `host:port`, or null to send it where the
+     * account registers — which is the outbound proxy for a registered line,
+     * and the reason a phone behind a NAT works at all.
+     */
+    val destination: String? = null,
+    /**
+     * Whether to keep every branch a proxy forks the INVITE into. Zero keeps
+     * the first that answers and hangs up the rest, which is what a telephone
+     * does.
+     */
+    val keepAllForks: Long = 0,
+    /**
+     * Where this end will receive media, as `host:port`, for a call this
+     * stack describes and runs the audio of.
+     *
+     * The application owns the socket, so it is the only one that can say. Set
+     * it and the offer is written from this stack's codec order, the answer is
+     * read, and the call gets a media session that `crate::media` and
+     * `crate::record` reach. Leave it null and set `sdp` instead for a call
+     * where the application describes its own session and runs its own RTP.
+     */
+    val mediaAddress: String? = null,
+)
+
+/**
+ * Something the library has to tell the application.
+ *
+ * The pointer handed to the callback is the library's, and it is valid for
+ * the duration of that call and no longer. `size` says how much of the
+ * struct this build filled in, and a binding reads no further than that. The
+ * union stays the last member for the same reason: an arm that grows grows
+ * the tail, which is the one place a released struct may change.
+ *
+ * `payload` is not carried here. Which of its arms the library wrote is named
+ * by another member, and nothing in the declarations says which value names
+ * which arm, so this binding does not guess.
+ */
+class SipralEvent(
+    /**
+     * How many bytes of this struct are meaningful.
+     */
+    val size: Long,
+    /**
+     * The stack it is about.
+     */
+    val stack: Long,
+    /**
+     * What it is.
+     */
+    val kind: Long,
+    /**
+     * The account it is about, or SIPRAL_HANDLE_NONE.
+     */
+    val account: Long,
+    /**
+     * The call it is about, or SIPRAL_HANDLE_NONE.
+     */
+    val call: Long,
+    /**
+     * The SIP message behind it, whole and unparsed, when there is one.
+     *
+     * A reason phrase, a `Retry-After`, the `Contact` of a redirect and the
+     * caller's display name all live here and none of them is worth a member
+     * of its own. Null when the event came from no single message.
+     */
+    val message: ByteArray?,
+)
+
+/**
+ * The one callback a stack has.
+ *
+ * It is called from inside `sipral_stack_poll`, on the thread that called
+ * it, with the `user_data` the stack was created with, and never on two
+ * threads at once for one stack. It must not unwind. Nothing is held
+ * while it runs, so it may call back into the library, the stack it was
+ * given included: see crate::stack.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralEventListener {
+    fun onEvent(event: SipralEvent)
+}
+
+/**
+ * Every SipralEventListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralEventListeners {
+    private val listening = HashMap<Long, SipralEventListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralEventListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /** Tie a kept listener to the handle the call made, or let it go when the call failed. */
+    fun made(key: Long, status: Int, handle: Long) {
+        if (key == 0L) {
+            return
+        }
+        synchronized(this) {
+            if (status == SipralStatus.OK.value) {
+                handles[handle] = key
+            } else {
+                listening.remove(key)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was made with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -1461,14 +1866,30 @@ class SipralException(val status: SipralStatus?, message: String) :
     RuntimeException(if (message.isEmpty()) status.toString() else "$status: $message")
 
 /**
- * The ABI as JNI declares it. Every integer crosses as a Long and
- * every struct the library fills in comes back in a LongArray, so
- * nothing here depends on a field offset that the two Android
- * pointer widths would disagree about.
+ * The ABI as JNI declares it. Every integer crosses as a Long, every
+ * struct the library fills in comes back in a LongArray, and every
+ * struct a caller builds crosses one field at a time, so nothing here
+ * depends on a field offset that the two Android pointer widths would
+ * disagree about.
  */
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
+        agree(0, 9)
+    }
+
+    /**
+     * Throw unless the library that loaded serves a binding printed
+     * against major.minor. Called once, as this object is initialised,
+     * with the version this file was printed from, so a package whose
+     * native library came from another build fails here with both
+     * versions named rather than in whichever call first disagrees.
+     */
+    fun agree(major: Long, minor: Long) {
+        val status = sipral_abi_check(major, minor)
+        if (status != SipralStatus.OK.value) {
+            throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+        }
     }
 
     external fun sipral_last_error_message(buffer: ByteArray, len: LongArray): Int
@@ -1478,17 +1899,17 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(config: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
-    external fun sipral_account_add(stack: Long, config: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, config: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
@@ -1500,7 +1921,7 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, config: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer(stack: Long, call: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -1832,9 +2253,19 @@ object Sipral {
      * says how long it is, with every pointer in it readable for the length
      * beside it, and `out_stack` at one `sipral_handle_t`.
      */
-    fun stackCreate(config: Long): Long {
+    fun stackCreate(config: SipralStackConfig): Long {
+        val configBindAddress = config.bindAddress?.toByteArray(Charsets.UTF_8)
+        val configUserAgent = config.userAgent?.toByteArray(Charsets.UTF_8)
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
-        check(SipralNative.sipral_stack_create(config, stackSlot))
+        val configEventCallback = SipralEventListeners.register(config.eventListener)
+        var status = -1
+        try {
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, stackSlot)
+        } finally {
+            SipralEventListeners.made(configEventCallback, status, stackSlot[0])
+        }
+        check(status)
         return stackSlot[0]
     }
 
@@ -1874,7 +2305,9 @@ object Sipral {
      * Safe to call with any handle value. Reads no memory the caller owns.
      */
     fun stackDestroy(stack: Long) {
-        check(SipralNative.sipral_stack_destroy(stack))
+        val status = SipralNative.sipral_stack_destroy(stack)
+        SipralEventListeners.gone(stack)
+        check(status)
     }
 
     /**
@@ -1943,9 +2376,17 @@ object Sipral {
      * says how long it is, with every pointer in it readable for the length
      * beside it, and `out_account` at one `sipral_handle_t`.
      */
-    fun accountAdd(stack: Long, config: Long): Long {
+    fun accountAdd(stack: Long, config: SipralAccountConfig): Long {
+        val configAor = config.aor?.toByteArray(Charsets.UTF_8)
+        val configRegistrar = config.registrar?.toByteArray(Charsets.UTF_8)
+        val configContact = config.contact?.toByteArray(Charsets.UTF_8)
+        val configRegistrarAddress = config.registrarAddress?.toByteArray(Charsets.UTF_8)
+        val configDisplayName = config.displayName?.toByteArray(Charsets.UTF_8)
+        val configAuthUser = config.authUser?.toByteArray(Charsets.UTF_8)
+        val configAuthPassword = config.authPassword?.toByteArray(Charsets.UTF_8)
+        val configInstanceId = config.instanceId?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, config, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, accountSlot))
         return accountSlot[0]
     }
 
@@ -2036,9 +2477,12 @@ object Sipral {
      * says how long it is, with every pointer in it readable for the length
      * beside it, and `out_call` at one `sipral_handle_t`.
      */
-    fun callPlace(stack: Long, account: Long, config: Long, nowMs: Long): Long {
+    fun callPlace(stack: Long, account: Long, config: SipralCallConfig, nowMs: Long): Long {
+        val configTarget = config.target?.toByteArray(Charsets.UTF_8)
+        val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
+        val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, config, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -2260,9 +2704,12 @@ object Sipral {
      *
      * As sipral_call_place.
      */
-    fun callConsult(stack: Long, call: Long, config: Long, nowMs: Long): Long {
+    fun callConsult(stack: Long, call: Long, config: SipralCallConfig, nowMs: Long): Long {
+        val configTarget = config.target?.toByteArray(Charsets.UTF_8)
+        val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
+        val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, config, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 

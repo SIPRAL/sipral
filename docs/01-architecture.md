@@ -57,7 +57,7 @@ still ahead.
         │               │               │
    sipral-ua      sipral-media     sipral-rtp        sipral-nat
    registration,  pipeline,        RTP/RTCP,         STUN, TURN,
-   calls, hold    codecs, AEC      jitter, SRTP      ICE-lite
+   calls, hold    codecs, AEC      jitter, SRTP      ICE
         │                                                 │
         └────────────────────────┬────────────────────────┘
                                  │

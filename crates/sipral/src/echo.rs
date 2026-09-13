@@ -33,9 +33,9 @@ use sipral_media::processor::Processor;
 /// The longest render-to-capture delay history is kept for.
 ///
 /// Half a second is far beyond any device that works, and the margin is wider
-/// than it first looks: a laptop's own speakers and microphone measure a
-/// hundred milliseconds together — most of it the devices' own processing
-/// rather than buffering — and its voice-processing unit about half that. The
+/// than it first looks: a laptop's own speakers and microphone report a little
+/// over a hundred milliseconds together once its voice-processing unit has
+/// them open. The
 /// limit exists so that a wrong number arriving from a platform is refused
 /// rather than turned into megabytes of ring per call.
 pub const MAX_RENDER_DELAY: Duration = Duration::from_millis(500);

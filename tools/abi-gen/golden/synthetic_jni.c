@@ -5,15 +5,128 @@
  * Do not edit: `cargo run -p sipral-abi-gen` writes it again, and
  * `scripts/check.sh` fails when what is committed is not what came out.
  *
- * One function per entry point, and nothing else: the casts are the
- * whole of what it does, so that the two halves of the Kotlin binding
- * cannot drift apart without the generator saying so.
+ * One function per entry point, one function per callback for it to land
+ * in, and the load hook that finds what those hand events to. All of it
+ * is printed from the same walk as the Kotlin beside it, so that the two
+ * halves of the binding cannot drift apart without the generator saying so.
  */
 
 #include <jni.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "sipral.h"
+
+/* The JVM this library was loaded into, and for each callback the class and
+ * method its events are handed to. They are looked up as the library loads,
+ * on the thread that loaded it, because a thread attached later looks a
+ * class up through the system class loader, which on Android cannot see
+ * the application's. */
+static JavaVM *jni_vm;
+static jclass jni_event_callback_class;
+static jmethodID jni_event_callback_deliver;
+
+/* Whether the struct a callback was handed reaches as far as one of its
+ * members: the library fills in no more of it than its size member says. */
+#define JNI_REACHES(pointer, type, member) \
+    ((pointer)->size >= offsetof(type, member) + sizeof (pointer)->member)
+
+JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    JNIEnv *env = NULL;
+
+    (void)reserved;
+    if ((*vm)->GetEnv(vm, (void *)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralEventListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_event_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_event_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJ[B)V");
+        if (jni_event_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
+    jni_vm = vm;
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL
+JNI_OnUnload(JavaVM *vm, void *reserved)
+{
+    JNIEnv *env = NULL;
+
+    (void)reserved;
+    jni_vm = NULL;
+    if ((*vm)->GetEnv(vm, (void *)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return;
+    }
+    if (jni_event_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_event_callback_class);
+        jni_event_callback_class = NULL;
+    }
+}
+
+/* Where a sipral_event_callback_t lands. The event is handed to
+ * SipralEventListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. */
+static void
+jni_event_callback(const sipral_event_t *event, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    jbyteArray message = NULL;
+
+    if (jni_vm == NULL || event == NULL) {
+        return;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return;
+    }
+    if (built && JNI_REACHES(event, sipral_event_t, message_len) && event->message != NULL) {
+        message = (*env)->NewByteArray(env, (jsize)event->message_len);
+        if (message == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, message, 0, (jsize)event->message_len, (const jbyte *)event->message);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, message);
+    }
+    /* deliver hands what a listener throws to the thread's own handler, so
+     * what is pending here is the JVM's -- an array it could not make --
+     * and a callback has no Java frame beneath it to throw into */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (message != NULL) {
+        (*env)->DeleteLocalRef(env, message);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
+}
 
 JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1abi_1check(JNIEnv *env, jobject self, jlong major, jlong minor)
@@ -53,12 +166,25 @@ Java_org_sipral_SipralNative_sipral_1status_1name(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong config, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jbyteArray configBindAddress, jlong configEcho, jlongArray stack)
 {
     (void)env;
     (void)self;
+    sipral_stack_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    config_value.event_callback = configEventCallback != 0 ? jni_event_callback : NULL;
+    config_value.event_user_data = (void *)(intptr_t)configEventCallback;
+    jbyte *configBindAddress_data = configBindAddress ? (*env)->GetByteArrayElements(env, configBindAddress, NULL) : NULL;
+    jsize configBindAddress_size = configBindAddress ? (*env)->GetArrayLength(env, configBindAddress) : 0;
+    config_value.bind_address = (const char *)configBindAddress_data;
+    config_value.bind_address_len = (size_t)configBindAddress_size;
+    config_value.echo = (sipral_toggle_t)configEcho;
     sipral_handle_t stack_value = 0;
-    sipral_status_t status = sipral_stack_create((const sipral_stack_config_t *)(intptr_t)config, &stack_value);
+    sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
+    if (configBindAddress) {
+        (*env)->ReleaseByteArrayElements(env, configBindAddress, configBindAddress_data, JNI_ABORT);
+    }
     {
         jlong slot = (jlong)stack_value;
         (*env)->SetLongArrayRegion(env, stack, 0, 1, &slot);

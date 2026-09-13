@@ -3,8 +3,9 @@
 
 //! NAT traversal.
 //!
-//! STUN and TURN clients and ICE-lite. Symmetric RTP with rport covers most
-//! carriers on its own; the rest is what this crate is for.
+//! STUN and TURN clients, and ICE in both the lite and the full role.
+//! Symmetric RTP with rport covers most carriers on its own; the rest is what
+//! this crate is for.
 //!
 //! Sans-I/O, like the rest of the tree: nothing here opens a socket, reads a
 //! clock or draws a random number. The caller supplies the datagrams, the
@@ -14,7 +15,7 @@
 //! because the tree has no dependencies. Every one of them is checked against
 //! the digests published with its own specification.
 //!
-//! Written from RFC 8489, RFC 8445, RFC 8656 and RFC 8839; see
+//! Written from RFC 8489, RFC 8445, RFC 8656, RFC 8839 and RFC 7675; see
 //! `docs/02-clean-room.md` for why that matters here.
 
 #![doc(

@@ -145,6 +145,9 @@ mod stream;
 #[cfg(target_os = "windows")]
 mod sys;
 
+#[cfg(all(test, target_os = "windows"))]
+mod fake;
+
 #[cfg(target_os = "windows")]
 pub use endpoint::{DeviceMonitor, default_device, devices};
 #[cfg(target_os = "windows")]

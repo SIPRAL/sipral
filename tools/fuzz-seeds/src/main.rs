@@ -312,12 +312,150 @@ fn sdp_seeds() -> Result<Vec<Seed>, Wrong> {
         ("offer", offer()),
         ("answer", answer()),
         ("two-streams-one-rejected", awkward_sdp()),
+        ("bare-lf-at-body-limit", bare_lf_at_body_limit()?),
+        ("answer-past-body-limit", answer_past_body_limit()?),
+        ("answer-past-line-limit", answer_past_line_limit()?),
     ] {
         sdp::parse(&bytes)
             .map_err(|why| Wrong(format!("the {name} seed is not a description: {why:?}")))?;
         out.push((name, bytes));
     }
     Ok(out)
+}
+
+/// A description at the parser's own body limit (`sdp::Limits::DEFAULT`),
+/// every line closed with a bare LF, which `sdp::parse` tolerates -- RFC
+/// 4566's own §5 asks a parser to "accept records terminated with a single
+/// newline character". `to_bytes` closes every line with CRLF instead, so
+/// writing this back out grows it past the limit it just satisfied: the
+/// false crash 8.3.17 fixed in the target.
+///
+/// Built and checked here rather than by hand, so a change that stopped
+/// `to_bytes` from growing the body fails this generator instead of leaving
+/// a seed in the corpus that no longer proves anything.
+fn bare_lf_at_body_limit() -> Result<Vec<u8>, Wrong> {
+    let mut lines = vec![
+        "v=0".to_owned(),
+        "o=- 0 0 IN IP4 192.0.2.1".to_owned(),
+        "s=-".to_owned(),
+        "c=IN IP4 192.0.2.1".to_owned(),
+        "t=0 0".to_owned(),
+        "m=audio 49170 RTP/AVP 0".to_owned(),
+        "a=rtpmap:0 PCMU/8000".to_owned(),
+    ];
+    let target = sdp::Limits::DEFAULT.max_body_bytes as usize;
+    // filler attribute lines, one per line so each carries its own LF
+    let filler = format!("a={}", "y".repeat(999));
+    let mut total: usize = lines.iter().map(|line| line.len() + 1).sum();
+    while total + filler.len() < target {
+        lines.push(filler.clone());
+        total += filler.len() + 1;
+    }
+    // one more, sized to land on the limit exactly
+    let remainder = target - total;
+    if remainder > 3 {
+        lines.push(format!("a={}", "z".repeat(remainder - 3)));
+    } else if remainder > 0 {
+        return Err(Wrong(format!(
+            "the bare-lf-at-body-limit seed is {remainder} bytes short of the limit, too few to \
+             close with one more attribute line"
+        )));
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if body.len() != target {
+        return Err(Wrong(format!(
+            "the bare-lf-at-body-limit seed is {} bytes and the body limit is {target}",
+            body.len()
+        )));
+    }
+    let parsed = sdp::parse(body.as_bytes()).map_err(|why| {
+        Wrong(format!(
+            "the bare-lf-at-body-limit seed does not parse: {why:?}"
+        ))
+    })?;
+    if parsed.to_bytes().len() <= target {
+        return Err(Wrong(
+            "the bare-lf-at-body-limit seed no longer grows past the body limit once written \
+             back out, so it no longer proves 8.3.17"
+                .to_owned(),
+        ));
+    }
+    Ok(body.into_bytes())
+}
+
+/// The answer the `sdp` target builds to an offer, built the way it builds
+/// it: every stream with formats accepted on port 5000 with its first one,
+/// every stream without refused, from `192.0.2.1`.
+fn answer_as_the_target_builds_it(
+    name: &str,
+    offer: &[u8],
+) -> Result<sdp::SessionDescription, Wrong> {
+    let offer = sdp::parse(offer)
+        .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
+    let streams: Vec<sdp::StreamAnswer> = offer
+        .media
+        .iter()
+        .map(|media| match media.formats.first() {
+            Some(format) => {
+                sdp::StreamAnswer::Accept(sdp::AcceptedStream::new(5000, vec![format.clone()]))
+            }
+            None => sdp::StreamAnswer::Reject,
+        })
+        .collect();
+    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    offer
+        .answer(
+            sdp::Origin::new(1, 1, address),
+            sdp::Connection::new(address),
+            &streams,
+        )
+        .map_err(|why| Wrong(format!("the {name} seed cannot be answered: {why:?}")))
+}
+
+/// An offer with CRLF endings, within the body limit, whose answer is not.
+///
+/// "The "t=" line in the answer MUST equal that of the offer" (RFC 3264 §6),
+/// and the `r=` lines under it go with it. So an offer made almost entirely
+/// of `r=` lines is answered with all of them, under a `c=` line the offer did
+/// not have and an origin longer than the offer's: the answer ends up past the
+/// limit the offer was held to, with no bare LF anywhere to blame.
+fn answer_past_body_limit() -> Result<Vec<u8>, Wrong> {
+    let limit = sdp::Limits::DEFAULT.max_body_bytes as usize;
+    let mut body = String::from("v=0\r\no=- 0 0 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\n");
+    // RFC 4566 §5.10's own example of a weekly repeat
+    let repeat = "r=604800 3600 0 90000\r\n";
+    while body.len() + repeat.len() <= limit {
+        body.push_str(repeat);
+    }
+    let answer = answer_as_the_target_builds_it("answer-past-body-limit", body.as_bytes())?;
+    match sdp::parse(&answer.to_bytes()) {
+        Err(sdp::SdpError::BodyTooLarge { .. }) => Ok(body.into_bytes()),
+        other => Err(Wrong(format!(
+            "the answer to the answer-past-body-limit seed is meant to be refused as too large \
+             under the default limits, and reading it gave {other:?}"
+        ))),
+    }
+}
+
+/// An offer whose one `m=` line is exactly as long as the line limit allows,
+/// with a port of one digit where the answer writes four: the answer's `m=`
+/// line repeats the offer's media type ("MUST match that of the offer", RFC
+/// 3264 §6.1), its transport and the format it keeps, and so ends up three
+/// bytes past the limit the offer's line met.
+fn answer_past_line_limit() -> Result<Vec<u8>, Wrong> {
+    let limit = sdp::Limits::DEFAULT.max_line_bytes as usize;
+    let start = "m=audio 9 RTP/AVP ";
+    let line = format!("{start}{}", "x".repeat(limit - start.len()));
+    let body = format!("v=0\r\no=- 0 0 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\n{line}\r\n");
+    let answer = answer_as_the_target_builds_it("answer-past-line-limit", body.as_bytes())?;
+    match sdp::parse(&answer.to_bytes()) {
+        Err(sdp::SdpError::LineTooLong { .. }) => Ok(body.into_bytes()),
+        other => Err(Wrong(format!(
+            "the answer to the answer-past-line-limit seed is meant to be refused for a line too \
+             long under the default limits, and reading it gave {other:?}"
+        ))),
+    }
 }
 
 fn crypto_seeds() -> Result<Vec<Seed>, Wrong> {

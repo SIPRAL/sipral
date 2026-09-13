@@ -67,13 +67,22 @@ impl fmt::Display for ComponentId {
 pub struct Foundation(String);
 
 impl Foundation {
-    fn numbered(n: u32) -> Self {
+    pub(crate) fn numbered(n: u32) -> Self {
         Self(n.to_string())
+    }
+
+    /// The foundation of a remote candidate learned from a check rather than
+    /// read from the peer's description: "an arbitrary value, different from
+    /// the foundations of all other remote candidates" (RFC 8445 §7.3.1.3).
+    /// The tilde is not an `ice-char`, so no foundation a peer wrote can ever
+    /// equal one of these.
+    pub(crate) fn learned(n: u32) -> Self {
+        Self(format!("~{n}"))
     }
 
     /// Read a foundation token: 1 to 32 of `ALPHA / DIGIT / "+" / "/"`
     /// (RFC 8839 §5.1, `ice-char`).
-    fn parse(token: &str) -> Option<Self> {
+    pub(crate) fn parse(token: &str) -> Option<Self> {
         if token.is_empty() || token.len() > 32 {
             return None;
         }
@@ -112,6 +121,19 @@ pub enum CandidateType {
 }
 
 impl CandidateType {
+    /// The type preference RFC 8445 §5.1.2.2 recommends: "126 for host
+    /// candidates, 110 for peer-reflexive candidates, 100 for server-reflexive
+    /// candidates, and 0 for relayed candidates".
+    #[must_use]
+    pub const fn type_preference(self) -> u32 {
+        match self {
+            Self::Host => 126,
+            Self::PeerReflexive => 110,
+            Self::ServerReflexive => 100,
+            Self::Relay => 0,
+        }
+    }
+
     const fn token(self) -> &'static str {
         match self {
             Self::Host => "host",
@@ -254,6 +276,26 @@ fn priority(component: ComponentId, local_preference: u32) -> u32 {
     (TYPE_PREFERENCE_HOST << 24) + (local_preference << 8) + (256 - u32::from(component.get()))
 }
 
+/// A candidate's priority by the formula RFC 8445 §5.1.2.1 recommends:
+/// `(2^24)*(type preference) + (2^8)*(local preference) + (256 - component ID)`.
+///
+/// Every term is in range by construction — the type preference is at most
+/// 126, the local preference sixteen bits and the component 1 to 256 — so the
+/// result never exceeds 2^31 - 1. It is zero only for a relayed candidate with
+/// a local preference of zero on component 256, which §5.1.2's "positive
+/// integer" rules out and which the full agent never assigns: its local
+/// preferences count down from 65535 and its components are 1 and 2.
+#[must_use]
+pub fn candidate_priority(
+    kind: CandidateType,
+    local_preference: u16,
+    component: ComponentId,
+) -> u32 {
+    (kind.type_preference() << 24)
+        + (u32::from(local_preference) << 8)
+        + (256 - u32::from(component.get()))
+}
+
 /// Host candidates for one or more components, from the addresses this agent
 /// is already listening on (RFC 8445 §5.1.1.1, narrowed by §5.2 to host
 /// candidates only).
@@ -311,7 +353,7 @@ fn foundation_for(seen: &mut Vec<(IpAddr, Foundation)>, address: IpAddr) -> Foun
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, CandidateType, ComponentId, HostAddresses, gather};
+    use super::{Candidate, CandidateType, ComponentId, HostAddresses, candidate_priority, gather};
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
     fn v4(port: u16) -> SocketAddrV4 {
@@ -498,5 +540,30 @@ mod tests {
     #[test]
     fn a_component_with_no_addresses_gathers_nothing() {
         assert!(gather(&[(ComponentId::RTP, HostAddresses::default())]).is_empty());
+    }
+
+    #[test]
+    fn candidate_priority_uses_the_type_preferences_section_5_1_2_2_recommends() {
+        // 126 host, 110 peer-reflexive, 100 server-reflexive, 0 relayed
+        assert_eq!(
+            candidate_priority(CandidateType::Host, 65_535, ComponentId::RTP),
+            2_130_706_431
+        );
+        assert_eq!(
+            candidate_priority(CandidateType::PeerReflexive, 65_535, ComponentId::RTP),
+            (110 << 24) + (65_535 << 8) + 255
+        );
+        // the server-reflexive line in RFC 8839 SS5.1's example
+        assert_eq!(
+            candidate_priority(CandidateType::ServerReflexive, 65_535, ComponentId::RTP),
+            1_694_498_815
+        );
+        assert_eq!(
+            candidate_priority(CandidateType::Relay, 65_535, ComponentId::RTCP),
+            (65_535 << 8) + 254
+        );
+        // every term at its floor
+        let last = ComponentId::new(256).expect("in range");
+        assert_eq!(candidate_priority(CandidateType::Relay, 0, last), 0);
     }
 }

@@ -819,6 +819,8 @@ else
     skip "dotnet build: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
 fi
 
+kotlin_classes=""
+kotlin_lib=""
 if command -v kotlinc >/dev/null 2>&1; then
     # The sources are found rather than listed: a new file nobody added here
     # would otherwise go uncompiled, which is the failure this step exists
@@ -830,13 +832,25 @@ if command -v kotlinc >/dev/null 2>&1; then
     while IFS= read -r -d '' one; do
         kotlin_sources+=("$one")
     done < <(find "$ROOT/bindings/kotlin" -name '*.kt' -print0 2>/dev/null)
+    # BindingCheck.kt is compiled with the rest and asserts with kotlin.test,
+    # which ships in the lib/ of the distribution kotlinc runs from, beside
+    # the standard library the JVM run below needs as well. The directory is
+    # read off the command rather than guessed, and asserted to hold both.
+    kotlin_lib="$(cd "$(dirname "$(readlink -f "$(command -v kotlinc)")")/.." 2>/dev/null && pwd)/lib"
     if [ "${#kotlin_sources[@]}" -eq 0 ]; then
         fail "no Kotlin source found under bindings/kotlin, so nothing was compiled"
+    elif [ ! -s "$kotlin_lib/kotlin-test.jar" ] || [ ! -s "$kotlin_lib/kotlin-stdlib.jar" ]; then
+        fail "kotlinc runs from a distribution with no kotlin-test.jar and kotlin-stdlib.jar in $kotlin_lib"
     else
-        classes=$(mktemp -d)
-        kotlinc "${kotlin_sources[@]}" -d "$classes" >/dev/null 2>&1 \
-            && pass "kotlinc" || fail "kotlinc, over bindings/kotlin"
-        rm -rf "$classes"
+        kotlin_classes=$(mktemp -d)
+        if kotlinc -cp "$kotlin_lib/kotlin-test.jar" "${kotlin_sources[@]}" \
+            -d "$kotlin_classes" >/dev/null 2>&1; then
+            pass "kotlinc"
+        else
+            fail "kotlinc, over bindings/kotlin"
+            rm -rf "$kotlin_classes"
+            kotlin_classes=""
+        fi
     fi
 else
     skip "kotlinc: no Kotlin compiler (brew install kotlin)"
@@ -852,9 +866,59 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
         "$ROOT/bindings/kotlin/sipral/src/main/jni/sipral_jni.c" >/dev/null 2>&1 \
         && pass "cc -fsyntax-only, the JNI shim" \
         || fail "cc -fsyntax-only, bindings/kotlin/sipral/src/main/jni/sipral_jni.c"
+
+    # Compiling the shim says it is C, not that it works. So it is linked
+    # against the shared library built above, beside a helper that polls from
+    # a thread no JVM made, and BindingCheck.kt runs against the two on a JVM
+    # under -Xcheck:jni. What the run printed is looked for as well as how it
+    # exited, because a JVM that ran nothing also exits zero.
+    if [ -z "$kotlin_classes" ]; then
+        skip "the JVM run: kotlinc compiled nothing to run, which the lines above say why"
+    elif [ ! -s "$DYLIB" ]; then
+        fail "the JVM run: $DYLIB is not there to link the shim against"
+    elif [ ! -x "$jdk/bin/java" ]; then
+        fail "the JVM run: $jdk carries include/jni.h and no bin/java"
+    else
+        work=$(mktemp -d)
+        linked=1
+        for pair in "sipral_jni:bindings/kotlin/sipral/src/main/jni/sipral_jni.c" \
+            "sipral_jni_check:bindings/kotlin/sipral/src/test/jni/native_thread.c"; do
+            if ! cc -std=c11 -Wall -Wextra -Werror -dynamiclib \
+                -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
+                -o "$work/lib${pair%%:*}.dylib" "$ROOT/${pair#*:}" \
+                -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
+                >"$work/cc" 2>&1; then
+                fail "${pair#*:} does not build against the shared library:"
+                sed 's/^/        /' "$work/cc"
+                linked=0
+            fi
+        done
+        if [ "$linked" -eq 1 ]; then
+            ran=$("$jdk/bin/java" -Xcheck:jni -Djava.library.path="$work" \
+                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar" \
+                org.sipral.BindingCheckKt 2>&1)
+            exited=$?
+            said=$(printf '%s\n' "$ran" | grep '^kotlin binding: ' || true)
+            warned=$(printf '%s\n' "$ran" \
+                | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
+            if [ "$exited" -ne 0 ]; then
+                fail "BindingCheck.kt did not come back zero:"
+                printf '%s\n' "$ran" | sed 's/^/        /'
+            elif [ -z "$said" ]; then
+                fail "BindingCheck.kt came back zero and said nothing, so nothing was checked"
+            elif [ -n "$warned" ]; then
+                fail "-Xcheck:jni found something wrong in the shim:"
+                printf '%s\n' "$warned" | sed 's/^/        /'
+            else
+                pass "${said#kotlin binding: }"
+            fi
+        fi
+        rm -rf "$work"
+    fi
 else
     skip "the JNI shim: no JDK carrying include/jni.h (JAVA_HOME must name a JDK, not a JRE)"
 fi
+[ -n "$kotlin_classes" ] && rm -rf "$kotlin_classes"
 
 # SwiftPM reads Package.swift by compiling it against the PackageDescription
 # module, which a full Xcode ships and the Command Line Tools alone do not --

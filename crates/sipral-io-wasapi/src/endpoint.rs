@@ -73,8 +73,9 @@ pub(crate) fn enumerator() -> Result<Com<DeviceEnumeratorVtable>, Error> {
 
 /// The endpoint a choice names, opened.
 ///
-/// A preference the machine does not have is not an error. That is the whole
-/// point of one: the headset is in a bag, the call still has to happen.
+/// A preference the machine does not have is not an error, and neither is one
+/// it has and cannot play through. That is the whole point of one: the headset
+/// is in a bag, the call still has to happen.
 pub(crate) fn open_choice(
     enumerator: &Com<DeviceEnumeratorVtable>,
     choice: &DeviceChoice,
@@ -84,12 +85,43 @@ pub(crate) fn open_choice(
         DeviceChoice::System => open(enumerator, None, direction),
         DeviceChoice::Device(ref id) => open(enumerator, Some(id), direction),
         DeviceChoice::Preferred(ref id) => match open(enumerator, Some(id), direction) {
+            // Windows keeps an unplugged, disabled or absent endpoint in its
+            // registry, and `GetDevice` finds one of those as readily as a
+            // live one; it is `Activate` that refuses, after this has already
+            // answered. Without asking, a preference would fall back only for
+            // an endpoint the machine has never seen — which is not the one a
+            // saved selection names.
+            Ok(saved) => {
+                if carries_audio(&saved)? {
+                    Ok(saved)
+                } else {
+                    drop(saved);
+                    open(enumerator, None, direction)
+                }
+            }
             Err(Error::NoDevice) => open(enumerator, None, direction),
             // A GetDevice that failed for any other reason is not a missing
             // endpoint, it is a broken one, and falling back would hide it.
             other => other,
         },
     }
+}
+
+/// Whether an endpoint can carry audio now: plugged in, enabled and present.
+///
+/// The same test `EnumAudioEndpoints` applies with the mask [`devices`] asks
+/// for, so an endpoint this accepts is one the list would have offered.
+///
+/// # Errors
+/// [`Error::Call`] when the endpoint will not say. That is a broken endpoint
+/// rather than a missing one, and a preference does not fall back past it for
+/// the same reason it does not fall back past a `GetDevice` that failed.
+fn carries_audio(device: &Com<MmDeviceVtable>) -> Result<bool, Error> {
+    let mut state: u32 = 0;
+    // SAFETY: a live endpoint and a live out-parameter.
+    let status = unsafe { (device.vtable().get_state)(device.as_ptr(), &raw mut state) };
+    sys::check("IMMDevice::GetState", status)?;
+    Ok(state & DEVICE_STATE_ACTIVE != 0)
 }
 
 /// The endpoint a stream should open: the one named, or the machine's default
@@ -616,10 +648,249 @@ impl Drop for DeviceMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceMonitor, default_device, devices};
-    use crate::device::Direction;
-    use crate::status::Error;
+    use super::{DeviceMonitor, default_device, devices, open_choice};
+    use crate::abi::{
+        DEVICE_STATE_ACTIVE, DeviceCollection, DeviceEnumerator, DeviceEnumeratorVtable, Guid,
+        MmDevice, MmDeviceVtable, NotificationClient, PropVariant, PropertyStore,
+    };
+    use crate::device::{DeviceChoice, DeviceId, Direction};
+    use crate::fake::{self, Fake, NOT_IMPLEMENTED};
+    use crate::status::{E_POINTER, Error, HResult};
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicU32, Ordering};
     use core::time::Duration;
+
+    /// `DEVICE_STATE_DISABLED`, from `mmdeviceapi.h`.
+    const DEVICE_STATE_DISABLED: u32 = 0x0000_0002;
+    /// `DEVICE_STATE_NOTPRESENT`, from `mmdeviceapi.h`.
+    const DEVICE_STATE_NOTPRESENT: u32 = 0x0000_0004;
+    /// `DEVICE_STATE_UNPLUGGED`, from `mmdeviceapi.h`.
+    const DEVICE_STATE_UNPLUGGED: u32 = 0x0000_0008;
+
+    /// What one endpoint says about itself.
+    struct Endpoint {
+        state: u32,
+        /// What `GetState` returns, whatever the state.
+        answers: i32,
+        asked: AtomicU32,
+    }
+
+    static ENDPOINT: MmDeviceVtable = MmDeviceVtable {
+        unknown: fake::unknown::<MmDeviceVtable, Endpoint>(),
+        activate: endpoint_activate,
+        open_property_store: endpoint_property_store,
+        get_id: endpoint_id,
+        get_state: endpoint_state,
+    };
+
+    unsafe extern "system" fn endpoint_activate(
+        _this: *mut MmDevice,
+        _interface: *const Guid,
+        _context: u32,
+        _parameters: *mut PropVariant,
+        _out: *mut *mut c_void,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn endpoint_property_store(
+        _this: *mut MmDevice,
+        _access: u32,
+        _out: *mut *mut PropertyStore,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn endpoint_id(_this: *mut MmDevice, _out: *mut *mut u16) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn endpoint_state(this: *mut MmDevice, out: *mut u32) -> i32 {
+        // SAFETY: `this` is the address of a live `Fake` over this table.
+        let Some(endpoint) = (unsafe { fake::script::<MmDeviceVtable, Endpoint>(this) }) else {
+            return E_POINTER;
+        };
+        endpoint.asked.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: null, or the caller's live out-parameter.
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return E_POINTER;
+        };
+        *out = endpoint.state;
+        endpoint.answers
+    }
+
+    /// The machine's endpoints in one direction: the one a selection saved,
+    /// which the registry still has, and the one calls are routed to.
+    struct Machine {
+        saved: Fake<MmDeviceVtable, Endpoint>,
+        route: Fake<MmDeviceVtable, Endpoint>,
+        routes_asked: AtomicU32,
+    }
+
+    static MACHINE: DeviceEnumeratorVtable = DeviceEnumeratorVtable {
+        unknown: fake::unknown::<DeviceEnumeratorVtable, Machine>(),
+        enum_audio_endpoints: machine_enumerate,
+        get_default_audio_endpoint: machine_route,
+        get_device: machine_device,
+        register_endpoint_notification_callback: machine_register,
+        unregister_endpoint_notification_callback: machine_register,
+    };
+
+    unsafe extern "system" fn machine_enumerate(
+        _this: *mut DeviceEnumerator,
+        _flow: u32,
+        _mask: u32,
+        _out: *mut *mut DeviceCollection,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn machine_register(
+        _this: *mut DeviceEnumerator,
+        _client: *mut NotificationClient,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn machine_route(
+        this: *mut DeviceEnumerator,
+        _flow: u32,
+        _role: u32,
+        out: *mut *mut MmDevice,
+    ) -> i32 {
+        // SAFETY: `this` is the address of a live `Fake` over this table.
+        let Some(machine) = (unsafe { fake::script::<DeviceEnumeratorVtable, Machine>(this) })
+        else {
+            return E_POINTER;
+        };
+        machine.routes_asked.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: null, or the caller's live out-parameter.
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return E_POINTER;
+        };
+        *out = machine.route.hand_out();
+        0
+    }
+
+    unsafe extern "system" fn machine_device(
+        this: *mut DeviceEnumerator,
+        _id: *const u16,
+        out: *mut *mut MmDevice,
+    ) -> i32 {
+        // SAFETY: `this` is the address of a live `Fake` over this table.
+        let Some(machine) = (unsafe { fake::script::<DeviceEnumeratorVtable, Machine>(this) })
+        else {
+            return E_POINTER;
+        };
+        // SAFETY: null, or the caller's live out-parameter.
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return E_POINTER;
+        };
+        *out = machine.saved.hand_out();
+        0
+    }
+
+    fn endpoint(state: u32, answers: i32) -> Fake<MmDeviceVtable, Endpoint> {
+        Fake::new(
+            &ENDPOINT,
+            Endpoint {
+                state,
+                answers,
+                asked: AtomicU32::new(0),
+            },
+        )
+    }
+
+    fn machine(saved: Fake<MmDeviceVtable, Endpoint>) -> Fake<DeviceEnumeratorVtable, Machine> {
+        Fake::new(
+            &MACHINE,
+            Machine {
+                saved,
+                route: endpoint(DEVICE_STATE_ACTIVE, 0),
+                routes_asked: AtomicU32::new(0),
+            },
+        )
+    }
+
+    fn headset() -> DeviceChoice {
+        DeviceChoice::Preferred(DeviceId::new("{0.0.1.00000000}.{headset}"))
+    }
+
+    #[test]
+    fn a_preference_the_machine_has_but_cannot_play_through_opens_the_route() {
+        for state in [
+            DEVICE_STATE_DISABLED,
+            DEVICE_STATE_NOTPRESENT,
+            DEVICE_STATE_UNPLUGGED,
+        ] {
+            let machine = machine(endpoint(state, 0));
+            let enumerator = machine.com();
+            let script = machine.script();
+            let saved = &script.saved;
+
+            let opened = open_choice(&enumerator, &headset(), Direction::Input)
+                .unwrap_or_else(|error| panic!("state {state:#x}: {error}"));
+
+            assert_eq!(
+                opened.as_ptr(),
+                script.route.as_ptr(),
+                "state {state:#x}: the saved endpoint was opened although it cannot carry audio"
+            );
+            assert_eq!(saved.script().asked.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                saved.refs(),
+                1,
+                "state {state:#x}: the endpoint passed over was not given back"
+            );
+            drop(opened);
+            drop(enumerator);
+            assert_eq!(script.route.refs(), 1);
+            assert_eq!(machine.refs(), 1);
+        }
+    }
+
+    #[test]
+    fn a_preference_that_can_play_is_the_one_opened() {
+        let machine = machine(endpoint(DEVICE_STATE_ACTIVE, 0));
+        let enumerator = machine.com();
+        let script = machine.script();
+        let saved = &script.saved;
+
+        let opened = open_choice(&enumerator, &headset(), Direction::Output).expect("the headset");
+
+        assert_eq!(opened.as_ptr(), saved.as_ptr());
+        assert_eq!(saved.script().asked.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            script.routes_asked.load(Ordering::SeqCst),
+            0,
+            "a live preference does not look at the route at all"
+        );
+        drop(opened);
+        assert_eq!(saved.refs(), 1);
+    }
+
+    #[test]
+    fn a_preference_that_will_not_say_its_state_is_not_hidden_behind_the_route() {
+        let machine = machine(endpoint(DEVICE_STATE_UNPLUGGED, E_POINTER));
+        let enumerator = machine.com();
+        let script = machine.script();
+
+        let outcome = open_choice(&enumerator, &headset(), Direction::Input);
+
+        assert_eq!(
+            outcome.err(),
+            Some(Error::Call {
+                call: "IMMDevice::GetState",
+                status: HResult::new(E_POINTER),
+            })
+        );
+        assert_eq!(script.routes_asked.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            script.saved.refs(),
+            1,
+            "the endpoint was not given back on the way out of a refusal"
+        );
+    }
 
     #[test]
     fn enumeration_either_answers_or_says_why() {

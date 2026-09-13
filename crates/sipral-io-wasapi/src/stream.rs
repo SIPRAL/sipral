@@ -27,7 +27,7 @@
 //! neither waits for the other except at teardown, where the waiting has a
 //! deadline.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::time::Duration;
 use std::ffi::c_void;
 use std::panic::{self, AssertUnwindSafe};
@@ -87,6 +87,26 @@ const COMMAND_STOP: u32 = 2;
 /// Leave the loop, put every interface back, and end.
 const COMMAND_QUIT: u32 = 3;
 
+/// Two thirty-two-bit halves in one word: a ticket on top, and a command or a
+/// status underneath.
+///
+/// One word, so that whichever thread loads it takes both halves from the same
+/// store. A command and its ticket in two cells could be read as one command
+/// under the next one's ticket.
+fn ticketed(ticket: u32, low: u32) -> u64 {
+    (u64::from(ticket) << 32) | u64::from(low)
+}
+
+/// The two halves of a word [`ticketed`] made: the ticket, then the rest.
+fn unticket(word: u64) -> (u32, u32) {
+    // each half is thirty-two bits by construction, so neither conversion can
+    // fail and the fallback is never taken
+    (
+        u32::try_from(word >> 32).unwrap_or(u32::MAX),
+        u32::try_from(word & u64::from(u32::MAX)).unwrap_or(u32::MAX),
+    )
+}
+
 /// What to open, and how much slack to leave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamConfig {
@@ -128,7 +148,8 @@ impl StreamConfig {
     }
 
     /// A saved selection, at the given format: that endpoint when the machine
-    /// has it, and the system's route for calls when it does not.
+    /// has it and it can carry audio, and the system's route for calls when
+    /// the machine does not have it or has it unplugged, disabled or absent.
     ///
     /// This is the one to build from a [`DeviceId`] read out of a
     /// configuration file. A docking station or a headset that reboots itself
@@ -212,9 +233,13 @@ struct Shared {
     control: Event,
     /// Signalled by the audio thread when it has carried a command out.
     answered: Event,
-    command: AtomicU32,
-    /// What the last command returned.
-    reply: AtomicI32,
+    /// The command the owner wants carried out, under the ticket it was sent
+    /// with. See [`ticketed`].
+    command: AtomicU64,
+    /// What the last command carried out returned, under the ticket it was
+    /// sent with — which is how an owner tells the answer to its own question
+    /// from the answer to one whose asker stopped waiting.
+    outcome: AtomicU64,
     /// What the final stop returned, on the way out of the loop.
     parting: AtomicI32,
     /// Whether the client is started. Written by the audio thread only.
@@ -238,8 +263,9 @@ impl Shared {
             ready: Event::new()?,
             control: Event::new()?,
             answered: Event::new()?,
-            command: AtomicU32::new(COMMAND_NONE),
-            reply: AtomicI32::new(0),
+            command: AtomicU64::new(ticketed(0, COMMAND_NONE)),
+            // ticket zero is never handed out, so this answers nobody
+            outcome: AtomicU64::new(ticketed(0, 0)),
             parting: AtomicI32::new(0),
             running: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -313,6 +339,8 @@ struct Session {
     /// rather than on every poll.
     loss_reported: bool,
     closed: bool,
+    /// The last ticket a command was sent under. Zero until the first.
+    tickets: u32,
 }
 
 impl Session {
@@ -352,7 +380,9 @@ impl Session {
                 // refuses, but wait with the same deadline as anything else
                 // here: it is a thread inside COM, not a thread we control.
                 shared.gate.close();
-                shared.command.store(COMMAND_QUIT, Ordering::SeqCst);
+                shared
+                    .command
+                    .store(ticketed(0, COMMAND_QUIT), Ordering::SeqCst);
                 shared.control.signal();
                 if shared.finished(TEARDOWN_WAIT) {
                     let _ = worker.join();
@@ -375,33 +405,76 @@ impl Session {
             started: false,
             loss_reported: false,
             closed: false,
+            tickets: 0,
         })
     }
 
     /// Send the audio thread a command and wait for what it made of it.
-    fn ask(&self, command: u32, call: &'static str) -> Result<(), Error> {
-        if self.shared.ended.load(Ordering::SeqCst) {
+    fn ask(&mut self, command: u32, call: &'static str) -> Result<(), Error> {
+        self.ask_within(command, call, ANSWER_WAIT)
+    }
+
+    /// The same with the wait spelled out, so a test can ask for a deadline it
+    /// is willing to sit through.
+    ///
+    /// The command goes under a ticket of its own and only the answer under
+    /// that ticket is taken. A command that timed out is still carried out
+    /// once the driver call it was stuck behind returns, and its answer then
+    /// arrives with nobody waiting for it: already signalled when the next
+    /// command is sent, or signalled while the next one waits. Either way it
+    /// is the answer to another question, and taken for this one it would
+    /// have a stop report the success of a start from two seconds ago.
+    fn ask_within(
+        &mut self,
+        command: u32,
+        call: &'static str,
+        within: Duration,
+    ) -> Result<(), Error> {
+        if self.shared.ended.load(Ordering::SeqCst) || self.shared.lost.load(Ordering::SeqCst) {
             // the endpoint went away, or the thread already ended: nobody is
-            // left to answer, and waiting would only cost the deadline
+            // left to answer, and waiting would only cost the deadline. The
+            // loss is the earlier of the two to say so: it is written down
+            // before the loop that found it is left, and the end only once the
+            // client and the apartment have been given back.
             return Err(Error::NoDevice);
         }
-        self.shared.command.store(command, Ordering::SeqCst);
+        // never zero, which is the ticket a quit goes under and the one the
+        // outcome starts with
+        self.tickets = self.tickets.checked_add(1).unwrap_or(1);
+        let ticket = self.tickets;
+        self.shared
+            .command
+            .store(ticketed(ticket, command), Ordering::SeqCst);
         self.shared.control.signal();
-        if !self.shared.answer(ANSWER_WAIT) {
-            return Err(Error::Draining {
-                waited_millis: TEARDOWN_WAIT_MILLIS,
-            });
+
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !self.shared.answer(left) {
+                return Err(Error::Draining {
+                    waited_millis: u64::try_from(within.as_millis()).unwrap_or(u64::MAX),
+                });
+            }
+            let (answered, status) = unticket(self.shared.outcome.load(Ordering::SeqCst));
+            if answered == ticket {
+                return sys::check(call, status.cast_signed());
+            }
         }
-        sys::check(call, self.shared.reply.load(Ordering::SeqCst))
     }
 
     fn start(&mut self) -> Result<(), Error> {
         if self.shared.running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.ask(COMMAND_START, "IAudioClient::Start")?;
-        self.started = true;
-        Ok(())
+        let outcome = self.ask(COMMAND_START, "IAudioClient::Start");
+        // A start refused because the endpoint had gone is still the owner
+        // asking for a running stream. The loss is what `recover` answers, and
+        // it starts again only what was started — so without this, the
+        // documented answer to the event would bring back a silent stream.
+        if outcome.is_ok() || self.shared.lost.load(Ordering::SeqCst) {
+            self.started = true;
+        }
+        outcome
     }
 
     fn stop(&mut self) -> Result<(), Error> {
@@ -476,7 +549,9 @@ impl Session {
         self.closed = true;
 
         self.shared.gate.close();
-        self.shared.command.store(COMMAND_QUIT, Ordering::SeqCst);
+        self.shared
+            .command
+            .store(ticketed(0, COMMAND_QUIT), Ordering::SeqCst);
         self.shared.control.signal();
 
         if !(self.shared.gate.drained(within) && self.shared.finished(within)) {
@@ -632,7 +707,12 @@ macro_rules! session_methods {
         /// What it reports is exact rather than inferred: every WASAPI call
         /// the audio thread makes answers `AUDCLNT_E_DEVICE_INVALIDATED` once
         /// the endpoint has gone, and nothing else in this crate treats that
-        /// status as survivable.
+        /// status as survivable. That includes `Start`, `Stop` and `Reset`, so
+        /// an endpoint that went while the stream was stopped is reported by
+        /// the next [`Self::start`], and here straight after. Not by a
+        /// [`Self::stop`]: stopping a stream that is not running asks Windows
+        /// nothing, so it finds nothing. A stop finds the endpoint gone only
+        /// on a running stream, before a buffer pass has.
         ///
         /// A stream that has said [`StreamEvent::DeviceLost`] has stopped.
         /// What it had already captured can still be read out; nothing further
@@ -654,6 +734,12 @@ macro_rules! session_methods {
         /// [`Error::Call`] from `IAudioClient::Start`, [`Error::NoDevice`] when
         /// the endpoint has already gone away, or [`Error::Draining`] when the
         /// audio thread does not answer.
+        ///
+        /// A `Start` refused with `AUDCLNT_E_DEVICE_INVALIDATED` — the endpoint
+        /// went while the stream was stopped — is that [`Error::Call`], and
+        /// [`Self::poll`] then says [`StreamEvent::DeviceLost`]. The stream
+        /// counts as started for [`Self::recover`], which is the answer to
+        /// the event and starts what it puts back.
         pub fn start(&mut self) -> Result<(), Error> {
             self.session.start()
         }
@@ -1099,7 +1185,13 @@ unsafe fn read_wave(pointer: *const WaveFormat) -> Option<WaveFormatExtensible> 
     if header.cb_size >= WaveFormatExtensible::EXTENSION_BYTES {
         // SAFETY: the header says at least twenty-two octets follow it, which
         // is exactly the extension being read here.
-        return Some(unsafe { ptr::read_unaligned(pointer.cast::<WaveFormatExtensible>()) });
+        let mut whole = unsafe { ptr::read_unaligned(pointer.cast::<WaveFormatExtensible>()) };
+        // What was copied is the header and twenty-two octets, so the copy
+        // says twenty-two. An endpoint's longer extension left in place would
+        // tell `IAudioClient::Initialize` that octets follow this value which
+        // are not there, and it would read them off the audio thread's stack.
+        whole.format.cb_size = WaveFormatExtensible::EXTENSION_BYTES;
+        return Some(whole);
     }
     let mut whole = WaveFormatExtensible::EMPTY;
     whole.format = header;
@@ -1182,6 +1274,9 @@ fn serve(shared: &Shared, mut engine: Engine, direction: Direction) {
     } else {
         0
     };
+    // The loop is over whatever this says, and it is not always the owner
+    // that ended it: a wait that failed leaves a stream behind to be polled.
+    carry_on(shared, parting);
     shared.running.store(false, Ordering::SeqCst);
     // a meter left where the last pass put it reads as a live signal
     shared.channel.quiet();
@@ -1190,13 +1285,24 @@ fn serve(shared: &Shared, mut engine: Engine, direction: Direction) {
 }
 
 /// Carry out whatever the owner asked for. `false` means leave the loop.
+///
+/// An endpoint found gone by `Start`, `Stop` or `Reset` ends the loop exactly
+/// as one found gone by a buffer pass does, and is written down before the
+/// answer goes, so an owner told the call failed can poll for why at once. A
+/// thread left waiting on an invalidated client would be one nothing ever
+/// reports on again.
 fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
-    match shared.command.swap(COMMAND_NONE, Ordering::SeqCst) {
+    let (ticket, wanted) = unticket(
+        shared
+            .command
+            .swap(ticketed(0, COMMAND_NONE), Ordering::SeqCst),
+    );
+    match wanted {
         COMMAND_START => {
             let status = start(shared, engine, direction);
-            shared.reply.store(status, Ordering::SeqCst);
-            shared.answered.signal();
-            true
+            let survived = carry_on(shared, status);
+            reply(shared, ticket, status);
+            survived
         }
         COMMAND_STOP => {
             // SAFETY: a live client.
@@ -1213,15 +1319,25 @@ fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
             } else {
                 stopped
             };
-            shared.reply.store(first, Ordering::SeqCst);
-            shared.answered.signal();
-            true
+            // both, not only the one reported: a stop that went through and a
+            // reset that found the endpoint gone is still an endpoint gone
+            let survived = carry_on(shared, stopped) && carry_on(shared, cleared);
+            reply(shared, ticket, first);
+            survived
         }
         COMMAND_QUIT => false,
         // a spurious wake, or a command already taken: nothing to do and
         // nothing to answer
         _ => true,
     }
+}
+
+/// Hand the owner what a command came to, under the ticket it was sent with.
+fn reply(shared: &Shared, ticket: u32, status: i32) {
+    shared
+        .outcome
+        .store(ticketed(ticket, status.cast_unsigned()), Ordering::SeqCst);
+    shared.answered.signal();
 }
 
 /// Fill the engine's buffer and start it.
@@ -1452,20 +1568,29 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptureStream, Category, DEFAULT_DEPTH_FRAMES, PlaybackStream, Session, Shared,
-        StreamConfig, carry_on, read_wave, survivable,
+        COMMAND_QUIT, COMMAND_START, COMMAND_STOP, CaptureStream, Category, DEFAULT_DEPTH_FRAMES,
+        Engine, PlaybackStream, Session, Shared, StreamConfig, carry_on, command, read_wave, serve,
+        survivable, ticketed, unticket,
     };
-    use crate::abi::{WAVE_FORMAT_PCM, WaveFormat, WaveFormatExtensible};
+    use crate::abi::{
+        AudioClient, AudioClientVtable, Guid, Handle, SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_EXTENSIBLE,
+        WAVE_FORMAT_PCM, WaveFormat, WaveFormatExtensible,
+    };
     use crate::device::Device;
     use crate::device::{DeviceChoice, DeviceId, Direction, StreamEvent};
     use crate::endpoint::devices;
+    use crate::fake::{self, Fake, NOT_IMPLEMENTED};
     use crate::format::{SampleFormat, StreamFormat};
     use crate::level::{Channel, Controls, Gain, Level, window_samples};
-    use crate::status::AUDCLNT_E_DEVICE_INVALIDATED;
-    use core::sync::atomic::Ordering;
+    use crate::status::{AUDCLNT_E_DEVICE_INVALIDATED, E_POINTER, Error, HResult};
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
     use std::sync::Arc;
-    use std::thread;
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
+
+    /// `AUDCLNT_E_NOT_INITIALIZED`: a refusal, and not a loss.
+    const NOT_INITIALIZED: i32 = 0x8889_0001_u32.cast_signed();
 
     #[test]
     fn a_configuration_defaults_to_the_system_route() {
@@ -1497,9 +1622,18 @@ mod tests {
     fn detached(channel: &Arc<Channel>) -> Session {
         let shared = Arc::new(Shared::new(Arc::clone(channel)).expect("three event handles"));
         shared.ended.store(true, Ordering::SeqCst);
+        session(shared, None, channel)
+    }
+
+    /// The owner's half of a stream, over whatever audio thread the test has.
+    fn session(
+        shared: Arc<Shared>,
+        worker: Option<JoinHandle<()>>,
+        channel: &Arc<Channel>,
+    ) -> Session {
         Session {
             shared,
-            worker: None,
+            worker,
             device: Device {
                 id: DeviceId::new("{0.0.1.00000000}.{gone}"),
                 name: "A headset in a bag".to_string(),
@@ -1520,7 +1654,362 @@ mod tests {
             started: false,
             loss_reported: false,
             closed: false,
+            tickets: 0,
         }
+    }
+
+    /// What one client call comes to, and how long the driver takes over it.
+    #[derive(Default)]
+    struct Answer {
+        status: AtomicI32,
+        millis: AtomicU32,
+    }
+
+    impl Answer {
+        fn set(&self, status: i32, millis: u32) {
+            self.status.store(status, Ordering::SeqCst);
+            self.millis.store(millis, Ordering::SeqCst);
+        }
+
+        fn give(&self) -> i32 {
+            let millis = self.millis.load(Ordering::SeqCst);
+            if millis > 0 {
+                thread::sleep(Duration::from_millis(u64::from(millis)));
+            }
+            self.status.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The three calls a command makes of the client. Everything else the
+    /// client has is never reached from a command, and answers `E_NOTIMPL`.
+    #[derive(Default)]
+    struct Script {
+        start: Answer,
+        stop: Answer,
+        reset: Answer,
+        /// How long the audio thread takes to be gone once its loop is over,
+        /// which on a machine is giving the client back and leaving the
+        /// apartment. Only the delay is read.
+        leaving: Answer,
+    }
+
+    static CLIENT: AudioClientVtable = AudioClientVtable {
+        unknown: fake::unknown::<AudioClientVtable, Arc<Script>>(),
+        initialize: client_initialize,
+        get_buffer_size: client_count,
+        get_stream_latency: client_latency,
+        get_current_padding: client_count,
+        is_format_supported: client_format_supported,
+        get_mix_format: client_mix_format,
+        get_device_period: client_period,
+        start: client_start,
+        stop: client_stop,
+        reset: client_reset,
+        set_event_handle: client_event_handle,
+        get_service: client_service,
+    };
+
+    unsafe extern "system" fn client_initialize(
+        _this: *mut AudioClient,
+        _share: u32,
+        _flags: u32,
+        _duration: i64,
+        _periodicity: i64,
+        _format: *const WaveFormat,
+        _session: *const Guid,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_count(_this: *mut AudioClient, _out: *mut u32) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_latency(_this: *mut AudioClient, _out: *mut i64) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_format_supported(
+        _this: *mut AudioClient,
+        _share: u32,
+        _format: *const WaveFormat,
+        _closest: *mut *mut WaveFormat,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_mix_format(
+        _this: *mut AudioClient,
+        _out: *mut *mut WaveFormat,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_period(
+        _this: *mut AudioClient,
+        _default: *mut i64,
+        _minimum: *mut i64,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_event_handle(_this: *mut AudioClient, _event: Handle) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_service(
+        _this: *mut AudioClient,
+        _interface: *const Guid,
+        _out: *mut *mut c_void,
+    ) -> i32 {
+        NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn client_start(this: *mut AudioClient) -> i32 {
+        // SAFETY: `this` is the address of a live `Fake` over this table.
+        unsafe { fake::script::<AudioClientVtable, Arc<Script>>(this) }
+            .map_or(E_POINTER, |script| script.start.give())
+    }
+
+    unsafe extern "system" fn client_stop(this: *mut AudioClient) -> i32 {
+        // SAFETY: as above.
+        unsafe { fake::script::<AudioClientVtable, Arc<Script>>(this) }
+            .map_or(E_POINTER, |script| script.stop.give())
+    }
+
+    unsafe extern "system" fn client_reset(this: *mut AudioClient) -> i32 {
+        // SAFETY: as above.
+        unsafe { fake::script::<AudioClientVtable, Arc<Script>>(this) }
+            .map_or(E_POINTER, |script| script.reset.give())
+    }
+
+    /// What the audio thread owns, with the fake as its client and nothing
+    /// else: no service interface, so a pass would leave the loop, and no
+    /// event handle given to the client, so no pass ever comes.
+    fn engine(client: &Fake<AudioClientVtable, Arc<Script>>) -> Engine {
+        Engine {
+            client: client.com(),
+            render: None,
+            capture: None,
+            format: crate::format::DeviceFormat {
+                sample_rate_hz: 48_000,
+                channels: 2,
+                sample: SampleFormat::F32,
+            },
+            buffer_frames: 0,
+            scratch: Box::default(),
+        }
+    }
+
+    /// A session whose audio thread is the real loop, in front of a client
+    /// the script decides for.
+    fn scripted(script: &Arc<Script>, channel: &Arc<Channel>) -> Session {
+        let shared = Arc::new(Shared::new(Arc::clone(channel)).expect("three event handles"));
+        let worker = {
+            let shared = Arc::clone(&shared);
+            let script = Arc::clone(script);
+            thread::spawn(move || {
+                let client = Fake::new(&CLIENT, Arc::clone(&script));
+                serve(&shared, engine(&client), Direction::Input);
+                drop(client);
+                let _ = script.leaving.give();
+                shared.ended.store(true, Ordering::SeqCst);
+            })
+        };
+        session(shared, Some(worker), channel)
+    }
+
+    #[test]
+    fn a_start_refused_because_the_endpoint_went_while_stopped_is_a_loss() {
+        let script = Arc::new(Script::default());
+        script.start.set(AUDCLNT_E_DEVICE_INVALIDATED, 0);
+        let channel = channel();
+        let mut session = scripted(&script, &channel);
+
+        assert_eq!(
+            session.start(),
+            Err(Error::Call {
+                call: "IAudioClient::Start",
+                status: HResult::new(AUDCLNT_E_DEVICE_INVALIDATED),
+            })
+        );
+        assert_eq!(
+            session.poll(),
+            Some(StreamEvent::DeviceLost),
+            "the owner was told the start failed, and never why"
+        );
+        assert!(
+            session.started,
+            "recover starts only what was started, and this was asked to run"
+        );
+        assert!(
+            session.shared.finished(Duration::from_secs(2)),
+            "the audio thread stayed behind, waiting on an invalidated client"
+        );
+        assert_eq!(session.teardown(), Ok(()));
+    }
+
+    #[test]
+    fn a_start_sent_after_the_endpoint_was_found_gone_is_not_left_waiting() {
+        let script = Arc::new(Script::default());
+        script.start.set(AUDCLNT_E_DEVICE_INVALIDATED, 0);
+        // the loop is over at once, the thread is gone a second later
+        script.leaving.set(0, 1_000);
+        let channel = channel();
+        let mut session = scripted(&script, &channel);
+
+        assert_eq!(
+            session.start(),
+            Err(Error::Call {
+                call: "IAudioClient::Start",
+                status: HResult::new(AUDCLNT_E_DEVICE_INVALIDATED),
+            })
+        );
+        // A caller told the start failed tries again, before the thread that
+        // found the endpoint gone has finished leaving. Nothing is left in
+        // the loop to answer.
+        let asked = Instant::now();
+        assert_eq!(
+            session.start(),
+            Err(Error::NoDevice),
+            "the second start waited out the deadline on a loop already left"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "the second start took {:?} to say the endpoint is gone",
+            asked.elapsed()
+        );
+        assert_eq!(session.poll(), Some(StreamEvent::DeviceLost));
+        assert!(
+            session.started,
+            "the owner still asked for a running stream"
+        );
+    }
+
+    #[test]
+    fn a_stop_or_a_reset_that_finds_the_endpoint_gone_is_a_loss() {
+        const TICKET: u32 = 7;
+        for (stop, reset) in [
+            (AUDCLNT_E_DEVICE_INVALIDATED, 0),
+            (0, AUDCLNT_E_DEVICE_INVALIDATED),
+            (NOT_INITIALIZED, 0),
+        ] {
+            let script = Arc::new(Script::default());
+            script.stop.set(stop, 0);
+            script.reset.set(reset, 0);
+            let client = Fake::new(&CLIENT, Arc::clone(&script));
+            let mut engine = engine(&client);
+            let shared = Shared::new(channel()).expect("three event handles");
+            shared.running.store(true, Ordering::SeqCst);
+            shared
+                .command
+                .store(ticketed(TICKET, COMMAND_STOP), Ordering::SeqCst);
+
+            let stays = command(&shared, &mut engine, Direction::Input);
+
+            let gone =
+                stop == AUDCLNT_E_DEVICE_INVALIDATED || reset == AUDCLNT_E_DEVICE_INVALIDATED;
+            assert_eq!(
+                shared.lost.load(Ordering::SeqCst),
+                gone,
+                "stop {stop:#x}, reset {reset:#x}: the loss was not written down"
+            );
+            assert_eq!(
+                stays, !gone,
+                "stop {stop:#x}, reset {reset:#x}: the loop has to end with the endpoint"
+            );
+            let (ticket, status) = unticket(shared.outcome.load(Ordering::SeqCst));
+            assert_eq!(ticket, TICKET, "the answer went under another ticket");
+            assert_eq!(status.cast_signed(), if stop == 0 { reset } else { stop });
+            drop(engine);
+            assert_eq!(client.refs(), 1);
+        }
+    }
+
+    #[test]
+    fn the_last_stop_on_the_way_out_of_the_loop_is_looked_at_too() {
+        let script = Arc::new(Script::default());
+        script.stop.set(AUDCLNT_E_DEVICE_INVALIDATED, 0);
+        let client = Fake::new(&CLIENT, Arc::clone(&script));
+        let shared = Shared::new(channel()).expect("three event handles");
+        shared.running.store(true, Ordering::SeqCst);
+        shared
+            .command
+            .store(ticketed(0, COMMAND_QUIT), Ordering::SeqCst);
+        shared.control.signal();
+
+        serve(&shared, engine(&client), Direction::Input);
+
+        assert_eq!(
+            shared.parting.load(Ordering::SeqCst),
+            AUDCLNT_E_DEVICE_INVALIDATED
+        );
+        assert!(
+            shared.lost.load(Ordering::SeqCst),
+            "the final stop found the endpoint gone and nothing wrote it down"
+        );
+        assert_eq!(client.refs(), 1, "the loop did not give the client back");
+    }
+
+    #[test]
+    fn an_answer_nobody_waited_for_is_not_taken_for_the_next_command() {
+        let script = Arc::new(Script::default());
+        // slow enough that an owner who takes the first signal it sees reads
+        // the outcome well before this stop has written one
+        script.stop.set(NOT_INITIALIZED, 200);
+        let channel = channel();
+        let mut session = scripted(&script, &channel);
+        assert_eq!(session.start(), Ok(()));
+
+        // what an audio thread leaves behind when it comes back from a
+        // command whose asker gave up: a success, signalled, and nobody
+        // waiting for it
+        session
+            .shared
+            .outcome
+            .store(ticketed(session.tickets, 0), Ordering::SeqCst);
+        session.shared.answered.signal();
+
+        assert_eq!(
+            session.stop(),
+            Err(Error::Call {
+                call: "IAudioClient::Stop",
+                status: HResult::new(NOT_INITIALIZED),
+            }),
+            "the stop reported an answer that was not to it"
+        );
+    }
+
+    #[test]
+    fn an_answer_still_on_its_way_is_not_taken_for_the_command_sent_after_it() {
+        let script = Arc::new(Script::default());
+        script.start.set(0, 300);
+        // The stop takes a while too. An audio thread at Pro Audio priority
+        // can otherwise carry it out and overwrite the start's outcome before
+        // the owner that woke for the start has read anything, and an owner
+        // that takes the first answer it sees would pass by luck.
+        script.stop.set(NOT_INITIALIZED, 200);
+        let channel = channel();
+        let mut session = scripted(&script, &channel);
+
+        assert_eq!(
+            session.ask_within(
+                COMMAND_START,
+                "IAudioClient::Start",
+                Duration::from_millis(30)
+            ),
+            Err(Error::Draining { waited_millis: 30 })
+        );
+        // The start is still inside the driver. This goes while it is, and the
+        // start's answer arrives while this one waits.
+        assert_eq!(
+            session.ask_within(COMMAND_STOP, "IAudioClient::Stop", Duration::from_secs(2)),
+            Err(Error::Call {
+                call: "IAudioClient::Stop",
+                status: HResult::new(NOT_INITIALIZED),
+            }),
+            "the stop reported the start's answer"
+        );
     }
 
     #[test]
@@ -1680,6 +2169,39 @@ mod tests {
                 .sample,
             SampleFormat::F32
         );
+    }
+
+    #[test]
+    fn a_longer_extension_is_copied_as_the_one_that_was_read() {
+        let mut whole = WaveFormatExtensible::EMPTY;
+        whole.format.format_tag = WAVE_FORMAT_EXTENSIBLE;
+        whole.format.channels = 2;
+        whole.format.samples_per_sec = 48_000;
+        whole.format.bits_per_sample = 32;
+        whole.format.block_align = 8;
+        // twelve octets more than the extension this crate reads, as a format
+        // with fields of its own after the subtype declares
+        whole.format.cb_size = WaveFormatExtensible::EXTENSION_BYTES + 12;
+        whole.valid_bits_per_sample = 32;
+        whole.sub_format = SUBTYPE_IEEE_FLOAT;
+        let mut memory = [0u8; 52];
+        // SAFETY: forty octets written into fifty-two, unaligned because the
+        // structure is byte-packed.
+        unsafe {
+            std::ptr::write_unaligned(memory.as_mut_ptr().cast::<WaveFormatExtensible>(), whole);
+        }
+
+        // SAFETY: a live header followed by the thirty-four octets its cbSize
+        // declares.
+        let read = unsafe { read_wave(memory.as_ptr().cast::<WaveFormat>()) }.expect("a format");
+        let size = read.format.cb_size;
+        let subtype = read.sub_format;
+        assert_eq!(
+            size,
+            WaveFormatExtensible::EXTENSION_BYTES,
+            "the copy claims octets after it that were never copied"
+        );
+        assert_eq!(subtype, SUBTYPE_IEEE_FLOAT);
     }
 
     #[test]

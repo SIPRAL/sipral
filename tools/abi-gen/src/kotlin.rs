@@ -9,22 +9,40 @@
 //! come out of the same walk over the same declarations, which is the only
 //! reason it is safe to have two of them.
 //!
-//! Structs are the part JNI makes awkward, and the way out of it is not to let
-//! a struct cross at all. A struct the library fills in whole is handed back a
-//! member at a time in a `long[]` the shim writes, with a float carried as its
-//! own bits, so nothing on the Kotlin side has to know a field offset — which
-//! it could not, since Android builds for two pointer widths. A struct the
-//! caller part-fills is the one shape left over, and it crosses as an address:
-//! `docs/08-ffi.md` says so and says what it costs.
+//! Structs are the part JNI makes awkward, and the way out of it is never to
+//! let a struct's layout cross. A struct the library fills in whole is handed
+//! back a member at a time in a `long[]` the shim writes, with a float carried
+//! as its own bits, so nothing on the Kotlin side has to know a field offset —
+//! which it could not, since Android builds for two pointer widths. A struct
+//! the caller fills in and the library only reads is a Kotlin class instead,
+//! whose fields the wrapper hands over one argument each and the shim copies
+//! into a zeroed C struct with the size member set. A struct the caller
+//! part-fills with buffers the library writes into is the one shape left
+//! over, and it crosses as an address: `docs/08-ffi.md` says so and says what
+//! it costs.
+//!
+//! The callback goes the other way, and the listener behind it never leaves
+//! the JVM. A struct going in that holds the callback holds a Kotlin listener
+//! in its place; the wrapper keeps the listener under a key, and what reaches
+//! C is the key, as the callback's user pointer, beside a C function the shim
+//! prints for the callback to land in. That function attaches the polling
+//! thread to the JVM when it is not attached already, hands over the event,
+//! deletes every local reference it made, and detaches only what it attached.
+//! The listener is let go of by the entry point that destroys the handle the
+//! struct was handed to, so an event that arrives for a stack already
+//! destroyed finds no listener rather than a freed one.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Surface, Value};
+use sipral_ffi::abi::{
+    Alias, Code, Enumeration, Function, Member, Record, Shape, Stands, Surface, Value,
+};
 
 use crate::c;
 use crate::model::{
     Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
-    plain_named, read_all, record_named, roles, screaming, without_prefix,
+    plain_named, read_all, record_named, roles, screaming, snake, upper_camel, without_prefix,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -185,6 +203,15 @@ fn jni_element_of(ty: &Type) -> (&'static str, &'static str) {
     }
 }
 
+/// How the JVM writes that array's type in a method descriptor.
+fn descriptor_of_array(ty: &Type) -> &'static str {
+    match ty.base {
+        Base::Int(Int { bits: 16, .. }) => "[S",
+        Base::Int(Int { bits: 32, .. }) => "[I",
+        _ => "[B",
+    }
+}
+
 /// What a plain value crosses as. Everything integral is a `Long`, because a
 /// binding that argued about widths at this seam would be arguing with the
 /// header rather than with the ABI.
@@ -202,9 +229,557 @@ fn plain_jni(ty: &Type) -> &'static str {
     }
 }
 
+/// How the JVM writes a plain value's type in a method descriptor.
+fn plain_descriptor(ty: &Type) -> &'static str {
+    match ty.base {
+        Base::Float(_) => "D",
+        _ => "J",
+    }
+}
+
+/// What a plain field of a class defaults to, which is the zero the C struct
+/// would have held.
+fn zero_of(ty: &Type) -> &'static str {
+    match ty.base {
+        Base::Float(_) => "0.0",
+        _ => "0",
+    }
+}
+
+// ------------------------------------------------------------ records as classes
+
+/// One member of a record as a Kotlin class holds it.
+enum Part<'a> {
+    /// A number, which is a `Long` or a `Double` here as everywhere else.
+    Plain(&'a Read<'a>),
+    /// A pointer and the `_len` after it: a `String` when it points at
+    /// characters, an array otherwise, and null for a null pointer.
+    Buffer {
+        /// The pointer.
+        data: &'a Read<'a>,
+        /// The length that follows it.
+        len: &'a Read<'a>,
+    },
+    /// The callback and the user pointer after it, which together are one
+    /// listener.
+    Listener {
+        /// The function pointer.
+        callback: &'a Read<'a>,
+        /// The pointer handed back to it, which carries the listener's key.
+        user_data: &'a Read<'a>,
+        /// What the callback is.
+        alias: &'static Alias,
+    },
+    /// A union held by value, whose live arm another member names.
+    Arm(&'a Read<'a>),
+}
+
+/// The callback a name refers to, if the surface has one.
+fn callback_named(surface: &Surface, name: &str) -> Option<&'static Alias> {
+    surface
+        .aliases
+        .iter()
+        .find(|alias| alias.name == name && matches!(alias.stands, Stands::Callback(_)))
+}
+
+/// The pointer a callback's user data travels in.
+fn user_pointer() -> Type {
+    Type {
+        pointer: Some(Writable::Yes),
+        base: Base::Opaque,
+    }
+}
+
+/// Read the members of a record, from `first` on, as a Kotlin class holds
+/// them.
+///
+/// The conventions are the ones a parameter list follows, read off a struct:
+/// a pointer followed by its `_len` is one buffer, and the callback followed
+/// by a `*mut c_void` is one listener. Anything else that is not a number is
+/// refused, naming the member, rather than crossing as an address nobody on
+/// the Kotlin side has a way to make.
+fn parts<'a>(
+    surface: &Surface,
+    record: &Record,
+    fields: &'a [Read<'a>],
+    first: usize,
+) -> Result<Vec<Part<'a>>, Refused> {
+    let mut out = Vec::new();
+    let mut index = first;
+    while let Some(field) = fields.get(index) {
+        let next = fields.get(index + 1);
+        let refuse = |why: &str| {
+            Refused::about(&format!(
+                "{}::{} {why}, which a Kotlin class has no field for; give it one in \
+                 tools/abi-gen/src/kotlin.rs",
+                record.name, field.member.name
+            ))
+        };
+        match (field.ty.pointer, &field.ty.base) {
+            (None, Base::Named(name)) => {
+                if let Some(alias) = callback_named(surface, name) {
+                    let Some(user_data) = next.filter(|after| after.ty == user_pointer()) else {
+                        return Err(refuse(
+                            "is a callback with no `*mut c_void` after it to carry its listener",
+                        ));
+                    };
+                    out.push(Part::Listener {
+                        callback: field,
+                        user_data,
+                        alias,
+                    });
+                    index += 2;
+                    continue;
+                }
+                match surface.records.iter().find(|inner| inner.name == *name) {
+                    Some(inner) if inner.shape == Shape::Union => out.push(Part::Arm(field)),
+                    Some(_) => return Err(refuse("holds a struct by value")),
+                    None => out.push(Part::Plain(field)),
+                }
+            }
+            (None, _) => out.push(Part::Plain(field)),
+            (Some(Writable::No), _) if field.ty.points_at_bytes() => {
+                let wanted = format!("{}_len", field.member.name);
+                let Some(len) =
+                    next.filter(|after| after.ty.is_length() && after.member.name == wanted)
+                else {
+                    return Err(refuse(&format!(
+                        "points at bytes with no `{wanted}` after it"
+                    )));
+                };
+                out.push(Part::Buffer { data: field, len });
+                index += 2;
+                continue;
+            }
+            _ => {
+                return Err(refuse(
+                    "is a pointer that is neither a buffer going in nor a callback's user pointer",
+                ));
+            }
+        }
+        index += 1;
+    }
+    Ok(out)
+}
+
+/// A struct going in holds a union, which a caller could not set.
+fn not_built(record: &Record, field: &Read<'_>) -> Refused {
+    Refused::about(&format!(
+        "{}::{} is a union inside a struct a caller builds, and a Kotlin class has no way to \
+         say which arm it set; give it one in tools/abi-gen/src/kotlin.rs",
+        record.name, field.member.name
+    ))
+}
+
+/// A struct handed to a listener holds a callback, which nothing would call.
+fn not_handed(record: &Record, field: &Read<'_>) -> Refused {
+    Refused::about(&format!(
+        "{}::{} is a callback inside a struct the library hands to a listener, and a listener \
+         has nothing to do with one; give it a shape in tools/abi-gen/src/kotlin.rs",
+        record.name, field.member.name
+    ))
+}
+
+/// The record a struct going in names.
+fn config_record(surface: &Surface, read: &Read<'_>) -> Result<&'static Record, Refused> {
+    let Base::Named(name) = &read.ty.base else {
+        return Err(Refused::about("a struct with no name"));
+    };
+    surface
+        .records
+        .iter()
+        .find(|record| record.name == name)
+        .ok_or_else(|| Refused::about(&format!("{name} is not a record the surface declares")))
+}
+
+/// Every record an entry point takes behind a `const` pointer: the structs a
+/// Kotlin caller builds, in the order the surface declares them.
+fn built(surface: &Surface) -> Result<Vec<&'static Record>, Refused> {
+    let mut named = BTreeSet::new();
+    for (_, read) in functions(surface)? {
+        for role in roles(surface, &read) {
+            if let Role::Config(parameter) = role
+                && let Base::Named(name) = &parameter.ty.base
+            {
+                named.insert(name.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for record in surface.records {
+        if !named.contains(record.name) {
+            continue;
+        }
+        if !record.is_versioned() {
+            return Err(Refused::about(&format!(
+                "{} goes in behind a const pointer and has no size member for the shim to fill \
+                 in",
+                record.name
+            )));
+        }
+        if is_given(record) {
+            return Err(Refused::about(&format!(
+                "{} goes in behind a const pointer and holds nothing but numbers, so it would be \
+                 printed twice: as a class to build and as a data class to read back. Give it one \
+                 shape in tools/abi-gen/src/kotlin.rs",
+                record.name
+            )));
+        }
+        out.push(record);
+    }
+    Ok(out)
+}
+
+/// The Kotlin name of the field a listener takes: `event_callback` is
+/// `eventListener`.
+fn listener_field(callback: &Read<'_>) -> String {
+    let name = callback.member.name;
+    let listening = match name.strip_suffix("callback") {
+        Some(stem) => format!("{stem}listener"),
+        None => format!("{name}_listener"),
+    };
+    safe(&lower_camel(&listening))
+}
+
+/// One member of a struct going in, as the argument it crosses JNI in:
+/// `config` and `bind_address` are `configBindAddress`.
+fn flat(parameter: &Read<'_>, member: &Read<'_>) -> String {
+    lower_camel(&format!("{}_{}", parameter.member.name, member.member.name))
+}
+
+// ------------------------------------------------------------ the callback
+
+/// A callback, and what a Kotlin listener is handed when it is called: the
+/// record its first parameter points at.
+struct Landing {
+    alias: &'static Alias,
+    /// The parameter the record arrives in.
+    event: &'static Member,
+    /// The user pointer, which carries the key the listener is kept under.
+    user_data: &'static Member,
+    record: &'static Record,
+}
+
+impl Landing {
+    /// Read a callback, refusing one that is not a pointer to a record and a
+    /// user pointer: that is the one shape this back end lands in Kotlin.
+    fn of(surface: &Surface, alias: &'static Alias) -> Result<Self, Refused> {
+        let refuse = || {
+            Refused::about(&format!(
+                "{} is a callback that does not take a pointer to a versioned struct and a \
+                 `*mut c_void`, which is the one shape this back end hands to a Kotlin \
+                 listener; give it another in tools/abi-gen/src/kotlin.rs",
+                alias.name
+            ))
+        };
+        let Stands::Callback(arguments) = alias.stands else {
+            return Err(refuse());
+        };
+        let [event, user_data] = arguments else {
+            return Err(refuse());
+        };
+        let pointed = Type::read(event.rust_type)?;
+        if Type::read(user_data.rust_type)? != user_pointer()
+            || pointed.pointer != Some(Writable::No)
+        {
+            return Err(refuse());
+        }
+        let Base::Named(name) = &pointed.base else {
+            return Err(refuse());
+        };
+        let Some(record) = surface.records.iter().find(|record| {
+            record.name == name && record.shape == Shape::Struct && record.is_versioned()
+        }) else {
+            return Err(refuse());
+        };
+        Ok(Self {
+            alias,
+            event,
+            user_data,
+            record,
+        })
+    }
+
+    /// `SipralEventCallback` is `SipralEventListener`.
+    fn listener(&self) -> String {
+        let name = self.alias.name;
+        format!("{}Listener", name.strip_suffix("Callback").unwrap_or(name))
+    }
+
+    /// And the object those are kept in, `SipralEventListeners`.
+    fn keeper(&self) -> String {
+        format!("{}s", self.listener())
+    }
+
+    /// The one method a listener has, named for what it is handed: `onEvent`.
+    fn method(&self) -> String {
+        format!("on{}", upper_camel(self.event.name))
+    }
+
+    /// The C function the callback lands in: `jni_event_callback`.
+    fn function(&self) -> String {
+        let name = snake(self.alias.name);
+        format!("jni_{}", name.strip_prefix("sipral_").unwrap_or(&name))
+    }
+
+    /// Where the shim keeps the keeper's class.
+    fn class(&self) -> String {
+        format!("{}_class", self.function())
+    }
+
+    /// And the method it hands events to.
+    fn deliver(&self) -> String {
+        format!("{}_deliver", self.function())
+    }
+}
+
+/// Every callback the surface declares, each as it lands in Kotlin.
+fn landings(surface: &Surface) -> Result<Vec<Landing>, Refused> {
+    surface
+        .aliases
+        .iter()
+        .filter(|alias| matches!(alias.stands, Stands::Callback(_)))
+        .map(|alias| Landing::of(surface, alias))
+        .collect()
+}
+
+/// The locals the landing function writes beside its two parameters.
+const LANDING_LOCALS: &[(&str, &str)] = &[
+    ("env", "the JNI environment the landing function looks up"),
+    (
+        "attached",
+        "whether the landing function attached this thread",
+    ),
+    (
+        "built",
+        "whether every array the event is handed over in was made",
+    ),
+    ("found", "what the JVM said about the calling thread"),
+];
+
+/// The file-scope names the shim writes once, whatever the surface holds.
+const SHIM_FILE: &[(&str, &str)] = &[
+    ("jni_vm", "the JVM the shim was loaded into"),
+    ("JNI_REACHES", "the size check the landing functions make"),
+    ("JNI_OnLoad", "the load hook"),
+    ("JNI_OnUnload", "the unload hook"),
+];
+
+/// The fixed names inside the keeper's `deliver`, beside the key and the
+/// members it is handed.
+const DELIVER_LOCALS: &[(&str, &str)] = &[
+    ("key", "the key the shim hands back"),
+    ("listening", "the map deliver finds the listener in"),
+    ("listener", "the listener the key names"),
+    ("failure", "what the listener threw"),
+    ("thread", "the thread it threw on"),
+];
+
+/// One member of a struct handed to a listener: as `deliver` takes it, as the
+/// class declares it, and as the landing function passes it.
+struct Handed {
+    /// The member it came from, as the declaration spelled it.
+    from: &'static str,
+    /// Its documentation.
+    doc: &'static [&'static str],
+    /// The name, Kotlin side.
+    kotlin: String,
+    /// The parameter `deliver` declares.
+    parameter: String,
+    /// What the class is built with from that parameter.
+    argument: String,
+    /// The field the class declares.
+    field: String,
+    /// The type in the JVM descriptor.
+    descriptor: String,
+    /// The local the landing function makes an array in, and its type.
+    c_local: Option<(&'static str, String)>,
+    /// What the landing function does before the call to make that array.
+    c_make: String,
+    /// What it passes.
+    c_passed: String,
+}
+
+/// Every member the listener is handed, with the ones left out named.
+fn handed(
+    surface: &Surface,
+    landing: &Landing,
+    fields: &[Read<'_>],
+) -> Result<(Vec<Handed>, Vec<String>), Refused> {
+    let record = landing.record;
+    let event = landing.event.name;
+    let spelled = c::named(record.name);
+    let mut out = Vec::new();
+    let mut left_out = Vec::new();
+    for part in parts(surface, record, fields, 0)? {
+        match part {
+            Part::Plain(field) => {
+                let kotlin = held(field);
+                let name = field.member.name;
+                let (cast, zero) = match field.ty.base {
+                    Base::Float(_) => ("jdouble", "0.0"),
+                    _ => ("jlong", "0"),
+                };
+                // the size member is there in every length the struct has
+                // had; every other one is read only when the size says so
+                let c_passed = if name == "size" {
+                    format!("({cast}){event}->size")
+                } else {
+                    format!(
+                        "JNI_REACHES({event}, {spelled}, {name}) ? ({cast}){event}->{name} : {zero}"
+                    )
+                };
+                out.push(Handed {
+                    from: field.member.name,
+                    doc: field.member.doc,
+                    parameter: format!("{kotlin}: {}", plain_kotlin(&field.ty)),
+                    argument: kotlin.clone(),
+                    field: format!("val {kotlin}: {}", plain_kotlin(&field.ty)),
+                    descriptor: plain_descriptor(&field.ty).to_owned(),
+                    kotlin,
+                    c_local: None,
+                    c_make: String::new(),
+                    c_passed,
+                });
+            }
+            Part::Buffer { data, len } => {
+                let kotlin = held(data);
+                let text = data.ty.base == Base::Char;
+                let name = data.member.name;
+                let len = len.member.name;
+                let (element, kind) = jni_element_of(&data.ty);
+                let c_make = format!(
+                    "    if (built && JNI_REACHES({event}, {spelled}, {len}) && {event}->{name} != NULL) {{\n\
+                     \x20       {name} = (*env)->New{kind}Array(env, (jsize){event}->{len});\n\
+                     \x20       if ({name} == NULL) {{\n\
+                     \x20           built = 0;\n\
+                     \x20       }} else {{\n\
+                     \x20           (*env)->Set{kind}ArrayRegion(env, {name}, 0, (jsize){event}->{len}, (const {element} *){event}->{name});\n\
+                     \x20       }}\n\
+                     \x20   }}\n"
+                );
+                out.push(Handed {
+                    from: data.member.name,
+                    doc: data.member.doc,
+                    parameter: format!("{kotlin}: {}?", array_of(&data.ty)),
+                    argument: if text {
+                        format!("{kotlin}?.let {{ String(it, Charsets.UTF_8) }}")
+                    } else {
+                        kotlin.clone()
+                    },
+                    field: if text {
+                        format!("val {kotlin}: String?")
+                    } else {
+                        format!("val {kotlin}: {}?", array_of(&data.ty))
+                    },
+                    descriptor: descriptor_of_array(&data.ty).to_owned(),
+                    kotlin,
+                    c_local: Some((name, jni_array_of(&data.ty).to_owned())),
+                    c_make,
+                    c_passed: name.to_owned(),
+                });
+            }
+            Part::Listener { callback, .. } => return Err(not_handed(record, callback)),
+            Part::Arm(field) => left_out.push(field.member.name.to_owned()),
+        }
+    }
+    Ok((out, left_out))
+}
+
+/// The JVM descriptor of a keeper's `deliver`: the key, then every member.
+fn deliver_descriptor(members: &[Handed]) -> String {
+    let inside: String = members.iter().map(|one| one.descriptor.as_str()).collect();
+    format!("(J{inside})V")
+}
+
+/// The listener each struct going in to an entry point holds, by the object
+/// it is kept in.
+fn kept_by(surface: &Surface, roles: &[Role<'_>]) -> Result<Vec<String>, Refused> {
+    let mut out = Vec::new();
+    for role in roles {
+        let Role::Config(read) = role else {
+            continue;
+        };
+        let record = config_record(surface, read)?;
+        let fields = read_all(record.name, record.fields)?;
+        for part in parts(surface, record, &fields, 1)? {
+            if let Part::Listener { alias, .. } = part {
+                out.push(Landing::of(surface, alias)?.keeper());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The entry point that takes apart what `maker` made, and the one value
+/// `maker` writes back.
+///
+/// It is the one named for the same thing with `_destroy` in place of the
+/// last word, taking the handle `maker` writes back and nothing else:
+/// `sipral_stack_create` is undone by `sipral_stack_destroy`. A listener is
+/// let go of there, and an entry point that keeps one without such a partner
+/// is refused rather than printed with a listener nothing lets go of.
+fn destroyer(surface: &Surface, maker: &Function) -> Result<&'static Function, Refused> {
+    let refuse = || {
+        Refused::about(&format!(
+            "{} takes a listener, and the surface has no entry point named for the same thing \
+             with `_destroy` that takes the one handle it writes back, which is where the \
+             listener would be let go of",
+            maker.name
+        ))
+    };
+    let read = read_all(maker.name, maker.parameters)?;
+    let made: Vec<&Read<'_>> = roles(surface, &read)
+        .into_iter()
+        .filter_map(|role| match role {
+            Role::Out(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    let [made] = made.as_slice() else {
+        return Err(refuse());
+    };
+    let Some((stem, _)) = maker.name.rsplit_once('_') else {
+        return Err(refuse());
+    };
+    let wanted = format!("{stem}_destroy");
+    let Some(found) = surface
+        .functions
+        .iter()
+        .find(|function| function.name == wanted)
+    else {
+        return Err(refuse());
+    };
+    let [handle] = found.parameters else {
+        return Err(refuse());
+    };
+    let handle = Type::read(handle.rust_type)?;
+    if handle.pointer.is_some() || handle.base != made.ty.base {
+        return Err(refuse());
+    }
+    Ok(found)
+}
+
+/// The objects whose listeners an entry point lets go of: every one a struct
+/// going in to another entry point held, when this is that one's destroyer.
+fn released_by(surface: &Surface, function: &Function) -> Result<Vec<String>, Refused> {
+    let mut out = Vec::new();
+    for (maker, read) in functions(surface)? {
+        let keepers = kept_by(surface, &roles(surface, &read))?;
+        if keepers.is_empty() || destroyer(surface, maker)?.name != function.name {
+            continue;
+        }
+        out.extend(keepers);
+    }
+    Ok(out)
+}
+
+// ------------------------------------------------------------ the declarations
+
 /// How one parameter appears on each side of JNI: what is declared, and the
 /// bare identifiers, which the uniqueness pass reads rather than deriving
 /// them a second time.
+#[derive(Default)]
 struct Crossing {
     kotlin: Vec<String>,
     jni: Vec<String>,
@@ -212,7 +787,7 @@ struct Crossing {
     shim: Vec<(String, String)>,
 }
 
-fn crossing(role: &Role<'_>) -> Crossing {
+fn crossing(surface: &Surface, role: &Role<'_>) -> Result<Crossing, Refused> {
     let (kotlin_type, jni_type, read, kotlin_name, c_name) = match role {
         Role::Plain(read) => (
             plain_kotlin(&read.ty).to_owned(),
@@ -228,7 +803,8 @@ fn crossing(role: &Role<'_>) -> Crossing {
             held(data),
             c_held(data),
         ),
-        Role::Config(read) | Role::Shared(read) => (
+        Role::Config(read) => return fields_crossing(surface, read),
+        Role::Shared(read) => (
             "Long".to_owned(),
             "jlong".to_owned(),
             read,
@@ -243,12 +819,43 @@ fn crossing(role: &Role<'_>) -> Crossing {
             returned(read.member.name),
         ),
     };
-    Crossing {
+    Ok(Crossing {
         kotlin: vec![format!("{kotlin_name}: {kotlin_type}")],
         jni: vec![format!("{jni_type} {c_name}")],
         names: vec![(kotlin_name, read.member.name.to_owned())],
         shim: vec![(c_name, read.member.name.to_owned())],
+    })
+}
+
+/// A struct going in crosses one argument per member of the class it was
+/// built from, in the order the struct declares them.
+fn fields_crossing(surface: &Surface, read: &Read<'_>) -> Result<Crossing, Refused> {
+    let record = config_record(surface, read)?;
+    let fields = read_all(record.name, record.fields)?;
+    let mut out = Crossing::default();
+    for part in parts(surface, record, &fields, 1)? {
+        let (member, kotlin_type, jni_type) = match part {
+            Part::Plain(field) => (
+                field,
+                plain_kotlin(&field.ty).to_owned(),
+                plain_jni(&field.ty).to_owned(),
+            ),
+            Part::Buffer { data, .. } => (
+                data,
+                format!("{}?", array_of(&data.ty)),
+                jni_array_of(&data.ty).to_owned(),
+            ),
+            Part::Listener { callback, .. } => (callback, "Long".to_owned(), "jlong".to_owned()),
+            Part::Arm(field) => return Err(not_built(record, field)),
+        };
+        let name = flat(read, member);
+        let from = format!("{}::{}", record.name, member.member.name);
+        out.kotlin.push(format!("{}: {kotlin_type}", safe(&name)));
+        out.jni.push(format!("{jni_type} {name}"));
+        out.names.push((safe(&name), from.clone()));
+        out.shim.push((name, from));
     }
+    Ok(out)
 }
 
 fn returns_kotlin(function: &Function) -> Result<&'static str, Refused> {
@@ -301,6 +908,207 @@ fn data_classes(surface: &Surface) -> Result<String, Refused> {
     Ok(out)
 }
 
+/// The class a caller builds each struct going in from: one field per member,
+/// a buffer and its length as one, the callback and its user pointer as one
+/// listener, and every field defaulting to the zero the struct would hold.
+fn built_classes(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::new();
+    for record in built(surface)? {
+        let mut about = lines(surface, record.doc);
+        about.push(String::new());
+        about.push(
+            " Built here and copied into the C struct by the JNI shim, which sets the".to_owned(),
+        );
+        about.push(
+            " size member itself: a field left at its default is the zero the struct".to_owned(),
+        );
+        about.push(" would have held.".to_owned());
+        doc(&mut out, "", &about);
+        let _ = writeln!(out, "class {}(", record.name);
+        let fields = read_all(record.name, record.fields)?;
+        for part in parts(surface, record, &fields, 1)? {
+            let (field, declared) = match part {
+                Part::Plain(field) => (
+                    field,
+                    format!(
+                        "val {}: {} = {}",
+                        held(field),
+                        plain_kotlin(&field.ty),
+                        zero_of(&field.ty)
+                    ),
+                ),
+                Part::Buffer { data, .. } => {
+                    let ty = if data.ty.base == Base::Char {
+                        "String"
+                    } else {
+                        array_of(&data.ty)
+                    };
+                    (data, format!("val {}: {ty}? = null", held(data)))
+                }
+                Part::Listener {
+                    callback, alias, ..
+                } => (
+                    callback,
+                    format!(
+                        "val {}: {}? = null",
+                        listener_field(callback),
+                        Landing::of(surface, alias)?.listener()
+                    ),
+                ),
+                Part::Arm(field) => return Err(not_built(record, field)),
+            };
+            doc(&mut out, "    ", &lines(surface, field.member.doc));
+            let _ = writeln!(out, "    {declared},");
+        }
+        out.push_str(")\n\n");
+    }
+    Ok(out)
+}
+
+/// For each callback: the class its record is handed over as, the listener
+/// interface, and the object listeners are kept in until the handle they were
+/// made with is destroyed.
+fn listeners(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::new();
+    for landing in landings(surface)? {
+        let record = landing.record;
+        let fields = read_all(record.name, record.fields)?;
+        let (members, left_out) = handed(surface, &landing, &fields)?;
+
+        let mut about = lines(surface, record.doc);
+        for name in &left_out {
+            about.push(String::new());
+            about.push(format!(
+                " `{name}` is not carried here. Which of its arms the library wrote is named"
+            ));
+            about.push(
+                " by another member, and nothing in the declarations says which value names"
+                    .to_owned(),
+            );
+            about.push(" which arm, so this binding does not guess.".to_owned());
+        }
+        doc(&mut out, "", &about);
+        let _ = writeln!(out, "class {}(", record.name);
+        for member in &members {
+            doc(&mut out, "    ", &lines(surface, member.doc));
+            let _ = writeln!(out, "    {},", member.field);
+        }
+        out.push_str(")\n\n");
+
+        let listener = landing.listener();
+        let mut about = lines(surface, landing.alias.doc);
+        about.push(String::new());
+        about.push(
+            " In Kotlin it is this interface, called on the thread that polls. The JNI".to_owned(),
+        );
+        about.push(
+            " shim attaches that thread to the JVM for the length of the call when it".to_owned(),
+        );
+        about.push(
+            " is not attached already. What a listener throws goes to that thread's".to_owned(),
+        );
+        about.push(
+            " uncaught exception handler, and the poll carries on once the handler".to_owned(),
+        );
+        about.push(
+            " returns. Android's default handler does not return: it ends the process.".to_owned(),
+        );
+        doc(&mut out, "", &about);
+        let _ = writeln!(
+            out,
+            "fun interface {listener} {{\n    fun {}({}: {})\n}}\n",
+            landing.method(),
+            safe(&lower_camel(landing.event.name)),
+            record.name
+        );
+
+        out.push_str(&keeper_object(&landing, &members));
+    }
+    Ok(out)
+}
+
+/// The object a callback's listeners are kept in, and the `deliver` the JNI
+/// shim hands each event to.
+fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
+    let listener = landing.listener();
+    let keeper = landing.keeper();
+    let record = landing.record;
+    let parameters: Vec<&str> = members
+        .iter()
+        .map(|member| member.parameter.as_str())
+        .collect();
+    let arguments: Vec<&str> = members
+        .iter()
+        .map(|member| member.argument.as_str())
+        .collect();
+    let mut out = String::new();
+    {
+        let _ = writeln!(
+            out,
+            "/**\n\
+             \x20* Every {listener} a live handle was made with, under the key the JNI\n\
+             \x20* shim hands back with each event. The native side holds no reference\n\
+             \x20* to a listener at all: an event for a handle already destroyed finds\n\
+             \x20* nothing here and goes nowhere.\n\
+             \x20*/\n\
+             internal object {keeper} {{\n\
+             \x20   private val listening = HashMap<Long, {listener}>()\n\
+             \x20   private val handles = HashMap<Long, Long>()\n\
+             \x20   private var last = 0L\n\n\
+             \x20   /** Keep a listener, and say what key the shim will hand it back under: zero for none. */\n\
+             \x20   fun register(listener: {listener}?): Long {{\n\
+             \x20       if (listener == null) {{\n\
+             \x20           return 0\n\
+             \x20       }}\n\
+             \x20       synchronized(this) {{\n\
+             \x20           // the key crosses as a C pointer, which is 32 bits wide on half of Android\n\
+             \x20           check(last < Int.MAX_VALUE) {{ \"every key a listener can be kept under has been handed out\" }}\n\
+             \x20           last += 1\n\
+             \x20           listening[last] = listener\n\
+             \x20           return last\n\
+             \x20       }}\n\
+             \x20   }}\n\n\
+             \x20   /** Tie a kept listener to the handle the call made, or let it go when the call failed. */\n\
+             \x20   fun made(key: Long, status: Int, handle: Long) {{\n\
+             \x20       if (key == 0L) {{\n\
+             \x20           return\n\
+             \x20       }}\n\
+             \x20       synchronized(this) {{\n\
+             \x20           if (status == SipralStatus.OK.value) {{\n\
+             \x20               handles[handle] = key\n\
+             \x20           }} else {{\n\
+             \x20               listening.remove(key)\n\
+             \x20           }}\n\
+             \x20       }}\n\
+             \x20   }}\n\n\
+             \x20   /** Let go of the listener a destroyed handle was made with. */\n\
+             \x20   fun gone(handle: Long) {{\n\
+             \x20       synchronized(this) {{\n\
+             \x20           val key = handles.remove(handle) ?: return\n\
+             \x20           listening.remove(key)\n\
+             \x20       }}\n\
+             \x20   }}\n\n\
+             \x20   /** Called by the JNI shim, once per event, on the thread that polls. */\n\
+             \x20   @JvmStatic\n\
+             \x20   fun deliver(key: Long, {}) {{\n\
+             \x20       val listener = synchronized(this) {{ listening[key] }} ?: return\n\
+             \x20       try {{\n\
+             \x20           listener.{}({}({}))\n\
+             \x20       }} catch (failure: Throwable) {{\n\
+             \x20           val thread = Thread.currentThread()\n\
+             \x20           thread.uncaughtExceptionHandler.uncaughtException(thread, failure)\n\
+             \x20       }}\n\
+             \x20   }}\n\
+             }}\n",
+            parameters.join(", "),
+            landing.method(),
+            record.name,
+            arguments.join(", ")
+        );
+    }
+    out
+}
+
 /// A call that answers with a static string rather than a status.
 fn naming(function: &Function, read: &[Read<'_>]) -> String {
     let mut out = String::new();
@@ -321,28 +1129,50 @@ fn naming(function: &Function, read: &[Read<'_>]) -> String {
 }
 
 /// What one call needs written around it: the parameters it takes, what goes
-/// to the declaration, what has to be prepared first, and what comes back.
+/// to the declaration, what has to be prepared first, what has to happen
+/// between the call and the status check, and what comes back.
 #[derive(Default)]
 struct Handover {
     arguments: Vec<String>,
     passed: Vec<String>,
     prologue: String,
+    /// Keeping every listener the call is handed, written after everything
+    /// else the call needs, so that nothing which can throw sits between a
+    /// listener being kept and the call that lets it go again.
+    keeping: String,
+    /// Written in a `finally` around the call, with its status in `status`:
+    /// a listener handed over is tied to the handle the call made or let go
+    /// of, and a call that throws rather than answers leaves no status, so it
+    /// is let go of then too.
+    settled: String,
+    /// Written after the call with its status held in `status`, before that
+    /// status is turned into a throw: letting go of a listener whose handle
+    /// was destroyed happens whatever the call answered.
+    epilogue: String,
     results: Vec<(String, String)>,
     /// Every identifier the wrapper puts in its own scope, reported so the
     /// uniqueness pass reads what was written rather than deriving it again.
     names: Vec<Named>,
 }
 
-fn hand_over(parts: &[Role<'_>]) -> Result<Handover, Refused> {
+fn hand_over(
+    surface: &Surface,
+    function: &Function,
+    parts_of_call: &[Role<'_>],
+) -> Result<Handover, Refused> {
     let mut out = Handover::default();
     let Handover {
         arguments,
         passed,
         prologue,
+        keeping,
+        settled,
+        epilogue,
         results,
         names,
     } = &mut out;
-    for role in parts {
+    let mut kept = Vec::new();
+    for role in parts_of_call {
         match role {
             Role::Plain(read) => {
                 let held = held(read);
@@ -373,7 +1203,16 @@ fn hand_over(parts: &[Role<'_>]) -> Result<Handover, Refused> {
                 arguments.push(format!("{held}: {}", array_of(&data.ty)));
                 passed.push(held);
             }
-            Role::Config(read) | Role::Shared(read) => {
+            Role::Config(read) => {
+                let built = built_argument(surface, read)?;
+                arguments.push(built.argument);
+                passed.extend(built.passed);
+                prologue.push_str(&built.prologue);
+                keeping.push_str(&built.keeping);
+                names.extend(built.names);
+                kept.extend(built.kept);
+            }
+            Role::Shared(read) => {
                 let held = held(read);
                 names.push(Named::new("the wrapper", held.clone(), read.member.name));
                 arguments.push(format!("{held}: Long"));
@@ -398,7 +1237,137 @@ fn hand_over(parts: &[Role<'_>]) -> Result<Handover, Refused> {
             }
         }
     }
+
+    let (tied, released) = listeners_after(surface, function, parts_of_call, &kept)?;
+    settled.push_str(&tied);
+    epilogue.push_str(&released);
+    if !settled.is_empty() || !epilogue.is_empty() {
+        names.push(Named::new(
+            "the wrapper",
+            "status".to_owned(),
+            "the status the wrapper holds on to",
+        ));
+    }
     Ok(out)
+}
+
+/// What a struct going in adds to the wrapper around a call.
+struct BuiltArgument {
+    /// The class the wrapper takes.
+    argument: String,
+    /// One argument per field, in the order the declaration takes them.
+    passed: Vec<String>,
+    /// The locals a text field needs before the call.
+    prologue: String,
+    /// The local each listener's key is kept in, written last before the
+    /// call.
+    keeping: String,
+    names: Vec<Named>,
+    /// Every listener the class held: the object it is kept in, and the
+    /// local its key is in.
+    kept: Vec<(String, String)>,
+}
+
+fn built_argument(surface: &Surface, read: &Read<'_>) -> Result<BuiltArgument, Refused> {
+    let record = config_record(surface, read)?;
+    let whole = held(read);
+    let mut out = BuiltArgument {
+        argument: format!("{whole}: {}", record.name),
+        passed: Vec::new(),
+        prologue: String::new(),
+        keeping: String::new(),
+        names: vec![Named::new("the wrapper", whole.clone(), read.member.name)],
+        kept: Vec::new(),
+    };
+    let fields = read_all(record.name, record.fields)?;
+    for part in parts(surface, record, &fields, 1)? {
+        match part {
+            Part::Plain(field) => out.passed.push(format!("{whole}.{}", held(field))),
+            Part::Buffer { data, .. } if data.ty.base == Base::Char => {
+                let local = safe(&flat(read, data));
+                out.names.push(Named::new(
+                    "the wrapper",
+                    local.clone(),
+                    format!("{}::{}", record.name, data.member.name),
+                ));
+                let _ = writeln!(
+                    out.prologue,
+                    "        val {local} = {whole}.{}?.toByteArray(Charsets.UTF_8)",
+                    held(data)
+                );
+                out.passed.push(local);
+            }
+            Part::Buffer { data, .. } => out.passed.push(format!("{whole}.{}", held(data))),
+            Part::Listener {
+                callback, alias, ..
+            } => {
+                let keeper = Landing::of(surface, alias)?.keeper();
+                let local = safe(&flat(read, callback));
+                out.names.push(Named::new(
+                    "the wrapper",
+                    local.clone(),
+                    format!("{}::{}", record.name, callback.member.name),
+                ));
+                let _ = writeln!(
+                    out.keeping,
+                    "        val {local} = {keeper}.register({whole}.{})",
+                    listener_field(callback)
+                );
+                out.passed.push(local.clone());
+                out.kept.push((keeper, local));
+            }
+            Part::Arm(field) => return Err(not_built(record, field)),
+        }
+    }
+    Ok(out)
+}
+
+/// What a wrapper does with listeners once the call is over: ties each one it
+/// handed over to the handle the call made, or lets it go when there is none,
+/// and then lets go of every one the handle it destroys was made with. The
+/// first is written in a `finally`, the second after it.
+fn listeners_after(
+    surface: &Surface,
+    function: &Function,
+    parts_of_call: &[Role<'_>],
+    kept: &[(String, String)],
+) -> Result<(String, String), Refused> {
+    let mut tied = String::new();
+    let mut out = String::new();
+    if !kept.is_empty() {
+        // the handle a listener is tied to is the one value this call writes
+        // back, and destroyer() refuses a call that writes back more, or has
+        // nothing that undoes it
+        destroyer(surface, function)?;
+        let Some(slot) = parts_of_call.iter().find_map(|role| match role {
+            Role::Out(read) => Some(beside(&returned(read.member.name), "Slot")),
+            _ => None,
+        }) else {
+            return Err(Refused::about(&format!(
+                "{} takes a listener and writes back no handle to tie it to",
+                function.name
+            )));
+        };
+        for (keeper, local) in kept {
+            let _ = writeln!(
+                tied,
+                "            {keeper}.made({local}, status, {slot}[0])"
+            );
+        }
+    }
+    let released = released_by(surface, function)?;
+    if !released.is_empty() {
+        let Some(Role::Plain(handle)) = parts_of_call.first() else {
+            return Err(Refused::about(&format!(
+                "{} lets go of a listener and takes no handle to find it by",
+                function.name
+            )));
+        };
+        for keeper in released {
+            let _ = writeln!(out, "        {keeper}.gone({})", held(handle));
+        }
+    }
+    Ok((tied, out))
 }
 
 fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<String, Refused> {
@@ -412,9 +1381,12 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
         arguments,
         passed,
         prologue,
+        keeping,
+        settled,
+        epilogue,
         results,
         names: _,
-    } = hand_over(&roles(surface, read))?;
+    } = hand_over(surface, function, &roles(surface, read))?;
     let returns = match results.len() {
         0 => String::new(),
         1 => results
@@ -439,12 +1411,26 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
     };
     let _ = writeln!(out, "    fun {name}({}){returns} {{", arguments.join(", "));
     out.push_str(&prologue);
-    let _ = writeln!(
-        out,
-        "        check(SipralNative.{}({}))",
-        function.name,
-        passed.join(", ")
-    );
+    let call = format!("SipralNative.{}({})", function.name, passed.join(", "));
+    if !settled.is_empty() {
+        out.push_str(&keeping);
+        // -1 is no status the library answers with, so a call that threw
+        // reaches the finally as a call that failed
+        let _ = writeln!(
+            out,
+            "        var status = -1\n        try {{\n            status = {call}\n        }} finally {{"
+        );
+        out.push_str(&settled);
+        out.push_str("        }\n");
+        out.push_str(&epilogue);
+        out.push_str("        check(status)\n");
+    } else if epilogue.is_empty() {
+        let _ = writeln!(out, "        check({call})");
+    } else {
+        let _ = writeln!(out, "        val status = {call}");
+        out.push_str(&epilogue);
+        out.push_str("        check(status)\n");
+    }
     match results.len() {
         0 => {}
         1 => {
@@ -500,11 +1486,10 @@ fn enumerations(surface: &Surface) -> String {
 fn natives(surface: &Surface) -> Result<String, Refused> {
     let mut out = String::new();
     for (function, read) in functions(surface)? {
-        let parts = roles(surface, &read);
-        let arguments: Vec<String> = parts
-            .iter()
-            .flat_map(|role| crossing(role).kotlin)
-            .collect();
+        let mut arguments = Vec::new();
+        for role in roles(surface, &read) {
+            arguments.extend(crossing(surface, &role)?.kotlin);
+        }
         let _ = writeln!(
             out,
             "    external fun {}({}): {}",
@@ -514,6 +1499,30 @@ fn natives(surface: &Surface) -> Result<String, Refused> {
         );
     }
     Ok(out)
+}
+
+/// The entry point a binding asks at load whether the library speaks its
+/// ABI, when the surface has one: two plain numbers, the major and the minor.
+fn abi_check(surface: &Surface) -> Result<Option<&'static Function>, Refused> {
+    let Some(function) = surface
+        .functions
+        .iter()
+        .find(|function| function.name == "sipral_abi_check")
+    else {
+        return Ok(None);
+    };
+    let read = read_all(function.name, function.parameters)?;
+    let plain = read.iter().all(|parameter| {
+        parameter.ty.pointer.is_none() && matches!(parameter.ty.base, Base::Int(_))
+    });
+    if read.len() != 2 || !plain {
+        return Err(Refused::about(
+            "sipral_abi_check does not take a major and a minor, which is what the Kotlin \
+             binding asks it with at load; give the new shape a call in \
+             tools/abi-gen/src/kotlin.rs",
+        ));
+    }
+    Ok(Some(function))
 }
 
 /// Print the Kotlin binding.
@@ -532,6 +1541,8 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(&enumerations(surface));
     out.push_str(&data_classes(surface)?);
+    out.push_str(&built_classes(surface)?);
+    out.push_str(&listeners(surface)?);
 
     out.push_str(
         "/**\n\
@@ -545,16 +1556,39 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(
         "/**\n\
-         \x20* The ABI as JNI declares it. Every integer crosses as a Long and\n\
-         \x20* every struct the library fills in comes back in a LongArray, so\n\
-         \x20* nothing here depends on a field offset that the two Android\n\
-         \x20* pointer widths would disagree about.\n\
+         \x20* The ABI as JNI declares it. Every integer crosses as a Long, every\n\
+         \x20* struct the library fills in comes back in a LongArray, and every\n\
+         \x20* struct a caller builds crosses one field at a time, so nothing here\n\
+         \x20* depends on a field offset that the two Android pointer widths would\n\
+         \x20* disagree about.\n\
          \x20*/\n\
          internal object SipralNative {\n\
          \x20   init {\n\
-         \x20       System.loadLibrary(\"sipral_jni\")\n\
-         \x20   }\n\n",
+         \x20       System.loadLibrary(\"sipral_jni\")\n",
     );
+    let checked = abi_check(surface)?;
+    if checked.is_some() {
+        let (major, minor, _) = surface.version;
+        let _ = writeln!(out, "        agree({major}, {minor})");
+    }
+    out.push_str("    }\n\n");
+    if checked.is_some() {
+        out.push_str(
+            "    /**\n\
+             \x20    * Throw unless the library that loaded serves a binding printed\n\
+             \x20    * against major.minor. Called once, as this object is initialised,\n\
+             \x20    * with the version this file was printed from, so a package whose\n\
+             \x20    * native library came from another build fails here with both\n\
+             \x20    * versions named rather than in whichever call first disagrees.\n\
+             \x20    */\n\
+             \x20   fun agree(major: Long, minor: Long) {\n\
+             \x20       val status = sipral_abi_check(major, minor)\n\
+             \x20       if (status != SipralStatus.OK.value) {\n\
+             \x20           throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())\n\
+             \x20       }\n\
+             \x20   }\n\n",
+        );
+    }
     out.push_str(&natives(surface)?);
     out.push_str("}\n\n");
 
@@ -611,6 +1645,8 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     Ok(out)
 }
 
+// ------------------------------------------------------------ the shim
+
 /// What the C around one call has to say: the arguments it passes, the
 /// arrays it fetches and gives back, and the values it writes into the
 /// caller's `long[]`.
@@ -627,19 +1663,16 @@ struct Around {
 }
 
 impl Around {
-    /// One array parameter: fetched on the way in, released on the way out,
-    /// and passed as a pointer and a length like every other buffer.
-    fn array(&mut self, data: &Read<'_>) {
-        let name = c_held(data);
+    /// One array argument, fetched on the way in and released on the way
+    /// out; what comes back is the pointer and the length, for the caller to
+    /// put wherever the declaration wants them.
+    fn fetch(&mut self, name: &str, ty: &Type, from: &str) -> (String, String) {
         for suffix in ["_data", "_size"] {
-            self.names.push(Named::new(
-                "the shim",
-                format!("{name}{suffix}"),
-                data.member.name,
-            ));
+            self.names
+                .push(Named::new("the shim", format!("{name}{suffix}"), from));
         }
-        let (element, kind) = jni_element_of(&data.ty);
-        let writable = data.ty.pointer == Some(Writable::Yes);
+        let (element, kind) = jni_element_of(ty);
+        let writable = ty.pointer == Some(Writable::Yes);
         let _ = writeln!(
             self.fetches,
             "    {element} *{name}_data = {name} ? (*env)->Get{kind}ArrayElements(env, \
@@ -655,9 +1688,16 @@ impl Around {
             "    if ({name}) {{\n        (*env)->Release{kind}ArrayElements(env, \
              {name}, {name}_data, {mode});\n    }}"
         );
+        (format!("{name}_data"), format!("{name}_size"))
+    }
+
+    /// One array parameter, passed as a pointer and a length like every
+    /// other buffer.
+    fn array(&mut self, data: &Read<'_>) {
+        let (pointer, size) = self.fetch(&c_held(data), &data.ty, data.member.name);
         self.passed
-            .push(format!("({}){name}_data", c::spell(&data.ty)));
-        self.passed.push(format!("(size_t){name}_size"));
+            .push(format!("({}){pointer}", c::spell(&data.ty)));
+        self.passed.push(format!("(size_t){size}"));
     }
 
     /// One value written back, which crosses in a `long[]` of one.
@@ -717,18 +1757,83 @@ impl Around {
         self.writes.push_str(&slots(&name, record_name, record)?);
         Ok(())
     }
+
+    /// One struct a caller built in Kotlin: zeroed, sized by this shim's own
+    /// header, and filled in a member at a time from the arguments the class
+    /// crossed as.
+    fn built(&mut self, surface: &Surface, read: &Read<'_>) -> Result<(), Refused> {
+        let record = config_record(surface, read)?;
+        let value = format!("{}_value", c_held(read));
+        self.names
+            .push(Named::new("the shim", value.clone(), read.member.name));
+        let _ = writeln!(self.fetches, "    {} {value};", c::named(record.name));
+        let _ = writeln!(self.fetches, "    memset(&{value}, 0, sizeof {value});");
+        let _ = writeln!(self.fetches, "    {value}.size = sizeof {value};");
+        let fields = read_all(record.name, record.fields)?;
+        for part in parts(surface, record, &fields, 1)? {
+            match part {
+                Part::Plain(field) => {
+                    let _ = writeln!(
+                        self.fetches,
+                        "    {value}.{} = ({}){};",
+                        field.member.name,
+                        c::spell(&field.ty),
+                        flat(read, field)
+                    );
+                }
+                Part::Buffer { data, len } => {
+                    let from = format!("{}::{}", record.name, data.member.name);
+                    let (pointer, size) = self.fetch(&flat(read, data), &data.ty, &from);
+                    let _ = writeln!(
+                        self.fetches,
+                        "    {value}.{} = ({}){pointer};",
+                        data.member.name,
+                        c::spell(&data.ty)
+                    );
+                    let _ = writeln!(
+                        self.fetches,
+                        "    {value}.{} = (size_t){size};",
+                        len.member.name
+                    );
+                }
+                Part::Listener {
+                    callback,
+                    user_data,
+                    alias,
+                } => {
+                    let landing = Landing::of(surface, alias)?;
+                    let key = flat(read, callback);
+                    let _ = writeln!(
+                        self.fetches,
+                        "    {value}.{} = {key} != 0 ? {} : NULL;",
+                        callback.member.name,
+                        landing.function()
+                    );
+                    let _ = writeln!(
+                        self.fetches,
+                        "    {value}.{} = (void *)(intptr_t){key};",
+                        user_data.member.name
+                    );
+                }
+                Part::Arm(field) => return Err(not_built(record, field)),
+            }
+        }
+        self.passed.push(format!("&{value}"));
+        Ok(())
+    }
 }
 
-fn around(surface: &Surface, parts: &[Role<'_>]) -> Result<Around, Refused> {
+fn around(surface: &Surface, parts_of_call: &[Role<'_>]) -> Result<Around, Refused> {
     let mut out = Around::default();
-    for role in parts {
+    for role in parts_of_call {
         match role {
             Role::Plain(read) => {
                 out.passed
                     .push(format!("({}){}", c::spell(&read.ty), c_held(read)));
             }
             Role::Buffer { data, .. } | Role::Fill { data, .. } => out.array(data),
-            Role::Config(read) | Role::Shared(read) => {
+            Role::Config(read) => out.built(surface, read)?,
+            Role::Shared(read) => {
                 out.passed.push(format!(
                     "({})(intptr_t){}",
                     c::spell(&read.ty),
@@ -781,8 +1886,11 @@ fn implementation(
     read: &[Read<'_>],
 ) -> Result<String, Refused> {
     let mut out = String::new();
-    let parts = roles(surface, read);
-    let arguments: Vec<String> = parts.iter().flat_map(|role| crossing(role).jni).collect();
+    let parts_of_call = roles(surface, read);
+    let mut arguments = Vec::new();
+    for role in &parts_of_call {
+        arguments.extend(crossing(surface, role)?.jni);
+    }
     let returns = Type::read(function.returns)?;
     let answers_text = returns.pointer.is_some() && returns.base == Base::Char;
     let head = if answers_text { "jstring" } else { "jint" };
@@ -802,7 +1910,7 @@ fn implementation(
         releases,
         writes,
         names: _,
-    } = around(surface, &parts)?;
+    } = around(surface, &parts_of_call)?;
     out.push_str(&fetches);
     if answers_text {
         let _ = writeln!(
@@ -827,6 +1935,173 @@ fn implementation(
     Ok(out)
 }
 
+/// The hooks the JVM calls as it loads and unloads the shim, which is where
+/// every class and method a callback hands events to is looked up.
+fn load_hooks(surface: &Surface, landings: &[Landing]) -> Result<String, Refused> {
+    let mut out = String::new();
+    out.push_str(
+        "/* The JVM this library was loaded into, and for each callback the class and\n\
+         \x20* method its events are handed to. They are looked up as the library loads,\n\
+         \x20* on the thread that loaded it, because a thread attached later looks a\n\
+         \x20* class up through the system class loader, which on Android cannot see\n\
+         \x20* the application's. */\n\
+         static JavaVM *jni_vm;\n",
+    );
+    for landing in landings {
+        let _ = writeln!(out, "static jclass {};", landing.class());
+        let _ = writeln!(out, "static jmethodID {};", landing.deliver());
+    }
+    out.push_str(
+        "\n/* Whether the struct a callback was handed reaches as far as one of its\n\
+         \x20* members: the library fills in no more of it than its size member says. */\n\
+         #define JNI_REACHES(pointer, type, member) \\\n\
+         \x20   ((pointer)->size >= offsetof(type, member) + sizeof (pointer)->member)\n\n\
+         JNIEXPORT jint JNICALL\n\
+         JNI_OnLoad(JavaVM *vm, void *reserved)\n\
+         {\n\
+         \x20   JNIEnv *env = NULL;\n\n\
+         \x20   (void)reserved;\n\
+         \x20   if ((*vm)->GetEnv(vm, (void *)&env, JNI_VERSION_1_6) != JNI_OK) {\n\
+         \x20       return JNI_ERR;\n\
+         \x20   }\n",
+    );
+    for landing in landings {
+        let fields = read_all(landing.record.name, landing.record.fields)?;
+        let (handed_over, _) = handed(surface, landing, &fields)?;
+        let members = deliver_descriptor(&handed_over);
+        let _ = writeln!(
+            out,
+            "    {{\n\
+             \x20       jclass found = (*env)->FindClass(env, \"org/sipral/{keeper}\");\n\
+             \x20       if (found == NULL) {{\n\
+             \x20           return JNI_ERR;\n\
+             \x20       }}\n\
+             \x20       {class} = (jclass)(*env)->NewGlobalRef(env, found);\n\
+             \x20       (*env)->DeleteLocalRef(env, found);\n\
+             \x20       if ({class} == NULL) {{\n\
+             \x20           return JNI_ERR;\n\
+             \x20       }}\n\
+             \x20       {deliver} = (*env)->GetStaticMethodID(env, {class}, \"deliver\", \"{members}\");\n\
+             \x20       if ({deliver} == NULL) {{\n\
+             \x20           return JNI_ERR;\n\
+             \x20       }}\n\
+             \x20   }}",
+            keeper = landing.keeper(),
+            class = landing.class(),
+            deliver = landing.deliver(),
+        );
+    }
+    out.push_str(
+        "    jni_vm = vm;\n\
+         \x20   return JNI_VERSION_1_6;\n\
+         }\n\n\
+         JNIEXPORT void JNICALL\n\
+         JNI_OnUnload(JavaVM *vm, void *reserved)\n\
+         {\n\
+         \x20   JNIEnv *env = NULL;\n\n\
+         \x20   (void)reserved;\n\
+         \x20   jni_vm = NULL;\n\
+         \x20   if ((*vm)->GetEnv(vm, (void *)&env, JNI_VERSION_1_6) != JNI_OK) {\n\
+         \x20       return;\n\
+         \x20   }\n",
+    );
+    for landing in landings {
+        let _ = writeln!(
+            out,
+            "    if ({class} != NULL) {{\n\
+             \x20       (*env)->DeleteGlobalRef(env, {class});\n\
+             \x20       {class} = NULL;\n\
+             \x20   }}",
+            class = landing.class()
+        );
+    }
+    out.push_str("}\n\n");
+    Ok(out)
+}
+
+/// The C function one callback lands in.
+fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refused> {
+    let record = landing.record;
+    let fields = read_all(record.name, record.fields)?;
+    let (members, _) = handed(surface, landing, &fields)?;
+    let event = landing.event.name;
+    let user_data = landing.user_data.name;
+    let pointed = c::spell(&Type::read(landing.event.rust_type)?);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/* Where a {callback} lands. The event is handed to\n\
+         \x20* {keeper}.deliver under the key its user pointer carries, on a\n\
+         \x20* thread attached to the JVM for the length of the call when it was not\n\
+         \x20* attached already, and every local reference made here is deleted\n\
+         \x20* before it returns: a poll delivers all its events inside one native\n\
+         \x20* call, and nothing made here would be released until that call ended. */",
+        callback = c::named(landing.alias.name),
+        keeper = landing.keeper()
+    );
+    let _ = writeln!(
+        out,
+        "static void\n{}({pointed}{event}, void *{user_data})\n{{",
+        landing.function()
+    );
+    out.push_str(
+        "    JNIEnv *env = NULL;\n    int attached = 0;\n    int built = 1;\n    jint found;\n",
+    );
+    for member in &members {
+        if let Some((name, ty)) = &member.c_local {
+            let _ = writeln!(out, "    {ty} {name} = NULL;");
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n    if (jni_vm == NULL || {event} == NULL) {{\n        return;\n    }}"
+    );
+    out.push_str(
+        "    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);\n\
+         \x20   if (found == JNI_EDETACHED) {\n\
+         \x20       if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {\n\
+         \x20           return;\n\
+         \x20       }\n\
+         \x20       attached = 1;\n\
+         \x20   } else if (found != JNI_OK) {\n\
+         \x20       return;\n\
+         \x20   }\n",
+    );
+    for member in &members {
+        out.push_str(&member.c_make);
+    }
+    let mut passed = vec![format!("(jlong)(intptr_t){user_data}")];
+    passed.extend(members.iter().map(|member| member.c_passed.clone()));
+    let _ = writeln!(
+        out,
+        "    if (built) {{\n        (*env)->CallStaticVoidMethod(env, {}, {}, {});\n    }}",
+        landing.class(),
+        landing.deliver(),
+        passed.join(", ")
+    );
+    out.push_str(
+        "    /* deliver hands what a listener throws to the thread's own handler, so\n\
+         \x20    * what is pending here is the JVM's -- an array it could not make --\n\
+         \x20    * and a callback has no Java frame beneath it to throw into */\n\
+         \x20   if ((*env)->ExceptionCheck(env)) {\n\
+         \x20       (*env)->ExceptionDescribe(env);\n\
+         \x20       (*env)->ExceptionClear(env);\n\
+         \x20   }\n",
+    );
+    for member in &members {
+        if let Some((name, _)) = &member.c_local {
+            let _ = writeln!(
+                out,
+                "    if ({name} != NULL) {{\n        (*env)->DeleteLocalRef(env, {name});\n    }}"
+            );
+        }
+    }
+    out.push_str(
+        "    if (attached) {\n        (*jni_vm)->DetachCurrentThread(jni_vm);\n    }\n}\n\n",
+    );
+    Ok(out)
+}
+
 /// Print the C that implements the declarations above.
 pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
     audit(surface, &Names)?;
@@ -839,13 +2114,20 @@ pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
          \x20* Do not edit: `cargo run -p sipral-abi-gen` writes it again, and\n\
          \x20* `scripts/check.sh` fails when what is committed is not what came out.\n\
          \x20*\n\
-         \x20* One function per entry point, and nothing else: the casts are the\n\
-         \x20* whole of what it does, so that the two halves of the Kotlin binding\n\
-         \x20* cannot drift apart without the generator saying so.\n\
+         \x20* One function per entry point, one function per callback for it to land\n\
+         \x20* in, and the load hook that finds what those hand events to. All of it\n\
+         \x20* is printed from the same walk as the Kotlin beside it, so that the two\n\
+         \x20* halves of the binding cannot drift apart without the generator saying so.\n\
          \x20*/\n\n\
-         #include <jni.h>\n#include <string.h>\n\n#include \"sipral.h\"\n\n",
+         #include <jni.h>\n#include <stddef.h>\n#include <string.h>\n\n#include \"sipral.h\"\n\n",
     );
-
+    let landings = landings(surface)?;
+    if !landings.is_empty() {
+        out.push_str(&load_hooks(surface, &landings)?);
+        for landing in &landings {
+            out.push_str(&landing_function(surface, landing)?);
+        }
+    }
     for (function, read) in functions(surface)? {
         out.push_str(&implementation(surface, function, &read)?);
     }
@@ -899,8 +2181,10 @@ impl Spelling for Names {
     }
 
     fn members(&self, record: &Record) -> Result<Vec<(String, String)>, Refused> {
-        // only the records that come back a member at a time are printed;
-        // the rest cross as an address and have no Kotlin shape at all
+        // only the records that come back a member at a time are printed
+        // member for member; a struct going in and a struct a listener is
+        // handed are classes whose fields depend on how the surface uses
+        // them, and `own` answers for those
         if !is_given(record) {
             return Ok(Vec::new());
         }
@@ -935,16 +2219,25 @@ impl Spelling for Names {
         ]
     }
 
-    /// Nothing. This binding never prints the callback: the settings struct
-    /// crosses JNI as an address, so the function pointer inside it is never
-    /// spelled on the Kotlin side, and the shim includes `sipral.h` rather
-    /// than declaring a typedef of its own. The only spelling of these
-    /// parameters anywhere this back end writes is the header's, and
-    /// [`crate::c::Names`] reads that one. The day a Kotlin-side callback is
-    /// printed, it is named here.
+    /// The C function a callback lands in, which names its two parameters as
+    /// the declaration spelled them -- in C, where there is no escape -- and
+    /// the listener's one method, which names the first the Kotlin way.
     fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
-        let _ = (alias, read);
-        Vec::new()
+        let _ = alias;
+        let mut out: Vec<Named> = read
+            .iter()
+            .map(|parameter| {
+                Named::new(
+                    "the shim",
+                    parameter.member.name.to_owned(),
+                    parameter.member.name,
+                )
+            })
+            .collect();
+        if let Some(first) = read.first() {
+            out.push(Named::new("the listener", held(first), first.member.name));
+        }
+        out
     }
 
     fn inside(
@@ -952,11 +2245,11 @@ impl Spelling for Names {
         surface: &Surface,
         function: &Function,
         read: &[Read<'_>],
-        parts: &[Role<'_>],
+        parts_of_call: &[Role<'_>],
     ) -> Result<Vec<Named>, Refused> {
         let mut out = Vec::new();
-        for role in parts {
-            let crossing = crossing(role);
+        for role in parts_of_call {
+            let crossing = crossing(surface, role)?;
             out.extend(
                 crossing
                     .names
@@ -994,8 +2287,112 @@ impl Spelling for Names {
             "status".to_owned(),
             "the status the shim holds on to",
         ));
-        out.extend(around(surface, parts)?.names);
-        out.extend(hand_over(parts)?.names);
+        out.extend(around(surface, parts_of_call)?.names);
+        out.extend(hand_over(surface, function, parts_of_call)?.names);
+        Ok(out)
+    }
+
+    /// The classes a struct going in and a struct a listener is handed are
+    /// printed as, the listener and the object listeners are kept in, the
+    /// landing function and the names the shim declares once for the whole
+    /// file, and the load-time check.
+    fn own(&self, surface: &Surface) -> Result<Vec<(String, Named)>, Refused> {
+        let top = "the top of the file";
+        let file = "sipral_jni.c";
+        let mut out = Vec::new();
+        for record in built(surface)? {
+            out.push((
+                top.to_owned(),
+                Named::new("", record.name.to_owned(), record.name),
+            ));
+            let class = format!("{}, the class", record.name);
+            let fields = read_all(record.name, record.fields)?;
+            for part in parts(surface, record, &fields, 1)? {
+                let (emitted, from) = match part {
+                    Part::Plain(field) => (held(field), field.member.name),
+                    Part::Buffer { data, .. } => (held(data), data.member.name),
+                    Part::Listener { callback, .. } => {
+                        (listener_field(callback), callback.member.name)
+                    }
+                    Part::Arm(field) => return Err(not_built(record, field)),
+                };
+                out.push((
+                    class.clone(),
+                    Named::new("the class", emitted, format!("{}::{from}", record.name)),
+                ));
+            }
+        }
+        let landings = landings(surface)?;
+        for landing in &landings {
+            let record = landing.record;
+            let alias = landing.alias.name;
+            out.push((
+                top.to_owned(),
+                Named::new("", record.name.to_owned(), record.name),
+            ));
+            for emitted in [landing.listener(), landing.keeper()] {
+                out.push((top.to_owned(), Named::new("", emitted, alias)));
+            }
+            out.push((
+                landing.listener(),
+                Named::new("the listener", landing.method(), alias),
+            ));
+            let class = format!("{}, the class", record.name);
+            let deliver = format!("{}.deliver", landing.keeper());
+            let landed = format!("{alias}, the shim");
+            for (name, what) in DELIVER_LOCALS {
+                out.push((
+                    deliver.clone(),
+                    Named::new("the wrapper", (*name).to_owned(), *what),
+                ));
+            }
+            for (name, what) in LANDING_LOCALS {
+                out.push((
+                    landed.clone(),
+                    Named::new("the shim", (*name).to_owned(), *what),
+                ));
+            }
+            let fields = read_all(record.name, record.fields)?;
+            let (members, _) = handed(surface, landing, &fields)?;
+            for member in &members {
+                let from = format!("{}::{}", record.name, member.from);
+                out.push((
+                    class.clone(),
+                    Named::new("the class", member.kotlin.clone(), from.clone()),
+                ));
+                out.push((
+                    deliver.clone(),
+                    Named::new("the wrapper", member.kotlin.clone(), from.clone()),
+                ));
+                if let Some((local, _)) = &member.c_local {
+                    out.push((
+                        landed.clone(),
+                        Named::new("the shim", (*local).to_owned(), from),
+                    ));
+                }
+            }
+            for emitted in [landing.function(), landing.class(), landing.deliver()] {
+                out.push((file.to_owned(), Named::new("the shim", emitted, alias)));
+            }
+        }
+        if !landings.is_empty() {
+            for (name, what) in SHIM_FILE {
+                out.push((
+                    file.to_owned(),
+                    Named::new("the shim", (*name).to_owned(), *what),
+                ));
+            }
+        }
+        if abi_check(surface)?.is_some() {
+            out.push((
+                "SipralNative".to_owned(),
+                Named::new(
+                    "the declaration",
+                    "agree".to_owned(),
+                    "the check this back end makes at load",
+                ),
+            ));
+        }
         Ok(out)
     }
 }

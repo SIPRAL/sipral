@@ -88,6 +88,11 @@ pub(crate) struct BufferList {
     pub(crate) buffers: [Buffer; 1],
 }
 
+/// Where the buffers begin inside an `AudioBufferList`: after the count and
+/// the padding the pointer alignment forces. Buffer `n` of a longer list is
+/// `n` buffers further on.
+pub(crate) const BUFFERS_AT: usize = core::mem::offset_of!(BufferList, buffers);
+
 /// `SMPTETime`, from `CoreAudioTypes/CoreAudioBaseTypes.h`. Nothing here reads
 /// it; it is declared because it sits in the middle of [`TimeStamp`] and its
 /// twenty-four bytes decide where the fields after it begin.

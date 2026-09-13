@@ -76,6 +76,126 @@ data class SipralCounters(
 }
 
 /**
+ * What a stack is made with.
+ *
+ * Holds buffers of the caller's and the library only reads it, so it
+ * crosses behind a `const` pointer as a struct going in.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralStackConfig(
+    /**
+     * Called for every event, from inside the poll.
+     */
+    val eventListener: SipralEventListener? = null,
+    /**
+     * Where to listen, as UTF-8.
+     */
+    val bindAddress: String? = null,
+    val echo: Long = 0,
+)
+
+/**
+ * One thing that happened, as the callback is handed it.
+ *
+ * `payload` is not carried here. Which of its arms the library wrote is named
+ * by another member, and nothing in the declarations says which value names
+ * which arm, so this binding does not guess.
+ */
+class SipralEvent(
+    val size: Long,
+    /**
+     * Which stack it came from.
+     */
+    val stack: Long,
+    /**
+     * Which of them, from SipralStatus.
+     */
+    val kind: Long,
+    /**
+     * The message behind it, or null. It is the library's, and
+     * it lives as long as SipralStatus.OK is being reported
+     * -- see sipral_stack_create for who owns what.
+     */
+    val message: ByteArray?,
+)
+
+/**
+ * What the library calls when something happens.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralEventListener {
+    fun onEvent(event: SipralEvent)
+}
+
+/**
+ * Every SipralEventListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralEventListeners {
+    private val listening = HashMap<Long, SipralEventListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralEventListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /** Tie a kept listener to the handle the call made, or let it go when the call failed. */
+    fun made(key: Long, status: Int, handle: Long) {
+        if (key == 0L) {
+            return
+        }
+        synchronized(this) {
+            if (status == SipralStatus.OK.value) {
+                handles[handle] = key
+            } else {
+                listening.remove(key)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was made with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onEvent(SipralEvent(size, stack, kind, message))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -84,20 +204,36 @@ class SipralException(val status: SipralStatus?, message: String) :
     RuntimeException(if (message.isEmpty()) status.toString() else "$status: $message")
 
 /**
- * The ABI as JNI declares it. Every integer crosses as a Long and
- * every struct the library fills in comes back in a LongArray, so
- * nothing here depends on a field offset that the two Android
- * pointer widths would disagree about.
+ * The ABI as JNI declares it. Every integer crosses as a Long, every
+ * struct the library fills in comes back in a LongArray, and every
+ * struct a caller builds crosses one field at a time, so nothing here
+ * depends on a field offset that the two Android pointer widths would
+ * disagree about.
  */
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
+        agree(0, 8)
+    }
+
+    /**
+     * Throw unless the library that loaded serves a binding printed
+     * against major.minor. Called once, as this object is initialised,
+     * with the version this file was printed from, so a package whose
+     * native library came from another build fails here with both
+     * versions named rather than in whichever call first disagrees.
+     */
+    fun agree(major: Long, minor: Long) {
+        val status = sipral_abi_check(major, minor)
+        if (status != SipralStatus.OK.value) {
+            throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+        }
     }
 
     external fun sipral_abi_check(major: Long, minor: Long): Int
     external fun sipral_last_error_message(buffer: ByteArray, needed: LongArray): Int
     external fun sipral_status_name(code: Long): String?
-    external fun sipral_stack_create(config: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configBindAddress: ByteArray?, configEcho: Long, stack: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
     external fun sipral_stack_send(stack: Long, message: ByteArray): Int
     external fun sipral_stack_describe(stack: Long, note: ByteArray): Int
@@ -179,9 +315,17 @@ object Sipral {
     /**
      * Make one.
      */
-    fun stackCreate(config: Long): Long {
+    fun stackCreate(config: SipralStackConfig): Long {
+        val configBindAddress = config.bindAddress?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
-        check(SipralNative.sipral_stack_create(config, stackSlot))
+        val configEventCallback = SipralEventListeners.register(config.eventListener)
+        var status = -1
+        try {
+            status = SipralNative.sipral_stack_create(configEventCallback, configBindAddress, config.echo, stackSlot)
+        } finally {
+            SipralEventListeners.made(configEventCallback, status, stackSlot[0])
+        }
+        check(status)
         return stackSlot[0]
     }
 
@@ -257,7 +401,9 @@ object Sipral {
      * Take it apart.
      */
     fun stackDestroy(stack: Long) {
-        check(SipralNative.sipral_stack_destroy(stack))
+        val status = SipralNative.sipral_stack_destroy(stack)
+        SipralEventListeners.gone(stack)
+        check(status)
     }
 
 }

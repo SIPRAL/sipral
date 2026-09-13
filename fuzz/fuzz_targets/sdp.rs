@@ -16,7 +16,49 @@
 
 use libfuzzer_sys::fuzz_target;
 use sipral_core::sdp::{
-    AcceptedStream, Connection, Origin, SessionDescription, StreamAnswer, parse,
+    AcceptedStream, Connection, Limits, Origin, SessionDescription, StreamAnswer, parse,
+    parse_with_limits,
+};
+
+/// `to_bytes` always closes a line with CRLF, the ending RFC 4566 itself
+/// writes; `parse` tolerates a bare LF too, per its own doc comment, which is
+/// what a body close to the size limit and built with one grows by once it
+/// gets its `\r` back: one octet per line, and two on a last line that had no
+/// ending at all. A line is at least two bytes, so that growth cannot exceed
+/// the input's own length plus one -- and `parse(data)` below already bounds
+/// that length to `Limits::DEFAULT.max_body_bytes`. So a body that
+/// was at most the default limit going in is at most double that plus one
+/// coming back out, and re-parsing under that relaxed body limit -- every
+/// other bound left at the default -- is what makes the assertion below test
+/// the real property: that writing a description does not change what it
+/// means, not that its canonical form stays inside the size a wire policy
+/// puts on bytes a stranger sent.
+const ROUND_TRIP_LIMITS: Limits = Limits {
+    max_body_bytes: Limits::DEFAULT.max_body_bytes * 2 + 1,
+    ..Limits::DEFAULT
+};
+
+/// The answer is read back under bounds of its own, for the same reason and
+/// because it is not the offer written again. Every line of it is one of
+/// three things. One of the four it opens with -- `v=`, `o=`, `s=`, `c=` --
+/// 56 octets as this target has them written. A direction line, 12 octets,
+/// one per stream, so at most `Limits::DEFAULT.max_media` of them. Or a line
+/// of the offer written again, each at most once: the `t=` and `r=` lines
+/// (RFC 3264 §6), and for each stream its `m=` line and the `rtpmap` and
+/// `fmtp` of the one format it keeps. None of those comes out longer than it
+/// went in, except an `m=` line, whose port is written as 5000 where the
+/// offer's may have been one digit: four octets more at most, for any port a
+/// `u16` holds, which is the line bound below. With its CRLF, a line of the
+/// offer of at least two bytes comes back at most double its length, and so
+/// does an `m=` line with its four extra octets, since one is at least seven.
+/// So the answer is at most twice the offer plus the 56 + 12 x 16 = 248
+/// octets it writes of its own, which is under three times the default body
+/// limit. The counts need no room: as many streams as the offer, and at most
+/// one format and three attributes in each.
+const ANSWER_LIMITS: Limits = Limits {
+    max_body_bytes: Limits::DEFAULT.max_body_bytes * 3,
+    max_line_bytes: Limits::DEFAULT.max_line_bytes + 4,
+    ..Limits::DEFAULT
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -26,7 +68,8 @@ fuzz_target!(|data: &[u8]| {
     walk(&offer);
 
     let written = offer.to_bytes();
-    let again = parse(&written).expect("what was written out has to read back in");
+    let again = parse_with_limits(&written, ROUND_TRIP_LIMITS)
+        .expect("what was written out has to read back in");
     assert_eq!(offer, again, "writing a description changed it");
     assert_eq!(written, again.to_bytes());
 
@@ -49,7 +92,7 @@ fuzz_target!(|data: &[u8]| {
         walk(&answer);
         let written = answer.to_bytes();
         assert_eq!(
-            parse(&written).expect("an answer has to read back in"),
+            parse_with_limits(&written, ANSWER_LIMITS).expect("an answer has to read back in"),
             answer
         );
     }

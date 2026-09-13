@@ -1,6 +1,6 @@
 [package]
 name = "sipral-nat"
-description = "STUN client, TURN client and ICE-lite."
+description = "STUN client, TURN client and ICE."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

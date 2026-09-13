@@ -119,7 +119,12 @@ point 5, A.7), and reverse reconsideration — pulling the next deadline
 forward — when a member's BYE arrives (§6.3.4, `IntervalTimer::remove_member`).
 The random draw itself is `Draws::unit` in `sipral::session`: a seeded
 SplitMix64 generator, deliberately not a source of secrecy, since a
-predictable report time leaks nothing but when the next report goes.
+predictable report time leaks nothing but when the next report goes. That
+includes the very first report: `MediaSession::open` draws from it before
+`RtpSession::new`/`RtpSession::protected` are ever called, rather than
+handing the constructor a fixed number, so the first interval is randomised
+exactly like every later one and two calls opened from the same catalogue do
+not schedule their first report at the same point in it.
 The one number that scaling starts from is fixed: `RTCP_BANDWIDTH` in
 `sipral::session`, five hundred octets per second — five percent of a
 two-party narrowband call's roughly ten-kilo-octet-a-second wire rate, which
@@ -140,11 +145,20 @@ inside, the block naming this session's own SSRC gives the round-trip time
 SR from the remote source is separately remembered
 (`ReceptionTracker::on_sender_report`) so this session's own next report can
 carry that source's LSR and DLSR. A BYE naming the remote SSRC drops it from
-the interval timer's membership and sender counts (§6.3.4) and is reported to
-the caller as `Arrival::Goodbye` from `MediaSession::receive_control` (or from
-`MediaSession::receive`, which hands it RTCP on a muxed socket) — audio is
-assumed to stop, but the call itself ends only when signalling says so, which
-is `sipral-ua`'s decision, not this crate's. An incoming SDES is parsed
+the interval timer's membership and sender counts once (§6.3.4) and is
+reported to the caller as `Arrival::Goodbye` from `MediaSession::receive_control`
+(or from `MediaSession::receive`, which hands it RTCP on a muxed socket) —
+audio is assumed to stop, but the call itself ends only when signalling says
+so, which is `sipral-ua`'s decision, not this crate's. "Once" is load-bearing:
+`Inbound::departed` marks the source as gone (§6.2.1's "the entry SHOULD be
+marked as having received a BYE") so a repeated BYE for it — a retransmission,
+or a duplicate the network made — is still reported but no longer removes
+anything: not a second member, and not a second sender, which on a call this
+end is sending on would be this end's own entry. Underneath that,
+`IntervalTimer::remove_member` never counts below one, the local participant
+itself (§6.3.2): `send_bye` resets the count to exactly that one (§6.3.7), so
+a far end's BYE crossing ours on the wire has nobody left to remove and moves
+nothing. An incoming SDES is parsed
 (`rtcp::SourceDescription`) but nothing here reads its content; only its
 presence is required, to keep the compound packet the shape §6.1 demands.
 
@@ -749,17 +763,28 @@ CoreAudio has no such property at all: the figure is the device's own latency,
 its safety offset, the frames in its IO buffer, and the latency of the stream
 on that side — four properties, asked per direction, with the header explicit
 that the device's and the stream's are summed rather than one standing for the
-other. `sipral_io_coreaudio::Stream::latency` does that arithmetic for both
-directions of the device the unit landed on, and `RenderDelay` keeps the parts,
-so that a device which answered for three of them can be told from one that
+other. `sipral_io_coreaudio::Stream::latency` does that arithmetic for the two
+device objects the unit reports it is on — the speaker's output side at the
+speaker's rate, and the microphone's input side at the microphone's, because on
+a Mac those are usually two objects — and `RenderDelay` keeps the parts, so
+that a device which answered for three of them can be told from one that
 answered for four. A device that answers for none gives zero, which is what a
 session that was never told a delay already assumes.
 
-Measured on a MacBook Air, its own speakers and microphone come to a hundred
-milliseconds of that, most of it the two streams' own processing rather than
-the buffers, and the two devices do not run at the same rate — 44.1 kHz out and
-48 kHz in — so even the arithmetic has to be done per direction. That is the
-case for asking the device rather than assuming a number.
+The figure is what the devices say, not a timed acoustic round trip, and it
+moves with the machine and with the stream. Read through `Stream::render_delay`
+on an Intel MacBook Pro running macOS 12.7, with a narrowband stream open on its
+built-in speakers and built-in microphone — two device objects, both at
+44.1 kHz — it comes to 115 ms: 21 ms out (930 frames: 325 of device latency, a
+safety offset of 93, an IO buffer of 512) and 94 ms in (4,162 frames: 9, 57 and
+4,096). The same two devices report 34 ms while nothing has them open. The
+difference is the microphone's IO buffer, which the voice-processing unit
+raises from 512 frames to the 4,096 the stream sets as its largest slice. An
+earlier reading on a MacBook Air, with nothing open, came to about a hundred
+milliseconds, most of it the two streams' own latency, with the speakers at
+44.1 kHz and the microphone at 48 kHz, so even the arithmetic has to be done per
+direction. That is the case for asking the devices rather than assuming a
+number.
 
 ## What device I/O owns, and does not
 
@@ -813,9 +838,14 @@ answer.
 A stream reports the loss of the device under it as an event the caller polls
 for, and stops. On Windows this is exact: every WASAPI call answers
 `AUDCLNT_E_DEVICE_INVALIDATED` once the endpoint has gone, and the audio thread
-writes that down before it leaves. On macOS the stream asks the hardware layer
-whether the device object it opened is still alive, which is a property read
-rather than an inference from silence. On iOS it reports nothing, because there
+writes that down before it leaves — starting and stopping included, so an
+endpoint that went while the stream was stopped is reported by the start that
+finds it gone, not only by a buffer pass that never comes. On macOS the stream
+asks the hardware layer whether each of the two device objects under it is
+still alive — the speaker's and the microphone's, which on a Mac are usually
+not the same object — and losing either is losing the stream. That is a
+property read rather than an inference from silence. On iOS it reports nothing,
+because there
 the route belongs to `AVAudioSession` and its changes are delivered to the
 application; anything else would be a guess dressed as a fact.
 
@@ -836,9 +866,13 @@ when it is not there. The system's route is whatever the operating system is
 routing calls to. A named device is that device or nothing. A *preference* is a
 saved identity — `Device::uid` on macOS, the endpoint identifier on Windows,
 both of which survive a replug and a reboot where a device number does not — and
-falls back to the system's route when the machine does not have it. A preference
-is what a selection read out of a configuration file should be, and it is what
-makes recovery from an unplugged headset land somewhere instead of failing.
+falls back to the system's route when the machine does not have it. On Windows
+that includes an endpoint the machine still knows but cannot play through:
+unplugged, disabled and absent endpoints keep their identifiers in the registry,
+so the preference asks the endpoint's state rather than only whether the
+identifier resolves. A preference is what a selection read out of a
+configuration file should be, and it is what makes recovery from an unplugged
+headset land somewhere instead of failing.
 
 What the crate does not promise: it cannot stop the operating system changing
 the default device behind the application's back, and it cannot move a running
