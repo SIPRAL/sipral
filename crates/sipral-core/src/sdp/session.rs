@@ -150,12 +150,78 @@ impl fmt::Display for Timing {
 }
 
 /// `a=<name>` or `a=<name>:<value>` (§5.13).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Attribute {
     /// The part before the colon.
     pub name: String,
     /// The part after it, when there is one.
     pub value: Option<String>,
+}
+
+impl fmt::Debug for Attribute {
+    /// Everything as it was read, except the master key on an `a=crypto`
+    /// line, which is the one thing an attribute can carry that must never
+    /// reach a log.
+    ///
+    /// Written here rather than on the descriptions above it because there is
+    /// no way to hold one of those without holding these: a redaction on
+    /// `SessionDescription` is one a user agent, a call, an engine and an
+    /// event each have to remember to route through, and the first one that
+    /// forgets prints every key on the machine. RFC 4568 §9.2 is explicit —
+    /// "the SDP MUST be protected" — and a `{:?}` on a live stack is not
+    /// protection.
+    ///
+    /// The tag and the suite stay. They are what a reader needs when a
+    /// negotiation has gone wrong, and neither is secret.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut shown = f.debug_struct("Attribute");
+        shown.field("name", &self.name);
+        match self.value.as_deref() {
+            Some(value) if self.name == "crypto" => {
+                let named: Vec<&str> = value.split_ascii_whitespace().take(2).collect();
+                shown.field("value", &Some(format!("{} <redacted>", named.join(" "))))
+            }
+            other => shown.field("value", &other),
+        }
+        .finish()
+    }
+}
+
+/// The value of a `k=` line (§5.12), kept as it was read and never printed.
+///
+/// The line is deprecated — §5.12 says so itself, and this stack neither
+/// writes one nor reads any meaning from one — but a description parsed from a
+/// peer keeps every line it arrived with, and this one is by definition the
+/// peer's key. `Display` writes it, because that is the wire format and the
+/// wire format is what it came from; `Debug` does not, because a log is not
+/// the wire.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KeyLine(String);
+
+impl KeyLine {
+    /// Take a `k=` value as it was written.
+    #[must_use]
+    pub fn new(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+
+    /// The value, for a caller that has decided it needs it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for KeyLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyLine(<redacted>)")
+    }
 }
 
 impl Attribute {
@@ -225,7 +291,7 @@ pub struct SessionDescription {
     /// `z=`
     pub timezones: Option<String>,
     /// `k=`
-    pub key: Option<String>,
+    pub key: Option<KeyLine>,
     /// `a=` at session level.
     pub attributes: Vec<Attribute>,
     /// The `m=` blocks, in the order they were written — which is the order

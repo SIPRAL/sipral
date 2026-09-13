@@ -30,6 +30,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **A debug print of a live stack no longer carries the keys.** `{:?}` on a
+  user agent printed every `a=crypto` line of every call with its master key
+  on it, and every RFC 8599 push token every account held — the one that wakes
+  the device, which §4.1 keeps off every request but REGISTER for exactly that
+  reason. RFC 4568 §9.2 says the SDP "MUST be protected"; a log file is a worse
+  place for a key than an INVITE is, because it is kept. The engine redacted
+  its own copy, but that was a rule every other holder had to remember, and
+  they did not. The redaction now sits on the four types that carry the
+  material — `Attribute` (which keeps the tag and the suite and drops the key),
+  the deprecated `k=` line, `KeySalt`, and the push token — so every holder
+  above them may derive `Debug` freely and none of them can get it wrong.
+  `scripts/check.sh` refuses a build in which one of the four grows a derive
+  or loses its own implementation. The `k=` value is now `sdp::KeyLine` rather
+  than `String`.
+
 - **A mid-call downgrade is no longer answered by a layer that holds no
   policy.** `SrtpPolicy::Required` promises that a plain re-offer inside a
   live call is refused rather than accepted, and it was — as long as the

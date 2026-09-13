@@ -354,6 +354,58 @@ done | grep 'Instant::now\|SystemTime::now' || true)
     printf '%s\n' "$clock" | sed 's/^/        /'
 }
 
+# RFC 4568 §9.2: "the SDP MUST be protected". A `{:?}` on a live stack is not
+# protection, and the reason this is a gate rather than a review note is that
+# the leak is never in the type that holds the key -- those redact themselves.
+# It is in whatever derives `Debug` above them. So the rule is stated the way
+# it can be checked: the four types that carry key material or a device token
+# write their own `Debug`, and a derive on one of them is what this catches.
+#
+# WHAT IS READ. The declaration of each of the four, and the twenty lines
+# after it, which is where a `#[derive]` on it would be. WHAT IS NOT READ.
+# Anything that merely holds one of the four -- that is the point of putting
+# the redaction at the bottom, and a holder deriving `Debug` is correct.
+step "nothing that holds a key derives Debug"
+redacting="crates/sipral-core/src/sdp/session.rs:Attribute
+crates/sipral-core/src/sdp/session.rs:KeyLine
+crates/sipral-core/src/sdp/crypto.rs:KeySalt
+crates/sipral-ua/src/account.rs:Push"
+derived=""
+for pair in $redacting; do
+    file=${pair%%:*}
+    name=${pair##*:}
+    if [ ! -f "$file" ]; then
+        derived="$derived
+        $file is gone, and $name's redaction with it"
+        continue
+    fi
+    # the declaration, and whether its own derive list carries Debug
+    line=$(grep -n "^pub struct $name\b" "$file" | head -1 | cut -d: -f1)
+    if [ -z "$line" ]; then
+        derived="$derived
+        $file no longer declares $name"
+        continue
+    fi
+    before=$((line - 1))
+    if [ "$before" -ge 1 ] && sed -n "${before}p" "$file" | grep -q 'derive(.*Debug'; then
+        derived="$derived
+        $file:$line $name derives Debug"
+    fi
+    # the trailing brace is load-bearing: without it `Push` matches
+    # `PushGone`, and the step passes on a type whose redaction has been
+    # renamed out from under it
+    if ! grep -q "impl fmt::Debug for $name {\|impl core::fmt::Debug for $name {" "$file"; then
+        derived="$derived
+        $file $name has no Debug of its own"
+    fi
+done
+[ -z "$derived" ] && pass "the four that carry key material write their own" || {
+    fail "a type that carries key material prints it:"
+    printf '%s\n' "$derived"
+    printf '        docs/05-media.md says why: the redaction goes at the bottom,\n'
+    printf '        because every holder above it is a place to forget.\n'
+}
+
 # A panic that unwinds into C takes the host process with it, and no C caller
 # can defend itself against that. The `entry!` macro is the only way to declare
 # an entry point and every shape of it catches, so the guarantee holds exactly

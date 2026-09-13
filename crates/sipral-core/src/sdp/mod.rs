@@ -44,4 +44,4 @@ pub use plan::{
     Crypto, Keying, MediaCapabilities, MediaPlan, NegotiatedCodec, RtcpPlan, SrtpSupport,
     static_rtpmap,
 };
-pub use session::{Attribute, Connection, Origin, SessionDescription, Timing};
+pub use session::{Attribute, Connection, KeyLine, Origin, SessionDescription, Timing};

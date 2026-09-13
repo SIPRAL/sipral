@@ -57,13 +57,32 @@ pub(crate) struct Extra {
 /// They go out on REGISTER and nowhere else. §4.1 forbids the parameters in
 /// any other request, because a `pn-prid` in the `Contact` of an INVITE hands
 /// the far end a token that wakes this device whenever it likes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Push {
     provider: Box<str>,
     prid: Box<str>,
     param: Option<Box<str>>,
     /// `+sip.pnsreg` (§4.1.4): this device can wake itself to refresh.
     wakes_itself: bool,
+}
+
+impl core::fmt::Debug for Push {
+    /// The provider, and nothing that identifies the device.
+    ///
+    /// `pn-prid` is a token that wakes this installation. §4.1 keeps it off
+    /// every request but REGISTER for exactly that reason — "a `pn-prid` in
+    /// the `Contact` of an INVITE hands the far end a token that wakes this
+    /// device whenever it likes" — and a log file is a worse place for it than
+    /// an INVITE, because it is kept. `pn-param` goes with it: §8.7 makes both
+    /// opaque and service-specific, so neither can be judged safe from here.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Push")
+            .field("provider", &self.provider)
+            .field("prid", &"<redacted>")
+            .field("param", &self.param.as_ref().map(|_| "<redacted>"))
+            .field("wakes_itself", &self.wakes_itself)
+            .finish()
+    }
 }
 
 impl Push {

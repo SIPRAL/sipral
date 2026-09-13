@@ -49,7 +49,6 @@
 //! holds two calls at once, and a global codec order or a global render delay
 //! would make the second one a race against whichever call touches it last.
 
-use core::fmt;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -86,7 +85,7 @@ const TELEPHONE_EVENT: &str = "telephone-event";
 const COMFORT_NOISE: &str = "CN";
 
 /// What this engine knows about one call.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Managed {
     /// What this end has described. Absent for an incoming call between the
     /// INVITE arriving and it being answered.
@@ -109,48 +108,6 @@ struct Managed {
     /// D6: how this call's session is opened — this engine's default unless
     /// overridden the same way.
     config: MediaConfig,
-}
-
-impl fmt::Debug for Managed {
-    /// The two descriptions, with the key parameter of every `a=crypto` line
-    /// taken out.
-    ///
-    /// The line itself is worth seeing when a negotiation has gone wrong; the
-    /// master key on it is the one thing this crate holds that must not reach
-    /// a log, and `{:?}` on a live engine would reach every call's at once.
-    /// `Inline`, `KeySalt` and `Security` redact themselves for the same
-    /// reason, and this is the last place the same material is still text.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Managed")
-            .field("local", &self.local.as_ref().map(redacted))
-            .field("remote", &self.remote.as_ref().map(redacted))
-            .field("address", &self.address)
-            .field("identity", &self.identity)
-            .field("session_id", &self.session_id)
-            .field("version", &self.version)
-            .field("catalog", &self.catalog)
-            .field("config", &self.config)
-            .finish()
-    }
-}
-
-/// A description with the keying information of every `a=crypto` line
-/// replaced, keeping the tag and the suite that say what was negotiated.
-fn redacted(description: &SessionDescription) -> SessionDescription {
-    let mut copy = description.clone();
-    for attribute in copy
-        .media
-        .iter_mut()
-        .flat_map(|stream| stream.attributes.iter_mut())
-    {
-        if attribute.name == "crypto"
-            && let Some(value) = attribute.value.as_mut()
-        {
-            let named: Vec<&str> = value.split_ascii_whitespace().take(2).collect();
-            *value = format!("{} <redacted>", named.join(" "));
-        }
-    }
-    copy
 }
 
 /// What one call opens with, when it is not this engine's defaults.

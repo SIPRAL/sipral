@@ -6696,3 +6696,29 @@ fn a_refer_a_pbx_keeps_challenging_gives_the_transfer_seat_back() {
         .transfer(call, &uri("sip:dave@example.com"), t0)
         .expect("the call is free to be transferred again");
 }
+
+/// RFC 8599 §4.1 keeps `pn-prid` off every request but REGISTER, because a
+/// token that wakes this device is one the far end must not be handed. A log
+/// file is a worse place for it than an INVITE, because it is kept.
+#[test]
+fn printing_an_agent_prints_no_push_token() {
+    const TOKEN: &str = "a1b2c3d4-this-wakes-the-device";
+    const PARAM: &str = "com.example.app.voip";
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account().push(crate::account::Push::new("apns", TOKEN).param(PARAM)));
+
+    let printed = format!("{agent:?}");
+    assert!(
+        printed.contains("apns"),
+        "the provider is not the secret and is worth seeing: {printed}"
+    );
+    assert!(
+        !printed.contains(TOKEN),
+        "the push token reached a debug print"
+    );
+    assert!(
+        !printed.contains(PARAM),
+        "the push parameter reached a debug print"
+    );
+}

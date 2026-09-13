@@ -18,6 +18,7 @@
 
 use super::error::SdpError;
 use super::media::MediaDescription;
+use super::session::KeyLine;
 use super::session::{Attribute, Connection, Origin, SessionDescription, Timing};
 
 /// Bounds that stop a hostile peer from making the parser do unbounded work.
@@ -130,7 +131,7 @@ struct SessionFields {
     bandwidth: Vec<String>,
     timing: Vec<Timing>,
     timezones: Option<String>,
-    key: Option<String>,
+    key: Option<KeyLine>,
     attributes: Vec<Attribute>,
 }
 
@@ -251,7 +252,7 @@ impl Parser {
                 timing.repeats.push(value.to_owned());
             }
             'z' => self.session.timezones = Some(value.to_owned()),
-            'k' => self.session.key = Some(value.to_owned()),
+            'k' => self.session.key = Some(KeyLine::new(value)),
             _ => self.session.attributes.push(attribute_line(value)),
         }
         Ok(rank)
@@ -277,7 +278,7 @@ fn media_field(
         'i' => media.information = Some(value.to_owned()),
         'c' => media.connection = Some(connection_line(value, line)?),
         'b' => media.bandwidth.push(value.to_owned()),
-        'k' => media.key = Some(value.to_owned()),
+        'k' => media.key = Some(KeyLine::new(value)),
         _ => media.attributes.push(attribute_line(value)),
     }
     Ok(rank)

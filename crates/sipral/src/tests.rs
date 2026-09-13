@@ -2600,3 +2600,48 @@ fn a_plain_re_offer_that_keeps_the_formats_is_refused_too() {
          away: {answered:?}"
     );
 }
+
+/// RFC 4568 §9.2: "the SDP MUST be protected". A `{:?}` on a live stack is
+/// not protection, and it reaches every call at once — so the test is on the
+/// whole thing, not on the one type that happens to hold the key today.
+#[test]
+fn printing_a_live_secured_stack_prints_no_key_material() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+    );
+
+    let printed = format!("{:?} {:?}", pair.caller.engine, pair.caller.agent);
+    // the offer and the answer both carried a key, and both are held
+    assert!(
+        printed.contains("crypto"),
+        "the crypto line itself is worth seeing: {printed}"
+    );
+    for line in pair
+        .caller
+        .answer_received()
+        .expect("the caller saw the answer")
+        .media
+        .iter()
+        .flat_map(|stream| stream.attributes.iter())
+        .filter(|attribute| attribute.name == "crypto")
+    {
+        let value = line.value.as_deref().expect("a crypto line has a value");
+        let inline = value
+            .split_ascii_whitespace()
+            .find(|word| word.starts_with("inline:"))
+            .expect("a crypto line names a key");
+        assert!(
+            !printed.contains(inline),
+            "the master key reached a debug print: {inline}"
+        );
+    }
+}

@@ -258,6 +258,28 @@ else entirely, by somebody who was told the file holds only what a capture
 holds. The C ABI refuses the two seeds being equal, since `sipral_stack_create`
 is the one place that can see both.
 
+**Nothing that carries key material derives `Debug`.** RFC 4568 §9.2 says the
+SDP "MUST be protected", and a `{:?}` on a live stack is not protection — it
+reaches every call at once, and it lands in a file that is kept. The rule is
+not "remember to redact when you print a description": that is a rule a user
+agent, a call, an engine and an event each have to follow, and the first one
+that forgets prints every key on the machine.
+
+So the redaction sits at the bottom, on the four types that actually hold the
+material, and every holder above them may derive `Debug` freely. `Attribute`
+prints an `a=crypto` line with its tag and suite and `<redacted>` where the key
+was — the line is worth seeing when a negotiation has gone wrong, and neither
+of those two is secret. `KeyLine` is the deprecated `k=` line (§5.12), which
+this stack never writes and never reads a meaning from, but which a
+description parsed from a peer keeps: it prints nothing at all. `KeySalt` is
+the key itself. `Push` is not key material but is the same shape of secret — a
+token that wakes a device, which RFC 8599 §4.1 keeps off every request but
+REGISTER for that reason. `scripts/check.sh` refuses a build in which any of
+the four grows a derive or loses its own.
+
+`Display` on the SDP types is a different matter and does write the key: that
+is the wire format, and the wire format is what these values came from.
+
 **A poor media seed costs the whole of the encryption** — an attacker who can
 guess those thirty-two bytes can derive every master key this stack will ever
 offer — and nothing about a call made with one looks wrong. That is the same

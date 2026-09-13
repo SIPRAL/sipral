@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use super::session::{Attribute, Connection};
+use super::session::{Attribute, Connection, KeyLine};
 
 /// Which way media may flow (RFC 4566 §6, RFC 3264 §6.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +149,7 @@ pub struct MediaDescription {
     /// `b=`, kept as written.
     pub bandwidth: Vec<String>,
     /// `k=`, kept as written.
-    pub key: Option<String>,
+    pub key: Option<KeyLine>,
     /// `a=`, in the order they were written.
     pub attributes: Vec<Attribute>,
 }
