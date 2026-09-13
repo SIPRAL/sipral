@@ -104,7 +104,12 @@ all of them. Hanging up sends one more packet that is not on this schedule:
 empty reason, from `MediaSession::goodbye`, queued in
 `MediaEngine::farewells` because the call and its session are already gone by
 the time there is anything left to send it from (see the doc comment on
-`MediaEngine::poll_farewell`).
+`MediaEngine::poll_farewell`). §6.3.7 lets a session below fifty members send
+that BYE immediately without resetting who it counts as members and senders
+(`IntervalTimer::sent_bye`); only a session past that threshold executes the
+full reset the RFC also allows (`IntervalTimer::leaving`) — a distinction
+`RtpSession::bye_should_back_off` exposes, though a two-party call never
+crosses it.
 
 **When, and how often.** `MediaEngine::poll_rtcp` asks each call in turn
 whether its deadline has passed (`MediaSession::rtcp_deadline_passed`); the
@@ -150,9 +155,13 @@ inside, the block naming this session's own SSRC gives the round-trip time
 `A - LSR - DLSR` from A.3, `None` until the peer has echoed an SR of ours); an
 SR from the remote source is separately remembered
 (`ReceptionTracker::on_sender_report`) so this session's own next report can
-carry that source's LSR and DLSR. A BYE naming the remote SSRC drops it from
-the interval timer's membership and sender counts once (§6.3.4) and is
-reported to the caller as `Arrival::Goodbye` from `MediaSession::receive_control`
+carry that source's LSR and DLSR. A BYE naming the remote SSRC — matched
+against whichever identifier this session actually has for it,
+`Inbound::source` when RTP set one or `Inbound::rtcp_source` when only RTCP
+ever has, which is all a recvonly peer or a call on hold ever gives it —
+drops it from the interval timer's membership and sender counts once
+(§6.3.4) and is reported to the caller as `Arrival::Goodbye` from
+`MediaSession::receive_control`
 (or from `MediaSession::receive`, which hands it RTCP on a muxed socket) —
 audio is assumed to stop, but the call itself ends only when signalling says
 so, which is `sipral-ua`'s decision, not this crate's. "Once" is load-bearing:
@@ -162,9 +171,15 @@ or a duplicate the network made — is still reported but no longer removes
 anything: not a second member, and not a second sender, which on a call this
 end is sending on would be this end's own entry. Underneath that,
 `IntervalTimer::remove_member` never counts below one, the local participant
-itself (§6.3.2): `send_bye` resets the count to exactly that one (§6.3.7), so
-a far end's BYE crossing ours on the wire has nobody left to remove and moves
-nothing. An incoming SDES is parsed
+itself (§6.3.2). Once this end has sent its own BYE, though, a BYE arriving
+afterwards is not removed at all: §6.3.4's own rule for a received BYE
+excludes "the case when an RTCP BYE is to be transmitted", and
+`IntervalTimer::is_departing` — set by `RtpSession::send_bye`, whichever of
+its two branches ran — switches the handling to §6.3.7 bullet two instead,
+which counts the departure up rather than down
+(`IntervalTimer::note_bye_while_departing`): a far end's BYE crossing ours on
+the wire grows the count the next interval is computed from, rather than
+shrinking it. An incoming SDES is parsed
 (`rtcp::SourceDescription`) but nothing here reads its content; only its
 presence is required, to keep the compound packet the shape §6.1 demands.
 
@@ -222,7 +237,11 @@ places, plainly:
    loses a member or a sender when a BYE actually arrives (§6.3.4, above), and
    this session's own `we_sent`, which §6.3.8 clears after two intervals
    without RTP, is set by `IntervalTimer::note_local_sender` and cleared only
-   by `IntervalTimer::leaving`. The consequence is bounded for the two-party
+   by `IntervalTimer::leaving` — the branch of `RtpSession::send_bye` reserved
+   for a session past the fifty-member backoff threshold; the ordinary path,
+   `IntervalTimer::sent_bye`, leaves `we_sent` as it was, since nothing below
+   that threshold asks a session to forget who was sending. The consequence
+   is bounded for the two-party
    call this crate targets — a far end that stops sending without a BYE is
    `MediaEvent::Stalled`'s job to notice, not the RTCP scheduler's — but the
    interval timer's own counts will not reflect it, which matters the day this

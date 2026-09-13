@@ -88,6 +88,14 @@ pub(crate) struct IntervalTimer {
     we_sent: bool,
     avg_packet_size: f64,
     initial: bool,
+    /// Whether this participant has itself sent (or, backing off, begun
+    /// scheduling) its own BYE — by [`IntervalTimer::leaving`] or
+    /// [`IntervalTimer::sent_bye`], whichever branch of §6.3.7
+    /// [`IntervalTimer::should_back_off_bye`] selected. Not one of the
+    /// RFC's own named state variables; kept to know which rule a
+    /// received BYE falls under, since §6.3.4's own text excludes this
+    /// case from the removal it otherwise describes.
+    departing: bool,
 }
 
 impl IntervalTimer {
@@ -107,6 +115,7 @@ impl IntervalTimer {
             we_sent: false,
             avg_packet_size: as_size(first_packet_size),
             initial: true,
+            departing: false,
         };
         timer.tn = timer.interval(unit_interval);
         timer
@@ -230,10 +239,12 @@ impl IntervalTimer {
     }
 
     /// Reset state for leaving the session (§6.3.7 bullet one) and compute
-    /// when the BYE should go out. §6.3.7 only applies this reset when
-    /// more than fifty members are known
-    /// ([`IntervalTimer::should_back_off_bye`]); a caller below that
-    /// threshold sends immediately instead of calling this at all.
+    /// when the BYE should go out, for a participant past the fifty-member
+    /// threshold ([`IntervalTimer::should_back_off_bye`]) — "the
+    /// participant MUST execute the following algorithm". A session at or
+    /// below it sends its BYE immediately through
+    /// [`IntervalTimer::sent_bye`] instead, which does not reset anything
+    /// the way this does.
     pub(crate) fn leaving(
         &mut self,
         now: Duration,
@@ -248,7 +259,50 @@ impl IntervalTimer {
         self.senders = 0;
         self.avg_packet_size = as_size(bye_size);
         self.tn = now.saturating_add(self.interval(unit_interval));
+        self.departing = true;
         self.tn
+    }
+
+    /// Send this participant's own BYE the way §6.3.7 allows at or below
+    /// the fifty-member threshold: "the participant MAY send a BYE packet
+    /// immediately," which this reads as bullet three on its own —
+    /// "transmission of the BYE packet then follows the rules for
+    /// transmitting a regular RTCP packet" — without bullet one's reset.
+    /// `members`, `senders` and `pmembers` are left exactly as they were;
+    /// only the size and the schedule move, exactly as
+    /// [`IntervalTimer::sent`] already does for any other outgoing RTCP
+    /// packet.
+    pub(crate) fn sent_bye(
+        &mut self,
+        now: Duration,
+        bye_size: usize,
+        unit_interval: f64,
+    ) -> Duration {
+        let next = self.sent(now, bye_size, unit_interval);
+        self.departing = true;
+        next
+    }
+
+    /// Whether this participant has itself sent a BYE, by either branch of
+    /// §6.3.7. §6.3.4's rule for a *received* BYE excludes "the case when
+    /// an RTCP BYE is to be transmitted" from the removal it otherwise
+    /// describes, without conditioning that exclusion on group size — so a
+    /// caller checks this, not [`IntervalTimer::should_back_off_bye`], to
+    /// decide which rule a BYE just received falls under.
+    #[must_use]
+    pub(crate) const fn is_departing(&self) -> bool {
+        self.departing
+    }
+
+    /// §6.3.7 bullet two, once this participant is itself leaving: "every
+    /// time a BYE packet from another participant is received, members is
+    /// incremented by 1 ... regardless of whether that participant exists
+    /// in the member table or not." This "usurps the normal role of the
+    /// members variable to count BYE packets instead" of removing
+    /// departures, for as long as this participant's own goodbye is being
+    /// scheduled or has already gone out.
+    pub(crate) fn note_bye_while_departing(&mut self) {
+        self.members = self.members.saturating_add(1);
     }
 
     /// Whether §6.3.7's BYE backoff applies: "a participant MUST execute
@@ -432,5 +486,52 @@ mod tests {
         // a fresh `due` at that deadline should send: the reset put
         // `initial` back to true, so the interval is the smaller one again
         assert_eq!(timer.due(deadline, 0.5), Due::Send);
+        assert!(timer.is_departing());
+    }
+
+    #[test]
+    fn sent_bye_does_not_reset_membership_the_way_leaving_does() {
+        // §6.3.7 lets a participant at or below the fifty-member threshold
+        // "send a BYE packet immediately" -- read here as transmitting it
+        // like any other RTCP packet (bullet three) rather than executing
+        // bullet one's reset to a single member. A bandwidth this large
+        // keeps the deterministic interval pinned at its floor, so the
+        // only thing that can move the schedule is whether `initial` was
+        // put back to true, which only `leaving` does.
+        const HUGE_BANDWIDTH: f64 = 1e9;
+        let mut timer = IntervalTimer::new(HUGE_BANDWIDTH, PACKET, 0.5);
+        timer.note_member();
+        // clears `initial`, as a session's first real report would before
+        // anyone hangs up
+        let _ = timer.sent(Duration::ZERO, PACKET, 0.5);
+
+        let deadline = timer.sent_bye(Duration::from_secs(1), 40, 0.5);
+        let floor =
+            Duration::try_from_secs_f64(super::MIN_INTERVAL_SECS / super::REDRAW_COMPENSATION)
+                .expect("a positive, finite duration");
+        assert!(
+            (deadline.as_secs_f64() - (Duration::from_secs(1) + floor).as_secs_f64()).abs() < 1e-6,
+            "sent_bye moved the schedule as if `initial` had been reset to true"
+        );
+        assert!(timer.is_departing());
+    }
+
+    #[test]
+    fn note_bye_while_departing_counts_a_departure_up_not_down() {
+        // §6.3.7 bullet two, once this participant is itself leaving:
+        // "every time a BYE packet from another participant is received,
+        // members is incremented by 1 ... regardless of whether that
+        // participant exists in the member table or not" -- the opposite
+        // of §6.3.4's usual decrement, which the RFC excludes for exactly
+        // this case ("Except as described in Section 6.3.7 for the case
+        // when an RTCP BYE is to be transmitted").
+        let mut timer = IntervalTimer::new(BANDWIDTH, PACKET, 0.5);
+        timer.note_member();
+        timer.sent_bye(Duration::ZERO, 40, 0.5);
+        assert!(timer.is_departing());
+
+        let members_before = timer.members;
+        timer.note_bye_while_departing();
+        assert_eq!(timer.members, members_before + 1);
     }
 }

@@ -85,6 +85,9 @@ pub fn parse_with_limits<'a>(
     scratch.slots.clear();
 
     let (line, mut pos) = read_line(buf, 0, mode).ok_or(ParseError::BadStartLine { at: 0 })?;
+    if holds_a_lone_cr(buf, line) {
+        return Err(ParseError::BadStartLine { at: 0 });
+    }
     let start = parse_start_line(buf, line)?;
 
     let mut content_length: Option<u32> = None;
@@ -95,6 +98,10 @@ pub fn parse_with_limits<'a>(
         if line.is_empty() {
             break;
         }
+        let bad_line = ParseError::BadHeaderLine { at: line.start };
+        if holds_a_lone_cr(buf, line) {
+            return Err(bad_line);
+        }
 
         let (name, mut value) = split_header(buf, line)?;
 
@@ -102,6 +109,9 @@ pub fn parse_with_limits<'a>(
         // previous value. The span grows over it, interior CRLF included.
         while starts_with_ws(buf, pos) {
             let (cont, after) = read_line(buf, pos, mode).ok_or(ParseError::UnterminatedHeaders)?;
+            if holds_a_lone_cr(buf, cont) {
+                return Err(bad_line);
+            }
             value.end = cont.end;
             pos = after;
         }
@@ -274,6 +284,18 @@ fn read_line(buf: &[u8], from: usize, mode: ParseMode) -> Option<(Span, usize)> 
     }
 }
 
+/// Whether a line, terminator already cut off, still holds a CR.
+///
+/// RFC 3261 §25.1 has a CR in the head of a message only as half of a CRLF,
+/// which ends a line or begins a fold, and `quoted-pair` leaves %x0D out, so
+/// one anywhere else has no reading in either mode. It is refused rather than
+/// kept because it could never be written back: every response copies `Via`,
+/// `From`, `To`, `Call-ID` and `CSeq`, and a header line cannot hold the byte,
+/// so a request carrying one would sit unanswered for good.
+fn holds_a_lone_cr(buf: &[u8], line: Span) -> bool {
+    line.slice(buf).contains(&b'\r')
+}
+
 fn starts_with_ws(buf: &[u8], at: usize) -> bool {
     matches!(buf.get(at), Some(b' ' | b'\t'))
 }
@@ -390,6 +412,36 @@ v=0\n";
         assert_eq!(m.header_slots().len(), 1);
         let (_, value) = m.raw_headers().next().unwrap_or((b"", b""));
         assert_eq!(value, b"one\r\n two\r\n\tthree");
+    }
+
+    #[test]
+    fn a_cr_that_ends_no_line_and_begins_no_fold_is_refused() {
+        // §25.1: a CR in the head of a message is half of a CRLF, which ends a
+        // line or begins a fold, and `quoted-pair` leaves %x0D out, so a lone
+        // one has no reading. Taken in anyway, it is a message nobody can
+        // answer: every response copies Via, From, To, Call-ID and CSeq, and
+        // no header line can be written with that byte in it
+        let mut accepted: Vec<String> = Vec::new();
+        for message in [
+            &b"INVITE sip:bob@example.com SIP/2.0\r\nFrom: <sip:a@example.com>;x=a\rb;tag=1\r\n\r\n"[..],
+            b"INVITE sip:bob@example.com SIP/2.0\r\nCall-ID: a\rb\r\n\r\n",
+            b"INVITE sip:bob@example.com SIP/2.0\r\nSubject: one\r\n two\rthree\r\n\r\n",
+            b"INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/UDP h\r\r\n\r\n",
+            b"INVITE sip:bob\r@example.com SIP/2.0\r\n\r\n",
+        ] {
+            for mode in [ParseMode::Strict, ParseMode::Lenient] {
+                let mut scratch = ParseScratch::new();
+                match parse(message, &mut scratch, mode) {
+                    Err(ParseError::BadStartLine { .. } | ParseError::BadHeaderLine { .. }) => (),
+                    other => accepted.push(format!(
+                        "{mode:?} {:?}: {:?}",
+                        String::from_utf8_lossy(message),
+                        other.map(|m| m.len())
+                    )),
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "not refused: {accepted:#?}");
     }
 
     #[test]
@@ -627,6 +679,63 @@ v=0\n";
         let to = m.to().expect("a To");
         assert_eq!(to.display_name().as_deref(), Some(&b"Bob"[..]));
         assert_eq!(to.tag(), None);
+    }
+
+    #[test]
+    fn a_from_or_to_tag_that_is_not_a_token_is_a_malformed_field() {
+        use crate::msg::HeaderError;
+        const PLAIN_FROM: &str = "<sip:alice@example.com>;tag=a1";
+        const PLAIN_TO: &str = "<sip:bob@example.com>";
+        // §25.1: tag-param = "tag" EQUAL token. Whatever tag these accessors
+        // hand out is written back after ";tag=" by the dialog, so a value that
+        // is not a token there is a parameter or an address the peer added
+        let message = |from: &str, to: &str| {
+            format!("OPTIONS sip:bob@example.com SIP/2.0\r\nFrom: {from}\r\nTo: {to}\r\n\r\n")
+                .into_bytes()
+        };
+        let mut accepted: Vec<String> = Vec::new();
+        for param in [
+            ";tag=\"a1;maddr=198.51.100.66\"",
+            ";tag=a1, <sip:mallory@example.net>",
+            ";tag=\"\"",
+            ";tag=\"a1\\\"b\"",
+            // no value at all is not a token either
+            ";tag",
+        ] {
+            let from = format!("<sip:alice@example.com>{param}");
+            let bytes = message(&from, PLAIN_TO);
+            let mut scratch = ParseScratch::new();
+            if !matches!(
+                ok(&bytes, &mut scratch).from(),
+                Err(HeaderError::Malformed(_))
+            ) {
+                accepted.push(format!("From: {from}"));
+            }
+
+            let to = format!("<sip:bob@example.com>{param}");
+            let bytes = message(PLAIN_FROM, &to);
+            let mut scratch = ParseScratch::new();
+            if !matches!(
+                ok(&bytes, &mut scratch).to(),
+                Err(HeaderError::Malformed(_))
+            ) {
+                accepted.push(format!("To: {to}"));
+            }
+        }
+        assert!(accepted.is_empty(), "read as a tag: {accepted:#?}");
+
+        // while a token in quotes, which is not the grammar but reads as one
+        // value, is still the token it holds
+        let bytes = message("<sip:alice@example.com>;tag=\"a1\"", PLAIN_TO);
+        let mut scratch = ParseScratch::new();
+        assert_eq!(
+            ok(&bytes, &mut scratch)
+                .from()
+                .expect("a From")
+                .tag()
+                .as_deref(),
+            Some(&b"a1"[..])
+        );
     }
 
     #[test]

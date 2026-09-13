@@ -198,6 +198,20 @@ struct Inbound {
     /// RTP one even when the host does not.
     rtcp_latch: Option<SocketAddr>,
     source: Option<u32>,
+    /// The SSRC an SR or RR has named itself with, latched the way
+    /// `source` is but from RTCP instead of RTP.
+    ///
+    /// A source that never sends RTP — recvonly, or a call on hold — is
+    /// still a member by §6.3.3's own rule ("received from a
+    /// participant" says nothing about which protocol), but `source`
+    /// never learns its SSRC, since only RTP sets that one. Kept
+    /// separately from `source` rather than merged into it because the
+    /// two answer different questions once both are known: `source` is
+    /// who §6.4.1's reception report describes and whose sequence numbers
+    /// feed the jitter buffer, while this is only ever read to match a
+    /// BYE against whichever identifier this session actually has for
+    /// the remote side.
+    rtcp_source: Option<u32>,
     sequence: SequenceState,
     buffer: JitterBuffer,
     rtcp: ReceptionTracker,
@@ -268,6 +282,7 @@ impl RtpSession {
                 latch: None,
                 rtcp_latch: None,
                 source: None,
+                rtcp_source: None,
                 sequence: SequenceState::new(),
                 buffer: JitterBuffer::new(config.clock_rate, &config.playout),
                 rtcp: ReceptionTracker::new(),
@@ -685,21 +700,47 @@ impl RtpSession {
     /// Listen to a different synchronization source, for a far end that has
     /// been told to change it. Everything held for the old one is dropped,
     /// since it belongs to a stream that has ended.
+    ///
+    /// §6.3's membership bookkeeping goes with it only when the old source
+    /// left by BYE. A far end that said goodbye under its old SSRC and came
+    /// back under a new one — what a re-INVITE or an ICE restart produces —
+    /// was taken out of the count, so the source followed now is counted
+    /// afresh. A far end that changed its SSRC without a BYE is still the one
+    /// remote participant it was, already in the count; counting it again
+    /// would add a member for every change and stretch the report interval
+    /// with each one.
     pub fn follow(&mut self, ssrc: u32) {
         self.inbound.source = Some(ssrc);
+        self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
         self.inbound.rtcp = ReceptionTracker::new();
+        self.forget_departed();
+    }
+
+    /// The membership flags start again for the next source only if the one
+    /// they describe has left; see [`RtpSession::follow`].
+    fn forget_departed(&mut self) {
+        if self.inbound.departed {
+            self.inbound.member_known = false;
+            self.inbound.sender_known = false;
+            self.inbound.departed = false;
+        }
     }
 
     /// Listen to whichever source arrives next. For a stream that has been
     /// re-negotiated, where what the far end will call itself is not known in
     /// advance.
+    ///
+    /// As with [`RtpSession::follow`], the §6.3 membership flags start again
+    /// only when the source they describe left by BYE.
     pub fn resync(&mut self) {
         self.inbound.source = None;
+        self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
         self.inbound.rtcp = ReceptionTracker::new();
+        self.forget_departed();
     }
 
     /// Carry this stream on under a different codec.
@@ -853,10 +894,29 @@ impl RtpSession {
     }
 
     /// Build a BYE for this stream's own SSRC, to send on hangup, and fold
-    /// its size into the schedule the way any other RTCP packet's would be
-    /// (§6.3.7). Always sends immediately rather than backing off — see
-    /// [`RtpSession::bye_should_back_off`] for when that would not be
-    /// correct.
+    /// its size into the schedule (§6.3.7). Always writes the packet
+    /// immediately — nothing in this crate queues one for later — but
+    /// which bookkeeping applies depends on which of §6.3.7's two branches
+    /// a session this size is in, per [`RtpSession::bye_should_back_off`]:
+    ///
+    /// * Past the fifty-member threshold, bullet one's reset applies —
+    ///   "the participant MUST execute the following algorithm" — done by
+    ///   `IntervalTimer::leaving`: `members`, `senders` and `pmembers`
+    ///   collapse to just this participant.
+    /// * At or below it, this reads the RFC's other branch — "the
+    ///   participant MAY send a BYE packet immediately" — as skipping
+    ///   that reset entirely and transmitting the BYE exactly like any
+    ///   other RTCP packet (bullet three), through
+    ///   `IntervalTimer::sent_bye`: `members` and `senders` are left as
+    ///   they were, since nothing here says a session too small to need
+    ///   the backoff algorithm should also forget who is in it.
+    ///
+    /// Either branch marks the session as leaving. §6.3.4's rule for a
+    /// *received* BYE carves out "the case when an RTCP BYE is to be
+    /// transmitted" without conditioning that on group size, so from here
+    /// on [`RtpSession::rtcp_receive`]'s BYE handling follows §6.3.7
+    /// bullet two instead — a BYE from someone else counts `members` up,
+    /// not down — regardless of which branch this call took.
     ///
     /// # Errors
     /// [`RtcpBuildError`], for a buffer too small.
@@ -893,7 +953,11 @@ impl RtpSession {
             Self::room(out, need, overhead).ok_or(RtcpBuildError::Short { need, got: offered })?;
         let built = compound.write(room)?;
         let written = self.protect_rtcp(out, built)?;
-        self.timer.leaving(now, written, unit_interval);
+        if self.timer.should_back_off_bye() {
+            self.timer.leaving(now, written, unit_interval);
+        } else {
+            self.timer.sent_bye(now, written, unit_interval);
+        }
         Ok(written)
     }
 
@@ -948,6 +1012,24 @@ impl RtpSession {
         // avg_rtcp_size is the numerator of §6.3.1's interval, so anything
         // counted here moves this session's own reporting cadence.
         self.timer.observe(wire);
+        // §6.3.3 counts a source once it is heard from at all, by RTP or
+        // RTCP, and does not require RTP to know who it was: the SSRC an
+        // SR or RR names itself with is the only identifier a recvonly
+        // peer, or a call on hold, ever gives this session, since RTP
+        // never arrives from either to set `inbound.source`. Read before
+        // the loop below so a compound naming the same source in both its
+        // report and its BYE — the common shape [`RtpSession::send_bye`]
+        // itself builds — has the identifier in hand by the time the BYE
+        // is checked, whichever order the two are in.
+        if let Some(reporter) = compound.packets().find_map(|packet| match packet {
+            RtcpPacket::SenderReport(sr) => Some(sr.ssrc()),
+            RtcpPacket::ReceiverReport(rr) => Some(rr.ssrc()),
+            RtcpPacket::Goodbye(_)
+            | RtcpPacket::SourceDescription(_)
+            | RtcpPacket::Other { .. } => None,
+        }) {
+            self.inbound.rtcp_source = Some(reporter);
+        }
         if !self.inbound.member_known {
             self.inbound.member_known = true;
             self.timer.note_member();
@@ -964,7 +1046,15 @@ impl RtpSession {
                 }
                 RtcpPacket::ReceiverReport(rr) => self.note_round_trip(rr.reports(), ntp),
                 RtcpPacket::Goodbye(bye) => {
-                    if bye.sources().any(|ssrc| Some(ssrc) == self.inbound.source) {
+                    // Matched against whichever identifier this session
+                    // actually has for the remote side — `source` when
+                    // RTP set one, `rtcp_source` when only RTCP ever has
+                    // (recvonly, or on hold). Matching `source` alone left
+                    // such a peer's BYE unmatched forever, since RTP was
+                    // never going to teach this session that SSRC.
+                    if bye.sources().any(|ssrc| {
+                        Some(ssrc) == self.inbound.source || Some(ssrc) == self.inbound.rtcp_source
+                    }) {
                         // §6.3.4 removes the member (and sender) table entry
                         // "if present"; a source already marked departed has
                         // no entry left, so a repeated BYE — a retransmission
@@ -975,9 +1065,21 @@ impl RtpSession {
                         // the next report to the instant the repeat arrived.
                         if !self.inbound.departed {
                             self.inbound.departed = true;
-                            self.timer.remove_member(now);
-                            if self.inbound.sender_known {
-                                self.timer.remove_sender();
+                            if self.timer.is_departing() {
+                                // §6.3.4's own removal rule excludes "the
+                                // case when an RTCP BYE is to be
+                                // transmitted": once this session has sent
+                                // its own BYE ([`RtpSession::send_bye`],
+                                // either of its branches), a BYE received
+                                // from someone else no longer shrinks
+                                // `members` — §6.3.7 bullet two counts it
+                                // up instead.
+                                self.timer.note_bye_while_departing();
+                            } else {
+                                self.timer.remove_member(now);
+                                if self.inbound.sender_known {
+                                    self.timer.remove_sender();
+                                }
                             }
                         }
                         goodbye = Some(bye.reason().unwrap_or_default());
@@ -2109,6 +2211,159 @@ mod tests {
             session.next_rtcp_deadline(),
             scheduled,
             "the far end's goodbye removed this participant from its own session"
+        );
+    }
+
+    /// (a) `follow` and `resync` used to leave `member_known`,
+    /// `sender_known` and `departed` untouched, so once a source had
+    /// departed by BYE, this session never counted it as a member or a
+    /// sender again -- not even under a fresh SSRC, the shape a
+    /// re-INVITE or an ICE restart gives a far end that comes back.
+    /// Counting has to follow whichever source is actually being
+    /// received (§6.3.3), not the one that left.
+    #[test]
+    fn a_source_that_returns_under_a_new_ssrc_after_a_bye_is_counted_again() {
+        let quiet = StreamConfig {
+            rtcp_bandwidth: 0.01,
+            ..config()
+        };
+        let mut session = RtpSession::new(&quiet, 0.5);
+        establish(&mut session, 7, addr(PEER));
+
+        let mut incoming = [0_u8; 256];
+        let n = goodbye_packet(&mut incoming, 7, b"restarting");
+        assert_eq!(
+            session.rtcp_receive(&mut incoming[..n], addr(PEER_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Goodbye {
+                reason: b"restarting"
+            }
+        );
+        let Due::Wait(after_bye) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        session.follow(99);
+        establish(&mut session, 99, addr(PEER));
+        let Due::Wait(after_return) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        assert!(
+            after_return > after_bye,
+            "the source that returned under a new SSRC was not counted as \
+             a member again: {after_bye:?} became {after_return:?}"
+        );
+    }
+
+    /// The other side of the same reset: a far end that changes its SSRC
+    /// without a BYE is still the one remote participant a call has, so
+    /// following its new SSRC must not add it to the count a second time.
+    /// Were it added, every change would stretch the report interval.
+    #[test]
+    fn a_source_that_changes_its_ssrc_without_a_bye_is_not_counted_twice() {
+        let quiet = StreamConfig {
+            rtcp_bandwidth: 0.01,
+            ..config()
+        };
+        let mut session = RtpSession::new(&quiet, 0.5);
+        establish(&mut session, 7, addr(PEER));
+        let Due::Wait(before) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        for ssrc in [99, 100, 101] {
+            session.follow(ssrc);
+            establish(&mut session, ssrc, addr(PEER));
+        }
+        let Due::Wait(after) = session.rtcp_due(Duration::ZERO, 0.5) else {
+            panic!("nothing is due at the instant the session opened");
+        };
+
+        assert_eq!(
+            after, before,
+            "three changes of SSRC with no BYE were counted as three more members"
+        );
+    }
+
+    /// (b) a recvonly peer, or a call put on hold, never sends RTP -- so
+    /// `inbound.source` never learns its SSRC -- yet `rtcp_receive`
+    /// already counts it as a member the moment its first report
+    /// arrives. A BYE matched only against `inbound.source` was never
+    /// recognized as that member's departure.
+    #[test]
+    fn a_bye_from_a_source_known_only_through_rtcp_is_still_a_departure() {
+        let mut session = session();
+        assert_eq!(session.remote_ssrc(), None, "nothing has arrived over RTP");
+
+        let mut report = [0_u8; 256];
+        let n = round_trip_report(&mut report, 7);
+        assert_eq!(
+            session.rtcp_receive(&mut report[..n], addr(SIGNALLED_RTCP), Duration::ZERO, 0),
+            RtcpReceived::Report,
+            "the recvonly peer's report is heard, and counts it as a member"
+        );
+
+        let mut incoming = [0_u8; 256];
+        let n = goodbye_packet(&mut incoming, 7, b"never sent a packet");
+        assert_eq!(
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(SIGNALLED_RTCP),
+                Duration::from_millis(1),
+                0
+            ),
+            RtcpReceived::Goodbye {
+                reason: b"never sent a packet"
+            },
+            "a source known only through RTCP still has to be recognized as departed"
+        );
+    }
+
+    /// (c) once this session has sent its own BYE, a BYE received from the
+    /// far end no longer removes it the way §6.3.4 ordinarily would:
+    /// §6.3.4's own text excludes "the case when an RTCP BYE is to be
+    /// transmitted" from the removal it otherwise describes, handing that
+    /// case to §6.3.7 bullet two instead, which counts BYEs up rather
+    /// than down for as long as this participant is leaving.
+    #[test]
+    fn a_bye_received_after_this_session_has_left_grows_membership_rather_than_shrinking_it() {
+        let quiet = StreamConfig {
+            rtcp_bandwidth: 0.01,
+            ..config()
+        };
+        let mut session = RtpSession::new(&quiet, 0.5);
+        establish(&mut session, 7, addr(PEER));
+
+        let mut out = [0_u8; 256];
+        session
+            .send_bye(&mut out, Duration::from_millis(1), b"hanging up", 0.5)
+            .expect("room");
+        let Due::Wait(before) = session.rtcp_due(Duration::from_millis(2), 0.5) else {
+            panic!("nothing is due the instant after hanging up");
+        };
+
+        let mut incoming = [0_u8; 256];
+        let n = goodbye_packet(&mut incoming, 7, b"hanging up too");
+        assert_eq!(
+            session.rtcp_receive(
+                &mut incoming[..n],
+                addr(PEER_RTCP),
+                Duration::from_millis(3),
+                0
+            ),
+            RtcpReceived::Goodbye {
+                reason: b"hanging up too"
+            }
+        );
+
+        let Due::Wait(after) = session.rtcp_due(Duration::from_millis(4), 0.5) else {
+            panic!("nothing is due right after the crossing goodbye");
+        };
+        assert!(
+            after > before,
+            "a bye crossing this session's own should have grown, not \
+             shrunk, the membership the next interval is computed from: \
+             {before:?} became {after:?}"
         );
     }
 

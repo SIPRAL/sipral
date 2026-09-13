@@ -341,9 +341,18 @@ impl Account {
     /// tag and with flow keepalive and flow recovery, none of which exists
     /// here yet; claiming the tag without them would be a promise this stack
     /// does not keep.
+    ///
+    /// Given with or without the angle brackets `+sip.instance` wraps it in:
+    /// one pair is taken off here and `Contact` writes the pair back, so an
+    /// application that copied the value out of a `Contact` does not send it
+    /// bracketed twice.
     #[must_use]
     pub fn instance_id(mut self, urn: &str) -> Self {
-        self.instance_id = Some(Box::from(urn));
+        let bare = urn
+            .strip_prefix('<')
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(urn);
+        self.instance_id = Some(Box::from(bare));
         self
     }
 
@@ -474,11 +483,14 @@ impl Account {
         out.extend_from_slice(bytes.get(cut..).unwrap_or_default());
         out.push(b'>');
         if let Some(ref urn) = self.instance_id {
-            // RFC 3840 §9: the value is a quoted string, and RFC 5626 §4.1
-            // compares it case-sensitively, so it goes out exactly as given
-            out.extend_from_slice(b";+sip.instance=\"");
+            // §4.1: c-p-instance = "+sip.instance" EQUAL
+            //         DQUOTE "<" instance-val ">" DQUOTE — the angle brackets
+            // are part of the grammar, not decoration, because RFC 3840 §9
+            // compares the quoted string case-sensitively and this is the
+            // encapsulation that makes that comparison work
+            out.extend_from_slice(b";+sip.instance=\"<");
             out.extend_from_slice(urn.as_bytes());
-            out.push(b'"');
+            out.extend_from_slice(b">\"");
         }
         if push.is_some_and(|push| push.wakes_itself) {
             // §8.5: the media feature tag has no values
@@ -544,7 +556,20 @@ mod tests {
         assert_eq!(rendered(&account, false), rendered(&account, true));
         assert_eq!(
             rendered(&account, false),
-            "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:1234\""
+            "<sip:alice@192.0.2.1>;+sip.instance=\"<urn:uuid:1234>\""
         );
+    }
+
+    #[test]
+    fn an_instance_given_with_its_brackets_is_not_bracketed_twice() {
+        // an application that copied the value out of a Contact hands it over
+        // bracketed, and RFC 5626 §4.1 writes one pair around it, never two
+        let bracketed = account("sip:alice@192.0.2.1").instance_id("<urn:uuid:1234>");
+        let bare = account("sip:alice@192.0.2.1").instance_id("urn:uuid:1234");
+        assert_eq!(
+            rendered(&bracketed, false),
+            "<sip:alice@192.0.2.1>;+sip.instance=\"<urn:uuid:1234>\""
+        );
+        assert_eq!(rendered(&bracketed, false), rendered(&bare, false));
     }
 }

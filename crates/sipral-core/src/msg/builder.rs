@@ -19,9 +19,12 @@
 //! calls; a builder lives inside one step of a state machine and would only
 //! make the caller allocate twice.
 //!
-//! No value may contain CR or LF. A header value is written on one line, so a
-//! caller that passes a line break would otherwise be injecting a header, or
-//! a body, into a message someone else's data went into.
+//! A header value is written on one line. A fold is the one line break a value
+//! may hold, and it goes out as the single space RFC 3261 §7.3.1 says it
+//! stands for, which is how a value copied from a message that arrived folded
+//! can be written back at all. Any other CR or LF is refused: a caller that
+//! passes one would otherwise be injecting a header, or a body, into a message
+//! someone else's data went into.
 
 use std::sync::Arc;
 
@@ -134,10 +137,7 @@ fn write_header(
     out.extend_from_slice(name.canonical().as_bytes());
     out.extend_from_slice(b": ");
     match value {
-        Value::Bytes(v) => {
-            check(v)?;
-            out.extend_from_slice(v);
-        }
+        Value::Bytes(v) => write_value(out, v)?,
         Value::Number(n) => write_number(out, n),
         Value::NumberThenMethod(n, m) => {
             write_number(out, n);
@@ -145,16 +145,46 @@ fn write_header(
             out.extend_from_slice(m.as_str().as_bytes());
         }
         Value::ToWithTag(v, tag) => {
-            check(v)?;
             if tag.is_empty() || !tag.iter().copied().all(is_token_byte) {
                 return Err(BuildError::IllegalValue("a tag is a token"));
             }
-            out.extend_from_slice(v);
+            write_value(out, v)?;
             out.extend_from_slice(b";tag=");
             out.extend_from_slice(tag);
         }
     }
     out.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
+/// One header value, on one line.
+///
+/// RFC 3261 §7.3.1: "The line break and the whitespace at the beginning of the
+/// next line are treated as a single SP character." A value copied out of a
+/// message that arrived folded — every `Via`, `From`, `To`, `Call-ID` and
+/// `CSeq` of a response, the `To` of an ACK — still holds that line break, so
+/// each fold goes out as the space it stands for. A CR or LF that does not
+/// begin a fold ends the line early instead, and is refused.
+fn write_value(out: &mut Vec<u8>, value: &[u8]) -> Result<(), BuildError> {
+    let mut i = 0;
+    while let Some(&byte) = value.get(i) {
+        if !matches!(byte, b'\r' | b'\n') {
+            out.push(byte);
+            i += 1;
+            continue;
+        }
+        let lf = if byte == b'\r' { i + 1 } else { i };
+        if value.get(lf) != Some(&b'\n') || !matches!(value.get(lf + 1), Some(b' ' | b'\t')) {
+            return Err(BuildError::IllegalValue(
+                "a header value cannot hold CR or LF",
+            ));
+        }
+        i = lf + 1;
+        while matches!(value.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        out.push(b' ');
+    }
     Ok(())
 }
 
@@ -283,7 +313,7 @@ impl<'a> RequestBuilder<'a> {
     /// # Errors
     /// [`BuildError::MissingField`] for any of the six fields §8.1.1 makes
     /// mandatory in a request, and [`BuildError::IllegalValue`] for a value
-    /// with a line break in it.
+    /// with a line break in it that is not a fold.
     pub fn build(self) -> Result<OwnedMessage, BuildError> {
         self.fields.require(HeaderName::Via, "Via")?;
         self.fields
@@ -423,7 +453,7 @@ impl<'a> ResponseBuilder<'a> {
     /// # Errors
     /// [`BuildError::MissingField`] when the request was missing one of the
     /// fields §8.2.6.2 has to copy, and [`BuildError::IllegalValue`] for a
-    /// value with a line break in it.
+    /// value with a line break in it that is not a fold.
     pub fn build(self) -> Result<OwnedMessage, BuildError> {
         self.fields.require(HeaderName::Via, "Via")?;
         self.fields.require(HeaderName::From, "From")?;
@@ -643,6 +673,64 @@ CSeq: 314159 INVITE\r\n\
 Content-Length: 0\r\n\
 \r\n"
         );
+    }
+
+    #[test]
+    fn a_response_to_a_folded_request_writes_each_fold_as_one_space() {
+        // RFC 3261 §7.3.1: "The line break and the whitespace at the beginning
+        // of the next line are treated as a single SP character." Every field
+        // a response copies may arrive that way, and it is still the field
+        let folded = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP\r\n first;branch=z9hG4bK1\r\n\
+Record-Route:\r\n <sip:p1.example.com;lr>\r\n\
+Max-Forwards: 70\r\n\
+From: Alice\r\n\t <sip:alice@example.com>;tag=1928301774\r\n\
+To:\r\n <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159\r\n  INVITE\r\n\
+\r\n";
+        let built = with_request(folded, |m| {
+            ResponseBuilder::for_request(m, StatusCode::OK)
+                .copy_record_route(m)
+                .to_tag(b"a6c85cf")
+                .build()
+                .expect("a response")
+        });
+        assert_eq!(
+            built.as_raw().as_bytes(),
+            b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP first;branch=z9hG4bK1\r\n\
+Record-Route: <sip:p1.example.com;lr>\r\n\
+From: Alice <sip:alice@example.com>;tag=1928301774\r\n\
+To: <sip:bob@example.com>;tag=a6c85cf\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 INVITE\r\n\
+Content-Length: 0\r\n\
+\r\n"
+        );
+
+        // while a line break that does not begin a fold is still not a value
+        for value in [
+            &b"<sip:b@example.com>\rContact: <sip:evil@example.net>"[..],
+            b"<sip:b@example.com>\nContact: <sip:evil@example.net>",
+            b"<sip:b@example.com>\r Contact: <sip:evil@example.net>",
+            b"<sip:b@example.com>\r\n",
+            b"<sip:b@example.com>\r",
+        ] {
+            let built = RequestBuilder::new(Method::Options, b"sip:b@example.com")
+                .via(b"SIP/2.0/UDP h;branch=z9hG4bK1")
+                .max_forwards(70)
+                .from(b"<sip:a@example.com>;tag=1")
+                .to(value)
+                .call_id(b"c")
+                .cseq(1)
+                .build();
+            assert!(
+                matches!(built, Err(BuildError::IllegalValue(_))),
+                "written: {:?}",
+                String::from_utf8_lossy(value)
+            );
+        }
     }
 
     #[test]

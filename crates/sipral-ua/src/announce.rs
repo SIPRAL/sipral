@@ -1127,7 +1127,7 @@ Content-Length: 0\r\n\r\n"
             text(&register, HeaderName::Contact),
             "<sip:alice@192.0.2.1;pn-provider=apns;pn-param=com.example.phone.voip;\
              pn-prid=ZTY4ZDJlMzODE1NmUgKi0K%3D>;\
-             +sip.instance=\"urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6\";+sip.pnsreg"
+             +sip.instance=\"<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>\";+sip.pnsreg"
         );
         deliver(
             &mut agent,
@@ -1150,7 +1150,7 @@ Content-Length: 0\r\n\r\n"
         let ringing = sent(&mut agent);
         assert_eq!(
             text(&ringing, HeaderName::Contact),
-            "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"",
+            "<sip:alice@192.0.2.1>;+sip.instance=\"<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>\"",
             "§4.1 forbids the push identifier anywhere the far end can read it"
         );
     }

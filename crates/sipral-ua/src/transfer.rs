@@ -275,9 +275,14 @@ impl UserAgent {
         replaces.extend_from_slice(b";from-tag=");
         replaces.extend_from_slice(snapshot.local_tag.as_bytes());
 
+        // the target as a Request-URI (§19.1.5), which is what the transferee
+        // will make of it: no URI headers and no method. A dialog's Contact
+        // may carry neither (RFC 3261 Table 1), and one that does anyway would
+        // otherwise swallow the `?Replaces=` below into its last header value
+        let target = snapshot.remote_target.as_request_uri();
         let mut value = Vec::new();
         value.push(b'<');
-        value.extend_from_slice(snapshot.remote_target.as_bytes());
+        value.extend_from_slice(target.as_bytes());
         value.extend_from_slice(b"?Replaces=");
         escape(&replaces, &mut value);
         value.push(b'>');
@@ -834,6 +839,16 @@ fn refer_to(request: &RawMessage<'_>) -> Option<ReferTo> {
     let value = request.header(HeaderName::ReferTo)?;
     let inside = between_angles(value).unwrap_or(value);
     let (uri, replaces) = split_replaces(inside);
+    // The Replaces is unescaped to go onto a header line of the INVITE, so an
+    // escape is how a control byte would get there: a NUL, or a CRLF and a
+    // header of the sender's choosing. RFC 3891 §6.1 makes the value a Call-ID
+    // and token parameters, which hold none, and RFC 3261 §19.1.5 treats a
+    // URI that forms an invalid request as invalid. The whole Refer-To is
+    // refused rather than just the Replaces, which would quietly turn an
+    // attended transfer into a blind one.
+    if replaces.as_deref().is_some_and(holds_a_control_byte) {
+        return None;
+    }
     Some(ReferTo {
         target: Uri::parse(uri).ok()?,
         replaces,
@@ -924,6 +939,14 @@ fn escape(value: &[u8], out: &mut Vec<u8>) {
             }
         }
     }
+}
+
+/// A byte no header value may hold outside a quoted pair: the C0 controls but
+/// the tab LWS allows, and DEL.
+fn holds_a_control_byte(value: &[u8]) -> bool {
+    value
+        .iter()
+        .any(|byte| (*byte < 0x20 && *byte != b'\t') || *byte == 0x7f)
 }
 
 /// And back.

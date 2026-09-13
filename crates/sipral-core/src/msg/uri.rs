@@ -89,6 +89,10 @@ pub enum UriError {
     NotSip,
     /// More than 4 GiB of URI, which [`Uri`] records offsets into.
     TooLong,
+    /// A space, a control byte, or one of `"` `<` `>`, unescaped. RFC 3261
+    /// §19.1.2 has all of them escaped, and each one would end the URI early
+    /// in the line or the brackets it is written back into.
+    IllegalByte,
 }
 
 impl fmt::Display for UriError {
@@ -102,6 +106,7 @@ impl fmt::Display for UriError {
             Self::NotUtf8 => "not UTF-8",
             Self::NotSip => "not a sip: or sips: URI",
             Self::TooLong => "URI too long to keep",
+            Self::IllegalByte => "a space, a control byte, or a quote or angle bracket, unescaped",
         })
     }
 }
@@ -143,6 +148,7 @@ impl<'a> UriRef<'a> {
     /// # Errors
     /// See [`UriError`].
     pub fn parse_str(s: &'a str) -> Result<Self, UriError> {
+        check_bytes(s)?;
         let (scheme, rest) = split_scheme(s)?;
         match scheme {
             UriScheme::Sip | UriScheme::Sips => {
@@ -206,6 +212,27 @@ fn split_scheme(s: &str) -> Result<(UriScheme<'_>, &str), UriError> {
     Ok((classify_scheme(scheme_str), rest))
 }
 
+/// Refuse the bytes that would change the shape of whatever a URI is written
+/// back into (RFC 3261 §19.1.2: "URIs MUST NOT contain unescaped space and
+/// control characters", and RFC 2396's delimiters are escaped too).
+///
+/// Whitespace ends a Request-URI, a control byte or a line break ends a header
+/// line, `<` and `>` are the brackets of a `name-addr`, and `"` opens a quoted
+/// string that runs past the closing bracket. Every URI this stack keeps from
+/// a peer — a remote target, a route, a `Refer-To` target — is written into
+/// another message later, so it is refused here, once, rather than escaped at
+/// each of those places. Bytes the grammar also excludes but that shape
+/// nothing (`#`, `{`, `|`, bytes above 0x7F) are left to the leniency the
+/// field needs.
+fn check_bytes(s: &str) -> Result<(), UriError> {
+    if s.bytes()
+        .any(|b| matches!(b, 0x00..=0x20 | 0x7f | b'"' | b'<' | b'>'))
+    {
+        return Err(UriError::IllegalByte);
+    }
+    Ok(())
+}
+
 fn classify_scheme(s: &str) -> UriScheme<'_> {
     if s.eq_ignore_ascii_case("sip") {
         UriScheme::Sip
@@ -245,6 +272,7 @@ impl<'a> SipUriRef<'a> {
     /// # Errors
     /// See [`UriError`]. A URI of any other scheme is [`UriError::NotSip`].
     pub fn parse_str(s: &'a str) -> Result<Self, UriError> {
+        check_bytes(s)?;
         let (scheme, rest) = split_scheme(s)?;
         match scheme {
             UriScheme::Sip | UriScheme::Sips => Self::parse_after_scheme(scheme, rest),
@@ -703,7 +731,10 @@ impl Uri {
     ///
     /// One simplification, said out loud because it is a deviation: URI header
     /// values are compared as text, not by the per-field rules §20 defines for
-    /// each header.
+    /// each header, and the text keeps its case. Some of those rules ignore
+    /// case and some do not — a `Call-ID`, the user of a URI in `to=` — and
+    /// when the field's own rule is not applied, the answer that never
+    /// matches where that rule would not is the one given.
     #[must_use]
     pub fn equivalent(&self, other: &Self) -> bool {
         match (self.as_uri_ref(), other.as_uri_ref()) {
@@ -800,7 +831,7 @@ fn sip_equivalent(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
 
 fn params_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
     a.params().all(|(name, value)| {
-        match b.params().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        match b.params().find(|(n, _)| names_match(n, name)) {
             // "Any uri-parameter appearing in both URIs must match."
             Some((_, other)) => text_matches(
                 value.unwrap_or_default(),
@@ -808,18 +839,34 @@ fn params_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
                 Case::Insensitive,
             ),
             // "All other uri-parameters appearing in only one URI are ignored."
-            None => !DECISIVE_PARAMS.iter().any(|k| name.eq_ignore_ascii_case(k)),
+            None => !DECISIVE_PARAMS.iter().any(|k| names_match(name, k)),
         }
     })
 }
 
+/// A parameter or header name is escapable like any other part (§25.1
+/// `pname`, `hname`), so `%6Daddr` is `maddr` and has to be found as one.
+fn names_match(a: &str, b: &str) -> bool {
+    text_matches(a, b, Case::Insensitive)
+}
+
 fn headers_match(a: SipUriRef<'_>, b: SipUriRef<'_>) -> bool {
     // "URI header components are never ignored. Any present header component
-    // MUST be present in both URIs and match for the URIs to match."
-    a.headers().all(|(name, value)| {
+    // MUST be present in both URIs and match for the URIs to match." A name
+    // may be given more than once, and fields of one name keep their order
+    // (§7.3.1), so the n-th field of a name is held against the n-th field of
+    // that name in the other URI. Asked both ways, that also makes the counts
+    // agree.
+    a.headers().enumerate().all(|(at, (name, value))| {
+        let nth = a
+            .headers()
+            .take(at)
+            .filter(|(n, _)| names_match(n, name))
+            .count();
         b.headers()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .is_some_and(|(_, other)| text_matches(value, other, Case::Insensitive))
+            .filter(|(n, _)| names_match(n, name))
+            .nth(nth)
+            .is_some_and(|(_, other)| text_matches(value, other, Case::Sensitive))
     })
 }
 
@@ -860,6 +907,10 @@ fn text_matches(a: &str, b: &str, case: Case) -> bool {
 
 /// Undo the escapes that stand for unreserved characters, and write the rest
 /// in one case so that `%2f` and `%2F` compare equal.
+///
+/// A `%` that does not start an escape is the octet `%` and comes out as
+/// `%25`. Copied through bare, it would join whatever a decoded escape puts
+/// after it: `%%33B` would read as `%3B`, the escape of a semicolon.
 fn decode_unreserved(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -880,7 +931,11 @@ fn decode_unreserved(s: &str) -> Vec<u8> {
             i += 3;
             continue;
         }
-        out.push(b);
+        if b == b'%' {
+            out.extend_from_slice(b"%25");
+        } else {
+            out.push(b);
+        }
         i += 1;
     }
     out
@@ -1179,6 +1234,71 @@ mod tests {
     }
 
     #[test]
+    fn a_uri_holds_no_byte_that_would_end_what_it_is_written_into() {
+        // §19.1.2: "URIs MUST NOT contain unescaped space and control
+        // characters", and the delimiters RFC 2396 excludes have to be escaped
+        // too. These are the ones that change the shape of the line a URI is
+        // written back into: whitespace ends a Request-URI, a control byte or
+        // a line break ends the header, '<' and '>' are the brackets of a
+        // name-addr, and '"' opens a quoted string that swallows the rest.
+        for uri in [
+            "sip:carol>;tag=abc@example.com",
+            "sip:a\"b@example.com",
+            "sip:a<b@example.com",
+            "sip:alice@example.com;x=\"",
+            "sip:alice@example.com?subject=a>b",
+            "sip:alice smith@example.com",
+            "sip:alice@example.com;x=a\tb",
+            "sip:alice@example.com;x=a\r\nVia: evil",
+            "sip:null\0byte@example.com",
+            "sip:del\u{7f}@example.com",
+            "tel:+1-201-555-0123;x=>",
+            "urn:service:sos<",
+        ] {
+            assert_eq!(
+                Uri::parse_str(uri).map(|u| u.to_string()),
+                Err(UriError::IllegalByte),
+                "{uri:?}"
+            );
+            assert_eq!(
+                SipUriRef::parse_str(uri).map(|u| u.to_string()),
+                Err(UriError::IllegalByte),
+                "{uri:?}"
+            );
+        }
+        // the escaped forms are the way to carry those bytes, and still parse
+        assert!(Uri::parse_str("sip:a%22b%3C%3E%20%00@example.com").is_ok());
+    }
+
+    #[test]
+    fn whatever_a_uri_accepts_comes_back_whole_from_between_brackets() {
+        // the property the refusal above buys: a URI kept from one message can
+        // be written into another as <uri>;tag=t and read back as the same URI
+        // with the same one parameter
+        let candidates = [
+            "sip:carol>;tag=abc@example.com",
+            "sip:a\"b@example.com;tag=x",
+            "sip:alice@example.com;x=\"",
+            "sip:x<y@example.com",
+            "sip:user;par=u%40example.net@example.com:5060;transport=tcp?to=x",
+            "sip:1_unusual.URI~(to-be!sure)&isn't+it$/crazy?,/;;*:&it+has=1,weird!*pas$wo~d_too.(doesn't-it)@example.com",
+            "sips:[2001:db8::1]:5061;lr",
+            "tel:+1-201-555-0123",
+        ];
+        for text in candidates {
+            let Ok(uri) = Uri::parse_str(text) else {
+                continue;
+            };
+            let written = format!("<{uri}>;tag=t");
+            let read = crate::msg::NameAddrRef::parse(written.as_bytes())
+                .unwrap_or_else(|e| panic!("{written:?} does not read back: {e}"));
+            assert_eq!(read.uri_bytes(), text.as_bytes(), "{written:?}");
+            assert_eq!(read.params().count(), 1, "{written:?}");
+            assert_eq!(read.tag().as_deref(), Some(&b"t"[..]), "{written:?}");
+        }
+    }
+
+    #[test]
     fn not_utf8_is_refused_rather_than_guessed() {
         assert_eq!(UriRef::parse(b"sip:a@\xff\xfe"), Err(UriError::NotUtf8));
     }
@@ -1368,6 +1488,212 @@ mod tests {
         assert!(!owned("sip:a%3Bb@example.com").equivalent(&owned("sip:a;b@example.com")));
         // and case in an escape is not case in the value
         assert!(owned("sip:a%2Fb@example.com").equivalent(&owned("sip:a%2fb@example.com")));
+    }
+
+    #[test]
+    fn a_user_or_a_password_present_in_only_one_uri_never_matches() {
+        // §19.1.4: "A URI omitting the user component will not match a URI
+        // that includes one. A URI omitting the password component will not
+        // match a URI that includes one." And the password is userinfo, so its
+        // case counts.
+        for (a, b, why) in [
+            (
+                "sip:example.com",
+                "sip:alice@example.com",
+                "user in one only",
+            ),
+            (
+                "sip:alice@example.com",
+                "sip:alice:secret@example.com",
+                "password in one only",
+            ),
+            (
+                "sip:alice:secret@example.com",
+                "sip:alice:SECRET@example.com",
+                "password case",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(!a.equivalent(&b), "{why}: {a} vs {b}");
+            assert!(!b.equivalent(&a), "{why}, reversed: {b} vs {a}");
+        }
+        // an escape of an unreserved character is that character there too
+        assert!(
+            owned("sip:alice:%73ecret@example.com")
+                .equivalent(&owned("sip:alice:secret@example.com"))
+        );
+    }
+
+    #[test]
+    fn a_user_ttl_method_or_maddr_parameter_in_only_one_uri_never_matches() {
+        // §19.1.4: "A user, ttl, or method uri-parameter appearing in only one
+        // URI never matches, even if it contains the default value", and "A URI
+        // that includes an maddr parameter will not match a URI that contains
+        // no maddr parameter". The values are the defaults of Table 1 where
+        // there is one, which is the case the rule is written for.
+        let plain = owned("sip:alice@example.com");
+        let matched: Vec<String> = [
+            "sip:alice@example.com;user=ip",
+            "sip:alice@example.com;ttl=1",
+            "sip:alice@example.com;method=INVITE",
+            "sip:alice@example.com;maddr=192.0.2.1",
+        ]
+        .into_iter()
+        .map(owned)
+        .filter(|with| plain.equivalent(with) || with.equivalent(&plain))
+        .map(|with| with.to_string())
+        .collect();
+        assert!(matched.is_empty(), "matched a URI without it: {matched:?}");
+    }
+
+    #[test]
+    fn a_header_named_twice_is_compared_occurrence_by_occurrence() {
+        const TWO_HOPS: &str =
+            "sip:alice@example.com?Route=%3Csip:p1.example.com%3E&Route=%3Csip:p2.example.com%3E";
+        // a URI is equivalent to itself, whatever it carries
+        assert!(owned(TWO_HOPS).equivalent(&owned(TWO_HOPS)), "{TWO_HOPS}");
+
+        for (a, b, why) in [
+            (
+                "sip:alice@example.com?Route=%3Csip:p1.example.com%3E",
+                "sip:alice@example.com?Route=%3Csip:p1.example.com%3E&Route=%3Csip:p1.example.com%3E",
+                "one hop is not the same hop twice",
+            ),
+            (
+                TWO_HOPS,
+                "sip:alice@example.com?Route=%3Csip:p2.example.com%3E&Route=%3Csip:p1.example.com%3E",
+                // §7.3.1: the relative order of fields with one name is data
+                "the same hops the other way round",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(!a.equivalent(&b), "{why}: {a} vs {b}");
+            assert!(!b.equivalent(&a), "{why}, reversed: {b} vs {a}");
+        }
+
+        // while fields of different names may still come in any order
+        let a = owned(
+            "sip:alice@example.com?Route=%3Csip:p1.example.com%3E&subject=x&Route=%3Csip:p2.example.com%3E",
+        );
+        let b = owned(
+            "sip:alice@example.com?subject=x&Route=%3Csip:p1.example.com%3E&Route=%3Csip:p2.example.com%3E",
+        );
+        assert!(a.equivalent(&b), "{a} vs {b}");
+        assert!(b.equivalent(&a), "not symmetric: {b} vs {a}");
+    }
+
+    #[test]
+    fn a_uri_header_value_keeps_its_case() {
+        // §19.1.4 hands URI headers to "the matching rules ... defined for each
+        // header field in Section 20", and several of those are not blind to
+        // case: a Call-ID is "case-sensitive" (§20.8), and a URI in a To has a
+        // userinfo §19.1.4 itself compares with case
+        for (a, b) in [
+            (
+                "sip:alice@example.com?to=sip:Bob%40example.com",
+                "sip:alice@example.com?to=sip:bob%40example.com",
+            ),
+            (
+                "sip:alice@example.com?Call-ID=a84b4c76e66710",
+                "sip:alice@example.com?Call-ID=A84B4C76E66710",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(!a.equivalent(&b), "{a} vs {b}");
+            assert!(!b.equivalent(&a), "reversed: {b} vs {a}");
+        }
+        // the name is still a header field name, which never has case (§7.3.1),
+        // and the digits of an escape are still not the value's case
+        for (a, b) in [
+            (
+                "sip:alice@example.com?Subject=lunch",
+                "sip:alice@example.com?subject=lunch",
+            ),
+            (
+                "sip:alice@example.com?subject=project%2fx",
+                "sip:alice@example.com?subject=project%2Fx",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(a.equivalent(&b), "{a} vs {b}");
+            assert!(b.equivalent(&a), "not symmetric: {b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn a_percent_that_starts_no_escape_is_not_half_of_the_next_one() {
+        // "%%33B" is a lone '%', then %33 (the digit 3), then B. Decoding the
+        // %33 must not glue the lone '%' to "3B" and produce the escape of a
+        // semicolon, which is a different user name
+        let stray = owned("sip:a%%33B@example.com");
+        let semicolon = owned("sip:a%3B@example.com");
+        assert!(!stray.equivalent(&semicolon), "{stray} vs {semicolon}");
+        assert!(!semicolon.equivalent(&stray), "{semicolon} vs {stray}");
+        // the lone '%' is the octet it is, which is what %25 writes
+        assert!(stray.equivalent(&owned("sip:a%253B@example.com")));
+    }
+
+    #[test]
+    fn an_escaped_parameter_or_header_name_is_the_name_it_spells() {
+        // §19.1.4: "Characters other than those in the reserved set ... are
+        // equivalent to their "%" HEX HEX encoding", and a name is made of
+        // them. %6D is 'm', so this URI carries an maddr the other one does
+        // not, which is a URI that routes somewhere else.
+        let plain = owned("sip:alice@example.com");
+        let routed = owned("sip:alice@example.com;%6Daddr=198.51.100.66");
+        assert!(!plain.equivalent(&routed), "{plain} vs {routed}");
+        assert!(!routed.equivalent(&plain), "{routed} vs {plain}");
+
+        // and the same name spelled two ways is one parameter, compared once
+        for (a, b) in [
+            (
+                "sip:alice@example.com;%74ransport=tcp",
+                "sip:alice@example.com;transport=tcp",
+            ),
+            (
+                "sip:alice@example.com?%73ubject=lunch",
+                "sip:alice@example.com?subject=lunch",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(a.equivalent(&b), "{a} vs {b}");
+            assert!(b.equivalent(&a), "not symmetric: {b} vs {a}");
+        }
+        assert!(
+            !owned("sip:alice@example.com;%74ransport=tcp")
+                .equivalent(&owned("sip:alice@example.com;transport=udp"))
+        );
+    }
+
+    #[test]
+    fn an_escape_in_the_host_is_not_the_character_it_stands_for() {
+        // §19.1.2: "Current implementations MUST NOT attempt to improve
+        // robustness by treating received escaped characters in the host
+        // component as literally equivalent to their unescaped counterpart."
+        // The host grammar has no '%', so the URI does not get as far as a
+        // comparison.
+        assert_eq!(
+            Uri::parse_str("sip:alice@ex%61mple.com").map(|u| u.to_string()),
+            Err(UriError::BadHost)
+        );
+    }
+
+    #[test]
+    fn rfc_5954_compares_address_literals_by_value() {
+        // RFC 5954 §4.2 rewrites the host rule of §19.1.4: textual forms that
+        // "yield the same binary IP address" match, and these are its vectors
+        for (a, b) in [
+            ("sip:bob@[::ffff:192.0.2.128]", "sip:bob@[::ffff:c000:280]"),
+            ("sip:bob@[2001:db8::9:1]", "sip:bob@[2001:db8::9:01]"),
+            (
+                "sip:bob@[0:0:0:0:0:FFFF:129.144.52.38]",
+                "sip:bob@[::FFFF:129.144.52.38]",
+            ),
+        ] {
+            let (a, b) = (owned(a), owned(b));
+            assert!(a.equivalent(&b), "{a} vs {b}");
+            assert!(b.equivalent(&a), "not symmetric: {b} vs {a}");
+        }
     }
 
     #[test]

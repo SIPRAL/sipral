@@ -258,6 +258,16 @@ contain `;` and `?` unescaped (RFC 3261 §25.1 `user-unreserved`). In
 `user;par=u%40example.net` and the host is `example.com`; splitting on the
 first `;` gets both wrong. That URI is in the corpus for exactly this reason.
 
+What a URI may not hold is refused before any of that: a space, a control
+byte, `"`, `<` or `>`, unescaped (`UriError::IllegalByte`). RFC 3261 §19.1.2
+has them escaped, and every URI kept from a peer — a remote target, a route, a
+`Refer-To` target — is written into another message later, where each of those
+bytes ends something early: the Request-URI, the header line, the brackets of
+a `name-addr`, or the quoted string a `"` opens. Refusing them once at the
+parser is what lets every writer put a kept URI between `<` and `>` as it is.
+Other bytes the grammar excludes but that shape nothing, such as `#` or
+non-ASCII, are still accepted.
+
 An address is the URI plus what surrounds it, and the angle brackets are the
 part that carries meaning:
 
@@ -368,6 +378,13 @@ the same way: a `Call-ID` is "case-sensitive and ... simply compared
 byte-by-byte" (§20.8), while a tag is a token and "Tokens are always
 case-insensitive" (§7.3.1). `Tag` therefore hashes on one case, so a peer that
 echoes our tag back in different case still lands in the same dialog.
+
+A tag has to be a token to be read at all: `RawMessage::from` and
+`RawMessage::to` refuse one that is not as a malformed field. The dialog writes
+the remote tag back after `;tag=` on every request it sends, so a quoted value
+holding a `;`, or an unquoted one running on to a comma, would come back out as
+parameters or an address the peer added. A quoted token, `tag="a1"`, is not
+the grammar either, but it reads as the one value it holds and is kept.
 
 ```rust
 pub enum Method<'a> {
@@ -485,8 +502,12 @@ then whatever else the caller added in the order it was added, then
 `Content-Type` and `Content-Length` around the body. `Content-Length` is
 always written, since a stream transport has no other way to find the end.
 
-No value may contain CR or LF: a header value goes out on one line, so a
-caller's data with a line break in it would be writing headers of its own.
+A header value goes out on one line. The one line break a value may hold is a
+fold, and it is written as the single space RFC 3261 §7.3.1 says it is: a
+response copies `Via`, `From`, `To`, `Call-ID` and `CSeq` as they arrived, and
+a request is free to have folded any of them. Any other CR or LF is refused,
+because a caller's data with a line break in it would be writing headers of
+its own.
 `build()` parses what it wrote and hands back the failure rather than
 shipping a message the far end will reject.
 

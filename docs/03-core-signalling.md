@@ -22,6 +22,10 @@ Two levels of strictness, chosen by the caller:
   understood. Unknown headers are preserved as opaque and passed through in
   responses where the RFC requires. Real deployments emit malformed messages
   daily, and a stack that rejects them loses calls a competitor completes.
+  One thing is refused here too: a CR in the head of a message that neither
+  ends a line nor begins a fold. It has no reading, and a request carrying one
+  could never be answered, because the response copies the fields it sits in
+  and no header line can be written with it.
 - **Strict** (for our own output, and for the torture corpus). Reject anything
   not conforming.
 

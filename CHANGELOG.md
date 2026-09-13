@@ -12,6 +12,60 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **A CR that neither ends a line nor begins a fold makes a message malformed,
+  in both parse modes.** It has no reading in RFC 3261 §25.1, and it could never
+  be written back: `From: <sip:bob@example.com>;x=a\rb;tag=1` on an INVITE made a
+  call that could not be answered, refused or hung up, whose server transaction
+  waited for good, and the same byte in a REFER's `Referred-By` got a 202 for a
+  transfer that then placed nothing. The parser now answers
+  `ParseError::BadHeaderLine`, or `BadStartLine` on the first line.
+
+- **A request whose copied fields arrived folded can be answered.** Every
+  response copies `Via`, `From`, `To`, `Call-ID` and `CSeq` from the request,
+  and the builder refused the line break a fold leaves in them (RFC 3261
+  §7.3.1), so no response to such a request could be written: an INVITE got no
+  100, could not be answered, refused or hung up, and its server transaction
+  waited for good. A fold now goes out as the one space it stands for; any other
+  CR or LF is still refused.
+
+- **A REFER whose `Replaces` unescapes to a control byte draws a 400.** The
+  `Replaces` in a `Refer-To` is unescaped to go onto the INVITE sent to the
+  transfer target, so `?Replaces=call%00x...` put a NUL into that header, and
+  `%0D%0AContact:%20...` a line break the builder refused only after the REFER
+  had been accepted with a 202, leaving a transfer that could never be placed.
+  The Refer-To is now refused up front (RFC 3515 §2.4.2).
+
+- **A `From` or `To` whose tag is not a token is a malformed field.** The tag
+  was unquoted and kept as it came, and a dialog writes it back after `;tag=`
+  on every request: `tag="alice1;maddr=198.51.100.66"` put a `maddr` the peer
+  chose into the `To` of the BYE, and `tag=bob1, <sip:mallory@example.net>`
+  put a second address into it. `RawMessage::from` and `RawMessage::to` now
+  refuse such a tag (RFC 3261 §25.1 `tag-param`); a quoted token still reads.
+
+- **A URI holding an unescaped space, control byte, `"`, `<` or `>` is refused
+  (`UriError::IllegalByte`).** Kept from a peer and written into the next
+  message, each one broke out of where it was put: a REFER whose
+  `Refer-To: <sip:carol>;tag=abc@example.com>` made the transferee's INVITE
+  carry a `To` tag the referrer chose, and an unbracketed
+  `From: sip:a"b@example.com;tag=alice1` left the dialog with no remote tag and
+  every BYE addressed `To: <sip:a"b@example.com;tag=alice1>`.
+
+- **`Uri::equivalent` no longer matches a URI whose `maddr` is spelled with an
+  escape.** Parameter and URI header names were compared as written, so
+  `;%6Daddr=198.51.100.66` was an unknown parameter and ignored, and the URI
+  compared equal to the same address without it (RFC 3261 §19.1.4 makes
+  `%6D` the letter `m`).
+
+- **`Uri::equivalent` no longer reads a lone `%` as the start of the escape
+  after it.** `sip:a%%33B@example.com` decoded `%33` to `3`, the lone `%`
+  joined it, and the user compared equal to `sip:a%3B@example.com`, whose
+  user holds a semicolon. A `%` that starts no escape is now the octet `%25`.
+
+- **`Uri::equivalent` compares URI header values with their case.**
+  `?to=sip:Bob%40example.com` matched `?to=sip:bob%40example.com` and
+  `?Call-ID=abc` matched `?Call-ID=ABC`, although RFC 3261 §20 compares both
+  with case; header names still ignore it.
+
 - **`sdp::parse` had no bound on a session description's size, `m=` count or
   attribute lists — the message parser has had one since it was written, this
   did not.** A body arrives inside a message a proxy may have grown on the
@@ -181,6 +235,33 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   from the call's own seeded generator before the session exists — the same
   generator every later report already drew from.
 
+- **A far end that came back under a new SSRC after saying goodbye was never
+  counted again, and a peer heard only through RTCP could say goodbye and
+  never be removed.** (a) `RtpSession::follow` and `resync` left
+  `member_known`, `sender_known` and `departed` set the way the abandoned
+  source had left them, so a re-INVITE or an ICE restart that brought the far
+  end back under a fresh SSRC found this session already claiming to count it
+  and never added it again (RFC 3550 §6.3.3: counting has to follow whichever
+  source is actually being received). Both methods now reset all three, along
+  with the new `rtcp_source` below. (b) `rtcp_receive`'s BYE handling matched
+  a departure only against `Inbound::source`, which only RTP ever sets, even
+  though the same method already counts a source as a member the moment its
+  first RTCP report arrives — so a recvonly peer, or a call on hold, could
+  never have its BYE recognized. A BYE is now matched against
+  `Inbound::rtcp_source` too, the SSRC an SR or RR names itself with. (c)
+  `send_bye` called `IntervalTimer::leaving` — §6.3.7 bullet one's reset to a
+  single member — regardless of group size, although the RFC lets a session
+  at or below fifty members send its BYE immediately without resetting
+  anything (bullet three, "MAY send a BYE packet immediately"); that branch
+  is now `IntervalTimer::sent_bye`, which leaves `members` and `senders`
+  alone, and `leaving` is reserved for a session actually past
+  `bye_should_back_off`'s fifty-member threshold. Either branch now marks the
+  session as departing, because §6.3.4's rule for a *received* BYE excludes
+  "the case when an RTCP BYE is to be transmitted" without conditioning that
+  on group size: once this session has sent its own goodbye, a BYE from the
+  far end no longer removes it — §6.3.7 bullet two counts it up instead
+  (`IntervalTimer::note_bye_while_departing`).
+
 - **A master key identifier whose value does not fit the width its line gives
   it is refused rather than truncated.** `Mki::new` checked only the width, so
   `|1066:1` built an identifier that went out as the single octet `0x2a` and
@@ -197,6 +278,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   index and, under `UNENCRYPTED_SRTCP`, wrote the tag over the packet's own
   header and reported success. Such a length is now refused as `TooShort`
   before anything is added to it, as `protect_rtp` already refused it.
+
+- **An attended transfer names its own dialog whatever the target's `Contact`
+  carried.** `transfer_to` appended `?Replaces=` to the target's `Contact` URI
+  as it came, so one that already held URI headers turned ours into part of
+  its last header value, and the transferee read the Replaces the target had
+  written instead. The target now goes into `Refer-To` as a Request-URI, with
+  no URI headers and no `method` (RFC 3261 Table 1 allows neither in a
+  dialog's `Contact`).
+
+- **A URI whose headers name one field twice is equivalent to itself again.**
+  `Uri::equivalent` held every URI header against the first of that name in
+  the other URI, so `?Route=a&Route=b` failed against itself, and `?Route=a`
+  matched `?Route=a&Route=a`. The n-th field of a name is now held against the
+  n-th of that name, in order (RFC 3261 §7.3.1).
 
 - **A session timer that could not be refreshed yet stayed due at the instant
   that had already fired, forever.** `send_refresh` returned without moving
@@ -647,6 +742,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   every later transfer on it was refused here before anything was sent. The
   application is now told the transfer did not happen, and the call can be
   transferred again.
+
+- **`+sip.instance` went out without the angle brackets RFC 5626 §4.1
+  requires around the URN.** `Account::contact_with` wrote
+  `+sip.instance="urn:..."` on every REGISTER, INVITE and response carrying
+  the parameter, instead of the `+sip.instance="<urn:...>"` the grammar
+  (`DQUOTE "<" instance-val ">" DQUOTE`) and RFC 3840 §9's case-sensitive
+  comparison both need; a strict registrar could refuse the registration or
+  never grant a GRUU. The reader that matches a registrar's echoed value
+  against this instance already tolerated both forms and needed no change.
 
 ### Added
 

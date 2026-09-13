@@ -12,13 +12,31 @@ use super::error::HeaderError;
 use super::events::{EventRef, SubscriptionStateRef};
 use super::header::HeaderName;
 use super::lex::{CommaList, trim};
-use super::method::{Method, StatusCode};
+use super::method::{Method, StatusCode, is_token_byte};
 use super::route::RouteIter;
 use super::scalar::{CSeq, Digits, RAck, SipDate, digits, rseq};
 use super::span::{HeaderSlot, Span};
 use super::tokens::{MediaTypeRef, TokenIter};
 use super::uri::{UriError, UriRef};
 use super::via::ViaRef;
+
+/// A `From` or `To` whose tag is a token, or the field is malformed.
+///
+/// §25.1: `tag-param = "tag" EQUAL token`. The tag read here is the one a
+/// dialog is named by and the one it writes back after `;tag=` on every request
+/// it sends, so it has to be something that goes back out as one parameter
+/// value. [`NameAddrRef::tag`] undoes quoting, which keeps `tag="a1"` readable
+/// as `a1`; a quoted value holding a `;`, an unquoted one running on to a
+/// comma, or an empty one would each be written back as parameters or an
+/// address the peer added.
+fn tagged_by_a_token(addr: NameAddrRef<'_>) -> Result<NameAddrRef<'_>, HeaderError> {
+    match addr.tag() {
+        Some(tag) if tag.is_empty() || !tag.iter().copied().all(is_token_byte) => {
+            Err(HeaderError::Malformed("a tag is a token"))
+        }
+        _ => Ok(addr),
+    }
+}
 
 /// Whether a message is a request or a response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,17 +239,18 @@ impl<'a> RawMessage<'a> {
     /// caller.
     ///
     /// # Errors
-    /// See [`NameAddrRef::parse`] and [`RawMessage::single`].
+    /// See [`NameAddrRef::parse`] and [`RawMessage::single`], and
+    /// [`HeaderError::Malformed`] for a `tag` that is not a token.
     pub fn from(&self) -> Result<NameAddrRef<'a>, HeaderError> {
-        NameAddrRef::parse(self.single(HeaderName::From)?)
+        tagged_by_a_token(NameAddrRef::parse(self.single(HeaderName::From)?)?)
     }
 
     /// `To` (RFC 3261 §20.39). One value, for the same reason as `From`.
     ///
     /// # Errors
-    /// See [`NameAddrRef::parse`] and [`RawMessage::single`].
+    /// As [`RawMessage::from`].
     pub fn to(&self) -> Result<NameAddrRef<'a>, HeaderError> {
-        NameAddrRef::parse(self.single(HeaderName::To)?)
+        tagged_by_a_token(NameAddrRef::parse(self.single(HeaderName::To)?)?)
     }
 
     /// `Contact` (RFC 3261 §20.10): the addresses, or the `*` wildcard.

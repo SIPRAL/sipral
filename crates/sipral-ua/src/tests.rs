@@ -299,7 +299,7 @@ fn an_instance_id_rides_on_the_contact_and_nothing_else_does() {
     let contact = String::from_utf8_lossy(&contact);
     assert_eq!(
         contact,
-        "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:f81d4fae-7ced-11d0-a765-00a0c91e6bf6\""
+        "<sip:alice@192.0.2.1>;+sip.instance=\"<urn:uuid:f81d4fae-7ced-11d0-a765-00a0c91e6bf6>\""
     );
     assert!(!contact.contains("reg-id"), "outbound is not claimed here");
 }
@@ -506,7 +506,7 @@ const PUBLIC_GRUU: &str = "sip:alice@example.com;gr=urn:uuid:f81d4fae-7dec-11d0-
 const TEMPORARY_GRUU: &str = "sip:tgruu.7hs==jd7vnzga5w7fajsc7-ajd6fabz0f8g5@example.com;gr";
 /// The `Contact` an account with no GRUU to use writes on a dialog.
 const CONFIGURED: &str =
-    "<sip:alice@192.0.2.1>;+sip.instance=\"urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"";
+    "<sip:alice@192.0.2.1>;+sip.instance=\"<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>\"";
 /// A two-hop service route with a fold in the middle of it (RFC 3608 §6.4.1),
 /// and two associated identities, one of them a telephone number (RFC 7315).
 const SERVICES: &str = "Service-Route: <sip:p2.example.com;lr>,\r\n <sip:hsp.example.com;lr>\r\n ;role=home\r\n\
@@ -666,6 +666,31 @@ fn an_instance_is_matched_by_the_rules_of_its_urn_and_not_byte_for_byte() {
         None,
         "the rest of a URN outside a namespace understood here is compared exactly"
     );
+}
+
+#[test]
+fn an_instance_echoed_without_the_angle_brackets_the_rfc_asks_for_is_still_matched() {
+    // RFC 3840 §9 wraps the URN in "<" and ">" inside the quoted string, but a
+    // registrar that echoes back what a non-conforming peer sent — or what it
+    // received before this stack wrote the brackets itself — must not cost a
+    // UA its own GRUU over a detail the far end got wrong
+    let t0 = Instant::now();
+    let mut agent = self::agent(t0);
+    let id = agent.add_account(account().instance_id(INSTANCE));
+    agent.register(id, t0).expect("the REGISTER goes");
+    let request = sent(&mut agent);
+    let ok = reply(
+        &request,
+        200,
+        "OK",
+        &format!(
+            "Contact: <sip:alice@192.0.2.1>;pub-gruu=\"{PUBLIC_GRUU}\"\
+             ;+sip.instance=\"{INSTANCE}\";expires=3600\r\n"
+        ),
+    );
+    deliver(&mut agent, &ok, t0);
+    let info = registered_info(&mut agent).expect("the binding stands");
+    assert_eq!(info.public_gruu().map(Uri::as_str), Some(PUBLIC_GRUU));
 }
 
 #[test]
@@ -5176,6 +5201,59 @@ fn an_attended_transfer_names_the_dialog_it_wants_replaced() {
 }
 
 #[test]
+fn an_attended_transfer_names_its_own_dialog_whatever_the_target_contact_carried() {
+    // RFC 3261 Table 1 allows no URI headers in a dialog's Contact, and a
+    // receiver "SHOULD ignore" them. Written through into the Refer-To they
+    // are not ignored: the `?Replaces=` added after them becomes part of the
+    // last header's value, so the transferee reads the Replaces the target
+    // wrote into its own Contact instead of the one naming this dialog.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (first, _) = call_up(&mut agent, id, t0);
+    let second = agent
+        .call(id, &outgoing(), t0)
+        .expect("the second INVITE goes");
+    let invite = sent(&mut agent);
+    let answer = String::from_utf8_lossy(&answered(&invite, 200, "OK", "desk", Some(ANSWER)))
+        .replace(
+            "Contact: <sip:bob@192.0.2.9>",
+            "Contact: <sip:bob@192.0.2.9;method=BYE?Replaces=other%3Bto-tag%3Dx%3Bfrom-tag%3Dy>",
+        );
+    deliver(&mut agent, answer.as_bytes(), t0);
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    agent
+        .transfer_to(first, second, t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    let refer_to = header(&refer, HeaderName::ReferTo);
+    let addr = sipral_core::msg::NameAddrRef::parse(&refer_to).expect("a Refer-To");
+    let target = addr.uri().sip().expect("a SIP target");
+    let headers: Vec<(&str, &str)> = target.headers().collect();
+    let written = String::from_utf8_lossy(&refer_to);
+    assert_eq!(headers.len(), 1, "one URI header, the Replaces: {written}");
+    let (name, value) = headers.first().copied().unwrap_or_default();
+    assert_eq!(name, "Replaces", "{written}");
+    let replaces =
+        String::from_utf8_lossy(&sipral_core::msg::unescape(value.as_bytes())).into_owned();
+    let call_id = String::from_utf8_lossy(&header(&ack, HeaderName::CallId)).into_owned();
+    assert_eq!(
+        replaces,
+        format!(
+            "{call_id};to-tag={};from-tag={}",
+            tag_of(&ack, HeaderName::To),
+            tag_of(&ack, HeaderName::From)
+        ),
+        "{written}"
+    );
+    // and a method parameter, which a Contact cannot carry either, is not
+    // passed on as the method the transferee should use
+    assert!(!target.has_param("method"), "{written}");
+}
+
+#[test]
 fn a_refer_that_arrives_is_the_applications_to_take_or_refuse() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
@@ -5286,6 +5364,218 @@ fn a_refer_with_the_wrong_number_of_targets_is_a_bad_request() {
         t0,
     );
     assert!(sent(&mut agent).starts_with(b"SIP/2.0 400 "));
+}
+
+#[test]
+fn a_refer_to_whose_target_would_break_out_of_its_brackets_is_a_bad_request() {
+    // The target of a REFER is written into the INVITE the transfer places, as
+    // `To: <target>`. A '>' inside it closes those brackets early: this one
+    // would reach the third party as `To: <sip:carol>;tag=abc@example.com>`,
+    // an out-of-dialog INVITE carrying a To tag the referrer chose. RFC 3261
+    // §19.1.2 does not let a URI hold the byte unescaped, and 2.4.2 of RFC 3515
+    // answers a Refer-To that cannot be used with a 400.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = call_arriving(&mut agent, &incoming_invite("ref4", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "ref4ack", 1), t0);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &plus(
+            &in_dialog(&ok, "REFER", "ref4refer", 2),
+            "Refer-To: <sip:carol>;tag=abc@example.com>\r\n",
+        ),
+        t0,
+    );
+    assert!(sent(&mut agent).starts_with(b"SIP/2.0 400 "));
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. })),
+        "nothing is offered to the application"
+    );
+}
+
+#[test]
+fn a_replaces_that_unescapes_to_a_control_byte_makes_the_refer_to_a_bad_request() {
+    // The Replaces in a Refer-To is escaped inside the URI and unescaped to go
+    // onto the INVITE the transfer places, so an escape is how a control byte
+    // reaches a header line this end writes to a third party. RFC 3891 §6.1
+    // makes the value a Call-ID and token parameters, neither of which can
+    // hold one, and RFC 3261 §19.1.5 has a URI that forms an invalid request
+    // treated as invalid rather than sent. RFC 3515 2.4.2 answers a Refer-To
+    // that cannot be acted on with a 400.
+    let t0 = Instant::now();
+    let mut accepted: Vec<&str> = Vec::new();
+    for (n, escaped) in [
+        "call%00x%3Bto-tag%3Da%3Bfrom-tag%3Db",
+        "call%3Bto-tag%3Da%3Bfrom-tag%3Db%0D%0AContact:%20%3Csip:mallory@example.net%3E",
+        "call%3Bto-tag%3Da%01%3Bfrom-tag%3Db",
+        "call%3Bto-tag%3Da%3Bfrom-tag%3Db%7F",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut agent = agent(t0);
+        agent.add_account(account());
+        let branch = format!("rep{n}");
+        let call = call_arriving(&mut agent, &incoming_invite(&branch, Some(OFFER)), t0);
+        agent
+            .answer(call, Some(Arc::from(ANSWER)), t0)
+            .expect("200 goes");
+        let ok = sent(&mut agent);
+        deliver(
+            &mut agent,
+            &in_dialog(&ok, "ACK", &format!("{branch}ack"), 1),
+            t0,
+        );
+        events(&mut agent);
+
+        deliver(
+            &mut agent,
+            &plus(
+                &in_dialog(&ok, "REFER", &format!("{branch}refer"), 2),
+                &format!("Refer-To: <sip:carol@example.com?Replaces={escaped}>\r\n"),
+            ),
+            t0,
+        );
+        let refused = transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 400 "));
+        let offered = events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. }));
+        if !refused || offered {
+            accepted.push(escaped);
+        }
+    }
+    assert!(accepted.is_empty(), "taken as a transfer: {accepted:#?}");
+}
+
+#[test]
+fn an_invite_whose_fields_arrived_folded_is_answered() {
+    // RFC 3261 §7.3.1 lets any field value continue on the next line, and
+    // §8.2.6.2 has every response copy the request's Via, From, To, Call-ID and
+    // CSeq. Copied with the fold's line break still in them, not one response
+    // could be written: no 100, no 200, not even the refusal hanging up sends,
+    // and the INVITE server transaction waited for an answer that never came.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let invite = String::from_utf8_lossy(&incoming_invite("fold1", Some(OFFER)))
+        .replace(
+            "Via: SIP/2.0/UDP 192.0.2.9:5060;",
+            "Via: SIP/2.0/UDP\r\n 192.0.2.9:5060;",
+        )
+        .replace(
+            "From: Bob <sip:bob@example.com>;tag=bobtag",
+            "From: Bob\r\n <sip:bob@example.com>;tag=bobtag",
+        )
+        .replace(
+            "To: Alice <sip:alice@example.com>",
+            "To: Alice\r\n\t<sip:alice@example.com>",
+        )
+        .replace("Call-ID: incoming-fold1", "Call-ID:\r\n incoming-fold1")
+        .replace("CSeq: 1 INVITE", "CSeq: 1\r\n  INVITE");
+    deliver(&mut agent, invite.as_bytes(), t0);
+    let trying = transmits(&mut agent);
+    assert!(
+        trying
+            .iter()
+            .any(|bytes| bytes.starts_with(b"SIP/2.0 100 ")),
+        "no 100 Trying for a folded INVITE"
+    );
+    let call = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("the 200 can be written");
+    let ok = sent(&mut agent);
+    assert!(ok.starts_with(b"SIP/2.0 200 "));
+    // and each field it copied is the request's, with the fold as one space
+    assert_eq!(text(&ok, HeaderName::CallId), "incoming-fold1");
+    assert_eq!(text(&ok, HeaderName::CSeq), "1 INVITE");
+    assert!(
+        text(&ok, HeaderName::From).starts_with("Bob <sip:bob@example.com>;tag=bobtag"),
+        "{}",
+        text(&ok, HeaderName::From)
+    );
+    assert_eq!(
+        tag_of(&ok, HeaderName::From),
+        "bobtag",
+        "the peer's tag reads back"
+    );
+}
+
+#[test]
+fn a_message_holding_a_lone_cr_leaves_nothing_waiting_on_an_answer() {
+    // A CR that neither ends a line nor begins a fold used to be taken in and
+    // then could never be written back. An INVITE carrying one in its From
+    // became a call that could not be answered, refused or hung up; a REFER
+    // carrying one in its Referred-By, which RFC 3892 §2.2 copies onto the
+    // INVITE the transfer places, was answered 202 and then placed nothing.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let lone_cr = |agent: &mut UserAgent, bytes: &[u8]| {
+        agent.receive(
+            Input::Datagram {
+                transport: UDP,
+                remote: registrar(),
+                local: local(),
+                data: bytes,
+            },
+            t0,
+        )
+    };
+    let invite = String::from_utf8_lossy(&incoming_invite("lonecr1", Some(OFFER))).replace(
+        "From: Bob <sip:bob@example.com>;tag=bobtag",
+        "From: Bob <sip:bob@example.com>;x=a\rb;tag=bobtag",
+    );
+    assert!(
+        lone_cr(&mut agent, invite.as_bytes()).is_err(),
+        "an INVITE with a lone CR is not a well formed datagram"
+    );
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::IncomingCall { .. })),
+        "a call nothing can be written for was offered"
+    );
+    transmits(&mut agent);
+
+    let call = call_arriving(&mut agent, &incoming_invite("lonecr2", Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "lonecr2ack", 1), t0);
+    events(&mut agent);
+    let refer = plus(
+        &in_dialog(&ok, "REFER", "lonecr2refer", 2),
+        "Refer-To: <sip:carol@example.com>\r\nReferred-By: <sip:alice@example.com>;x=a\rb\r\n",
+    );
+    assert!(
+        lone_cr(&mut agent, &refer).is_err(),
+        "a REFER with a lone CR is not a well formed datagram"
+    );
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. })),
+        "a transfer that could never be placed was offered"
+    );
 }
 
 #[test]

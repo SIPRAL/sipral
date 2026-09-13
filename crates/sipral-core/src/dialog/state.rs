@@ -712,6 +712,93 @@ Content-Length: 0\r\n\
     }
 
     #[test]
+    fn a_remote_uri_that_would_not_survive_its_brackets_makes_no_dialog() {
+        // A '"' in the user part of an addr-spec without brackets opens a
+        // quoted string in the field's lexer, which hides ";tag=alice1" from
+        // the field's parameters: the tag is read as part of the URI, the
+        // dialog gets no remote tag, and every request it sends says
+        // To: <sip:a"b@example.com;tag=alice1>.
+        let request = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
+Max-Forwards: 70\r\n\
+From: sip:a\"b@example.com;tag=alice1\r\n\
+To: Bob <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 INVITE\r\n\
+Contact: <sip:alice@192.0.2.1>\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let made = with(request, |request| {
+            Dialog::from_request(request, b"bob1", StatusCode::new(200).expect("200"), false)
+        });
+        match made {
+            Err(DialogError::Field(_)) => (),
+            Ok(mut dialog) => {
+                let bye = dialog.next_request(Method::Bye).expect("a BYE");
+                panic!(
+                    "a dialog was made, and its BYE says To: {}",
+                    String::from_utf8_lossy(bye.to())
+                );
+            }
+            Err(other) => panic!("refused, but not for its From: {other}"),
+        }
+    }
+
+    #[test]
+    fn a_tag_that_would_not_go_back_out_as_one_parameter_makes_no_dialog() {
+        // A tag is a token (§25.1 `tag-param`), and the dialog writes the
+        // remote one back after `;tag=` on every request it sends. A quoted
+        // value is unquoted on the way in, so one holding a ';' comes back out
+        // as a parameter the peer chose; an unquoted one runs to the next ';'
+        // and can carry a comma, which is a second address in a To.
+        let quoted_maddr = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
+Max-Forwards: 70\r\n\
+From: Alice <sip:alice@example.com>;tag=\"alice1;maddr=198.51.100.66\"\r\n\
+To: Bob <sip:bob@example.com>\r\n\
+Call-ID: a84b4c76e66710\r\n\
+CSeq: 314159 INVITE\r\n\
+Contact: <sip:alice@192.0.2.1>\r\n\
+Content-Length: 0\r\n\
+\r\n";
+        let made = with(quoted_maddr, |request| {
+            Dialog::from_request(request, b"bob1", StatusCode::new(200).expect("200"), false)
+        });
+        match made {
+            Err(DialogError::Field(_)) => (),
+            Ok(mut dialog) => {
+                let bye = dialog.next_request(Method::Bye).expect("a BYE");
+                panic!(
+                    "callee: a dialog was made, and its BYE says To: {}",
+                    String::from_utf8_lossy(bye.to())
+                );
+            }
+            Err(other) => panic!("callee: refused, but not for its From: {other}"),
+        }
+
+        let two_addresses = String::from_utf8_lossy(&ok()).replace(
+            "To: Bob <sip:bob@example.com>;tag=bob1",
+            "To: Bob <sip:bob@example.com>;tag=bob1, <sip:mallory@example.net>",
+        );
+        let made = with(INVITE, |request| {
+            with(two_addresses.as_bytes(), |response| {
+                Dialog::from_response(request, response, false)
+            })
+        });
+        match made {
+            Err(DialogError::Field(_)) => (),
+            Ok(mut dialog) => {
+                let bye = dialog.next_request(Method::Bye).expect("a BYE");
+                panic!(
+                    "caller: a dialog was made, and its BYE says To: {}",
+                    String::from_utf8_lossy(bye.to())
+                );
+            }
+            Err(other) => panic!("caller: refused, but not for its To: {other}"),
+        }
+    }
+
+    #[test]
     fn the_secure_flag_wants_both_tls_and_a_sips_request_uri() {
         let over_sips = b"INVITE sips:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/TLS 192.0.2.1:5061;branch=z9hG4bK1\r\n\
