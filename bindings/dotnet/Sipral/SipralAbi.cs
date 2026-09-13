@@ -1283,6 +1283,38 @@ public struct SipralStackSettings
 }
 
 /// <summary>
+/// One header field an application hands over: a name and a value, UTF-8,
+/// neither NUL-terminated.
+///
+/// Always an element of an array whose length travels beside it, which is
+/// why it carries no `size`: an array is strided by the length of its
+/// element, so a member appended here would move every element after the
+/// first. A header field is a name and a value, and this never grows.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralHeader
+{
+    /// <summary>
+    /// The field name, `X-Conversation-Id`. A compact form is the field it
+    /// abbreviates.
+    /// </summary>
+    public IntPtr Name;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint NameLen;
+    /// <summary>
+    /// The value, as it goes on the line after the colon. Null or empty
+    /// for a field with an empty value.
+    /// </summary>
+    public IntPtr Value;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ValueLen;
+}
+
+/// <summary>
 /// What an account is configured with.
 ///
 /// Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
@@ -1381,6 +1413,22 @@ public struct SipralAccountConfig
     /// is where the effective value is read back, not here.
     /// </summary>
     public ulong ExpiresSeconds;
+    /// <summary>
+    /// Header fields to put on every REGISTER this account sends, in the
+    /// order given, or null for none.
+    ///
+    /// Checked when the account is added, as `sipral_call_config_t::headers`
+    /// is, against what the stack writes on a REGISTER: `Expires` is the
+    /// stack's there, because it is `expires_seconds`, and `Supported` is the
+    /// application's, because a registration asking for a GRUU has to say
+    /// so. Refused for an account with no registrar, which sends no REGISTER
+    /// to put them on.
+    /// </summary>
+    public IntPtr Headers;
+    /// <summary>
+    /// How many elements `headers` has.
+    /// </summary>
+    public nuint HeadersLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -1457,6 +1505,22 @@ public struct SipralCallConfig
     /// How many bytes of it.
     /// </summary>
     public nuint MediaAddressLen;
+    /// <summary>
+    /// Header fields to put on the INVITE, in the order given, or null for
+    /// none.
+    ///
+    /// Each is checked before anything is built: the name a token, the value
+    /// one line of text, and not a field the stack writes on a call itself.
+    /// Those are listed in `docs/04-ua.md` with the reason for each, and
+    /// `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
+    /// set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
+    /// and no call.
+    /// </summary>
+    public IntPtr Headers;
+    /// <summary>
+    /// How many elements `headers` has.
+    /// </summary>
+    public nuint HeadersLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2153,6 +2217,99 @@ public struct SipralEvent
     }
 }
 
+/// <summary>
+/// A list of SipralHeader as the array the library reads, for the length of
+/// one call. Every piece of text in every element is copied into one
+/// buffer, the records point into it, and both are pinned until Dispose,
+/// which the wrapper that made this runs as the call returns or throws.
+/// The count the library is given is the list's own, and an empty piece
+/// of text crosses as a null pointer with a length of zero.
+/// </summary>
+internal sealed class SipralHeaderArray : IDisposable
+{
+    private GCHandle bytesPinned;
+    private GCHandle recordsPinned;
+
+    internal SipralHeaderArray((string Name, string Value)[]? list)
+    {
+        if (list is null || list.Length == 0)
+        {
+            return;
+        }
+
+        var parts = new byte[checked(list.Length * 2)][];
+        for (var index = 0; index < list.Length; index++)
+        {
+            parts[index * 2 + 0] = Encoding.UTF8.GetBytes(list[index].Name);
+            parts[index * 2 + 1] = Encoding.UTF8.GetBytes(list[index].Value);
+        }
+
+        var total = 0;
+        foreach (var part in parts)
+        {
+            total = checked(total + part.Length);
+        }
+
+        var bytes = new byte[total];
+        var records = new SipralHeader[list.Length];
+        var at = 0;
+        for (var index = 0; index < list.Length; index++)
+        {
+            Buffer.BlockCopy(parts[index * 2 + 0], 0, bytes, at, parts[index * 2 + 0].Length);
+            records[index].NameLen = (nuint)parts[index * 2 + 0].Length;
+            at += parts[index * 2 + 0].Length;
+            Buffer.BlockCopy(parts[index * 2 + 1], 0, bytes, at, parts[index * 2 + 1].Length);
+            records[index].ValueLen = (nuint)parts[index * 2 + 1].Length;
+            at += parts[index * 2 + 1].Length;
+        }
+
+        bytesPinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            recordsPinned = GCHandle.Alloc(records, GCHandleType.Pinned);
+        }
+        catch
+        {
+            bytesPinned.Free();
+            throw;
+        }
+
+        var start = bytesPinned.AddrOfPinnedObject();
+        at = 0;
+        for (var index = 0; index < records.Length; index++)
+        {
+            records[index].Name = records[index].NameLen == 0 ? IntPtr.Zero : start + at;
+            at += (int)records[index].NameLen;
+            records[index].Value = records[index].ValueLen == 0 ? IntPtr.Zero : start + at;
+            at += (int)records[index].ValueLen;
+        }
+
+        Address = recordsPinned.AddrOfPinnedObject();
+        Count = (nuint)records.Length;
+    }
+
+    /// <summary>Where the first record is, or zero for no list.</summary>
+    internal IntPtr Address { get; }
+
+    /// <summary>How many records there are, which is how long the list
+    /// is.</summary>
+    internal nuint Count { get; }
+
+    /// <summary>Let go of the buffer and the records.</summary>
+    public void Dispose()
+    {
+        if (recordsPinned.IsAllocated)
+        {
+            recordsPinned.Free();
+        }
+
+        if (bytesPinned.IsAllocated)
+        {
+            bytesPinned.Free();
+        }
+    }
+}
+
 /// <summary>What a call across the boundary answered, when it did not
 /// answer Ok. The message is the calling thread's last error, read
 /// before anything else on this thread could replace it.</summary>
@@ -2171,7 +2328,9 @@ public sealed class SipralException : Exception
 /// <summary>
 /// The ABI as the runtime calls it. Every pointer is written as an
 /// array or as in, ref or out, so nothing here needs an unsafe block
-/// and the runtime pins what it passes.
+/// and the runtime pins what it passes. An array of records is the
+/// one IntPtr: the wrapper pins the records and the text they point
+/// at itself, for the length of the call.
 /// </summary>
 internal static class NativeMethods
 {
@@ -2247,6 +2406,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_hangup(ulong stack, ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_set_headers(ulong stack, ulong call, IntPtr headers, nuint headersLen);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_hold(ulong stack, ulong call, ulong nowMs);
@@ -2355,6 +2517,18 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern IntPtr sipral_event_kind_name(uint kind);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_message_header_count(byte[] message, nuint messageLen, sbyte[] name, nuint nameLen, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_message_header(byte[] message, nuint messageLen, sbyte[] name, nuint nameLen, nuint index, out nuint offset, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_message_header_element_count(byte[] message, nuint messageLen, sbyte[] name, nuint nameLen, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_message_header_element(byte[] message, nuint messageLen, sbyte[] name, nuint nameLen, nuint index, out nuint offset, out nuint len);
 
 }
 
@@ -2809,9 +2983,13 @@ public static class Sipral
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_account` at one `sipral_handle_t`.
     /// </summary>
-    public static ulong AccountAdd(ulong stack, in SipralAccountConfig config)
+    public static ulong AccountAdd(ulong stack, in SipralAccountConfig config, (string Name, string Value)[]? configHeaders)
     {
-        Check(NativeMethods.sipral_account_add(stack, in config, out var account));
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_account_add(stack, in configValue, out var account));
         return account;
     }
 
@@ -2905,9 +3083,13 @@ public static class Sipral
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_call` at one `sipral_handle_t`.
     /// </summary>
-    public static ulong CallPlace(ulong stack, ulong account, in SipralCallConfig config, ulong nowMs)
+    public static ulong CallPlace(ulong stack, ulong account, in SipralCallConfig config, (string Name, string Value)[]? configHeaders, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_place(stack, account, in config, out var call, nowMs));
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_call_place(stack, account, in configValue, out var call, nowMs));
         return call;
     }
 
@@ -2996,6 +3178,38 @@ public static class Sipral
     public static void CallHangup(ulong stack, ulong call, ulong nowMs)
     {
         Check(NativeMethods.sipral_call_hangup(stack, call, nowMs));
+    }
+
+    /// <summary>
+    /// Set the header fields that go on what this call sends at the
+    /// application's request, from now until they are set again.
+    ///
+    /// They go on the 180 or 183 from `sipral_call_ring`, the 200 from
+    /// `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
+    /// `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
+    /// turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
+    /// `sipral_call_resume` send. Kept rather than spent on the first of those,
+    /// so that a field set before ringing is on the 200 as well. Never on a
+    /// CANCEL, which a proxy answers and replaces with its own, and never on
+    /// what the stack sends by itself: a session refresh, or the BYE for a 2xx
+    /// that was never acknowledged or for a fork that lost.
+    ///
+    /// Replaces what was set before, whole, and a `headers_len` of zero takes
+    /// every field off. Each field is checked first, as it is on
+    /// `sipral_call_config_t::headers`, and a refusal names the element, keeps
+    /// none of the new fields and leaves the old ones in place. Nothing is
+    /// sent.
+    ///
+    /// Safety
+    ///
+    /// `headers` must be null with `headers_len` zero, or readable for
+    /// `headers_len` elements, each with a name and a value readable for the
+    /// lengths beside them.
+    /// </summary>
+    public static void CallSetHeaders(ulong stack, ulong call, (string Name, string Value)[] headers)
+    {
+        using var headersArray = new SipralHeaderArray(headers);
+        Check(NativeMethods.sipral_call_set_headers(stack, call, headersArray.Address, headersArray.Count));
     }
 
     /// <summary>
@@ -3146,9 +3360,13 @@ public static class Sipral
     ///
     /// As sipral_call_place.
     /// </summary>
-    public static ulong CallConsult(ulong stack, ulong call, in SipralCallConfig config, ulong nowMs)
+    public static ulong CallConsult(ulong stack, ulong call, in SipralCallConfig config, (string Name, string Value)[]? configHeaders, ulong nowMs)
     {
-        Check(NativeMethods.sipral_call_consult(stack, call, in config, out var consultation, nowMs));
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_call_consult(stack, call, in configValue, out var consultation, nowMs));
         return consultation;
     }
 
@@ -3760,5 +3978,106 @@ public static class Sipral
     /// </summary>
     public static string? EventKindName(uint kind) =>
         Marshal.PtrToStringUTF8(NativeMethods.sipral_event_kind_name(kind));
+
+    /// <summary>
+    /// How many lines a header field is on, in a whole SIP message.
+    ///
+    /// The message is any SIP message in bytes: the one an event carries in
+    /// `sipral_event_t::message`, or one the application came by some other
+    /// way. The name is matched the way the parser matches it, without regard to
+    /// case, and a compact form and its long form are one field (RFC 3261
+    /// §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
+    /// written `i:`. A field that is not there is a count of zero, not a
+    /// failure.
+    ///
+    /// Safety
+    ///
+    /// `message` must be readable for `message_len` bytes and `name` for
+    /// `name_len`, and `out_count` must point at one `size_t`.
+    /// </summary>
+    public static nuint MessageHeaderCount(byte[] message, string name)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes(name);
+        var nameSigned = new sbyte[nameBytes.Length];
+        Buffer.BlockCopy(nameBytes, 0, nameSigned, 0, nameBytes.Length);
+        Check(NativeMethods.sipral_message_header_count(message, (nuint)message.Length, nameSigned, (nuint)nameSigned.Length, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// Where one line of a header field is, in a whole SIP message.
+    ///
+    /// `index` counts from zero in the order the lines arrived, and has to be
+    /// below what `sipral_message_header_count` says for the same name: past it
+    /// is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
+    /// where the value sits inside `message`, trimmed at both ends and otherwise
+    /// as it arrived, a line fold included. An offset rather than a pointer,
+    /// because the bytes are the caller's, and a binding that copied them across
+    /// the boundary holds its own copy.
+    ///
+    /// One line of a field whose value is a comma-separated list may hold
+    /// several values; `sipral_message_header_element` reaches those.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header_count`, with `out_offset` and `out_len` each
+    /// pointing at one `size_t`.
+    /// </summary>
+    public static (nuint Offset, nuint Len) MessageHeader(byte[] message, string name, nuint index)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes(name);
+        var nameSigned = new sbyte[nameBytes.Length];
+        Buffer.BlockCopy(nameBytes, 0, nameSigned, 0, nameBytes.Length);
+        Check(NativeMethods.sipral_message_header(message, (nuint)message.Length, nameSigned, (nuint)nameSigned.Length, index, out var offset, out var len));
+        return (offset, len);
+    }
+
+    /// <summary>
+    /// How many values a field whose value is a comma-separated list holds,
+    /// across every line it is on.
+    ///
+    /// RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
+    /// and the same two values on two lines one and the same message, and a
+    /// proxy is free to turn either into the other. So this counts values
+    /// rather than lines, split at every comma that is not inside quotes or
+    /// angle brackets. Otherwise as `sipral_message_header_count`.
+    ///
+    /// Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
+    /// `Contact`, `Supported`. Any other is split at a comma its value holds as
+    /// text, like the one in a `Date` or the ones between the parameters of a
+    /// challenge, and `sipral_message_header_count` is the call for it.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header_count`.
+    /// </summary>
+    public static nuint MessageHeaderElementCount(byte[] message, string name)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes(name);
+        var nameSigned = new sbyte[nameBytes.Length];
+        Buffer.BlockCopy(nameBytes, 0, nameSigned, 0, nameBytes.Length);
+        Check(NativeMethods.sipral_message_header_element_count(message, (nuint)message.Length, nameSigned, (nuint)nameSigned.Length, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// Where one value of a list field is, across every line the field is on.
+    ///
+    /// `index` counts values in the order they arrived, and has to be below what
+    /// `sipral_message_header_element_count` says for the same name. Otherwise
+    /// as `sipral_message_header`.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header`.
+    /// </summary>
+    public static (nuint Offset, nuint Len) MessageHeaderElement(byte[] message, string name, nuint index)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes(name);
+        var nameSigned = new sbyte[nameBytes.Length];
+        Buffer.BlockCopy(nameBytes, 0, nameSigned, 0, nameBytes.Length);
+        Check(NativeMethods.sipral_message_header_element(message, (nuint)message.Length, nameSigned, (nuint)nameSigned.Length, index, out var offset, out var len));
+        return (offset, len);
+    }
 
 }

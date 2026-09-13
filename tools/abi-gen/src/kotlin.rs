@@ -41,8 +41,9 @@ use sipral_ffi::abi::{
 
 use crate::c;
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
-    plain_named, read_all, record_named, roles, screaming, snake, upper_camel, without_prefix,
+    Base, Element, Int, Linked, Read, Refused, Role, Text, Type, Writable, counts_records, element,
+    elements, functions, linked, lower_camel, plain_named, read_all, record_named, roles,
+    screaming, snake, unprintable, upper_camel, without_prefix,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -260,6 +261,16 @@ enum Part<'a> {
         /// The length that follows it.
         len: &'a Read<'a>,
     },
+    /// A pointer to records and the `_len` after it: a list of the class
+    /// the element is built from, and null for a null pointer.
+    Records {
+        /// The pointer.
+        data: &'a Read<'a>,
+        /// The length that follows it.
+        len: &'a Read<'a>,
+        /// What each element is.
+        element: Element,
+    },
     /// The callback and the user pointer after it, which together are one
     /// listener.
     Listener {
@@ -294,10 +305,10 @@ fn user_pointer() -> Type {
 /// them.
 ///
 /// The conventions are the ones a parameter list follows, read off a struct:
-/// a pointer followed by its `_len` is one buffer, and the callback followed
-/// by a `*mut c_void` is one listener. Anything else that is not a number is
-/// refused, naming the member, rather than crossing as an address nobody on
-/// the Kotlin side has a way to make.
+/// a pointer followed by its `_len` is one buffer, or a list when it points
+/// at records, and the callback followed by a `*mut c_void` is one listener.
+/// Anything else that is not a number is refused, naming the member, rather
+/// than crossing as an address nobody on the Kotlin side has a way to make.
 fn parts<'a>(
     surface: &Surface,
     record: &Record,
@@ -308,6 +319,15 @@ fn parts<'a>(
     let mut index = first;
     while let Some(field) = fields.get(index) {
         let next = fields.get(index + 1);
+        if let Some(len) = next.filter(|after| counts_records(surface, field, after)) {
+            out.push(Part::Records {
+                data: field,
+                len,
+                element: element(surface, field, "Kotlin")?,
+            });
+            index += 2;
+            continue;
+        }
         let refuse = |why: &str| {
             Refused::about(&format!(
                 "{}::{} {why}, which a Kotlin class has no field for; give it one in \
@@ -378,6 +398,23 @@ fn not_handed(record: &Record, field: &Read<'_>) -> Refused {
          has nothing to do with one; give it a shape in tools/abi-gen/src/kotlin.rs",
         record.name, field.member.name
     ))
+}
+
+/// A struct handed to a listener holds an array of records, which nothing here
+/// reads back.
+fn records_not_handed(record: &Record, field: &Read<'_>) -> Refused {
+    Refused::about(&format!(
+        "{}::{} is an array of records inside a struct the library hands to a listener, and \
+         this back end builds such arrays but reads none back; give it a shape in \
+         tools/abi-gen/src/kotlin.rs",
+        record.name, field.member.name
+    ))
+}
+
+/// The two arguments a list crosses JNI in, spelled from `base` the Kotlin
+/// way: the packed text, and the length of each piece of it.
+fn packed_names(base: &str) -> (String, String) {
+    (beside(base, "Bytes"), beside(base, "Lengths"))
 }
 
 /// The record a struct going in names.
@@ -679,6 +716,7 @@ fn handed(
                     c_passed: name.to_owned(),
                 });
             }
+            Part::Records { data, .. } => return Err(records_not_handed(record, data)),
             Part::Listener { callback, .. } => return Err(not_handed(record, callback)),
             Part::Arm(field) => left_out.push(field.member.name.to_owned()),
         }
@@ -787,8 +825,33 @@ struct Crossing {
     shim: Vec<(String, String)>,
 }
 
+impl Crossing {
+    /// A list, which crosses as two arguments: every piece of text in it
+    /// packed into one `ByteArray`, and the length of each piece in a
+    /// `LongArray`. `base` is the name the Kotlin side derives both from, and
+    /// `from` the declaration it stands for.
+    fn packed(&mut self, base: &str, from: &str) {
+        let (bytes, lengths) = packed_names(base);
+        for (kotlin, suffix, kotlin_type, jni_type) in [
+            (bytes, "Bytes", "ByteArray?", "jbyteArray"),
+            (lengths, "Lengths", "LongArray?", "jlongArray"),
+        ] {
+            let c_name = format!("{base}{suffix}");
+            self.kotlin.push(format!("{kotlin}: {kotlin_type}"));
+            self.jni.push(format!("{jni_type} {c_name}"));
+            self.names.push((kotlin, from.to_owned()));
+            self.shim.push((c_name, from.to_owned()));
+        }
+    }
+}
+
 fn crossing(surface: &Surface, role: &Role<'_>) -> Result<Crossing, Refused> {
     let (kotlin_type, jni_type, read, kotlin_name, c_name) = match role {
+        Role::Records { data, .. } => {
+            let mut out = Crossing::default();
+            out.packed(&lower_camel(data.member.name), data.member.name);
+            return Ok(out);
+        }
         Role::Plain(read) => (
             plain_kotlin(&read.ty).to_owned(),
             plain_jni(&read.ty).to_owned(),
@@ -835,6 +898,13 @@ fn fields_crossing(surface: &Surface, read: &Read<'_>) -> Result<Crossing, Refus
     let mut out = Crossing::default();
     for part in parts(surface, record, &fields, 1)? {
         let (member, kotlin_type, jni_type) = match part {
+            Part::Records { data, .. } => {
+                out.packed(
+                    &flat(read, data),
+                    &format!("{}::{}", record.name, data.member.name),
+                );
+                continue;
+            }
             Part::Plain(field) => (
                 field,
                 plain_kotlin(&field.ty).to_owned(),
@@ -945,6 +1015,10 @@ fn built_classes(surface: &Surface) -> Result<String, Refused> {
                     };
                     (data, format!("val {}: {ty}? = null", held(data)))
                 }
+                Part::Records { data, element, .. } => (
+                    data,
+                    format!("val {}: List<{}>? = null", held(data), element.record.name),
+                ),
                 Part::Listener {
                     callback, alias, ..
                 } => (
@@ -961,6 +1035,94 @@ fn built_classes(surface: &Surface) -> Result<String, Refused> {
             let _ = writeln!(out, "    {declared},");
         }
         out.push_str(")\n\n");
+    }
+    Ok(out)
+}
+
+/// The locals `packed` writes, beside one per piece of text.
+const PACKED_LOCALS: &[(&str, &str)] = &[
+    ("list", "the list packed is handed"),
+    ("run", "the bytes packed writes every piece of text into"),
+    ("lengths", "the length of each piece of text"),
+    ("part", "which length packed writes next"),
+    ("element", "the element packed is reading"),
+];
+
+/// The local `packed` holds one piece of text's bytes in.
+fn text_bytes(text: &Text) -> String {
+    beside(&lower_camel(text.data.member.name), "Bytes")
+}
+
+/// For each record handed over as the element of an array: the class a caller
+/// builds one from, and `packed`, which turns a list of them into the two
+/// arguments the JNI shim takes.
+///
+/// A list crosses packed rather than as an array of objects the shim walks.
+/// Walking one would mean a class and a field looked up for every member, and
+/// a local reference made for every string, which a list of any length turns
+/// into more than the JVM promises a native call; packed, it is two arrays
+/// the shim fetches the way it fetches every other buffer, and one loop that
+/// checks every length before it makes a pointer from it.
+fn element_classes(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::new();
+    for element in elements(surface, "Kotlin")? {
+        let record = element.record;
+        let pieces = element.texts.len();
+        let mut about = lines(surface, record.doc);
+        about.push(String::new());
+        for line in [
+            " Handed over in a list, which the JNI shim makes into a C array for the",
+            " length of the call. `packed` copies every piece of text into one array of",
+            " UTF-8 first, and the shim checks every length against that array before",
+            " it points into it. An empty piece of text crosses as a null pointer with",
+            " a length of zero.",
+        ] {
+            about.push(line.to_owned());
+        }
+        doc(&mut out, "", &about);
+        let _ = writeln!(out, "class {}(", record.name);
+        for text in &element.texts {
+            doc(&mut out, "    ", &lines(surface, text.data.member.doc));
+            let _ = writeln!(out, "    val {}: String,", held(&text.data));
+        }
+        let _ = write!(
+            out,
+            ") {{\n\
+             \x20   internal companion object {{\n\
+             \x20       /**\n\
+             \x20        * A list of them as the JNI shim takes it: every piece of text in\n\
+             \x20        * every element, in order, as one run of UTF-8, and how many bytes\n\
+             \x20        * each took, {pieces} to an element. A null list is two nulls, which the\n\
+             \x20        * shim reads as no elements.\n\
+             \x20        */\n\
+             \x20       fun packed(list: List<{name}>?): Pair<ByteArray?, LongArray?> {{\n\
+             \x20           if (list == null) {{\n\
+             \x20               return Pair(null, null)\n\
+             \x20           }}\n\
+             \x20           val run = java.io.ByteArrayOutputStream()\n\
+             \x20           val lengths = LongArray(Math.multiplyExact(list.size, {pieces}))\n\
+             \x20           var part = 0\n\
+             \x20           for (element in list) {{\n",
+            name = record.name,
+        );
+        for text in &element.texts {
+            let bytes = text_bytes(text);
+            let _ = write!(
+                out,
+                "                val {bytes} = element.{}.toByteArray(Charsets.UTF_8)\n\
+                 \x20               run.write({bytes}, 0, {bytes}.size)\n\
+                 \x20               lengths[part] = {bytes}.size.toLong()\n\
+                 \x20               part += 1\n",
+                held(&text.data)
+            );
+        }
+        out.push_str(
+            "            }\n\
+             \x20           return Pair(run.toByteArray(), lengths)\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\n",
+        );
     }
     Ok(out)
 }
@@ -1203,6 +1365,13 @@ fn hand_over(
                 arguments.push(format!("{held}: {}", array_of(&data.ty)));
                 passed.push(held);
             }
+            Role::Records { data, .. } => {
+                let built = list_argument(surface, data)?;
+                arguments.push(built.argument);
+                passed.extend(built.passed);
+                prologue.push_str(&built.prologue);
+                names.extend(built.names);
+            }
             Role::Config(read) => {
                 let built = built_argument(surface, read)?;
                 arguments.push(built.argument);
@@ -1268,6 +1437,29 @@ struct BuiltArgument {
     kept: Vec<(String, String)>,
 }
 
+/// What a list going in adds to the wrapper around a call: the list it takes,
+/// and the line that packs it into the two arguments the shim takes.
+fn list_argument(surface: &Surface, data: &Read<'_>) -> Result<BuiltArgument, Refused> {
+    let element = element(surface, data, "Kotlin")?;
+    let held = held(data);
+    let (bytes, lengths) = packed_names(&lower_camel(data.member.name));
+    let names = [&held, &bytes, &lengths]
+        .into_iter()
+        .map(|name| Named::new("the wrapper", name.clone(), data.member.name))
+        .collect();
+    Ok(BuiltArgument {
+        argument: format!("{held}: List<{}>", element.record.name),
+        prologue: format!(
+            "        val ({bytes}, {lengths}) = {}.packed({held})\n",
+            element.record.name
+        ),
+        passed: vec![bytes, lengths],
+        keeping: String::new(),
+        names,
+        kept: Vec::new(),
+    })
+}
+
 fn built_argument(surface: &Surface, read: &Read<'_>) -> Result<BuiltArgument, Refused> {
     let record = config_record(surface, read)?;
     let whole = held(read);
@@ -1298,6 +1490,22 @@ fn built_argument(surface: &Surface, read: &Read<'_>) -> Result<BuiltArgument, R
                 out.passed.push(local);
             }
             Part::Buffer { data, .. } => out.passed.push(format!("{whole}.{}", held(data))),
+            Part::Records { data, element, .. } => {
+                let (bytes, lengths) = packed_names(&flat(read, data));
+                let from = format!("{}::{}", record.name, data.member.name);
+                for name in [&bytes, &lengths] {
+                    out.names
+                        .push(Named::new("the wrapper", name.clone(), from.clone()));
+                }
+                let _ = writeln!(
+                    out.prologue,
+                    "        val ({bytes}, {lengths}) = {}.packed({whole}.{})",
+                    element.record.name,
+                    held(data)
+                );
+                out.passed.push(bytes);
+                out.passed.push(lengths);
+            }
             Part::Listener {
                 callback, alias, ..
             } => {
@@ -1541,6 +1749,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(&enumerations(surface));
     out.push_str(&data_classes(surface)?);
+    out.push_str(&element_classes(surface)?);
     out.push_str(&built_classes(surface)?);
     out.push_str(&listeners(surface)?);
 
@@ -1654,6 +1863,11 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 struct Around {
     passed: Vec<String>,
     fetches: String,
+    /// Every list made into an array, written after every fetch: making one
+    /// can leave an exception pending, and no JNI call that fetches may be
+    /// made after that. Empty when the call takes no list, and then the call
+    /// is made unconditionally, as it always was.
+    prepares: String,
     releases: String,
     writes: String,
     /// Every identifier the shim writes in the C function's own scope. C has
@@ -1698,6 +1912,38 @@ impl Around {
         self.passed
             .push(format!("({}){pointer}", c::spell(&data.ty)));
         self.passed.push(format!("(size_t){size}"));
+    }
+
+    /// One list, made into the array the library reads out of the two
+    /// arguments it crossed as, and let go of again after the call. What comes
+    /// back is the array and its count, which is the list's own.
+    fn records(&mut self, base: &str, element: &Element, from: &str) -> (String, String) {
+        let (make, release) = element_helpers(element.record);
+        let pinned = format!("{base}_pinned");
+        let array = format!("{base}_array");
+        let count = format!("{base}_count");
+        for name in [&pinned, &array, &count] {
+            self.names
+                .push(Named::new("the shim", name.clone(), from.to_owned()));
+        }
+        self.names.push(Named::new(
+            "the shim",
+            "ready".to_owned(),
+            "whether every list this shim was handed made an array",
+        ));
+        let _ = write!(
+            self.prepares,
+            "    jbyte *{pinned} = NULL;\n\
+             \x20   {} *{array} = NULL;\n\
+             \x20   size_t {count} = 0;\n\
+             \x20   ready = ready && {make}(env, {base}Bytes, {base}Lengths, &{pinned}, &{array}, &{count});\n",
+            c::named(element.record.name)
+        );
+        let _ = writeln!(
+            self.releases,
+            "    {release}(env, {base}Bytes, {pinned}, {array});"
+        );
+        (array, count)
     }
 
     /// One value written back, which crosses in a `long[]` of one.
@@ -1796,6 +2042,15 @@ impl Around {
                         len.member.name
                     );
                 }
+                Part::Records { data, len, element } => {
+                    let from = format!("{}::{}", record.name, data.member.name);
+                    let (array, count) = self.records(&flat(read, data), &element, &from);
+                    let _ = write!(
+                        self.prepares,
+                        "    {value}.{} = {array};\n    {value}.{} = {count};\n",
+                        data.member.name, len.member.name
+                    );
+                }
                 Part::Listener {
                     callback,
                     user_data,
@@ -1832,6 +2087,12 @@ fn around(surface: &Surface, parts_of_call: &[Role<'_>]) -> Result<Around, Refus
                     .push(format!("({}){}", c::spell(&read.ty), c_held(read)));
             }
             Role::Buffer { data, .. } | Role::Fill { data, .. } => out.array(data),
+            Role::Records { data, .. } => {
+                let element = element(surface, data, "Kotlin")?;
+                let (array, count) = out.records(&c_held(data), &element, data.member.name);
+                out.passed.push(array);
+                out.passed.push(count);
+            }
             Role::Config(read) => out.built(surface, read)?,
             Role::Shared(read) => {
                 out.passed.push(format!(
@@ -1907,32 +2168,251 @@ fn implementation(
     let Around {
         passed,
         fetches,
+        prepares,
         releases,
         writes,
         names: _,
     } = around(surface, &parts_of_call)?;
     out.push_str(&fetches);
+    let call = format!("{}({})", function.name, passed.join(", "));
     if answers_text {
-        let _ = writeln!(
-            out,
-            "    const char *text = {}({});",
-            function.name,
-            passed.join(", ")
-        );
+        let _ = writeln!(out, "    const char *text = {call};");
         out.push_str(&releases);
         out.push_str("    return text ? (*env)->NewStringUTF(env, text) : NULL;\n}\n\n");
         return Ok(out);
     }
+    if prepares.is_empty() {
+        let _ = writeln!(out, "    sipral_status_t status = {call};");
+        out.push_str(&releases);
+        out.push_str(&writes);
+        out.push_str("    return (jint)status;\n}\n\n");
+        return Ok(out);
+    }
+    // A list that does not make an array leaves an exception pending, and
+    // then neither the call nor anything that writes back may be made; what
+    // was fetched is released either way, which JNI allows with one pending
+    out.push_str("    int ready = 1;\n");
+    out.push_str(&prepares);
     let _ = writeln!(
         out,
-        "    sipral_status_t status = {}({});",
-        function.name,
-        passed.join(", ")
+        "    /* -1 is no status the library answers with, and it is never read: a list\n\
+         \x20    * that did not make an array left an exception pending, and the JVM\n\
+         \x20    * throws that instead */\n\
+         \x20   sipral_status_t status = -1;\n\
+         \x20   if (ready) {{\n\
+         \x20       status = {call};\n\
+         \x20   }}"
     );
     out.push_str(&releases);
-    out.push_str(&writes);
+    if !writes.is_empty() {
+        out.push_str("    if (ready) {\n");
+        for line in writes.lines() {
+            let _ = writeln!(out, "    {line}");
+        }
+        out.push_str("    }\n");
+    }
     out.push_str("    return (jint)status;\n}\n\n");
     Ok(out)
+}
+
+/// The C functions that make a list of an element into the array the library
+/// reads and let go of it again: `jni_header_array` and `jni_header_release`
+/// for `SipralHeader`.
+fn element_helpers(record: &Record) -> (String, String) {
+    let name = snake(record.name);
+    let stem = name.strip_prefix("sipral_").unwrap_or(&name);
+    (format!("jni_{stem}_array"), format!("jni_{stem}_release"))
+}
+
+/// The one function every list helper refuses through.
+const REFUSE: &str = "jni_refuse";
+
+/// The locals the function that makes a list into an array writes, beside its
+/// parameters.
+const ARRAY_LOCALS: &[(&str, &str)] = &[
+    ("env", "the JNI environment the list helper is handed"),
+    ("bytes", "the packed text the list helper is handed"),
+    ("lengths", "the lengths the list helper is handed"),
+    ("out_pinned", "where the list helper says what it pinned"),
+    ("out_array", "where the list helper says what array it made"),
+    (
+        "out_count",
+        "where the list helper says how long the array is",
+    ),
+    ("parts", "how many lengths the list helper was handed"),
+    ("room", "how many bytes the list helper was handed"),
+    ("count", "how many elements the list helper makes"),
+    ("index", "the element the list helper is making"),
+    ("at", "how far into the bytes the list helper has pointed"),
+    ("length", "the length the list helper is checking"),
+    ("given", "the lengths as the list helper fetched them"),
+    ("pinned", "the bytes as the list helper fetched them"),
+    ("array", "the array the list helper makes"),
+];
+
+/// What every list the surface takes needs in the shim: a function that turns
+/// what `packed` made into the array the library reads, one that lets go of
+/// it, and the function both refuse through.
+///
+/// The bytes are pinned rather than copied, and each length is read once, out
+/// of the shim's own fetch of the lengths, and checked against what is left of
+/// the bytes before any pointer is made from it; so a length that reaches past
+/// them, a negative one, a count that is not a whole number of elements and
+/// bytes the lengths do not account for are all an exception in Kotlin, and
+/// none of them a read past the end of an array. Nothing here makes a local
+/// reference except the class an exception is thrown with, which is deleted
+/// at once.
+fn list_helpers(surface: &Surface) -> Result<String, Refused> {
+    let found = elements(surface, "Kotlin")?;
+    if found.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "/* Throw a new exception of the class named. What is wrong with a list the\n\
+         \x20* shim was handed is the JVM's to report: a status would be read as the\n\
+         \x20* library's answer, and the library was never called. */\n\
+         static void\n\
+         {REFUSE}(JNIEnv *env, const char *thrown, const char *why)\n\
+         {{\n\
+         \x20   jclass found = (*env)->FindClass(env, thrown);\n\
+         \x20   if (found != NULL) {{\n\
+         \x20       (*env)->ThrowNew(env, found, why);\n\
+         \x20       (*env)->DeleteLocalRef(env, found);\n\
+         \x20   }}\n\
+         }}\n\n"
+    );
+    for element in &found {
+        out.push_str(&list_functions(element));
+    }
+    Ok(out)
+}
+
+/// The two functions one element's lists go through.
+fn list_functions(element: &Element) -> String {
+    let record = element.record;
+    let spelled = c::named(record.name);
+    let (make, release) = element_helpers(record);
+    let pieces = element.texts.len();
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "/* A list of {spelled} as {class}.packed hands it over, made into the\n\
+         \x20* array the library reads. `bytes` is every piece of text in every element,\n\
+         \x20* one after another, and `lengths` how many bytes each took, {pieces} to an\n\
+         \x20* element in the order the struct declares them. The bytes are pinned, and\n\
+         \x20* every length is read once and checked against what is left of them before\n\
+         \x20* a pointer is made from it, so no element reaches past the array it came\n\
+         \x20* in; an empty piece of text is a null pointer with a length of zero. Answers\n\
+         \x20* 1 with what {release} lets go of in the three out parameters, or 0\n\
+         \x20* with an exception pending and nothing held. */\n\
+         static int\n\
+         {make}(JNIEnv *env, jbyteArray bytes, jlongArray lengths, jbyte **out_pinned, {spelled} **out_array, size_t *out_count)\n\
+         {{\n\
+         \x20   jsize parts;\n\
+         \x20   jsize room;\n\
+         \x20   size_t count;\n\
+         \x20   size_t index;\n\
+         \x20   size_t at = 0;\n\
+         \x20   jlong length;\n\
+         \x20   jlong *given;\n\
+         \x20   jbyte *pinned = NULL;\n\
+         \x20   {spelled} *array;\n\n\
+         \x20   *out_pinned = NULL;\n\
+         \x20   *out_array = NULL;\n\
+         \x20   *out_count = 0;\n\
+         \x20   parts = lengths != NULL ? (*env)->GetArrayLength(env, lengths) : 0;\n\
+         \x20   room = bytes != NULL ? (*env)->GetArrayLength(env, bytes) : 0;\n\
+         \x20   if (parts % {pieces} != 0) {{\n\
+         \x20       {REFUSE}(env, \"java/lang/IllegalArgumentException\", \"the lengths of a list of {spelled} are not {pieces} to an element\");\n\
+         \x20       return 0;\n\
+         \x20   }}\n\
+         \x20   count = (size_t)parts / {pieces};\n\
+         \x20   if (count == 0) {{\n\
+         \x20       if (room != 0) {{\n\
+         \x20           {REFUSE}(env, \"java/lang/IllegalArgumentException\", \"the lengths of a list of {spelled} do not account for its bytes\");\n\
+         \x20           return 0;\n\
+         \x20       }}\n\
+         \x20       return 1;\n\
+         \x20   }}\n\
+         \x20   if (count > SIZE_MAX / sizeof *array) {{\n\
+         \x20       {REFUSE}(env, \"java/lang/OutOfMemoryError\", \"a list of {spelled} longer than memory can hold\");\n\
+         \x20       return 0;\n\
+         \x20   }}\n\
+         \x20   array = malloc(count * sizeof *array);\n\
+         \x20   if (array == NULL) {{\n\
+         \x20       {REFUSE}(env, \"java/lang/OutOfMemoryError\", \"no memory for a list of {spelled}\");\n\
+         \x20       return 0;\n\
+         \x20   }}\n\
+         \x20   given = (*env)->GetLongArrayElements(env, lengths, NULL);\n\
+         \x20   if (given == NULL) {{\n\
+         \x20       free(array);\n\
+         \x20       return 0;\n\
+         \x20   }}\n\
+         \x20   if (room > 0) {{\n\
+         \x20       pinned = (*env)->GetByteArrayElements(env, bytes, NULL);\n\
+         \x20       if (pinned == NULL) {{\n\
+         \x20           (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);\n\
+         \x20           free(array);\n\
+         \x20           return 0;\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   for (index = 0; index < count; index++) {{\n",
+        class = record.name,
+    );
+    for (position, text) in element.texts.iter().enumerate() {
+        let _ = write!(
+            out,
+            "        length = given[index * {pieces} + {position}];\n\
+             \x20       if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {{\n\
+             \x20           break;\n\
+             \x20       }}\n\
+             \x20       array[index].{data} = length == 0 ? NULL : ({pointer})pinned + at;\n\
+             \x20       array[index].{len} = (size_t)length;\n\
+             \x20       at += (size_t)length;\n",
+            data = text.data.member.name,
+            len = text.len.member.name,
+            pointer = c::spell(&text.data.ty),
+        );
+    }
+    let _ = write!(
+        out,
+        "    }}\n\
+         \x20   (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);\n\
+         \x20   if (index != count || at != (size_t)room) {{\n\
+         \x20       if (pinned != NULL) {{\n\
+         \x20           (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);\n\
+         \x20       }}\n\
+         \x20       free(array);\n\
+         \x20       {REFUSE}(env, \"java/lang/IllegalArgumentException\", \"the lengths of a list of {spelled} do not account for its bytes\");\n\
+         \x20       return 0;\n\
+         \x20   }}\n\
+         \x20   *out_pinned = pinned;\n\
+         \x20   *out_array = array;\n\
+         \x20   *out_count = count;\n\
+         \x20   return 1;\n\
+         }}\n\n"
+    );
+    out.push_str(&list_release(element));
+    out
+}
+
+/// The function that lets go of what the one before it made.
+fn list_release(element: &Element) -> String {
+    let (make, release) = element_helpers(element.record);
+    let spelled = c::named(element.record.name);
+    format!(
+        "/* Let go of what {make} made, which is nothing when it answered 0. */\n\
+         static void\n\
+         {release}(JNIEnv *env, jbyteArray bytes, jbyte *pinned, {spelled} *array)\n\
+         {{\n\
+         \x20   if (pinned != NULL) {{\n\
+         \x20       (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);\n\
+         \x20   }}\n\
+         \x20   free(array);\n\
+         }}\n\n"
+    )
 }
 
 /// The hooks the JVM calls as it loads and unloads the shim, which is where
@@ -2119,7 +2599,7 @@ pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
          \x20* is printed from the same walk as the Kotlin beside it, so that the two\n\
          \x20* halves of the binding cannot drift apart without the generator saying so.\n\
          \x20*/\n\n\
-         #include <jni.h>\n#include <stddef.h>\n#include <string.h>\n\n#include \"sipral.h\"\n\n",
+         #include <jni.h>\n#include <stddef.h>\n#include <stdlib.h>\n#include <string.h>\n\n#include \"sipral.h\"\n\n",
     );
     let landings = landings(surface)?;
     if !landings.is_empty() {
@@ -2128,8 +2608,67 @@ pub(crate) fn shim(surface: &Surface) -> Result<String, Refused> {
             out.push_str(&landing_function(surface, landing)?);
         }
     }
+    out.push_str(&list_helpers(surface)?);
     for (function, read) in functions(surface)? {
         out.push_str(&implementation(surface, function, &read)?);
+    }
+    Ok(out)
+}
+
+/// Every name the lists a surface takes put into files of this back end's: the
+/// class each element is built from and its fields, the locals of `packed`,
+/// and the functions the shim makes arrays with and the locals of those.
+fn own_lists(surface: &Surface, top: &str, file: &str) -> Result<Vec<(String, Named)>, Refused> {
+    let mut out = Vec::new();
+    let listed = elements(surface, "Kotlin")?;
+    for element in &listed {
+        let record = element.record;
+        out.push((
+            top.to_owned(),
+            Named::new("", record.name.to_owned(), record.name),
+        ));
+        let class = format!("{}, the class", record.name);
+        let packed = format!("{}.packed", record.name);
+        for (name, what) in PACKED_LOCALS {
+            out.push((
+                packed.clone(),
+                Named::new("the wrapper", (*name).to_owned(), *what),
+            ));
+        }
+        for text in &element.texts {
+            let from = format!("{}::{}", record.name, text.data.member.name);
+            out.push((
+                class.clone(),
+                Named::new("the class", held(&text.data), from.clone()),
+            ));
+            out.push((
+                packed.clone(),
+                Named::new("the wrapper", text_bytes(text), from),
+            ));
+        }
+        let (make, release) = element_helpers(record);
+        for emitted in [make.clone(), release] {
+            out.push((
+                file.to_owned(),
+                Named::new("the shim", emitted, record.name),
+            ));
+        }
+        for (name, what) in ARRAY_LOCALS {
+            out.push((
+                format!("{make}, the shim"),
+                Named::new("the shim", (*name).to_owned(), *what),
+            ));
+        }
+    }
+    if !listed.is_empty() {
+        out.push((
+            file.to_owned(),
+            Named::new(
+                "the shim",
+                REFUSE.to_owned(),
+                "the function every list helper refuses through",
+            ),
+        ));
     }
     Ok(out)
 }
@@ -2247,6 +2786,7 @@ impl Spelling for Names {
         read: &[Read<'_>],
         parts_of_call: &[Role<'_>],
     ) -> Result<Vec<Named>, Refused> {
+        unprintable(surface, function, read, "Kotlin")?;
         let mut out = Vec::new();
         for role in parts_of_call {
             let crossing = crossing(surface, role)?;
@@ -2310,7 +2850,9 @@ impl Spelling for Names {
             for part in parts(surface, record, &fields, 1)? {
                 let (emitted, from) = match part {
                     Part::Plain(field) => (held(field), field.member.name),
-                    Part::Buffer { data, .. } => (held(data), data.member.name),
+                    Part::Buffer { data, .. } | Part::Records { data, .. } => {
+                        (held(data), data.member.name)
+                    }
                     Part::Listener { callback, .. } => {
                         (listener_field(callback), callback.member.name)
                     }
@@ -2322,6 +2864,7 @@ impl Spelling for Names {
                 ));
             }
         }
+        out.extend(own_lists(surface, top, file)?);
         let landings = landings(surface)?;
         for landing in &landings {
             let record = landing.record;

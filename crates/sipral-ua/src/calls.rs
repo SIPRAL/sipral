@@ -32,8 +32,8 @@ use std::time::Instant;
 
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
-    DialogEndReason, Event, FailureReason, OutgoingRequest, OutgoingResponse, PrackError,
-    TerminationReason,
+    DialogEndReason, Event, FailureReason, OutgoingInDialogRequest, OutgoingRequest,
+    OutgoingResponse, PrackError, TerminationReason,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
 use sipral_core::sdp;
@@ -41,7 +41,7 @@ use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
 };
 
-use crate::account::AccountId;
+use crate::account::{AccountId, Extra};
 use crate::agent::UserAgent;
 use crate::call::{
     Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall, Refusal,
@@ -49,6 +49,7 @@ use crate::call::{
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::headers::{HeadersFor, onto_request, onto_response};
 use crate::parked::needs_a_stream;
 use crate::registration::{anonymous, dialog_contact};
 use crate::renegotiate::ALLOW;
@@ -95,6 +96,9 @@ impl UserAgent {
         now: Instant,
     ) -> Result<CallHandle, UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        // before anything is kept or built, so a refused field leaves no call
+        // behind and nothing on the wire
+        HeadersFor::Call.check_each(&outgoing.extra)?;
         let learned = self.learned_for(account, outgoing.destination, now);
         let contact = dialog_contact(config, learned, anonymous(&outgoing.extra));
         let asked = config.session_interval;
@@ -205,9 +209,12 @@ impl UserAgent {
             StatusCode::RINGING
         };
         let contact = self.contact_of(call)?;
-        let mut response = OutgoingResponse::new(status)
-            .contact(&contact)
-            .header(HeaderName::Allow, ALLOW);
+        let mut response = onto_response(
+            OutgoingResponse::new(status)
+                .contact(&contact)
+                .header(HeaderName::Allow, ALLOW),
+            &self.application_headers(call),
+        );
         let described = early
             .as_deref()
             .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
@@ -284,6 +291,7 @@ impl UserAgent {
                 response = response.header(HeaderName::Require, b"timer");
             }
         }
+        response = onto_response(response, &self.application_headers(call));
         let described = sdp
             .as_deref()
             .and_then(|sdp| sdp::parse_with_limits(sdp, limits).ok());
@@ -325,9 +333,24 @@ impl UserAgent {
         status: StatusCode,
         now: Instant,
     ) -> Result<(), UaError> {
+        let headers = self.application_headers(call);
+        self.refuse(call, status, &headers, now)
+    }
+
+    /// [`UserAgent::reject`], carrying `headers`.
+    fn refuse(
+        &mut self,
+        call: CallHandle,
+        status: StatusCode,
+        headers: &[Extra],
+        now: Instant,
+    ) -> Result<(), UaError> {
         let transaction = self.answerable(call)?;
-        self.endpoint
-            .respond_invite(transaction, &OutgoingResponse::new(status), now)?;
+        self.endpoint.respond_invite(
+            transaction,
+            &onto_response(OutgoingResponse::new(status), headers),
+            now,
+        )?;
         self.finish(call, CallEndReason::LocalHangup, Some(status), None, now);
         self.drain(now);
         Ok(())
@@ -432,6 +455,19 @@ impl UserAgent {
     /// # Errors
     /// [`UaError::NoSuchCall`], or the error of whatever it turned into.
     pub fn hangup(&mut self, call: CallHandle, now: Instant) -> Result<(), UaError> {
+        let headers = self.application_headers(call);
+        self.end_call(call, &headers, now)
+    }
+
+    /// [`UserAgent::hangup`], carrying `headers` on the refusal or the BYE it
+    /// turns into: the application's own when it asked, none when this layer
+    /// decided by itself. A CANCEL carries none either way (§16.10).
+    pub(crate) fn end_call(
+        &mut self,
+        call: CallHandle,
+        headers: &[Extra],
+        now: Instant,
+    ) -> Result<(), UaError> {
         let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
         let (state, direction, invite, dialog, server) = (
             held.state,
@@ -447,11 +483,15 @@ impl UserAgent {
                 if direction == Direction::Incoming =>
             {
                 let _ = server;
-                self.reject(call, NOT_NOW, now)
+                self.refuse(call, NOT_NOW, headers, now)
             }
             CallState::Confirmed | CallState::Consulting => {
                 let dialog = dialog.ok_or(UaError::WrongState(state))?;
-                let bye = self.endpoint.bye(dialog, now)?;
+                let bye = self.endpoint.bye_with(
+                    dialog,
+                    &onto_request(OutgoingInDialogRequest::new(Method::Bye), headers),
+                    now,
+                )?;
                 self.remember_request(call, AnyTransactionId::NonInviteClient(bye), Method::Bye);
                 self.mark(call, CallState::Terminating);
                 self.drain(now);
@@ -483,6 +523,66 @@ impl UserAgent {
     #[must_use]
     pub fn call_dialog(&self, call: CallHandle) -> Option<DialogId> {
         self.calls.get(&call).and_then(|held| held.dialog)
+    }
+
+    /// The header fields to put on what this call sends at the application's
+    /// request, from now until they are replaced.
+    ///
+    /// They go on the 180 or 183 from [`UserAgent::ring`], on the 200 from
+    /// [`UserAgent::answer`] whether RFC 3262 §5 holds it back or not, on the
+    /// refusal from [`UserAgent::reject`], on the refusal or the BYE a
+    /// [`UserAgent::hangup`] turns into, and on the re-INVITE or UPDATE that
+    /// [`UserAgent::hold`], [`UserAgent::resume`] and [`UserAgent::reoffer`]
+    /// send, the retry after a 491 included. Kept rather than spent on the
+    /// first of those: an application that labels a call labels all of it,
+    /// and a label spent on a provisional response that left first is a label
+    /// silently missing from the 200 that mattered.
+    ///
+    /// Not on a CANCEL, which is hop by hop: a proxy answers it and sends its
+    /// own to every branch (RFC 3261 §16.10), so nothing written on it reaches
+    /// the far end. Not on the answer to a change the far end offered, which
+    /// belongs to the far end's request. And not on anything this layer sends
+    /// by itself — a session refresh, the BYE for a 2xx that was never
+    /// acknowledged, for a fork that lost or for a hangup whose CANCEL lost
+    /// the race — because a field the application wrote is the application
+    /// speaking, on a message it asked for.
+    ///
+    /// Replaces what was set before, whole; an empty list takes every field
+    /// off. Every field is checked first ([`crate::HeadersFor::Call`]), and a
+    /// refusal keeps none of the new ones and leaves the old ones in place.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`], or [`UaError::Header`] for the first field
+    /// refused.
+    pub fn respond_with_headers(
+        &mut self,
+        call: CallHandle,
+        headers: &[(HeaderName<'_>, &[u8])],
+    ) -> Result<(), UaError> {
+        if !self.calls.contains_key(&call) {
+            return Err(UaError::NoSuchCall);
+        }
+        let kept: Vec<Extra> = headers
+            .iter()
+            .map(|(name, value)| Extra {
+                name: Box::from(name.canonical().as_bytes()),
+                value: Box::from(*value),
+            })
+            .collect();
+        HeadersFor::Call.check_each(&kept)?;
+        if let Some(held) = self.calls.get_mut(&call) {
+            held.headers = kept;
+        }
+        Ok(())
+    }
+
+    /// The fields the application wants on what it sends for a call, copied
+    /// out so that the call can be borrowed again while they are written.
+    pub(crate) fn application_headers(&self, call: CallHandle) -> Vec<Extra> {
+        self.calls
+            .get(&call)
+            .map(|held| held.headers.clone())
+            .unwrap_or_default()
     }
 }
 

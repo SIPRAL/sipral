@@ -5,10 +5,13 @@
 //!
 //! Two layers, both printed. `NativeMethods` is the ABI as P/Invoke declares
 //! it — every pointer written as `in`, `ref`, `out` or an array, so that the
-//! package needs no unsafe block and the runtime does the pinning. `Sipral` is
-//! the layer above it, where a status becomes an exception, a byte pointer and
-//! its length become a `string`, and everything written back becomes what the
-//! call returns.
+//! package needs no unsafe block and the runtime does the pinning. The one
+//! exception is an array of records, which crosses as an `IntPtr` to records
+//! the wrapper pinned itself: what they point at has to stay pinned too, and
+//! the runtime would pin the records alone. `Sipral` is the layer above it,
+//! where a status becomes an exception, a byte pointer and its length become a
+//! `string`, a list of records becomes an array of tuples, and everything
+//! written back becomes what the call returns.
 
 use std::fmt::Write as _;
 
@@ -17,8 +20,8 @@ use sipral_ffi::abi::{
 };
 
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
-    plain_named, read_all, roles, upper_camel,
+    Base, Element, Int, Linked, Read, Refused, Role, Type, Writable, element, elements, functions,
+    linked, listed_in, lower_camel, plain_named, read_all, roles, unprintable, upper_camel,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -223,6 +226,10 @@ fn declared<'a>(role: &Role<'a>) -> Vec<Declared<'a>> {
             one(format!("{}[]", scalar(&data.ty)), data, held(data)),
             one("nuint".to_owned(), capacity, held(capacity)),
         ],
+        Role::Records { data, len } => vec![
+            one("IntPtr".to_owned(), data, held(data)),
+            one("nuint".to_owned(), len, held(len)),
+        ],
         Role::Config(read) => vec![one(format!("in {}", scalar(&read.ty)), read, held(read))],
         Role::Shared(read) | Role::Given(read) => {
             vec![one(format!("ref {}", scalar(&read.ty)), read, held(read))]
@@ -249,7 +256,9 @@ fn native(surface: &Surface) -> Result<String, Refused> {
         "/// <summary>\n\
          /// The ABI as the runtime calls it. Every pointer is written as an\n\
          /// array or as in, ref or out, so nothing here needs an unsafe block\n\
-         /// and the runtime pins what it passes.\n\
+         /// and the runtime pins what it passes. An array of records is the\n\
+         /// one IntPtr: the wrapper pins the records and the text they point\n\
+         /// at itself, for the length of the call.\n\
          /// </summary>\n\
          internal static class NativeMethods\n{\n\
          \x20   /// <summary>What the native library is called, before the\n\
@@ -322,7 +331,212 @@ struct Handover {
     names: Vec<Named>,
 }
 
-fn hand_over(parts: &[Role<'_>]) -> Handover {
+/// The class a list of an element is pinned in for the length of a call.
+fn array_class(element: &Element) -> String {
+    format!("{}Array", element.record.name)
+}
+
+/// The names a tuple element may not take in C#, at any position.
+const TUPLE_RESERVED: &[&str] = &[
+    "CompareTo",
+    "Deconstruct",
+    "Equals",
+    "GetHashCode",
+    "Rest",
+    "ToString",
+];
+
+/// The tuple a C# caller hands one element over as: `(string Name, string
+/// Value)`.
+///
+/// A tuple rather than a type printed for the purpose, because the name such
+/// a type would take is the record's, and the record's is already the struct
+/// the library reads. A tuple has no spelling for one member, and C# will not
+/// take some names for an element of one; both are refused by name.
+fn tuple_of(element: &Element) -> Result<String, Refused> {
+    let record = element.record.name;
+    let refuse = |why: String| {
+        Refused::about(&format!(
+            "{why}; give it a shape in tools/abi-gen/src/csharp.rs"
+        ))
+    };
+    if element.texts.len() < 2 {
+        return Err(refuse(format!(
+            "{record} is handed over as the element of an array and has one member, and C# has \
+             no tuple of one to take it in"
+        )));
+    }
+    let mut named = Vec::new();
+    for (position, text) in element.texts.iter().enumerate() {
+        let name = upper_camel(text.data.member.name);
+        let numbered = name
+            .strip_prefix("Item")
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
+        if TUPLE_RESERVED.contains(&name.as_str())
+            || (numbered && name != format!("Item{}", position + 1))
+        {
+            return Err(refuse(format!(
+                "{record}::{} is `{name}` in C#, which an element of a tuple may not be called \
+                 there",
+                text.data.member.name
+            )));
+        }
+        named.push(format!("string {name}"));
+    }
+    Ok(format!("({})", named.join(", ")))
+}
+
+/// The locals the constructor of a list's class writes.
+const ARRAY_LOCALS: &[(&str, &str)] = &[
+    ("list", "the list the class is made from"),
+    ("parts", "every piece of text, encoded"),
+    ("index", "the element being read"),
+    ("total", "how many bytes every piece of text takes"),
+    ("part", "the piece of text being counted"),
+    ("bytes", "the buffer every piece of text is copied into"),
+    ("records", "the records the library reads"),
+    ("at", "how far into the buffer the class has written"),
+    ("start", "where the pinned buffer is"),
+];
+
+/// The members of a list's class, beside the constructor.
+const ARRAY_MEMBERS: &[(&str, &str)] = &[
+    ("bytesPinned", "the pin on the buffer"),
+    ("recordsPinned", "the pin on the records"),
+    ("Address", "where the records are"),
+    ("Count", "how many records there are"),
+    ("Dispose", "what lets go of both pins"),
+];
+
+/// For each record handed over as the element of an array, the class a list of
+/// them is pinned in for the length of one call.
+///
+/// Every piece of text is encoded and copied into one buffer before anything
+/// is pinned, so that nothing which can throw sits between pinning and the
+/// `using` that lets go; the second pin undoes the first when it cannot be
+/// made. The wrapper declares the class with `using`, so both pins go when the
+/// call returns or throws, and no pointer into them is left behind.
+fn list_classes(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::new();
+    for element in elements(surface, "C#")? {
+        let record = element.record.name;
+        let class = array_class(&element);
+        let tuple = tuple_of(&element)?;
+        let pieces = element.texts.len();
+        let _ = write!(
+            out,
+            "/// <summary>\n\
+             /// A list of {record} as the array the library reads, for the length of\n\
+             /// one call. Every piece of text in every element is copied into one\n\
+             /// buffer, the records point into it, and both are pinned until Dispose,\n\
+             /// which the wrapper that made this runs as the call returns or throws.\n\
+             /// The count the library is given is the list's own, and an empty piece\n\
+             /// of text crosses as a null pointer with a length of zero.\n\
+             /// </summary>\n\
+             internal sealed class {class} : IDisposable\n\
+             {{\n\
+             \x20   private GCHandle bytesPinned;\n\
+             \x20   private GCHandle recordsPinned;\n\n\
+             \x20   internal {class}({tuple}[]? list)\n\
+             \x20   {{\n\
+             \x20       if (list is null || list.Length == 0)\n\
+             \x20       {{\n\
+             \x20           return;\n\
+             \x20       }}\n\n\
+             \x20       var parts = new byte[checked(list.Length * {pieces})][];\n\
+             \x20       for (var index = 0; index < list.Length; index++)\n\
+             \x20       {{\n"
+        );
+        for (position, text) in element.texts.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "            parts[index * {pieces} + {position}] = \
+                 Encoding.UTF8.GetBytes(list[index].{});",
+                upper_camel(text.data.member.name)
+            );
+        }
+        let _ = write!(
+            out,
+            "        }}\n\n\
+             \x20       var total = 0;\n\
+             \x20       foreach (var part in parts)\n\
+             \x20       {{\n\
+             \x20           total = checked(total + part.Length);\n\
+             \x20       }}\n\n\
+             \x20       var bytes = new byte[total];\n\
+             \x20       var records = new {record}[list.Length];\n\
+             \x20       var at = 0;\n\
+             \x20       for (var index = 0; index < list.Length; index++)\n\
+             \x20       {{\n"
+        );
+        for (position, text) in element.texts.iter().enumerate() {
+            let piece = format!("parts[index * {pieces} + {position}]");
+            let _ = write!(
+                out,
+                "            Buffer.BlockCopy({piece}, 0, bytes, at, {piece}.Length);\n\
+                 \x20           records[index].{} = (nuint){piece}.Length;\n\
+                 \x20           at += {piece}.Length;\n",
+                upper_camel(text.len.member.name)
+            );
+        }
+        out.push_str(
+            "        }\n\n\
+             \x20       bytesPinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);\n\
+             \x20       try\n\
+             \x20       {\n\
+             \x20           recordsPinned = GCHandle.Alloc(records, GCHandleType.Pinned);\n\
+             \x20       }\n\
+             \x20       catch\n\
+             \x20       {\n\
+             \x20           bytesPinned.Free();\n\
+             \x20           throw;\n\
+             \x20       }\n\n\
+             \x20       var start = bytesPinned.AddrOfPinnedObject();\n\
+             \x20       at = 0;\n\
+             \x20       for (var index = 0; index < records.Length; index++)\n\
+             \x20       {\n",
+        );
+        for text in &element.texts {
+            let data = upper_camel(text.data.member.name);
+            let len = upper_camel(text.len.member.name);
+            let _ = write!(
+                out,
+                "            records[index].{data} = records[index].{len} == 0 ? IntPtr.Zero : start + at;\n\
+                 \x20           at += (int)records[index].{len};\n"
+            );
+        }
+        out.push_str(LIST_CLASS_TAIL);
+    }
+    Ok(out)
+}
+
+/// The end of every list's class, which is the same whatever the element:
+/// the address and the count the wrapper hands over, and the Dispose that
+/// lets go of both pins.
+const LIST_CLASS_TAIL: &str = "        }\n\n\
+     \x20       Address = recordsPinned.AddrOfPinnedObject();\n\
+     \x20       Count = (nuint)records.Length;\n\
+     \x20   }\n\n\
+     \x20   /// <summary>Where the first record is, or zero for no list.</summary>\n\
+     \x20   internal IntPtr Address { get; }\n\n\
+     \x20   /// <summary>How many records there are, which is how long the list\n\
+     \x20   /// is.</summary>\n\
+     \x20   internal nuint Count { get; }\n\n\
+     \x20   /// <summary>Let go of the buffer and the records.</summary>\n\
+     \x20   public void Dispose()\n\
+     \x20   {\n\
+     \x20       if (recordsPinned.IsAllocated)\n\
+     \x20       {\n\
+     \x20           recordsPinned.Free();\n\
+     \x20       }\n\n\
+     \x20       if (bytesPinned.IsAllocated)\n\
+     \x20       {\n\
+     \x20           bytesPinned.Free();\n\
+     \x20       }\n\
+     \x20   }\n\
+     }\n\n";
+
+fn hand_over(surface: &Surface, parts: &[Role<'_>]) -> Result<Handover, Refused> {
     let mut out = Handover::default();
     let Handover {
         arguments,
@@ -331,11 +545,16 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
         results,
         names,
     } = &mut out;
+    let mut claimed = Vec::new();
     let mut wrote = |name: &str, member: &Member| {
-        names.push(Named::new("the wrapper", name.to_owned(), member.name));
+        claimed.push(Named::new("the wrapper", name.to_owned(), member.name));
     };
     for role in parts {
         match role {
+            Role::Records { data, .. } => {
+                let fragment = list_argument(&element(surface, data, "C#")?, data)?;
+                absorb(fragment, arguments, passed, prologue, names);
+            }
             Role::Plain(read) => {
                 let held = held(read);
                 wrote(&held, read.member);
@@ -378,10 +597,8 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
                 passed.push(format!("(nuint){held}.Length"));
             }
             Role::Config(read) => {
-                let held = held(read);
-                wrote(&held, read.member);
-                arguments.push(format!("in {} {held}", scalar(&read.ty)));
-                passed.push(format!("in {held}"));
+                let fragment = config_argument(surface, read)?;
+                absorb(fragment, arguments, passed, prologue, names);
             }
             Role::Shared(read) => {
                 let held = held(read);
@@ -408,7 +625,96 @@ fn hand_over(parts: &[Role<'_>]) -> Handover {
             }
         }
     }
-    out
+    names.extend(claimed);
+    Ok(out)
+}
+
+/// Add what one parameter contributes to the wrapper around a call.
+fn absorb(
+    fragment: Handover,
+    arguments: &mut Vec<String>,
+    passed: &mut Vec<String>,
+    prologue: &mut String,
+    names: &mut Vec<Named>,
+) {
+    arguments.extend(fragment.arguments);
+    passed.extend(fragment.passed);
+    prologue.push_str(&fragment.prologue);
+    names.extend(fragment.names);
+}
+
+/// What an array of records going in adds to the wrapper: the tuples it
+/// takes, the class that pins them for the length of the call, and that
+/// class's address and count.
+fn list_argument(element: &Element, data: &Read<'_>) -> Result<Handover, Refused> {
+    let held = held(data);
+    let array = safe(&format!("{}Array", lower_camel(data.member.name)));
+    let mut out = Handover::default();
+    for name in [&held, &array] {
+        out.names
+            .push(Named::new("the wrapper", name.clone(), data.member.name));
+    }
+    out.arguments
+        .push(format!("{}[] {held}", tuple_of(element)?));
+    let _ = writeln!(
+        out.prologue,
+        "        using var {array} = new {}({held});",
+        array_class(element)
+    );
+    out.passed.push(format!("{array}.Address"));
+    out.passed.push(format!("{array}.Count"));
+    Ok(out)
+}
+
+/// What a struct going in adds to the wrapper. Every array of records it
+/// holds is taken beside it and set into a copy of it, so that the pointer
+/// and the count the library reads are the list's own, pinned until the call
+/// is over, whatever the caller left in the struct.
+fn config_argument(surface: &Surface, read: &Read<'_>) -> Result<Handover, Refused> {
+    let held = held(read);
+    let mut out = Handover::default();
+    out.names
+        .push(Named::new("the wrapper", held.clone(), read.member.name));
+    out.arguments
+        .push(format!("in {} {held}", scalar(&read.ty)));
+    let listed = listed_in(surface, read, "C#")?;
+    if listed.is_empty() {
+        out.passed.push(format!("in {held}"));
+        return Ok(out);
+    }
+    let value = safe(&format!("{}Value", lower_camel(read.member.name)));
+    let mut filled = String::new();
+    for one in &listed {
+        let base = lower_camel(&format!("{}_{}", read.member.name, one.data.member.name));
+        let list = safe(&base);
+        let array = safe(&format!("{base}Array"));
+        for name in [&list, &array] {
+            out.names.push(Named::new(
+                "the wrapper",
+                name.clone(),
+                one.data.member.name,
+            ));
+        }
+        out.arguments
+            .push(format!("{}[]? {list}", tuple_of(&one.element)?));
+        let _ = writeln!(
+            out.prologue,
+            "        using var {array} = new {}({list});",
+            array_class(&one.element)
+        );
+        let _ = writeln!(
+            filled,
+            "        {value}.{} = {array}.Address;\n        {value}.{} = {array}.Count;",
+            upper_camel(one.data.member.name),
+            upper_camel(one.len.member.name)
+        );
+    }
+    out.names
+        .push(Named::new("the wrapper", value.clone(), read.member.name));
+    let _ = writeln!(out.prologue, "        var {value} = {held};");
+    out.prologue.push_str(&filled);
+    out.passed.push(format!("in {value}"));
+    Ok(out)
 }
 
 fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<String, Refused> {
@@ -429,7 +735,7 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
         prologue,
         results,
         names: _,
-    } = hand_over(&roles(surface, read));
+    } = hand_over(surface, &roles(surface, read))?;
     let returns = match results.len() {
         0 => "void".to_owned(),
         1 => results
@@ -625,6 +931,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     );
 
     out.push_str(&declarations(surface)?);
+    out.push_str(&list_classes(surface)?);
 
     out.push_str(
         "/// <summary>What a call across the boundary answered, when it did not\n\
@@ -797,6 +1104,29 @@ impl Spelling for Names {
             .collect()
     }
 
+    /// The class a list of each element is pinned in, its members, and the
+    /// locals of its constructor.
+    fn own(&self, surface: &Surface) -> Result<Vec<(String, Named)>, Refused> {
+        let mut out = Vec::new();
+        for element in elements(surface, "C#")? {
+            let class = array_class(&element);
+            out.push((
+                "the top of the file".to_owned(),
+                Named::new("", class.clone(), element.record.name),
+            ));
+            for (name, what) in ARRAY_MEMBERS {
+                out.push((class.clone(), Named::new("", (*name).to_owned(), *what)));
+            }
+            for (name, what) in ARRAY_LOCALS {
+                out.push((
+                    format!("{class}, the constructor"),
+                    Named::new("the wrapper", (*name).to_owned(), *what),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     fn inside(
         &self,
         surface: &Surface,
@@ -804,7 +1134,7 @@ impl Spelling for Names {
         read: &[Read<'_>],
         parts: &[Role<'_>],
     ) -> Result<Vec<Named>, Refused> {
-        let _ = surface;
+        unprintable(surface, function, read, "C#")?;
         let mut out: Vec<Named> = parts
             .iter()
             .flat_map(declared)
@@ -819,7 +1149,7 @@ impl Spelling for Names {
             }));
             return Ok(out);
         }
-        out.extend(hand_over(parts).names);
+        out.extend(hand_over(surface, parts)?.names);
         Ok(out)
     }
 }

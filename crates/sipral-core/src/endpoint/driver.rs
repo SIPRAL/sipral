@@ -39,7 +39,8 @@ use crate::auth::{Answered, Credentials};
 use crate::diag::{Decision, Direction, Reason, Records};
 use crate::dialog::{CallId, DialogSet, DialogState, InDialogRequest};
 use crate::msg::{
-    HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder, StatusCode,
+    BuildError, HeaderName, Method, OwnedMessage, ParseScratch, RequestBuilder, ResponseBuilder,
+    StatusCode,
 };
 use crate::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, NonInviteServer,
@@ -668,8 +669,27 @@ impl Endpoint {
         dialog: DialogId,
         now: Instant,
     ) -> Result<TransactionId<NonInviteClient>, SendError> {
+        self.bye_with(dialog, &OutgoingInDialogRequest::new(Method::Bye), now)
+    }
+
+    /// Hang up with a BYE of the caller's own: the one an application ends a
+    /// call with carries the header fields it added.
+    ///
+    /// # Errors
+    /// [`SendError::WrongMethod`] for a request that is not a BYE, because
+    /// what follows the send is the end of the dialog and nothing else ends
+    /// one. Otherwise as [`Endpoint::bye`].
+    pub fn bye_with(
+        &mut self,
+        dialog: DialogId,
+        request: &OutgoingInDialogRequest,
+        now: Instant,
+    ) -> Result<TransactionId<NonInviteClient>, SendError> {
         self.mark(now);
-        let id = self.request_in_dialog(dialog, &OutgoingInDialogRequest::new(Method::Bye), now)?;
+        if request.method() != Method::Bye {
+            return Err(SendError::WrongMethod);
+        }
+        let id = self.request_in_dialog(dialog, request, now)?;
         // §15.1.1: "The UAC MUST consider the session terminated ... as soon
         // as the BYE request is passed to the client transaction." Whether the
         // far end answers it changes nothing here
@@ -1254,7 +1274,7 @@ impl Endpoint {
             &request.extra,
             minted.supported.is_some(),
             minted.credentials,
-        );
+        )?;
         if let (Some(kind), Some(body)) = (request.content_type.as_deref(), request.body.as_deref())
         {
             builder = builder.body(kind, body);
@@ -1331,7 +1351,7 @@ impl Endpoint {
             if let Some(ref contact) = extra.contact {
                 builder = builder.contact(contact);
             }
-            builder = add_extra(builder, &extra.extra, false, &[]);
+            builder = add_extra(builder, &extra.extra, false, &[])?;
             if let (Some(kind), Some(body)) = (extra.content_type.as_deref(), body) {
                 builder = builder.body(kind, body);
             }
@@ -1366,10 +1386,11 @@ pub(super) fn build_response(
     if response.status.is_provisional() || response.status.is_success() {
         builder = builder.copy_record_route(&raw);
     }
+    // after everything the endpoint wrote, so that a field it owns is refused
+    // here rather than written a second time beside its own
     for extra in &response.extra {
-        if let Some((name, value)) = extra.parts() {
-            builder = builder.header(name, value);
-        }
+        let (name, value) = extra.field()?;
+        builder = builder.header(name, value);
     }
     if let (Some(kind), Some(body)) = (response.content_type.as_deref(), response.body.as_deref()) {
         builder = builder.body(kind, body);
@@ -1381,29 +1402,33 @@ pub(super) fn build_response(
 ///
 /// `Supported` is skipped when the endpoint has written its own: the two would
 /// otherwise arrive as two lines of one field, which is legal but reads as a
-/// stack that does not know what it supports.
+/// stack that does not know what it supports. What it has written is the
+/// caller's `Supported` with `100rel` merged in, so nothing is lost.
+///
+/// # Errors
+/// [`BuildError::OwnedField`] for a field in [`super::ENDPOINT_FIELDS`], and
+/// [`BuildError::IllegalValue`] for a name that is not a token.
 fn add_extra<'a>(
     mut builder: RequestBuilder<'a>,
     extra: &'a [Extra],
     supported_written: bool,
     credentials: &[(HeaderName<'static>, String)],
-) -> RequestBuilder<'a> {
+) -> Result<RequestBuilder<'a>, BuildError> {
     for one in extra {
-        if let Some((name, value)) = one.parts() {
-            if supported_written && name == HeaderName::Supported {
-                continue;
-            }
-            // the endpoint's own answer wins over one the caller wrote by
-            // hand, for the same reason a retry replaces rather than stacks:
-            // two sets of credentials for one realm is one of them ignored,
-            // and which one is the server's guess
-            if credentials.iter().any(|(written, _)| *written == name) {
-                continue;
-            }
-            builder = builder.header(name, value);
+        let (name, value) = one.field()?;
+        if supported_written && name == HeaderName::Supported {
+            continue;
         }
+        // the endpoint's own answer wins over one the caller wrote by
+        // hand, for the same reason a retry replaces rather than stacks:
+        // two sets of credentials for one realm is one of them ignored,
+        // and which one is the server's guess
+        if credentials.iter().any(|(written, _)| *written == name) {
+            continue;
+        }
+        builder = builder.header(name, value);
     }
-    builder
+    Ok(builder)
 }
 
 /// What the caller put in `Supported`, with `100rel` in it.

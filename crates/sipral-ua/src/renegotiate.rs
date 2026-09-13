@@ -47,6 +47,7 @@ use crate::agent::UserAgent;
 use crate::call::{Answering, CallHandle, CallState, Direction, Offer};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::headers::onto_request;
 use crate::parked::{Parked, call_needs_a_stream};
 use crate::registration::spread;
 use crate::session::Hold;
@@ -141,7 +142,8 @@ impl UserAgent {
             state.session.stamp(&mut description);
             state.session.hold.local
         };
-        self.send_offer(call, description, held, false, now)
+        let fields = self.application_headers(call);
+        self.send_offer(call, description, held, false, &fields, now)
     }
 
     /// Answer a [`UaEvent::Reoffer`] the far end sent.
@@ -227,7 +229,8 @@ impl UserAgent {
             }
             call_state.session.offer(held).ok_or(UaError::NoSession)?
         };
-        self.send_offer(call, offer, held, false, now)
+        let fields = self.application_headers(call);
+        self.send_offer(call, offer, held, false, &fields, now)
     }
 
     fn send_offer(
@@ -236,6 +239,7 @@ impl UserAgent {
         offer: SessionDescription,
         held: bool,
         retried: bool,
+        fields: &[crate::account::Extra],
         now: Instant,
     ) -> Result<(), UaError> {
         let (state, dialog, contact, allows_update) = {
@@ -259,10 +263,13 @@ impl UserAgent {
         let body: Arc<[u8]> = Arc::from(offer.to_bytes());
         // §8.1.1.8 makes Contact a MUST on anything that can refresh a target,
         // and both of these can
-        let request = OutgoingInDialogRequest::new(method)
-            .contact(&contact)
-            .header(HeaderName::Allow, ALLOW)
-            .body(b"application/sdp", body);
+        let request = onto_request(
+            OutgoingInDialogRequest::new(method)
+                .contact(&contact)
+                .header(HeaderName::Allow, ALLOW),
+            fields,
+        )
+        .body(b"application/sdp", body);
         let transaction = if method == Method::Invite {
             AnyTransactionId::InviteClient(self.endpoint.reinvite(dialog, &request, now)?)
         } else {
@@ -301,7 +308,14 @@ impl UserAgent {
         let Some(description) = offer.description else {
             return;
         };
-        match self.send_offer(call, description.clone(), offer.held, true, now) {
+        // a refresh is this layer's own message, and offering it again after a
+        // 491 does not make it the application's
+        let fields = if offer.refresh {
+            Vec::new()
+        } else {
+            self.application_headers(call)
+        };
+        match self.send_offer(call, description.clone(), offer.held, true, &fields, now) {
             Ok(()) => {}
             Err(ref error) if call_needs_a_stream(error) => {
                 let dialog = self.calls.get_mut(&call).and_then(|held| {

@@ -619,6 +619,67 @@ public extension sipral_event_t {
     }
 }
 
+/// One header field an application hands over: a name and a value, UTF-8,
+/// neither NUL-terminated.
+///
+/// Always an element of an array whose length travels beside it, which is
+/// why it carries no `size`: an array is strided by the length of its
+/// element, so a member appended here would move every element after the
+/// first. A header field is a name and a value, and this never grows.
+///
+/// Built here and handed to C in a list. `withUnsafeArray` copies every
+/// piece of text in every element into one buffer, points an array of
+/// sipral_header_t into it and hands that array on for as long as one closure
+/// runs, with the list's own count. An empty piece of text crosses as a
+/// null pointer with a length of zero.
+public struct SipralHeader: Sendable {
+    /// The field name, `X-Conversation-Id`. A compact form is the field it
+    /// abbreviates.
+    public var name: String
+    /// The value, as it goes on the line after the colon. Null or empty
+    /// for a field with an empty value.
+    public var value: String
+
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+
+    /// A list of them as the array of sipral_header_t C reads, for as long as
+    /// `body` runs and no longer: every pointer in it points into a buffer
+    /// that is gone when `body` returns.
+    static func withUnsafeArray<Answer>(_ list: [SipralHeader], _ body: (UnsafeBufferPointer<sipral_header_t>) throws -> Answer) rethrows -> Answer {
+        var run: [CChar] = []
+        var lengths: [Int] = []
+        for element in list {
+            let nameBytes = element.name.utf8.map { CChar(bitPattern: $0) }
+            run.append(contentsOf: nameBytes)
+            lengths.append(nameBytes.count)
+            let valueBytes = element.value.utf8.map { CChar(bitPattern: $0) }
+            run.append(contentsOf: valueBytes)
+            lengths.append(valueBytes.count)
+        }
+        return try run.withUnsafeBufferPointer { bytes -> Answer in
+            var array: [sipral_header_t] = []
+            var at = 0
+            var part = 0
+            for _ in list {
+                var record = sipral_header_t()
+                record.name = lengths[part] == 0 ? nil : bytes.baseAddress.map { $0 + at }
+                record.name_len = lengths[part]
+                at += lengths[part]
+                part += 1
+                record.value = lengths[part] == 0 ? nil : bytes.baseAddress.map { $0 + at }
+                record.value_len = lengths[part]
+                at += lengths[part]
+                part += 1
+                array.append(record)
+            }
+            return try array.withUnsafeBufferPointer(body)
+        }
+    }
+}
+
 /// Everything the library does, with the C conventions read off it.
 ///
 /// Swift gives a namespace `enum` like this one no load hook: there is
@@ -1001,10 +1062,15 @@ public enum Sipral {
     /// `config` must point at a `sipral_account_config_t` whose `size` member
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_account` at one `sipral_handle_t`.
-    public static func accountAdd(stack: SipralHandle, config: sipral_account_config_t) throws -> SipralHandle {
+    public static func accountAdd(stack: SipralHandle, config: sipral_account_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {
         var config = config
         var account = SipralHandle()
-        let status = sipral_account_add(stack, &config, &account)
+        let status =
+            SipralHeader.withUnsafeArray(configHeaders) { p1Headers -> sipral_status_t in
+                config.headers = p1Headers.baseAddress
+                config.headers_len = p1Headers.count
+                return sipral_account_add(stack, &config, &account)
+            }
         try check(status)
         return account
     }
@@ -1090,10 +1156,15 @@ public enum Sipral {
     /// `config` must point at a `sipral_call_config_t` whose `size` member
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_call` at one `sipral_handle_t`.
-    public static func callPlace(stack: SipralHandle, account: SipralHandle, config: sipral_call_config_t, nowMs: UInt64) throws -> SipralHandle {
+    public static func callPlace(stack: SipralHandle, account: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws -> SipralHandle {
         var config = config
         var call = SipralHandle()
-        let status = sipral_call_place(stack, account, &config, &call, nowMs)
+        let status =
+            SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in
+                config.headers = p2Headers.baseAddress
+                config.headers_len = p2Headers.count
+                return sipral_call_place(stack, account, &config, &call, nowMs)
+            }
         try check(status)
         return call
     }
@@ -1180,6 +1251,38 @@ public enum Sipral {
     /// Safe to call with any handle values.
     public static func callHangup(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
         let status = sipral_call_hangup(stack, call, nowMs)
+        try check(status)
+    }
+
+    /// Set the header fields that go on what this call sends at the
+    /// application's request, from now until they are set again.
+    ///
+    /// They go on the 180 or 183 from `sipral_call_ring`, the 200 from
+    /// `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
+    /// `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
+    /// turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
+    /// `sipral_call_resume` send. Kept rather than spent on the first of those,
+    /// so that a field set before ringing is on the 200 as well. Never on a
+    /// CANCEL, which a proxy answers and replaces with its own, and never on
+    /// what the stack sends by itself: a session refresh, or the BYE for a 2xx
+    /// that was never acknowledged or for a fork that lost.
+    ///
+    /// Replaces what was set before, whole, and a `headers_len` of zero takes
+    /// every field off. Each field is checked first, as it is on
+    /// `sipral_call_config_t::headers`, and a refusal names the element, keeps
+    /// none of the new fields and leaves the old ones in place. Nothing is
+    /// sent.
+    ///
+    /// Safety
+    ///
+    /// `headers` must be null with `headers_len` zero, or readable for
+    /// `headers_len` elements, each with a name and a value readable for the
+    /// lengths beside them.
+    public static func callSetHeaders(stack: SipralHandle, call: SipralHandle, headers: [SipralHeader]) throws {
+        let status =
+            SipralHeader.withUnsafeArray(headers) { p2 in
+                sipral_call_set_headers(stack, call, p2.baseAddress, p2.count)
+            }
         try check(status)
     }
 
@@ -1324,10 +1427,15 @@ public enum Sipral {
     /// Safety
     ///
     /// As sipral_call_place.
-    public static func callConsult(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, nowMs: UInt64) throws -> SipralHandle {
+    public static func callConsult(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws -> SipralHandle {
         var config = config
         var consultation = SipralHandle()
-        let status = sipral_call_consult(stack, call, &config, &consultation, nowMs)
+        let status =
+            SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in
+                config.headers = p2Headers.baseAddress
+                config.headers_len = p2Headers.count
+                return sipral_call_consult(stack, call, &config, &consultation, nowMs)
+            }
         try check(status)
         return consultation
     }
@@ -1925,6 +2033,121 @@ public enum Sipral {
     public static func eventKindName(kind: UInt32) -> String? {
         guard let text = sipral_event_kind_name(kind) else { return nil }
         return String(cString: text)
+    }
+
+    /// How many lines a header field is on, in a whole SIP message.
+    ///
+    /// The message is any SIP message in bytes: the one an event carries in
+    /// `sipral_event_t::message`, or one the application came by some other
+    /// way. The name is matched the way the parser matches it, without regard to
+    /// case, and a compact form and its long form are one field (RFC 3261
+    /// §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
+    /// written `i:`. A field that is not there is a count of zero, not a
+    /// failure.
+    ///
+    /// Safety
+    ///
+    /// `message` must be readable for `message_len` bytes and `name` for
+    /// `name_len`, and `out_count` must point at one `size_t`.
+    public static func messageHeaderCount(message: [UInt8], name: String) throws -> Int {
+        var count = Int()
+        let status =
+            message.withUnsafeBufferPointer { p0 in
+                Array(name.utf8).withUnsafeBufferPointer { raw1 in
+                    raw1.withMemoryRebound(to: CChar.self) { p1 in
+                        sipral_message_header_count(p0.baseAddress, p0.count, p1.baseAddress, p1.count, &count)
+                    }
+                }
+            }
+        try check(status)
+        return count
+    }
+
+    /// Where one line of a header field is, in a whole SIP message.
+    ///
+    /// `index` counts from zero in the order the lines arrived, and has to be
+    /// below what `sipral_message_header_count` says for the same name: past it
+    /// is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
+    /// where the value sits inside `message`, trimmed at both ends and otherwise
+    /// as it arrived, a line fold included. An offset rather than a pointer,
+    /// because the bytes are the caller's, and a binding that copied them across
+    /// the boundary holds its own copy.
+    ///
+    /// One line of a field whose value is a comma-separated list may hold
+    /// several values; `sipral_message_header_element` reaches those.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header_count`, with `out_offset` and `out_len` each
+    /// pointing at one `size_t`.
+    public static func messageHeader(message: [UInt8], name: String, index: Int) throws -> (offset: Int, len: Int) {
+        var offset = Int()
+        var len = Int()
+        let status =
+            message.withUnsafeBufferPointer { p0 in
+                Array(name.utf8).withUnsafeBufferPointer { raw1 in
+                    raw1.withMemoryRebound(to: CChar.self) { p1 in
+                        sipral_message_header(p0.baseAddress, p0.count, p1.baseAddress, p1.count, index, &offset, &len)
+                    }
+                }
+            }
+        try check(status)
+        return (offset: offset, len: len)
+    }
+
+    /// How many values a field whose value is a comma-separated list holds,
+    /// across every line it is on.
+    ///
+    /// RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
+    /// and the same two values on two lines one and the same message, and a
+    /// proxy is free to turn either into the other. So this counts values
+    /// rather than lines, split at every comma that is not inside quotes or
+    /// angle brackets. Otherwise as `sipral_message_header_count`.
+    ///
+    /// Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
+    /// `Contact`, `Supported`. Any other is split at a comma its value holds as
+    /// text, like the one in a `Date` or the ones between the parameters of a
+    /// challenge, and `sipral_message_header_count` is the call for it.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header_count`.
+    public static func messageHeaderElementCount(message: [UInt8], name: String) throws -> Int {
+        var count = Int()
+        let status =
+            message.withUnsafeBufferPointer { p0 in
+                Array(name.utf8).withUnsafeBufferPointer { raw1 in
+                    raw1.withMemoryRebound(to: CChar.self) { p1 in
+                        sipral_message_header_element_count(p0.baseAddress, p0.count, p1.baseAddress, p1.count, &count)
+                    }
+                }
+            }
+        try check(status)
+        return count
+    }
+
+    /// Where one value of a list field is, across every line the field is on.
+    ///
+    /// `index` counts values in the order they arrived, and has to be below what
+    /// `sipral_message_header_element_count` says for the same name. Otherwise
+    /// as `sipral_message_header`.
+    ///
+    /// Safety
+    ///
+    /// As `sipral_message_header`.
+    public static func messageHeaderElement(message: [UInt8], name: String, index: Int) throws -> (offset: Int, len: Int) {
+        var offset = Int()
+        var len = Int()
+        let status =
+            message.withUnsafeBufferPointer { p0 in
+                Array(name.utf8).withUnsafeBufferPointer { raw1 in
+                    raw1.withMemoryRebound(to: CChar.self) { p1 in
+                        sipral_message_header_element(p0.baseAddress, p0.count, p1.baseAddress, p1.count, index, &offset, &len)
+                    }
+                }
+            }
+        try check(status)
+        return (offset: offset, len: len)
     }
 
 }

@@ -2204,3 +2204,148 @@ fn a_non_invite_request_refused_on_a_stream_reports_the_response_first() {
         assert!(reported < ended, "{method:?}: {seen:?}");
     }
 }
+
+// -- fields added by name ----------------------------------------------------
+
+#[test]
+fn a_field_the_endpoint_writes_is_refused_rather_than_written_twice() {
+    for &owned in super::ENDPOINT_FIELDS {
+        let t0 = Instant::now();
+        let mut endpoint = endpoint(t0);
+        let refused = endpoint.request(&request(Method::Options).header(owned, b"1"), t0);
+        assert_eq!(
+            refused,
+            Err(super::SendError::Build(crate::msg::BuildError::OwnedField(
+                owned.canonical()
+            ))),
+            "{owned} was taken by name"
+        );
+        assert!(
+            transmits(&mut endpoint).is_empty(),
+            "{owned}: a refused request left something on the wire"
+        );
+    }
+}
+
+#[test]
+fn a_response_refuses_a_field_the_endpoint_writes() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    deliver(&mut endpoint, &incoming("INVITE", "owned", ""), t0);
+    let _ = sent(&mut endpoint);
+    let transaction = events(&mut endpoint)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::IncomingInvite { transaction, .. } => Some(transaction),
+            _ => None,
+        })
+        .expect("an incoming call");
+
+    // a second Record-Route in a 180 is a route set the caller's end reads
+    // off a line this end never meant to write
+    let refused = endpoint.respond_invite(
+        transaction,
+        &OutgoingResponse::new(StatusCode::RINGING)
+            .contact(b"<sip:alice@192.0.2.1>")
+            .header(HeaderName::RecordRoute, b"<sip:elsewhere.example.net;lr>"),
+        t0,
+    );
+    assert_eq!(
+        refused,
+        Err(super::RespondError::Build(
+            crate::msg::BuildError::OwnedField("Record-Route")
+        ))
+    );
+    assert!(transmits(&mut endpoint).is_empty());
+}
+
+#[test]
+fn a_request_inside_a_dialog_refuses_a_field_the_endpoint_writes() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let _ = sent(&mut endpoint);
+
+    let refused = endpoint.request_in_dialog(
+        dialog,
+        &OutgoingInDialogRequest::new(Method::Info).header(HeaderName::CSeq, b"9 INFO"),
+        t0,
+    );
+    assert_eq!(
+        refused,
+        Err(super::SendError::Build(crate::msg::BuildError::OwnedField(
+            "CSeq"
+        )))
+    );
+    assert!(transmits(&mut endpoint).is_empty());
+}
+
+#[test]
+fn a_name_that_is_not_a_token_is_refused_rather_than_dropped() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let refused = endpoint.request(
+        &request(Method::Options).header(HeaderName::Extension("X-Two Words"), b"1"),
+        t0,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(super::SendError::Build(
+                crate::msg::BuildError::IllegalValue(_)
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(transmits(&mut endpoint).is_empty());
+}
+
+#[test]
+fn a_bye_of_the_callers_own_carries_its_fields_and_ends_the_dialog() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let _ = sent(&mut endpoint);
+    let _ = events(&mut endpoint);
+
+    endpoint
+        .bye_with(
+            dialog,
+            &OutgoingInDialogRequest::new(Method::Bye)
+                .header(HeaderName::Extension("X-Conversation-Id"), b"c-7"),
+            t0,
+        )
+        .expect("the BYE goes");
+    let bytes = sent(&mut endpoint);
+    assert!(bytes.starts_with(b"BYE "));
+    assert_eq!(
+        header(&bytes, HeaderName::Extension("X-Conversation-Id")),
+        b"c-7"
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::DialogTerminated { .. })),
+        "§15.1.1: the dialog is over once the BYE is passed to its transaction"
+    );
+}
+
+#[test]
+fn a_bye_of_the_callers_own_that_is_not_a_bye_is_refused_and_ends_nothing() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    let _ = sent(&mut endpoint);
+
+    let refused = endpoint.bye_with(dialog, &OutgoingInDialogRequest::new(Method::Info), t0);
+    assert_eq!(refused, Err(super::SendError::WrongMethod));
+    assert!(transmits(&mut endpoint).is_empty());
+    assert_eq!(
+        endpoint.dialog(dialog).map(|d| d.state),
+        Some(crate::dialog::DialogState::Confirmed),
+        "an INFO handed to the call that hangs up does not hang up"
+    );
+}

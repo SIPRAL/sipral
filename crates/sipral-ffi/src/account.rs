@@ -28,13 +28,14 @@ use std::time::Duration;
 
 use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
-use sipral_ua::Account;
+use sipral_ua::{Account, HeadersFor};
 
 use crate::abi::record;
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
 use crate::event::registration_state;
 use crate::handle::SipralHandle;
+use crate::header::{SipralHeader, supplied};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
@@ -101,6 +102,18 @@ record! {
         /// figure is what `sipral_registration_event_t::expires_ms` carries — that
         /// is where the effective value is read back, not here.
         pub expires_seconds: u64,
+        /// Header fields to put on every REGISTER this account sends, in the
+        /// order given, or null for none.
+        ///
+        /// Checked when the account is added, as `sipral_call_config_t::headers`
+        /// is, against what the stack writes on a REGISTER: `Expires` is the
+        /// stack's there, because it is `expires_seconds`, and `Supported` is the
+        /// application's, because a registration asking for a GRUU has to say
+        /// so. Refused for an account with no registrar, which sends no REGISTER
+        /// to put them on.
+        pub headers: *const SipralHeader,
+        /// How many elements `headers` has.
+        pub headers_len: usize,
     }
 }
 
@@ -197,6 +210,22 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         )
     }?;
     let instance = unsafe { text(config.instance_id, config.instance_id_len, "instance_id") }?;
+    let asked = unsafe {
+        supplied(
+            config.headers,
+            config.headers_len,
+            HeadersFor::Registration,
+            state.user_agent.is_some(),
+        )
+    }?;
+    // accepted and never sent would be a field the application believes is
+    // on the wire
+    if registrar.is_none() && !asked.is_empty() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "headers go on the REGISTER, and with registrar_len zero the account never sends one",
+        ));
+    }
 
     let aor = uri(aor, "aor")?;
     let registrar = registrar
@@ -233,6 +262,9 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }
     if let Some(ref named) = state.user_agent {
         account = account.header(HeaderName::UserAgent, named);
+    }
+    for (name, value) in asked {
+        account = account.header(name, value);
     }
     Ok(account)
 }
@@ -378,7 +410,7 @@ pub(crate) mod tests {
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags};
     use crate::media::SIPRAL_ADDRESS_BYTES;
     use crate::stack::sipral_stack_destroy;
-    use crate::stack::tests::{Observed, poll, stack, stack_on};
+    use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
     use crate::status::SipralStatus;
     use crate::transport::tests::drain;
     use crate::transport::{SIPRAL_MESSAGE_BYTES, SipralTransmit, sipral_stack_poll_transmit};
@@ -418,6 +450,8 @@ pub(crate) mod tests {
             instance_id: ptr::null(),
             instance_id_len: 0,
             expires_seconds: 0,
+            headers: ptr::null(),
+            headers_len: 0,
         }
     }
 
@@ -875,9 +909,104 @@ pub(crate) mod tests {
     fn a_config_that_declares_the_wrong_size_is_refused() {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
+        // one byte short of the oldest published length: anything between that
+        // and this build's own is an older caller, and is taken
         let mut config = account_config();
-        config.size = size_of::<SipralAccountConfig>() - 1;
+        config.size = crate::versioned::min_size::ACCOUNT_CONFIG - 1;
         assert_eq!(add(handle, &config).0, SipralStatus::UnsupportedVersion);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    fn header_of(name: &'static str, value: &'static str) -> crate::header::SipralHeader {
+        let (name, name_len) = text(name);
+        let (value, value_len) = text(value);
+        crate::header::SipralHeader {
+            name,
+            name_len,
+            value,
+            value_len,
+        }
+    }
+
+    #[test]
+    fn fields_an_account_is_given_go_on_its_register() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let line = [header_of("X-Line", "3")];
+        let mut config = account_config();
+        config.headers = line.as_ptr();
+        config.headers_len = line.len();
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        let out = drain(handle);
+        let register = out.first().expect("a REGISTER");
+        assert!(register.starts_with(b"REGISTER "));
+        let wire = String::from_utf8_lossy(register);
+        assert!(wire.contains("\r\nX-Line: 3\r\n"), "{wire}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_field_the_stack_writes_on_a_register_is_refused_where_it_is_set() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let expiring = [header_of("X-Line", "3"), header_of("Expires", "60")];
+        let mut config = account_config();
+        config.headers = expiring.as_ptr();
+        config.headers_len = expiring.len();
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(account, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(
+            message.contains("headers[1]") && message.contains("Expires"),
+            "{message}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn fields_for_an_account_that_never_registers_are_refused_rather_than_never_sent() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let line = [header_of("X-Line", "3")];
+        let mut config = trunk_config();
+        config.headers = line.as_ptr();
+        config.headers_len = line.len();
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(account, SIPRAL_HANDLE_NONE);
+        let message = last_error_text();
+        assert!(message.contains("never sends one"), "{message}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn the_stacks_own_user_agent_is_not_written_twice_on_a_register() {
+        let mut observed = Observed::default();
+        let mut stack_config = config(record, &mut observed);
+        (stack_config.user_agent, stack_config.user_agent_len) = text("Sipral-Test/1");
+        let (status, handle) = create(&stack_config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let second = [header_of("User-Agent", "Somebody-Else/2")];
+        let mut config = account_config();
+        config.headers = second.as_ptr();
+        config.headers_len = second.len();
+        let (status, account) = add(handle, &config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(account, SIPRAL_HANDLE_NONE);
+        assert!(
+            last_error_text().contains("User-Agent"),
+            "{}",
+            last_error_text()
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

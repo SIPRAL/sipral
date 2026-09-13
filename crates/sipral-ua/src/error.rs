@@ -14,6 +14,7 @@ use sipral_core::endpoint::{AckError, RespondError, SendError};
 use sipral_core::sdp::SdpError;
 
 use crate::call::CallState;
+use crate::headers::HeaderRefused;
 
 /// Why a user agent operation could not be started.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +50,9 @@ pub enum UaError {
     CannotRenegotiate,
     /// The session description could not be read.
     Sdp(SdpError),
+    /// A header field the application supplied was refused, and nothing was
+    /// built: see [`crate::HeadersFor`].
+    Header(HeaderRefused),
 }
 
 impl fmt::Display for UaError {
@@ -68,6 +72,7 @@ impl fmt::Display for UaError {
                 f.write_str("the call is not up and the far end cannot take an UPDATE")
             }
             Self::Sdp(ref error) => write!(f, "cannot read the description: {error}"),
+            Self::Header(refused) => write!(f, "cannot take the header field: {refused}"),
         }
     }
 }

@@ -40,6 +40,7 @@ use crate::announce::{Announcement, Arrival, WINDOW};
 use crate::call::{Call, CallHandle, Refusal, RequestRefusal};
 use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
+use crate::headers::HeadersFor;
 use crate::lifecycle::Machine;
 use crate::parked::Parked;
 use crate::registration::{
@@ -374,6 +375,9 @@ impl UserAgent {
         let Some(registrar) = config.registrar.as_ref() else {
             return Err(UaError::NoRegistrar);
         };
+        // and the one place the fields the account was configured with are
+        // checked, for the same reason
+        HeadersFor::Registration.check_each(&config.extra)?;
         let reg = self
             .registrations
             .get(&account)

@@ -269,6 +269,9 @@ impl OutgoingCall {
     }
 
     /// A header field on the INVITE.
+    ///
+    /// Checked when the call is placed, before anything is built:
+    /// [`crate::HeadersFor::Call`] says which fields are refused and why.
     #[must_use]
     pub fn header(mut self, name: HeaderName<'_>, value: &[u8]) -> Self {
         self.extra.push(Extra {
@@ -377,6 +380,10 @@ pub(crate) struct Call {
     /// The interval this end asked for, which is what §7.2 falls back to when
     /// the far end answers without saying anything about timers.
     pub(crate) asked: Option<Duration>,
+    /// The header fields the application wants on what it sends for this
+    /// call, kept until it replaces them
+    /// ([`UserAgent::respond_with_headers`](crate::UserAgent::respond_with_headers)).
+    pub(crate) headers: Vec<Extra>,
 }
 
 /// A session change this end has offered.
@@ -453,6 +460,7 @@ impl Call {
             id: None,
             cseq: 1,
             asked: None,
+            headers: Vec::new(),
         }
     }
 
@@ -496,6 +504,7 @@ impl Call {
             id: None,
             cseq: 1,
             asked: None,
+            headers: Vec::new(),
         }
     }
 
@@ -538,6 +547,8 @@ impl Call {
             id: None,
             cseq: 1,
             asked: None,
+            // the application labelled the call, and a branch of it is the call
+            headers: other.headers.clone(),
         }
     }
 }

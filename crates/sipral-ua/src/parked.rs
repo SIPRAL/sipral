@@ -313,7 +313,7 @@ impl UserAgent {
 
     /// Hang up a call this layer has decided to end.
     pub(crate) fn hang_up_by_itself(&mut self, call: CallHandle, now: Instant) {
-        if let Err(error) = self.hangup(call, now)
+        if let Err(error) = self.end_call(call, &[], now)
             && call_needs_a_stream(&error)
             && let Some(dialog) = self.calls.get(&call).and_then(|held| held.dialog)
         {

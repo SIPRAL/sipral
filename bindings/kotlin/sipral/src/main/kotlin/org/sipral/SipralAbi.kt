@@ -1453,6 +1453,62 @@ data class SipralStreamStats(
 }
 
 /**
+ * One header field an application hands over: a name and a value, UTF-8,
+ * neither NUL-terminated.
+ *
+ * Always an element of an array whose length travels beside it, which is
+ * why it carries no `size`: an array is strided by the length of its
+ * element, so a member appended here would move every element after the
+ * first. A header field is a name and a value, and this never grows.
+ *
+ * Handed over in a list, which the JNI shim makes into a C array for the
+ * length of the call. `packed` copies every piece of text into one array of
+ * UTF-8 first, and the shim checks every length against that array before
+ * it points into it. An empty piece of text crosses as a null pointer with
+ * a length of zero.
+ */
+class SipralHeader(
+    /**
+     * The field name, `X-Conversation-Id`. A compact form is the field it
+     * abbreviates.
+     */
+    val name: String,
+    /**
+     * The value, as it goes on the line after the colon. Null or empty
+     * for a field with an empty value.
+     */
+    val value: String,
+) {
+    internal companion object {
+        /**
+         * A list of them as the JNI shim takes it: every piece of text in
+         * every element, in order, as one run of UTF-8, and how many bytes
+         * each took, 2 to an element. A null list is two nulls, which the
+         * shim reads as no elements.
+         */
+        fun packed(list: List<SipralHeader>?): Pair<ByteArray?, LongArray?> {
+            if (list == null) {
+                return Pair(null, null)
+            }
+            val run = java.io.ByteArrayOutputStream()
+            val lengths = LongArray(Math.multiplyExact(list.size, 2))
+            var part = 0
+            for (element in list) {
+                val nameBytes = element.name.toByteArray(Charsets.UTF_8)
+                run.write(nameBytes, 0, nameBytes.size)
+                lengths[part] = nameBytes.size.toLong()
+                part += 1
+                val valueBytes = element.value.toByteArray(Charsets.UTF_8)
+                run.write(valueBytes, 0, valueBytes.size)
+                lengths[part] = valueBytes.size.toLong()
+                part += 1
+            }
+            return Pair(run.toByteArray(), lengths)
+        }
+    }
+}
+
+/**
  * What a stack is created with.
  *
  * Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
@@ -1683,6 +1739,18 @@ class SipralAccountConfig(
      * is where the effective value is read back, not here.
      */
     val expiresSeconds: Long = 0,
+    /**
+     * Header fields to put on every REGISTER this account sends, in the
+     * order given, or null for none.
+     *
+     * Checked when the account is added, as `sipral_call_config_t::headers`
+     * is, against what the stack writes on a REGISTER: `Expires` is the
+     * stack's there, because it is `expires_seconds`, and `Supported` is the
+     * application's, because a registration asking for a GRUU has to say
+     * so. Refused for an account with no registrar, which sends no REGISTER
+     * to put them on.
+     */
+    val headers: List<SipralHeader>? = null,
 )
 
 /**
@@ -1732,6 +1800,18 @@ class SipralCallConfig(
      * where the application describes its own session and runs its own RTP.
      */
     val mediaAddress: String? = null,
+    /**
+     * Header fields to put on the INVITE, in the order given, or null for
+     * none.
+     *
+     * Each is checked before anything is built: the name a token, the value
+     * one line of text, and not a field the stack writes on a call itself.
+     * Those are listed in `docs/04-ua.md` with the reason for each, and
+     * `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
+     * set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
+     * and no call.
+     */
+    val headers: List<SipralHeader>? = null,
 )
 
 /**
@@ -1904,24 +1984,25 @@ internal object SipralNative {
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_hangup(stack: Long, call: Long, nowMs: Long): Int
+    external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
     external fun sipral_call_hold(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_resume(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_accept_session(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer(stack: Long, call: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -1951,6 +2032,10 @@ internal object SipralNative {
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
     external fun sipral_event_kind_name(kind: Long): String?
+    external fun sipral_message_header_count(message: ByteArray, name: ByteArray, count: LongArray): Int
+    external fun sipral_message_header(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
+    external fun sipral_message_header_element_count(message: ByteArray, name: ByteArray, count: LongArray): Int
+    external fun sipral_message_header_element(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -2385,8 +2470,9 @@ object Sipral {
         val configAuthUser = config.authUser?.toByteArray(Charsets.UTF_8)
         val configAuthPassword = config.authPassword?.toByteArray(Charsets.UTF_8)
         val configInstanceId = config.instanceId?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, accountSlot))
         return accountSlot[0]
     }
 
@@ -2481,8 +2567,9 @@ object Sipral {
         val configTarget = config.target?.toByteArray(Charsets.UTF_8)
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -2564,6 +2651,37 @@ object Sipral {
      */
     fun callHangup(stack: Long, call: Long, nowMs: Long) {
         check(SipralNative.sipral_call_hangup(stack, call, nowMs))
+    }
+
+    /**
+     * Set the header fields that go on what this call sends at the
+     * application's request, from now until they are set again.
+     *
+     * They go on the 180 or 183 from `sipral_call_ring`, the 200 from
+     * `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
+     * `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
+     * turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
+     * `sipral_call_resume` send. Kept rather than spent on the first of those,
+     * so that a field set before ringing is on the 200 as well. Never on a
+     * CANCEL, which a proxy answers and replaces with its own, and never on
+     * what the stack sends by itself: a session refresh, or the BYE for a 2xx
+     * that was never acknowledged or for a fork that lost.
+     *
+     * Replaces what was set before, whole, and a `headers_len` of zero takes
+     * every field off. Each field is checked first, as it is on
+     * `sipral_call_config_t::headers`, and a refusal names the element, keeps
+     * none of the new fields and leaves the old ones in place. Nothing is
+     * sent.
+     *
+     * Safety
+     *
+     * `headers` must be null with `headers_len` zero, or readable for
+     * `headers_len` elements, each with a name and a value readable for the
+     * lengths beside them.
+     */
+    fun callSetHeaders(stack: Long, call: Long, headers: List<SipralHeader>) {
+        val (headersBytes, headersLengths) = SipralHeader.packed(headers)
+        check(SipralNative.sipral_call_set_headers(stack, call, headersBytes, headersLengths))
     }
 
     /**
@@ -2708,8 +2826,9 @@ object Sipral {
         val configTarget = config.target?.toByteArray(Charsets.UTF_8)
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -3296,5 +3415,100 @@ object Sipral {
      */
     fun eventKindName(kind: Long): String? =
         SipralNative.sipral_event_kind_name(kind)
+
+    /**
+     * How many lines a header field is on, in a whole SIP message.
+     *
+     * The message is any SIP message in bytes: the one an event carries in
+     * `sipral_event_t::message`, or one the application came by some other
+     * way. The name is matched the way the parser matches it, without regard to
+     * case, and a compact form and its long form are one field (RFC 3261
+     * §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
+     * written `i:`. A field that is not there is a count of zero, not a
+     * failure.
+     *
+     * Safety
+     *
+     * `message` must be readable for `message_len` bytes and `name` for
+     * `name_len`, and `out_count` must point at one `size_t`.
+     */
+    fun messageHeaderCount(message: ByteArray, name: String): Long {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_message_header_count(message, nameBytes, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * Where one line of a header field is, in a whole SIP message.
+     *
+     * `index` counts from zero in the order the lines arrived, and has to be
+     * below what `sipral_message_header_count` says for the same name: past it
+     * is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
+     * where the value sits inside `message`, trimmed at both ends and otherwise
+     * as it arrived, a line fold included. An offset rather than a pointer,
+     * because the bytes are the caller's, and a binding that copied them across
+     * the boundary holds its own copy.
+     *
+     * One line of a field whose value is a comma-separated list may hold
+     * several values; `sipral_message_header_element` reaches those.
+     *
+     * Safety
+     *
+     * As `sipral_message_header_count`, with `out_offset` and `out_len` each
+     * pointing at one `size_t`.
+     */
+    fun messageHeader(message: ByteArray, name: String, index: Long): Pair<Long, Long> {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val offsetSlot = LongArray(1)
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_message_header(message, nameBytes, index, offsetSlot, lenSlot))
+        return Pair(offsetSlot[0], lenSlot[0])
+    }
+
+    /**
+     * How many values a field whose value is a comma-separated list holds,
+     * across every line it is on.
+     *
+     * RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
+     * and the same two values on two lines one and the same message, and a
+     * proxy is free to turn either into the other. So this counts values
+     * rather than lines, split at every comma that is not inside quotes or
+     * angle brackets. Otherwise as `sipral_message_header_count`.
+     *
+     * Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
+     * `Contact`, `Supported`. Any other is split at a comma its value holds as
+     * text, like the one in a `Date` or the ones between the parameters of a
+     * challenge, and `sipral_message_header_count` is the call for it.
+     *
+     * Safety
+     *
+     * As `sipral_message_header_count`.
+     */
+    fun messageHeaderElementCount(message: ByteArray, name: String): Long {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_message_header_element_count(message, nameBytes, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * Where one value of a list field is, across every line the field is on.
+     *
+     * `index` counts values in the order they arrived, and has to be below what
+     * `sipral_message_header_element_count` says for the same name. Otherwise
+     * as `sipral_message_header`.
+     *
+     * Safety
+     *
+     * As `sipral_message_header`.
+     */
+    fun messageHeaderElement(message: ByteArray, name: String, index: Long): Pair<Long, Long> {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val offsetSlot = LongArray(1)
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_message_header_element(message, nameBytes, index, offsetSlot, lenSlot))
+        return Pair(offsetSlot[0], lenSlot[0])
+    }
 
 }

@@ -42,6 +42,10 @@ pub enum BuildError {
     MissingField(&'static str),
     /// A value holds something that cannot go on a header line.
     IllegalValue(&'static str),
+    /// A field added by name is one the layer building the message writes
+    /// itself, from state it keeps. A second line of it is a message the two
+    /// ends read differently, so it is refused rather than written twice.
+    OwnedField(&'static str),
     /// The bytes that came out do not parse, which is a bug here rather than
     /// anything the caller did.
     NotWellFormed(ParseError),
@@ -52,6 +56,9 @@ impl core::fmt::Display for BuildError {
         match *self {
             Self::MissingField(name) => write!(f, "{name} is required"),
             Self::IllegalValue(what) => write!(f, "illegal value: {what}"),
+            Self::OwnedField(name) => {
+                write!(f, "{name} is written here and is not taken by name")
+            }
             Self::NotWellFormed(e) => write!(f, "the built message does not parse: {e}"),
         }
     }

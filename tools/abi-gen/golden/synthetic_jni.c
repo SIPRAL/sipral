@@ -13,6 +13,7 @@
 
 #include <jni.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sipral.h"
@@ -128,6 +129,121 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
 }
 
+/* Throw a new exception of the class named. What is wrong with a list the
+ * shim was handed is the JVM's to report: a status would be read as the
+ * library's answer, and the library was never called. */
+static void
+jni_refuse(JNIEnv *env, const char *thrown, const char *why)
+{
+    jclass found = (*env)->FindClass(env, thrown);
+    if (found != NULL) {
+        (*env)->ThrowNew(env, found, why);
+        (*env)->DeleteLocalRef(env, found);
+    }
+}
+
+/* A list of sipral_header_t as SipralHeader.packed hands it over, made into the
+ * array the library reads. `bytes` is every piece of text in every element,
+ * one after another, and `lengths` how many bytes each took, 2 to an
+ * element in the order the struct declares them. The bytes are pinned, and
+ * every length is read once and checked against what is left of them before
+ * a pointer is made from it, so no element reaches past the array it came
+ * in; an empty piece of text is a null pointer with a length of zero. Answers
+ * 1 with what jni_header_release lets go of in the three out parameters, or 0
+ * with an exception pending and nothing held. */
+static int
+jni_header_array(JNIEnv *env, jbyteArray bytes, jlongArray lengths, jbyte **out_pinned, sipral_header_t **out_array, size_t *out_count)
+{
+    jsize parts;
+    jsize room;
+    size_t count;
+    size_t index;
+    size_t at = 0;
+    jlong length;
+    jlong *given;
+    jbyte *pinned = NULL;
+    sipral_header_t *array;
+
+    *out_pinned = NULL;
+    *out_array = NULL;
+    *out_count = 0;
+    parts = lengths != NULL ? (*env)->GetArrayLength(env, lengths) : 0;
+    room = bytes != NULL ? (*env)->GetArrayLength(env, bytes) : 0;
+    if (parts % 2 != 0) {
+        jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t are not 2 to an element");
+        return 0;
+    }
+    count = (size_t)parts / 2;
+    if (count == 0) {
+        if (room != 0) {
+            jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t do not account for its bytes");
+            return 0;
+        }
+        return 1;
+    }
+    if (count > SIZE_MAX / sizeof *array) {
+        jni_refuse(env, "java/lang/OutOfMemoryError", "a list of sipral_header_t longer than memory can hold");
+        return 0;
+    }
+    array = malloc(count * sizeof *array);
+    if (array == NULL) {
+        jni_refuse(env, "java/lang/OutOfMemoryError", "no memory for a list of sipral_header_t");
+        return 0;
+    }
+    given = (*env)->GetLongArrayElements(env, lengths, NULL);
+    if (given == NULL) {
+        free(array);
+        return 0;
+    }
+    if (room > 0) {
+        pinned = (*env)->GetByteArrayElements(env, bytes, NULL);
+        if (pinned == NULL) {
+            (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);
+            free(array);
+            return 0;
+        }
+    }
+    for (index = 0; index < count; index++) {
+        length = given[index * 2 + 0];
+        if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {
+            break;
+        }
+        array[index].name = length == 0 ? NULL : (const char *)pinned + at;
+        array[index].name_len = (size_t)length;
+        at += (size_t)length;
+        length = given[index * 2 + 1];
+        if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {
+            break;
+        }
+        array[index].value = length == 0 ? NULL : (const char *)pinned + at;
+        array[index].value_len = (size_t)length;
+        at += (size_t)length;
+    }
+    (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);
+    if (index != count || at != (size_t)room) {
+        if (pinned != NULL) {
+            (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);
+        }
+        free(array);
+        jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t do not account for its bytes");
+        return 0;
+    }
+    *out_pinned = pinned;
+    *out_array = array;
+    *out_count = count;
+    return 1;
+}
+
+/* Let go of what jni_header_array made, which is nothing when it answered 0. */
+static void
+jni_header_release(JNIEnv *env, jbyteArray bytes, jbyte *pinned, sipral_header_t *array)
+{
+    if (pinned != NULL) {
+        (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);
+    }
+    free(array);
+}
+
 JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1abi_1check(JNIEnv *env, jobject self, jlong major, jlong minor)
 {
@@ -166,7 +282,7 @@ Java_org_sipral_SipralNative_sipral_1status_1name(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jbyteArray configBindAddress, jlong configEcho, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jbyteArray configBindAddress, jlong configEcho, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -181,13 +297,29 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.bind_address_len = (size_t)configBindAddress_size;
     config_value.echo = (sipral_toggle_t)configEcho;
     sipral_handle_t stack_value = 0;
-    sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
+    int ready = 1;
+    jbyte *configHeaders_pinned = NULL;
+    sipral_header_t *configHeaders_array = NULL;
+    size_t configHeaders_count = 0;
+    ready = ready && jni_header_array(env, configHeadersBytes, configHeadersLengths, &configHeaders_pinned, &configHeaders_array, &configHeaders_count);
+    config_value.headers = configHeaders_array;
+    config_value.headers_len = configHeaders_count;
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_stack_create(&config_value, &stack_value);
+    }
     if (configBindAddress) {
         (*env)->ReleaseByteArrayElements(env, configBindAddress, configBindAddress_data, JNI_ABORT);
     }
-    {
-        jlong slot = (jlong)stack_value;
-        (*env)->SetLongArrayRegion(env, stack, 0, 1, &slot);
+    jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (ready) {
+        {
+            jlong slot = (jlong)stack_value;
+            (*env)->SetLongArrayRegion(env, stack, 0, 1, &slot);
+        }
     }
     return (jint)status;
 }
@@ -226,6 +358,27 @@ Java_org_sipral_SipralNative_sipral_1stack_1send(JNIEnv *env, jobject self, jlon
     if (message) {
         (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
     }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1label(JNIEnv *env, jobject self, jlong stack, jbyteArray headersBytes, jlongArray headersLengths)
+{
+    (void)env;
+    (void)self;
+    int ready = 1;
+    jbyte *headers_pinned = NULL;
+    sipral_header_t *headers_array = NULL;
+    size_t headers_count = 0;
+    ready = ready && jni_header_array(env, headersBytes, headersLengths, &headers_pinned, &headers_array, &headers_count);
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_stack_label((sipral_handle_t)stack, headers_array, headers_count);
+    }
+    jni_header_release(env, headersBytes, headers_pinned, headers_array);
     return (jint)status;
 }
 

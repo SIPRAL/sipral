@@ -85,6 +85,57 @@ public extension sipral_event_t {
     }
 }
 
+/// One header field: a name and a value.
+///
+/// Built here and handed to C in a list. `withUnsafeArray` copies every
+/// piece of text in every element into one buffer, points an array of
+/// sipral_header_t into it and hands that array on for as long as one closure
+/// runs, with the list's own count. An empty piece of text crosses as a
+/// null pointer with a length of zero.
+public struct SipralHeader: Sendable {
+    public var name: String
+    public var value: String
+
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+
+    /// A list of them as the array of sipral_header_t C reads, for as long as
+    /// `body` runs and no longer: every pointer in it points into a buffer
+    /// that is gone when `body` returns.
+    static func withUnsafeArray<Answer>(_ list: [SipralHeader], _ body: (UnsafeBufferPointer<sipral_header_t>) throws -> Answer) rethrows -> Answer {
+        var run: [CChar] = []
+        var lengths: [Int] = []
+        for element in list {
+            let nameBytes = element.name.utf8.map { CChar(bitPattern: $0) }
+            run.append(contentsOf: nameBytes)
+            lengths.append(nameBytes.count)
+            let valueBytes = element.value.utf8.map { CChar(bitPattern: $0) }
+            run.append(contentsOf: valueBytes)
+            lengths.append(valueBytes.count)
+        }
+        return try run.withUnsafeBufferPointer { bytes -> Answer in
+            var array: [sipral_header_t] = []
+            var at = 0
+            var part = 0
+            for _ in list {
+                var record = sipral_header_t()
+                record.name = lengths[part] == 0 ? nil : bytes.baseAddress.map { $0 + at }
+                record.name_len = lengths[part]
+                at += lengths[part]
+                part += 1
+                record.value = lengths[part] == 0 ? nil : bytes.baseAddress.map { $0 + at }
+                record.value_len = lengths[part]
+                at += lengths[part]
+                part += 1
+                array.append(record)
+            }
+            return try array.withUnsafeBufferPointer(body)
+        }
+    }
+}
+
 /// Everything the library does, with the C conventions read off it.
 ///
 /// Swift gives a namespace `enum` like this one no load hook: there is
@@ -160,10 +211,15 @@ public enum Sipral {
     }
 
     /// Make one.
-    public static func stackCreate(config: sipral_stack_config_t) throws -> SipralHandle {
+    public static func stackCreate(config: sipral_stack_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {
         var config = config
         var stack = SipralHandle()
-        let status = sipral_stack_create(&config, &stack)
+        let status =
+            SipralHeader.withUnsafeArray(configHeaders) { p0Headers -> sipral_status_t in
+                config.headers = p0Headers.baseAddress
+                config.headers_len = p0Headers.count
+                return sipral_stack_create(&config, &stack)
+            }
         try check(status)
         return stack
     }
@@ -181,6 +237,15 @@ public enum Sipral {
         let status =
             message.withUnsafeBufferPointer { p1 in
                 sipral_stack_send(stack, p1.baseAddress, p1.count)
+            }
+        try check(status)
+    }
+
+    /// Hand it header fields, an array of them with its length beside it.
+    public static func stackLabel(stack: SipralHandle, headers: [SipralHeader]) throws {
+        let status =
+            SipralHeader.withUnsafeArray(headers) { p1 in
+                sipral_stack_label(stack, p1.baseAddress, p1.count)
             }
         try check(status)
     }

@@ -854,6 +854,8 @@ pub(crate) mod tests {
             instance_id: ptr::null(),
             instance_id_len: 0,
             expires_seconds: 0,
+            headers: ptr::null(),
+            headers_len: 0,
         }
     }
 

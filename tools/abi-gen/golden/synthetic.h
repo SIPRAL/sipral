@@ -59,6 +59,7 @@ typedef uint64_t sipral_handle_t;
 /* Every record, named before any of them is defined, so that a
  * declaration never has to come before the one it mentions. */
 typedef struct sipral_counters sipral_counters_t;
+typedef struct sipral_header sipral_header_t;
 typedef struct sipral_stack_config sipral_stack_config_t;
 typedef struct sipral_media_packet sipral_media_packet_t;
 typedef struct sipral_registration_event sipral_registration_event_t;
@@ -122,6 +123,16 @@ struct sipral_counters {
 };
 
 /**
+ * One header field: a name and a value.
+ */
+struct sipral_header {
+    const char *name;
+    size_t name_len;
+    const char *value;
+    size_t value_len;
+};
+
+/**
  * What a stack is made with.
  *
  * Holds buffers of the caller's and the library only reads it, so it
@@ -143,6 +154,11 @@ struct sipral_stack_config {
     const char *bind_address;
     size_t bind_address_len;
     sipral_toggle_t echo;
+    /**
+     * Header fields to send, `headers_len` of them.
+     */
+    const sipral_header_t *headers;
+    size_t headers_len;
 };
 
 /**
@@ -268,6 +284,11 @@ sipral_status_t sipral_stack_counters(sipral_handle_t stack, sipral_counters_t *
  * Hand it bytes to send.
  */
 sipral_status_t sipral_stack_send(sipral_handle_t stack, const uint8_t *message, size_t message_len);
+
+/**
+ * Hand it header fields, an array of them with its length beside it.
+ */
+sipral_status_t sipral_stack_label(sipral_handle_t stack, const sipral_header_t *headers, size_t headers_len);
 
 /**
  * Hand it text, which crosses as UTF-8 and not as a String.

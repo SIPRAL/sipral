@@ -5,13 +5,14 @@
  * scripts/check.sh: ask the library whether it speaks this header's ABI and
  * whether it agrees about the length of every struct in it, hand every struct
  * a caller declares to an entry point that takes it at the oldest length
- * abi-sizes.txt pins and one byte short of it, build a stack with a callback
- * of its own, add an account, place one call, ask for its media handle before
- * it has any media, have another call refused, retire the transport and watch
- * a third come back as not sent, poll once, call back into the stack from
- * inside the event callback, and dispose of the stack from in there too --
- * docs/08-ffi.md says the callback runs with nothing held, and nothing else
- * proves that from C.
+ * abi-sizes.txt pins and one byte short of it, carry a header field of its own
+ * across a call between two stacks and read it back out of the answer, build
+ * a stack with a callback of its own, add an account, place one call, ask for
+ * its media handle before it has any media, have another call refused, retire
+ * the transport and watch a third come back as not sent, poll once, call back
+ * into the stack from inside the event callback, and dispose of the stack from
+ * in there too -- docs/08-ffi.md says the callback runs with nothing held, and
+ * nothing else proves that from C.
  *
  * It links the shared library rather than the archive, because that is
  * what a packaged binding loads.
@@ -615,6 +616,258 @@ static void oldest_lengths_still_work(void)
     sipral_stack_destroy(fixture.stack);
 }
 
+/* -- header fields in and out ------------------------------------------------
+ *
+ * What an integrator asks for right after placing a call: a field of its own
+ * on the INVITE, and the same field read back out of what the far end
+ * answered, without a SIP parser written in C to find it. Two stacks in one
+ * process, a caller and a callee, with the bytes carried between them by hand.
+ * The callee reads the field out of the INVITE its event carries and echoes it
+ * on the 200 with sipral_call_set_headers; the caller reads it out of the 200
+ * its own event carries. Both reads happen inside the callback, because the
+ * message an event points at lives exactly that long. */
+
+static const char crossing_caller_bind[] = "192.0.2.40:5060";
+static const char crossing_callee_bind[] = "192.0.2.41:5060";
+static const char crossing_target[] = "sip:frank@192.0.2.41:5060";
+static const char crossing_name[] = "X-Conversation-Id";
+static const char crossing_label[] = "smoke-crossing-7";
+
+/* What one of the two stacks saw: the call that came in, and the field read
+ * out of the message the event carried. */
+struct crossing {
+    sipral_handle_t call;
+    int invited;
+    int confirmed;
+    char value[64];
+};
+
+/* The first line of a field, copied out of a message as a C string: 1 when
+ * there was one and it fit. */
+static int field_of(const uint8_t *message, size_t message_len, const char *name, char *into,
+                    size_t room)
+{
+    size_t count = 0;
+    size_t offset = 0;
+    size_t len = 0;
+    if (sipral_message_header_count(message, message_len, name, strlen(name), &count) !=
+            SIPRAL_STATUS_OK ||
+        count == 0 ||
+        sipral_message_header(message, message_len, name, strlen(name), 0, &offset, &len) !=
+            SIPRAL_STATUS_OK ||
+        len >= room) {
+        return 0;
+    }
+    memcpy(into, message + offset, len);
+    into[len] = '\0';
+    return 1;
+}
+
+static void on_crossing_event(const sipral_event_t *event, void *user_data)
+{
+    struct crossing *crossing = (struct crossing *)user_data;
+    if (event->kind == SIPRAL_EVENT_KIND_INCOMING_CALL) {
+        crossing->call = event->call;
+        crossing->invited = field_of(event->message, event->message_len, crossing_name,
+                                     crossing->value, sizeof crossing->value);
+    } else if (event->kind == SIPRAL_EVENT_KIND_CALL_CONFIRMED) {
+        crossing->confirmed = field_of(event->message, event->message_len, crossing_name,
+                                       crossing->value, sizeof crossing->value);
+    }
+}
+
+/* Everything `from` wants written, handed to `to` as datagrams arriving from
+ * `from_address`: how many were carried, or -1 when a call refused. */
+static int carry(sipral_handle_t from, const char *from_address, sipral_handle_t to,
+                 const char *to_address)
+{
+    int carried = 0;
+    for (;;) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(from, &transmit) != SIPRAL_STATUS_OK) {
+            return -1;
+        }
+        if (transmit.len == 0) {
+            return carried;
+        }
+        if (sipral_stack_receive_datagram(to, SIPRAL_TRANSPORT_MAIN, message_buffer, transmit.len,
+                                          from_address, strlen(from_address), to_address,
+                                          strlen(to_address), 0) != SIPRAL_STATUS_OK) {
+            return -1;
+        }
+        carried++;
+    }
+}
+
+/* A stack for one end of the crossing, with an account whose requests go to
+ * the other end. */
+static sipral_handle_t crossing_end(struct crossing *seen, const char *bind, const char *aor,
+                                    const char *contact, const char *other,
+                                    sipral_handle_t *out_account)
+{
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    *out_account = SIPRAL_HANDLE_NONE;
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for a stack the header fields cross between", 0);
+        return SIPRAL_HANDLE_NONE;
+    }
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    config.bind_address = bind;
+    config.bind_address_len = strlen(bind);
+    config.event_callback = on_crossing_event;
+    config.event_user_data = seen;
+    expect("a stack the header fields cross between would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    sipral_account_config_t account = fixture_account_config(sizeof account);
+    account.aor = aor;
+    account.aor_len = strlen(aor);
+    account.contact = contact;
+    account.contact_len = strlen(contact);
+    account.registrar_address = other;
+    account.registrar_address_len = strlen(other);
+    expect("an account the header fields cross between was refused",
+           sipral_account_add(stack, &account, out_account) == SIPRAL_STATUS_OK);
+    return stack;
+}
+
+static void headers_cross_a_call(void)
+{
+    struct crossing caller_seen = { SIPRAL_HANDLE_NONE, 0, 0, { 0 } };
+    struct crossing callee_seen = { SIPRAL_HANDLE_NONE, 0, 0, { 0 } };
+    sipral_handle_t caller_account = SIPRAL_HANDLE_NONE;
+    sipral_handle_t callee_account = SIPRAL_HANDLE_NONE;
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+
+    sipral_handle_t caller =
+        crossing_end(&caller_seen, crossing_caller_bind, "sip:erin@example.com",
+                     "sip:erin@192.0.2.40:5060", crossing_callee_bind, &caller_account);
+    sipral_handle_t callee =
+        crossing_end(&callee_seen, crossing_callee_bind, "sip:frank@example.com",
+                     "sip:frank@192.0.2.41:5060", crossing_caller_bind, &callee_account);
+
+    const sipral_header_t label[1] = {
+        { crossing_name, strlen(crossing_name), crossing_label, strlen(crossing_label) },
+    };
+    sipral_call_config_t call_config = { 0 };
+    call_config.size = sizeof call_config;
+    call_config.target = crossing_target;
+    call_config.target_len = strlen(crossing_target);
+    call_config.sdp = (const uint8_t *)fixture_offer;
+    call_config.sdp_len = strlen(fixture_offer);
+    call_config.headers = label;
+    call_config.headers_len = 1;
+    expect("a call carrying a header field of the application's own would not go out",
+           sipral_call_place(caller, caller_account, &call_config, &call, 0) == SIPRAL_STATUS_OK);
+    expect("the INVITE did not reach the callee",
+           carry(caller, crossing_caller_bind, callee, crossing_callee_bind) == 1);
+    expect("the callee would not poll", sipral_stack_poll(callee, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the call never reached the callee", callee_seen.call != SIPRAL_HANDLE_NONE);
+    expect("the field was not read out of the INVITE through sipral_message_header",
+           callee_seen.invited && strcmp(callee_seen.value, crossing_label) == 0);
+    if (callee_seen.call == SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(callee);
+        sipral_stack_destroy(caller);
+        return;
+    }
+
+    const sipral_header_t echo[1] = {
+        { crossing_name, strlen(crossing_name), callee_seen.value, strlen(callee_seen.value) },
+    };
+    expect("the callee would not set the field it answers with",
+           sipral_call_set_headers(callee, callee_seen.call, echo, 1) == SIPRAL_STATUS_OK);
+
+    /* Two it must not take, and taking neither leaves the field above in
+     * place: a field the stack writes itself, and a value that would end its
+     * line and start another. */
+    static const char owned_name[] = "Call-ID";
+    static const char owned_value[] = "somebody-elses@example.net";
+    static const char broken_value[] = "smoke\r\nContact: <sip:elsewhere@example.net>";
+    const sipral_header_t owned[1] = {
+        { owned_name, strlen(owned_name), owned_value, strlen(owned_value) },
+    };
+    const sipral_header_t broken[1] = {
+        { crossing_name, strlen(crossing_name), broken_value, strlen(broken_value) },
+    };
+    expect("a Call-ID of the application's own was taken",
+           sipral_call_set_headers(callee, callee_seen.call, owned, 1) ==
+               SIPRAL_STATUS_INVALID_ARGUMENT);
+    expect("a value with a line break in it was taken",
+           sipral_call_set_headers(callee, callee_seen.call, broken, 1) ==
+               SIPRAL_STATUS_INVALID_ARGUMENT);
+
+    expect("the callee would not answer",
+           sipral_call_answer(callee, callee_seen.call, (const uint8_t *)fixture_offer,
+                              strlen(fixture_offer), 0) == SIPRAL_STATUS_OK);
+    expect("the 200 did not reach the caller",
+           carry(callee, crossing_callee_bind, caller, crossing_caller_bind) >= 1);
+    expect("the caller would not poll", sipral_stack_poll(caller, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the field did not come back on the 200, read through sipral_message_header",
+           caller_seen.confirmed && strcmp(caller_seen.value, crossing_label) == 0);
+
+    /* And reading a field that is on two lines, one of them a list, and a
+     * Call-ID written in its compact form. */
+    static const char listed[] = "SIP/2.0 200 OK\r\n"
+                                 "Via: SIP/2.0/UDP 192.0.2.40:5060;branch=z9hG4bK-smoke-listed\r\n"
+                                 "From: <sip:erin@example.com>;tag=e\r\n"
+                                 "To: <sip:frank@example.com>;tag=f\r\n"
+                                 "i: smoke-listed@192.0.2.40\r\n"
+                                 "CSeq: 1 INVITE\r\n"
+                                 "Diversion: <sip:desk@example.com>, <sip:front@example.com>\r\n"
+                                 "Diversion: <sip:mobile@example.com>\r\n"
+                                 "Content-Length: 0\r\n"
+                                 "\r\n";
+    static const char diversion[] = "Diversion";
+    static const char call_id[] = "Call-ID";
+    const uint8_t *bytes = (const uint8_t *)listed;
+    size_t count = 0;
+    size_t offset = 0;
+    size_t len = 0;
+    expect("two lines of one field did not count as two",
+           sipral_message_header_count(bytes, strlen(listed), diversion, strlen(diversion),
+                                       &count) == SIPRAL_STATUS_OK &&
+               count == 2);
+    expect("the second line of a field is not the one that arrived second",
+           sipral_message_header(bytes, strlen(listed), diversion, strlen(diversion), 1, &offset,
+                                 &len) == SIPRAL_STATUS_OK &&
+               len == strlen("<sip:mobile@example.com>") &&
+               memcmp(listed + offset, "<sip:mobile@example.com>", len) == 0);
+    expect("an index past the count was not refused",
+           sipral_message_header(bytes, strlen(listed), diversion, strlen(diversion), 2, &offset,
+                                 &len) == SIPRAL_STATUS_INVALID_ARGUMENT);
+    expect("three values across two lines did not count as three",
+           sipral_message_header_element_count(bytes, strlen(listed), diversion,
+                                               strlen(diversion), &count) == SIPRAL_STATUS_OK &&
+               count == 3);
+    expect("the second value of the list is not the one after the first comma",
+           sipral_message_header_element(bytes, strlen(listed), diversion, strlen(diversion), 1,
+                                         &offset, &len) == SIPRAL_STATUS_OK &&
+               len == strlen("<sip:front@example.com>") &&
+               memcmp(listed + offset, "<sip:front@example.com>", len) == 0);
+    expect("a Call-ID written compact was not counted by its long name",
+           sipral_message_header_count(bytes, strlen(listed), call_id, strlen(call_id), &count) ==
+                   SIPRAL_STATUS_OK &&
+               count == 1);
+    expect("a Call-ID written compact was not found by its long name",
+           sipral_message_header(bytes, strlen(listed), call_id, strlen(call_id), 0, &offset,
+                                 &len) == SIPRAL_STATUS_OK &&
+               len == strlen("smoke-listed@192.0.2.40") &&
+               memcmp(listed + offset, "smoke-listed@192.0.2.40", len) == 0);
+
+    sipral_stack_destroy(callee);
+    sipral_stack_destroy(caller);
+}
+
 static void sizes_agree(void)
 {
 #define ASK(type)                                                             \
@@ -701,6 +954,7 @@ int main(void)
     }
     sizes_agree();
     oldest_lengths_still_work();
+    headers_cross_a_call();
 
     config.size = sizeof config;
     config.event_callback = on_event;

@@ -24,9 +24,10 @@
 //! ([`stack`]), accounts are registered ([`account`]), calls are placed,
 //! answered, held, handed on and hung up ([`call`]), audio is negotiated,
 //! carried and measured ([`media`]), signalling goes on and comes off the wire
-//! ([`transport`]), a conversation is written to a file ([`record`]), and
-//! everything the stack has to say comes back on one callback as one tagged
-//! union ([`event`]). Whether a stack may be used from two threads at once, and
+//! ([`transport`]), a conversation is written to a file ([`record`]), the
+//! header fields an application adds go on and come back out of a message
+//! ([`header`]), and everything the stack has to say comes back on one callback
+//! as one tagged union ([`event`]). Whether a stack may be used from two threads at once, and
 //! whether the library may be re-entered from inside that callback, are both
 //! answered in [`stack`], because a binding author who cannot find the answer
 //! will assume the wrong one. Two more answer questions an application asks
@@ -65,6 +66,7 @@ pub mod counters;
 pub mod error;
 pub mod event;
 pub mod handle;
+pub mod header;
 pub mod media;
 mod names;
 pub mod record;

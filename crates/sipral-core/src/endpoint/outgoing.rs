@@ -19,7 +19,46 @@ use std::sync::Arc;
 
 use super::transport::TransportId;
 use crate::dialog::CallId;
-use crate::msg::{HeaderName, Method, StatusCode, Uri};
+use crate::msg::{BuildError, HeaderName, Method, StatusCode, Uri};
+
+/// The fields an endpoint writes itself, from what it keeps, and therefore
+/// refuses to take from a caller by name.
+///
+/// A second line of any of them is not a harmless repeat. Each is either a
+/// field that appears once, so that two lines are a malformed message every
+/// hop on the path resolves by guessing, or one whose value decides where the
+/// message goes or where it ends, so that a second line sends it somewhere
+/// the endpoint did not. [`OutgoingRequest::header`] and its two siblings
+/// cannot refuse on the spot, being builders, so the refusal is
+/// [`BuildError::OwnedField`] from the call that sends: nothing is built and
+/// nothing leaves.
+pub const ENDPOINT_FIELDS: &[HeaderName<'static>] = &[
+    // §8.1.1.7, §18.2.2: the branch keys the transaction, and the sent-by is
+    // where the response comes back to
+    HeaderName::Via,
+    // §8.1.1.2, §8.1.1.3: the tags name the dialog, and each field is one
+    HeaderName::From,
+    HeaderName::To,
+    // §8.1.1.4: the dialog's name, once
+    HeaderName::CallId,
+    // §8.1.1.5, §12.2.1.1: the number a transaction and a dialog are ordered by
+    HeaderName::CSeq,
+    // §8.1.1.6: the hop count a loop is caught by
+    HeaderName::MaxForwards,
+    // §8.1.1.8, §12.1.1: the remote target the far end sends the dialog to
+    HeaderName::Contact,
+    // §8.1.2, §12.2.1.1: the route set; a hop written by hand detours the
+    // request through a proxy the caller named
+    HeaderName::Route,
+    // §12.1.1: copied from the request into a response that opens a dialog,
+    // and the far end reads its route set off it
+    HeaderName::RecordRoute,
+    // §7.4.1, §20.15: what the body is, written with the body
+    HeaderName::ContentType,
+    // §18.3, §20.14: where the message ends on a stream, so a second one is
+    // the start of a second message
+    HeaderName::ContentLength,
+];
 
 /// One header the caller added, kept in the case it was written in.
 #[derive(Clone, Debug)]
@@ -32,6 +71,21 @@ impl Extra {
     /// The name and value, ready for a builder.
     pub(crate) fn parts(&self) -> Option<(HeaderName<'_>, &[u8])> {
         Some((HeaderName::from_bytes(&self.name)?, &self.value))
+    }
+
+    /// The same, refused rather than skipped when it cannot be written: a
+    /// name that is not a token, or a field the endpoint writes itself.
+    ///
+    /// A header the caller asked for and did not get, with nothing said, is
+    /// found in a capture a week later.
+    pub(crate) fn field(&self) -> Result<(HeaderName<'_>, &[u8]), BuildError> {
+        let Some((name, value)) = self.parts() else {
+            return Err(BuildError::IllegalValue("a header field name is a token"));
+        };
+        match ENDPOINT_FIELDS.iter().find(|owned| **owned == name) {
+            Some(owned) => Err(BuildError::OwnedField(owned.canonical())),
+            None => Ok((name, value)),
+        }
     }
 }
 

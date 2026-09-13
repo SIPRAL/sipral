@@ -5,8 +5,9 @@
 // scripts/check.sh against the shared library: load the binding and have it
 // check the ABI, build a stack out of a class, hear its first event on a
 // thread the JVM did not make, hear a poll's worth of incoming calls without
-// the shim holding on to what it handed over for any of them, throw from a
-// listener, and destroy a stack from inside its own listener.
+// the shim holding on to what it handed over for any of them, put header
+// fields of its own on a call in a list and find them in what went out, throw
+// from a listener, and destroy a stack from inside its own listener.
 //
 // A program rather than a test runner's test, because the gate has a compiler
 // and a JVM and no build tool; kotlin.test's assertions throw without one.
@@ -30,10 +31,45 @@ internal object NativeThread {
     }
 
     external fun poll(stack: Long, nowMs: Long): Int
+
+    /** The next datagram a stack wants sent, or null when it wants none sent. */
+    external fun transmitted(stack: Long): ByteArray?
 }
 
 private const val BOUND = "192.0.2.10:5060"
 private const val REGISTRAR = "203.0.113.5:5060"
+
+/** A description to place a call with. */
+private const val OFFER =
+    "v=0\r\n" +
+        "o=alice 1 1 IN IP4 192.0.2.10\r\n" +
+        "s=-\r\n" +
+        "c=IN IP4 192.0.2.10\r\n" +
+        "t=0 0\r\n" +
+        "m=audio 41000 RTP/AVP 0\r\n" +
+        "a=rtpmap:0 PCMU/8000\r\n" +
+        "a=sendrecv\r\n"
+
+/** Everything a stack wants sent, in the order it wants it sent. */
+private fun drained(stack: Long): List<ByteArray> {
+    val out = mutableListOf<ByteArray>()
+    while (true) {
+        out.add(NativeThread.transmitted(stack) ?: return out)
+    }
+}
+
+/** Whether a message starts with the text given. */
+private fun opens(message: ByteArray, opening: String): Boolean =
+    String(message, 0, minOf(message.size, opening.length), Charsets.US_ASCII) == opening
+
+/** The first line of a header field, read out of a message through the binding. */
+private fun fieldIn(message: ByteArray, name: String): String? {
+    if (Sipral.messageHeaderCount(message, name) == 0L) {
+        return null
+    }
+    val (offset, len) = Sipral.messageHeader(message, name, 0)
+    return String(message, offset.toInt(), len.toInt(), Charsets.UTF_8)
+}
 
 /**
  * Where call `index` comes from: a caller of its own each time, because the
@@ -74,6 +110,7 @@ private fun invitation(index: Int): ByteArray =
  */
 private class Heard : SipralEventListener {
     val kinds = mutableListOf<Long>()
+    val calls = mutableListOf<Long>()
     val stacks = mutableListOf<Long>()
     val sizes = mutableListOf<Long>()
     val threads = mutableListOf<Thread>()
@@ -89,6 +126,7 @@ private class Heard : SipralEventListener {
 
     override fun onEvent(event: SipralEvent) {
         kinds.add(event.kind)
+        calls.add(event.call)
         stacks.add(event.stack)
         sizes.add(event.size)
         threads.add(Thread.currentThread())
@@ -156,7 +194,7 @@ private fun everything(): String {
     assertFalse(foreign.isAlive, "the thread the shim attached is attached still")
 
     // A poll's worth of events that each carry a message.
-    Sipral.accountAdd(
+    val account = Sipral.accountAdd(
         stack,
         SipralAccountConfig(
             aor = "sip:alice@example.com",
@@ -184,6 +222,86 @@ private fun everything(): String {
     // a check that looked at nothing has not checked
     assertTrue(heard.looked >= calls - 1, "only ${heard.looked} messages were looked for after their event")
     assertEquals(0, heard.survived, "${heard.survived} messages were still held by the shim when the next event arrived")
+
+    // Header fields of the application's own, handed over in a list: two on
+    // a call's configuration, found in the INVITE it went out in, and two set
+    // on a call that came in, found in the refusal it went out on. Two rather
+    // than one, because one is what a binding that hands over a single struct
+    // also gets right.
+    drained(stack)
+    val placed = Sipral.callPlace(
+        stack,
+        account,
+        SipralCallConfig(
+            target = "sip:bob@example.com",
+            sdp = OFFER.toByteArray(Charsets.US_ASCII),
+            headers = listOf(
+                SipralHeader("X-Conversation-Id", "kotlin-placed"),
+                SipralHeader("X-Second-Field", "the second of two"),
+            ),
+        ),
+        30,
+    )
+    assertNotEquals(Sipral.HANDLE_NONE, placed)
+    val invite = assertNotNull(
+        drained(stack).firstOrNull { opens(it, "INVITE ") },
+        "no INVITE went out for the call placed with header fields",
+    )
+    assertEquals("kotlin-placed", fieldIn(invite, "X-Conversation-Id"))
+    assertEquals("the second of two", fieldIn(invite, "X-Second-Field"))
+
+    val ringing = heard.calls[incoming.first()]
+    // The second element is where a binding that read one struct would have
+    // read past it, so it is the one the stack is made to refuse by name.
+    val owned = assertFailsWith<SipralException> {
+        Sipral.callSetHeaders(
+            stack,
+            ringing,
+            listOf(
+                SipralHeader("X-Conversation-Id", "kotlin-refused"),
+                SipralHeader("Call-ID", "somebody-elses@example.net"),
+            ),
+        )
+    }
+    assertEquals(SipralStatus.INVALID_ARGUMENT, owned.status)
+    assertTrue(assertNotNull(owned.message).contains("headers[1]"), owned.message)
+    Sipral.callSetHeaders(
+        stack,
+        ringing,
+        listOf(
+            SipralHeader("X-Conversation-Id", "kotlin-refusal"),
+            SipralHeader("X-Second-Field", "on the refusal"),
+        ),
+    )
+
+    // What the shim is handed is what SipralHeader.packed makes, and it checks
+    // it anyway, before it points into any of it. None of these reaches the
+    // library, which the refusal below shows by carrying the fields set above.
+    val text = "X-Conversation-Id".toByteArray(Charsets.US_ASCII)
+    val whole = text.size.toLong()
+    for ((what, bytes, lengths) in listOf(
+        Triple("a value one byte past the end", text, longArrayOf(whole, 1)),
+        Triple("a value as long as a Long can say", text, longArrayOf(whole, Long.MAX_VALUE)),
+        Triple("a negative name", text, longArrayOf(-1, whole + 1)),
+        Triple("a length that is half an element", text, longArrayOf(whole)),
+        Triple("bytes no length accounts for", text, longArrayOf(1, 1)),
+        Triple("lengths with no bytes behind them", null, longArrayOf(whole, 0)),
+        Triple("bytes with no lengths at all", text, longArrayOf()),
+        Triple("bytes with no array of lengths", text, null),
+    )) {
+        assertFailsWith<IllegalArgumentException>(what) {
+            SipralNative.sipral_call_set_headers(stack, ringing, bytes, lengths)
+        }
+    }
+
+    drained(stack)
+    Sipral.callReject(stack, ringing, 486, 40)
+    val refusal = assertNotNull(
+        drained(stack).firstOrNull { opens(it, "SIP/2.0 486") },
+        "no 486 went out for the call refused with header fields",
+    )
+    assertEquals("kotlin-refusal", fieldIn(refusal, "X-Conversation-Id"))
+    assertEquals("on the refusal", fieldIn(refusal, "X-Second-Field"))
 
     // A listener that throws hands its exception to the thread's handler and
     // does not stop the poll; destroying the stack from inside it is the one
@@ -232,5 +350,6 @@ private fun everything(): String {
 
     Sipral.stackDestroy(stack)
     return "a stack built from a class, ${heard.kinds.size} events heard, the first on a thread " +
-        "the shim attached and let go of, $calls messages none of which it held past its event"
+        "the shim attached and let go of, $calls messages none of which it held past its event, " +
+        "two header fields in a list on a call placed and two on a call refused"
 }

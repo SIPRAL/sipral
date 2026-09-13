@@ -393,20 +393,21 @@ pub enum Method<'a> {
 }
 
 pub enum HeaderName<'a> {
-    Accept, Allow, AllowEvents, Authorization, CallId, Contact,
+    Accept, AcceptContact, Allow, AllowEvents, Authorization, CallId, Contact,
     ContentEncoding, ContentLength, ContentType, CSeq, Date, Event, Expires,
-    From, MaxForwards, MinExpires, MinSe, ProxyAuthenticate,
+    From, Identity, MaxForwards, MinExpires, MinSe, ProxyAuthenticate,
     ProxyAuthorization, ProxyRequire, RAck, RecordRoute, ReferTo, ReferredBy,
-    Replaces, Require, RetryAfter, Route, RSeq, SessionExpires, Subject,
-    SubscriptionState, Supported, To, Unsupported, UserAgent, Via, Warning,
-    WwwAuthenticate,
+    RejectContact, Replaces, RequestDisposition, Require, RetryAfter, Route,
+    RSeq, SessionExpires, Subject, SubscriptionState, Supported, To,
+    Unsupported, UserAgent, Via, Warning, WwwAuthenticate,
     Extension(&'a str),
 }
 // Equality is ASCII case-insensitive and treats a compact form as the field
-// it abbreviates, so `Via`, `via` and `v` are one value. Fifteen fields have
+// it abbreviates, so `Via`, `via` and `v` are one value. Nineteen fields have
 // one: i m e l c f t v k s (RFC 3261 §7.3.3), u and o (RFC 6665 §8.2),
-// r (RFC 3515), b (RFC 3892), x (RFC 4028). `Extension` compares
-// case-insensitively too, and keeps the spelling it arrived with.
+// r (RFC 3515), b (RFC 3892), x (RFC 4028), a j and d (RFC 3841 §12), y
+// (RFC 8224 §13.1). `Extension` compares case-insensitively too, and keeps
+// the spelling it arrived with.
 //
 // `HeaderName::KNOWN` lists every recognised field, so a test can assert that
 // the long form, the compact form and the table cannot drift apart.
@@ -463,7 +464,7 @@ impl<'a> ResponseBuilder<'a> {
     pub fn build(self) -> Result<OwnedMessage, BuildError>;
 }
 
-pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), NotWellFormed(ParseError) }
+pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), OwnedField(&'static str), NotWellFormed(ParseError) }
 
 /// Reassembles TCP and TLS bytes into messages. The one place inbound bytes
 /// must be copied into an accumulation buffer, because a message can arrive
@@ -768,6 +769,14 @@ impl OutgoingRequest {
     pub fn max_forwards(self, hops: u32) -> Self;
 }
 
+/// The fields the endpoint writes itself — `Via`, `From`, `To`, `Call-ID`,
+/// `CSeq`, `Max-Forwards`, `Contact`, `Route`, `Record-Route`, `Content-Type`,
+/// `Content-Length` — and so refuses from `header` on all three of these, with
+/// `BuildError::OwnedField` from the call that sends, rather than writing a
+/// second line of one. A name that is not a token is `BuildError::IllegalValue`
+/// the same way, not a field quietly left out.
+pub const ENDPOINT_FIELDS: &[HeaderName<'static>];
+
 /// Shorter, because §12.2.1.1 already decides the Request-URI, the route, both
 /// addresses with their tags, the `Call-ID` and the number.
 pub struct OutgoingInDialogRequest { /* method, contact, headers, body */ }
@@ -863,6 +872,11 @@ impl Endpoint {
     /// `Event::DialogTerminated`. A BYE refused for want of a stream has not
     /// been passed to one, and the dialog stays up.
     pub fn bye(&mut self, dialog: DialogId, now: Instant)
+        -> Result<TransactionId<NonInviteClient>, SendError>;
+    /// The same, with a BYE of the caller's own, which is how a hangup carries
+    /// the fields an application added. Anything but a BYE is
+    /// `SendError::WrongMethod`, because what follows the send ends the dialog.
+    pub fn bye_with(&mut self, dialog: DialogId, request: &OutgoingInDialogRequest, now: Instant)
         -> Result<TransactionId<NonInviteClient>, SendError>;
 
     /// REGISTER, OPTIONS, SUBSCRIBE, and any out-of-dialog non-INVITE request.

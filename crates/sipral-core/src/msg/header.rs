@@ -21,6 +21,8 @@ use super::method::is_token_byte;
 pub enum HeaderName<'a> {
     /// RFC 3261 §20.1.
     Accept,
+    /// RFC 3841 §9.2, compact `a`.
+    AcceptContact,
     /// RFC 3261 §20.5.
     Allow,
     /// RFC 6665 §8.2, compact `u`.
@@ -47,6 +49,8 @@ pub enum HeaderName<'a> {
     Expires,
     /// RFC 3261 §20.20, compact `f`.
     From,
+    /// RFC 8224 §4, compact `y` (§13.1).
+    Identity,
     /// RFC 3261 §20.22.
     MaxForwards,
     /// RFC 3261 §20.23.
@@ -67,8 +71,12 @@ pub enum HeaderName<'a> {
     ReferTo,
     /// RFC 3892 §3, compact `b`.
     ReferredBy,
+    /// RFC 3841 §9.2, compact `j`.
+    RejectContact,
     /// RFC 3891 §6.1.
     Replaces,
+    /// RFC 3841 §9.1, compact `d`.
+    RequestDisposition,
     /// RFC 3261 §20.32.
     Require,
     /// RFC 3261 §20.33.
@@ -105,6 +113,7 @@ impl HeaderName<'static> {
     /// Every name this crate knows, in the order it recognises them.
     pub const KNOWN: &'static [HeaderName<'static>] = &[
         Self::Accept,
+        Self::AcceptContact,
         Self::Allow,
         Self::AllowEvents,
         Self::Authorization,
@@ -118,6 +127,7 @@ impl HeaderName<'static> {
         Self::Event,
         Self::Expires,
         Self::From,
+        Self::Identity,
         Self::MaxForwards,
         Self::MinExpires,
         Self::MinSe,
@@ -128,7 +138,9 @@ impl HeaderName<'static> {
         Self::RecordRoute,
         Self::ReferTo,
         Self::ReferredBy,
+        Self::RejectContact,
         Self::Replaces,
+        Self::RequestDisposition,
         Self::Require,
         Self::RetryAfter,
         Self::Route,
@@ -173,6 +185,7 @@ impl<'a> HeaderName<'a> {
     pub const fn canonical(&self) -> &'a str {
         match *self {
             Self::Accept => "Accept",
+            Self::AcceptContact => "Accept-Contact",
             Self::Allow => "Allow",
             Self::AllowEvents => "Allow-Events",
             Self::Authorization => "Authorization",
@@ -186,6 +199,7 @@ impl<'a> HeaderName<'a> {
             Self::Event => "Event",
             Self::Expires => "Expires",
             Self::From => "From",
+            Self::Identity => "Identity",
             Self::MaxForwards => "Max-Forwards",
             Self::MinExpires => "Min-Expires",
             Self::MinSe => "Min-SE",
@@ -196,7 +210,9 @@ impl<'a> HeaderName<'a> {
             Self::RecordRoute => "Record-Route",
             Self::ReferTo => "Refer-To",
             Self::ReferredBy => "Referred-By",
+            Self::RejectContact => "Reject-Contact",
             Self::Replaces => "Replaces",
+            Self::RequestDisposition => "Request-Disposition",
             Self::Require => "Require",
             Self::RetryAfter => "Retry-After",
             Self::Route => "Route",
@@ -219,6 +235,7 @@ impl<'a> HeaderName<'a> {
     #[must_use]
     pub const fn compact(&self) -> Option<u8> {
         Some(match *self {
+            Self::AcceptContact => b'a',
             Self::AllowEvents => b'u',
             Self::CallId => b'i',
             Self::Contact => b'm',
@@ -227,8 +244,11 @@ impl<'a> HeaderName<'a> {
             Self::ContentType => b'c',
             Self::Event => b'o',
             Self::From => b'f',
+            Self::Identity => b'y',
             Self::ReferTo => b'r',
             Self::ReferredBy => b'b',
+            Self::RejectContact => b'j',
+            Self::RequestDisposition => b'd',
             Self::SessionExpires => b'x',
             Self::Subject => b's',
             Self::Supported => b'k',
@@ -305,15 +325,15 @@ mod tests {
     }
 
     #[test]
-    fn the_fifteen_compact_forms_are_the_ones_the_rfcs_define() {
+    fn the_nineteen_compact_forms_are_the_ones_the_rfcs_define() {
         let mut found: Vec<u8> = HeaderName::KNOWN
             .iter()
             .filter_map(HeaderName::compact)
             .collect();
         found.sort_unstable();
         // RFC 3261 §7.3.3 defines ten; u and o are RFC 6665, r is RFC 3515,
-        // b is RFC 3892, x is RFC 4028
-        assert_eq!(found, b"bcefiklmorstuvx".to_vec());
+        // b is RFC 3892, x is RFC 4028, a j and d are RFC 3841, y is RFC 8224
+        assert_eq!(found, b"abcdefijklmorstuvxy".to_vec());
     }
 
     #[test]
@@ -341,6 +361,17 @@ mod tests {
         assert_eq!(name("l"), name("content-length"));
         assert_eq!(name("i"), name("Call-ID"));
         assert_eq!(name("x"), name("Session-Expires"));
+    }
+
+    #[test]
+    fn the_compact_forms_registered_after_rfc_3261_are_their_fields_too() {
+        // RFC 8224 §13.1: "The Identity header, however, retains the compact
+        // form "y""; RFC 3841 §9 and §12 give a, j and d
+        assert_eq!(name("y"), name("Identity"));
+        assert_eq!(name("Y"), name("identity"));
+        assert_eq!(name("a"), name("Accept-Contact"));
+        assert_eq!(name("j"), name("Reject-Contact"));
+        assert_eq!(name("d"), name("Request-Disposition"));
     }
 
     #[test]

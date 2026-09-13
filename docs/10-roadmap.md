@@ -266,8 +266,11 @@ shape is permanent once published:
 - no event says who is calling; `From`, `To` and `Call-ID` join the call event,
   from the core's own parse, so no binding writes a SIP parser to show a
   caller;
-- an application header cannot be put on any request or response; a header
-  list joins the configurations and a call-scoped setter covers responses;
+- application header fields on requests and responses, and a way to read any
+  field back out. *Built*: `sipral_header_t` in `headers`/`headers_len` on the
+  call and account configurations, `sipral_call_set_headers` for what a call
+  sends at the application's request, and `sipral_message_header` with its
+  three siblings over the core's parser;
 - a transfer accepted through the ABI places an INVITE with no offer; the
   entry point takes a call configuration like `sipral_call_place`;
 - one transport per stack, and a registrar that cannot be re-pointed: a

@@ -39,8 +39,8 @@ use sipral_ffi::abi::{
 };
 
 use crate::model::{
-    Base, Int, Refused, Role, Type, Writable, functions, lower_camel, read_all, roles, screaming,
-    snake, upper_camel, words,
+    Base, Int, Refused, Role, Type, Writable, functions, listed_in, lower_camel, read_all, roles,
+    screaming, snake, upper_camel, words,
 };
 use crate::names::{Spelling, audit};
 use crate::{c, csharp, kotlin, swift};
@@ -254,6 +254,22 @@ const EVENT: Record = Record {
     size: 64,
 };
 
+/// A record with no size member that is not an arm of the payload: an element
+/// of an array that crosses behind a pointer, with its length beside it, where
+/// a member appended would re-stride every element after the first.
+const HEADER: Record = Record {
+    name: "SipralHeader",
+    doc: &[" One header field: a name and a value."],
+    shape: Shape::Struct,
+    fields: &[
+        member("name", "*const c_char"),
+        member("name_len", "usize"),
+        member("value", "*const c_char"),
+        member("value_len", "usize"),
+    ],
+    size: 32,
+};
+
 const CONFIG: Record = Record {
     name: "SipralStackConfig",
     doc: &[
@@ -282,8 +298,14 @@ const CONFIG: Record = Record {
         },
         member("bind_address_len", "usize"),
         member("echo", "SipralToggle"),
+        Member {
+            name: "headers",
+            rust_type: "*const SipralHeader",
+            doc: &[" Header fields to send, `headers_len` of them."],
+        },
+        member("headers_len", "usize"),
     ],
-    size: 48,
+    size: 64,
 };
 
 /// The struct the caller part-fills and the library finishes: it brings the
@@ -382,6 +404,16 @@ const FUNCTIONS: &[Function] = &[
             member("stack", "SipralHandle"),
             member("message", "*const u8"),
             member("message_len", "usize"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
+        name: "sipral_stack_label",
+        doc: &[" Hand it header fields, an array of them with its length beside it."],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("headers", "*const SipralHeader"),
+            member("headers_len", "usize"),
         ],
         returns: "SipralStatus",
     },
@@ -490,6 +522,7 @@ const SYNTHETIC: Surface = Surface {
     enumerations: &[STATUS, TOGGLE],
     records: &[
         COUNTERS,
+        HEADER,
         CONFIG,
         PACKET,
         REGISTRATION,
@@ -1072,6 +1105,7 @@ fn role_kind(role: &Role<'_>) -> &'static str {
         Role::Plain(_) => "a plain value",
         Role::Buffer { .. } => "a buffer going in",
         Role::Fill { .. } => "a buffer being filled",
+        Role::Records { .. } => "an array of records going in",
         Role::Config(_) => "a struct going in",
         Role::Given(_) => "a struct coming back",
         Role::Shared(_) => "a struct going both ways",
@@ -1188,12 +1222,23 @@ fn shapes(surface: &Surface) -> BTreeSet<String> {
         }
         for role in roles(surface, &read) {
             out.insert(format!("a parameter playing {}", role_kind(&role)));
-            if let Role::Buffer { data, .. } | Role::Fill { data, .. } = role {
+            if let Role::Buffer { data, .. }
+            | Role::Fill { data, .. }
+            | Role::Records { data, .. } = role
+            {
                 out.insert(format!(
                     "{} whose element is {}",
                     role_kind(&role),
                     kind_of(surface, &data.ty)
                 ));
+            }
+            if let Role::Config(read) = role {
+                for listed in listed_in(surface, read, "the golden files").expect("a struct") {
+                    out.insert(format!(
+                        "a struct going in that holds an array of {}",
+                        named_kind(surface, listed.element.record.name)
+                    ));
+                }
             }
         }
     }
@@ -1374,7 +1419,8 @@ fn a_struct_going_in_is_a_kotlin_class_the_shim_copies_in() {
     assert!(
         printed.contains(
             "external fun sipral_stack_create(configEventCallback: Long, configBindAddress: \
-             ByteArray?, configEcho: Long, stack: LongArray): Int"
+             ByteArray?, configEcho: Long, configHeadersBytes: ByteArray?, \
+             configHeadersLengths: LongArray?, stack: LongArray): Int"
         ),
         "{printed}"
     );
@@ -2105,6 +2151,684 @@ fn a_listener_that_throws_is_not_promised_that_the_poll_goes_on() {
     assert!(
         !about.contains("handler, and the poll carries on.\n"),
         "{about}"
+    );
+}
+
+// ------------------------------------------------------------ arrays of records going in
+
+/// Header fields handed to an entry point, the way `sipral_call_set_headers`
+/// takes them.
+const LABEL: Function = Function {
+    name: "sipral_stack_label",
+    doc: &[],
+    parameters: &[
+        member("stack", "u64"),
+        member("headers", "*const SipralHeader"),
+        member("headers_len", "usize"),
+    ],
+    returns: "SipralStatus",
+};
+
+/// The same pointer with a length beside it that is not named for it, which
+/// is therefore not its count.
+const TAG: Function = Function {
+    name: "sipral_stack_tag",
+    doc: &[],
+    parameters: &[
+        member("stack", "u64"),
+        member("headers", "*const SipralHeader"),
+        member("count", "usize"),
+    ],
+    returns: "SipralStatus",
+};
+
+const RECORDS: Surface = Surface {
+    records: &[HEADER],
+    functions: &[LABEL, TAG],
+    ..NOTHING
+};
+
+#[test]
+fn an_array_of_records_going_in_is_read_off_the_declarations() {
+    let kinds = |surface: &Surface, name: &str| {
+        let (_, read) = functions(surface)
+            .unwrap()
+            .into_iter()
+            .find(|(function, _)| function.name == name)
+            .unwrap_or_else(|| panic!("no {name}"));
+        roles(surface, &read)
+            .iter()
+            .map(role_kind)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        kinds(&RECORDS, "sipral_stack_label"),
+        ["a plain value", "an array of records going in"]
+    );
+    // a length the pointer is not named in is some other number, and reading
+    // it as the count is the mistake the rule is there to rule out
+    assert_eq!(
+        kinds(&RECORDS, "sipral_stack_tag"),
+        ["a plain value", "a struct going in", "a plain value"]
+    );
+
+    let surface = &sipral_ffi::abi::SURFACE;
+    assert_eq!(
+        kinds(surface, "sipral_call_set_headers"),
+        [
+            "a plain value",
+            "a plain value",
+            "an array of records going in"
+        ]
+    );
+    // and as two members of every struct going in that carries them
+    for (name, record) in [
+        ("sipral_call_place", "SipralCallConfig"),
+        ("sipral_call_consult", "SipralCallConfig"),
+        ("sipral_account_add", "SipralAccountConfig"),
+    ] {
+        let (_, read) = functions(surface)
+            .unwrap()
+            .into_iter()
+            .find(|(function, _)| function.name == name)
+            .unwrap();
+        let config = read
+            .iter()
+            .find(|parameter| parameter.member.name == "config")
+            .unwrap();
+        let listed = listed_in(surface, config, "the test").unwrap();
+        let [one] = listed.as_slice() else {
+            panic!("{record} holds {} arrays of records", listed.len());
+        };
+        assert_eq!(
+            (one.data.member.name, one.len.member.name),
+            ("headers", "headers_len"),
+            "{record}"
+        );
+        assert_eq!(one.element.record.name, "SipralHeader");
+        let texts: Vec<_> = one
+            .element
+            .texts
+            .iter()
+            .map(|text| (text.data.member.name, text.len.member.name))
+            .collect();
+        assert_eq!(texts, [("name", "name_len"), ("value", "value_len")]);
+    }
+}
+
+#[test]
+fn every_binding_hands_over_a_list_with_its_own_count() {
+    let surface = &sipral_ffi::abi::SURFACE;
+
+    // Swift: an array of a struct it prints, made into the C array inside
+    // the call, with the array's pointer and the array's count, and no length
+    // of the caller's anywhere
+    let printed = swift::binding(surface).unwrap();
+    for line in [
+        "    public static func callSetHeaders(stack: SipralHandle, call: SipralHandle, \
+         headers: [SipralHeader]) throws {\n        let status =\n            \
+         SipralHeader.withUnsafeArray(headers) { p2 in\n                \
+         sipral_call_set_headers(stack, call, p2.baseAddress, p2.count)\n",
+        "config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws \
+         -> SipralHandle {\n",
+        "SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in\n                \
+         config.headers = p2Headers.baseAddress\n                \
+         config.headers_len = p2Headers.count\n                \
+         return sipral_call_place(stack, account, &config, &call, nowMs)\n",
+        "config: sipral_account_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {\n",
+    ] {
+        assert!(printed.contains(line), "Swift: no `{line}`");
+    }
+    for stale in ["headersLen", "headers: sipral_header_t"] {
+        assert!(!printed.contains(stale), "Swift still prints `{stale}`");
+    }
+
+    // C#: an array of tuples, copied into memory the wrapper pins and lets go
+    // of as the call returns, and the address and count of that
+    let printed = csharp::binding(surface).unwrap();
+    for line in [
+        "internal static extern SipralStatus sipral_call_set_headers(ulong stack, ulong call, \
+         IntPtr headers, nuint headersLen);",
+        "    public static void CallSetHeaders(ulong stack, ulong call, (string Name, string \
+         Value)[] headers)\n    {\n        using var headersArray = new \
+         SipralHeaderArray(headers);\n        Check(NativeMethods.sipral_call_set_headers(stack, \
+         call, headersArray.Address, headersArray.Count));\n",
+        "in SipralCallConfig config, (string Name, string Value)[]? configHeaders, ulong nowMs)\n",
+        "        using var configHeadersArray = new SipralHeaderArray(configHeaders);\n        \
+         var configValue = config;\n        configValue.Headers = \
+         configHeadersArray.Address;\n        configValue.HeadersLen = \
+         configHeadersArray.Count;\n        Check(NativeMethods.sipral_call_place(stack, \
+         account, in configValue, out var call, nowMs));\n",
+    ] {
+        assert!(printed.contains(line), "C#: no `{line}`");
+    }
+    assert!(
+        !printed.contains("in SipralHeader headers"),
+        "C# still hands over one record"
+    );
+
+    // Kotlin: a list of a class it prints, packed for the shim, and the shim
+    // hands the library the array it made and that array's count
+    let printed = kotlin::binding(surface).unwrap();
+    for line in [
+        "    fun callSetHeaders(stack: Long, call: Long, headers: List<SipralHeader>) {\n        \
+         val (headersBytes, headersLengths) = SipralHeader.packed(headers)\n        \
+         check(SipralNative.sipral_call_set_headers(stack, call, headersBytes, headersLengths))\n",
+        "external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, \
+         headersLengths: LongArray?): Int",
+        "    val headers: List<SipralHeader>? = null,\n",
+        "        val (configHeadersBytes, configHeadersLengths) = \
+         SipralHeader.packed(config.headers)\n",
+    ] {
+        assert!(printed.contains(line), "Kotlin: no `{line}`");
+    }
+    let shim = kotlin::shim(surface).unwrap();
+    for line in [
+        "        status = sipral_call_set_headers((sipral_handle_t)stack, (sipral_handle_t)call, \
+         headers_array, headers_count);\n",
+        "    config_value.headers = configHeaders_array;\n    config_value.headers_len = \
+         configHeaders_count;\n",
+    ] {
+        assert!(shim.contains(line), "the JNI shim: no `{line}`");
+    }
+    assert!(
+        !shim.contains("(const sipral_header_t *)(intptr_t)"),
+        "the shim still hands over an address a Kotlin caller supplied"
+    );
+}
+
+#[test]
+fn the_shim_checks_every_length_before_it_points_into_the_bytes() {
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    let helper = shim
+        .split("static int\njni_header_array(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("no list helper in:\n{shim}"));
+    // one check per piece of text, each against what is left of the bytes
+    // and made before the pointer the length goes with
+    let check = "if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {";
+    assert_eq!(helper.matches(check).count(), 2, "{helper}");
+    let checked = helper.find(check).unwrap_or(usize::MAX);
+    let pointed = helper
+        .find("array[index].name = length == 0 ? NULL : (const char *)pinned + at;")
+        .unwrap_or_else(|| panic!("{helper}"));
+    assert!(checked < pointed, "{helper}");
+    // and bytes the lengths leave over are refused too, including bytes with
+    // no lengths at all, which would otherwise reach the library as no list
+    assert!(
+        helper.contains("if (index != count || at != (size_t)room) {"),
+        "{helper}"
+    );
+    let empty = helper
+        .find("    if (count == 0) {\n        if (room != 0) {\n            jni_refuse(env, ")
+        .unwrap_or_else(|| panic!("no refusal of bytes behind no lengths in:\n{helper}"));
+    let allowed = helper
+        .find("        return 1;\n    }\n")
+        .unwrap_or_else(|| panic!("{helper}"));
+    assert!(empty < allowed, "{helper}");
+    assert!(
+        !helper.contains("if (lengths == NULL) {\n        return 1;"),
+        "{helper}"
+    );
+
+    // Made after every other fetch, since a list that makes no array leaves an
+    // exception pending; the call and every write back only when it made one;
+    // and what it pinned let go of whatever happened.
+    let create = shim
+        .split("Java_org_sipral_SipralNative_sipral_1stack_1create(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("no sipral_stack_create in:\n{shim}"));
+    let at = |what: &str| {
+        create
+            .find(what)
+            .unwrap_or_else(|| panic!("no `{what}` in:\n{create}"))
+    };
+    let fetched = at("configBindAddress_data = ");
+    let made = at("ready = ready && jni_header_array(env, configHeadersBytes, ");
+    let called = at("    if (ready) {\n        status = sipral_stack_create(");
+    let released = at("    jni_header_release(env, configHeadersBytes, ");
+    let written = at("    if (ready) {\n        {\n            jlong slot");
+    assert!(
+        fetched < made && made < called && called < released && released < written,
+        "{create}"
+    );
+}
+
+/// An element with a size member.
+const VERSIONED_ELEMENT: Surface = Surface {
+    records: &[Record {
+        name: "SipralHeader",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[
+            member("size", "usize"),
+            member("name", "*const c_char"),
+            member("name_len", "usize"),
+        ],
+        size: 24,
+    }],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+/// An element with a member that is not text.
+const NUMBER_ELEMENT: Surface = Surface {
+    records: &[Record {
+        name: "SipralHeader",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[
+            member("name", "*const c_char"),
+            member("name_len", "usize"),
+            member("weight", "u32"),
+        ],
+        size: 24,
+    }],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+/// An element that is a union.
+const UNION_ELEMENT: Surface = Surface {
+    records: &[Record {
+        name: "SipralHeader",
+        doc: &[],
+        shape: Shape::Union,
+        fields: &[member("a", "u32"), member("b", "u32")],
+        size: 4,
+    }],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+/// An element of one member.
+const SINGLE_ELEMENT: Surface = Surface {
+    records: &[Record {
+        name: "SipralHeader",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[member("name", "*const c_char"), member("name_len", "usize")],
+        size: 16,
+    }],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+/// An element with a member C# will not take as the name of a tuple element.
+const REST_ELEMENT: Surface = Surface {
+    records: &[Record {
+        name: "SipralHeader",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[
+            member("name", "*const c_char"),
+            member("name_len", "usize"),
+            member("rest", "*const c_char"),
+            member("rest_len", "usize"),
+        ],
+        size: 32,
+    }],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+/// A struct handed to a listener that holds an array of records.
+const LISTENER_RECORDS: Surface = Surface {
+    records: &[
+        HEADER,
+        Record {
+            name: "SipralEvent",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("headers", "*const SipralHeader"),
+                member("headers_len", "usize"),
+            ],
+            size: 24,
+        },
+        Record {
+            name: "SipralStackConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("event_callback", "SipralEventCallback"),
+                member("event_user_data", "*mut c_void"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[
+        Function {
+            name: "sipral_stack_create",
+            doc: &[],
+            parameters: &[
+                member("config", "*const SipralStackConfig"),
+                member("out_stack", "*mut SipralHandle"),
+            ],
+            returns: "SipralStatus",
+        },
+        Function {
+            name: "sipral_stack_destroy",
+            doc: &[],
+            parameters: &[member("stack", "SipralHandle")],
+            returns: "SipralStatus",
+        },
+    ],
+    ..UNRELEASED
+};
+
+/// An entry point that answers with text and takes an array of records.
+const TEXT_WITH_RECORDS: Surface = Surface {
+    records: &[HEADER],
+    functions: &[Function {
+        name: "sipral_stack_label_text",
+        doc: &[],
+        parameters: &[
+            member("headers", "*const SipralHeader"),
+            member("headers_len", "usize"),
+        ],
+        returns: "*const c_char",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn an_element_a_binding_cannot_build_is_refused_by_name() {
+    for (surface, expect) in [
+        (
+            &VERSIONED_ELEMENT,
+            "SipralHeader is handed over as the element of an array and carries a size member",
+        ),
+        (
+            &NUMBER_ELEMENT,
+            "SipralHeader::weight is not a piece of text",
+        ),
+        (
+            &UNION_ELEMENT,
+            "SipralHeader is handed over as the element of an array and is a union",
+        ),
+    ] {
+        // C hands the caller's pointer through and builds nothing
+        if let Err(why) = audit(surface, &c::Names) {
+            panic!("C: {why}");
+        }
+        for how in [
+            &csharp::Names as &dyn Spelling,
+            &kotlin::Names,
+            &swift::Names,
+        ] {
+            let why = refusal(surface, how);
+            assert!(
+                why.contains(expect) && why.contains(&format!("the {} binding", how.language())),
+                "{}: {why}",
+                how.language()
+            );
+        }
+    }
+
+    // a tuple has no spelling for one member and no room for some names, and
+    // a class or a struct has both
+    let why = refusal(&SINGLE_ELEMENT, &csharp::Names);
+    assert!(
+        why.contains("SipralHeader") && why.contains("no tuple of one"),
+        "{why}"
+    );
+    let why = refusal(&REST_ELEMENT, &csharp::Names);
+    assert!(
+        why.contains("SipralHeader::rest") && why.contains("`Rest`"),
+        "{why}"
+    );
+    for surface in [&SINGLE_ELEMENT, &REST_ELEMENT] {
+        for how in [&kotlin::Names as &dyn Spelling, &swift::Names] {
+            if let Err(why) = audit(surface, how) {
+                panic!("{}: {why}", how.language());
+            }
+        }
+    }
+
+    // Kotlin builds lists and reads none back out of what a listener is
+    // handed, and prints a call that answers with text with nothing before it
+    let why = refusal(&LISTENER_RECORDS, &kotlin::Names);
+    assert!(
+        why.contains("SipralEvent::headers") && why.contains("hands to a listener"),
+        "{why}"
+    );
+    let why = refusal(&TEXT_WITH_RECORDS, &kotlin::Names);
+    assert!(
+        why.contains("sipral_stack_label_text") && why.contains("answers with text"),
+        "{why}"
+    );
+}
+
+/// Header fields behind a pointer the library may write through, with the
+/// `_len` named for them: an array written back, which no back end builds.
+const FILLED_RECORDS: Surface = Surface {
+    records: &[HEADER],
+    functions: &[Function {
+        name: "sipral_stack_fill",
+        doc: &[],
+        parameters: &[
+            member("stack", "u64"),
+            member("headers", "*mut SipralHeader"),
+            member("headers_len", "usize"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+/// Versioned records behind a pointer the library may write through, with the
+/// `_len` named for them: an array written back of a struct that does carry
+/// its size.
+const FILLED_VERSIONED: Surface = Surface {
+    records: &[Record {
+        name: "SipralTally",
+        doc: &[],
+        shape: Shape::Struct,
+        fields: &[member("size", "usize"), member("sent", "u64")],
+        size: 16,
+    }],
+    functions: &[Function {
+        name: "sipral_stack_tallies",
+        doc: &[],
+        parameters: &[
+            member("stack", "u64"),
+            member("tallies", "*mut SipralTally"),
+            member("tallies_len", "usize"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+/// Header fields with a length beside them that is not named for them.
+const COUNTED_RECORDS: Surface = Surface {
+    records: &[HEADER],
+    functions: &[TAG],
+    ..NOTHING
+};
+
+#[test]
+fn a_record_behind_a_pointer_with_a_length_no_binding_reads_is_refused() {
+    // None of these is an array of records going in, and none is one struct
+    // either: two are arrays the library writes back, the third points at a
+    // record with no size member, which only an array is made of. Printed as
+    // one struct, the wrapper hands C the address of a single element and a
+    // length the caller chose, and C reads past the element.
+    for (surface, parameter, record, why_not) in [
+        (
+            &FILLED_RECORDS,
+            "sipral_stack_fill::headers",
+            "SipralHeader",
+            "an array the library writes back",
+        ),
+        (
+            &FILLED_VERSIONED,
+            "sipral_stack_tallies::tallies",
+            "SipralTally",
+            "an array the library writes back",
+        ),
+        (
+            &COUNTED_RECORDS,
+            "sipral_stack_tag::headers",
+            "SipralHeader",
+            "has no size member",
+        ),
+    ] {
+        // C hands the caller's pointer and length through as they are
+        if let Err(why) = audit(surface, &c::Names) {
+            panic!("C: {why}");
+        }
+        let mut refusing: Vec<&dyn Spelling> = vec![&csharp::Names, &swift::Names];
+        // Kotlin refuses a record with no size behind a const pointer before
+        // it reaches an entry point, for the class it would have to build
+        if why_not != "has no size member" {
+            refusing.push(&kotlin::Names);
+        }
+        for how in refusing {
+            let why = refusal(surface, how);
+            assert!(
+                why.contains(parameter)
+                    && why.contains(record)
+                    && why.contains(why_not)
+                    && why.contains(&format!("the {} binding", how.language())),
+                "{}: {why}",
+                how.language()
+            );
+        }
+        let why = refusal(surface, &kotlin::Names);
+        assert!(why.contains(record), "Kotlin: {why}");
+    }
+}
+
+/// An entry point that answers with text and takes a struct holding a list.
+const TEXT_WITH_LISTED_CONFIG: Surface = Surface {
+    records: &[
+        HEADER,
+        Record {
+            name: "SipralCallConfig",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[
+                member("size", "usize"),
+                member("headers", "*const SipralHeader"),
+                member("headers_len", "usize"),
+            ],
+            size: 24,
+        },
+    ],
+    functions: &[Function {
+        name: "sipral_call_label_text",
+        doc: &[],
+        parameters: &[member("config", "*const SipralCallConfig")],
+        returns: "*const c_char",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_call_that_answers_with_text_and_takes_a_list_is_refused_in_every_binding() {
+    // a call that answers with text is printed with its parameters handed
+    // through as they came, so a list would cross as whatever the caller
+    // supplied beside it
+    for (surface, function) in [
+        (&TEXT_WITH_RECORDS, "sipral_stack_label_text"),
+        (&TEXT_WITH_LISTED_CONFIG, "sipral_call_label_text"),
+    ] {
+        for how in [
+            &csharp::Names as &dyn Spelling,
+            &kotlin::Names,
+            &swift::Names,
+        ] {
+            let why = refusal(surface, how);
+            assert!(
+                why.contains(function) && why.contains("answers with text"),
+                "{}: {why}",
+                how.language()
+            );
+        }
+    }
+}
+
+/// A struct going in that carries its own size, immediately followed by a
+/// plain length with nothing to do with it.
+const SIZED_THING: Record = Record {
+    name: "SipralThing",
+    doc: &[],
+    shape: Shape::Struct,
+    fields: &[
+        member("size", "usize"),
+        member("label", "*const c_char"),
+        member("label_len", "usize"),
+        member("value", "u32"),
+    ],
+    size: 24,
+};
+
+/// A versioned struct going in beside a length that is some other number:
+/// `counts_records` never reads this pointer as an array, since the pointee
+/// carries a size member, and [`unprintable`](crate::model::unprintable) has
+/// to let it through rather than refuse it the way it refuses the same shape
+/// over a record with no size member.
+const SIZED_BESIDE_A_LENGTH: Surface = Surface {
+    records: &[SIZED_THING],
+    functions: &[Function {
+        name: "sipral_stack_configure",
+        doc: &[],
+        parameters: &[
+            member("stack", "u64"),
+            member("thing", "*const SipralThing"),
+            member("extra", "usize"),
+        ],
+        returns: "SipralStatus",
+    }],
+    ..NOTHING
+};
+
+#[test]
+fn a_versioned_struct_going_in_beside_an_unrelated_length_is_not_refused() {
+    for how in [
+        &csharp::Names as &dyn Spelling,
+        &kotlin::Names,
+        &swift::Names,
+    ] {
+        if let Err(why) = audit(&SIZED_BESIDE_A_LENGTH, how) {
+            panic!("{}: {why}", how.language());
+        }
+    }
+}
+
+/// A record that has nothing to do with header fields, but is named the way
+/// C# names the class a list of `SipralHeader` is pinned in.
+const HEADER_ARRAY_COLLISION: Surface = Surface {
+    records: &[
+        HEADER,
+        Record {
+            name: "SipralHeaderArray",
+            doc: &[],
+            shape: Shape::Struct,
+            fields: &[member("flag", "u32")],
+            size: 4,
+        },
+    ],
+    functions: &[LABEL],
+    ..NOTHING
+};
+
+#[test]
+fn a_list_class_named_for_an_unrelated_declaration_is_refused() {
+    // `list_classes` names the class C# pins a list of `SipralHeader` in
+    // `SipralHeaderArray` without asking the declarations first, and nothing
+    // stops a later declaration from taking that name for something else;
+    // the audit is what has to notice the two are printed as one.
+    let why = refusal(&HEADER_ARRAY_COLLISION, &csharp::Names);
+    assert!(
+        why.contains("SipralHeaderArray") && why.contains("SipralHeader"),
+        "{why}"
     );
 }
 

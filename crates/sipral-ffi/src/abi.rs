@@ -524,6 +524,7 @@ pub const SURFACE: Surface = Surface {
         crate::stack::SipralStackConfig::ABI,
         crate::stack::SipralPollResult::ABI,
         crate::stack::SipralStackSettings::ABI,
+        crate::header::SipralHeader::ABI,
         crate::account::SipralAccountConfig::ABI,
         crate::call::SipralCallConfig::ABI,
         crate::media::SipralCodecInfo::ABI,
@@ -569,6 +570,7 @@ pub const SURFACE: Surface = Surface {
         crate::call::sipral_call_answer_media::ABI,
         crate::call::sipral_call_reject::ABI,
         crate::call::sipral_call_hangup::ABI,
+        crate::call::sipral_call_set_headers::ABI,
         crate::call::sipral_call_hold::ABI,
         crate::call::sipral_call_resume::ABI,
         crate::call::sipral_call_accept_session::ABI,
@@ -605,6 +607,10 @@ pub const SURFACE: Surface = Surface {
         crate::transport::sipral_stack_transport_failed::ABI,
         crate::transport::sipral_stack_stream_closed::ABI,
         crate::event::sipral_event_kind_name::ABI,
+        crate::header::sipral_message_header_count::ABI,
+        crate::header::sipral_message_header::ABI,
+        crate::header::sipral_message_header_element_count::ABI,
+        crate::header::sipral_message_header_element::ABI,
     ],
 };
 
@@ -763,9 +769,11 @@ mod tests {
     }
 
     /// The size member is what makes appending to a released struct safe, so
-    /// every struct a caller fills in or reads back has to have one. The two
+    /// every struct a caller fills in or reads back has to have one. The ones
     /// that do not are the event payload arms, which live inside an event that
-    /// carries the size for all of them.
+    /// carries the size for all of them, and the element of an array whose
+    /// length travels beside it, which an appended member would re-stride and
+    /// which therefore never grows.
     #[test]
     fn every_record_a_caller_hands_over_carries_its_own_size() {
         let inside_an_event = [
@@ -775,8 +783,9 @@ mod tests {
             "SipralMediaEvent",
             "SipralEventPayload",
         ];
+        let array_elements = ["SipralHeader"];
         for record in SURFACE.records {
-            if inside_an_event.contains(&record.name) {
+            if inside_an_event.contains(&record.name) || array_elements.contains(&record.name) {
                 assert!(!record.is_versioned(), "{} grew a size", record.name);
                 continue;
             }

@@ -302,6 +302,98 @@ message is going out over rather than what the socket is, and it is the member
 that would start disagreeing with `sipral_stack_settings_t::transport` on the day
 that lands.
 
+**Header fields go in as an array and come out as offsets.** An application
+that labels a call, asserts an identity or reads a carrier's `Diversion` needs
+fields this ABI has no member for, and a binding that writes its own SIP parser
+to reach them is exactly what the library exists to spare it. `sipral_header_t`
+is a name and a value. `headers` and `headers_len` sit at the tail of
+`sipral_call_config_t`, for the INVITE, and of `sipral_account_config_t`, for
+every REGISTER. `sipral_call_set_headers` sets the fields for what a call sends
+afterwards at the application's request: the 180 or 183, the 200, a refusal,
+the BYE a hangup turns into, and the re-INVITE or UPDATE of a hold or a resume.
+Those are kept until they are set again rather than spent on the first message,
+because a field spent on a provisional response that left first is missing from
+the 200 that mattered; and they never go on a CANCEL, which a proxy answers and
+replaces with its own, or on anything the stack sends by itself.
+`sipral_header_t` is the one struct here without a `size`: it is an array
+element, strided by its own length, so it cannot grow — and a field is a name
+and a value and has nothing to grow into.
+
+Every field is checked before anything is built, and refused with
+`SIPRAL_STATUS_INVALID_ARGUMENT` naming the element: a name that is not a token,
+a value that is not one line of UTF-8 text, or a field the stack writes itself on
+those messages. That list, and the reason for each name on it, is in
+`docs/04-ua.md`; the C side adds `User-Agent` when
+`sipral_stack_config_t::user_agent` is set. A second `Contact` or `Via` is not a
+detail the far end sorts out, it is a message two implementations read two ways,
+so refusing it is the one answer that does not leave the choice to whichever hop
+reads it first. An account with no registrar refuses `headers` outright, since it
+sends no REGISTER to put them on.
+
+Out of a message, four accessors run the parser the stack already runs, over
+bytes the caller holds — the message an event carries, or any other.
+`sipral_message_header_count` says how many lines a field is on and
+`sipral_message_header` reaches one of them by index;
+`sipral_message_header_element_count` and `sipral_message_header_element` do the
+same for the values of a list field across its lines and its commas, which
+RFC 3261 §7.3.1 makes the same message and a proxy may convert between. A field
+that is absent is a count of zero rather than a failure, so no status was added
+for it, and an index past the count is `SIPRAL_STATUS_INVALID_ARGUMENT`. What
+comes back is an offset and a length into the caller's bytes rather than a
+pointer: a binding that copied the bytes across the boundary holds its own copy,
+and an offset means the same thing in both. Counting and reaching are two calls
+rather than one with three values written back because no binding generator here
+has a shape for a third. Names match the way the parser matches them, without
+regard to case, and a compact form is the field it abbreviates (§7.3.3).
+
+**A binding takes a list of header fields, and C is handed the list's own
+count.** A pointer and a length taken separately from the caller are a length
+nothing checked against the pointer: the first Swift and .NET wrappers printed
+for `sipral_call_set_headers` took one `sipral_header_t` and the caller's
+`headers_len`, so any length above one read the memory after it. The generator
+reads the shape off the declarations instead — a `const` pointer to a record,
+followed by the `usize` named for it with `_len`, is an array of records going
+in, whether the two are parameters or members of a struct going in — and each
+binding builds the array itself:
+
+- **Swift** takes `[SipralHeader]`, a struct it prints with a `name` and a
+  `value`. `SipralHeader.withUnsafeArray` copies every name and value into one
+  buffer, points an array of `sipral_header_t` into it and hands that array's
+  `baseAddress` and `count` to C inside a closure, so nothing it points at
+  outlives the call.
+- **.NET** takes `(string Name, string Value)[]`. `SipralHeaderArray` encodes
+  and copies the text into one buffer before it pins anything, pins that buffer
+  and the records, and is declared with `using`, so both pins go as the call
+  returns or throws. `NativeMethods` takes the records as an `IntPtr`, the one
+  pointer it does not let the runtime pin, because what the records point at
+  has to stay pinned as well.
+- **Kotlin** takes `List<SipralHeader>`, a class it prints. `SipralHeader.packed`
+  turns the list into one `ByteArray` of UTF-8 and a `LongArray` with the length
+  of every piece, and the JNI shim pins the bytes, reads each length once,
+  checks it against what is left of them before it makes a pointer, and
+  releases the pin whatever the library answered. A negative length, one past
+  the bytes, a count that is not a whole number of elements and bytes no length
+  accounts for are each an `IllegalArgumentException` before the library is
+  called. A list crosses packed rather than as objects the shim walks, because
+  walking one makes a local reference per string, which a long list turns into
+  more than a native call is promised.
+
+Where the list is a member of `sipral_call_config_t` or
+`sipral_account_config_t`, Kotlin's class has a `headers` field, and Swift and
+.NET take the list as an argument beside the struct — `configHeaders` — and set
+`headers` and `headers_len` from it inside the call, over whatever the caller
+left in them. An empty name or value crosses as a null pointer with a length of
+zero, which the library reads as empty. A record the generator cannot build an
+element out of — one with a `size`, a union, a member that is not text, or, in
+.NET, a single member or a name a tuple element may not take — stops it with
+the declaration named. So does a pointer to a record with a length after it
+that is not that shape, since printed as one struct it would hand C the address
+of a single element and a length the caller chose: the `_len` behind a writable
+pointer, which is an array coming back that no binding builds, and any length
+beside a record with no `size`, which only an array is made of. So does a call
+that answers with text and takes a list, directly or in a struct, because such
+a call is printed with its parameters handed through as they came.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to
@@ -456,13 +548,15 @@ naming each shape the golden files do not reach.
 
 **The conventions are load-bearing now.** The generator reads the ABI's own
 shapes off the parameter lists: a pointer followed by a length is one buffer
-going in, a pointer followed by `capacity` is a buffer the library fills, a
-writable pointer named `out_…` is one value coming back, and a pointer to a
-versioned struct is a struct going in, coming back, or both, according to which
-way it points and whether the struct holds buffers of the caller's. So a new
-parameter called `blob` beside `blob_size` rather than `blob_len` is not a
-naming preference: it is a binding that hands over a raw pointer instead of a
-string. `tools/abi-gen/src/model.rs` is where those four rules are written down.
+going in, a `const` pointer to a record followed by the `_len` named for it is
+an array of records going in, a pointer followed by `capacity` is a buffer the
+library fills, a writable pointer named `out_…` is one value coming back, and a
+pointer to a versioned struct is a struct going in, coming back, or both,
+according to which way it points and whether the struct holds buffers of the
+caller's. So a new parameter called `blob` beside `blob_size` rather than
+`blob_len` is not a naming preference: it is a binding that hands over a raw
+pointer instead of a string. `tools/abi-gen/src/model.rs` is where those five
+rules are written down.
 
 ### What the gate catches
 
@@ -535,9 +629,11 @@ compared. What they build is.
 A Swift Package whose C target is the generated header, and whose Swift target
 is `SipralAbi.swift`, printed beside it. A status is a thrown `SipralError`
 carrying the last message; a pointer and a length are a `String` or an array
-held alive across the call; a buffer the caller brings is an `inout` array; a
-struct the library fills in whole is what the call returns, with an extension
-per struct that hands over a zeroed one with its `size` already set. Nothing in
+held alive across the call; an array of records going in is an array of a
+struct the binding prints, made into the C array inside the call; a buffer the
+caller brings is an `inout` array; a struct the library fills in whole is what
+the call returns, with an extension per struct that hands over a zeroed one
+with its `size` already set. Nothing in
 the printed surface is a raw pointer except the two structs a caller part-fills
 with its own buffers, which are `inout` and typed.
 
@@ -553,9 +649,11 @@ belongs there too.
 `SipralAbi.cs`, printed, in two layers. `NativeMethods` is the ABI as P/Invoke
 declares it, with every pointer written as an array or as `in`, `ref` or `out`,
 so the package compiles without an unsafe block and the runtime does the
-pinning; `Sipral` is the layer above, where a status becomes a
-`SipralException`, a byte pointer and its length become a `string`, and
-everything written back becomes what the call returns.
+pinning — except for an array of records, an `IntPtr` to records the wrapper
+pins itself; `Sipral` is the layer above, where a status becomes a
+`SipralException`, a byte pointer and its length become a `string`, an array of
+records becomes an array of tuples, and everything written back becomes what
+the call returns.
 
 What is not printed: the native assets for `osx-arm64`, `osx-x64`, `win-x64`,
 `win-arm64` and `linux-x64`, the `Task`-based surface, `IAsyncEnumerable` for
@@ -578,8 +676,9 @@ could not, since Android builds for two pointer widths. A struct the caller
 fills in and the library only reads — `sipral_stack_config_t`,
 `sipral_account_config_t`, `sipral_call_config_t` — is a Kotlin class with one
 field per member, every field defaulting to the zero the C struct would hold:
-a pointer and its `_len` are one `String` or array, and the callback with the
-user pointer after it is one listener. The wrapper hands the fields over one
+a pointer and its `_len` are one `String` or array, or a `List` of a class the
+binding prints when the pointer is to records, and the callback with the user
+pointer after it is one listener. The wrapper hands the fields over one
 argument each, and the shim copies them into a zeroed struct whose `size` it
 sets from its own header. A member those conventions do not cover — a pointer
 with no `_len` after it, a struct or a union held by value — stops the
@@ -641,7 +740,10 @@ holds the rest to account. `scripts/check.sh` links the printed shim against
 the shared library and runs it on a JVM with `-Xcheck:jni`: a stack built from
 a class, its first event heard on a native thread the shim attached and let go
 of, a poll's worth of messages none of which the shim still holds when the next
-event arrives, a listener that throws, and one that destroys its own stack.
+event arrives, two header fields in a list found in the INVITE a call went out
+in and two more in the 486 a refused call went out on, a second element refused
+by name, every malformed packing thrown before the library is called, a
+listener that throws, and one that destroys its own stack.
 
 ## Versioning
 

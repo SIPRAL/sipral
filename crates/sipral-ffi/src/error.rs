@@ -36,6 +36,18 @@ pub(crate) struct Fail {
     message: Cow<'static, str>,
 }
 
+impl Fail {
+    /// The same failure, said about one element of a list the caller handed
+    /// over: `headers[2]: ...` rather than a sentence that could be about any
+    /// of them.
+    pub(crate) fn within(self, place: &str) -> Self {
+        Self {
+            status: self.status,
+            message: format!("{place}: {}", self.message).into(),
+        }
+    }
+}
+
 /// A failure with its explanation. A borrowed message costs nothing, which is
 /// what most of them are.
 pub(crate) fn fail(status: SipralStatus, message: impl Into<Cow<'static, str>>) -> Fail {

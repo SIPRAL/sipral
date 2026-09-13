@@ -49,6 +49,7 @@ mod calls;
 mod dialoginfo;
 mod error;
 mod event;
+mod headers;
 mod lifecycle;
 mod options;
 mod parked;
@@ -77,6 +78,7 @@ pub use dialoginfo::{
 };
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+pub use headers::{HeaderRefused, HeadersFor};
 pub use lifecycle::{
     Idle, LifecycleState, Link, Network, Recovery, RecoveryFailure, Rung, Suspending,
 };

@@ -15,8 +15,9 @@ use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Stands, Surfac
 
 use crate::c;
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Role, Type, Writable, functions, linked, lower_camel,
-    plain_named, record_named, roles, without_prefix,
+    Base, Int, Linked, Read, Refused, Role, Text, Type, Writable, element, elements, functions,
+    linked, listed_in, lower_camel, plain_named, record_named, roles, unprintable, upper_camel,
+    without_prefix,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -161,17 +162,32 @@ fn called(function: &Function) -> String {
     safe(&without_prefix(function.name))
 }
 
-/// One wrapping closure around the call, for a buffer that has to stay alive
+/// One wrapping closure around the call, for memory that has to stay alive
 /// while C reads it.
 struct Wrap {
-    opening: String,
+    /// What the closure is handed to, up to its opening brace.
+    head: String,
+    /// What the call reads the pointer and the count out of, when it reads
+    /// them through this closure.
     binding: String,
     /// The name the closure introduces, which is a name in the function's
     /// scope like any other and is claimed as one.
     bound: String,
+    /// What has to be set before the call, inside the innermost closure,
+    /// where every pointer the call reads is still alive.
+    setup: Vec<String>,
 }
 
-fn wrapping(index: usize, role: &Role<'_>) -> Vec<Wrap> {
+/// One member of a struct going in, as the argument a list for it is taken
+/// in: `config` and `headers` are `configHeaders`.
+fn flat(parameter: &Read<'_>, member: &Read<'_>) -> String {
+    safe(&lower_camel(&format!(
+        "{}_{}",
+        parameter.member.name, member.member.name
+    )))
+}
+
+fn wrapping(surface: &Surface, index: usize, role: &Role<'_>) -> Result<Vec<Wrap>, Refused> {
     let (name, ty, writable) = match role {
         Role::Buffer { data, .. } => (
             held(data),
@@ -179,7 +195,48 @@ fn wrapping(index: usize, role: &Role<'_>) -> Vec<Wrap> {
             data.ty.pointer == Some(Writable::Yes),
         ),
         Role::Fill { data, .. } => (held(data), data.ty.clone(), true),
-        _ => return Vec::new(),
+        Role::Records { data, .. } => {
+            let element = element(surface, data, "Swift")?;
+            let pointer = format!("p{index}");
+            return Ok(vec![Wrap {
+                head: format!("{}.withUnsafeArray({})", element.record.name, held(data)),
+                binding: pointer.clone(),
+                bound: pointer,
+                setup: Vec::new(),
+            }]);
+        }
+        Role::Config(read) => {
+            // the struct is the caller's, and every list it holds is taken
+            // beside it and set into it inside the closure, so that the
+            // pointer and the count C reads are the list's own and alive
+            let config = held(read);
+            return Ok(listed_in(surface, read, "Swift")?
+                .into_iter()
+                .map(|listed| {
+                    let pointer = format!("p{index}{}", upper_camel(listed.data.member.name));
+                    Wrap {
+                        head: format!(
+                            "{}.withUnsafeArray({})",
+                            listed.element.record.name,
+                            flat(read, &listed.data)
+                        ),
+                        binding: String::new(),
+                        setup: vec![
+                            format!(
+                                "{config}.{} = {pointer}.baseAddress",
+                                safe(listed.data.member.name)
+                            ),
+                            format!(
+                                "{config}.{} = {pointer}.count",
+                                safe(listed.len.member.name)
+                            ),
+                        ],
+                        bound: pointer,
+                    }
+                })
+                .collect());
+        }
+        _ => return Ok(Vec::new()),
     };
     let pointer = format!("p{index}");
     let method = if writable {
@@ -190,33 +247,54 @@ fn wrapping(index: usize, role: &Role<'_>) -> Vec<Wrap> {
     if ty.base == Base::Char && !writable {
         // a String has to become bytes before it has an address, and those
         // bytes are unsigned where C's are not
-        return vec![
+        return Ok(vec![
             Wrap {
-                opening: format!("Array({name}.utf8).withUnsafeBufferPointer {{ raw{index} in"),
+                head: format!("Array({name}.utf8).withUnsafeBufferPointer"),
                 binding: String::new(),
                 bound: format!("raw{index}"),
+                setup: Vec::new(),
             },
             Wrap {
-                opening: format!("raw{index}.withMemoryRebound(to: CChar.self) {{ {pointer} in"),
+                head: format!("raw{index}.withMemoryRebound(to: CChar.self)"),
                 binding: pointer.clone(),
                 bound: pointer,
+                setup: Vec::new(),
             },
-        ];
+        ]);
     }
-    vec![Wrap {
-        opening: format!("{name}.{method} {{ {pointer} in"),
+    Ok(vec![Wrap {
+        head: format!("{name}.{method}"),
         binding: pointer.clone(),
         bound: pointer,
-    }]
+        setup: Vec::new(),
+    }])
 }
 
-fn signature(function: &Function, parts: &[Role<'_>]) -> String {
+fn signature(
+    surface: &Surface,
+    function: &Function,
+    parts: &[Role<'_>],
+) -> Result<String, Refused> {
     let mut arguments = Vec::new();
     let mut results = Vec::new();
     for role in parts {
         match role {
-            Role::Plain(read) | Role::Config(read) => {
+            Role::Plain(read) => {
                 arguments.push(format!("{}: {}", held(read), scalar(&read.ty)));
+            }
+            Role::Config(read) => {
+                arguments.push(format!("{}: {}", held(read), scalar(&read.ty)));
+                for listed in listed_in(surface, read, "Swift")? {
+                    arguments.push(format!(
+                        "{}: [{}]",
+                        flat(read, &listed.data),
+                        listed.element.record.name
+                    ));
+                }
+            }
+            Role::Records { data, .. } => {
+                let element = element(surface, data, "Swift")?;
+                arguments.push(format!("{}: [{}]", held(data), element.record.name));
             }
             Role::Buffer { data, .. } => {
                 let name = held(data);
@@ -254,11 +332,11 @@ fn signature(function: &Function, parts: &[Role<'_>]) -> String {
             format!(" -> ({inner})")
         }
     };
-    format!(
+    Ok(format!(
         "    public static func {}({}) throws{returns} {{",
         called(function),
         arguments.join(", ")
-    )
+    ))
 }
 
 fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
@@ -271,7 +349,7 @@ fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
             .unwrap_or_default();
         match role {
             Role::Plain(read) => arguments.push(held(read)),
-            Role::Buffer { .. } | Role::Fill { .. } => {
+            Role::Buffer { .. } | Role::Fill { .. } | Role::Records { .. } => {
                 arguments.push(format!("{pointer}.baseAddress"));
                 arguments.push(format!("{pointer}.count"));
             }
@@ -286,7 +364,7 @@ fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
     arguments
 }
 
-fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
+fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> Result<String, Refused> {
     let mut out = String::new();
     for role in parts {
         match role {
@@ -308,11 +386,12 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
     let wraps: Vec<Vec<Wrap>> = parts
         .iter()
         .enumerate()
-        .map(|(index, role)| wrapping(index, role))
-        .collect();
+        .map(|(index, role)| wrapping(surface, index, role))
+        .collect::<Result<_, _>>()?;
     let arguments = call_arguments(parts, &wraps);
     let mut depth = 2;
     let opened: Vec<&Wrap> = wraps.iter().flatten().collect();
+    let setup: Vec<&String> = opened.iter().flat_map(|wrap| wrap.setup.iter()).collect();
     if opened.is_empty() {
         let _ = writeln!(
             out,
@@ -323,14 +402,32 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
         );
     } else {
         let _ = writeln!(out, "{}let status =", "    ".repeat(depth));
-        for wrap in &opened {
+        for (index, wrap) in opened.iter().enumerate() {
             depth += 1;
-            let _ = writeln!(out, "{}{}", "    ".repeat(depth), wrap.opening);
+            // a closure of more than one statement says what it answers
+            // with, which is the status, rather than leave a toolchain older
+            // than the one that infers it to guess
+            let answers = if index + 1 == opened.len() && !setup.is_empty() {
+                format!(" -> {}", scalar(&Type::read(function.returns)?))
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                out,
+                "{}{} {{ {}{answers} in",
+                "    ".repeat(depth),
+                wrap.head,
+                wrap.bound
+            );
+        }
+        for line in &setup {
+            let _ = writeln!(out, "{}{line}", "    ".repeat(depth + 1));
         }
         let _ = writeln!(
             out,
-            "{}{}({})",
+            "{}{}{}({})",
             "    ".repeat(depth + 1),
+            if setup.is_empty() { "" } else { "return " },
             function.name,
             arguments.join(", ")
         );
@@ -361,7 +458,127 @@ fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> String {
             let _ = writeln!(out, "        return ({inner})");
         }
     }
-    out
+    Ok(out)
+}
+
+/// The locals `withUnsafeArray` writes, beside one per piece of text.
+const ARRAY_LOCALS: &[(&str, &str)] = &[
+    ("list", "the list withUnsafeArray is handed"),
+    ("body", "the closure withUnsafeArray is handed"),
+    ("run", "the buffer every piece of text is copied into"),
+    ("lengths", "the length of each piece of text"),
+    ("element", "the element withUnsafeArray is reading"),
+    ("bytes", "the buffer, while it has an address"),
+    ("array", "the records C reads"),
+    ("at", "how far into the buffer withUnsafeArray has pointed"),
+    ("part", "which length withUnsafeArray reads next"),
+    ("record", "the record withUnsafeArray is filling in"),
+    ("Answer", "what withUnsafeArray answers with"),
+];
+
+/// The local `withUnsafeArray` holds one piece of text's bytes in.
+fn text_bytes(text: &Text) -> String {
+    safe(&format!("{}Bytes", lower_camel(text.data.member.name)))
+}
+
+/// For each record handed over as the element of an array: a struct a caller
+/// builds one from, and `withUnsafeArray`, which makes a list of them into the
+/// array C reads for as long as one closure runs.
+///
+/// Every piece of text is copied into one buffer, and every pointer in the
+/// array points into it, so that nothing a caller holds is pointed at and
+/// nothing pointed at outlives the closure. The count is the list's own.
+fn element_structs(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::new();
+    for element in elements(surface, "Swift")? {
+        let record = element.record;
+        let spelled = c::named(record.name);
+        let mut about = lines(surface, record.doc);
+        about.push(String::new());
+        for line in [
+            " Built here and handed to C in a list. `withUnsafeArray` copies every",
+            " piece of text in every element into one buffer, points an array of",
+        ] {
+            about.push(line.to_owned());
+        }
+        about.push(format!(
+            " {spelled} into it and hands that array on for as long as one closure"
+        ));
+        for line in [
+            " runs, with the list's own count. An empty piece of text crosses as a",
+            " null pointer with a length of zero.",
+        ] {
+            about.push(line.to_owned());
+        }
+        doc(&mut out, "", &about);
+        let _ = writeln!(out, "public struct {}: Sendable {{", record.name);
+        for text in &element.texts {
+            doc(&mut out, "    ", &lines(surface, text.data.member.doc));
+            let _ = writeln!(out, "    public var {}: String", held(&text.data));
+        }
+        let parameters: Vec<String> = element
+            .texts
+            .iter()
+            .map(|text| format!("{}: String", held(&text.data)))
+            .collect();
+        let _ = writeln!(out, "\n    public init({}) {{", parameters.join(", "));
+        for text in &element.texts {
+            let name = held(&text.data);
+            let _ = writeln!(out, "        self.{name} = {name}");
+        }
+        let _ = write!(
+            out,
+            "    }}\n\n\
+             \x20   /// A list of them as the array of {spelled} C reads, for as long as\n\
+             \x20   /// `body` runs and no longer: every pointer in it points into a buffer\n\
+             \x20   /// that is gone when `body` returns.\n\
+             \x20   static func withUnsafeArray<Answer>(_ list: [{name}], _ body: (UnsafeBufferPointer<{spelled}>) throws -> Answer) rethrows -> Answer {{\n\
+             \x20       var run: [CChar] = []\n\
+             \x20       var lengths: [Int] = []\n\
+             \x20       for element in list {{\n",
+            name = record.name,
+        );
+        for text in &element.texts {
+            let bytes = text_bytes(text);
+            let _ = write!(
+                out,
+                "            let {bytes} = element.{}.utf8.map {{ CChar(bitPattern: $0) }}\n\
+                 \x20           run.append(contentsOf: {bytes})\n\
+                 \x20           lengths.append({bytes}.count)\n",
+                held(&text.data)
+            );
+        }
+        let _ = write!(
+            out,
+            "        }}\n\
+             \x20       return try run.withUnsafeBufferPointer {{ bytes -> Answer in\n\
+             \x20           var array: [{spelled}] = []\n\
+             \x20           var at = 0\n\
+             \x20           var part = 0\n\
+             \x20           for _ in list {{\n\
+             \x20               var record = {spelled}()\n"
+        );
+        for text in &element.texts {
+            let _ = write!(
+                out,
+                "                record.{data} = lengths[part] == 0 ? nil : bytes.baseAddress.map {{ $0 + at }}\n\
+                 \x20               record.{len} = lengths[part]\n\
+                 \x20               at += lengths[part]\n\
+                 \x20               part += 1\n",
+                data = safe(text.data.member.name),
+                len = safe(text.len.member.name),
+            );
+        }
+        out.push_str(
+            "                array.append(record)\n\
+             \x20           }\n\
+             \x20           return try array.withUnsafeBufferPointer(body)\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\n",
+        );
+    }
+    Ok(out)
 }
 
 /// A call that answers with a static string rather than a status.
@@ -491,6 +708,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     );
 
     out.push_str(&sized(surface));
+    out.push_str(&element_structs(surface)?);
 
     // the call the application is told to make, spelled the way the method
     // and the constants below are spelled, from the declarations they are
@@ -589,8 +807,8 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
             continue;
         }
         let parts = roles(surface, &read);
-        let _ = writeln!(out, "{}", signature(function, &parts));
-        out.push_str(&body(surface, function, &parts));
+        let _ = writeln!(out, "{}", signature(surface, function, &parts)?);
+        out.push_str(&body(surface, function, &parts)?);
         out.push_str("    }\n\n");
     }
 
@@ -678,6 +896,51 @@ impl Spelling for Names {
         Vec::new()
     }
 
+    /// The struct each element of an array going in is built from, its
+    /// members and its initialiser's parameters, and the locals of
+    /// `withUnsafeArray`.
+    fn own(&self, surface: &Surface) -> Result<Vec<(String, Named)>, Refused> {
+        let mut out = Vec::new();
+        for element in elements(surface, "Swift")? {
+            let record = element.record.name;
+            out.push((
+                "the top of the file".to_owned(),
+                Named::new("", record.to_owned(), record),
+            ));
+            let array = format!("{record}.withUnsafeArray");
+            out.push((
+                record.to_owned(),
+                Named::new(
+                    "",
+                    "withUnsafeArray".to_owned(),
+                    format!("the function this back end gives {record}"),
+                ),
+            ));
+            for (name, what) in ARRAY_LOCALS {
+                out.push((
+                    array.clone(),
+                    Named::new("the wrapper", (*name).to_owned(), *what),
+                ));
+            }
+            for text in &element.texts {
+                let from = format!("{record}::{}", text.data.member.name);
+                out.push((
+                    record.to_owned(),
+                    Named::new("", held(&text.data), from.clone()),
+                ));
+                out.push((
+                    format!("{record}.init"),
+                    Named::new("the wrapper", held(&text.data), from.clone()),
+                ));
+                out.push((
+                    array.clone(),
+                    Named::new("the wrapper", text_bytes(text), from),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     fn inside(
         &self,
         surface: &Surface,
@@ -685,7 +948,7 @@ impl Spelling for Names {
         read: &[Read<'_>],
         parts: &[Role<'_>],
     ) -> Result<Vec<Named>, Refused> {
-        let _ = surface;
+        unprintable(surface, function, read, "Swift")?;
         let here = "the wrapper";
         let ty = Type::read(function.returns)?;
         if ty.pointer.is_some() && ty.base == Base::Char {
@@ -707,12 +970,24 @@ impl Spelling for Names {
         )];
         for (index, role) in parts.iter().enumerate() {
             match role {
-                Role::Plain(read) | Role::Config(read) | Role::Shared(read) => {
+                Role::Plain(read) | Role::Shared(read) => {
                     out.push(Named::new(here, held(read), read.member.name));
                 }
-                Role::Buffer { data, .. } | Role::Fill { data, .. } => {
+                Role::Config(read) => {
+                    out.push(Named::new(here, held(read), read.member.name));
+                    for listed in listed_in(surface, read, "Swift")? {
+                        let from = format!("{}::{}", read.member.name, listed.data.member.name);
+                        out.push(Named::new(here, flat(read, &listed.data), from));
+                    }
+                    for wrap in wrapping(surface, index, role)? {
+                        out.push(Named::new(here, wrap.bound, read.member.name));
+                    }
+                }
+                Role::Buffer { data, .. }
+                | Role::Fill { data, .. }
+                | Role::Records { data, .. } => {
                     out.push(Named::new(here, held(data), data.member.name));
-                    for wrap in wrapping(index, role) {
+                    for wrap in wrapping(surface, index, role)? {
                         out.push(Named::new(here, wrap.bound, data.member.name));
                     }
                 }

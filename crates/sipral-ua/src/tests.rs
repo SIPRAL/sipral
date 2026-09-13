@@ -9210,3 +9210,409 @@ fn a_second_transfers_report_waiting_for_a_stream_leaves_the_first_transfers_las
         "the second transfer's first: {bodies:?}"
     );
 }
+
+// -- the application's own header fields ---------------------------------------
+
+fn conversation_id() -> HeaderName<'static> {
+    HeaderName::Extension("X-Conversation-Id")
+}
+
+/// An INVITE that came in, and the call it became.
+fn a_call_that_came_in(agent: &mut UserAgent, branch: &str, now: Instant) -> CallHandle {
+    deliver(agent, &incoming_invite(branch, Some(OFFER)), now);
+    transmits(agent);
+    events(agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::IncomingCall { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("somebody is calling")
+}
+
+#[test]
+fn a_ring_and_an_answer_carry_the_fields_the_application_set() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = a_call_that_came_in(&mut agent, "labelled", t0);
+    let asserted = HeaderName::Extension("P-Asserted-Identity");
+    agent
+        .respond_with_headers(
+            call,
+            &[
+                (conversation_id(), &b"c-7"[..]),
+                (asserted, &b"<sip:alice@example.com>"[..]),
+            ],
+        )
+        .expect("two fields nothing else writes");
+
+    agent.ring(call, None, t0).expect("180 goes");
+    let ringing = sent(&mut agent);
+    assert_eq!(header(&ringing, conversation_id()), b"c-7");
+
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    assert!(ok.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(
+        header(&ok, conversation_id()),
+        b"c-7",
+        "kept for the 200, not spent on the 180"
+    );
+    assert_eq!(header(&ok, asserted), b"<sip:alice@example.com>");
+}
+
+#[test]
+fn a_hangup_carries_the_fields_as_they_were_last_replaced() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = a_call_that_came_in(&mut agent, "relabelled", t0);
+    let asserted = HeaderName::Extension("P-Asserted-Identity");
+    agent
+        .respond_with_headers(
+            call,
+            &[
+                (conversation_id(), &b"c-7"[..]),
+                (asserted, &b"<sip:alice@example.com>"[..]),
+            ],
+        )
+        .expect("two fields nothing else writes");
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    deliver(&mut agent, &in_dialog(&ok, "ACK", "relabelledack", 1), t0);
+    events(&mut agent);
+
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-8"[..])])
+        .expect("replaced");
+    agent.hangup(call, t0).expect("the BYE goes");
+    let bye = sent(&mut agent);
+    assert!(bye.starts_with(b"BYE "));
+    assert_eq!(header(&bye, conversation_id()), b"c-8");
+    assert!(
+        header(&bye, asserted).is_empty(),
+        "replaced whole rather than merged"
+    );
+}
+
+#[test]
+fn a_refusal_carries_the_fields_the_application_set() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = a_call_that_came_in(&mut agent, "refusedlabel", t0);
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set");
+    agent
+        .reject(call, StatusCode::BUSY_HERE, t0)
+        .expect("486 goes");
+    let busy = sent(&mut agent);
+    assert!(busy.starts_with(b"SIP/2.0 486"));
+    assert_eq!(header(&busy, conversation_id()), b"c-7");
+}
+
+#[test]
+fn a_hold_carries_the_fields_the_application_set_on_its_re_invite() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set");
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    assert!(reinvite.starts_with(b"INVITE "));
+    assert_eq!(header(&reinvite, conversation_id()), b"c-7");
+}
+
+#[test]
+fn a_forked_siblings_hold_carries_the_fields_staged_before_the_fork() {
+    // §13.2.2: one INVITE can open several dialogs; a sibling minted for a
+    // later branch is still the same labelled call, not a blank one
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let first = agent
+        .call(id, &outgoing().forks(ForkPolicy::KeepAll), t0)
+        .expect("the INVITE goes");
+    agent
+        .respond_with_headers(first, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set before either branch answered");
+    let invite = sent(&mut agent);
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "mobile", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    let sibling = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::CallConfirmed { call, .. } if call != first => Some(call),
+            _ => None,
+        })
+        .expect("the second branch is a sibling of its own");
+
+    agent.hold(sibling, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    assert!(reinvite.starts_with(b"INVITE "));
+    assert_eq!(
+        header(&reinvite, conversation_id()),
+        b"c-7",
+        "a branch minted after the fields were staged carries them too"
+    );
+}
+
+#[test]
+fn a_refresh_offered_again_after_491_carries_none_of_the_applications_fields() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set");
+
+    // RFC 4028 §7.2: the refresher keeps the session alive by itself, with a
+    // re-INVITE when the far end never allowed UPDATE
+    let due = t0 + Duration::from_secs(300);
+    agent.handle_timeout(due);
+    let refresh = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the refresh");
+    assert!(header(&refresh, conversation_id()).is_empty());
+    events(&mut agent);
+
+    // RFC 3261 §14.1: a 491 is tried once more, and it is still the refresh
+    deliver(
+        &mut agent,
+        &answered(&refresh, 491, "Request Pending", "desk", None),
+        due,
+    );
+    transmits(&mut agent);
+    let wait = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => retry_in,
+            _ => None,
+        })
+        .expect("491 says to wait and try again");
+    agent.handle_timeout(due + wait);
+    let again = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the refresh goes out again");
+    assert!(
+        header(&again, conversation_id()).is_empty(),
+        "a refresh the stack sent by itself is not the application speaking, the second time either"
+    );
+}
+
+#[test]
+fn a_bye_this_layer_sends_by_itself_carries_none_of_the_applications_fields() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set");
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "mobile", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // the mobile answers too, and loses: acknowledged, and hung up by this
+    // layer on its own
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "mobile", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    let bye = out
+        .iter()
+        .find(|bytes| bytes.starts_with(b"BYE "))
+        .expect("the branch that lost is hung up");
+    assert!(
+        header(bye, conversation_id()).is_empty(),
+        "a hangup nobody asked for is not the application speaking"
+    );
+}
+
+#[test]
+fn a_field_the_stack_writes_is_refused_on_a_call_before_anything_is_built() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    for (name, value) in [
+        (HeaderName::Contact, &b"<sip:elsewhere@example.net>"[..]),
+        (HeaderName::SessionExpires, &b"90"[..]),
+    ] {
+        let refused = agent.call(id, &outgoing().header(name, value), t0);
+        assert_eq!(
+            refused,
+            Err(UaError::Header(crate::HeaderRefused::WrittenByTheStack(
+                name.canonical()
+            )))
+        );
+        assert!(
+            transmits(&mut agent).is_empty(),
+            "{name}: nothing was built"
+        );
+    }
+    // a compact name is the field it abbreviates (RFC 3261 §7.3.3)
+    assert_eq!(
+        crate::HeadersFor::Call.check(b"m", b"<sip:elsewhere@example.net>"),
+        Err(crate::HeaderRefused::WrittenByTheStack("Contact"))
+    );
+}
+
+#[test]
+fn a_refused_replacement_keeps_the_fields_that_were_set_before() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = a_call_that_came_in(&mut agent, "keptlabel", t0);
+    agent
+        .respond_with_headers(call, &[(conversation_id(), &b"c-7"[..])])
+        .expect("set");
+    let refused = agent.respond_with_headers(
+        call,
+        &[
+            (conversation_id(), &b"c-8"[..]),
+            (HeaderName::Allow, &b"INVITE, BYE"[..]),
+        ],
+    );
+    assert_eq!(
+        refused,
+        Err(UaError::Header(crate::HeaderRefused::WrittenByTheStack(
+            "Allow"
+        )))
+    );
+
+    agent.ring(call, None, t0).expect("180 goes");
+    let ringing = sent(&mut agent);
+    assert_eq!(
+        header(&ringing, conversation_id()),
+        b"c-7",
+        "a refusal keeps none of the new fields"
+    );
+    assert_eq!(
+        with(&ringing, |message| message.header_count(HeaderName::Allow)),
+        1,
+        "and the stack's Allow is the only one"
+    );
+}
+
+#[test]
+fn a_field_the_stack_writes_on_a_register_is_refused_and_is_the_applications_on_an_invite() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().header(HeaderName::Expires, b"60"));
+    assert_eq!(
+        agent.register(id, t0),
+        Err(UaError::Header(crate::HeaderRefused::WrittenByTheStack(
+            "Expires"
+        )))
+    );
+    assert!(transmits(&mut agent).is_empty(), "nothing was built");
+
+    // on an INVITE it limits how long the invitation stands (§13.2.1), and
+    // nothing here writes one
+    agent
+        .call(id, &outgoing().header(HeaderName::Expires, b"30"), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(header(&invite, HeaderName::Expires), b"30");
+}
+
+#[test]
+fn a_value_that_would_break_the_line_is_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let call = a_call_that_came_in(&mut agent, "brokenlabel", t0);
+    let refused = agent.respond_with_headers(
+        call,
+        &[(
+            conversation_id(),
+            &b"c-7\r\nContact: <sip:elsewhere@example.net>"[..],
+        )],
+    );
+    assert_eq!(
+        refused,
+        Err(UaError::Header(crate::HeaderRefused::ControlByte {
+            offset: 3
+        }))
+    );
+    assert_eq!(
+        crate::HeadersFor::Call.check(b"X-Conversation-Id", b"c\x007"),
+        Err(crate::HeaderRefused::ControlByte { offset: 1 })
+    );
+    assert_eq!(
+        crate::HeadersFor::Call.check(b"X-Conversation-Id", b"c\t7"),
+        Ok(conversation_id()),
+        "a tab is whitespace"
+    );
+}
+
+#[test]
+fn a_name_that_is_not_a_token_is_refused() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let refused = agent.call(
+        id,
+        &outgoing().header(HeaderName::Extension("X-Two Words"), b"1"),
+        t0,
+    );
+    assert_eq!(
+        refused,
+        Err(UaError::Header(crate::HeaderRefused::NotAName))
+    );
+    assert!(transmits(&mut agent).is_empty());
+    assert_eq!(
+        crate::HeadersFor::Call.check(b"X-Colon:", b"1"),
+        Err(crate::HeaderRefused::NotAName)
+    );
+}

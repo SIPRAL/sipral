@@ -29,12 +29,13 @@ use std::time::Duration;
 
 use sipral_core::endpoint::OutgoingInDialogRequest;
 use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
-use sipral_ua::{ForkPolicy, OutgoingCall, UaError};
+use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, UaError};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralCallState, call_state};
 use crate::handle::SipralHandle;
+use crate::header::{SipralHeader, supplied};
 use crate::media::{address, media_failed};
 use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
@@ -95,6 +96,18 @@ record! {
         pub media_address: *const c_char,
         /// How many bytes of it.
         pub media_address_len: usize,
+        /// Header fields to put on the INVITE, in the order given, or null for
+        /// none.
+        ///
+        /// Each is checked before anything is built: the name a token, the value
+        /// one line of text, and not a field the stack writes on a call itself.
+        /// Those are listed in `docs/04-ua.md` with the reason for each, and
+        /// `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
+        /// set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
+        /// and no call.
+        pub headers: *const SipralHeader,
+        /// How many elements `headers` has.
+        pub headers_len: usize,
     }
 }
 
@@ -123,7 +136,9 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
         // would be taken, and no amount of waiting will change this one
-        UaError::Sdp(_) | UaError::NoRegistrar => SipralStatus::InvalidArgument,
+        UaError::Sdp(_) | UaError::NoRegistrar | UaError::Header(_) => {
+            SipralStatus::InvalidArgument
+        }
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())
@@ -240,6 +255,17 @@ unsafe fn outgoing_from(
     }
     if let Some(ref named) = state.user_agent {
         outgoing = outgoing.header(HeaderName::UserAgent, named);
+    }
+    let asked = unsafe {
+        supplied(
+            config.headers,
+            config.headers_len,
+            HeadersFor::Call,
+            state.user_agent.is_some(),
+        )
+    }?;
+    for (name, value) in asked {
+        outgoing = outgoing.header(name, value);
     }
     Ok(outgoing)
 }
@@ -438,6 +464,49 @@ entry! {
             state
                 .agent
                 .hangup(id, now)
+                .map_err(|error| ua_failed(&error))
+        })
+    }
+}
+
+entry! {
+    /// Set the header fields that go on what this call sends at the
+    /// application's request, from now until they are set again.
+    ///
+    /// They go on the 180 or 183 from `sipral_call_ring`, the 200 from
+    /// `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
+    /// `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
+    /// turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
+    /// `sipral_call_resume` send. Kept rather than spent on the first of those,
+    /// so that a field set before ringing is on the 200 as well. Never on a
+    /// CANCEL, which a proxy answers and replaces with its own, and never on
+    /// what the stack sends by itself: a session refresh, or the BYE for a 2xx
+    /// that was never acknowledged or for a fork that lost.
+    ///
+    /// Replaces what was set before, whole, and a `headers_len` of zero takes
+    /// every field off. Each field is checked first, as it is on
+    /// `sipral_call_config_t::headers`, and a refusal names the element, keeps
+    /// none of the new fields and leaves the old ones in place. Nothing is
+    /// sent.
+    ///
+    /// # Safety
+    ///
+    /// `headers` must be null with `headers_len` zero, or readable for
+    /// `headers_len` elements, each with a name and a value readable for the
+    /// lengths beside them.
+    fn sipral_call_set_headers(
+        stack: SipralHandle,
+        call: SipralHandle,
+        headers: *const SipralHeader,
+        headers_len: usize,
+    ) {
+        with_stack(stack, |state| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            // the stack writes no User-Agent on any of these
+            let asked = unsafe { supplied(headers, headers_len, HeadersFor::Call, false) }?;
+            state
+                .agent
+                .respond_with_headers(id, &asked)
                 .map_err(|error| ua_failed(&error))
         })
     }
@@ -1083,6 +1152,8 @@ a=recvonly\r\n";
             instance_id: ptr::null(),
             instance_id_len: 0,
             expires_seconds: 0,
+            headers: ptr::null(),
+            headers_len: 0,
         }
     }
 
@@ -1099,6 +1170,8 @@ a=recvonly\r\n";
             keep_all_forks: 0,
             media_address: ptr::null(),
             media_address_len: 0,
+            headers: ptr::null(),
+            headers_len: 0,
         }
     }
 
@@ -2392,10 +2465,273 @@ Content-Length: 0\r\n\r\n";
             },
             unsafe { sipral_call_transfer(handle, SIPRAL_HANDLE_NONE, target, target_len, 0) },
             unsafe { sipral_call_transfer_to(handle, SIPRAL_HANDLE_NONE, SIPRAL_HANDLE_NONE, 0) },
+            unsafe { super::sipral_call_set_headers(handle, SIPRAL_HANDLE_NONE, ptr::null(), 0) },
         ];
         for status in refused {
             assert_eq!(status, SipralStatus::InvalidHandle);
         }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    // -- header fields -------------------------------------------------------
+
+    fn header_of(name: &str, value: &str) -> crate::header::SipralHeader {
+        let (name, name_len) = as_text(name);
+        let (value, value_len) = as_text(value);
+        crate::header::SipralHeader {
+            name,
+            name_len,
+            value,
+            value_len,
+        }
+    }
+
+    /// The first line of a field, read the way C reads it: through the
+    /// accessor, with the offset and the length it answers.
+    fn field_through_c(message: &[u8], name: &str) -> Option<Vec<u8>> {
+        let mut count = usize::MAX;
+        let status = unsafe {
+            crate::header::sipral_message_header_count(
+                message.as_ptr(),
+                message.len(),
+                name.as_ptr().cast::<c_char>(),
+                name.len(),
+                &raw mut count,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        if count == 0 {
+            return None;
+        }
+        let (mut offset, mut len) = (usize::MAX, usize::MAX);
+        let status = unsafe {
+            crate::header::sipral_message_header(
+                message.as_ptr(),
+                message.len(),
+                name.as_ptr().cast::<c_char>(),
+                name.len(),
+                0,
+                &raw mut offset,
+                &raw mut len,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        Some(message[offset..offset + len].to_vec())
+    }
+
+    #[test]
+    fn a_field_put_on_the_invite_through_c_is_read_out_of_the_200_the_far_end_answered_with() {
+        // the near end places the call, the far end answers it
+        let mut near_seen = Observed::default();
+        let (near, account) = line(&mut near_seen);
+        let labelled = [header_of("X-Conversation-Id", "c-7")];
+        let mut config = call_config();
+        // to the address of record the far end's account has, so that the call
+        // it answers belongs to a line and its 200 carries that line's Contact
+        (config.target, config.target_len) = as_text(AOR);
+        config.headers = labelled.as_ptr();
+        config.headers_len = labelled.len();
+        let (status, placed) = place(near, account, &config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(near);
+        assert_eq!(
+            field_through_c(&invite, "X-Conversation-Id").as_deref(),
+            Some(&b"c-7"[..])
+        );
+
+        // the far end is a stack of its own, and reads the field back out of
+        // the INVITE through the accessor to echo it
+        let mut far_seen = Observed::default();
+        let (far, _) = line(&mut far_seen);
+        deliver(far, &invite, 1_000);
+        poll(far, 1_000);
+        let incoming = called(&far_seen);
+        let _ = sent(far);
+        let echoed = field_through_c(&invite, "x-conversation-id").expect("the field is there");
+        let echoed = String::from_utf8(echoed).expect("text");
+        let answering = [header_of("X-Conversation-Id", &echoed)];
+        assert_eq!(
+            unsafe {
+                super::sipral_call_set_headers(far, incoming, answering.as_ptr(), answering.len())
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { sipral_call_answer(far, incoming, ANSWER.as_ptr(), ANSWER.len(), 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let accepted = one(far);
+        assert!(start_line(&accepted).starts_with("SIP/2.0 200"));
+        assert_eq!(
+            field_through_c(&accepted, "X-Conversation-Id").as_deref(),
+            Some(&b"c-7"[..])
+        );
+
+        // and the 200 is one the near end takes
+        deliver(near, &accepted, 1_200);
+        let result = poll(near, 1_200);
+        assert!(
+            near_seen.kinds().contains(&SipralEventKind::CallConfirmed),
+            "{:?}, {} unclaimed, the call in state {}, after:\n{}",
+            near_seen.kinds(),
+            result.events_unclaimed,
+            state_of(near, placed),
+            String::from_utf8_lossy(&accepted)
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(far) }, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(near) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_field_the_stack_writes_is_refused_on_every_call_path_and_nothing_is_sent() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+
+        let owned = [
+            header_of("X-Conversation-Id", "c-7"),
+            header_of("Contact", "<sip:elsewhere@example.net>"),
+        ];
+        let mut config = call_config();
+        config.headers = owned.as_ptr();
+        config.headers_len = owned.len();
+        let (status, call) = place(handle, account, &config, 1_000);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(call, SIPRAL_HANDLE_NONE);
+        let said = last_error_text();
+        assert!(
+            said.contains("headers[1]") && said.contains("Contact"),
+            "{said}"
+        );
+        assert!(sent(handle).is_empty(), "nothing was built");
+
+        // the compact form is the field it abbreviates
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let incoming = called(&observed);
+        let _ = sent(handle);
+        let compact = [header_of("i", "somebody-elses@example.net")];
+        assert_eq!(
+            unsafe {
+                super::sipral_call_set_headers(handle, incoming, compact.as_ptr(), compact.len())
+            },
+            SipralStatus::InvalidArgument
+        );
+        let said = last_error_text();
+        assert!(said.contains("Call-ID"), "{said}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_field_that_is_not_one_line_of_text_under_a_token_is_refused() {
+        const NOT_UTF8: &[u8] = b"c-\xff";
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (name, name_len) = as_text("X-Conversation-Id");
+        for (hostile, why) in [
+            (
+                header_of(
+                    "X-Conversation-Id",
+                    "c-7\r\nContact: <sip:elsewhere@example.net>",
+                ),
+                "control byte",
+            ),
+            (header_of("X-Two Words", "1"), "not a token"),
+            (
+                crate::header::SipralHeader {
+                    name,
+                    name_len,
+                    value: NOT_UTF8.as_ptr().cast::<c_char>(),
+                    value_len: NOT_UTF8.len(),
+                },
+                "not UTF-8",
+            ),
+        ] {
+            let smuggled = [hostile];
+            let mut config = call_config();
+            config.headers = smuggled.as_ptr();
+            config.headers_len = smuggled.len();
+            assert_eq!(
+                place(handle, account, &config, 1_000).0,
+                SipralStatus::InvalidArgument
+            );
+            let said = last_error_text();
+            assert!(said.contains("headers[0]") && said.contains(why), "{said}");
+            assert!(sent(handle).is_empty(), "nothing was built");
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn the_stacks_own_user_agent_is_not_written_twice() {
+        let mut observed = Observed::default();
+        let mut stack_config = config(record, &mut observed);
+        (stack_config.user_agent, stack_config.user_agent_len) = as_text("Sipral-Test/1");
+        let (status, handle) = create(&stack_config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(handle);
+        let second = [header_of("User-Agent", "Somebody-Else/2")];
+        let mut config = call_config();
+        config.headers = second.as_ptr();
+        config.headers_len = second.len();
+        assert_eq!(
+            place(handle, account, &config, 1_000).0,
+            SipralStatus::InvalidArgument
+        );
+        assert!(last_error_text().contains("User-Agent"));
+        assert!(sent(handle).is_empty());
+
+        // on a stack that writes none, the application's is the one
+        let mut bare_observed = Observed::default();
+        let (bare, bare_account) = line(&mut bare_observed);
+        assert_eq!(
+            place(bare, bare_account, &config, 1_000).0,
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(field(&one(bare), HeaderName::UserAgent), b"Somebody-Else/2");
+        assert_eq!(unsafe { sipral_stack_destroy(bare) }, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn more_headers_than_any_message_takes_are_refused_before_an_element_is_read() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let too_many = vec![header_of("X-Bulk", "1"); 65];
+        let mut config = call_config();
+        config.headers = too_many.as_ptr();
+        config.headers_len = too_many.len();
+        assert_eq!(
+            place(handle, account, &config, 1_000).0,
+            SipralStatus::InvalidArgument
+        );
+        assert!(last_error_text().contains("65"), "{}", last_error_text());
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_null_headers_pointer_with_a_nonzero_length_is_refused() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let mut config = call_config();
+        config.headers = ptr::null();
+        config.headers_len = 1;
+        assert_eq!(
+            place(handle, account, &config, 1_000).0,
+            SipralStatus::InvalidArgument
+        );
+        assert!(
+            last_error_text().contains("headers is null"),
+            "{}",
+            last_error_text()
+        );
+        assert!(sent(handle).is_empty(), "nothing was built");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

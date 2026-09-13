@@ -76,6 +76,48 @@ data class SipralCounters(
 }
 
 /**
+ * One header field: a name and a value.
+ *
+ * Handed over in a list, which the JNI shim makes into a C array for the
+ * length of the call. `packed` copies every piece of text into one array of
+ * UTF-8 first, and the shim checks every length against that array before
+ * it points into it. An empty piece of text crosses as a null pointer with
+ * a length of zero.
+ */
+class SipralHeader(
+    val name: String,
+    val value: String,
+) {
+    internal companion object {
+        /**
+         * A list of them as the JNI shim takes it: every piece of text in
+         * every element, in order, as one run of UTF-8, and how many bytes
+         * each took, 2 to an element. A null list is two nulls, which the
+         * shim reads as no elements.
+         */
+        fun packed(list: List<SipralHeader>?): Pair<ByteArray?, LongArray?> {
+            if (list == null) {
+                return Pair(null, null)
+            }
+            val run = java.io.ByteArrayOutputStream()
+            val lengths = LongArray(Math.multiplyExact(list.size, 2))
+            var part = 0
+            for (element in list) {
+                val nameBytes = element.name.toByteArray(Charsets.UTF_8)
+                run.write(nameBytes, 0, nameBytes.size)
+                lengths[part] = nameBytes.size.toLong()
+                part += 1
+                val valueBytes = element.value.toByteArray(Charsets.UTF_8)
+                run.write(valueBytes, 0, valueBytes.size)
+                lengths[part] = valueBytes.size.toLong()
+                part += 1
+            }
+            return Pair(run.toByteArray(), lengths)
+        }
+    }
+}
+
+/**
  * What a stack is made with.
  *
  * Holds buffers of the caller's and the library only reads it, so it
@@ -95,6 +137,10 @@ class SipralStackConfig(
      */
     val bindAddress: String? = null,
     val echo: Long = 0,
+    /**
+     * Header fields to send, `headers_len` of them.
+     */
+    val headers: List<SipralHeader>? = null,
 )
 
 /**
@@ -233,9 +279,10 @@ internal object SipralNative {
     external fun sipral_abi_check(major: Long, minor: Long): Int
     external fun sipral_last_error_message(buffer: ByteArray, needed: LongArray): Int
     external fun sipral_status_name(code: Long): String?
-    external fun sipral_stack_create(configEventCallback: Long, configBindAddress: ByteArray?, configEcho: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configBindAddress: ByteArray?, configEcho: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, stack: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
     external fun sipral_stack_send(stack: Long, message: ByteArray): Int
+    external fun sipral_stack_label(stack: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
     external fun sipral_stack_describe(stack: Long, note: ByteArray): Int
     external fun sipral_stack_name(stack: Long, name: ByteArray, len: LongArray): Int
     external fun sipral_stack_codec_order(stack: Long, outCodecs: IntArray, count: LongArray): Int
@@ -317,11 +364,12 @@ object Sipral {
      */
     fun stackCreate(config: SipralStackConfig): Long {
         val configBindAddress = config.bindAddress?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val stackSlot = LongArray(1)
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, configBindAddress, config.echo, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, configBindAddress, config.echo, configHeadersBytes, configHeadersLengths, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -343,6 +391,14 @@ object Sipral {
      */
     fun stackSend(stack: Long, message: ByteArray) {
         check(SipralNative.sipral_stack_send(stack, message))
+    }
+
+    /**
+     * Hand it header fields, an array of them with its length beside it.
+     */
+    fun stackLabel(stack: Long, headers: List<SipralHeader>) {
+        val (headersBytes, headersLengths) = SipralHeader.packed(headers)
+        check(SipralNative.sipral_stack_label(stack, headersBytes, headersLengths))
     }
 
     /**

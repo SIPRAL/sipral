@@ -81,6 +81,18 @@ public struct SipralCounters
 }
 
 /// <summary>
+/// One header field: a name and a value.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralHeader
+{
+    public IntPtr Name;
+    public nuint NameLen;
+    public IntPtr Value;
+    public nuint ValueLen;
+}
+
+/// <summary>
 /// What a stack is made with.
 ///
 /// Holds buffers of the caller's and the library only reads it, so it
@@ -104,6 +116,11 @@ public struct SipralStackConfig
     public IntPtr BindAddress;
     public nuint BindAddressLen;
     public SipralToggle Echo;
+    /// <summary>
+    /// Header fields to send, `headers_len` of them.
+    /// </summary>
+    public IntPtr Headers;
+    public nuint HeadersLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -239,6 +256,99 @@ public struct SipralEvent
     }
 }
 
+/// <summary>
+/// A list of SipralHeader as the array the library reads, for the length of
+/// one call. Every piece of text in every element is copied into one
+/// buffer, the records point into it, and both are pinned until Dispose,
+/// which the wrapper that made this runs as the call returns or throws.
+/// The count the library is given is the list's own, and an empty piece
+/// of text crosses as a null pointer with a length of zero.
+/// </summary>
+internal sealed class SipralHeaderArray : IDisposable
+{
+    private GCHandle bytesPinned;
+    private GCHandle recordsPinned;
+
+    internal SipralHeaderArray((string Name, string Value)[]? list)
+    {
+        if (list is null || list.Length == 0)
+        {
+            return;
+        }
+
+        var parts = new byte[checked(list.Length * 2)][];
+        for (var index = 0; index < list.Length; index++)
+        {
+            parts[index * 2 + 0] = Encoding.UTF8.GetBytes(list[index].Name);
+            parts[index * 2 + 1] = Encoding.UTF8.GetBytes(list[index].Value);
+        }
+
+        var total = 0;
+        foreach (var part in parts)
+        {
+            total = checked(total + part.Length);
+        }
+
+        var bytes = new byte[total];
+        var records = new SipralHeader[list.Length];
+        var at = 0;
+        for (var index = 0; index < list.Length; index++)
+        {
+            Buffer.BlockCopy(parts[index * 2 + 0], 0, bytes, at, parts[index * 2 + 0].Length);
+            records[index].NameLen = (nuint)parts[index * 2 + 0].Length;
+            at += parts[index * 2 + 0].Length;
+            Buffer.BlockCopy(parts[index * 2 + 1], 0, bytes, at, parts[index * 2 + 1].Length);
+            records[index].ValueLen = (nuint)parts[index * 2 + 1].Length;
+            at += parts[index * 2 + 1].Length;
+        }
+
+        bytesPinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            recordsPinned = GCHandle.Alloc(records, GCHandleType.Pinned);
+        }
+        catch
+        {
+            bytesPinned.Free();
+            throw;
+        }
+
+        var start = bytesPinned.AddrOfPinnedObject();
+        at = 0;
+        for (var index = 0; index < records.Length; index++)
+        {
+            records[index].Name = records[index].NameLen == 0 ? IntPtr.Zero : start + at;
+            at += (int)records[index].NameLen;
+            records[index].Value = records[index].ValueLen == 0 ? IntPtr.Zero : start + at;
+            at += (int)records[index].ValueLen;
+        }
+
+        Address = recordsPinned.AddrOfPinnedObject();
+        Count = (nuint)records.Length;
+    }
+
+    /// <summary>Where the first record is, or zero for no list.</summary>
+    internal IntPtr Address { get; }
+
+    /// <summary>How many records there are, which is how long the list
+    /// is.</summary>
+    internal nuint Count { get; }
+
+    /// <summary>Let go of the buffer and the records.</summary>
+    public void Dispose()
+    {
+        if (recordsPinned.IsAllocated)
+        {
+            recordsPinned.Free();
+        }
+
+        if (bytesPinned.IsAllocated)
+        {
+            bytesPinned.Free();
+        }
+    }
+}
+
 /// <summary>What a call across the boundary answered, when it did not
 /// answer Ok. The message is the calling thread's last error, read
 /// before anything else on this thread could replace it.</summary>
@@ -257,7 +367,9 @@ public sealed class SipralException : Exception
 /// <summary>
 /// The ABI as the runtime calls it. Every pointer is written as an
 /// array or as in, ref or out, so nothing here needs an unsafe block
-/// and the runtime pins what it passes.
+/// and the runtime pins what it passes. An array of records is the
+/// one IntPtr: the wrapper pins the records and the text they point
+/// at itself, for the length of the call.
 /// </summary>
 internal static class NativeMethods
 {
@@ -282,6 +394,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_send(ulong stack, byte[] message, nuint messageLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_label(ulong stack, IntPtr headers, nuint headersLen);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_describe(ulong stack, sbyte[] note, nuint noteLen);
@@ -408,9 +523,13 @@ public static class Sipral
     /// <summary>
     /// Make one.
     /// </summary>
-    public static ulong StackCreate(in SipralStackConfig config)
+    public static ulong StackCreate(in SipralStackConfig config, (string Name, string Value)[]? configHeaders)
     {
-        Check(NativeMethods.sipral_stack_create(in config, out var stack));
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_stack_create(in configValue, out var stack));
         return stack;
     }
 
@@ -430,6 +549,15 @@ public static class Sipral
     public static void StackSend(ulong stack, byte[] message)
     {
         Check(NativeMethods.sipral_stack_send(stack, message, (nuint)message.Length));
+    }
+
+    /// <summary>
+    /// Hand it header fields, an array of them with its length beside it.
+    /// </summary>
+    public static void StackLabel(ulong stack, (string Name, string Value)[] headers)
+    {
+        using var headersArray = new SipralHeaderArray(headers);
+        Check(NativeMethods.sipral_stack_label(stack, headersArray.Address, headersArray.Count));
     }
 
     /// <summary>

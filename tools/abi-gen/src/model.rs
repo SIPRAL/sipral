@@ -10,7 +10,9 @@
 //! language back end asks "is this a pointer to bytes" rather than matching on
 //! a string.
 
-use sipral_ffi::abi::{Function, Member, Record, Surface, Value};
+use std::collections::BTreeSet;
+
+use sipral_ffi::abi::{Function, Member, Record, Shape, Surface, Value};
 // the rule for turning `SipralStackConfig` into `sipral_stack_config` is the
 // library's, because the library answers questions about the C names too
 pub(crate) use sipral_ffi::abi::snake;
@@ -267,6 +269,14 @@ pub(crate) enum Role<'a> {
         /// The `capacity` that follows it.
         capacity: &'a Read<'a>,
     },
+    /// Records the caller hands in, an array of them, with the `_len` after
+    /// the pointer saying how many.
+    Records {
+        /// The pointer to the first.
+        data: &'a Read<'a>,
+        /// How many there are.
+        len: &'a Read<'a>,
+    },
     /// A struct the caller fills in and the library only reads.
     Config(&'a Read<'a>),
     /// A struct the library fills in whole, which a binding can return.
@@ -280,12 +290,14 @@ pub(crate) enum Role<'a> {
 
 /// Read a parameter list as the conventions in `docs/08-ffi.md` describe it.
 ///
-/// Four conventions, and all four are the ABI's own rather than this
+/// Five conventions, and all five are the ABI's own rather than this
 /// generator's: a pointer followed by a length is one buffer going in; a
-/// pointer followed by `capacity` is one buffer being filled; a writable
-/// pointer named `out_` is one value coming back; and a pointer to a versioned
-/// struct is a struct going in, coming back, or both, depending on which way
-/// the pointer goes and on whether the struct holds buffers of the caller's.
+/// `const` pointer to a record followed by the `_len` named for it is an array
+/// of records going in; a pointer followed by `capacity` is one buffer being
+/// filled; a writable pointer named `out_` is one value coming back; and a
+/// pointer to a versioned struct is a struct going in, coming back, or both,
+/// depending on which way the pointer goes and on whether the struct holds
+/// buffers of the caller's.
 pub(crate) fn roles<'a>(surface: &Surface, parameters: &'a [Read<'a>]) -> Vec<Role<'a>> {
     let mut out = Vec::new();
     let mut index = 0;
@@ -294,6 +306,14 @@ pub(crate) fn roles<'a>(surface: &Surface, parameters: &'a [Read<'a>]) -> Vec<Ro
             .get(index + 1)
             .filter(|next| next.ty.is_length() && parameter.ty.pointer.is_some());
         if let Some(next) = following {
+            if counts_records(surface, parameter, next) {
+                out.push(Role::Records {
+                    data: parameter,
+                    len: next,
+                });
+                index += 2;
+                continue;
+            }
             if next.member.name == "capacity" {
                 out.push(Role::Fill {
                     data: parameter,
@@ -338,6 +358,258 @@ fn role_of<'a>(surface: &Surface, parameter: &'a Read<'a>) -> Role<'a> {
         return Role::Out(parameter);
     }
     Role::Plain(parameter)
+}
+
+/// Whether a pointer and the member after it are an array of records going
+/// in: a `const` pointer to a record the surface declares, and a `usize` named
+/// for it with `_len`.
+///
+/// The name is part of the rule, for parameters and struct members alike. A
+/// struct going in is also a `const` pointer to a record, and a length beside
+/// one that is not named for it is some other number: read as a count, it
+/// hands the library a length nobody meant for the array, which is the one
+/// mistake this shape exists to rule out.
+pub(crate) fn counts_records(surface: &Surface, data: &Read<'_>, next: &Read<'_>) -> bool {
+    data.ty.pointer == Some(Writable::No)
+        && matches!(&data.ty.base, Base::Named(name) if record_named(surface, name).is_some())
+        && next.ty.is_length()
+        && next.member.name == format!("{}_len", data.member.name)
+}
+
+/// Refuse, naming the declaration, an entry point a binding that builds its
+/// own values would hand C something other than what the declaration says.
+///
+/// A pointer to a record with a length after it that [`counts_records`] did
+/// not read as an array going in is one of two things, and neither is one
+/// struct. With the `_len` named for it behind a pointer the library may write
+/// through, it is an array coming back, which no back end builds. Pointing at
+/// a record with no size member, it is the element of an array whatever the
+/// length is called, since a struct handed over alone carries its size. Read
+/// as one struct, either hands C the address of a single element and a length
+/// the caller chose, which C reads past. And a call that answers with text is
+/// printed with its parameters handed through as they came, so an array of
+/// records it takes, directly or inside a struct, would cross as whatever the
+/// caller supplied beside it.
+pub(crate) fn unprintable(
+    surface: &Surface,
+    function: &Function,
+    parameters: &[Read<'_>],
+    language: &str,
+) -> Result<(), Refused> {
+    let refuse = |why: String| {
+        Err(Refused::about(&format!(
+            "{why}, so the {language} binding has no way to hand it over; give it a shape in \
+             tools/abi-gen/src/model.rs"
+        )))
+    };
+    for pair in parameters.windows(2) {
+        let [data, next] = pair else {
+            continue;
+        };
+        let (Some(writable), Base::Named(name)) = (data.ty.pointer, &data.ty.base) else {
+            continue;
+        };
+        let Some(record) = record_named(surface, name) else {
+            continue;
+        };
+        if !next.ty.is_length() || counts_records(surface, data, next) {
+            continue;
+        }
+        let wanted = format!("{}_len", data.member.name);
+        if writable == Writable::Yes && next.member.name == wanted {
+            return refuse(format!(
+                "{}::{} points at {} with `{wanted}` after it, which is an array the library \
+                 writes back",
+                function.name, data.member.name, record.name
+            ));
+        }
+        if !record.is_versioned() {
+            return refuse(format!(
+                "{}::{} points at {}, which has no size member and so is the element of an \
+                 array, and `{}` after it is not the `{wanted}` that says how many",
+                function.name, data.member.name, record.name, next.member.name
+            ));
+        }
+    }
+    let answers = Type::read(function.returns)
+        .map_err(|why| Refused::about(&format!("{} answers with {why}", function.name)))?;
+    if answers.pointer.is_none() || answers.base != Base::Char {
+        return Ok(());
+    }
+    for role in roles(surface, parameters) {
+        let listed = match role {
+            Role::Records { .. } => true,
+            Role::Config(read) => !listed_in(surface, read, language)?.is_empty(),
+            _ => false,
+        };
+        if listed {
+            return refuse(format!(
+                "{} answers with text and takes an array of records, and a call that answers \
+                 with text is printed with its parameters handed through as they came",
+                function.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A record as the element of an array going in, for a binding that builds
+/// every element out of values of its own rather than handing the caller's
+/// pointers through.
+pub(crate) struct Element {
+    /// The record.
+    pub(crate) record: &'static Record,
+    /// Its members, each a piece of text and the length after it, in the
+    /// order the record declares them.
+    pub(crate) texts: Vec<Text>,
+}
+
+/// One member of an element: a pointer to UTF-8 and its `_len`.
+pub(crate) struct Text {
+    /// The pointer.
+    pub(crate) data: Read<'static>,
+    /// The length that follows it.
+    pub(crate) len: Read<'static>,
+}
+
+/// Read the record an array of records going in is made of, or say why a
+/// binding in `language` cannot build one.
+///
+/// Every refusal names the declaration. An element is strided by its own
+/// length, so a `size` member would move every element after the first the
+/// day it grew; a union has no member a binding could say it set; and a
+/// member that is not text is a shape no back end builds an element out of
+/// yet, which is a decision for this file rather than a guess in three
+/// others.
+pub(crate) fn element_of(record: &'static Record, language: &str) -> Result<Element, Refused> {
+    let refuse = |why: String| {
+        Refused::about(&format!(
+            "{why}, so the {language} binding has no way to build one; give it a shape in \
+             tools/abi-gen/src/model.rs"
+        ))
+    };
+    if record.shape != Shape::Struct {
+        return Err(refuse(format!(
+            "{} is handed over as the element of an array and is a union",
+            record.name
+        )));
+    }
+    if record.is_versioned() {
+        return Err(refuse(format!(
+            "{} is handed over as the element of an array and carries a size member, which an \
+             array strided by the element's length cannot grow",
+            record.name
+        )));
+    }
+    let fields = read_all(record.name, record.fields)?;
+    if fields.is_empty() {
+        return Err(refuse(format!(
+            "{} is handed over as the element of an array and has no members",
+            record.name
+        )));
+    }
+    let mut texts = Vec::new();
+    let mut members = fields.into_iter().peekable();
+    while let Some(data) = members.next() {
+        let text = data.ty.pointer == Some(Writable::No) && data.ty.base == Base::Char;
+        let wanted = format!("{}_len", data.member.name);
+        let Some(len) =
+            members.next_if(|after| text && after.ty.is_length() && after.member.name == wanted)
+        else {
+            return Err(refuse(format!(
+                "{}::{} is not a piece of text with `{wanted}` after it, and a record handed \
+                 over as the element of an array holds nothing else here",
+                record.name, data.member.name
+            )));
+        };
+        texts.push(Text { data, len });
+    }
+    Ok(Element { record, texts })
+}
+
+/// Every record the surface hands over as the element of an array going in,
+/// once each and in the order the surface declares the records: through an
+/// entry point's parameters, or through a member of a struct one of them takes.
+pub(crate) fn elements(surface: &Surface, language: &str) -> Result<Vec<Element>, Refused> {
+    let mut named = BTreeSet::new();
+    for (_, read) in functions(surface)? {
+        for role in roles(surface, &read) {
+            match role {
+                Role::Records { data, .. } => {
+                    if let Base::Named(name) = &data.ty.base {
+                        named.insert(name.clone());
+                    }
+                }
+                Role::Config(config) => {
+                    for listed in listed_in(surface, config, language)? {
+                        named.insert(listed.element.record.name.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    surface
+        .records
+        .iter()
+        .filter(|record| named.contains(record.name))
+        .map(|record| element_of(record, language))
+        .collect()
+}
+
+/// The element a pointer to records going in points at.
+pub(crate) fn element(
+    surface: &Surface,
+    data: &Read<'_>,
+    language: &str,
+) -> Result<Element, Refused> {
+    let found = match &data.ty.base {
+        Base::Named(name) => surface.records.iter().find(|record| record.name == name),
+        _ => None,
+    };
+    let Some(record) = found else {
+        return Err(Refused::about(&format!(
+            "{} is taken as an array of records and points at no record the surface declares",
+            data.member.name
+        )));
+    };
+    element_of(record, language)
+}
+
+/// An array of records going in that a struct holds.
+pub(crate) struct Listed {
+    /// The pointer member.
+    pub(crate) data: Read<'static>,
+    /// The `_len` member after it.
+    pub(crate) len: Read<'static>,
+    /// What each element is.
+    pub(crate) element: Element,
+}
+
+/// Every array of records going in held by the struct a parameter points at,
+/// in the order the struct declares them. A parameter that points at no
+/// record holds none.
+pub(crate) fn listed_in(
+    surface: &Surface,
+    parameter: &Read<'_>,
+    language: &str,
+) -> Result<Vec<Listed>, Refused> {
+    let Base::Named(name) = &parameter.ty.base else {
+        return Ok(Vec::new());
+    };
+    let Some(record) = surface.records.iter().find(|record| record.name == name) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let mut members = read_all(record.name, record.fields)?.into_iter().peekable();
+    while let Some(data) = members.next() {
+        let Some(len) = members.next_if(|after| counts_records(surface, &data, after)) else {
+            continue;
+        };
+        let element = element(surface, &data, language)?;
+        out.push(Listed { data, len, element });
+    }
+    Ok(out)
 }
 
 /// `InvalidArgument` becomes `INVALID_ARGUMENT`.

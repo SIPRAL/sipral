@@ -12,6 +12,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **No binding reads past the header fields it was handed.** The Swift and .NET
+  wrappers printed for `sipral_call_set_headers` took a single `sipral_header_t`
+  and the caller's `headers_len`, so any length above one read the memory after
+  it, and the Kotlin binding could not be printed at all once `headers` joined
+  the call and account configurations. `tools/abi-gen` now reads an array of
+  records going in off the declarations — a `const` pointer to a record and the
+  `_len` named for it, as parameters or as struct members — and every binding
+  takes a list whose own count is what C sees: `[SipralHeader]` in Swift, copied
+  into one buffer for the length of the call; `(string Name, string Value)[]` in
+  .NET, copied and pinned until the call returns or throws; `List<SipralHeader>`
+  in Kotlin, packed, with the JNI shim checking every length against the bytes
+  before it points into them. A pointer to records beside a length that is not
+  that shape — the `_len` of a writable pointer, or any length beside a record
+  with no `size` — and a call answering with text that takes a list are refused
+  by name in Swift, .NET and Kotlin rather than printed as one struct.
+
 - **A CR that neither ends a line nor begins a fold makes a message malformed,
   in both parse modes.** It has no reading in RFC 3261 §25.1, and it could never
   be written back: `From: <sip:bob@example.com>;x=a\rb;tag=1` on an INVITE made a
@@ -312,6 +328,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   index and, under `UNENCRYPTED_SRTCP`, wrote the tag over the packet's own
   header and reported success. Such a length is now refused as `TooShort`
   before anything is added to it, as `protect_rtp` already refused it.
+
+- **A field written in a compact form registered after RFC 3261 was not the
+  field it abbreviates.** `HeaderName` knew fifteen compact forms and not the
+  other four: `y` for `Identity` (RFC 8224 §13.1), and `a`, `j` and `d` for
+  `Accept-Contact`, `Reject-Contact` and `Request-Disposition` (RFC 3841 §12).
+  A `y:` line was an extension named `y`, so `sipral_message_header_count`
+  asked for `Identity` counted none. All four are known fields now, in both
+  forms.
+
+- **An attended transfer names its own dialog whatever the target's `Contact`
+  carried.** `transfer_to` appended `?Replaces=` to the target's `Contact` URI
+  as it came, so one that already held URI headers turned ours into part of
+  its last header value, and the transferee read the Replaces the target had
+  written instead. The target now goes into `Refer-To` as a Request-URI, with
+  no URI headers and no `method` (RFC 3261 Table 1 allows neither in a
+  dialog's `Contact`).
+
+- **A URI whose headers name one field twice is equivalent to itself again.**
+  `Uri::equivalent` held every URI header against the first of that name in
+  the other URI, so `?Route=a&Route=b` failed against itself, and `?Route=a`
+  matched `?Route=a&Route=a`. The n-th field of a name is now held against the
+  n-th of that name, in order (RFC 3261 §7.3.1).
 
 - **An attended transfer names its own dialog whatever the target's `Contact`
   carried.** `transfer_to` appended `?Replaces=` to the target's `Contact` URI
@@ -881,6 +919,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   targets, `dtls_record` and `dtls_handshake`, seeded from a real handshake.
   The join to a call — the SDP lines, RFC 7983 demultiplexing, `MediaSession`
   — is the next part.
+
+- **Header fields in and out through the C ABI, and a field the stack writes
+  refused rather than written twice.** `sipral_header_t` is a name and a value;
+  `headers`/`headers_len` sit at the tail of `sipral_call_config_t` for the
+  INVITE and of `sipral_account_config_t` for every REGISTER;
+  `sipral_call_set_headers` (`UserAgent::respond_with_headers` in Rust) sets the
+  fields for the 180/183, 200, refusal, BYE and re-INVITE a call sends at the
+  application's request, kept until replaced and never on a CANCEL or on what
+  the stack sends by itself; and `sipral_message_header_count` and
+  `sipral_message_header`, with their `_element` pair, count and reach a field
+  in any message by line or by list value, compact names included, as an offset
+  into the caller's bytes. A
+  field the stack writes itself (`Via`, `Call-ID`, `Contact`, `Route`,
+  `Content-Length` and the rest in `docs/04-ua.md`) is refused on every path, C
+  and Rust (`UaError::Header`, and `BuildError::OwnedField` from the core, which
+  until now wrote a caller's `Contact` beside its own); so are a value holding a
+  line break and a name that is not a token, which the core used to drop without
+  a word. `Endpoint::bye_with` sends a BYE of the caller's own. The ABI minor
+  moves once, with the rest of this block of surface work.
 
 - **An account can have no registrar.** A trunk that knows this end by its
   address could not be configured: `sipral_account_add` refused an empty

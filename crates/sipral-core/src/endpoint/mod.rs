@@ -54,5 +54,5 @@ pub use error::{
     AckError, AuthRetryError, CancelError, PrackError, ReceiveError, RespondError, SendError,
 };
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
-pub use outgoing::{OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
+pub use outgoing::{ENDPOINT_FIELDS, OutgoingInDialogRequest, OutgoingRequest, OutgoingResponse};
 pub use transport::{Host, Input, Transmit, TransportErrorKind, TransportId, TransportProtocol};

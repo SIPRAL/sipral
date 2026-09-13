@@ -13,6 +13,7 @@
 
 #include <jni.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sipral.h"
@@ -126,6 +127,121 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
     }
+}
+
+/* Throw a new exception of the class named. What is wrong with a list the
+ * shim was handed is the JVM's to report: a status would be read as the
+ * library's answer, and the library was never called. */
+static void
+jni_refuse(JNIEnv *env, const char *thrown, const char *why)
+{
+    jclass found = (*env)->FindClass(env, thrown);
+    if (found != NULL) {
+        (*env)->ThrowNew(env, found, why);
+        (*env)->DeleteLocalRef(env, found);
+    }
+}
+
+/* A list of sipral_header_t as SipralHeader.packed hands it over, made into the
+ * array the library reads. `bytes` is every piece of text in every element,
+ * one after another, and `lengths` how many bytes each took, 2 to an
+ * element in the order the struct declares them. The bytes are pinned, and
+ * every length is read once and checked against what is left of them before
+ * a pointer is made from it, so no element reaches past the array it came
+ * in; an empty piece of text is a null pointer with a length of zero. Answers
+ * 1 with what jni_header_release lets go of in the three out parameters, or 0
+ * with an exception pending and nothing held. */
+static int
+jni_header_array(JNIEnv *env, jbyteArray bytes, jlongArray lengths, jbyte **out_pinned, sipral_header_t **out_array, size_t *out_count)
+{
+    jsize parts;
+    jsize room;
+    size_t count;
+    size_t index;
+    size_t at = 0;
+    jlong length;
+    jlong *given;
+    jbyte *pinned = NULL;
+    sipral_header_t *array;
+
+    *out_pinned = NULL;
+    *out_array = NULL;
+    *out_count = 0;
+    parts = lengths != NULL ? (*env)->GetArrayLength(env, lengths) : 0;
+    room = bytes != NULL ? (*env)->GetArrayLength(env, bytes) : 0;
+    if (parts % 2 != 0) {
+        jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t are not 2 to an element");
+        return 0;
+    }
+    count = (size_t)parts / 2;
+    if (count == 0) {
+        if (room != 0) {
+            jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t do not account for its bytes");
+            return 0;
+        }
+        return 1;
+    }
+    if (count > SIZE_MAX / sizeof *array) {
+        jni_refuse(env, "java/lang/OutOfMemoryError", "a list of sipral_header_t longer than memory can hold");
+        return 0;
+    }
+    array = malloc(count * sizeof *array);
+    if (array == NULL) {
+        jni_refuse(env, "java/lang/OutOfMemoryError", "no memory for a list of sipral_header_t");
+        return 0;
+    }
+    given = (*env)->GetLongArrayElements(env, lengths, NULL);
+    if (given == NULL) {
+        free(array);
+        return 0;
+    }
+    if (room > 0) {
+        pinned = (*env)->GetByteArrayElements(env, bytes, NULL);
+        if (pinned == NULL) {
+            (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);
+            free(array);
+            return 0;
+        }
+    }
+    for (index = 0; index < count; index++) {
+        length = given[index * 2 + 0];
+        if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {
+            break;
+        }
+        array[index].name = length == 0 ? NULL : (const char *)pinned + at;
+        array[index].name_len = (size_t)length;
+        at += (size_t)length;
+        length = given[index * 2 + 1];
+        if (length < 0 || (uint64_t)length > (uint64_t)((size_t)room - at)) {
+            break;
+        }
+        array[index].value = length == 0 ? NULL : (const char *)pinned + at;
+        array[index].value_len = (size_t)length;
+        at += (size_t)length;
+    }
+    (*env)->ReleaseLongArrayElements(env, lengths, given, JNI_ABORT);
+    if (index != count || at != (size_t)room) {
+        if (pinned != NULL) {
+            (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);
+        }
+        free(array);
+        jni_refuse(env, "java/lang/IllegalArgumentException", "the lengths of a list of sipral_header_t do not account for its bytes");
+        return 0;
+    }
+    *out_pinned = pinned;
+    *out_array = array;
+    *out_count = count;
+    return 1;
+}
+
+/* Let go of what jni_header_array made, which is nothing when it answered 0. */
+static void
+jni_header_release(JNIEnv *env, jbyteArray bytes, jbyte *pinned, sipral_header_t *array)
+{
+    if (pinned != NULL) {
+        (*env)->ReleaseByteArrayElements(env, bytes, pinned, JNI_ABORT);
+    }
+    free(array);
 }
 
 JNIEXPORT jint JNICALL
@@ -398,7 +514,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -439,7 +555,20 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.instance_id_len = (size_t)configInstanceId_size;
     config_value.expires_seconds = (uint64_t)configExpiresSeconds;
     sipral_handle_t account_value = 0;
-    sipral_status_t status = sipral_account_add((sipral_handle_t)stack, &config_value, &account_value);
+    int ready = 1;
+    jbyte *configHeaders_pinned = NULL;
+    sipral_header_t *configHeaders_array = NULL;
+    size_t configHeaders_count = 0;
+    ready = ready && jni_header_array(env, configHeadersBytes, configHeadersLengths, &configHeaders_pinned, &configHeaders_array, &configHeaders_count);
+    config_value.headers = configHeaders_array;
+    config_value.headers_len = configHeaders_count;
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_account_add((sipral_handle_t)stack, &config_value, &account_value);
+    }
     if (configAor) {
         (*env)->ReleaseByteArrayElements(env, configAor, configAor_data, JNI_ABORT);
     }
@@ -464,9 +593,12 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     if (configInstanceId) {
         (*env)->ReleaseByteArrayElements(env, configInstanceId, configInstanceId_data, JNI_ABORT);
     }
-    {
-        jlong slot = (jlong)account_value;
-        (*env)->SetLongArrayRegion(env, account, 0, 1, &slot);
+    jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (ready) {
+        {
+            jlong slot = (jlong)account_value;
+            (*env)->SetLongArrayRegion(env, account, 0, 1, &slot);
+        }
     }
     return (jint)status;
 }
@@ -513,7 +645,7 @@ Java_org_sipral_SipralNative_sipral_1account_1registration_1state(JNIEnv *env, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray call, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -538,7 +670,20 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     sipral_handle_t call_value = 0;
-    sipral_status_t status = sipral_call_place((sipral_handle_t)stack, (sipral_handle_t)account, &config_value, &call_value, (uint64_t)nowMs);
+    int ready = 1;
+    jbyte *configHeaders_pinned = NULL;
+    sipral_header_t *configHeaders_array = NULL;
+    size_t configHeaders_count = 0;
+    ready = ready && jni_header_array(env, configHeadersBytes, configHeadersLengths, &configHeaders_pinned, &configHeaders_array, &configHeaders_count);
+    config_value.headers = configHeaders_array;
+    config_value.headers_len = configHeaders_count;
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_call_place((sipral_handle_t)stack, (sipral_handle_t)account, &config_value, &call_value, (uint64_t)nowMs);
+    }
     if (configTarget) {
         (*env)->ReleaseByteArrayElements(env, configTarget, configTarget_data, JNI_ABORT);
     }
@@ -551,9 +696,12 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     if (configMediaAddress) {
         (*env)->ReleaseByteArrayElements(env, configMediaAddress, configMediaAddress_data, JNI_ABORT);
     }
-    {
-        jlong slot = (jlong)call_value;
-        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+    jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (ready) {
+        {
+            jlong slot = (jlong)call_value;
+            (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+        }
     }
     return (jint)status;
 }
@@ -615,6 +763,27 @@ Java_org_sipral_SipralNative_sipral_1call_1hangup(JNIEnv *env, jobject self, jlo
     (void)env;
     (void)self;
     sipral_status_t status = sipral_call_hangup((sipral_handle_t)stack, (sipral_handle_t)call, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1set_1headers(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray headersBytes, jlongArray headersLengths)
+{
+    (void)env;
+    (void)self;
+    int ready = 1;
+    jbyte *headers_pinned = NULL;
+    sipral_header_t *headers_array = NULL;
+    size_t headers_count = 0;
+    ready = ready && jni_header_array(env, headersBytes, headersLengths, &headers_pinned, &headers_array, &headers_count);
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_call_set_headers((sipral_handle_t)stack, (sipral_handle_t)call, headers_array, headers_count);
+    }
+    jni_header_release(env, headersBytes, headers_pinned, headers_array);
     return (jint)status;
 }
 
@@ -688,7 +857,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jlongArray consultation, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray consultation, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -713,7 +882,20 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     sipral_handle_t consultation_value = 0;
-    sipral_status_t status = sipral_call_consult((sipral_handle_t)stack, (sipral_handle_t)call, &config_value, &consultation_value, (uint64_t)nowMs);
+    int ready = 1;
+    jbyte *configHeaders_pinned = NULL;
+    sipral_header_t *configHeaders_array = NULL;
+    size_t configHeaders_count = 0;
+    ready = ready && jni_header_array(env, configHeadersBytes, configHeadersLengths, &configHeaders_pinned, &configHeaders_array, &configHeaders_count);
+    config_value.headers = configHeaders_array;
+    config_value.headers_len = configHeaders_count;
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_call_consult((sipral_handle_t)stack, (sipral_handle_t)call, &config_value, &consultation_value, (uint64_t)nowMs);
+    }
     if (configTarget) {
         (*env)->ReleaseByteArrayElements(env, configTarget, configTarget_data, JNI_ABORT);
     }
@@ -726,9 +908,12 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     if (configMediaAddress) {
         (*env)->ReleaseByteArrayElements(env, configMediaAddress, configMediaAddress_data, JNI_ABORT);
     }
-    {
-        jlong slot = (jlong)consultation_value;
-        (*env)->SetLongArrayRegion(env, consultation, 0, 1, &slot);
+    jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (ready) {
+        {
+            jlong slot = (jlong)consultation_value;
+            (*env)->SetLongArrayRegion(env, consultation, 0, 1, &slot);
+        }
     }
     return (jint)status;
 }
@@ -1195,5 +1380,111 @@ Java_org_sipral_SipralNative_sipral_1event_1kind_1name(JNIEnv *env, jobject self
     (void)self;
     const char *text = sipral_event_kind_name((uint32_t)kind);
     return text ? (*env)->NewStringUTF(env, text) : NULL;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1message_1header_1count(JNIEnv *env, jobject self, jbyteArray message, jbyteArray name, jlongArray count)
+{
+    (void)env;
+    (void)self;
+    jbyte *message_data = message ? (*env)->GetByteArrayElements(env, message, NULL) : NULL;
+    jsize message_size = message ? (*env)->GetArrayLength(env, message) : 0;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    size_t count_value = 0;
+    sipral_status_t status = sipral_message_header_count((const uint8_t *)message_data, (size_t)message_size, (const char *)name_data, (size_t)name_size, &count_value);
+    if (message) {
+        (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
+    }
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)count_value;
+        (*env)->SetLongArrayRegion(env, count, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1message_1header(JNIEnv *env, jobject self, jbyteArray message, jbyteArray name, jlong index, jlongArray offset, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *message_data = message ? (*env)->GetByteArrayElements(env, message, NULL) : NULL;
+    jsize message_size = message ? (*env)->GetArrayLength(env, message) : 0;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    size_t offset_value = 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_message_header((const uint8_t *)message_data, (size_t)message_size, (const char *)name_data, (size_t)name_size, (size_t)index, &offset_value, &len_value);
+    if (message) {
+        (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
+    }
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)offset_value;
+        (*env)->SetLongArrayRegion(env, offset, 0, 1, &slot);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1message_1header_1element_1count(JNIEnv *env, jobject self, jbyteArray message, jbyteArray name, jlongArray count)
+{
+    (void)env;
+    (void)self;
+    jbyte *message_data = message ? (*env)->GetByteArrayElements(env, message, NULL) : NULL;
+    jsize message_size = message ? (*env)->GetArrayLength(env, message) : 0;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    size_t count_value = 0;
+    sipral_status_t status = sipral_message_header_element_count((const uint8_t *)message_data, (size_t)message_size, (const char *)name_data, (size_t)name_size, &count_value);
+    if (message) {
+        (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
+    }
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)count_value;
+        (*env)->SetLongArrayRegion(env, count, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1message_1header_1element(JNIEnv *env, jobject self, jbyteArray message, jbyteArray name, jlong index, jlongArray offset, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *message_data = message ? (*env)->GetByteArrayElements(env, message, NULL) : NULL;
+    jsize message_size = message ? (*env)->GetArrayLength(env, message) : 0;
+    jbyte *name_data = name ? (*env)->GetByteArrayElements(env, name, NULL) : NULL;
+    jsize name_size = name ? (*env)->GetArrayLength(env, name) : 0;
+    size_t offset_value = 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_message_header_element((const uint8_t *)message_data, (size_t)message_size, (const char *)name_data, (size_t)name_size, (size_t)index, &offset_value, &len_value);
+    if (message) {
+        (*env)->ReleaseByteArrayElements(env, message, message_data, JNI_ABORT);
+    }
+    if (name) {
+        (*env)->ReleaseByteArrayElements(env, name, name_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)offset_value;
+        (*env)->SetLongArrayRegion(env, offset, 0, 1, &slot);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
 }
 

@@ -187,6 +187,7 @@ typedef struct sipral_counters sipral_counters_t;
 typedef struct sipral_stack_config sipral_stack_config_t;
 typedef struct sipral_poll_result sipral_poll_result_t;
 typedef struct sipral_stack_settings sipral_stack_settings_t;
+typedef struct sipral_header sipral_header_t;
 typedef struct sipral_account_config sipral_account_config_t;
 typedef struct sipral_call_config sipral_call_config_t;
 typedef struct sipral_codec_info sipral_codec_info_t;
@@ -1404,6 +1405,36 @@ struct sipral_stack_settings {
 };
 
 /**
+ * One header field an application hands over: a name and a value, UTF-8,
+ * neither NUL-terminated.
+ *
+ * Always an element of an array whose length travels beside it, which is
+ * why it carries no `size`: an array is strided by the length of its
+ * element, so a member appended here would move every element after the
+ * first. A header field is a name and a value, and this never grows.
+ */
+struct sipral_header {
+    /**
+     * The field name, `X-Conversation-Id`. A compact form is the field it
+     * abbreviates.
+     */
+    const char *name;
+    /**
+     * How many bytes of it.
+     */
+    size_t name_len;
+    /**
+     * The value, as it goes on the line after the colon. Null or empty
+     * for a field with an empty value.
+     */
+    const char *value;
+    /**
+     * How many bytes of it.
+     */
+    size_t value_len;
+};
+
+/**
  * What an account is configured with.
  *
  * Set `size` to `sizeof(sipral_account_config_t)` and zero the rest before
@@ -1500,6 +1531,22 @@ struct sipral_account_config {
      * is where the effective value is read back, not here.
      */
     uint64_t expires_seconds;
+    /**
+     * Header fields to put on every REGISTER this account sends, in the
+     * order given, or null for none.
+     *
+     * Checked when the account is added, as `sipral_call_config_t::headers`
+     * is, against what the stack writes on a REGISTER: `Expires` is the
+     * stack's there, because it is `expires_seconds`, and `Supported` is the
+     * application's, because a registration asking for a GRUU has to say
+     * so. Refused for an account with no registrar, which sends no REGISTER
+     * to put them on.
+     */
+    const sipral_header_t *headers;
+    /**
+     * How many elements `headers` has.
+     */
+    size_t headers_len;
 };
 
 /**
@@ -1565,6 +1612,22 @@ struct sipral_call_config {
      * How many bytes of it.
      */
     size_t media_address_len;
+    /**
+     * Header fields to put on the INVITE, in the order given, or null for
+     * none.
+     *
+     * Each is checked before anything is built: the name a token, the value
+     * one line of text, and not a field the stack writes on a call itself.
+     * Those are listed in `docs/04-ua.md` with the reason for each, and
+     * `User-Agent` joins them when `sipral_stack_config_t::user_agent` is
+     * set. A refusal is `SIPRAL_STATUS_INVALID_ARGUMENT` naming the element,
+     * and no call.
+     */
+    const sipral_header_t *headers;
+    /**
+     * How many elements `headers` has.
+     */
+    size_t headers_len;
 };
 
 /**
@@ -2551,6 +2614,34 @@ sipral_status_t sipral_call_reject(sipral_handle_t stack, sipral_handle_t call, 
 sipral_status_t sipral_call_hangup(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
 
 /**
+ * Set the header fields that go on what this call sends at the
+ * application's request, from now until they are set again.
+ *
+ * They go on the 180 or 183 from `sipral_call_ring`, the 200 from
+ * `sipral_call_answer` and `sipral_call_answer_media`, the refusal from
+ * `sipral_call_reject`, the refusal or the BYE that `sipral_call_hangup`
+ * turns into, and the re-INVITE or UPDATE that `sipral_call_hold` and
+ * `sipral_call_resume` send. Kept rather than spent on the first of those,
+ * so that a field set before ringing is on the 200 as well. Never on a
+ * CANCEL, which a proxy answers and replaces with its own, and never on
+ * what the stack sends by itself: a session refresh, or the BYE for a 2xx
+ * that was never acknowledged or for a fork that lost.
+ *
+ * Replaces what was set before, whole, and a `headers_len` of zero takes
+ * every field off. Each field is checked first, as it is on
+ * `sipral_call_config_t::headers`, and a refusal names the element, keeps
+ * none of the new fields and leaves the old ones in place. Nothing is
+ * sent.
+ *
+ * Safety
+ *
+ * `headers` must be null with `headers_len` zero, or readable for
+ * `headers_len` elements, each with a name and a value readable for the
+ * lengths beside them.
+ */
+sipral_status_t sipral_call_set_headers(sipral_handle_t stack, sipral_handle_t call, const sipral_header_t *headers, size_t headers_len);
+
+/**
  * Put a call on hold (RFC 3264 §8.4).
  *
  * The description is the stack's to write: the one already negotiated
@@ -3167,6 +3258,79 @@ sipral_status_t sipral_stack_stream_closed(sipral_handle_t stack, uint32_t trans
  * thread.
  */
 const char *sipral_event_kind_name(uint32_t kind);
+
+/**
+ * How many lines a header field is on, in a whole SIP message.
+ *
+ * The message is any SIP message in bytes: the one an event carries in
+ * `sipral_event_t::message`, or one the application came by some other
+ * way. The name is matched the way the parser matches it, without regard to
+ * case, and a compact form and its long form are one field (RFC 3261
+ * §7.3.3): `i` counts the `Call-ID` lines, and `Call-ID` counts a line
+ * written `i:`. A field that is not there is a count of zero, not a
+ * failure.
+ *
+ * Safety
+ *
+ * `message` must be readable for `message_len` bytes and `name` for
+ * `name_len`, and `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_message_header_count(const uint8_t *message, size_t message_len, const char *name, size_t name_len, size_t *out_count);
+
+/**
+ * Where one line of a header field is, in a whole SIP message.
+ *
+ * `index` counts from zero in the order the lines arrived, and has to be
+ * below what `sipral_message_header_count` says for the same name: past it
+ * is `SIPRAL_STATUS_INVALID_ARGUMENT`. `out_offset` and `out_len` then say
+ * where the value sits inside `message`, trimmed at both ends and otherwise
+ * as it arrived, a line fold included. An offset rather than a pointer,
+ * because the bytes are the caller's, and a binding that copied them across
+ * the boundary holds its own copy.
+ *
+ * One line of a field whose value is a comma-separated list may hold
+ * several values; `sipral_message_header_element` reaches those.
+ *
+ * Safety
+ *
+ * As `sipral_message_header_count`, with `out_offset` and `out_len` each
+ * pointing at one `size_t`.
+ */
+sipral_status_t sipral_message_header(const uint8_t *message, size_t message_len, const char *name, size_t name_len, size_t index, size_t *out_offset, size_t *out_len);
+
+/**
+ * How many values a field whose value is a comma-separated list holds,
+ * across every line it is on.
+ *
+ * RFC 3261 §7.3.1 makes two values on one line, with a comma between them,
+ * and the same two values on two lines one and the same message, and a
+ * proxy is free to turn either into the other. So this counts values
+ * rather than lines, split at every comma that is not inside quotes or
+ * angle brackets. Otherwise as `sipral_message_header_count`.
+ *
+ * Only for a field defined as a list: `P-Asserted-Identity`, `Diversion`,
+ * `Contact`, `Supported`. Any other is split at a comma its value holds as
+ * text, like the one in a `Date` or the ones between the parameters of a
+ * challenge, and `sipral_message_header_count` is the call for it.
+ *
+ * Safety
+ *
+ * As `sipral_message_header_count`.
+ */
+sipral_status_t sipral_message_header_element_count(const uint8_t *message, size_t message_len, const char *name, size_t name_len, size_t *out_count);
+
+/**
+ * Where one value of a list field is, across every line the field is on.
+ *
+ * `index` counts values in the order they arrived, and has to be below what
+ * `sipral_message_header_element_count` says for the same name. Otherwise
+ * as `sipral_message_header`.
+ *
+ * Safety
+ *
+ * As `sipral_message_header`.
+ */
+sipral_status_t sipral_message_header_element(const uint8_t *message, size_t message_len, const char *name, size_t name_len, size_t index, size_t *out_offset, size_t *out_len);
 
 #ifdef __cplusplus
 } /* extern "C" */
