@@ -14,6 +14,7 @@ mod csharp;
 mod kotlin;
 mod model;
 mod names;
+mod sizes;
 mod swift;
 
 #[cfg(test)]
@@ -54,6 +55,10 @@ fn outputs() -> Result<Vec<(PathBuf, String)>, Refused> {
         (
             here.join("bindings/kotlin/sipral/src/main/jni/sipral_jni.c"),
             kotlin::shim(&SURFACE)?,
+        ),
+        (
+            here.join("bindings/c/abi-sizes.txt"),
+            sizes::rendered(&SURFACE),
         ),
     ])
 }

@@ -1,0 +1,24 @@
+# Printed by tools/abi-gen. Do not edit.
+#
+# <struct> <first published length> <length in this build>
+#
+# The first number is pinned in crates/sipral-ffi and must not move:
+# it is what a caller built against the oldest header declares, and
+# a library that stopped accepting it would break that caller from a
+# change meant to be additive. The second grows by one appended
+# member at a time. A dash means the library fills that struct in
+# itself and no caller ever declares one.
+sipral_abi_version_t 24 24
+sipral_account_config_t 144 144
+sipral_call_config_t 80 80
+sipral_capabilities_t 24 24
+sipral_codec_info_t 32 32
+sipral_counters_t 152 152
+sipral_event_t - 128
+sipral_media_info_t 88 88
+sipral_media_packet_t 56 56
+sipral_poll_result_t 48 48
+sipral_stack_config_t 176 176
+sipral_stack_settings_t 72 72
+sipral_stream_stats_t 152 152
+sipral_transmit_t 88 88

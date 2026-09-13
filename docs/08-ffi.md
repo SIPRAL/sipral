@@ -465,17 +465,40 @@ is what they mean:
 - **patch**, for a fix that changes no declaration. It is not asked for at
   load, because it cannot make two builds disagree.
 
-A member appended to a config struct is the ordinary case of that, and it is
-not free even when it is only an addition: `declared_size` refuses anything
-smaller than the struct the library was built with, so a caller compiled
-against the older header is turned away at `sipral_stack_create` with
-`SIPRAL_STATUS_UNSUPPORTED_VERSION`. Loud rather than silent, which is the
-behaviour worth having when the new member is a security one — `media_seed`,
-added at minor 9, is exactly that.
+A member appended to a config struct is the ordinary case of that, and what
+decides whether it costs the caller anything is the **pinned length**.
+`declared_size` refuses anything below `Versioned::MIN_SIZE`, and that
+constant is the length the struct had in the **first published header** —
+written once as a literal in `crates/sipral-ffi`, never recomputed. Pinned
+that way, an appended member is genuinely additive: the old caller's smaller
+`sizeof` is still at or above the pin, so it is still accepted, and the
+members it never sent come back zero.
 
-Growing the surface is therefore a minor bump in the same change as the
-addition, next to the regenerated `bindings/`. The gate forces the second
-half of that — committed output against what the declarations print, which is
-the check described above — and nothing but a reader forces the first, which
-is why the rule is written here rather than left to be inferred from the
-constant.
+Written as `size_of::<Self>()` instead, which is what every one of these
+constants was until the pinning landed, the arrangement inverts: the pin
+tracks the current build, and the first appended member turns away every
+caller compiled against yesterday's header — from a change whose whole point
+was that it would not. That is the one way to get this wrong, and it is not
+visible in the diff that causes it.
+
+Turning a caller away is still the right answer when the member is one the
+call cannot proceed without: `media_seed`, added at minor 9, deliberately
+moved its pin, and `sipral_stack_create` says
+`SIPRAL_STATUS_UNSUPPORTED_VERSION` rather than running with one key
+generator where there should be two. That is a decision per member, taken
+once, not a consequence of how the constant happens to be written.
+
+`bindings/c/abi-sizes.txt` is printed from the pins beside the header and the
+four bindings, and the gate diffs it like the rest: the first number per
+struct is the pin, the second is what this build compiled to. Moving a pin is
+therefore a line in a committed file that somebody has to sign, rather than a
+constant nobody re-reads.
+
+Growing the surface is a minor bump in the same change as the addition, next
+to the regenerated `bindings/`. The gate forces the regeneration — committed
+output against what the declarations print — and nothing but a reader forces
+the bump, which is why the rule is written here rather than left to be
+inferred from the constant. Within one block of surface work the bump is
+taken **once, at the end**: nothing is published, so no build in the world is
+on an intermediate minor, and a bump per task costs a full gate run and a
+regenerated binding set for a version nobody can have.

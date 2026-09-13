@@ -259,7 +259,7 @@ record! {
 // each — a zeroed one reads as the codec that is not a codec.
 unsafe impl Versioned for SipralCodecInfo {
     const NAME: &'static str = "sipral_codec_info";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::CODEC_INFO;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -324,7 +324,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralMediaInfo {
     const NAME: &'static str = "sipral_media_info";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::MEDIA_INFO;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -407,7 +407,7 @@ record! {
 // valid value of each.
 unsafe impl Versioned for SipralStreamStats {
     const NAME: &'static str = "sipral_stream_stats";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::STREAM_STATS;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -452,7 +452,7 @@ record! {
 // being undefined.
 unsafe impl Versioned for SipralMediaPacket {
     const NAME: &'static str = "sipral_media_packet";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::MEDIA_PACKET;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

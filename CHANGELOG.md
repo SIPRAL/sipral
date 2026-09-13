@@ -62,6 +62,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **The mechanism that makes appending a struct member safe did the opposite
+  of what it promised.** `Versioned::MIN_SIZE`'s own contract says it is the
+  length of the **oldest published** version of a struct, and `declared_size`
+  refuses anything below it. All thirteen implementations wrote
+  `size_of::<Self>()` — the length of the **current** build. So the first
+  member appended to any config struct would have moved the floor with it and
+  turned away every caller compiled against yesterday's header, from a change
+  whose entire point was to be additive, and nothing in the diff that caused
+  it would have looked wrong. The thirteen lengths are now pinned as literals,
+  three tests driven off the ABI declaration say the table is complete, names
+  nothing that has gone, and pins nothing longer than the struct is now, and
+  `bindings/c/abi-sizes.txt` is printed beside the header and the four
+  bindings so that moving a pin is a line somebody has to sign.
+  `sipral_event_t` is named as the one exception and why: the library fills it
+  in, so no caller ever declares one and there is nothing to refuse.
+
 - **A registration restored from a snapshot, or one whose REGISTER answer
   arrived just before a suspend, could come back from a wake with nothing
   that would ever register it again.** `distrust()` — the first rung of

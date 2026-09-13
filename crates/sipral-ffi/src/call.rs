@@ -103,7 +103,7 @@ record! {
 // zero.
 unsafe impl Versioned for SipralCallConfig {
     const NAME: &'static str = "sipral_call_config";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::CALL_CONFIG;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

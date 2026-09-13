@@ -50,6 +50,52 @@ pub(crate) unsafe trait Versioned: Copy {
     fn set_declared_size(&mut self, bytes: usize);
 }
 
+/// The length each versioned struct had in the **first published header**,
+/// written once as a literal and never recomputed.
+///
+/// This is the whole of what makes appending a member safe, and writing
+/// `size_of::<Self>()` here instead — which is what every one of these used to
+/// be — inverts it. [`declared_size`] refuses anything below `MIN_SIZE`, so a
+/// `MIN_SIZE` that tracks the current build turns away every caller compiled
+/// against yesterday's header, from a change whose entire point was to be
+/// additive. The number has to stand still while the struct grows, and a
+/// literal is the only thing that does.
+///
+/// Changing one of these is therefore a deliberate act with a reviewable diff,
+/// and it is wrong in every case but one: a struct whose **first** published
+/// length was not what is written here. Nothing else is a reason.
+/// `bindings/c/abi-sizes.txt` is printed from this table and the gate diffs
+/// it, so the change shows up twice.
+pub(crate) mod min_size {
+    #![allow(unreachable_pub)]
+    /// `sipral_abi_version_t`
+    pub const ABI_VERSION: usize = 24;
+    /// `sipral_account_config_t`
+    pub const ACCOUNT_CONFIG: usize = 144;
+    /// `sipral_call_config_t`
+    pub const CALL_CONFIG: usize = 80;
+    /// `sipral_capabilities_t`
+    pub const CAPABILITIES: usize = 24;
+    /// `sipral_codec_info_t`
+    pub const CODEC_INFO: usize = 32;
+    /// `sipral_counters_t`
+    pub const COUNTERS: usize = 152;
+    /// `sipral_media_info_t`
+    pub const MEDIA_INFO: usize = 88;
+    /// `sipral_media_packet_t`
+    pub const MEDIA_PACKET: usize = 56;
+    /// `sipral_poll_result_t`
+    pub const POLL_RESULT: usize = 48;
+    /// `sipral_stack_config_t`
+    pub const STACK_CONFIG: usize = 176;
+    /// `sipral_stack_settings_t`
+    pub const STACK_SETTINGS: usize = 72;
+    /// `sipral_stream_stats_t`
+    pub const STREAM_STATS: usize = 152;
+    /// `sipral_transmit_t`
+    pub const TRANSMIT: usize = 88;
+}
+
 /// More than any struct here will ever be, and small enough that a size
 /// member the caller left uninitialised is refused rather than obeyed. The
 /// declared size decides how far the reader walks, so it is the one number a
@@ -169,6 +215,7 @@ pub(crate) unsafe fn write_versioned<T: Versioned>(
 #[cfg(test)]
 mod tests {
     use super::{Versioned, declared_size, read_versioned, write_versioned};
+    use crate::abi::{FILLED_BY_US, MIN_SIZES, SURFACE};
     use crate::status::SipralStatus;
     use std::mem::{MaybeUninit, size_of};
     use std::ptr;
@@ -465,5 +512,65 @@ mod tests {
         size_member_comes_first::<crate::stack::SipralPollResult>();
         size_member_comes_first::<crate::transport::SipralTransmit>();
         size_member_comes_first::<crate::version::SipralAbiVersion>();
+    }
+
+    // -- the pinned lengths --------------------------------------------------
+
+    /// A list of thirteen kept by hand beside a list of thirteen kept by the
+    /// declarations is two lists, and they drift. This is the loop that stops
+    /// them: everything in `SURFACE` that starts with a `size` either has a
+    /// pinned length or is named as one the library fills itself.
+    #[test]
+    fn every_versioned_struct_has_a_pinned_length() {
+        let mut missing = Vec::new();
+        for record in SURFACE.records.iter().filter(|r| r.is_versioned()) {
+            let pinned = MIN_SIZES.iter().any(|(name, _)| *name == record.name);
+            let ours = FILLED_BY_US.contains(&record.name);
+            if !pinned && !ours {
+                missing.push(record.name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "a struct a caller declares to us has no oldest published length, \
+             so an appended member would turn every old caller away: {missing:?}"
+        );
+    }
+
+    /// The other direction, which is the one that catches a rename: a pinned
+    /// length for a struct that is no longer declared pins nothing.
+    #[test]
+    fn nothing_is_pinned_that_does_not_exist() {
+        for (name, _) in MIN_SIZES {
+            assert!(
+                SURFACE.records.iter().any(|record| record.name == *name),
+                "{name} has a pinned length and is not in the surface"
+            );
+        }
+        for name in FILLED_BY_US {
+            assert!(
+                SURFACE.records.iter().any(|record| record.name == *name),
+                "{name} is excused from being pinned and is not in the surface"
+            );
+        }
+    }
+
+    /// The invariant the pinning exists for. A pinned length above the
+    /// current one would refuse a caller compiled against this very build.
+    #[test]
+    fn no_pinned_length_is_longer_than_the_struct_is_now() {
+        for (name, pinned) in MIN_SIZES {
+            let record = SURFACE
+                .records
+                .iter()
+                .find(|record| record.name == *name)
+                .expect("checked by the test above");
+            assert!(
+                *pinned <= record.size,
+                "{name} is pinned at {pinned} and is {} bytes long: a caller \
+                 built against this header would be turned away by it",
+                record.size
+            );
+        }
     }
 }

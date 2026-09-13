@@ -434,6 +434,56 @@ macro_rules! alias {
 
 pub(crate) use {alias, codes, constants, record};
 
+/// Every versioned struct and the length it first shipped at, for the
+/// generator and for the test that says the table is complete.
+///
+/// The Rust name, so that it can be matched against
+/// [`SURFACE`] without anything being spelled twice.
+pub const MIN_SIZES: &[(&str, usize)] = &[
+    ("SipralAbiVersion", crate::versioned::min_size::ABI_VERSION),
+    (
+        "SipralAccountConfig",
+        crate::versioned::min_size::ACCOUNT_CONFIG,
+    ),
+    ("SipralCallConfig", crate::versioned::min_size::CALL_CONFIG),
+    (
+        "SipralCapabilities",
+        crate::versioned::min_size::CAPABILITIES,
+    ),
+    ("SipralCodecInfo", crate::versioned::min_size::CODEC_INFO),
+    ("SipralCounters", crate::versioned::min_size::COUNTERS),
+    ("SipralMediaInfo", crate::versioned::min_size::MEDIA_INFO),
+    (
+        "SipralMediaPacket",
+        crate::versioned::min_size::MEDIA_PACKET,
+    ),
+    ("SipralPollResult", crate::versioned::min_size::POLL_RESULT),
+    (
+        "SipralStackConfig",
+        crate::versioned::min_size::STACK_CONFIG,
+    ),
+    (
+        "SipralStackSettings",
+        crate::versioned::min_size::STACK_SETTINGS,
+    ),
+    (
+        "SipralStreamStats",
+        crate::versioned::min_size::STREAM_STATS,
+    ),
+    ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
+];
+
+/// The one versioned-shaped struct with no pinned length, and why.
+///
+/// `sipral_event_t` starts with a `size` like the rest, but the library is
+/// what fills it in: it is handed to a callback as a `const` pointer and the
+/// caller reads no further than the `size` says. Nothing ever declares one to
+/// us, so there is no declared size to refuse and no oldest published length
+/// that matters. The exception is named here rather than left to be noticed,
+/// because a fourteenth struct that quietly went unpinned would look exactly
+/// like this one.
+pub const FILLED_BY_US: &[&str] = &["SipralEvent"];
+
 /// Everything this ABI publishes, and the only list a person maintains.
 ///
 /// A line here is one item. Adding an item without adding its line leaves a

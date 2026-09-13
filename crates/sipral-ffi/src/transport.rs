@@ -208,7 +208,7 @@ record! {
 // undefined.
 unsafe impl Versioned for SipralTransmit {
     const NAME: &'static str = "sipral_transmit";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::TRANSMIT;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

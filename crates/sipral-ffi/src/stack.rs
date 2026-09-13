@@ -284,7 +284,7 @@ record! {
 // being undefined.
 unsafe impl Versioned for SipralStackConfig {
     const NAME: &'static str = "sipral_stack_config";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::STACK_CONFIG;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -327,7 +327,7 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralPollResult {
     const NAME: &'static str = "sipral_poll_result";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::POLL_RESULT;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -384,7 +384,7 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralStackSettings {
     const NAME: &'static str = "sipral_stack_settings";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::STACK_SETTINGS;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

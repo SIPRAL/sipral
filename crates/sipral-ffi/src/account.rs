@@ -95,7 +95,7 @@ record! {
 // zero, which is how a caller says it has nothing to give.
 unsafe impl Versioned for SipralAccountConfig {
     const NAME: &'static str = "sipral_account_config";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::ACCOUNT_CONFIG;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

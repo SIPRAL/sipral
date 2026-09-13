@@ -112,7 +112,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralCapabilities {
     const NAME: &'static str = "sipral_capabilities";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::CAPABILITIES;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

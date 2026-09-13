@@ -57,7 +57,7 @@ record! {
 // Safety: four integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralAbiVersion {
     const NAME: &'static str = "sipral_abi_version";
-    const MIN_SIZE: usize = size_of::<Self>();
+    const MIN_SIZE: usize = crate::versioned::min_size::ABI_VERSION;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
