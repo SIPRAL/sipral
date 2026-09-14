@@ -812,6 +812,13 @@ impl UserAgent {
         self.challenged_offers
             .retain(|_, parked| parked.call != call);
         self.calls.remove(&call);
+        // a digit still waiting behind the one in flight has nowhere left to
+        // go once the call is gone; without this a late 2xx to that last
+        // INFO would otherwise find the queue and try to send into a call
+        // `send_one_dtmf_info` can no longer find either -- harmless, but a
+        // queue nothing will ever empty again is a leak for the life of the
+        // process
+        self.dtmf_queue.remove(&call);
         // by_request is not touched: the BYE that ended the call outlives the
         // call, and its answer is still this layer's rather than the
         // application's. `on_transaction_over` clears the entry when the
@@ -972,7 +979,7 @@ impl UserAgent {
                 transaction,
                 status,
                 ..
-            } => self.on_request_answered(transaction, status, event),
+            } => self.on_request_answered(transaction, status, event, now),
             Event::RequestFailed {
                 transaction,
                 reason,
@@ -986,7 +993,7 @@ impl UserAgent {
                 // where the transaction was retired first, `on_transaction_over`
                 // has already said it
                 if let Some(status) = unanswered(reason) {
-                    self.dtmf_info_over(id, call, status);
+                    self.dtmf_info_over(id, call, status, now);
                 }
                 None
             }
@@ -1347,7 +1354,7 @@ impl UserAgent {
     /// the call in `Terminating` with nothing said to anybody, and a REFER
     /// left the seat taken so `refer` refused every later transfer on that
     /// call for the life of the call.
-    pub(crate) fn settle_request_challenges(&mut self) {
+    pub(crate) fn settle_request_challenges(&mut self, now: Instant) {
         let refused: Vec<(AnyTransactionId, RequestRefusal)> =
             settled(&mut self.challenged_requests, |refusal| {
                 refusal.waiting_for_stream
@@ -1392,7 +1399,7 @@ impl UserAgent {
             if refusal.method == Method::Info
                 && let Some(status) = refusal.status
             {
-                self.dtmf_info_over(id, refusal.call, status);
+                self.dtmf_info_over(id, refusal.call, status, now);
             }
             self.by_dtmf_info.remove(&id);
         }
@@ -1690,13 +1697,53 @@ impl UserAgent {
     /// once: whichever of its answer, a challenge nothing could answer, or a
     /// transaction that gave up without either gets here first takes the
     /// digit with it.
-    fn dtmf_info_over(&mut self, id: AnyTransactionId, call: CallHandle, status: StatusCode) {
-        if let Some(digit) = self.by_dtmf_info.remove(&id) {
-            self.events.push_back(UaEvent::DtmfSent {
-                call,
-                digit,
-                status,
-            });
+    ///
+    /// This is also where a string handed to [`UserAgent::send_dtmf_info`]
+    /// moves on: a 2xx here sends the digit waiting behind this one, and
+    /// anything else ends the sequence and drops it (8.3.11-bis).
+    fn dtmf_info_over(
+        &mut self,
+        id: AnyTransactionId,
+        call: CallHandle,
+        status: StatusCode,
+        now: Instant,
+    ) {
+        let Some(digit) = self.by_dtmf_info.remove(&id) else {
+            return;
+        };
+        self.events.push_back(UaEvent::DtmfSent {
+            call,
+            digit,
+            status,
+        });
+        self.continue_dtmf_queue(call, status, now);
+    }
+
+    /// After one digit of a string [`UserAgent::send_dtmf_info`] sent reaches
+    /// its final answer: the next one waiting goes out on a 2xx, and
+    /// anything else — a refusal, a timeout, a transport failure — discards
+    /// whatever is still queued rather than send it out of order
+    /// (8.3.11-bis).
+    fn continue_dtmf_queue(&mut self, call: CallHandle, status: StatusCode, now: Instant) {
+        if !status.is_success() {
+            self.dtmf_queue.remove(&call);
+            return;
+        }
+        let Some(queue) = self.dtmf_queue.get_mut(&call) else {
+            return;
+        };
+        // the entry stays while the next digit is in flight, and only an
+        // answer to the last one, with nothing waiting behind it, retires it:
+        // a key handed over before then has to wait its turn
+        let Some(next) = queue.waiting.pop_front() else {
+            self.dtmf_queue.remove(&call);
+            return;
+        };
+        // with nothing in flight, nothing would ever move the rest on, and a
+        // key handed over later would wait behind them for the life of the
+        // call
+        if self.send_one_dtmf_info(call, next, now).is_err() {
+            self.dtmf_queue.remove(&call);
         }
     }
 
@@ -1846,6 +1893,7 @@ impl UserAgent {
         transaction: TransactionId<NonInviteClient>,
         status: StatusCode,
         event: Event,
+        now: Instant,
     ) -> Option<Event> {
         let id = AnyTransactionId::NonInviteClient(transaction);
         let Some(&(call, method)) = self.by_request.get(&id) else {
@@ -1874,7 +1922,7 @@ impl UserAgent {
             // NOTIFY are all this layer's own business, but a 415 to a digit
             // is news the caller cannot get any other way
             if method == Method::Info {
-                self.dtmf_info_over(id, call, status);
+                self.dtmf_info_over(id, call, status, now);
             }
         }
         None
@@ -1898,7 +1946,7 @@ impl UserAgent {
             // the timer or the transport that ended it retires the
             // transaction before it reports why, so this is where an INFO
             // that got no answer is first seen to be over
-            (Some(call), Some(status)) => self.dtmf_info_over(transaction, call, status),
+            (Some(call), Some(status)) => self.dtmf_info_over(transaction, call, status, now),
             // a challenge still parked is `settle_request_challenges`' to
             // report, and a reliable transport's zero Timer K retires the
             // transaction before that settle has run

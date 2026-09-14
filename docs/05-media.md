@@ -327,8 +327,13 @@ A digit shorter than 40 ms is refused where it is asked for rather than sent
 and not heard, as is one longer than ten seconds, and a call whose
 negotiation settled on no telephone-event payload type says so instead of
 swallowing the key. Both bounds are read through `sipral_ua::dtmf`, the same
-validation a digit sent or received by INFO goes through, so no form takes a
-length another refuses.
+validation a digit sent by INFO goes through, so neither sending form takes a
+length the other refuses; a digit *received* by INFO shares only the ceiling
+(`docs/04-ua.md`), because reading how long a peer already held a key needs
+no floor of its own. The hundred-millisecond default a length of zero asks
+for is shared the same way sending's bounds are — `sipral_ua::dtmf`'s own
+`DEFAULT_DTMF_MS`, which `sipral::DEFAULT_DIGIT` reads rather than keeping a
+copy of the same number (8.3.11-bis).
 
 **The other way a digit crosses, and where the two meet.** 8.3.11 gives
 `sipral-ua` its own INFO-based DTMF (`docs/04-ua.md`), sent and received

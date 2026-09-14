@@ -40,10 +40,14 @@ pub const SHORTEST_DIGIT: Duration = Duration::from_millis(40);
 
 /// How long a digit lasts unless the application says otherwise.
 ///
-/// Comfortably above the floor, because the floor is what the equipment in
-/// that survey managed rather than what a voice response system at the far end
-/// of a lossy path will reliably pick out.
-pub const DEFAULT_DIGIT: Duration = Duration::from_millis(100);
+/// The one default RTP, both INFO bodies and the C ABI's own `duration_ms`
+/// all fall back to — `sipral_ua::dtmf::DEFAULT_DTMF_MS`, defined once so
+/// that no form of DTMF holds a key longer than another when the application
+/// does not name a length (8.3.11-bis). Comfortably above the floor, because
+/// the floor is what the equipment in that survey managed rather than what a
+/// voice response system at the far end of a lossy path will reliably pick
+/// out.
+pub const DEFAULT_DIGIT: Duration = Duration::from_millis(sipral_ua::dtmf::DEFAULT_DTMF_MS as u64);
 
 /// The longest digit any form sends: `sipral_ua::dtmf::MAX_DTMF_MS`, the
 /// ceiling a digit sent or received by INFO is held to, so that no form of

@@ -821,16 +821,28 @@ entry! {
     /// end takes.
     ///
     /// `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-    /// RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how long
-    /// each one lasts, or zero for the default.
+    /// RFC 4733 §3.2, in the order they were pressed, checked as a whole
+    /// before anything goes out: one character no keypad has, anywhere in the
+    /// string, sends nothing, not even the keys ahead of it. `duration_ms` is
+    /// how long each one lasts, or zero for the hundred milliseconds every
+    /// one of the three forms defaults to.
     ///
     /// `via` is a [`SipralDtmf`], and it is chosen per send rather than per
     /// call: which form a peer accepts is a fact about the peer, and an
     /// application that has just learned the answer for this one must not have
     /// to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
     /// the media, where they replace the audio for as long as they last and
-    /// queue behind each other; the two INFO forms put one request per digit in
-    /// the dialog.
+    /// queue behind each other. The two INFO forms put one request per digit
+    /// in the dialog, but not all at once: over UDP, overlapping non-INVITE
+    /// transactions can arrive in any order, so the next digit's INFO waits
+    /// for the one before it to reach a final answer. A 2xx sends it; a
+    /// refusal, a timeout or a transport failure ends the sequence there
+    /// instead, and the digits still waiting are discarded rather than sent
+    /// out of order — the digit that ended it is what
+    /// `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
+    /// ones it took down with it. Digits handed over while an INFO of this
+    /// call is still unanswered queue behind the ones already waiting, as the
+    /// media's do, rather than go out at once.
     ///
     /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
     /// negotiation settled on no telephone event payload type: the key is a
@@ -854,7 +866,7 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let pressed = unsafe { required_text(digits, digits_len, "digits") }?;
-            let keys = keypad(pressed)?;
+            keypad(pressed)?;
             let held = tone_length(duration_ms)?;
             if form == SipralDtmf::Rtp {
                 let length = Duration::from_millis(u64::from(held));
@@ -864,13 +876,10 @@ entry! {
                 SipralDtmf::InfoPlain => sipral_ua::DtmfInfoForm::Plain,
                 _ => sipral_ua::DtmfInfoForm::Relay,
             };
-            for key in keys {
-                state
-                    .agent
-                    .send_dtmf_info(id, char::from(key), info_form, held, now)
-                    .map_err(|error| ua_failed(&error))?;
-            }
-            Ok(())
+            state
+                .agent
+                .send_dtmf_info(id, pressed, info_form, held, now)
+                .map_err(|error| ua_failed(&error))
         })
     }
 }
@@ -934,10 +943,11 @@ fn keypad(pressed: &str) -> Result<Vec<u8>, Fail> {
     Ok(keys)
 }
 
-/// Delegates to [`sipral_ua::dtmf::duration_ms`], the same bound
-/// [`keypad`]'s sixteen characters share with every other way a digit
-/// crosses this stack's boundary. Run before the form is looked at, so all
-/// three refuse a length with this one status and these same words.
+/// Delegates to [`sipral_ua::dtmf::duration_ms`], the bound RFC 4733 sending
+/// and both INFO bodies share; a length received by INFO is held only to its
+/// ceiling, because it reports a tone the peer already held. Run before the
+/// form is looked at, so all three refuse a length with this one status and
+/// these same words.
 fn tone_length(duration_ms: u32) -> Result<u32, Fail> {
     sipral_ua::dtmf::duration_ms(duration_ms)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))
@@ -1653,7 +1663,7 @@ a=recvonly\r\n";
         invite: &[u8],
         branch: &str,
         cseq: u32,
-        content_type: &str,
+        content_type: Option<&str>,
         body: &[u8],
     ) -> Vec<u8> {
         let mut out = b"INFO sip:alice@203.0.113.5 SIP/2.0\r\n".to_vec();
@@ -1677,7 +1687,9 @@ a=recvonly\r\n";
         }
         out.extend_from_slice(format!("CSeq: {cseq} INFO\r\n").as_bytes());
         out.extend_from_slice(b"Contact: <sip:bob@203.0.113.5:5060>\r\n");
-        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+        if let Some(content_type) = content_type {
+            out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+        }
         out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
         out.extend_from_slice(body);
         out
@@ -2574,12 +2586,16 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// 8.3.11-bis(b): over UDP, overlapping non-INVITE transactions can
+    /// arrive in any order, so a string of digits goes out one INFO at a
+    /// time — the second only after the first's final answer, and so on —
+    /// rather than all at once.
     #[test]
-    fn dtmf_goes_out_as_one_info_per_key() {
+    fn a_string_of_digits_goes_out_one_info_at_a_time() {
         let mut observed = Observed::default();
         let (handle, call) = connected(&mut observed);
         let _ = sent(handle);
-        let (digits, digits_len) = as_text("1#d");
+        let (digits, digits_len) = as_text("1#D");
         assert_eq!(
             unsafe {
                 sipral_call_send_dtmf(
@@ -2596,18 +2612,89 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
             "{}",
             last_error_text()
         );
-        let written = sent(handle);
-        assert_eq!(written.len(), 3, "one INFO per key");
-        for (message, expected) in written.iter().zip(["Signal=1", "Signal=#", "Signal=D"]) {
-            assert!(start_line(message).starts_with("INFO"));
+        for expected in ["Signal=1", "Signal=#", "Signal=D"] {
+            let written = one(handle);
+            assert!(start_line(&written).starts_with("INFO"));
             assert_eq!(
-                field(message, HeaderName::ContentType),
+                field(&written, HeaderName::ContentType),
                 b"application/dtmf-relay"
             );
-            let body = String::from_utf8_lossy(message).into_owned();
-            assert!(body.contains(expected), "{body}");
-            assert!(body.contains("Duration=160"), "{body}");
+            let text = String::from_utf8_lossy(&written).into_owned();
+            assert!(text.contains(expected), "{text}");
+            // 8.3.11-bis(d): the same hundred milliseconds every form of
+            // DTMF defaults to
+            assert!(text.contains("Duration=100"), "{text}");
+            deliver(handle, &answered_with(&written, 200, "OK"), 2_100);
         }
+        assert!(
+            sent(handle).is_empty(),
+            "nothing was left to send after the third digit"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A non-2xx anywhere in the middle of the string ends the sequence
+    /// there: the digits still waiting are discarded rather than sent out of
+    /// order.
+    #[test]
+    fn a_refusal_mid_string_means_the_rest_is_never_sent() {
+        let mut observed = Observed::default();
+        let (handle, call) = connected(&mut observed);
+        let _ = sent(handle);
+        let (digits, digits_len) = as_text("123");
+        assert_eq!(
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoRelay as u32,
+                    0,
+                    2_000,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let first = one(handle);
+        deliver(handle, &answered_with(&first, 200, "OK"), 2_100);
+        let second = one(handle);
+        deliver(handle, &answered_with(&second, 486, "Busy Here"), 2_100);
+        assert!(
+            sent(handle).is_empty(),
+            "a 486 on the second digit means the third is never sent"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The whole string is checked before anything goes out: one bad
+    /// character anywhere sends nothing, not even the keys ahead of it.
+    #[test]
+    fn an_invalid_character_anywhere_in_the_string_sends_nothing() {
+        let mut observed = Observed::default();
+        let (handle, call) = connected(&mut observed);
+        let _ = sent(handle);
+        let (digits, digits_len) = as_text("12E4");
+        assert_eq!(
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoRelay as u32,
+                    0,
+                    2_000,
+                )
+            },
+            SipralStatus::InvalidArgument
+        );
+        assert!(
+            sent(handle).is_empty(),
+            "a bad character anywhere in the string refuses the whole of it"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2829,7 +2916,7 @@ Content-Length: 0\r\n\r\n";
                 &invite,
                 "relay",
                 51,
-                "application/dtmf-relay",
+                Some("application/dtmf-relay"),
                 b"Signal=7\r\nDuration=200\r\n",
             ),
             2_000,
@@ -2849,7 +2936,7 @@ Content-Length: 0\r\n\r\n";
 
         deliver(
             handle,
-            &incoming_info(&invite, "plain", 52, "application/dtmf", b"9"),
+            &incoming_info(&invite, "plain", 52, Some("application/dtmf"), b"9"),
             2_100,
         );
         poll(handle, 2_100);
@@ -2864,6 +2951,99 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(heard.event_code, 9);
         assert_eq!(heard.held_ms, 0);
         assert_eq!(heard.source, SipralDigitSource::Info as u32);
+
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.3.11-bis(c): a peer that held a key for no time at all said so, and
+    /// this used to be reported as the hundred-millisecond default instead.
+    #[test]
+    fn a_received_duration_of_zero_is_reported_as_zero() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (status, call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle); // the ACK
+
+        deliver(
+            handle,
+            &incoming_info(
+                &invite,
+                "zero",
+                51,
+                Some("application/dtmf-relay"),
+                b"Signal=6\r\nDuration=0\r\n",
+            ),
+            2_000,
+        );
+        poll(handle, 2_000);
+        one(handle);
+        let heard = observed
+            .of(SipralEventKind::DigitReceived)
+            .into_iter()
+            .find(|heard| heard.call == call)
+            .expect("the relay INFO was reported");
+        assert_eq!(heard.digit, u32::from('6'));
+        assert_eq!(heard.held_ms, 0);
+
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.3.11-bis(a): only `application/dtmf-relay` and `application/dtmf`
+    /// are this stack's own; an INFO carrying anything else — RFC 5168's
+    /// media control here, and one with no body at all — reaches the
+    /// application unclaimed, and the stack answers neither.
+    #[test]
+    fn an_info_that_is_not_dtmf_reaches_the_application_unanswered() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (status, _call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle); // the ACK
+
+        deliver(
+            handle,
+            &incoming_info(
+                &invite,
+                "mediactl",
+                51,
+                Some("application/media_control+xml"),
+                b"<media_control><vc_primitive>...</vc_primitive></media_control>",
+            ),
+            2_000,
+        );
+        let result = poll(handle, 2_000);
+        assert!(
+            sent(handle).is_empty(),
+            "a body this stack does not read is not this stack's to answer"
+        );
+        assert!(
+            result.events_unclaimed >= 1,
+            "expected an unclaimed event, got {}",
+            result.events_unclaimed
+        );
+
+        deliver(
+            handle,
+            &incoming_info(&invite, "nobody", 52, None, b""),
+            2_100,
+        );
+        let result = poll(handle, 2_100);
+        assert!(
+            sent(handle).is_empty(),
+            "an INFO with no body this stack reads is not this stack's either"
+        );
+        assert!(
+            result.events_unclaimed >= 1,
+            "expected an unclaimed event, got {}",
+            result.events_unclaimed
+        );
 
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

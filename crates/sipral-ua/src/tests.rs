@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use sipral_core::diag::Reason;
 use sipral_core::dialog::CallId;
-use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
+use sipral_core::endpoint::Event;
+use sipral_core::msg::{HeaderName, Method, ParseMode, ParseScratch, RawMessage, parse};
 use sipral_core::sdp;
 
 use crate::account::{Account, AccountId};
@@ -10114,7 +10115,7 @@ fn a_refusal_of_the_info_reaches_the_application_named_with_the_digit_and_the_st
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 0, t0)
+        .send_dtmf_info(call, "5", crate::DtmfInfoForm::Relay, 0, t0)
         .expect("the INFO goes");
     let info = sent(&mut agent);
     assert!(String::from_utf8_lossy(&info).starts_with("INFO "));
@@ -10150,7 +10151,7 @@ fn a_success_of_the_info_is_also_reported_as_dtmf_sent() {
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '#', crate::DtmfInfoForm::Plain, 0, t0)
+        .send_dtmf_info(call, "#", crate::DtmfInfoForm::Plain, 0, t0)
         .expect("the INFO goes");
     let info = sent(&mut agent);
     assert_eq!(header(&info, HeaderName::ContentType), b"application/dtmf");
@@ -10225,8 +10226,52 @@ fn an_incoming_relay_and_an_incoming_plain_info_are_each_reported_as_a_received_
     );
 }
 
+/// 8.3.11-bis(c): a peer that held a key for no time at all said so, and
+/// this end used to report the hundred-millisecond default in its place —
+/// the same mistake `duration_ms` makes on purpose for a length nobody
+/// asked to send, applied to a length the peer did name.
 #[test]
-fn a_content_type_neither_form_uses_is_415_and_reports_nothing() {
+fn a_received_duration_of_zero_is_reported_as_zero_not_the_default() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &incoming_info(
+            &ack,
+            "zeroin",
+            51,
+            Some("application/dtmf-relay"),
+            b"Signal=6\r\nDuration=0\r\n",
+        ),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&answer).starts_with("SIP/2.0 200 OK"));
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfReceived {
+                call: reported,
+                digit: '6',
+                held_ms: Some(0),
+            } if reported == call
+        )),
+        "{seen:?}"
+    );
+}
+
+/// 8.3.11-bis(a): 8.3.11 made every INFO in a call's dialog this stack's own,
+/// so one carrying a body it does not read — RFC 5168's media control here —
+/// stopped reaching the application and was answered 415 instead. Only
+/// `application/dtmf-relay` and `application/dtmf` are this stack's; every
+/// other body is left for the application, unanswered, the way it reached it
+/// before 8.3.11 existed.
+#[test]
+fn a_content_type_neither_form_uses_reaches_the_application_unanswered() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     let id = agent.add_account(account());
@@ -10237,19 +10282,21 @@ fn a_content_type_neither_form_uses_is_415_and_reports_nothing() {
         &incoming_info(&ack, "wrongtype", 51, Some("application/sdp"), b"v=0\r\n"),
         t0,
     );
-    let answer = sent(&mut agent);
     assert!(
-        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 415 "),
-        "{}",
-        String::from_utf8_lossy(&answer)
+        transmits(&mut agent).is_empty(),
+        "a body this stack does not read is not this stack's to answer"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            UaEvent::Unclaimed(Event::IncomingInDialog { request, .. })
+                if request.as_raw().method() == Some(Method::Info)
+        )),
+        "the INFO should reach the application unclaimed: {seen:?}"
     );
     assert!(
-        !header(&answer, HeaderName::Accept).is_empty(),
-        "a 415 names what it does take (§21.4.13)"
-    );
-    assert!(
-        events(&mut agent)
-            .iter()
+        seen.iter()
             .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
         "nothing is reported for a body this stack never read"
     );
@@ -10326,11 +10373,11 @@ fn an_invalid_digit_or_duration_is_refused_before_anything_is_sent() {
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     assert_eq!(
-        agent.send_dtmf_info(call, 'E', crate::DtmfInfoForm::Relay, 0, t0),
+        agent.send_dtmf_info(call, "E", crate::DtmfInfoForm::Relay, 0, t0),
         Err(UaError::InvalidDtmf(crate::DtmfError::UnknownDigit))
     );
     assert_eq!(
-        agent.send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 10_001, t0),
+        agent.send_dtmf_info(call, "5", crate::DtmfInfoForm::Relay, 10_001, t0),
         Err(UaError::InvalidDtmf(crate::DtmfError::ToneTooLong(10_001)))
     );
     assert!(
@@ -10350,7 +10397,7 @@ fn a_401_challenge_to_the_info_still_reports_dtmf_sent_on_the_retry() {
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '3', crate::DtmfInfoForm::Relay, 0, t0)
+        .send_dtmf_info(call, "3", crate::DtmfInfoForm::Relay, 0, t0)
         .expect("the INFO goes");
     let first = only(&transmits(&mut agent), "INFO ");
     deliver(&mut agent, &unauthorized(&first), t0);
@@ -10384,7 +10431,7 @@ fn an_info_nobody_answers_reaches_the_application_as_a_408() {
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 0, t0)
+        .send_dtmf_info(call, "5", crate::DtmfInfoForm::Relay, 0, t0)
         .expect("the INFO goes");
     only(&transmits(&mut agent), "INFO ");
     events(&mut agent);
@@ -10417,7 +10464,7 @@ fn an_info_challenged_on_an_account_with_no_password_reaches_the_application_as_
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '9', crate::DtmfInfoForm::Plain, 0, t0)
+        .send_dtmf_info(call, "9", crate::DtmfInfoForm::Plain, 0, t0)
         .expect("the INFO goes");
     let info = only(&transmits(&mut agent), "INFO ");
     deliver(&mut agent, &unauthorized(&info), t0);
@@ -10449,7 +10496,7 @@ fn an_info_whose_transport_failed_reaches_the_application_as_a_503() {
     let (call, _ack) = call_up(&mut agent, id, t0);
 
     agent
-        .send_dtmf_info(call, '1', crate::DtmfInfoForm::Relay, 0, t0)
+        .send_dtmf_info(call, "1", crate::DtmfInfoForm::Relay, 0, t0)
         .expect("the INFO goes");
     only(&transmits(&mut agent), "INFO ");
     events(&mut agent);
@@ -10475,6 +10522,255 @@ fn an_info_whose_transport_failed_reaches_the_application_as_a_503() {
             } if reported == call && status.get() == 503
         )),
         "{seen:?}"
+    );
+}
+
+// -- a string of digits, one INFO at a time (8.3.11-bis(b)) ------------------
+
+/// The whole point: over UDP, overlapping non-INVITE transactions can arrive
+/// in any order, so the second and third digit must not go out until the one
+/// ahead of them has a final answer.
+#[test]
+fn a_string_of_digits_goes_out_one_info_at_a_time() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "1#D", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the string is accepted");
+    // only the first digit went; the transmit queue would carry a second one
+    // if the whole string had been sent at once
+    let first = sent(&mut agent);
+    assert!(body_of(&first).contains("Signal=1"), "{}", body_of(&first));
+    assert!(
+        events(&mut agent).is_empty(),
+        "nothing has answered the first digit yet"
+    );
+
+    deliver(&mut agent, &reply(&first, 200, "OK", ""), t0);
+    let second = sent(&mut agent);
+    assert!(
+        body_of(&second).contains("Signal=#"),
+        "{}",
+        body_of(&second)
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '1', status, .. } if status.get() == 200
+        )),
+        "{seen:?}"
+    );
+
+    deliver(&mut agent, &reply(&second, 200, "OK", ""), t0);
+    let third = sent(&mut agent);
+    assert!(body_of(&third).contains("Signal=D"), "{}", body_of(&third));
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '#', status, .. } if status.get() == 200
+        )),
+        "{seen:?}"
+    );
+
+    deliver(&mut agent, &reply(&third, 200, "OK", ""), t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "there was nothing left to send after the third digit"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: 'D', status, .. } if status.get() == 200
+        )),
+        "{seen:?}"
+    );
+}
+
+/// A non-2xx anywhere in the middle ends the sequence there: the digits still
+/// waiting are discarded rather than sent out of order.
+#[test]
+fn a_refusal_mid_string_discards_the_digits_still_waiting() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "123", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the string is accepted");
+    let first = sent(&mut agent);
+    events(&mut agent);
+
+    deliver(&mut agent, &reply(&first, 200, "OK", ""), t0);
+    let second = sent(&mut agent);
+    events(&mut agent);
+
+    deliver(&mut agent, &reply(&second, 486, "Busy Here", ""), t0);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '2', status, .. } if status.get() == 486
+        )),
+        "the digit that ended the sequence is what names it: {seen:?}"
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a 486 on the second digit means the third is never sent"
+    );
+}
+
+/// The whole string is validated before anything goes out: one bad character
+/// anywhere refuses the call and sends nothing, not even the keys ahead of
+/// it.
+#[test]
+fn an_invalid_character_anywhere_in_the_string_sends_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    assert_eq!(
+        agent.send_dtmf_info(call, "12E4", crate::DtmfInfoForm::Relay, 0, t0),
+        Err(UaError::InvalidDtmf(crate::DtmfError::UnknownDigit))
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a bad character anywhere in the string refuses the whole of it"
+    );
+}
+
+/// A string handed over while a digit of an earlier one still waits for its
+/// answer goes behind it. A keypad that hands over one key per press is the
+/// ordinary case, and an INFO sent the moment its key was pressed would
+/// overlap the one ahead of it and could arrive first. Each key keeps the
+/// body it was asked for, and once the last answer is in, nothing is left
+/// for the next key to wait behind.
+#[test]
+fn a_string_handed_over_while_a_digit_is_in_flight_waits_behind_it() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "12", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the first string is accepted");
+    let first = sent(&mut agent);
+    assert!(body_of(&first).contains("Signal=1"), "{}", body_of(&first));
+
+    agent
+        .send_dtmf_info(call, "3", crate::DtmfInfoForm::Plain, 0, t0)
+        .expect("the second string is accepted");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "the second string went out while the first digit was still unanswered"
+    );
+
+    deliver(&mut agent, &reply(&first, 200, "OK", ""), t0);
+    let second = sent(&mut agent);
+    assert!(
+        body_of(&second).contains("Signal=2"),
+        "{}",
+        body_of(&second)
+    );
+
+    deliver(&mut agent, &reply(&second, 200, "OK", ""), t0);
+    let third = sent(&mut agent);
+    assert_eq!(header(&third, HeaderName::ContentType), b"application/dtmf");
+    assert_eq!(body_of(&third), "3");
+
+    deliver(&mut agent, &reply(&third, 200, "OK", ""), t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "there was nothing left to send after the third digit"
+    );
+    events(&mut agent);
+
+    agent
+        .send_dtmf_info(call, "4", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("a key pressed later is accepted");
+    let fourth = sent(&mut agent);
+    assert!(
+        body_of(&fourth).contains("Signal=4"),
+        "{}",
+        body_of(&fourth)
+    );
+}
+
+/// A sequence a refusal or a timeout ended leaves nothing behind for a later
+/// key to wait for: the next one goes out at once.
+#[test]
+fn a_key_pressed_after_a_sequence_ended_goes_out_at_once() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "56", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the string is accepted");
+    let refused = sent(&mut agent);
+    deliver(&mut agent, &reply(&refused, 486, "Busy Here", ""), t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "the digit behind a refusal is discarded"
+    );
+    events(&mut agent);
+
+    agent
+        .send_dtmf_info(call, "7", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("a key after a refusal is accepted");
+    let unanswered = sent(&mut agent);
+    assert!(
+        body_of(&unanswered).contains("Signal=7"),
+        "{}",
+        body_of(&unanswered)
+    );
+
+    // past Timer F, 64·T1 (§17.1.2.2), with nothing back
+    let later = t0 + Duration::from_secs(33);
+    agent.handle_timeout(later);
+    transmits(&mut agent);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '7', status, .. } if status.get() == 408
+        )),
+        "{seen:?}"
+    );
+
+    agent
+        .send_dtmf_info(call, "8", crate::DtmfInfoForm::Relay, 0, later)
+        .expect("a key after a timeout is accepted");
+    let after = sent(&mut agent);
+    assert!(body_of(&after).contains("Signal=8"), "{}", body_of(&after));
+}
+
+/// 8.3.11-bis(d): one default, a hundred milliseconds, for a digit sent by
+/// INFO without a length of its own.
+#[test]
+fn an_info_sent_without_a_duration_carries_the_hundred_millisecond_default() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "5", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the INFO goes");
+    let info = sent(&mut agent);
+    assert!(
+        body_of(&info).contains("Duration=100"),
+        "{}",
+        body_of(&info)
     );
 }
 
@@ -10509,26 +10805,34 @@ fn an_oversized_relay_body_is_400_even_when_it_names_a_digit() {
     );
 }
 
+/// 8.3.11-bis(a): an INFO with no `Content-Type` names no body this stack
+/// reads either, so it is not this stack's to answer at all — RFC 6086
+/// §4.2.2's 200 for one that is "syntactically correct and well structured"
+/// is the application's to give if it chooses to, not this layer's to give
+/// on its behalf.
 #[test]
-fn an_info_with_no_body_at_all_is_200_and_reports_nothing() {
-    // RFC 3261 §21.4.13's 415 refuses "the message body of the request", and
-    // an INFO with none has no body to refuse; RFC 6086 §4.2.2 answers one
-    // that is "syntactically correct and well structured" 200
+fn an_info_with_no_body_at_all_reaches_the_application_unanswered() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     let id = agent.add_account(account());
     let (_call, ack) = call_up(&mut agent, id, t0);
 
     deliver(&mut agent, &incoming_info(&ack, "empty", 51, None, b""), t0);
-    let answer = sent(&mut agent);
     assert!(
-        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 200 "),
-        "{}",
-        String::from_utf8_lossy(&answer)
+        transmits(&mut agent).is_empty(),
+        "an INFO with no body this stack reads is not this stack's to answer"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            UaEvent::Unclaimed(Event::IncomingInDialog { request, .. })
+                if request.as_raw().method() == Some(Method::Info)
+        )),
+        "the INFO should reach the application unclaimed: {seen:?}"
     );
     assert!(
-        events(&mut agent)
-            .iter()
+        seen.iter()
             .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
         "an INFO with no body names no digit"
     );

@@ -99,6 +99,12 @@ pub struct UserAgent {
     /// every other method that map holds — BYE, CANCEL, PRACK, REFER, NOTIFY —
     /// has nothing to put here.
     pub(crate) by_dtmf_info: HashMap<AnyTransactionId, char>,
+    /// The digits still waiting behind the one [`UserAgent::send_dtmf_info`]
+    /// has in flight: a 2xx to the one just answered sends the next, and
+    /// anything else drops the rest (8.3.11-bis). One entry per call, present
+    /// while any of its digits is in flight and gone once the last has its
+    /// final answer.
+    pub(crate) dtmf_queue: HashMap<CallHandle, crate::dtmf::DtmfQueue>,
     /// The re-INVITEs and UPDATEs offering a session change.
     pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
     /// Refusals of an INVITE that carried a challenge, held until the drain
@@ -183,6 +189,7 @@ impl UserAgent {
             by_request: HashMap::new(),
             account_of: HashMap::new(),
             by_dtmf_info: HashMap::new(),
+            dtmf_queue: HashMap::new(),
             by_offer: HashMap::new(),
             challenged: HashMap::new(),
             challenged_requests: HashMap::new(),
@@ -548,7 +555,7 @@ impl UserAgent {
         }
         self.settle_challenges();
         self.settle_call_challenges(now);
-        self.settle_request_challenges();
+        self.settle_request_challenges(now);
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
         self.settle_announcements(now);

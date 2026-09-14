@@ -1320,9 +1320,11 @@ impl MediaSession {
 
 /// Whether a digit this long is one any form of DTMF sends.
 ///
-/// Read through `sipral_ua::dtmf::duration_ms`, the one bound INFO sending
-/// and INFO receiving are held to as well, so that RFC 4733 refuses exactly
-/// the lengths they do (8.3.11). A zero `Duration` is a length here and too
+/// Read through `sipral_ua::dtmf::duration_ms`, the one bound INFO sending is
+/// held to as well, so that RFC 4733 refuses exactly the lengths it does
+/// (8.3.11); a length received by INFO shares only the ceiling, because it
+/// reports a tone the peer already held (8.3.11-bis). A zero `Duration` is a
+/// length here and too
 /// short, where zero milliseconds there asks for the default, so it is read
 /// as the shortest length that is not zero.
 fn digit_length(length: Duration) -> Result<(), MediaError> {

@@ -1518,6 +1518,54 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     );
 }
 
+/// 8.3.11-bis(d): an RFC 4733 digit sent at the default lasts the same
+/// hundred milliseconds an INFO sent without a length carries. The far end
+/// reads the length off the closing packet's duration, 800 ticks at eight
+/// kilohertz.
+#[test]
+fn a_digit_dialled_at_the_default_length_lasts_a_hundred_milliseconds() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let frame = {
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        session
+            .dial("5", DEFAULT_DIGIT)
+            .expect("the digit is queued");
+        session.frame_samples()
+    };
+
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    for _ in 0..20 {
+        tone(&mut samples, 8_000, &mut phase);
+        pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    pair.callee.drain(pair.now, false);
+
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, held, .. } => Some((*digit, *held)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        heard,
+        vec![(Some('5'), Duration::from_millis(100))],
+        "the default digit as the far end heard it"
+    );
+}
+
 /// 8.3.11: an INFO's digit is the same [`Event::Media`] an RFC 4733 one is,
 /// told apart only by [`crate::DigitSource`] — not a signalling event of its
 /// own on the way through the facade.
@@ -1529,7 +1577,7 @@ fn a_digit_sent_by_info_is_heard_as_the_same_event_rfc_4733_uses() {
 
     pair.caller
         .agent
-        .send_dtmf_info(call, '7', crate::DtmfInfoForm::Relay, 0, pair.now)
+        .send_dtmf_info(call, "7", crate::DtmfInfoForm::Relay, 0, pair.now)
         .expect("the INFO goes");
     pair.settle();
 
@@ -1563,12 +1611,15 @@ fn a_digit_sent_by_info_is_heard_as_the_same_event_rfc_4733_uses() {
     );
 }
 
-/// 8.3.11(c): RFC 4733 sending, INFO sending and INFO receiving refuse the
-/// same tone lengths. The media used to refuse anything under 40 ms and queue
-/// a digit a minute long, while an INFO took one of 1 ms and refused anything
-/// over ten seconds. Zero is left out on purpose: where a length is a number
-/// of milliseconds it asks for the default, and where it is a `Duration` it is
-/// simply too short.
+/// 8.3.11(c) held RFC 4733 sending, INFO sending and INFO receiving to the
+/// same tone lengths. 8.3.11-bis(c) revises the receiving half of that: a
+/// `Duration=` a peer sent reports a tone that peer already generated, not
+/// one this end is about to, so only the ceiling every sending form also
+/// refuses still binds it — the floor below, 40 ms, is where sending and
+/// receiving now part ways. Zero is still left out of this loop, for the
+/// same reason it always was (where a length is a number of milliseconds it
+/// asks for the default, and where it is a `Duration` it is simply too
+/// short); `sipral_ua::dtmf`'s own tests cover a received `Duration=0`.
 #[test]
 fn every_form_a_digit_takes_refuses_the_same_tone_lengths() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
@@ -1591,15 +1642,16 @@ fn every_form_a_digit_takes_refuses_the_same_tone_lengths() {
         let by_info = pair
             .caller
             .agent
-            .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, held_ms, pair.now)
+            .send_dtmf_info(call, "5", crate::DtmfInfoForm::Relay, held_ms, pair.now)
             .is_ok();
         let body = format!("Signal=5\r\nDuration={held_ms}\r\n");
         let received =
             sipral_ua::dtmf::parse_info(Some(b"application/dtmf-relay"), body.as_bytes()).is_ok();
-        let taken = (40..=10_000).contains(&held_ms);
+        let sent_taken = (40..=10_000).contains(&held_ms);
+        let received_taken = held_ms <= 10_000;
         assert_eq!(
             (in_media, by_info, received),
-            (taken, taken, taken),
+            (sent_taken, sent_taken, received_taken),
             "{held_ms} ms, as (RFC 4733 sending, INFO sending, INFO receiving)"
         );
     }

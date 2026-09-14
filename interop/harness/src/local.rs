@@ -235,7 +235,7 @@ fn a_digit_sent_by_info_reaches_the_far_end_over_real_loopback_sockets() {
 
     dialling
         .agent
-        .send_dtmf_info(call, '7', DtmfInfoForm::Relay, 0, Instant::now())
+        .send_dtmf_info(call, "7", DtmfInfoForm::Relay, 0, Instant::now())
         .expect("the INFO goes");
 
     let mut heard = None;

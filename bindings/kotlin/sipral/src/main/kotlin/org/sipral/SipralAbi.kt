@@ -2938,16 +2938,28 @@ object Sipral {
      * end takes.
      *
      * `digits` are `0` to `9`, `*`, `#` and `A` to `D`, the sixteen events of
-     * RFC 4733 §3.2, in the order they were pressed. `duration_ms` is how long
-     * each one lasts, or zero for the default.
+     * RFC 4733 §3.2, in the order they were pressed, checked as a whole
+     * before anything goes out: one character no keypad has, anywhere in the
+     * string, sends nothing, not even the keys ahead of it. `duration_ms` is
+     * how long each one lasts, or zero for the hundred milliseconds every
+     * one of the three forms defaults to.
      *
      * `via` is a SipralDtmf, and it is chosen per send rather than per
      * call: which form a peer accepts is a fact about the peer, and an
      * application that has just learned the answer for this one must not have
      * to tear the call down to act on it. `SIPRAL_DTMF_RTP` puts the digits in
      * the media, where they replace the audio for as long as they last and
-     * queue behind each other; the two INFO forms put one request per digit in
-     * the dialog.
+     * queue behind each other. The two INFO forms put one request per digit
+     * in the dialog, but not all at once: over UDP, overlapping non-INVITE
+     * transactions can arrive in any order, so the next digit's INFO waits
+     * for the one before it to reach a final answer. A 2xx sends it; a
+     * refusal, a timeout or a transport failure ends the sequence there
+     * instead, and the digits still waiting are discarded rather than sent
+     * out of order — the digit that ended it is what
+     * `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
+     * ones it took down with it. Digits handed over while an INFO of this
+     * call is still unanswered queue behind the ones already waiting, as the
+     * media's do, rather than go out at once.
      *
      * `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
      * negotiation settled on no telephone event payload type: the key is a

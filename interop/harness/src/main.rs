@@ -945,7 +945,7 @@ impl Script {
         if let Some(call) = self.call {
             let asked = endpoint.agent.send_dtmf_info(
                 call,
-                TEST_DIGIT.as_char(),
+                &TEST_DIGIT.to_string(),
                 DtmfInfoForm::Relay,
                 0,
                 now,
