@@ -565,6 +565,27 @@ has to be that same one; after a `sipral_call_ring` that sent none it is
 not — see `docs/05-media.md`, "Ringing with media", for the reasoning in
 full.
 
+**`sipral_call_accept_transfer` takes a `sipral_call_config_t` now** (task
+8.4.4), and places the call a REFER asked for the way `sipral_call_place`
+places one: `media_address` for an offer this stack writes and runs the
+audio of, `sdp` for a description the application wrote and runs its own,
+`srtp` overriding the stack's policy for the former the same way it does on
+`sipral_call_place`, and `headers`, `destination` and `keep_all_forks` for
+the INVITE this places — read through the same versioned reader and
+`MIN_SIZE`. `Replaces` and `Referred-By` among `headers` are
+`SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still there
+to take: that INVITE takes both from the REFER. Giving neither `sdp` nor `media_address` is
+`SIPRAL_STATUS_INVALID_ARGUMENT`, the same refusal `sipral_call_place` gives
+for the same reason: the answer to an offerless INVITE belongs in the ACK,
+and this ABI has no way to hand one back from there. `target` is the one
+member this call does not read: the far end already said where the transfer
+goes, and a target of the caller's own would be a second one contradicting
+it, so a non-empty `target` is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it —
+nothing sent. The signature changed outright rather than growing a
+`sipral_call_config_t *` beside the old parameters, because nothing outside
+this tree calls it yet and a fifth parameter nobody could set would be a
+promise this ABI cannot keep before the offer this task exists to carry.
+
 **Four calls carry the packets**, each on a call's media handle, and none of
 them opens a socket or touches a device: `sipral_media_receive` for a datagram
 that arrived, `sipral_media_playback` for the frame due for the earpiece,

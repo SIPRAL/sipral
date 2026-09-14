@@ -10,6 +10,37 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Changed
+
+- **A transfer taken from C places its call the way `sipral_call_place`
+  does** (task 8.4.4). `sipral_call_accept_transfer` used to place an
+  offerless INVITE with no SRTP policy and no application headers on it,
+  because it had no configuration to read one from; it now takes a
+  `sipral_call_config_t`, the same struct and the same versioned reader
+  `sipral_call_place` uses, meaning the same thing on every member but
+  `target` — the REFER already named where this goes, so a `target` of the
+  caller's own is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it, and nothing is
+  placed. `media_address` writes the offer from this stack's codecs and runs
+  the audio, exactly as it does on a placed call, and `MediaEngine` gained
+  `accept_transfer`/`accept_transfer_with` to do it: the new call is managed
+  the same way one `place` placed, so its session opens once the 2xx is
+  acknowledged and `MEDIA_STARTED` follows. `sdp` carries the application's
+  own description and this stack runs no audio for it, as before. Giving
+  neither is now refused rather than placing an offerless INVITE — the
+  same rule `sipral_call_place` already keeps, and for the same reason: the
+  answer would have to travel in the ACK, which this ABI has no way to hand
+  back. In `sipral-ua`, `UserAgent::accept_transfer` takes an `OutgoingExtras`
+  bundling a destination, a fork policy and header fields — the pieces
+  `OutgoingCall` carries beside the target this call has no legitimate value
+  for, since the REFER supplies it instead. The REFER supplies `Replaces` and
+  `Referred-By` as well, so either among those header fields is refused
+  (`SIPRAL_STATUS_INVALID_ARGUMENT` from C) — RFC 3891 §3 has an INVITE with
+  more than one `Replaces` refused with a 400 — and every field is checked
+  before the REFER is touched, so a refusal leaves the transfer still there to
+  take. The signature is not additive:
+  nothing outside this tree calls it yet, so it changed outright rather than
+  carrying a parameter nobody could ever set.
+
 ### Added
 
 - **The SRTP policy is now chosen from C** (task 8.4.6). An application

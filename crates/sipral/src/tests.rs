@@ -33,7 +33,7 @@ use crate::record::tests::Buffer;
 use crate::session::{Arrival, MediaConfig, MediaSession, Playback, StreamIdentity};
 use crate::{
     Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, MediaEngine, OutgoingCall,
-    TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
+    OutgoingExtras, TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
 };
 
 const UDP: TransportId = TransportId(1);
@@ -2944,6 +2944,62 @@ fn a_call_that_ends_leaves_an_rtcp_goodbye_behind_it() {
         carries_bye(&payload),
         "the datagram carries no BYE: {:?}",
         payload.get(..8)
+    );
+}
+
+/// 8.4.4: the call a transfer becomes is a call this engine can put audio on,
+/// the same way one placed with [`MediaEngine::place`] is — an offer from
+/// this engine's own catalogue, and a call the engine now manages.
+#[test]
+fn a_transfer_taken_through_the_facade_places_a_call_with_media_on_it() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let transferor = pair.connect();
+    let transferee = *pair
+        .callee
+        .calls()
+        .first()
+        .expect("the callee is in a call");
+
+    // the caller hands the callee to somebody else (RFC 3515)
+    pair.caller
+        .agent
+        .transfer(transferor, &uri("sip:carol@example.com"), pair.now)
+        .expect("the REFER goes");
+    pair.settle();
+    assert!(
+        pair.callee
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::TransferRequested { .. }))),
+        "the transferee was asked"
+    );
+
+    let placed = pair
+        .callee
+        .engine
+        .accept_transfer(
+            &mut pair.callee.agent,
+            transferee,
+            callee_media(),
+            OutgoingExtras::default(),
+            pair.now,
+        )
+        .expect("the transfer is taken");
+    let written = pair.callee.outbound();
+    let invite = written
+        .iter()
+        .find(|bytes| bytes.starts_with(b"INVITE sip:carol@example.com"))
+        .expect("the call the REFER asked for is placed");
+
+    assert!(
+        String::from_utf8_lossy(invite).contains("m=audio"),
+        "the INVITE a transfer places carries no offer: {}",
+        String::from_utf8_lossy(invite)
+    );
+    assert!(
+        pair.callee.engine.call_catalog(placed).is_some(),
+        "the engine has never heard of the call the transfer became"
     );
 }
 

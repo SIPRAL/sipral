@@ -20,7 +20,7 @@ use sipral_core::sdp;
 
 use crate::account::{Account, AccountId};
 use crate::agent::UserAgent;
-use crate::call::{CallEndReason, CallHandle, CallState, ForkPolicy, OutgoingCall};
+use crate::call::{CallEndReason, CallHandle, CallState, ForkPolicy, OutgoingCall, OutgoingExtras};
 use crate::dialoginfo::{DialogInfoTable, DialogPhase};
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::session::Hold;
@@ -5598,7 +5598,7 @@ fn a_refer_that_arrives_is_the_applications_to_take_or_refuse() {
     );
 
     let placed = agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let written = transmits(&mut agent);
     assert!(
@@ -6489,7 +6489,7 @@ fn the_invite_a_transfer_places_carries_the_referred_by_that_asked_for_it() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -6528,7 +6528,7 @@ fn a_folded_referred_by_still_reaches_the_invite_the_transfer_places() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("a folded header field is not a reason to refuse the transfer");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -6564,7 +6564,7 @@ fn two_referred_by_values_on_one_line_are_two_values() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert_eq!(
@@ -6600,7 +6600,7 @@ fn a_refer_with_two_referred_by_fields_passes_none_of_them_on() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
     assert!(
@@ -8618,7 +8618,7 @@ fn refer_taken(agent: &mut UserAgent, now: Instant) -> (CallHandle, CallHandle, 
     );
     events(agent);
     let placed = agent
-        .accept_transfer(call, None, now)
+        .accept_transfer(call, None, OutgoingExtras::default(), now)
         .expect("the transfer is taken");
     let written = transmits(agent);
     let invite = only(&written, "INVITE ");
@@ -8728,7 +8728,7 @@ fn a_notify_about_a_transfer_names_which_refer_it_reports_on() {
     deliver(&mut agent, &refer, t0);
     events(&mut agent);
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let notify = only(&transmits(&mut agent), "NOTIFY ");
     assert_eq!(
@@ -8765,7 +8765,7 @@ fn accepting_a_transfer_places_the_call_with_the_offer_given() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, Some(Arc::from(OFFER)), t0)
+        .accept_transfer(call, Some(Arc::from(OFFER)), OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let invite = only(&transmits(&mut agent), "INVITE ");
     assert!(
@@ -8773,6 +8773,151 @@ fn accepting_a_transfer_places_the_call_with_the_offer_given() {
         "the INVITE a transfer places carries no offer: {}",
         body_of(&invite)
     );
+}
+
+/// A REFER that arrived on a call this end answered, with `refer_lines` on
+/// it, offered to the application and not yet taken or refused.
+fn a_refer_waiting(
+    agent: &mut UserAgent,
+    branch: &str,
+    refer_lines: &str,
+    t0: Instant,
+) -> CallHandle {
+    agent.add_account(account());
+    let call = call_arriving(agent, &incoming_invite(branch, Some(OFFER)), t0);
+    agent
+        .answer(call, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(agent);
+    deliver(
+        agent,
+        &in_dialog(&ok, "ACK", &format!("{branch}ack"), 1),
+        t0,
+    );
+    events(agent);
+    deliver(
+        agent,
+        &plus(
+            &in_dialog(&ok, "REFER", &format!("{branch}refer"), 2),
+            refer_lines,
+        ),
+        t0,
+    );
+    assert!(
+        events(agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::TransferRequested { .. })),
+        "the REFER was offered"
+    );
+    call
+}
+
+/// A field `accept_transfer` refuses is refused before the REFER is touched:
+/// no 202, no NOTIFY, no INVITE, and the transfer still there to take. Every
+/// refusal the INVITE would earn counts, a line break in a value included —
+/// found only once the call is built, it would come after the 202 had gone.
+#[test]
+fn a_header_field_refused_on_a_transfer_leaves_the_refer_to_be_taken() {
+    let t0 = Instant::now();
+    for (n, (name, value, why)) in [
+        (
+            HeaderName::Allow,
+            &b"INVITE, BYE"[..],
+            crate::HeaderRefused::WrittenByTheStack("Allow"),
+        ),
+        (
+            conversation_id(),
+            &b"c-7\r\nContact: <sip:elsewhere@example.net>"[..],
+            crate::HeaderRefused::ControlByte { offset: 3 },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut agent = agent(t0);
+        let call = a_refer_waiting(
+            &mut agent,
+            &format!("xhdr{n}"),
+            "Refer-To: <sip:carol@example.com>\r\n",
+            t0,
+        );
+        let fields = [(name, value)];
+        let refused = agent.accept_transfer(
+            call,
+            None,
+            OutgoingExtras {
+                headers: &fields,
+                ..OutgoingExtras::default()
+            },
+            t0,
+        );
+        assert_eq!(refused, Err(UaError::Header(why)), "{name}");
+        let written: Vec<String> = transmits(&mut agent)
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect();
+        assert!(written.is_empty(), "{name}: {written:#?}");
+
+        let taken = agent.accept_transfer(call, None, OutgoingExtras::default(), t0);
+        assert!(
+            taken.is_ok(),
+            "{name}: the refusal used the REFER up: {taken:?}"
+        );
+    }
+}
+
+/// RFC 3891 §3 has an INVITE with more than one `Replaces` refused with a
+/// 400, and RFC 3892 §3 gives `Referred-By` one referrer. On the INVITE an
+/// accepted transfer places both are the REFER's, never the application's,
+/// so one of its own is refused before the REFER is touched.
+#[test]
+fn a_replaces_or_referred_by_of_the_applications_is_refused_on_a_transfer() {
+    let t0 = Instant::now();
+    for (n, name, value) in [
+        (
+            0,
+            HeaderName::Replaces,
+            &b"other@192.0.2.1;to-tag=x;from-tag=y"[..],
+        ),
+        (1, HeaderName::ReferredBy, &b"<sip:mallory@example.net>"[..]),
+    ] {
+        let mut agent = agent(t0);
+        let call = a_refer_waiting(
+            &mut agent,
+            &format!("xrep{n}"),
+            "Refer-To: <sip:carol@example.com?Replaces=call%3Bto-tag%3Da%3Bfrom-tag%3Db>\r\n\
+             Referred-By: <sip:bob@example.com>\r\n",
+            t0,
+        );
+        let fields = [(name, value)];
+        let refused = agent.accept_transfer(
+            call,
+            None,
+            OutgoingExtras {
+                headers: &fields,
+                ..OutgoingExtras::default()
+            },
+            t0,
+        );
+        assert_eq!(
+            refused,
+            Err(UaError::Header(crate::HeaderRefused::WrittenByTheStack(
+                name.canonical()
+            ))),
+            "{name}"
+        );
+        assert!(transmits(&mut agent).is_empty(), "{name}: nothing went out");
+
+        agent
+            .accept_transfer(call, None, OutgoingExtras::default(), t0)
+            .expect("the REFER is still there to take");
+        let invite = only(&transmits(&mut agent), "INVITE sip:carol@example.com");
+        assert_eq!(
+            with(&invite, |message| message.header_count(name)),
+            1,
+            "{name}: the REFER's, and only the REFER's"
+        );
+    }
 }
 
 /// §2.4.6 gives every NOTIFY an `id` precisely because a dialog may carry
@@ -8804,7 +8949,7 @@ fn a_second_refer_on_one_call_waits_rather_than_replacing_the_first() {
     );
     events(&mut agent);
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the first transfer is taken");
     transmits(&mut agent);
     events(&mut agent);
@@ -9098,7 +9243,7 @@ fn a_transfer_report_waits_for_the_stream_rather_than_being_dropped() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let out = written(&mut agent);
     assert!(
@@ -9415,7 +9560,7 @@ fn transfer_reports_waiting_for_a_stream_do_not_pile_up_behind_each_other() {
     events(&mut agent);
 
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the transfer is taken");
     let out = written(&mut agent);
     let placed = out
@@ -9471,7 +9616,7 @@ fn a_second_transfers_report_waiting_for_a_stream_leaves_the_first_transfers_las
     transmits(&mut agent);
     events(&mut agent);
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the first transfer is taken");
     let placed = written(&mut agent)
         .into_iter()
@@ -9497,7 +9642,7 @@ fn a_second_transfers_report_waiting_for_a_stream_leaves_the_first_transfers_las
     transmits(&mut agent);
     events(&mut agent);
     agent
-        .accept_transfer(call, None, t0)
+        .accept_transfer(call, None, OutgoingExtras::default(), t0)
         .expect("the second transfer is taken");
     not_written(&written(&mut agent), "NOTIFY ");
 

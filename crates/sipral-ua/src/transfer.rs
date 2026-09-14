@@ -74,10 +74,18 @@ use sipral_core::msg::{
 use sipral_core::transaction::{AnyTransactionId, InviteServer, TransactionId};
 
 use crate::agent::UserAgent;
-use crate::call::{CallHandle, CallState, Direction, OutgoingCall};
+use crate::call::{CallHandle, CallState, Direction, OutgoingCall, OutgoingExtras};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::headers::{HeaderRefused, HeadersFor};
 use crate::screening::{Replacing, Screening};
+
+/// The fields the INVITE an accepted transfer places takes from the REFER and
+/// from nowhere else. RFC 3891 §3 has an INVITE with more than one `Replaces`
+/// refused with a 400, RFC 3892 §3 gives `Referred-By` one referrer, and on a
+/// blind transfer a `Replaces` of the application's own would take over a
+/// dialog the REFER never named.
+const FROM_THE_REFER: &[HeaderName<'static>] = &[HeaderName::Replaces, HeaderName::ReferredBy];
 
 /// The event package a REFER subscribes to (§3.1).
 const REFER: &[u8] = b"refer";
@@ -291,23 +299,46 @@ impl UserAgent {
 
     /// Take a transfer that was asked for, and place the call it names.
     ///
-    /// The target, `Replaces` and `Referred-By` are not the caller's to give —
-    /// they come from the REFER that was accepted, and this places the call
-    /// exactly where it asked. `offer` is: what to describe in the INVITE, as
-    /// [`UserAgent::ring`] and [`UserAgent::answer`] take one for the call
-    /// this REFER arrived on. With none the INVITE carries no offer and the
-    /// answer travels in the 2xx instead (§14.1), exactly as for a call
-    /// placed with [`UserAgent::call`] the same way.
+    /// The target, `Replaces` and `Referred-By` on the INVITE this places are
+    /// never the caller's to give — they come from the REFER that was
+    /// accepted, which is why `extra` is an [`OutgoingExtras`] rather than an
+    /// [`OutgoingCall`]: there is no legitimate target for the caller to put
+    /// in one. `offer` means what it does on [`UserAgent::call`] — the
+    /// session description to put in the INVITE, with none it carries no
+    /// offer and the answer travels in the 2xx instead (§14.1) — and so does
+    /// every field of `extra`: a destination other than the account's, which
+    /// forks to keep, and header fields of the caller's own, refused for
+    /// everything [`HeadersFor::Call`] refuses them for on
+    /// [`UserAgent::call`], and refused as well when they are `Replaces` or
+    /// `Referred-By`, which the REFER supplies. Every field is checked
+    /// before the REFER is touched: a refusal leaves the transfer waiting,
+    /// still to be taken or refused, with nothing sent.
     ///
     /// # Errors
+    /// [`UaError::Header`] for a field in `extra.headers` refused as above,
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing was
     /// asked, [`UaError::NoSuchAccount`], or [`UaError::Send`].
     pub fn accept_transfer(
         &mut self,
         call: CallHandle,
         offer: Option<Arc<[u8]>>,
+        extra: OutgoingExtras<'_>,
         now: Instant,
     ) -> Result<CallHandle, UaError> {
+        // every refusal `call` would give these fields, and the two fields
+        // the REFER alone supplies, checked before the REFER is touched: a
+        // field refused here leaves the transfer waiting, still to be taken
+        // or refused, with nothing sent
+        for &(name, value) in extra.headers {
+            let field = HeadersFor::Call
+                .check(name.canonical().as_bytes(), value)
+                .map_err(UaError::Header)?;
+            if let Some(written) = FROM_THE_REFER.iter().find(|own| **own == field) {
+                return Err(UaError::Header(HeaderRefused::WrittenByTheStack(
+                    written.canonical(),
+                )));
+            }
+        }
         let (transaction, wanted, account) = {
             let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             let state = held.state;
@@ -339,6 +370,13 @@ impl UserAgent {
         let mut placed = OutgoingCall::new(wanted.target.clone());
         if let Some(offer) = offer {
             placed = placed.offer(offer);
+        }
+        if let Some((transport, remote)) = extra.destination {
+            placed = placed.to_address(transport, remote);
+        }
+        placed = placed.forks(extra.forks);
+        for &(name, value) in extra.headers {
+            placed = placed.header(name, value);
         }
         if let Some(ref replaces) = wanted.replaces {
             placed = placed.header(HeaderName::Replaces, replaces);

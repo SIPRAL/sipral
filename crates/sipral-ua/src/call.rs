@@ -282,6 +282,26 @@ impl OutgoingCall {
     }
 }
 
+/// Everything [`OutgoingCall`] carries beside a target and an offer: a
+/// destination other than the account's, which forks to keep, and header
+/// fields of the application's own, already checked at whatever boundary
+/// read them.
+///
+/// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer) takes
+/// this instead of an [`OutgoingCall`] because its target is never the
+/// caller's to give — the REFER that was accepted already names it — and a
+/// mandatory field the caller has no legitimate value for is worse than a
+/// second, smaller type.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OutgoingExtras<'a> {
+    /// As [`OutgoingCall::to_address`].
+    pub destination: Option<(TransportId, SocketAddr)>,
+    /// As [`OutgoingCall::forks`].
+    pub forks: ForkPolicy,
+    /// As [`OutgoingCall::header`], already parsed into fields.
+    pub headers: &'a [(HeaderName<'a>, &'a [u8])],
+}
+
 /// Everything one call is doing.
 #[derive(Debug)]
 pub(crate) struct Call {

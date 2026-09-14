@@ -987,15 +987,64 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer_1to(JNIEnv *env, jobject sel
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jlongArray placed, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray placed, jlong nowMs)
 {
     (void)env;
     (void)self;
+    sipral_call_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    jbyte *configTarget_data = configTarget ? (*env)->GetByteArrayElements(env, configTarget, NULL) : NULL;
+    jsize configTarget_size = configTarget ? (*env)->GetArrayLength(env, configTarget) : 0;
+    config_value.target = (const char *)configTarget_data;
+    config_value.target_len = (size_t)configTarget_size;
+    jbyte *configSdp_data = configSdp ? (*env)->GetByteArrayElements(env, configSdp, NULL) : NULL;
+    jsize configSdp_size = configSdp ? (*env)->GetArrayLength(env, configSdp) : 0;
+    config_value.sdp = (const uint8_t *)configSdp_data;
+    config_value.sdp_len = (size_t)configSdp_size;
+    jbyte *configDestination_data = configDestination ? (*env)->GetByteArrayElements(env, configDestination, NULL) : NULL;
+    jsize configDestination_size = configDestination ? (*env)->GetArrayLength(env, configDestination) : 0;
+    config_value.destination = (const char *)configDestination_data;
+    config_value.destination_len = (size_t)configDestination_size;
+    config_value.keep_all_forks = (uint32_t)configKeepAllForks;
+    jbyte *configMediaAddress_data = configMediaAddress ? (*env)->GetByteArrayElements(env, configMediaAddress, NULL) : NULL;
+    jsize configMediaAddress_size = configMediaAddress ? (*env)->GetArrayLength(env, configMediaAddress) : 0;
+    config_value.media_address = (const char *)configMediaAddress_data;
+    config_value.media_address_len = (size_t)configMediaAddress_size;
+    config_value.srtp = (uint32_t)configSrtp;
     sipral_handle_t placed_value = 0;
-    sipral_status_t status = sipral_call_accept_transfer((sipral_handle_t)stack, (sipral_handle_t)call, &placed_value, (uint64_t)nowMs);
-    {
-        jlong slot = (jlong)placed_value;
-        (*env)->SetLongArrayRegion(env, placed, 0, 1, &slot);
+    int ready = 1;
+    jbyte *configHeaders_pinned = NULL;
+    sipral_header_t *configHeaders_array = NULL;
+    size_t configHeaders_count = 0;
+    ready = ready && jni_header_array(env, configHeadersBytes, configHeadersLengths, &configHeaders_pinned, &configHeaders_array, &configHeaders_count);
+    config_value.headers = configHeaders_array;
+    config_value.headers_len = configHeaders_count;
+    /* -1 is no status the library answers with, and it is never read: a list
+     * that did not make an array left an exception pending, and the JVM
+     * throws that instead */
+    sipral_status_t status = -1;
+    if (ready) {
+        status = sipral_call_accept_transfer((sipral_handle_t)stack, (sipral_handle_t)call, &config_value, &placed_value, (uint64_t)nowMs);
+    }
+    if (configTarget) {
+        (*env)->ReleaseByteArrayElements(env, configTarget, configTarget_data, JNI_ABORT);
+    }
+    if (configSdp) {
+        (*env)->ReleaseByteArrayElements(env, configSdp, configSdp_data, JNI_ABORT);
+    }
+    if (configDestination) {
+        (*env)->ReleaseByteArrayElements(env, configDestination, configDestination_data, JNI_ABORT);
+    }
+    if (configMediaAddress) {
+        (*env)->ReleaseByteArrayElements(env, configMediaAddress, configMediaAddress_data, JNI_ABORT);
+    }
+    jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (ready) {
+        {
+            jlong slot = (jlong)placed_value;
+            (*env)->SetLongArrayRegion(env, placed, 0, 1, &slot);
+        }
     }
     return (jint)status;
 }

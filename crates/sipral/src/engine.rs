@@ -32,10 +32,10 @@
 //!
 //! # What a call has to be for this to manage it
 //!
-//! Placed with [`MediaEngine::place`] or answered with
-//! [`MediaEngine::answer`]. A call placed straight on the user agent is one
-//! this engine has never described anything for, and it is left alone rather
-//! than guessed at.
+//! Placed with [`MediaEngine::place`], answered with [`MediaEngine::answer`],
+//! or taken from a transfer with [`MediaEngine::accept_transfer`]. A call
+//! placed straight on the user agent is one this engine has never described
+//! anything for, and it is left alone rather than guessed at.
 //!
 //! An incoming call may also be rung with [`MediaEngine::ring`] before it is
 //! answered: the far end hears the answer to its offer, and this end's
@@ -70,7 +70,8 @@ use sipral_core::sdp::{
     static_rtpmap,
 };
 use sipral_ua::{
-    AccountId, CallHandle, CallState, OutgoingCall, StatusCode, UaError, UaEvent, UserAgent,
+    AccountId, CallHandle, CallState, OutgoingCall, OutgoingExtras, StatusCode, UaError, UaEvent,
+    UserAgent,
 };
 
 use crate::clock::WallClock;
@@ -393,6 +394,74 @@ impl MediaEngine {
             },
         );
         Ok(call)
+    }
+
+    /// Take a transfer that was asked for, and place the call it names the
+    /// way [`MediaEngine::place`] places one: an offer from this engine's
+    /// default catalogue, opened on its default [`MediaConfig`].
+    ///
+    /// `extra` means what it means on [`UserAgent::accept_transfer`], which
+    /// this passes it straight to — a destination other than the account's,
+    /// which forks to keep, and header fields of the caller's own, carried
+    /// separately from the offer because the target itself is not this
+    /// call's to give: `accept_transfer` draws it from the REFER that was
+    /// accepted, the same way [`MediaEngine::place`]'s caller draws its own
+    /// from a directory.
+    ///
+    /// The new call is managed exactly as one [`MediaEngine::place`] placed:
+    /// its session opens once the 2xx is acknowledged, and
+    /// [`MediaEvent::Started`] follows.
+    ///
+    /// # Errors
+    /// [`MediaError::Signalling`] when the user agent refuses the call.
+    pub fn accept_transfer(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        extra: OutgoingExtras<'_>,
+        now: Instant,
+    ) -> Result<CallHandle, MediaError> {
+        let media = CallMedia::new(self.catalog.clone(), self.config.clone());
+        self.accept_transfer_with(agent, call, local, extra, media, now)
+    }
+
+    /// The same as [`MediaEngine::accept_transfer`], offering and opening the
+    /// session on `media` instead of this engine's defaults — D6, the same
+    /// reason [`MediaEngine::place_with`] takes one.
+    ///
+    /// # Errors
+    /// [`MediaError::Signalling`] when the user agent refuses the call.
+    pub fn accept_transfer_with(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        extra: OutgoingExtras<'_>,
+        media: CallMedia,
+        now: Instant,
+    ) -> Result<CallHandle, MediaError> {
+        let CallMedia { catalog, config } = media;
+        let (identity, session_id) = draw(agent);
+        let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
+        let offer = write_offer(&catalog, local, session_id, 1, keys);
+        let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
+        self.calls.insert(
+            new,
+            Managed {
+                local: Some(offer),
+                remote: None,
+                address: Some(local),
+                identity,
+                session_id,
+                version: 1,
+                catalog,
+                config,
+                // an outgoing call rings the far end's phone, not this one's
+                rung_with_media: false,
+            },
+        );
+        Ok(new)
     }
 
     /// Say a call that came in is ringing, with the answer to the offer it

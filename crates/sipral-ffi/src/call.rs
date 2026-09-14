@@ -28,9 +28,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sipral::CallMedia;
-use sipral_core::endpoint::OutgoingInDialogRequest;
+use sipral_core::endpoint::{OutgoingInDialogRequest, TransportId};
 use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
-use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, UaError};
+use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
@@ -272,6 +272,39 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
     }
 }
 
+/// Where `config` sends the INVITE, other than the account's own address, and
+/// what it does about the branches a fork leaves behind — the two members
+/// [`sipral_call_place`] and [`sipral_call_accept_transfer`] read exactly the
+/// same way, neither needing the target to make sense of.
+///
+/// # Safety
+///
+/// `config.destination` must be readable for `config.destination_len` bytes.
+unsafe fn destination_and_forks(
+    state: &StackState,
+    config: &SipralCallConfig,
+) -> Result<(Option<(TransportId, SocketAddr)>, ForkPolicy), Fail> {
+    let destination =
+        match unsafe { text(config.destination, config.destination_len, "destination") }? {
+            Some(elsewhere) => {
+                let Ok(address) = elsewhere.parse::<SocketAddr>() else {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        format!("destination is {elsewhere:?}, which is not an address and a port"),
+                    ));
+                };
+                Some((state.transport, address))
+            }
+            None => None,
+        };
+    let forks = if config.keep_all_forks == 0 {
+        ForkPolicy::KeepFirst
+    } else {
+        ForkPolicy::KeepAll
+    };
+    Ok((destination, forks))
+}
+
 /// Turn what crossed the boundary into a call to place.
 ///
 /// `managed` says the description is this stack's to write, so the one in the
@@ -298,20 +331,11 @@ unsafe fn outgoing_from(
         };
         outgoing = outgoing.offer(offer);
     }
-    if let Some(elsewhere) =
-        unsafe { text(config.destination, config.destination_len, "destination") }?
-    {
-        let Ok(address) = elsewhere.parse::<SocketAddr>() else {
-            return Err(fail(
-                SipralStatus::InvalidArgument,
-                format!("destination is {elsewhere:?}, which is not an address and a port"),
-            ));
-        };
-        outgoing = outgoing.to_address(state.transport, address);
+    let (destination, forks) = unsafe { destination_and_forks(state, config) }?;
+    if let Some((transport, address)) = destination {
+        outgoing = outgoing.to_address(transport, address);
     }
-    if config.keep_all_forks != 0 {
-        outgoing = outgoing.forks(ForkPolicy::KeepAll);
-    }
+    outgoing = outgoing.forks(forks);
     if let Some(ref named) = state.user_agent {
         outgoing = outgoing.header(HeaderName::UserAgent, named);
     }
@@ -1073,30 +1097,110 @@ entry! {
 }
 
 entry! {
-    /// Take a transfer that was asked for, place the call it names, and write
-    /// that call's handle to `out_placed`.
+    /// Take a transfer that was asked for, place the call it names the way
+    /// [`sipral_call_place`] places one, and write its handle to
+    /// `out_placed`.
+    ///
+    /// `config.target` is not read: the far end already said where this goes
+    /// when it asked for the transfer, and a target of the caller's own would
+    /// be a second one contradicting it — `SIPRAL_STATUS_INVALID_ARGUMENT`
+    /// naming it. Everything else in `config` means what it means on
+    /// `sipral_call_place`: `sdp` for a description the application wrote and
+    /// runs the audio of, `media_address` for one this stack writes and runs
+    /// (`config.srtp` overriding the stack's own policy for it, the same
+    /// way), `headers`, `destination` and `keep_all_forks` for the INVITE
+    /// this places. `Replaces` and `Referred-By` among `headers` are
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
+    /// there to take: that INVITE takes both from the REFER. Giving neither
+    /// `sdp` nor `media_address` is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
+    /// `sipral_call_place`: the answer to an offerless INVITE has nowhere to
+    /// go but the ACK, and this ABI hands nothing back from there.
     ///
     /// # Safety
     ///
-    /// `out_placed` must point at one `sipral_handle_t`.
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with every pointer in it readable for the length
+    /// beside it, and `out_placed` at one `sipral_handle_t`.
     fn sipral_call_accept_transfer(
         stack: SipralHandle,
         call: SipralHandle,
+        config: *const SipralCallConfig,
         out_placed: *mut SipralHandle,
         now_ms: u64,
     ) {
         if out_placed.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_placed is null"));
         }
+        let config = unsafe { read_versioned(config) }?;
+        if !config.target.is_null() || config.target_len != 0 {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "target is not read here: sipral_call_accept_transfer places the call the far \
+                 end already named when it asked for the transfer, and a target of the caller's \
+                 own would be a second one contradicting it",
+            ));
+        }
+        let media = unsafe { managed_media(&config) }?;
+        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            // No offer travels through this entry point yet -- it has no
-            // parameter to carry one -- so the INVITE goes out offerless and
-            // the answer is expected in the 2xx, exactly as it always has.
-            let placed = state
-                .agent
-                .accept_transfer(id, None, now)
-                .map_err(|error| ua_failed(&error))?;
+            let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
+            let mut headers = Vec::new();
+            if let Some(ref named) = state.user_agent {
+                headers.push((HeaderName::UserAgent, &**named));
+            }
+            let asked = unsafe {
+                supplied(
+                    config.headers,
+                    config.headers_len,
+                    HeadersFor::Call,
+                    state.user_agent.is_some(),
+                )
+            }?;
+            headers.extend(asked);
+            let extra = OutgoingExtras {
+                destination,
+                forks,
+                headers: &headers,
+            };
+            let placed = if let Some(local) = media {
+                let placed = match srtp {
+                    // the stack's own catalogue, untouched: this is what
+                    // `srtp` being unspecified on the call has to mean
+                    None => state
+                        .engine
+                        .accept_transfer(&mut state.agent, id, local, extra, now),
+                    Some(policy) => {
+                        let catalog = state.engine.catalog().clone().with_srtp(policy);
+                        let media = CallMedia::new(catalog, state.media_config());
+                        state.engine.accept_transfer_with(
+                            &mut state.agent,
+                            id,
+                            local,
+                            extra,
+                            media,
+                            now,
+                        )
+                    }
+                }
+                .map_err(|error| media_failed(&error))?;
+                state.manage(placed);
+                placed
+            } else {
+                let Some(offer) = (unsafe { description(config.sdp, config.sdp_len) })? else {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        "a call placed from here carries an offer, because the answer to one \
+                         that does not has to be written into the ACK. Set sdp for a session the \
+                         application describes, or media_address for one this stack describes",
+                    ));
+                };
+                state
+                    .agent
+                    .accept_transfer(id, Some(offer), extra, now)
+                    .map_err(|error| ua_failed(&error))?
+            };
             if let Some(identity) = state.agent.call_identity(placed) {
                 state.record_identity(placed, identity);
             }
@@ -1363,6 +1467,26 @@ a=recvonly\r\n";
             media_address,
             media_address_len,
             ..call_config()
+        }
+    }
+
+    /// What `sipral_call_accept_transfer` reads: everything `call_config`
+    /// does except `target`, which is not this call's to give — the REFER
+    /// already named it.
+    pub(crate) fn transfer_config() -> SipralCallConfig {
+        SipralCallConfig {
+            target: ptr::null(),
+            target_len: 0,
+            ..call_config()
+        }
+    }
+
+    /// The same, for a transfer whose session this stack describes.
+    pub(crate) fn managed_transfer_config() -> SipralCallConfig {
+        SipralCallConfig {
+            target: ptr::null(),
+            target_len: 0,
+            ..managed_config()
         }
     }
 
@@ -1995,16 +2119,13 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The third way a call is placed through this ABI, beside
-    /// `sipral_call_place` and `sipral_call_consult`: the one a REFER asked
-    /// for, taken with `sipral_call_accept_transfer`.
-    #[test]
-    fn a_call_a_transfer_placed_names_its_own_from_and_to_and_call_id() {
-        let mut observed = Observed::default();
-        let (handle, _) = line(&mut observed);
+    /// Answer an incoming call and have the far end REFER it to carol, so
+    /// that `sipral_call_accept_transfer` has something to take. Returns the
+    /// call the REFER arrived on.
+    fn ready_for_a_transfer(observed: &mut Observed, handle: SipralHandle) -> SipralHandle {
         deliver(handle, &invitation(), 1_000);
         poll(handle, 1_000);
-        let call = called(&observed);
+        let call = called(observed);
         let _ = sent(handle);
         assert_eq!(
             unsafe { sipral_call_answer(handle, call, ANSWER.as_ptr(), ANSWER.len(), 1_100) },
@@ -2034,18 +2155,38 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
             "the REFER was reported"
         );
         let _ = sent(handle);
+        call
+    }
 
+    /// Accept a transfer, and hand back the INVITE it placed to carol.
+    fn accept_transfer(
+        handle: SipralHandle,
+        call: SipralHandle,
+        config: &SipralCallConfig,
+    ) -> (SipralStatus, SipralHandle, Vec<u8>) {
         let mut placed = SIPRAL_HANDLE_NONE;
-        assert_eq!(
-            unsafe { sipral_call_accept_transfer(handle, call, &raw mut placed, 1_300) },
-            SipralStatus::Ok,
-            "{}",
-            last_error_text()
-        );
+        let status = unsafe {
+            sipral_call_accept_transfer(handle, call, ptr::from_ref(config), &raw mut placed, 1_300)
+        };
         let invite = sent(handle)
             .into_iter()
             .find(|bytes| start_line(bytes).starts_with("INVITE sip:carol@example.com"))
-            .expect("the call the REFER asked for went out");
+            .unwrap_or_default();
+        (status, placed, invite)
+    }
+
+    /// The third way a call is placed through this ABI, beside
+    /// `sipral_call_place` and `sipral_call_consult`: the one a REFER asked
+    /// for, taken with `sipral_call_accept_transfer`.
+    #[test]
+    fn a_call_a_transfer_placed_names_its_own_from_and_to_and_call_id() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let (status, placed, invite) = accept_transfer(handle, call, &transfer_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(!invite.is_empty(), "the call the REFER asked for went out");
         deliver(handle, &ringing(&invite), 1_350);
         poll(handle, 1_350);
 
@@ -2057,6 +2198,157 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
         assert_eq!(progress.from_uri, b"sip:alice@example.com");
         assert_eq!(progress.to_uri, b"sip:carol@example.com");
         assert_eq!(progress.call_id, field(&invite, HeaderName::CallId));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: accepted with `media_address`, the transfer's INVITE carries an
+    /// offer this stack wrote from its own codecs, and audio comes up once
+    /// carol answers and the 2xx is acknowledged — the same as a call placed
+    /// with `sipral_call_place`.
+    #[test]
+    fn a_transfer_accepted_with_media_address_places_an_invite_this_stack_wrote_and_media_starts_when_it_is_up()
+     {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let (status, placed, invite) = accept_transfer(handle, call, &managed_transfer_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(placed, SIPRAL_HANDLE_NONE);
+        let body = String::from_utf8_lossy(&invite).into_owned();
+        assert!(
+            body.contains("m=audio"),
+            "the offer was not this stack's own: {body}"
+        );
+
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_350);
+        poll(handle, 1_350);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaStarted),
+            "the transferred call came up without audio: {:?}",
+            observed.kinds()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: accepted with `sdp`, the transfer's INVITE carries exactly that
+    /// description, and this stack runs no audio for it — the description is
+    /// the application's, the same as a call placed with `sipral_call_place`.
+    #[test]
+    fn a_transfer_accepted_with_sdp_carries_exactly_that_description_and_the_stack_runs_no_audio() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let (status, _, invite) = accept_transfer(handle, call, &transfer_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            body(&invite),
+            OFFER,
+            "the INVITE did not carry exactly what sdp gave it"
+        );
+
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_350);
+        poll(handle, 1_350);
+        assert!(
+            !observed.kinds().contains(&SipralEventKind::MediaStarted),
+            "a call placed with sdp is the application's to run audio for: {:?}",
+            observed.kinds()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: `srtp` on an accepted transfer overrides the stack's policy the
+    /// same way it does on `sipral_call_place`.
+    #[test]
+    fn an_accepted_transfer_under_srtp_required_offers_the_secure_profile_with_a_key() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let mut config = managed_transfer_config();
+        config.srtp = SipralSrtp::Required as u32;
+        let (status, _, invite) = accept_transfer(handle, call, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&invite).into_owned();
+        assert!(
+            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
+            "{body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: header fields in `config.headers` reach the INVITE an accepted
+    /// transfer places, the same as they do on `sipral_call_place`.
+    #[test]
+    fn application_headers_on_an_accepted_transfer_reach_the_invite_it_places() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let labelled = [header_of("X-Conversation-Id", "xfer-9")];
+        let mut config = transfer_config();
+        config.headers = labelled.as_ptr();
+        config.headers_len = labelled.len();
+        let (status, _, invite) = accept_transfer(handle, call, &config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            field_through_c(&invite, "X-Conversation-Id").as_deref(),
+            Some(&b"xfer-9"[..])
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: the target of an accepted transfer is the REFER's, never the
+    /// caller's — setting `config.target` is refused, and nothing is placed.
+    #[test]
+    fn a_target_set_on_an_accepted_transfer_is_invalid_argument_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let mut config = transfer_config();
+        (config.target, config.target_len) = as_text("sip:wrong@example.com");
+        let (status, placed, invite) = accept_transfer(handle, call, &config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(placed, SIPRAL_HANDLE_NONE);
+        assert!(last_error_text().contains("target"));
+        assert!(invite.is_empty(), "an INVITE went out despite the refusal");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.4.4: `Replaces` on the INVITE an accepted transfer places is the
+    /// REFER's to give (RFC 3891 §3 has a second one refused with a 400), so
+    /// one in `config.headers` is refused, nothing is sent, and the transfer
+    /// is still there to take.
+    #[test]
+    fn a_replaces_in_the_headers_of_an_accepted_transfer_is_invalid_argument_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        let call = ready_for_a_transfer(&mut observed, handle);
+
+        let replacing = [header_of("Replaces", "other@192.0.2.1;to-tag=x;from-tag=y")];
+        let mut config = transfer_config();
+        config.headers = replacing.as_ptr();
+        config.headers_len = replacing.len();
+        let (status, placed, invite) = accept_transfer(handle, call, &config);
+        assert_eq!(
+            status,
+            SipralStatus::InvalidArgument,
+            "{}",
+            String::from_utf8_lossy(&invite)
+        );
+        assert_eq!(placed, SIPRAL_HANDLE_NONE);
+        assert!(
+            last_error_text().contains("Replaces"),
+            "{}",
+            last_error_text()
+        );
+        assert!(invite.is_empty(), "an INVITE went out despite the refusal");
+
+        let (status, _, invite) = accept_transfer(handle, call, &transfer_config());
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(!invite.is_empty(), "the refusal used the transfer up");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

@@ -2061,7 +2061,7 @@ internal object SipralNative {
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
     external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
@@ -2971,16 +2971,39 @@ object Sipral {
     }
 
     /**
-     * Take a transfer that was asked for, place the call it names, and write
-     * that call's handle to `out_placed`.
+     * Take a transfer that was asked for, place the call it names the way
+     * sipral_call_place places one, and write its handle to
+     * `out_placed`.
+     *
+     * `config.target` is not read: the far end already said where this goes
+     * when it asked for the transfer, and a target of the caller's own would
+     * be a second one contradicting it — `SIPRAL_STATUS_INVALID_ARGUMENT`
+     * naming it. Everything else in `config` means what it means on
+     * `sipral_call_place`: `sdp` for a description the application wrote and
+     * runs the audio of, `media_address` for one this stack writes and runs
+     * (`config.srtp` overriding the stack's own policy for it, the same
+     * way), `headers`, `destination` and `keep_all_forks` for the INVITE
+     * this places. `Replaces` and `Referred-By` among `headers` are
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
+     * there to take: that INVITE takes both from the REFER. Giving neither
+     * `sdp` nor `media_address` is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
+     * `sipral_call_place`: the answer to an offerless INVITE has nowhere to
+     * go but the ACK, and this ABI hands nothing back from there.
      *
      * Safety
      *
-     * `out_placed` must point at one `sipral_handle_t`.
+     * `config` must point at a `sipral_call_config_t` whose `size` member
+     * says how long it is, with every pointer in it readable for the length
+     * beside it, and `out_placed` at one `sipral_handle_t`.
      */
-    fun callAcceptTransfer(stack: Long, call: Long, nowMs: Long): Long {
+    fun callAcceptTransfer(stack: Long, call: Long, config: SipralCallConfig, nowMs: Long): Long {
+        val configTarget = config.target?.toByteArray(Charsets.UTF_8)
+        val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
+        val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
+        val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, placedSlot, nowMs))
         return placedSlot[0]
     }
 

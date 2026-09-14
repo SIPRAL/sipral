@@ -679,6 +679,30 @@ place SRTP on an incoming call's own terms was still missing after 8.4.6:
 stack describes the media of had no way to choose anything but the stack's
 SRTP policy until it could ring with one first.
 
+## Transfers with media (task 8.4.4)
+
+`MediaEngine::accept_transfer` and `MediaEngine::accept_transfer_with` are
+`MediaEngine::place` and `MediaEngine::place_with`'s mirror for the call a
+transfer becomes: an offer written from a catalogue — this engine's default,
+or one `accept_transfer_with`'s `CallMedia` names for this call alone, D6's
+reason — against `local`, and `UserAgent::accept_transfer` placing it. The new
+call is managed exactly as one `place` placed: nothing about how its session
+opens or how `MediaEvent::Started` follows is different, because nothing
+downstream of `UserAgent::accept_transfer` returning a `CallHandle` can tell
+the two apart.
+
+The one thing `place`'s caller has that `accept_transfer`'s does not is a
+target: `place` reads it from wherever the application keeps a directory,
+`accept_transfer`'s comes from the REFER that was accepted, before either
+engine method runs. That is why the destination override, fork policy and
+header fields that ride on `place`'s `OutgoingCall` reach `accept_transfer`
+through `OutgoingExtras` instead (`sipral-ua`, `docs/04-ua.md`) — the same
+three fields, without the target `OutgoingCall` requires and `accept_transfer`
+has no legitimate value to put in it. `sipral_call_accept_transfer`
+(`docs/08-ffi.md`) is the C entry point, reading `sipral_call_config_t` the
+same way `sipral_call_place` does apart from `target`, which the REFER already
+named and a second one from `config` is refused.
+
 ## What the end of a call sends
 
 RFC 3550 §6.6 has a participant that leaves send an RTCP BYE, and the engine

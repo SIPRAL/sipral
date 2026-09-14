@@ -73,6 +73,7 @@ pub use agent::UserAgent;
 pub use announce::{Announced, Announcement, AnnouncementId};
 pub use call::{
     CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
+    OutgoingExtras,
 };
 pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,

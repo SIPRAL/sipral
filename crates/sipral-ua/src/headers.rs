@@ -22,9 +22,11 @@
 //! are this layer's, each with its reason.
 //!
 //! Left open on purpose: `Replaces` and `Referred-By`, which this layer writes
-//! only on the INVITE an accepted transfer places, while an application that
-//! writes `Replaces` on a call it places itself is taking over a dialog it
-//! learned about some other way (RFC 3891 §1); `Expires` on an INVITE, which
+//! only on the INVITE an accepted transfer places — and refuses among the
+//! fields `UserAgent::accept_transfer` is given, since that INVITE takes both
+//! from the REFER — while an application that writes `Replaces` on a call it
+//! places itself is taking over a dialog it learned about some other way
+//! (RFC 3891 §1); `Expires` on an INVITE, which
 //! limits how long the invitation stands (§13.2.1); and `Supported` on a
 //! REGISTER, where this layer writes none and a registration that wants a
 //! GRUU has to (RFC 5627 §4.1).
