@@ -974,6 +974,14 @@ public struct SipralCounters
     /// still reads every counter that did.
     /// </summary>
     public ulong EventsDropped;
+    /// <summary>
+    /// RTCP goodbyes dropped, oldest first, because the application had
+    /// not called `sipral_stack_poll_farewell` and the queue behind it
+    /// was already at its ceiling. Appended at the tail for the same
+    /// reason `events_dropped` was: a build from before this member
+    /// existed still reads every counter that did.
+    /// </summary>
+    public ulong FarewellsDropped;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>

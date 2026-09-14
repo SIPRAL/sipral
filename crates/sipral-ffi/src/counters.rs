@@ -86,6 +86,12 @@ record! {
         /// about a call or a registration, and a build from before it existed
         /// still reads every counter that did.
         pub events_dropped: u64,
+        /// RTCP goodbyes dropped, oldest first, because the application had
+        /// not called `sipral_stack_poll_farewell` and the queue behind it
+        /// was already at its ceiling. Appended at the tail for the same
+        /// reason `events_dropped` was: a build from before this member
+        /// existed still reads every counter that did.
+        pub farewells_dropped: u64,
     }
 }
 
@@ -100,7 +106,7 @@ unsafe impl Versioned for SipralCounters {
     }
 }
 
-fn counters_of(counters: Counters, events_dropped: u64) -> SipralCounters {
+fn counters_of(counters: Counters, events_dropped: u64, farewells_dropped: u64) -> SipralCounters {
     SipralCounters {
         size: size_of::<SipralCounters>(),
         registrations_attempted: counters.registrations_attempted.get(),
@@ -122,6 +128,7 @@ fn counters_of(counters: Counters, events_dropped: u64) -> SipralCounters {
         stream_transport_wanted: counters.stream_transport_wanted.get(),
         active_calls: counters.active_calls.get(),
         events_dropped,
+        farewells_dropped,
     }
 }
 
@@ -142,7 +149,11 @@ entry! {
         // its size wrong is told that rather than something about the stack
         unsafe { declared_size(out_counters.cast_const()) }?;
         let counters = with_stack(stack, |state| {
-            Ok(counters_of(state.engine.counters(), state.events_dropped))
+            Ok(counters_of(
+                state.engine.counters(),
+                state.events_dropped,
+                state.farewells_dropped,
+            ))
         })?;
         unsafe { write_versioned(out_counters, counters) }
     }
@@ -179,6 +190,7 @@ mod tests {
             stream_transport_wanted: u64::MAX,
             active_calls: u64::MAX,
             events_dropped: u64::MAX,
+            farewells_dropped: u64::MAX,
         }
     }
 
@@ -201,6 +213,7 @@ mod tests {
         assert_eq!(read.stream_transport_wanted, 0);
         assert_eq!(read.active_calls, 0);
         assert_eq!(read.events_dropped, 0);
+        assert_eq!(read.farewells_dropped, 0);
     }
 
     /// The wiring this file owns: whatever a poll counted as dropped for want
@@ -216,6 +229,24 @@ mod tests {
         })
         .expect("the stack is live");
         assert_eq!(counters(stack).events_dropped, 3);
+    }
+
+    /// The same wiring for the farewell queue: whatever a poll counted as
+    /// dropped to keep that queue at its ceiling is what this reads back, and
+    /// not the outbox's count beside it. `crates/sipral-ffi/src/stack.rs` owns
+    /// making the count correct.
+    #[test]
+    fn a_stack_reports_farewells_it_dropped_at_the_ceiling() {
+        let mut observed = Observed::default();
+        let stack = crate::stack::tests::stack(&mut observed);
+        crate::stack::with_stack(stack, |state| {
+            state.farewells_dropped = 5;
+            Ok(())
+        })
+        .expect("the stack is live");
+        let read = counters(stack);
+        assert_eq!(read.farewells_dropped, 5);
+        assert_eq!(read.events_dropped, 0);
     }
 
     #[test]

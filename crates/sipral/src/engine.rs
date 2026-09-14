@@ -1049,11 +1049,16 @@ impl MediaEngine {
         if let Some(held) = running {
             let mut slot = share::lock(&held);
             // the same codec on a session that is already running: a hold, a
-            // resume, or a peer that moved its address
+            // resume, or a peer that moved its address — but settle is also
+            // reached from events that carry no new information at all, an
+            // ACK with no body chief among them, and a plan identical to the
+            // one already running is not a change to report
             if slot.session.codec() == codec {
+                let unchanged = *slot.session.plan() == plan;
                 let adopted = slot.session.adopt(&plan, candidates, now);
                 drop(slot);
                 match adopted {
+                    Ok(()) if unchanged => {}
                     Ok(()) => self.events.push_back((
                         call,
                         MediaEvent::Changed {

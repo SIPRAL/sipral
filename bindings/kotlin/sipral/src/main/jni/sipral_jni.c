@@ -489,7 +489,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
     counters_value.size = sizeof counters_value;
     sipral_status_t status = sipral_stack_counters((sipral_handle_t)stack, &counters_value);
     {
-        jlong slots[20];
+        jlong slots[21];
         slots[0] = (jlong)counters_value.size;
         slots[1] = (jlong)counters_value.registrations_attempted;
         slots[2] = (jlong)counters_value.registrations_succeeded;
@@ -510,7 +510,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
         slots[17] = (jlong)counters_value.stream_transport_wanted;
         slots[18] = (jlong)counters_value.active_calls;
         slots[19] = (jlong)counters_value.events_dropped;
-        (*env)->SetLongArrayRegion(env, counters, 0, 20, slots);
+        slots[20] = (jlong)counters_value.farewells_dropped;
+        (*env)->SetLongArrayRegion(env, counters, 0, 21, slots);
     }
     return (jint)status;
 }

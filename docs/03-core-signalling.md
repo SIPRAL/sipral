@@ -128,7 +128,25 @@ the socket.
   with a `Retry-After` rather than left to grow without bound — a peer
   already inside a dialog must not be able to reproduce the same flood from a
   friendlier address. RFC 5057 classes that 503 as ending only the
-  transaction, so the dialog underneath it stands.
+  transaction, so the dialog underneath it stands. A BYE in order never draws
+  from this ceiling either, however many of the sixteen are already open:
+  §15.1.1 has the caller consider the session over the moment it sends one,
+  whatever answer comes back, so refusing it does not slow a flood down — it
+  only leaves the far end holding a dialog the other side has already hung up
+  on, and only one BYE is ever worth answering per dialog regardless. A BYE
+  whose `CSeq` runs backwards is held to the ceiling like any other request:
+  §12.2.2 answers it 500 and it ends nothing, so exempting it would let a peer
+  open transactions without limit by numbering its BYEs low. The
+  `Retry-After` on this 503 is one second, deliberately short, because the
+  budget it answers for frees again as soon as any one of the sixteen open
+  transactions retires — on a reliable transport the moment this end answers
+  it, and over UDP `64 · T1` after that answer, when §17.2.2's Timer J lets
+  the transaction go. One this end never answers at all is answered 408 by
+  the endpoint's own 64·T1 deadline (below) and then waits out Timer J like
+  any other, so over UDP the slot is back within `128 · T1` at the latest.
+  Room can reappear at any instant up to that bound, so a caller told to
+  wait longer than a second would be idled on an otherwise healthy call for
+  room that may already be there.
 - **Connection reuse** on TCP and TLS, with the connection keyed so that a
   registration and its calls share it.
 

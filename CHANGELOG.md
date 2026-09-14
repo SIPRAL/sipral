@@ -91,6 +91,56 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **`MediaEngine::ring_with` no longer reports a change that never
+  happened.** `settle` re-evaluated the negotiation on every event that
+  could plausibly touch it, including the ACK that confirms a call answered
+  after early media — which carries no body of its own, since RFC 6337
+  §3.1.1 already forbids repeating a description sent reliably — and read
+  the absence of anything new as a change anyway. A call rung with media,
+  then answered, now reports `MediaEvent::Started` once and no
+  `MediaEvent::Changed` for it; a hold, a resume, a moved address or a real
+  re-negotiation afterward is still reported, because `settle` now compares
+  the plan already running against the one it just worked out rather than
+  assuming the second call always differs from the first. The same
+  comparison reaches C beyond `ring_with`: a re-offer the stack answers on a
+  managed call's behalf used to raise `SIPRAL_EVENT_KIND_MEDIA_CHANGED` every
+  time, and now raises it only when the codec, the address or the direction
+  actually moved.
+
+- **A BYE is exempt from the per-dialog non-INVITE transaction budget (task
+  8.7.4-ter a).** Sixteen non-INVITE server transactions open on a dialog
+  used to get a BYE the same 503 as a seventeenth INFO would, but RFC 3261
+  §15.1.1 has the caller consider the session over the moment it sends one,
+  whatever answer comes back — so the refusal only left the far end holding
+  a dialog this end had already been told was abandoned. A BYE in order now
+  reaches the dialog regardless of how many other transactions are open on
+  it; one whose `CSeq` runs backwards ends nothing (§12.2.2 answers it 500)
+  and, like every other non-INVITE request, is still held to the same
+  ceiling of sixteen.
+
+- **Documentation for the per-dialog 503 (task 8.7.4-ter c, d).**
+  `docs/09-rfc-index.md` gains the row for RFC 5057, the source for reading
+  that 503 as ending only the transaction it answers rather than the dialog
+  underneath it. `docs/03-core-signalling.md` says why the refusal carries
+  `Retry-After: 1`: the budget behind it frees again as soon as any one of
+  the sixteen open transactions retires, which is immediate on a reliable
+  transport once it is answered and `64 · T1` after its answer over UDP,
+  when Timer J lets it go — at most `128 · T1` for one this end never
+  answers itself, since the endpoint's own 408 goes at `64 · T1` and Timer J
+  runs after that. Room can reappear at any moment up to that bound, so a
+  longer wait would idle an otherwise healthy call for room that may already
+  be there.
+
+- **`StackState::farewells` is bounded (task 8.4.21).** An application that
+  never called `sipral_stack_poll_farewell` — a binding built against a
+  header from before that entry point existed, among others — kept every
+  ended call's RTCP goodbye queued for as long as the stack lived, about a
+  hundred bytes per call. The queue now holds at most 256; past that the
+  oldest queued goodbye is dropped to make room for the one that just
+  arrived, because a stale goodbye is worth less than a recent one, and each
+  drop is counted in `sipral_counters_t::farewells_dropped`, appended at the
+  struct's tail with `MIN_SIZE` unchanged.
+
 - **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A
   request inside a dialog was wholly exempt from `max_server_transactions`,
   so a peer already inside a live call could open non-INVITE server

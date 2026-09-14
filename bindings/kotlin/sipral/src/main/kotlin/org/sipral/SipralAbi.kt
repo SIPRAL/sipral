@@ -1022,9 +1022,17 @@ data class SipralCounters(
      * still reads every counter that did.
      */
     val eventsDropped: Long,
+    /**
+     * RTCP goodbyes dropped, oldest first, because the application had
+     * not called `sipral_stack_poll_farewell` and the queue behind it
+     * was already at its ceiling. Appended at the tail for the same
+     * reason `events_dropped` was: a build from before this member
+     * existed still reads every counter that did.
+     */
+    val farewellsDropped: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 20
+        const val SLOTS: Int = 21
 
         fun of(slots: LongArray): SipralCounters = SipralCounters(
             slots[0],
@@ -1047,6 +1055,7 @@ data class SipralCounters(
             slots[17],
             slots[18],
             slots[19],
+            slots[20],
         )
     }
 }

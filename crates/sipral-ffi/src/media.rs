@@ -1556,8 +1556,9 @@ pub(crate) mod tests {
         sipral_stack_poll_farewell, srtp_policy,
     };
     use crate::call::tests::{
-        PEER_MEDIA, account_on, connected, hangup, media_call, media_call_offering,
-        media_call_refused, media_call_tuned, media_line, sent,
+        ANSWER, PEER_MEDIA, accepted, account_on, connected, deliver, hangup, managed_config,
+        media_call, media_call_offering, media_call_refused, media_call_tuned, media_line, one,
+        place, sent,
     };
     use crate::error::last_error_text;
     use crate::event::{SipralEvent, SipralEventKind};
@@ -3339,6 +3340,70 @@ a=sendrecv\r\n";
 
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// An application that never calls `sipral_stack_poll_farewell` — a
+    /// binding built against a header from before that entry point existed,
+    /// among others — does not keep every ended call's goodbye for as long
+    /// as the stack lives: past `FAREWELL_CEILING` the oldest is dropped, and
+    /// each drop is counted in `farewells_dropped` (task 8.4.21).
+    #[test]
+    fn a_queue_of_farewells_past_its_ceiling_drops_the_oldest_and_counts_it() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+
+        let mut first_call = SIPRAL_HANDLE_NONE;
+        let mut second_call = SIPRAL_HANDLE_NONE;
+        let mut now = 1_000;
+        // one call's worth of farewells past the ceiling, ended one at a
+        // time and none of them ever polled
+        for i in 0..=crate::stack::FAREWELL_CEILING {
+            let (status, call) = place(handle, account, &managed_config(), now);
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            let invite = one(handle);
+            deliver(handle, &accepted(&invite, ANSWER, true), now + 100);
+            crate::stack::tests::poll(handle, now + 100);
+            // the ACK the answer produced, which is not this test's to keep
+            let _ = sent(handle);
+            match i {
+                0 => first_call = call,
+                1 => second_call = call,
+                _ => {}
+            }
+            hangup(handle, call, now + 200);
+            now += 1_000;
+        }
+
+        crate::stack::with_stack(handle, |state| {
+            assert_eq!(
+                state.farewells.len(),
+                crate::stack::FAREWELL_CEILING,
+                "the queue should sit at its ceiling rather than grow past it"
+            );
+            assert_eq!(
+                state.farewells_dropped, 1,
+                "exactly one farewell arrived past a queue already at the ceiling"
+            );
+            assert!(
+                state
+                    .farewells
+                    .iter()
+                    .all(|(named, ..)| *named != first_call),
+                "the first call's own goodbye should be the one that was dropped"
+            );
+            assert_eq!(
+                state.farewells.front().map(|(named, ..)| *named),
+                Some(second_call),
+                "the oldest surviving goodbye should be the second call's"
+            );
+            Ok(())
+        })
+        .expect("the stack is live");
+
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok
         );
     }

@@ -513,7 +513,14 @@ session is one too many.
 the same codec order, inside the poll that saw the request — so
 `SIPRAL_EVENT_KIND_SESSION_OFFERED` never arrives for one, and
 `sipral_call_accept_session` on it is `SIPRAL_STATUS_WRONG_STATE`. The
-application hears the outcome as `SIPRAL_EVENT_KIND_MEDIA_CHANGED`.
+application hears the outcome as `SIPRAL_EVENT_KIND_MEDIA_CHANGED` when the
+re-offer actually moves the session it is running — a different codec, a
+different address, a different direction. One that adds nothing this stack's
+catalogue would pick, or otherwise repeats what is already running, reports
+nothing: the codec order was answered from and the media itself never moved,
+and an event for a change that was not one would be the same false signal
+`ring`/`ring_with` learned not to send on the ACK that merely confirms a call
+already settled.
 
 **SRTP is a policy, chosen from C, for a call this stack describes.**
 `sipral_stack_config_t::srtp` is the stack's default and `sipral_call_config_t::srtp`
@@ -633,6 +640,19 @@ every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED` for a
 call this stack was running media on, and keep calling until it answers a
 `len` of zero — a goodbye that is never polled is a far end left to wait out
 its own timeout. A call whose media never ran leaves nothing here.
+
+**The queue behind it has a ceiling, the same shape `events_dropped` already
+has for the outbox** (task 8.4.21). An application that never calls
+`sipral_stack_poll_farewell` — including one built against a header from
+before this entry point existed — would otherwise keep every ended call's
+goodbye in memory for as long as the stack lives. Past
+`FAREWELL_CEILING` (256, `crates/sipral-ffi/src/stack.rs`) the oldest queued
+goodbye is dropped to make room for the one that just arrived, because a
+stale goodbye is worth less than a recent one — the far end it was owed to
+has almost always timed the dialog out on its own by the time a queue that
+deep would be reached — and each drop is counted in
+`sipral_counters_t::farewells_dropped`, appended at the struct's tail the
+same way `events_dropped` was.
 
 **Recording is where a path becomes a file**, and the file belongs to the media
 session from then on. C never sees the file handle, so it cannot leak it or

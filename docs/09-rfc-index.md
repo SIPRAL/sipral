@@ -38,6 +38,7 @@ by no call yet.
 | 4235 | Dialog event package, and the `application/dialog-info+xml` reader a busy lamp field is built on | sipral-ua | phase 2 |
 | 3856 | Presence event package: the subscription is the framework's, and the PIDF body reaches the application whole | sipral-ua | phase 2 |
 | 6026 | Correct transaction handling for 2xx | sipral-core | phase 1 |
+| 5057 | Multiple dialog usages in one call: read for the one point this stack needs — a 503 that answers a single non-INVITE transaction ends only that transaction, not the dialog — to decide that the per-dialog ceiling on those refuses the transaction and nothing else | sipral-core | phase 1 |
 | 5626 | Outbound: managing client connections | sipral-ua | phase 2 |
 | 3327 | The Path header, which Outbound registrations travel on | sipral-ua | phase 2 |
 | 5627 | Globally routable UA URIs (GRUU): asked for on REGISTER, learned from this instance's `Contact`, and used as the `Contact` of what opens a dialog, public or temporary as §3.3 says. Self-made GRUUs and the RFC 5628 event extension are not | sipral-ua | phase 2, built |

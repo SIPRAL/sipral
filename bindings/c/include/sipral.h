@@ -1138,6 +1138,14 @@ struct sipral_counters {
      * still reads every counter that did.
      */
     uint64_t events_dropped;
+    /**
+     * RTCP goodbyes dropped, oldest first, because the application had
+     * not called `sipral_stack_poll_farewell` and the queue behind it
+     * was already at its ceiling. Appended at the tail for the same
+     * reason `events_dropped` was: a build from before this member
+     * existed still reads every counter that did.
+     */
+    uint64_t farewells_dropped;
 };
 
 /**

@@ -1169,6 +1169,234 @@ Content-Length: 0\r\n\
     )
 }
 
+/// RFC 3261 §15.1.1: the caller considers the session terminated the moment
+/// it sends a BYE, whatever answer comes back — so a BYE draws from no
+/// per-dialog budget at all, unlike every other non-INVITE request, which
+/// the seventeenth INFO here still finds refused.
+#[test]
+fn a_bye_is_accepted_even_when_the_dialogs_non_invite_budget_is_full() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+
+    // sixteen fresh branches fill the dialog's own budget
+    for seq in 1..=16_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_info(&snapshot, &format!("full{seq}"), seq).as_bytes(),
+            t0,
+        );
+        events(&mut endpoint);
+        transmits(&mut endpoint);
+    }
+
+    // a seventeenth INFO still finds no room: the budget itself is
+    // unmoved, only BYE is exempt from it
+    deliver(
+        &mut endpoint,
+        dialog_info(&snapshot, "over", 17).as_bytes(),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingInDialog { .. })),
+        "a seventeenth INFO should still be refused while the budget is full"
+    );
+    let refusal = sent(&mut endpoint);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+
+    // the BYE that ends the same dialog, with the same sixteen still open,
+    // is accepted rather than refused
+    let bye = format!(
+        "BYE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bKbye1;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=desk\r\n\
+To: Alice <sip:alice@example.com>;tag={}\r\n\
+Call-ID: {}\r\n\
+CSeq: 18 BYE\r\n\
+Content-Length: 0\r\n\
+\r\n",
+        String::from_utf8_lossy(snapshot.local_tag.as_bytes()),
+        String::from_utf8_lossy(snapshot.call_id.as_bytes()),
+    );
+    deliver(&mut endpoint, bye.as_bytes(), t0);
+
+    let raised = events(&mut endpoint);
+    let transaction = raised
+        .iter()
+        .find_map(|event| match event {
+            Event::IncomingBye { transaction, .. } => Some(*transaction),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("the BYE should have been handed up rather than refused: {raised:?}")
+        });
+    assert!(
+        endpoint.dialog(dialog).is_none(),
+        "the dialog should already be gone once the BYE is handed up (§15.1.2)"
+    );
+
+    endpoint
+        .respond(transaction, &OutgoingResponse::new(StatusCode::OK), t0)
+        .expect("the BYE is answered");
+    let answered = sent(&mut endpoint);
+    assert!(
+        answered.starts_with(b"SIP/2.0 200 "),
+        "{}",
+        String::from_utf8_lossy(&answered)
+    );
+}
+
+/// A BYE is let past a full budget only because it ends the dialog, and the
+/// budget with it. One whose `CSeq` runs backwards ends nothing — §12.2.2
+/// answers it 500 and leaves the dialog as it was — so a peer inside the
+/// dialog that keeps sending those would otherwise open server transactions
+/// without any ceiling at all, the flood the budget exists to stop.
+#[test]
+fn a_bye_that_runs_backwards_is_held_to_the_dialogs_budget() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+
+    for seq in 1..=16_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_info(&snapshot, &format!("full{seq}"), seq).as_bytes(),
+            t0,
+        );
+        events(&mut endpoint);
+        transmits(&mut endpoint);
+    }
+
+    // numbered below the sixteen the dialog has already seen: each one is
+    // refused statelessly, and none of them opens a transaction
+    for stale in 1..=8_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_bye(&snapshot, &format!("stale{stale}"), 1).as_bytes(),
+            t0,
+        );
+        assert!(
+            events(&mut endpoint)
+                .iter()
+                .all(|event| !matches!(event, Event::IncomingBye { .. })),
+            "a BYE that runs backwards ends nothing"
+        );
+        let refusal = sent(&mut endpoint);
+        assert!(
+            refusal.starts_with(b"SIP/2.0 503 "),
+            "stale BYE {stale} should find the budget full: {}",
+            String::from_utf8_lossy(&refusal)
+        );
+    }
+    assert_eq!(
+        endpoint.dialog(dialog).map(|d| d.state),
+        Some(crate::dialog::DialogState::Confirmed),
+        "nothing so far ended the dialog"
+    );
+
+    // the BYE that is in order still ends it, full budget or not
+    deliver(
+        &mut endpoint,
+        dialog_bye(&snapshot, "bye", 17).as_bytes(),
+        t0,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingBye { .. })),
+        "the BYE in order should have been handed up"
+    );
+    assert!(endpoint.dialog(dialog).is_none());
+}
+
+/// Over UDP a transaction holds its place in the dialog's budget until Timer
+/// J retires it, 64·T1 after its final response (§17.2.2). One the
+/// application never answers holds it for 64·T1 until the endpoint's own 408
+/// and another 64·T1 after that — 128·T1 in all, the latest docs/03 says
+/// room behind the per-dialog 503 can reappear.
+#[test]
+fn over_udp_an_unanswered_transaction_holds_its_place_until_timer_j() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+    let snapshot = endpoint.dialog(dialog).expect("a dialog");
+
+    for seq in 1..=16_u32 {
+        deliver(
+            &mut endpoint,
+            dialog_info(&snapshot, &format!("full{seq}"), seq).as_bytes(),
+            t0,
+        );
+        events(&mut endpoint);
+        transmits(&mut endpoint);
+    }
+
+    // the endpoint answers all sixteen 408 on the application's behalf
+    endpoint.handle_timeout(t0 + T1 * 64);
+    assert_eq!(
+        transmits(&mut endpoint).len(),
+        16,
+        "one 408 for each unanswered INFO"
+    );
+
+    // answered now, but each is still absorbing retransmissions in Completed
+    deliver(
+        &mut endpoint,
+        dialog_info(&snapshot, "answered", 17).as_bytes(),
+        t0 + T1 * 64,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .all(|event| !matches!(event, Event::IncomingInDialog { .. })),
+        "a 408 alone gives no place back while Timer J still runs"
+    );
+    let refusal = sent(&mut endpoint);
+    assert!(
+        refusal.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
+
+    // Timer J has let every one of them go
+    endpoint.handle_timeout(t0 + T1 * 128);
+    transmits(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        dialog_info(&snapshot, "retired", 18).as_bytes(),
+        t0 + T1 * 128,
+    );
+    assert!(
+        events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::IncomingInDialog { .. })),
+        "room should be back once Timer J has retired the sixteen"
+    );
+}
+
+/// An in-dialog BYE from `bobtag`, addressed to whichever dialog `snapshot`
+/// names, with a fresh branch and the given sequence number.
+fn dialog_bye(snapshot: &DialogSnapshot, branch: &str, seq: u32) -> String {
+    dialog_info(snapshot, branch, seq)
+        .replacen("INFO sip:", "BYE sip:", 1)
+        .replace(" INFO\r\n", " BYE\r\n")
+}
+
 #[test]
 fn another_dialogs_budget_is_unaffected_by_a_full_one() {
     let t0 = Instant::now();

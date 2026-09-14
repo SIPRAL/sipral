@@ -659,7 +659,13 @@ could have gone out:
 
 Both cases end with exactly one session for the call and exactly one
 `MediaEvent::Started`, whichever of `ring_with`/`ring` or `answer`/
-`answer_with` came first.
+`answer_with` came first. The ACK that confirms the call does not also
+produce a `MediaEvent::Changed`: `settle` compares the plan already running
+against the one the confirmation leaves in place, and an ACK that carries no
+body of its own — the ordinary case, since the description was already
+settled — leaves that comparison equal. A `Changed` still follows whenever a
+description that arrives afterward actually disagrees with what is running,
+the 200 OK that repeats a different body after an unreliable 183 included.
 
 **Ringing with media twice on one call is refused**, with the same error
 `answer` uses for a call in the wrong state: once early media has been

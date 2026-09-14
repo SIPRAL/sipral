@@ -63,6 +63,18 @@ const PONG_DUE: core::time::Duration = core::time::Duration::from_secs(10);
 /// friendlier address on it. Sixteen is well past what a real exchange inside
 /// one call needs live at once (DTMF, a PRACK or two, an UPDATE) and well
 /// short of turning one noisy dialog into an unbounded one.
+///
+/// A BYE in order never draws from this budget, however many of the sixteen
+/// are already open: RFC 3261 §15.1.1 has the caller "consider the session
+/// terminated" from the moment it sends one, whatever answer comes back, so
+/// a 503 here does not slow a flood down — it leaves the far end holding a
+/// dialog the other side has already hung up on. Only one BYE is ever worth
+/// answering per dialog in any case, since the dialog itself, and the
+/// budget with it, is gone once it is. A BYE whose `CSeq` runs backwards is
+/// the exception: §12.2.2 answers it 500 and the dialog stands, so it ends
+/// nothing and is held to the budget like any other request — otherwise a
+/// peer could open transactions past it without limit by numbering its BYEs
+/// low.
 const MAX_DIALOG_NON_INVITE_TRANSACTIONS: usize = 16;
 /// `Retry-After` on the 503 [`Endpoint::refuse_when_dialog_full`] answers
 /// with. RFC 5057 does not name a value for this refusal; one second is
@@ -528,12 +540,15 @@ impl Endpoint {
     /// The ceiling on what a stranger may make this endpoint hold.
     ///
     /// A request inside a dialog we already have is never refused *for this*,
-    /// whatever the count says: it manages state that exists, and a BYE
-    /// turned away leaves the call standing for the life of the process. It
-    /// is held to [`Endpoint::refuse_when_dialog_full`] instead, which is its
-    /// own, smaller ceiling. Nor is a CANCEL that matches a transaction of
-    /// ours, for the same reason and because §9.2 makes answering it a MUST,
-    /// in or out of a dialog. A stranger's request is the remaining case, and
+    /// whatever the count says: it manages state that exists. It is held to
+    /// [`Endpoint::refuse_when_dialog_full`] instead, which is its own,
+    /// smaller ceiling — except a BYE in order, which that ceiling exempts too: a BYE
+    /// turned away leaves the call standing for the life of the process, and
+    /// §15.1.1 has the far end consider the session over the moment it sent
+    /// one regardless of what comes back, so refusing it buys nothing. Nor is
+    /// a CANCEL that matches a transaction of ours, for the same reason and
+    /// because §9.2 makes answering it a MUST, in or out of a dialog. A
+    /// stranger's request is the remaining case, and
     /// past the ceiling it gets §21.5.4's 503 — "temporarily unable to
     /// process the request due to a temporary overloading" — written straight
     /// to the flow, because the point of refusing is not to keep anything. No
@@ -607,19 +622,38 @@ impl Endpoint {
     /// A re-INVITE is an INVITE server transaction and is held to
     /// `max_dialogs` like any other INVITE — §14.1 refuses a second one in
     /// the same dialog anyway while one is outstanding — so only a
-    /// non-INVITE request draws from this budget. Past it the request is
-    /// answered 503, statelessly exactly as the endpoint-wide ceiling is, but
-    /// *with* a `Retry-After`: RFC 5057 classes a 503 as ending only the
-    /// transaction it answers, so the call underneath it is untouched, and
-    /// `Retry-After` tells this one peer's own client transaction to slow
-    /// down rather than read the refusal as a reason to give the call up.
+    /// non-INVITE request draws from this budget, and a BYE in order never
+    /// does either: §15.1.1 has the caller "consider the session terminated"
+    /// the moment its BYE is sent, whatever answer comes back, so a 503 here
+    /// buys nothing but a far end left holding a dialog the other side has
+    /// already abandoned, and only one BYE is ever worth honouring per
+    /// dialog regardless of how many other transactions are open on it. A
+    /// BYE whose `CSeq` runs backwards ends nothing (§12.2.2 answers it 500)
+    /// and draws from the budget like any other request. Past
+    /// it, every other non-INVITE request is answered 503, statelessly
+    /// exactly as the endpoint-wide ceiling is, but *with* a `Retry-After`:
+    /// RFC 5057 classes a 503 as ending only the transaction it answers, so
+    /// the call underneath it is untouched, and `Retry-After` tells this one
+    /// peer's own client transaction to slow down rather than read the
+    /// refusal as a reason to give the call up.
     fn refuse_when_dialog_full(
         &mut self,
         dialog: DialogId,
         request: &RawMessage<'_>,
         flow: Flow,
     ) -> bool {
-        if request.method() == Some(Method::Invite)
+        let exempt = match request.method() {
+            Some(Method::Invite) => true,
+            // only a BYE that will end the dialog: one numbered below what the
+            // dialog has already seen is answered 500 by `reject_out_of_order`
+            // and leaves the dialog, and this budget, exactly where they were
+            Some(Method::Bye) => {
+                let seen = self.dialogs.get(dialog).and_then(Dialog::remote_seq);
+                !matches!((seen, request.cseq()), (Some(remote), Ok(cseq)) if cseq.seq < remote)
+            }
+            _ => false,
+        };
+        if exempt
             || self.dialogs.non_invite_transactions(dialog) < MAX_DIALOG_NON_INVITE_TRANSACTIONS
         {
             return false;

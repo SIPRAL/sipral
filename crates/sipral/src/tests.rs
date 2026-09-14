@@ -572,6 +572,78 @@ fn ringing_with_media_then_answering_reuses_the_session_and_the_description() {
     );
 }
 
+/// The ACK that confirms a call rung with media carries no description of its
+/// own — the ordinary case, since RFC 6337 §3.1.1 already forbids repeating
+/// one sent reliably — and `settle` used to read that as a change anyway,
+/// because it compared nothing before deciding the running session had moved.
+/// Neither side's plan has moved: the far end's `CallConfirmed` and this
+/// end's `IncomingAck` both settle on exactly the same local and remote
+/// descriptions the 183 already wrote. A hold placed afterward is a real
+/// change and must still be reported.
+#[test]
+fn the_ack_after_ringing_with_media_reports_no_change_but_a_real_one_still_is() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let remote = pair.ring();
+    // whatever provisional response the core sent on its own before the
+    // application had a chance to
+    let _ = pair.callee.outbound();
+
+    pair.callee
+        .engine
+        .ring(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the 183 goes");
+    pair.callee.drain(pair.now, false);
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.settle();
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the 200 OK goes");
+    pair.callee.drain(pair.now, false);
+    // carries the 200 OK to the caller, the caller's ACK back to the callee,
+    // and drains both sides — the exchange that used to manufacture a change
+    pair.settle();
+
+    let call = pair.caller.call().expect("the caller knows the call");
+    for side in [
+        ("caller", pair.caller.media_events()),
+        ("callee", pair.callee.media_events()),
+    ] {
+        let (name, events) = side;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, MediaEvent::Started { .. }))
+                .count(),
+            1,
+            "{name} should have started media exactly once: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MediaEvent::Changed { .. })),
+            "{name} reported a change nothing about the session made: {events:?}"
+        );
+    }
+
+    // a real change — a hold — is still reported once it actually happens
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    assert!(
+        pair.callee
+            .media_events()
+            .iter()
+            .any(|event| matches!(event, MediaEvent::Changed { .. })),
+        "a hold placed after settling should still be reported: {:?}",
+        pair.callee.media_events()
+    );
+}
+
 /// Ringing with media twice on one call is refused, with the error
 /// [`MediaEngine::answer`] itself uses for a call in the wrong state.
 #[test]

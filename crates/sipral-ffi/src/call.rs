@@ -1352,7 +1352,7 @@ m=audio 40000 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=sendrecv\r\n";
 
-    const ANSWER: &[u8] = b"v=0\r\n\
+    pub(crate) const ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
 c=IN IP4 203.0.113.5\r\n\
@@ -1556,7 +1556,7 @@ a=recvonly\r\n";
         (handle, account_on(handle))
     }
 
-    fn place(
+    pub(crate) fn place(
         stack: SipralHandle,
         account: SipralHandle,
         config: &SipralCallConfig,
@@ -3194,7 +3194,10 @@ Content-Length: 0\r\n\r\n";
     /// A change the far end offers on a managed call is answered by the stack,
     /// from the same codec order, before the poll that saw it returns. So it is
     /// not handed to the application, and the two entry points that would
-    /// answer it a second time say so.
+    /// answer it a second time say so. This particular re-offer only adds a
+    /// format the catalogue does not carry, so the answer keeps running the
+    /// codec and the address it already had, and `MEDIA_CHANGED` — which is
+    /// for the far end's audio actually moving — is silent about it.
     #[test]
     fn a_stack_that_describes_a_call_answers_its_own_re_offers() {
         let mut observed = Observed::default();
@@ -3217,9 +3220,15 @@ Content-Length: 0\r\n\r\n";
             !sent(handle).is_empty(),
             "nothing went out in answer to the re-offer"
         );
+        // the re-offer only adds a format this stack's own catalogue does not
+        // carry, so the answer still runs PCMU at the address it already had:
+        // nothing about the session actually moved, and there is nothing to
+        // tell the application that a hold, a resume or a real codec change
+        // would be
         assert!(
-            observed.kinds().contains(&SipralEventKind::MediaChanged),
-            "the application was told nothing about the session that changed: {:?}",
+            !observed.kinds().contains(&SipralEventKind::MediaChanged),
+            "a re-offer that changed nothing the running session uses should \
+             report nothing: {:?}",
             observed.kinds()
         );
         assert_eq!(

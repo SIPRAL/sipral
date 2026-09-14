@@ -481,6 +481,23 @@ unsafe impl Versioned for SipralStackSettings {
 /// growing a queue for it.
 const OUTBOX_CEILING: usize = 4096;
 
+/// How many RTCP goodbyes [`StackState::farewells`] holds before the oldest
+/// is dropped to make room for one that just arrived.
+///
+/// Nothing here reads this queue unless the application calls
+/// [`crate::media::sipral_stack_poll_farewell`], so one that never does — a
+/// binding built against a header from before that entry point existed,
+/// among others — would otherwise keep every ended call's goodbye for as
+/// long as the stack lives. A stale goodbye is worth less than a recent one:
+/// RFC 3550 §6.6 has it tell a far end still holding the dialog open that
+/// this participant is gone, and a far end waiting on one that never
+/// arrives times its own dialog out regardless of how long this queue would
+/// have kept it. Two hundred fifty-six is a call ending every second for
+/// over four minutes before the application has looked once, which is a
+/// caller that has stopped polling rather than one running a few seconds
+/// behind.
+pub(crate) const FAREWELL_CEILING: usize = 256;
+
 /// One stack.
 ///
 /// Its lock is taken without waiting, which is what makes a call from a second
@@ -675,12 +692,17 @@ pub(crate) struct StackState {
     /// during a poll — one call handle at a time, resolved through
     /// [`StackState::calls`] — because by the time an application asks for
     /// one the call it belonged to may already be forgotten there. Drained by
-    /// [`crate::media::sipral_stack_poll_farewell`].
+    /// [`crate::media::sipral_stack_poll_farewell`], and held to at most
+    /// [`FAREWELL_CEILING`].
     pub(crate) farewells: VecDeque<(SipralHandle, SocketAddr, Vec<u8>)>,
     /// How many events a poll raised and then had nowhere to queue, because
     /// [`OUTBOX_CEILING`] was already reached. Reported at the tail of
     /// `sipral_counters_t`.
     pub(crate) events_dropped: u64,
+    /// How many farewells were dropped, oldest first, to keep
+    /// [`StackState::farewells`] at [`FAREWELL_CEILING`]. Reported beside
+    /// `events_dropped` in `sipral_counters_t`.
+    pub(crate) farewells_dropped: u64,
     /// What `now_ms` of zero means. Read once, from the only clock this
     /// library ever looks at, and never compared with a later reading.
     origin: Instant,
@@ -1158,6 +1180,7 @@ pub(crate) unsafe fn create_on(
             user_agent: named.map(|name| Box::from(name.as_bytes())),
             farewells: VecDeque::new(),
             events_dropped: 0,
+            farewells_dropped: 0,
             origin,
             polled_at_ms: 0,
             started: false,
@@ -1431,6 +1454,12 @@ fn drain(
     // yet
     while let Some((call, destination, payload)) = state.engine.poll_farewell() {
         let handle = state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+        if state.farewells.len() >= FAREWELL_CEILING {
+            // the oldest goodbye is worth less than the one that just
+            // arrived — see FAREWELL_CEILING
+            state.farewells.pop_front();
+            state.farewells_dropped = state.farewells_dropped.saturating_add(1);
+        }
         state.farewells.push_back((handle, destination, payload));
     }
     for call in ended {
