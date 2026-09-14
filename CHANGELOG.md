@@ -41,6 +41,37 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   nothing outside this tree calls it yet, so it changed outright rather than
   carrying a parameter nobody could ever set.
 
+- **The lab now drives calls through the facade an application links** (task
+  8.5.1). `sipral-interop` carried its own RTP session, its own codec pair and
+  its own DTMF sender — a second media join, written for the lab and used
+  nowhere else, which is a phase 1 exit criterion this stack had not met:
+  "a phase whose proof runs on a path no customer uses has not exited"
+  (`docs/10-roadmap.md`). It now depends on `sipral` and drives every flow
+  through `MediaEngine`/`MediaSession` — RTP, codecs, DTMF and SRTP alike —
+  and `interop/harness/src/media.rs` is gone; `crate::audio` is what is left,
+  a socket and a tone, which is what any application still has to write for
+  itself. The five existing flows judge exactly what they judged before, with
+  their numbers now read off what `capture`/`receive`/`playback` actually did
+  on the wire rather than a hand-rolled `RtpSession`. Three flows join them:
+  DTMF as an RFC 4733 named telephone event, confirmed by the lab's own
+  dialplan reading a digit however it arrived and naming it straight back
+  (`interop/asterisk/extensions.conf`'s 9003, `interop/freeswitch/lab.xml`'s
+  9003); SRTP against a new SDES endpoint of Asterisk's own
+  (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004); and a
+  hold whose resume re-offers a narrower codec list than the call held on
+  (the 8.2.1 case), against Asterisk, by a re-offer the harness writes
+  itself — `sipral::MediaEngine` has no public way yet to re-offer a live
+  call on a catalogue of its own choosing, which `interop/harness/src/main.rs`
+  (`reoffer_onto`) says in full. DTMF by SIP INFO is not among them:
+  nothing in `sipral-ua` sends one yet, so there is no path through the
+  facade to drive rather than a lab limitation to work around. The lessons
+  the old media join encoded by hand are now tests of `sipral::MediaSession`
+  itself (`crates/sipral/src/tests.rs`): a peer that answers with one G.711
+  law and sends the other used to be dropped as an unnegotiated payload
+  type, and is now decoded with the law it actually names — `accepted` and
+  `fill` in `crates/sipral/src/session.rs` both changed for it, watched red
+  before the fix by sending A-law on a call negotiated for mu-law.
+
 ### Added
 
 - **The SRTP policy is now chosen from C** (task 8.4.6). An application

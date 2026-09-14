@@ -12,18 +12,24 @@
 //! server was told to leave wide makes the PBX send an INVITE carrying
 //! everything it knows, and what comes back has to be exactly the G.711 in it
 //! and nothing else.
+//!
+//! Both roles are driven by [`Endpoint`], the same pump `main`'s flow script
+//! uses: `sipral::MediaEngine::answer` is what narrows the offer now, kept to
+//! the catalogue this side opened with, and the diagnosis is
+//! `sipral::MediaSession::codec_candidates` rather than a hand-rolled filter
+//! on the offer's own format list.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral_core::msg::OwnedMessage;
-use sipral_core::sdp::{self, AcceptedStream, Connection, Direction, Origin};
-use sipral_ua::{
-    Account, AccountId, CallHandle, Control, Credentials, EndpointConfig, Handler, OutgoingCall,
-    Runtime, UaEvent, Uri, UserAgent,
+use sipral::{
+    Account, AccountId, CallHandle, CallMedia, CodecOutcome, Credentials, Event, MediaConfig,
+    OutgoingCall, UaEvent, Uri,
 };
+use sipral_core::sdp;
 
-use crate::media::Media;
+use crate::audio::Media;
+use crate::{Endpoint, advertised, catalog, place_call, uri};
 
 /// How long the pair may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -34,111 +40,89 @@ const DWELL: Duration = Duration::from_secs(2);
 /// What the callee saw, which is what this flow exists to check.
 #[derive(Debug, Default)]
 struct Narrowing {
-    /// The formats the server offered us.
+    /// The formats the server offered us, read from the INVITE itself.
     offered: Vec<String>,
-    /// The ones our answer kept.
-    kept: Vec<String>,
+    /// Every codec in this end's own catalogue that the offer also named —
+    /// D5's diagnosis, filtered to drop what the far end never listed.
+    kept: Vec<sipral::Codec>,
     /// Whether the call was answered and confirmed.
     up: bool,
 }
 
 /// The end that waits to be called.
 struct Callee {
+    endpoint: Endpoint,
     account: AccountId,
-    local: SocketAddr,
-    media: Media,
-    narrowing: Narrowing,
+    remote: SocketAddr,
     registered: bool,
     asked: bool,
+    narrowing: Narrowing,
     done: bool,
 }
 
-impl Handler for Callee {
-    fn on_event(&mut self, agent: &mut UserAgent, event: UaEvent, now: Instant) {
+impl Callee {
+    fn turn(&mut self, now: Instant) {
+        if !self.asked {
+            self.asked = true;
+            let _ = self.endpoint.agent.register(self.account, now);
+        }
+        for event in self.endpoint.pump(now) {
+            self.on_event(event, now);
+        }
+        self.endpoint.run_media(now);
+        self.endpoint.timers(now);
+    }
+
+    fn on_event(&mut self, event: Event, now: Instant) {
         match event {
-            UaEvent::Registered { .. } => self.registered = true,
-            UaEvent::IncomingCall { call, request, .. } => self.answer(agent, call, &request, now),
-            UaEvent::CallConfirmed { .. } => self.narrowing.up = true,
-            UaEvent::CallEnded { .. } => {
-                self.media.hang_up(now);
-                self.done = true;
+            Event::Signalling(UaEvent::Registered { .. }) => self.registered = true,
+            Event::Signalling(UaEvent::IncomingCall { call, request, .. }) => {
+                self.narrowing.offered = offered_formats(request.as_raw().body());
+                if let Ok(local) = self.endpoint.open_media(call, self.remote, now) {
+                    let _ = self
+                        .endpoint
+                        .engine
+                        .answer(&mut self.endpoint.agent, call, local, now);
+                }
             }
+            Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
+                self.narrowing.up = true;
+                if let Some(session) = self.endpoint.engine.session(call) {
+                    self.narrowing.kept = session
+                        .codec_candidates()
+                        .iter()
+                        .filter(|candidate| !matches!(candidate.outcome, CodecOutcome::NotNamed))
+                        .map(|candidate| candidate.codec)
+                        .collect();
+                }
+            }
+            Event::Signalling(UaEvent::CallEnded { .. }) => self.done = true,
             _ => (),
         }
     }
-
-    fn on_tick(&mut self, agent: &mut UserAgent, now: Instant) -> Control {
-        if !self.asked {
-            self.asked = true;
-            let _ = agent.register(self.account, now);
-        }
-        self.media.turn(now);
-        if self.done {
-            return Control::Stop;
-        }
-        Control::Continue
-    }
 }
 
-impl Callee {
-    /// Answer with what is left after keeping only the formats we have.
-    fn answer(
-        &mut self,
-        agent: &mut UserAgent,
-        call: CallHandle,
-        request: &OwnedMessage,
-        now: Instant,
-    ) {
-        let Ok(theirs) = sdp::parse(request.as_raw().body()) else {
-            let _ = agent.answer(call, None, now);
-            return;
-        };
-        let Some(stream) = theirs.media.first() else {
-            return;
-        };
-        self.narrowing.offered.clone_from(&stream.formats);
-        // G.711 and nothing else. §6.1 allows an answer to add formats it
-        // cannot send yet; adding what we cannot decode would be a lie
-        let kept: Vec<String> = stream
-            .formats
-            .iter()
-            .filter(|format| matches!(format.as_str(), "0" | "8"))
-            .cloned()
-            .collect();
-        if kept.is_empty() {
-            let _ = agent.reject(call, sipral_core::msg::StatusCode::NOT_ACCEPTABLE_HERE, now);
-            return;
-        }
-        self.narrowing.kept.clone_from(&kept);
-        let port = self.media.port().unwrap_or(0);
-        let answer = theirs.answer(
-            Origin::new(1, 1, self.local.ip()),
-            Connection::new(self.local.ip()),
-            &[sipral_core::sdp::StreamAnswer::Accept(AcceptedStream {
-                port,
-                connection: None,
-                formats: kept,
-                direction: Direction::SendRecv,
-                attributes: Vec::new(),
-            })],
-        );
-        let Ok(answer) = answer else {
-            return;
-        };
-        let body = answer.to_string().into_bytes();
-        if agent.answer(call, Some(body.into()), now).is_ok()
-            && let Ok(ours) = sdp::parse(&answer.to_string().into_bytes())
-            && let Ok(Some(plan)) = ours.media_plan(&theirs, 0)
-        {
-            self.media.start(&plan, 0x4341_4c4c, now);
-        }
-    }
+/// The `m=audio` line's own format list, read straight off the request this
+/// end was handed — the offer as it actually arrived, not as this end would
+/// have written it.
+fn offered_formats(body: &[u8]) -> Vec<String> {
+    sdp::parse(body)
+        .ok()
+        .and_then(|description| {
+            description
+                .media
+                .first()
+                .map(|stream| stream.formats.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// The end that places it.
 struct Caller {
+    endpoint: Endpoint,
     account: AccountId,
     target: Uri,
+    remote: SocketAddr,
     call: Option<CallHandle>,
     hang_up_at: Option<Instant>,
     /// Every event this end saw, in order. A pair that stalls says nothing
@@ -149,54 +133,71 @@ struct Caller {
     done: bool,
 }
 
-impl Handler for Caller {
-    fn on_event(&mut self, _agent: &mut UserAgent, event: UaEvent, now: Instant) {
+impl Caller {
+    fn turn(&mut self, callee_registered: bool, now: Instant) {
+        if !self.asked {
+            self.asked = true;
+            let _ = self.endpoint.agent.register(self.account, now);
+        }
+        for event in self.endpoint.pump(now) {
+            self.on_event(event, now);
+        }
+        self.endpoint.run_media(now);
+        self.endpoint.timers(now);
+        // only once the callee is registered, or the server has nowhere to
+        // send the INVITE and answers 404 instead of ringing anybody
+        if callee_registered {
+            self.place(now);
+        }
+        if self.hang_up_at.is_some_and(|due| now >= due)
+            && let Some(call) = self.call
+        {
+            self.hang_up_at = None;
+            let _ = self.endpoint.agent.hangup(call, now);
+        }
+    }
+
+    fn place(&mut self, now: Instant) {
+        if self.placed {
+            return;
+        }
+        self.placed = true;
+        let media = CallMedia::new(catalog(), MediaConfig::default());
+        let outgoing =
+            OutgoingCall::new(self.target.clone()).to_address(self.endpoint.transport, self.remote);
+        if let Ok(call) = place_call(
+            &mut self.endpoint,
+            self.account,
+            outgoing,
+            media,
+            self.remote,
+            now,
+        ) {
+            self.call = Some(call);
+        }
+    }
+
+    fn on_event(&mut self, event: Event, now: Instant) {
         match event {
-            UaEvent::Registered { .. } => self.saw.push("registered".to_owned()),
-            UaEvent::CallProgress { state, .. } => self.saw.push(format!("progress {state:?}")),
-            UaEvent::CallConfirmed { .. } => {
+            Event::Signalling(UaEvent::Registered { .. }) => self.saw.push("registered".to_owned()),
+            Event::Signalling(UaEvent::CallProgress { state, .. }) => {
+                self.saw.push(format!("progress {state:?}"));
+            }
+            Event::Signalling(UaEvent::CallConfirmed { .. }) => {
                 self.saw.push("confirmed".to_owned());
                 self.hang_up_at = Some(now + DWELL);
             }
-            UaEvent::CallEnded { reason, status, .. } => {
+            Event::Signalling(UaEvent::CallEnded { reason, status, .. }) => {
                 self.saw.push(match status {
                     Some(status) => format!("ended {reason} ({})", status.get()),
                     None => format!("ended {reason}"),
                 });
                 self.done = true;
             }
-            other => self.saw.push(short(&other).to_owned()),
-        }
-    }
-
-    fn on_tick(&mut self, agent: &mut UserAgent, now: Instant) -> Control {
-        if !self.asked {
-            self.asked = true;
-            let _ = agent.register(self.account, now);
-        }
-        if self.hang_up_at.is_some_and(|due| now >= due)
-            && let Some(call) = self.call
-        {
-            self.hang_up_at = None;
-            let _ = agent.hangup(call, now);
-        }
-        if self.done {
-            return Control::Stop;
-        }
-        Control::Continue
-    }
-}
-
-impl Caller {
-    /// Place the call, once the callee has had time to register.
-    fn place(&mut self, agent: &mut UserAgent, now: Instant) {
-        if self.placed {
-            return;
-        }
-        self.placed = true;
-        let placing = OutgoingCall::new(self.target.clone());
-        if let Ok(call) = agent.call(self.account, &placing, now) {
-            self.call = Some(call);
+            Event::Signalling(other) => self.saw.push(short(&other).to_owned()),
+            // `Event::Media`, and anything `sipral::Event` (which is
+            // `#[non_exhaustive]`) grows later
+            _ => {}
         }
     }
 }
@@ -214,24 +215,25 @@ pub(crate) fn run(
     dialling_user: &str,
     dialling_pass: &str,
 ) -> Result<String, String> {
-    // the address that reaches the server, for the reason given in `run` in
-    // main.rs: a wildcard here becomes a `Via` naming nowhere
+    // the address that reaches the server, for the reason given in `main.rs`:
+    // a wildcard here becomes a `Via` naming nowhere
     let bind = SocketAddr::new(crate::route_to(remote), 0);
+    let now = Instant::now();
 
-    let mut answering_rt = Runtime::bind(EndpointConfig::default(), [71; 32], bind)
+    let mut answering_endpoint = Endpoint::bind([71; 32], [171; 32], bind, catalog(), now)
         .map_err(|error| format!("cannot bind the callee: {error}"))?;
-    let mut dialling_rt = Runtime::bind(EndpointConfig::default(), [73; 32], bind)
+    let mut dialling_endpoint = Endpoint::bind([73; 32], [173; 32], bind, catalog(), now)
         .map_err(|error| format!("cannot bind the caller: {error}"))?;
 
     let answering_id = account(
-        &mut answering_rt,
+        &mut answering_endpoint,
         server,
         remote,
         answering_user,
         answering_pass,
     )?;
     let dialling_id = account(
-        &mut dialling_rt,
+        &mut dialling_endpoint,
         server,
         remote,
         dialling_user,
@@ -239,17 +241,19 @@ pub(crate) fn run(
     )?;
 
     let mut answering = Callee {
+        endpoint: answering_endpoint,
         account: answering_id,
-        local: crate::advertised(answering_rt.local(), remote),
-        media: Media::bind(Instant::now())?,
-        narrowing: Narrowing::default(),
+        remote,
         registered: false,
         asked: false,
+        narrowing: Narrowing::default(),
         done: false,
     };
     let mut dialling = Caller {
+        endpoint: dialling_endpoint,
         account: dialling_id,
         target: crate::uri(&format!("sip:{answering_user}@{server}"))?,
+        remote,
         call: None,
         hang_up_at: None,
         saw: Vec::new(),
@@ -272,20 +276,8 @@ pub(crate) fn run(
                 answering.narrowing.up
             ));
         }
-        let a = answering_rt
-            .turn(&mut answering, now)
-            .map_err(|error| format!("the callee's loop stopped: {error}"))?;
-        // only once the callee is registered, or the server has nowhere to
-        // send the INVITE and answers 404 instead of ringing anybody
-        if answering.registered {
-            dialling.place(dialling_rt.agent(), Instant::now());
-        }
-        let b = dialling_rt
-            .turn(&mut dialling, Instant::now())
-            .map_err(|error| format!("the caller's loop stopped: {error}"))?;
-        if a == Control::Stop && b == Control::Stop {
-            break;
-        }
+        answering.turn(now);
+        dialling.turn(answering.registered, now);
         if answering.done && dialling.done {
             break;
         }
@@ -303,7 +295,7 @@ fn verdict(seen: &Callee) -> Result<String, String> {
         return Err("the call we answered was never confirmed".to_owned());
     }
     if seen.narrowing.kept.is_empty() {
-        return Err("the answer kept no format at all".to_owned());
+        return Err("the answer kept no codec at all".to_owned());
     }
     if seen.narrowing.offered.len() <= seen.narrowing.kept.len() {
         return Err(format!(
@@ -312,21 +304,23 @@ fn verdict(seen: &Callee) -> Result<String, String> {
             seen.narrowing.kept.len()
         ));
     }
-    if let Some(invented) = seen
+    let kept_names: Vec<String> = seen
         .narrowing
         .kept
         .iter()
-        .find(|format| !seen.narrowing.offered.contains(format))
-    {
-        return Err(format!(
-            "the answer kept {invented}, which was never offered"
-        ));
-    }
-    let heard = seen.media.heard();
+        .map(sipral::Codec::to_string)
+        .collect();
+    let heard = seen
+        .endpoint
+        .media
+        .values()
+        .next()
+        .map(Media::heard)
+        .unwrap_or_default();
     Ok(format!(
         "   ({} offered, kept {}; {} sent, {} back, {} audible)",
         seen.narrowing.offered.len(),
-        seen.narrowing.kept.join(" and "),
+        kept_names.join(" and "),
         heard.sent,
         heard.received,
         heard.audible
@@ -334,19 +328,20 @@ fn verdict(seen: &Callee) -> Result<String, String> {
 }
 
 fn account(
-    runtime: &mut Runtime,
+    endpoint: &mut Endpoint,
     server: &str,
     remote: SocketAddr,
     user: &str,
     pass: &str,
 ) -> Result<AccountId, String> {
-    let local = runtime.local();
-    let transport = runtime.transport();
-    let aor = crate::uri(&format!("sip:{user}@{server}"))?;
-    let registrar = crate::uri(&format!("sip:{server}"))?;
-    let contact = crate::uri(&format!("sip:{user}@{}", crate::advertised(local, remote)))?;
-    Ok(runtime.agent().add_account(
-        Account::new(aor, registrar, contact, transport, remote)
+    let aor = uri(&format!("sip:{user}@{server}"))?;
+    let registrar = uri(&format!("sip:{server}"))?;
+    let contact = uri(&format!(
+        "sip:{user}@{}",
+        advertised(endpoint.local, remote)
+    ))?;
+    Ok(endpoint.agent.add_account(
+        Account::new(aor, registrar, contact, endpoint.transport, remote)
             .credentials(Credentials::new(user, pass))
             .expires(Duration::from_secs(300)),
     ))
@@ -359,7 +354,6 @@ fn short(event: &UaEvent) -> &'static str {
         UaEvent::Unregistered { .. } => "unregistered",
         UaEvent::RegistrationFailed { .. } => "registration failed",
         UaEvent::IncomingCall { .. } => "incoming",
-        UaEvent::CallProgress { .. } => "progress",
         UaEvent::CallConfirmed { .. } => "confirmed",
         UaEvent::CallEnded { .. } => "ended",
         UaEvent::SessionChanged { .. } => "session changed",

@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::sdp::{CryptoPolicy, Direction, Keying, MediaPlan, RtcpPlan};
 use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFORT_NOISE};
+use sipral_media::g711::Law;
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed};
@@ -584,6 +585,17 @@ impl MediaSession {
         let events = &mut self.events;
         let payload_type = self.plan.codec.payload();
         let rate = self.plan.codec.clock_rate();
+        // a peer that answered with one G.711 law and sends the other: real
+        // equipment does this, and `accepted` (below) already lets the
+        // datagram through rather than refusing it as an unnegotiated type.
+        // What is left is to decode it with the law it actually names instead
+        // of the one the coder was built for — the two share a frame shape
+        // (RFC 3551 table 4), so nothing about `room`'s size has to change.
+        // Unless this call's own negotiation put its named events on that
+        // number: what arrives there is then a key, not audio, and the arm
+        // for named events below is the one that has to see it.
+        let dtmf = self.plan.dtmf;
+        let foreign_law = sibling_law(coder.codec()).filter(|&(sibling, _)| dtmf != Some(sibling));
         match self.rtp.pull(self.activity) {
             Pull::Packet(frame) if frame.payload_type == COMFORT_NOISE => {
                 if let Ok(described) = ComfortNoise::decode(frame.payload) {
@@ -599,6 +611,16 @@ impl MediaSession {
                     Ok(_) => Playback::Packet,
                     Err(_) => conceal(coder, room),
                 }
+            }
+            Pull::Packet(frame)
+                if foreign_law.is_some_and(|(sibling, _)| sibling == frame.payload_type) =>
+            {
+                let (_, law) = foreign_law.unwrap_or((0, Law::Mu));
+                let written = law.decode_into(frame.payload, room);
+                if let Some(rest) = room.get_mut(written..) {
+                    rest.fill(0);
+                }
+                Playback::Packet
             }
             // a type that was negotiated but is neither of those is the named
             // events, which are not audio and leave the earpiece alone. The
@@ -1487,20 +1509,39 @@ impl MediaSession {
 }
 
 /// The payload types this stream will take in: what was agreed, the named
-/// events if any were, and comfort noise.
+/// events if any were, comfort noise, and — for G.711 — the sibling law.
 ///
-/// Nothing else, and deliberately. A peer that answers with one companding law
-/// and sends the other is a real thing, and accepting it would mean decoding
-/// A-law through a mu-law table, which is not quiet distortion but loud
-/// distortion. Dropping it shows up in the statistics and then in the stall
-/// watchdog, which is a fault somebody can act on.
+/// The last of those is not a courtesy. A peer that answers with one
+/// companding law and sends the other is a real thing this stack has met, and
+/// refusing the datagram at the RTP layer would show up as silence rather
+/// than as the fault it is; [`fill`](MediaSession::fill) decodes it with the
+/// law it actually names, which the two share a frame shape for (RFC 3551
+/// table 4).
 fn accepted(plan: &MediaPlan) -> PayloadTypes {
-    let types = PayloadTypes::none()
+    let mut types = PayloadTypes::none()
         .with(plan.codec.payload())
         .with(COMFORT_NOISE);
+    if let Ok(codec) = Codec::of_plan(plan)
+        && let Some((sibling, _)) = sibling_law(codec)
+    {
+        types = types.with(sibling);
+    }
     match plan.dtmf {
         Some(payload) => types.with(payload),
         None => types,
+    }
+}
+
+/// The other G.711 law's static payload type and the law itself, for a codec
+/// that has one. `None` for G.722 and Opus, whose frame shape a G.711 payload
+/// does not fit.
+const fn sibling_law(codec: Codec) -> Option<(u8, Law)> {
+    match codec {
+        Codec::Pcmu => Some((Law::A.payload_type(), Law::A)),
+        Codec::Pcma => Some((Law::Mu.payload_type(), Law::Mu)),
+        Codec::G722 => None,
+        #[cfg(feature = "opus")]
+        Codec::Opus => None,
     }
 }
 

@@ -55,4 +55,19 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="hangup"/>
     </condition>
   </extension>
+  <!-- 8.5.1's RFC 4733 DTMF flow. `read` collects one digit into a channel
+       variable however it arrived on the wire, and `send_dtmf` names it
+       straight back — as a telephone-event, since rfc2833-pt is this
+       profile's own setting in lab_profile.xml and send_dtmf uses whichever
+       method the endpoint is configured for. `silence_stream://1` in place
+       of a prompt file: one millisecond of nothing, so the digit is read
+       without a tone playing over it. -->
+  <extension name="sipral_lab_dtmf">
+    <condition field="destination_number" expression="^9003$">
+      <action application="answer"/>
+      <action application="read" data="1 1 silence_stream://1 digit 5000 #"/>
+      <action application="send_dtmf" data="${digit}"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
 </include>

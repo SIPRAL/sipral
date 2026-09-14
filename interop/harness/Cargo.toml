@@ -11,14 +11,23 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
-sipral-core.workspace = true
+# The facade: signalling and media joined, the same seam an application
+# links. RTP, codecs, DTMF and SRTP all come from here now; nothing in this
+# crate opens a `sipral_rtp::RtpSession` or a `sipral_media` codec directly.
+#
 # default-features = false: the lab is driven on G.711 and G.722, nothing here
 # encodes Opus, and this way the harness builds on a machine with no C++
-# toolchain. A workspace build still links libopus, because the facade asks
-# for it and features unify.
-sipral-media = { path = "../../crates/sipral-media", version = "0.0.1", default-features = false }
-sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
-sipral-ua = { path = "../../crates/sipral-ua", version = "0.0.1", features = ["reference-loop"] }
+# toolchain. A workspace build still links libopus, because some other crate
+# in the graph asks for it and features unify.
+sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false }
+# Kept for two things the facade does not re-export: `HeaderName`/`OwnedMessage`
+# to read a refusal's own Warning and reason phrase, and `Origin`/`Connection`
+# for the one flow that writes its own re-offer (8.5.1's hold-with-a-codec-change:
+# `sipral::MediaEngine` has no public way to re-offer a live call on a catalogue
+# of the caller's choosing, so this is that seam until it does). Everything
+# else this crate used to reach into `sipral-core`, `sipral-media` and
+# `sipral-rtp` for now goes through `sipral` instead.
+sipral-core.workspace = true
 
 [lints]
 workspace = true

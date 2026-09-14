@@ -273,16 +273,41 @@ Known peer behaviours worth writing down rather than rediscovering:
 ## Interoperability procedure
 
 Each live exit criterion in `10-roadmap.md` is one scripted flow, driven by
-the reference loop from `sipral-ua` through a small test driver that phase 1
-builds alongside the crates. Pass and fail are defined per flow, not judged at
-the time:
+`interop/harness` (`sipral-interop`) against the container lab. Since 8.5.1
+the harness drives every flow through the `sipral` facade — `MediaEngine` and
+`MediaSession` for RTP, codecs, DTMF and SRTP — the same seam a real
+application links, rather than through a second RTP/codec pipeline written
+for the lab alone: **a phase whose proof runs on a path no customer uses has
+not exited** (`10-roadmap.md`). `crate::audio` in the harness is what a real
+application still has to write for itself either way — a socket and a
+tone — not a second media join. Pass and fail are defined per flow, not
+judged at the time; a flow that did four things out of five is a failure
+naming the fifth, printed as `FAIL <flow> — <what did not hold>`.
 
-| Flow | Pass condition | Evidence kept |
+Run through Kamailio to FreeSWITCH and straight at Asterisk (`scripts/lab.sh
+kamailio` / `asterisk`), unless a column below says one server only:
+
+| Flow | Pass condition | Servers |
 |---|---|---|
-| register | `Registration::Registered` with the registrar's granted expiry, one refresh observed before expiry, `Unregistered` after `Expires: 0` | event log, capture |
-| bidirectional call | 200 to INVITE, ACK seen by the peer, RTP flowing in both directions in the capture, G.711 audio audible both ways, BYE answered with 200 | event log, capture |
-| blind transfer | REFER accepted with 202, `NOTIFY` sequence ending in `200 OK` sipfrag, the transferee's new call established | event log, capture |
-| attended transfer | as blind, plus `Replaces` honoured: the replaced dialog terminated by the target | event log, capture |
+| register | bound, one binding round trip observed, then given back | both |
+| call | connected, hung up by this end, ended | both |
+| hold and resume | as call, plus the hold and the resume both agreed | both |
+| blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | both |
+| attended transfer | as blind, plus the consultation leg itself connected first | both |
+| DTMF, RFC 4733 | connected, a digit sent as a named telephone event named back the same way by the lab's own dialplan (`interop/asterisk/extensions.conf`'s 9003), hung up, ended. Not run through the proxy to FreeSWITCH yet: its 9003 in `interop/freeswitch/lab.xml` never named the digit back, dialled at once or after a pause, and a flow is not run where it is known not to pass until the reason is found | Asterisk only |
+| SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
+| hold with a codec change | as hold, but the resume re-offers a narrower codec list than the call held on (the 8.2.1 case) and the far end's answer actually moves — see `crate::reoffer_onto` in the harness for how, and its own doc comment for what is not yet a facade capability | Asterisk only |
+| inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |
+
+Every audible flow's result line carries the harness's own tally — sent, come
+back, audible, refused, and the session's own `Quality` (loss, jitter, delay
+against target, how much the buffer shrank or stretched) — read off what
+`MediaSession::capture`, `receive` and `playback` actually did on the wire,
+frame by frame, the same as a real application watching its own socket would
+read it. `SIPRAL_REQUIRE_AUDIO=1` makes the plain call and the SRTP call —
+the two that dwell on the far end's tone — fail outright if nothing came back
+audible; `scripts/lab.sh` sets it, and every impairment profile's "audio
+survived it" rests on it.
 
 A flow passes only if every condition holds; a partial run is a failure with
 the failing condition named. The event log and the capture of each passing run
@@ -290,6 +315,18 @@ are kept with the run, so the pass is reproducible and later regressions have a
 reference; a session worth replaying afterwards is anonymised, reviewed by hand
 and committed under `fixtures/replay/`. SIPp is used separately, as a scripted
 *peer* for regression scenarios; it is not how the live matrix is judged.
+
+The lessons the harness's own former media join encoded by hand — offer both
+G.711 laws, since the first real PBX this stack met allowed A-law only, and
+accept a peer that answers with one law and sends the other rather than
+refusing its audio as an unnegotiated payload type — are now tests of
+`sipral::MediaSession` itself (`crates/sipral/src/tests.rs`), not of the
+harness: `a_call_still_connects_against_a_peer_that_keeps_only_a_law` and
+`a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard`.
+`interop/harness/src/local.rs` covers what only the harness's own real
+sockets can — a call placed and answered, audio measured, and a codec change
+carried, all over loopback `UdpSocket`s rather than delivered byte for byte —
+since the real lab is not reachable from every machine this runs on.
 
 ## Tooling
 

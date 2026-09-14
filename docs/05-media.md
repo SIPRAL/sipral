@@ -68,7 +68,11 @@ source address of the first valid packet. This single behaviour, together with
 `rport`, is what makes most NAT traversal unnecessary.
 
 Validation before anything else: version, payload type in the negotiated set,
-plausible SSRC, length. Packets from an unexpected source after latching are
+plausible SSRC, length. The one widening of that set is G.711's other law: a
+call agreed on one companding law also takes the other's static payload type,
+because a peer that answers with one law and sends the other is real, and
+`sipral::MediaSession` decodes such a frame with the law its payload type
+names rather than refusing it as silence. Packets from an unexpected source after latching are
 dropped, not merged — and dropped first, ahead of that validation and ahead of
 SRTP, since the address is the one check that reads nothing out of the
 datagram. A copy that SRTP had already taken would have spent its index in the

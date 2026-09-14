@@ -1,0 +1,586 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+//! Two of this harness's own endpoints, dialling each other directly over
+//! real loopback sockets — no registrar, because there is none to run here.
+//!
+//! `crates/sipral/src/tests.rs` already proves the facade's own join between
+//! two stacks, byte for byte, with no socket under either of them. What that
+//! cannot catch is a fault in what *this* crate adds on top of the facade:
+//! `Endpoint`'s own SIP loop, and `audio::Media`'s own RTP one — binding a
+//! real `UdpSocket`, reading it non-blockingly, pacing a tone against a real
+//! clock. This is that other half, run locally because the real lab is not
+//! reachable from every machine this builds on. How Kamailio, FreeSWITCH and
+//! Asterisk take each flow is still `scripts/lab.sh`'s to say.
+//!
+//! Named `dialling`/`answering` throughout rather than `caller`/`callee`: the
+//! two read too much alike for `clippy::similar_names`, which this workspace
+//! denies.
+
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
+
+use sipral::{
+    Account, CallHandle, CallMedia, Codec, Direction, Event, MediaConfig, MediaEvent, OutgoingCall,
+    UaEvent, Uri,
+};
+
+use crate::{Endpoint, Fact, Flow, Script, Step, catalog, place_call};
+
+const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+const PATIENCE: Duration = Duration::from_secs(10);
+
+fn endpoint(seed: u8) -> Endpoint {
+    Endpoint::bind(
+        [seed; 32],
+        [seed ^ 0x5a; 32],
+        SocketAddr::new(LOOPBACK, 0),
+        catalog(),
+        Instant::now(),
+    )
+    .expect("binding on loopback")
+}
+
+/// An account this end never registers — placing and answering both work
+/// without one being registered — kept only so `UserAgent` has one to
+/// compute a real `Contact` from. A 2xx answered with no account behind the
+/// call carries an empty `Contact`, which RFC 3261 §12.1.1 needs to be real
+/// for the far end to have anywhere to send the dialog's next request, and a
+/// dialler that gets an empty one drops the response rather than completing
+/// a dialog it cannot reach.
+fn local_account(endpoint: &Endpoint, name: &str) -> Account {
+    Account::new(
+        Uri::parse_str(&format!("sip:{name}@127.0.0.1")).expect("a URI"),
+        Uri::parse_str("sip:127.0.0.1").expect("a URI"),
+        Uri::parse_str(&format!("sip:{name}@{}", endpoint.local)).expect("a URI"),
+        endpoint.transport,
+        endpoint.local,
+    )
+}
+
+/// Answer whatever comes in, on a socket this call's own media opens first.
+///
+/// `route_to` only reads the far end's address to pick which local interface
+/// answers it, and on loopback that is `127.0.0.1` whatever the port is, so
+/// a fixed address here says the same thing the real one would.
+fn answer_everything(endpoint: &mut Endpoint, event: &Event, now: Instant) {
+    let elsewhere = SocketAddr::new(LOOPBACK, 1);
+    if let Event::Signalling(UaEvent::IncomingCall { call, .. }) = event
+        && let Ok(local) = endpoint.open_media(*call, elsewhere, now)
+    {
+        let _ = endpoint
+            .engine
+            .answer(&mut endpoint.agent, *call, local, now);
+    }
+}
+
+/// Whether either side has heard the call confirmed.
+fn confirmed(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, Event::Signalling(UaEvent::CallConfirmed { .. })))
+}
+
+fn call_ended(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, Event::Signalling(UaEvent::CallEnded { .. })))
+}
+
+/// Whether a session change reports the stream flowing both ways again —
+/// what `Flow::HoldCodecChange`'s own `Fact::Resumed` reads, since a
+/// re-offer through `crate::reoffer_onto` does not flip
+/// `UaEvent::SessionChanged`'s own `hold.local` (see that flow's comment).
+fn resumed(events: &[Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Media {
+                event: MediaEvent::Changed {
+                    direction: Direction::SendRecv,
+                    ..
+                },
+                ..
+            }
+        )
+    })
+}
+
+/// One round of both endpoints: pump, answer anything that came in, run
+/// media, and read the sockets. Returns what each side saw.
+fn round(
+    dialling: &mut Endpoint,
+    answering: &mut Endpoint,
+    now: Instant,
+) -> (Vec<Event>, Vec<Event>) {
+    let dialled = dialling.pump(now);
+    let answered = answering.pump(now);
+    for event in &answered {
+        answer_everything(answering, event, now);
+    }
+    dialling.run_media(now);
+    answering.run_media(now);
+    dialling.timers(now);
+    answering.timers(now);
+    dialling.read_sip(now);
+    answering.read_sip(now);
+    (dialled, answered)
+}
+
+/// Round both endpoints until `until` says stop, or `PATIENCE` runs out —
+/// whichever comes first, panicking with `what` on the timeout.
+fn round_until(
+    dialling: &mut Endpoint,
+    answering: &mut Endpoint,
+    what: &str,
+    mut until: impl FnMut(&[Event], &[Event]) -> bool,
+) {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        let (dialled, answered) = round(dialling, answering, Instant::now());
+        if until(&dialled, &answered) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("{what}");
+}
+
+/// Place a call from `dialling` straight at `target`'s address — no
+/// registrar, since a direct call needs none.
+fn dial(dialling: &mut Endpoint, target: SocketAddr) -> CallHandle {
+    let account = dialling
+        .agent
+        .add_account(local_account(dialling, "dialling"));
+    let uri = Uri::parse_str(&format!("sip:answering@{target}")).expect("a URI");
+    let outgoing = OutgoingCall::new(uri).to_address(dialling.transport, target);
+    let media = CallMedia::new(catalog(), MediaConfig::default());
+    place_call(dialling, account, outgoing, media, target, Instant::now()).expect("the INVITE goes")
+}
+
+/// A call placed straight at an address connects, carries audio each way
+/// over real sockets, and ends cleanly.
+#[test]
+fn a_direct_call_between_two_of_this_harnesss_own_endpoints_carries_audio() {
+    let mut dialling = endpoint(201);
+    let mut answering = endpoint(202);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, answered| confirmed(dialled) || confirmed(answered),
+    );
+
+    // several frames each way: past RFC 3550 A.1's probation on both sides
+    let mut heard_audible = 0_u32;
+    for _ in 0..40 {
+        round(&mut dialling, &mut answering, Instant::now());
+        if let Some(answering_call) = answering.engine.active().next() {
+            heard_audible += u32::from(
+                answering
+                    .media
+                    .get(&answering_call)
+                    .is_some_and(|media| media.heard().audible > 0),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        heard_audible > 0,
+        "no frame decoded on the far end's own real socket ever measured as the tone"
+    );
+
+    let _ = dialling.agent.hangup(call, Instant::now());
+    let (mut near_ended, mut far_ended) = (false, false);
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the BYE never reached both real sockets",
+        |dialled, answered| {
+            near_ended |= call_ended(dialled);
+            far_ended |= call_ended(answered);
+            near_ended && far_ended
+        },
+    );
+}
+
+/// `Flow::HoldCodecChange`'s own mechanism, in full: a call is held, and a
+/// re-offer through `crate::reoffer_onto` while it is held both moves it to
+/// a different codec — `sipral::MediaEngine` carries the running session
+/// onto it rather than leaving the old one in place — and reports the
+/// stream flowing both ways again, over real sockets. The second half is
+/// the one that needed watching red: `UserAgent::reoffer` keeps whatever
+/// `UaEvent::SessionChanged.hold.local` already was rather than reading it
+/// back out of the SDP it was just handed, so a first version of this flow
+/// that read that flag for `Fact::Resumed` never saw it move — see
+/// `crate::Script::on_media`'s own comment on `MediaEvent::Changed`, which
+/// reads `sipral::MediaSession`'s own direction instead. This is the one
+/// piece of that flow's mechanism this crate can check without the real
+/// lab; how Asterisk itself takes the re-offer is not.
+#[test]
+fn reoffer_onto_resumes_a_held_call_between_two_real_endpoints_onto_a_different_codec() {
+    let mut dialling = endpoint(211);
+    let mut answering = endpoint(212);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, answered| confirmed(dialled) || confirmed(answered),
+    );
+    let before = dialling
+        .engine
+        .session(call)
+        .map(|session| session.codec())
+        .expect("the dialling side has media on a call that is up");
+    assert_ne!(
+        before,
+        Codec::Pcma,
+        "already on the codec the re-offer names"
+    );
+
+    dialling
+        .agent
+        .hold(call, Instant::now())
+        .expect("the hold goes");
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the hold was never agreed",
+        |dialled, _| {
+            dialled
+                .iter()
+                .any(|event| matches!(event, Event::Signalling(UaEvent::SessionChanged { .. })))
+        },
+    );
+
+    crate::reoffer_onto(&mut dialling, call, &["PCMA"], Instant::now()).expect("the re-offer goes");
+
+    let mut after = None;
+    let mut saw_resumed = false;
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        let (dialled, _) = round(&mut dialling, &mut answering, Instant::now());
+        saw_resumed |= resumed(&dialled);
+        after = dialling.engine.session(call).map(|session| session.codec());
+        if after == Some(Codec::Pcma) && saw_resumed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        after,
+        Some(Codec::Pcma),
+        "the re-offer went and the far end answered, but the codec never moved"
+    );
+    assert!(
+        saw_resumed,
+        "the codec moved but nothing ever reported the stream flowing both ways again"
+    );
+    // confirms the premise `Script::on_media`'s own comment states: the UA
+    // level flag really did stay put through a `reoffer`-driven resume, so
+    // reading it for `Fact::Resumed` would have been wrong. If
+    // `UserAgent::reoffer` is ever taught to read the direction back out of
+    // the SDP it is handed, this starts failing and both it and that
+    // workaround can go.
+    assert_eq!(
+        dialling.agent.hold_state(call).map(|hold| hold.local),
+        Some(true),
+        "UserAgent::reoffer no longer keeps the stale hold flag — main.rs's \
+         own workaround for it can be removed"
+    );
+
+    let _ = dialling.agent.hangup(call, Instant::now());
+}
+
+/// The origin a description arrived with, if it parses.
+fn origin_of(body: &[u8]) -> Option<sipral_core::sdp::Origin> {
+    sipral_core::sdp::parse(body)
+        .ok()
+        .map(|description| description.origin)
+}
+
+/// RFC 3264 §8: "When issuing an offer that modifies the session, the "o="
+/// line of the new SDP MUST be identical to that in the previous SDP, except
+/// that the version in the origin field MUST increment by one from the
+/// previous SDP." `Flow::HoldCodecChange`'s resume is exactly such an offer,
+/// written by `crate::reoffer_onto`, so the far end has to see the session id,
+/// the user name and the address the call already had — and the version one
+/// past the hold's.
+#[test]
+fn reoffer_onto_keeps_the_origin_line_the_call_already_had() {
+    let mut dialling = endpoint(251);
+    let mut answering = endpoint(252);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+
+    // every origin the answering side was handed, in the order it was handed
+    let mut origins = Vec::new();
+    let mut note = |answered: &[Event]| {
+        for event in answered {
+            let body = match event {
+                Event::Signalling(UaEvent::IncomingCall { request, .. }) => {
+                    Some(request.as_raw().body().to_vec())
+                }
+                Event::Signalling(UaEvent::SessionChanged {
+                    remote: Some(remote),
+                    ..
+                }) => Some(remote.to_vec()),
+                _ => None,
+            };
+            if let Some(origin) = body.as_deref().and_then(origin_of)
+                && origins.last() != Some(&origin)
+            {
+                origins.push(origin);
+            }
+        }
+    };
+
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, answered| {
+            note(answered);
+            confirmed(dialled)
+        },
+    );
+    dialling
+        .agent
+        .hold(call, Instant::now())
+        .expect("the hold goes");
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the hold was never agreed",
+        |dialled, answered| {
+            note(answered);
+            dialled
+                .iter()
+                .any(|event| matches!(event, Event::Signalling(UaEvent::SessionChanged { .. })))
+        },
+    );
+
+    crate::reoffer_onto(&mut dialling, call, &["PCMA"], Instant::now()).expect("the re-offer goes");
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the re-offer was never answered",
+        |dialled, answered| {
+            note(answered);
+            resumed(dialled)
+        },
+    );
+
+    let [placed, held, reoffered] = origins.as_slice() else {
+        panic!("expected the offer, the hold and the re-offer, and the far end saw {origins:#?}");
+    };
+    for (what, origin) in [("the hold", held), ("the re-offer", reoffered)] {
+        assert_eq!(
+            (&origin.username, origin.session_id, &origin.address),
+            (&placed.username, placed.session_id, &placed.address),
+            "{what} moved the o= line the call was placed with"
+        );
+    }
+    assert_eq!(
+        reoffered.version,
+        held.version + 1,
+        "the re-offer's version is not one past the hold's"
+    );
+
+    let _ = dialling.agent.hangup(call, Instant::now());
+}
+
+/// `MediaSession::playback` is one frame of the device's time per call, which
+/// is what lets the jitter buffer hold a delay at all. The loop that drives it
+/// turns whenever a socket has something or a few milliseconds have passed —
+/// far more often than every twenty — and a frame taken on every turn drains
+/// the buffer as fast as packets arrive, so the result line's `delay`,
+/// `shrunk` and `stretched` describe the loop rather than the path, and the
+/// blackout profile's question, whether the delay recovers after the gap, has
+/// nothing left to measure.
+#[test]
+fn playback_takes_one_frame_per_frame_of_time_however_often_the_loop_turns() {
+    let mut dialling = endpoint(241);
+    let mut answering = endpoint(242);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, _| confirmed(dialled),
+    );
+    // both ways, long enough for the answering side's buffer to be playing
+    for _ in 0..20 {
+        round(&mut dialling, &mut answering, Instant::now());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let answering_call = answering
+        .engine
+        .active()
+        .next()
+        .expect("the answering side has media");
+    let audible = |endpoint: &Endpoint| {
+        endpoint
+            .media
+            .get(&answering_call)
+            .map(|media| media.heard().audible)
+            .unwrap_or_default()
+    };
+
+    // one more turn of the answering side's own, so that everything it has
+    // played so far is behind this instant and the budget below starts here
+    let since = Instant::now();
+    answering.run_media(since);
+    let before = audible(&answering);
+
+    // ten frames of tone land at once, as a network that held them delivers
+    let mut burst = Vec::new();
+    {
+        let mut session = dialling
+            .engine
+            .session(call)
+            .expect("the dialling side's media");
+        let mut samples = vec![0_i16; session.frame_samples()];
+        let mut phase = 0_u32;
+        let rate = session.sample_rate();
+        for _ in 0..10 {
+            crate::audio::tone(&mut samples, &mut phase, rate);
+            if let Ok(Some(datagram)) = session.capture(&samples) {
+                burst.push((datagram.destination, datagram.payload.to_vec()));
+            }
+        }
+    }
+    assert_eq!(burst.len(), 10, "every frame of the burst encodes");
+    let socket = dialling
+        .media
+        .get(&call)
+        .expect("the dialling side's socket");
+    for (destination, payload) in &burst {
+        socket.send(*destination, payload);
+    }
+
+    // the answering loop turning every millisecond or so, for forty of them
+    while since.elapsed() < Duration::from_millis(40) {
+        answering.run_media(Instant::now());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let elapsed = since.elapsed();
+    let played = audible(&answering).saturating_sub(before);
+    let due = u32::try_from(elapsed.as_millis() / 20 + 1).unwrap_or(u32::MAX);
+    assert!(
+        played <= due,
+        "{played} frames of tone played in {elapsed:?}, where a device takes {due}"
+    );
+}
+
+/// A call's RTP socket is bound before the call is placed, because the offer
+/// has to name its port, and a real far end takes its time to answer: auth
+/// challenges, ringing, a person. None of that is time a microphone was
+/// running, so the call's first turn of media sends the frame that is due
+/// now, not every frame that would have been due since the socket was bound —
+/// a burst the far end's buffer has to swallow at the start of every call,
+/// and a `sent` count that measures the setup rather than the call.
+#[test]
+fn the_first_turn_of_a_calls_media_does_not_send_a_burst_for_the_setup_time() {
+    let mut dialling = endpoint(231);
+    let mut answering = endpoint(232);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+
+    // a far end that takes a while to answer, as every real one does
+    std::thread::sleep(Duration::from_millis(400));
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, _| confirmed(dialled),
+    );
+
+    let sent = dialling
+        .media
+        .get(&call)
+        .map(|media| media.heard().sent)
+        .unwrap_or_default();
+    assert!(
+        (1..=2).contains(&sent),
+        "the call's first turn of media put {sent} frames on the wire at once"
+    );
+}
+
+/// The result line's `lost`, `late`, `jitter`, `delay`, `shrunk` and
+/// `stretched` are read once the flow is over, and every flow that passes is
+/// over because its call ended — at which point `sipral::MediaEngine` has
+/// already let the session go. What the call's media cost is still there, in
+/// the `MediaEvent::Ended` that closed it; a result line read from the engine
+/// afterwards has nothing to read and silently prints none of it.
+#[test]
+fn the_result_line_still_has_the_calls_quality_once_the_call_has_ended() {
+    let mut dialling = endpoint(221);
+    let mut answering = endpoint(222);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+    let account = dialling
+        .agent
+        .add_account(local_account(&dialling, "scripted"));
+    let mut script = Script::new(
+        Flow::Call,
+        account,
+        "answering",
+        "elsewhere",
+        "127.0.0.1",
+        answering.local,
+        Instant::now(),
+    );
+    script.call = Some(call);
+    // already placed, so nothing the script's own advance does moves it on
+    script.step = Step::Placing;
+
+    let mut hung_up = false;
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline && script.step != Step::Done {
+        let now = Instant::now();
+        let (dialled, _) = round(&mut dialling, &mut answering, now);
+        for event in &dialled {
+            script.on_event(&mut dialling, event, now);
+        }
+        if !hung_up
+            && script.seen.has(Fact::Up)
+            && dialling
+                .media
+                .get(&call)
+                .is_some_and(|media| media.heard().received > 10)
+        {
+            hung_up = true;
+            dialling.agent.hangup(call, now).expect("the BYE goes");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(hung_up, "no audio ever arrived to hang up on");
+    assert!(script.seen.has(Fact::Over), "the call never ended");
+
+    let quality = script.quality(&mut dialling, Instant::now());
+    assert!(
+        quality.is_some_and(|quality| quality.received > 0),
+        "the call carried audio and ended, and the result line has no quality to print: \
+         {quality:?}"
+    );
+}

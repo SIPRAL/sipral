@@ -501,10 +501,8 @@ version = "0.0.1"
 name = "sipral-interop"
 version = "0.0.1"
 dependencies = [
+ "sipral",
  "sipral-core",
- "sipral-media",
- "sipral-rtp",
- "sipral-ua",
 ]
 
 [[package]]

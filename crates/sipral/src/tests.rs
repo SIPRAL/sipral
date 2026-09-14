@@ -862,6 +862,110 @@ fn a_tone_crosses_the_call() {
     );
 }
 
+/// The lesson the interop harness's own media join used to encode by hand: a
+/// real PBX that answers with one G.711 law and sends the other. Dropping the
+/// far end's audio at the RTP layer would look like silence rather than like
+/// a fault, so the sibling law is accepted and decoded with the law it
+/// actually names.
+#[test]
+fn a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    // past RFC 3550 A.1's probation, on the law this call actually negotiated
+    for _ in 0..4 {
+        tone(&mut samples, 8_000, &mut phase);
+        let _ = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+
+    // one more frame, mislabelled the way that PBX mislabelled it: the octets
+    // this end sends are still mu-law, but the RTP header now claims A-law
+    tone(&mut samples, 8_000, &mut phase);
+    let mut sent = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .capture(&samples)
+        .expect("the frame encodes")
+        .map(|datagram| datagram.payload.to_vec())
+        .expect("a frame that is neither held nor suppressed goes out");
+    let byte = sent.get_mut(1).expect("an RTP header has a second octet");
+    *byte = (*byte & 0x80) | 8; // keep the marker bit, claim PCMA (8)
+
+    let mut session = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media");
+    let arrival = session.receive(&mut sent, caller_media(), pair.now);
+    assert_eq!(
+        arrival,
+        Arrival::Queued,
+        "the far end's own law was refused at the RTP layer: {arrival:?}"
+    );
+    let mut played = vec![0_i16; session.frame_samples()];
+    let outcome = session.playback(&mut played);
+    assert_eq!(
+        outcome,
+        Playback::Packet,
+        "a mislabelled frame was concealed instead of played"
+    );
+    assert!(
+        loudness(&played) > 4_000,
+        "the mislabelled frame came back at {} rather than as the tone",
+        loudness(&played)
+    );
+}
+
+/// The other lesson: offering only mu-law is not what a client does, because
+/// the first real PBX the interop harness met allows A-law only. The default
+/// catalogue offers both, so a peer that keeps only A-law still gets a call
+/// with audio on it.
+#[test]
+fn a_call_still_connects_against_a_peer_that_keeps_only_a_law() {
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::new(),
+        CodecCatalog::with_order(&["PCMA"]).expect("an order"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    assert_eq!(
+        pair.caller
+            .engine
+            .session(call)
+            .map(|session| session.codec()),
+        Some(Codec::Pcma),
+        "the default catalogue did not offer A-law at all"
+    );
+
+    let frame = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .frame_samples();
+    let mut samples = vec![0_i16; frame];
+    let mut phase = 0_u32;
+    let mut heard = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        heard = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&heard) > 4_000,
+        "the tone came back at {} rather than crossing the call",
+        loudness(&heard)
+    );
+}
+
 // -- SDES ---------------------------------------------------------------------
 
 /// One call's worth of a caller talking: the last datagram that crossed, the
@@ -2054,8 +2158,13 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     assert!(quality.lost > 0, "the loss was not counted");
 }
 
-/// A payload type nobody negotiated is dropped rather than decoded through the
-/// wrong table, which is loud distortion rather than quiet.
+/// A payload type nobody negotiated, and that is not the sibling G.711 law
+/// either, is dropped rather than decoded through the wrong table, which is
+/// loud distortion rather than quiet. The sibling law itself is
+/// `a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard`,
+/// which this test used to cover before that lesson was learned: an offer of
+/// nothing but A-law's payload type, 8, is exactly what a peer answering with
+/// mu-law and sending A-law would put on the wire, and that is now accepted.
 #[test]
 fn a_payload_type_that_was_not_negotiated_is_refused() {
     let now = Instant::now();
@@ -2067,15 +2176,79 @@ fn a_payload_type_that_was_not_negotiated_is_refused() {
     );
     let mut receiver = session(&ours, &theirs, now);
 
-    // a well-formed RTP packet carrying A-law, which was never offered
-    let mut datagram = vec![0x80, 8, 0, 1, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44];
+    // a well-formed RTP packet carrying a dynamic type that names nothing
+    // this call agreed to and is not G.711's other law either
+    let mut datagram = vec![0x80, 97, 0, 1, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44];
     datagram.extend_from_slice(&[0x55; 160]);
     let arrival = receiver.receive(
         &mut datagram,
         "192.0.2.2:40002".parse().expect("an address"),
         now,
     );
-    assert_eq!(arrival, Arrival::Dropped(crate::Discard::PayloadType(8)));
+    assert_eq!(arrival, Arrival::Dropped(crate::Discard::PayloadType(97)));
+}
+
+/// G.711's other law is let through on a G.711 call, but only as the law its
+/// static payload type names when nothing in this call's own negotiation
+/// names that number otherwise. A far end whose description maps 8 to
+/// `telephone-event` beside PCMU is breaking RFC 3551's static table, and
+/// its digits still have to arrive as digits rather than be decoded through
+/// the A-law table as a burst of noise, with the key never reported.
+#[test]
+fn a_telephone_event_on_the_other_laws_number_is_still_a_digit() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:8 telephone-event/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:8 telephone-event/8000\r\n",
+    );
+    let mut receiver = session(&ours, &theirs, now);
+    assert_eq!(receiver.codec(), Codec::Pcmu);
+    assert_eq!(
+        receiver.plan().dtmf,
+        Some(8),
+        "the negotiation put named events on 8"
+    );
+    let from: SocketAddr = "192.0.2.2:40002".parse().expect("an address");
+
+    // six frames of audio, then a digit's closing packet three times over
+    // (RFC 4733 §2.5.1.4): event 5, end bit, volume 10, 800 ticks held
+    let packet = |sequence: u16, timestamp: u32, payload_type: u8, payload: &[u8]| {
+        let mut datagram = vec![0x80, payload_type];
+        datagram.extend_from_slice(&sequence.to_be_bytes());
+        datagram.extend_from_slice(&timestamp.to_be_bytes());
+        datagram.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        datagram.extend_from_slice(payload);
+        datagram
+    };
+    // the first of them are RFC 3550 A.1's probation, and refused as such
+    for index in 0..6_u16 {
+        let mut audio = packet(index + 1, u32::from(index) * 160, 0, &[0xff; 160]);
+        let _ = receiver.receive(&mut audio, from, now);
+    }
+    for sequence in 7..=9_u16 {
+        let mut event = packet(sequence, 960, 8, &[5, 0x8a, 0x03, 0x20]);
+        assert_eq!(receiver.receive(&mut event, from, now), Arrival::Queued);
+    }
+
+    let mut played = vec![0_i16; receiver.frame_samples()];
+    let mut heard = Vec::new();
+    for _ in 0..20 {
+        let _ = receiver.playback(&mut played);
+        while let Some(event) = receiver.poll_event() {
+            if let MediaEvent::DigitReceived { digit, .. } = event {
+                heard.push(digit);
+            }
+        }
+    }
+    assert_eq!(
+        heard,
+        vec![Some('5')],
+        "the key sent on the negotiated telephone-event number was not heard as one"
+    );
 }
 
 /// An answer naming a codec this build has no decoder for is a reported
