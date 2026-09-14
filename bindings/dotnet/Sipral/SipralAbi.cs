@@ -965,6 +965,15 @@ public struct SipralCounters
     /// moves both ways, and it is what every other member here is not.
     /// </summary>
     public ulong ActiveCalls;
+    /// <summary>
+    /// Events a poll raised and had nowhere to queue, because the
+    /// callback had not kept up and the outbox was already at its ceiling
+    /// (task 8.4.21). Appended here rather than woven in among the
+    /// others: it counts something about delivery itself rather than
+    /// about a call or a registration, and a build from before it existed
+    /// still reads every counter that did.
+    /// </summary>
+    public ulong EventsDropped;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2575,6 +2584,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_media_poll_rtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_poll_farewell(ulong stack, out ulong call, ref SipralMediaPacket outPacket);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_dialling(ulong media, out uint dialling, out nuint waiting);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -3889,6 +3901,41 @@ public static class Sipral
     public static void MediaPollRtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet)
     {
         Check(NativeMethods.sipral_media_poll_rtcp(media, nowMs, ref packet));
+    }
+
+    /// <summary>
+    /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
+    ///
+    /// `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+    /// the moment a call's session stops, but by then the call's media
+    /// handle is already gone — every `sipral_media_` entry point on it
+    /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
+    /// instead, the one place left that still knows the goodbye belonged to
+    /// that call.
+    ///
+    /// `out_call` is written with the handle of the call the goodbye
+    /// belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
+    /// call itself is already over; the handle is there only so the
+    /// application knows which media socket to send the datagram from, since
+    /// it owns that socket and this ABI never did. Passing it to any other
+    /// entry point answers whatever a stale handle of its kind already
+    /// answers.
+    ///
+    /// One at a time, like every other poll in this crate: call it after
+    /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
+    /// for a call this stack was running media on, and keep calling until
+    /// `out_packet` comes back with a `len` of zero. A call whose media never
+    /// ran leaves nothing here at all.
+    ///
+    /// Safety
+    ///
+    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `sipral_media_packet_t` as sipral_media_capture describes.
+    /// </summary>
+    public static ulong StackPollFarewell(ulong stack, ref SipralMediaPacket outPacket)
+    {
+        Check(NativeMethods.sipral_stack_poll_farewell(stack, out var call, ref outPacket));
+        return call;
     }
 
     /// <summary>

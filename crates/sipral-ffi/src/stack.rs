@@ -70,11 +70,33 @@
 //! moved past: a call that ended inside the same poll has a stale handle by
 //! the time its first event arrives.
 //!
+//! One delivery pass hands over only what was already queued when it began.
+//! Anything posted while it runs — from another thread, or from the callback
+//! itself — waits in the queue rather than being pulled into the same pass,
+//! and the pass returns once it has delivered what it started with: nothing
+//! here keeps a thread inside `sipral_stack_poll` for longer than that one
+//! batch, however long other threads go on posting behind it. The next poll
+//! on this stack, even one that raises nothing of its own, is what picks up
+//! whatever was left, and the poll whose pass left it says that poll is due
+//! now: `has_deadline` set and `next_poll_in_ms` zero, so a caller that waits
+//! for input or for the deadline polls again at once instead of leaving the
+//! events until a datagram or a timer wakes it.
+//!
+//! The queue itself holds at most `OUTBOX_CEILING` events at once. A poll
+//! that finds it already full drops the events it would have added instead
+//! of growing the queue further or waiting for room — signalling must answer
+//! every call it is asked whatever the application's callback is doing — and
+//! counts what it dropped in `sipral_counters_t::events_dropped`, appended at
+//! that struct's tail so a caller who has never heard of it still reads
+//! every counter that existed before it did.
+//!
 //! [`sipral_stack_destroy`] works from inside the callback as it always has.
 //! It takes nothing but the handle table, and the poll that is delivering
-//! holds its share of the stack until it returns, so the rest of the queue is
+//! holds its share of the stack until it returns, so the rest of its pass is
 //! still delivered and a binding whose event handler is where its object gets
-//! disposed does not need a queue of deferred frees to be correct.
+//! disposed does not need a queue of deferred frees to be correct. What was
+//! posted while that pass ran is freed with the stack rather than delivered:
+//! no poll can follow a destroy to take it.
 //!
 //! Everything that names no stack — the last error, the status and event-kind
 //! names, the ABI version — is callable from anywhere at any time, including
@@ -95,7 +117,9 @@ use sipral_ua::{AccountId, CallHandle, CallIdentity, UaEvent, UserAgent};
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
-use crate::handle::{HandleTable, Kind, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
+use crate::handle::{
+    HandleTable, Kind, Refused, SIPRAL_HANDLE_NONE, STACK_TAGS, SipralHandle, StackTag, StackTags,
+};
 use crate::media::{SipralStreamStats, catalog_of, srtp_policy, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
@@ -442,6 +466,21 @@ unsafe impl Versioned for SipralStackSettings {
     }
 }
 
+/// How many deliveries [`Outbox::waiting`] holds before the rest of a poll's
+/// own events are dropped rather than queued behind them.
+///
+/// A callback that is slow, or blocked, does not stop other threads from
+/// posting behind it — signalling on this stack still has to answer every
+/// call it is asked, and posting must never be one that waits — so without a
+/// ceiling the queue is exactly as large as a stuck callback and a determined
+/// poster can make it. Four thousand and ninety-six is a call's worth of
+/// events six hundred times over: nothing in this crate's own test suite ever
+/// raises more than a handful in one poll, a media event or a call event is a
+/// few hundred bytes at most, and a stack pinned open by a callback that
+/// never returns has a worse problem than which of its events gets to keep
+/// growing a queue for it.
+const OUTBOX_CEILING: usize = 4096;
+
 /// One stack.
 ///
 /// Its lock is taken without waiting, which is what makes a call from a second
@@ -453,46 +492,57 @@ struct StackEntry {
 }
 
 impl StackEntry {
-    /// Queue what one poll raised behind whatever is still waiting, and say
-    /// whether the poll that raised it is the one to deliver.
+    /// Queue what one poll raised behind whatever is still waiting, up to
+    /// [`OUTBOX_CEILING`], and say whether the poll that raised it is the one
+    /// to deliver and how many of its own events had no room.
     ///
     /// Called with the stack still held, so two polls queue in the order they
     /// ran. One poll delivers at a time: a poll that arrives while another is
     /// delivering — from inside that one's callback, or on a thread of its
     /// own — leaves its events to it, which is what keeps them in order and
-    /// the callback on one thread.
-    fn post(&self, raised: Vec<Delivery>) -> bool {
+    /// the callback on one thread. Whatever does not fit is dropped rather
+    /// than waited for room, which is what keeps this from ever blocking the
+    /// thread that is signalling.
+    fn post(&self, raised: Vec<Delivery>) -> (bool, usize) {
         let mut outbox = self.outbox();
-        outbox.waiting.extend(raised);
+        let room = OUTBOX_CEILING.saturating_sub(outbox.waiting.len());
+        let dropped = raised.len().saturating_sub(room);
+        outbox.waiting.extend(raised.into_iter().take(room));
         if outbox.delivering {
-            return false;
+            return (false, dropped);
         }
         outbox.delivering = true;
-        true
+        (true, dropped)
     }
 
-    /// Hand what is waiting to the callback one event at a time, with nothing
-    /// held while it runs, until nothing is left; and say how many that was.
-    fn deliver(&self, speaker: Speaker) -> usize {
+    /// Hand what was waiting to the callback, one event at a time and with
+    /// nothing held while it runs, and say how many that was and whether
+    /// anything is still waiting behind it.
+    ///
+    /// Only what was already there when this pass began. A pass that kept
+    /// pulling in whatever arrived while it ran could be held open for as
+    /// long as other threads kept posting, which is what let one slow
+    /// callback grow the queue without bound; anything posted during this
+    /// pass is still in [`Outbox::waiting`] when it returns, and clearing
+    /// `delivering` here — not part way through, only once — is what lets the
+    /// very next poll on this stack, even one that raised nothing of its own,
+    /// notice it is not being delivered and take it instead.
+    fn deliver(&self, speaker: Speaker) -> (usize, bool) {
+        let mut batch = {
+            let mut outbox = self.outbox();
+            std::mem::take(&mut outbox.waiting)
+        };
         let mut delivered = 0_usize;
-        loop {
-            let next = {
-                let mut outbox = self.outbox();
-                let next = outbox.waiting.pop_front();
-                // cleared under the same lock that found the queue empty, so
-                // a poll that posts a moment later finds nobody delivering and
-                // delivers its own
-                if next.is_none() {
-                    outbox.delivering = false;
-                }
-                next
-            };
-            let Some(delivery) = next else {
-                return delivered;
-            };
+        while let Some(delivery) = batch.pop_front() {
             unsafe { (speaker.callback)(ptr::from_ref(&delivery.event), speaker.user_data) };
             delivered = delivered.saturating_add(1);
         }
+        let mut outbox = self.outbox();
+        outbox.delivering = false;
+        // read under the same lock that stops the delivery: a poll that posts
+        // after this finds nobody delivering and delivers its own, and one that
+        // posted before it is what this pass reports as left behind
+        (delivered, !outbox.waiting.is_empty())
     }
 
     fn outbox(&self) -> MutexGuard<'_, Outbox> {
@@ -621,6 +671,16 @@ pub(crate) struct StackState {
     media: MediaConfig,
     /// What goes in `User-Agent`, when the caller wanted one.
     pub(crate) user_agent: Option<Box<[u8]>>,
+    /// The RTCP goodbyes `MediaEngine::poll_farewell` produced, gathered here
+    /// during a poll — one call handle at a time, resolved through
+    /// [`StackState::calls`] — because by the time an application asks for
+    /// one the call it belonged to may already be forgotten there. Drained by
+    /// [`crate::media::sipral_stack_poll_farewell`].
+    pub(crate) farewells: VecDeque<(SipralHandle, SocketAddr, Vec<u8>)>,
+    /// How many events a poll raised and then had nowhere to queue, because
+    /// [`OUTBOX_CEILING`] was already reached. Reported at the tail of
+    /// `sipral_counters_t`.
+    pub(crate) events_dropped: u64,
     /// What `now_ms` of zero means. Read once, from the only clock this
     /// library ever looks at, and never compared with a later reading.
     origin: Instant,
@@ -1096,6 +1156,8 @@ pub(crate) unsafe fn create_on(
             timers,
             media,
             user_agent: named.map(|name| Box::from(name.as_bytes())),
+            farewells: VecDeque::new(),
+            events_dropped: 0,
             origin,
             polled_at_ms: 0,
             started: false,
@@ -1241,14 +1303,26 @@ entry! {
             let counted = run(stack, &mut state, now, &mut raised);
             // posted with the stack still held, so that a poll on another
             // thread cannot queue what it raised in front of this
-            let speaker = entry.post(raised).then_some(Speaker {
+            let (should_deliver, dropped) = entry.post(raised);
+            state.events_dropped = state
+                .events_dropped
+                .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
+            let speaker = should_deliver.then_some(Speaker {
                 callback: state.callback,
                 user_data: state.user_data,
             });
             (counted, speaker)
         };
         if let Some(speaker) = speaker {
-            counted.events_delivered = entry.deliver(speaker);
+            let (delivered, left_waiting) = entry.deliver(speaker);
+            counted.events_delivered = delivered;
+            if left_waiting {
+                // what arrived during the pass is the next poll's to deliver,
+                // and that poll is due now, not when a timer or a datagram
+                // next happens to wake the caller
+                counted.has_deadline = 1;
+                counted.next_poll_in_ms = 0;
+            }
         }
 
         if !result.is_null() {
@@ -1299,7 +1373,10 @@ fn run(
 /// Calls that ended are forgotten at the end rather than as their news is
 /// translated: the media of a call is reported after the signalling that ended
 /// it, and a handle retired in between would leave the last word about a call
-/// naming nothing.
+/// naming nothing. What `MediaEngine::poll_farewell` produced for them is
+/// gathered here too, addressed to the same handle before it is forgotten,
+/// since the goodbye and the handle both outlive the call by exactly the same
+/// margin and neither is reachable again after this function returns.
 fn drain(
     stack: SipralHandle,
     state: &mut StackState,
@@ -1346,6 +1423,15 @@ fn drain(
             // and a number counted is more honest than a kind invented
             _ => *unclaimed = unclaimed.saturating_add(1),
         }
+    }
+    // one call's own release pushes at most one of these, synchronously,
+    // inside the very `poll_event` call above that returned its `CallEnded`
+    // — so by the time this loop runs every goodbye this poll is ever going
+    // to see is already here, still naming a call `calls` has not forgotten
+    // yet
+    while let Some((call, destination, payload)) = state.engine.poll_farewell() {
+        let handle = state.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+        state.farewells.push_back((handle, destination, payload));
     }
     for call in ended {
         state.calls.forget(call);
@@ -1440,8 +1526,9 @@ fn media(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SipralPollResult, SipralStackConfig, SipralStackSettings, SipralTransport, create_on,
-        sipral_stack_create, sipral_stack_destroy, sipral_stack_poll, sipral_stack_settings,
+        Delivery, OUTBOX_CEILING, SipralPollResult, SipralStackConfig, SipralStackSettings,
+        SipralTransport, Speaker, StackEntry, create_on, entry_of, sipral_stack_create,
+        sipral_stack_destroy, sipral_stack_poll, sipral_stack_settings, with_stack,
     };
     use crate::error::{guard, last_error_text};
     use crate::event::{SipralEvent, SipralEventKind};
@@ -1452,6 +1539,8 @@ pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_char, c_void};
     use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(crate) const BIND: &str = "192.0.2.10:5060";
     pub(crate) const SEED: [u8; 32] = [7; 32];
@@ -2536,11 +2625,13 @@ pub(crate) mod tests {
     }
 
     /// A poll from inside the callback does the stack's work and leaves what
-    /// it raised to the delivery already under way. Delivered there instead,
-    /// the new event would reach the callback before the one it is still
-    /// handling had returned, and ahead of anything else still queued.
+    /// it raised to the delivery already under way, which now means the
+    /// *next* pass rather than the rest of this one (task 8.4.21): delivered
+    /// into this one instead, the new event would reach the callback before
+    /// the one it is still handling had returned, and there is no bound left
+    /// on how long this pass could keep finding one more thing to deliver.
     #[test]
-    fn what_a_poll_from_inside_the_callback_raises_waits_its_turn() {
+    fn what_a_poll_from_inside_the_callback_raises_waits_for_the_next_pass() {
         let mut observed = Observed::default();
         let nested = Nested::default();
         let (handle, account) = crate::call::tests::media_line(&mut observed, |config| {
@@ -2554,7 +2645,7 @@ pub(crate) mod tests {
         assert_eq!(
             nested.inner.get(),
             Some((SipralStatus::Ok, 0)),
-            "the inner poll delivered its own events"
+            "the inner poll delivered nothing of its own: the outer pass was already delivering"
         );
         assert_eq!(
             nested.deepest.get(),
@@ -2563,15 +2654,55 @@ pub(crate) mod tests {
         );
         assert_eq!(
             *nested.kinds.borrow(),
+            [SipralEventKind::Started],
+            "the pass already under way delivers only what it began with"
+        );
+        assert_eq!(
+            result.events_delivered, 1,
+            "what the inner poll raised was left queued, not folded into this pass"
+        );
+
+        // the next poll on this stack raises nothing of its own and is still
+        // the one that notices the registration change left waiting
+        let result = poll(handle, 1);
+        assert_eq!(
+            *nested.kinds.borrow(),
             [
                 SipralEventKind::Started,
                 SipralEventKind::RegistrationChanged
             ]
         );
+        assert_eq!(result.events_delivered, 1);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A pass that returns with events still queued behind it says the next
+    /// poll is already due. Otherwise a caller that waits for input or for the
+    /// deadline, which is the loop `crate::transport` spells out, leaves those
+    /// events where they are until a datagram or a timer happens to arrive.
+    #[test]
+    fn a_pass_that_leaves_events_waiting_says_the_next_poll_is_already_due() {
+        let mut observed = Observed::default();
+        let nested = Nested::default();
+        let (handle, account) = crate::call::tests::media_line(&mut observed, |config| {
+            config.event_callback = Some(register_and_poll_from_inside);
+            config.event_user_data = ptr::from_ref(&nested).cast_mut().cast::<c_void>();
+        });
+        nested.account.set(account);
+
+        let result = poll(handle, 0);
         assert_eq!(
-            result.events_delivered, 2,
-            "the outer poll delivered what the inner one raised"
+            result.events_delivered, 1,
+            "the registration change was left for the next pass"
         );
+        assert_eq!(
+            (result.has_deadline, result.next_poll_in_ms),
+            (1, 0),
+            "an event is waiting, so the next poll is due now"
+        );
+
+        let result = poll(handle, 0);
+        assert_eq!(result.events_delivered, 1, "and that poll delivers it");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2769,5 +2900,127 @@ pub(crate) mod tests {
         );
         assert_eq!(unsafe { sipral_stack_destroy(inside) }, SipralStatus::Ok);
         assert_eq!(unsafe { sipral_stack_destroy(after) }, SipralStatus::Ok);
+    }
+
+    // -- the outbox ceiling, and one bounded delivery pass (task 8.4.21) -----
+
+    /// A poll that finds the outbox already at its ceiling — standing in for
+    /// one behind a callback that has not returned — drops what it raised
+    /// instead of growing the queue, and says so where `sipral_stack_counters`
+    /// reads it.
+    #[test]
+    fn a_poll_that_finds_the_outbox_at_the_ceiling_drops_its_own_event_and_counts_it() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let entry = entry_of(handle).expect("the stack exists");
+
+        // filled directly, bypassing signalling: nothing here has to raise
+        // four thousand and ninety-six real events to prove the queue turns
+        // the excess away once it is full
+        let filler: Vec<Delivery> = (0..OUTBOX_CEILING)
+            .map(|_| Delivery::bare(crate::event::started(handle)))
+            .collect();
+        let (delivering, dropped) = entry.post(filler);
+        assert!(delivering, "nobody else was delivering yet");
+        assert_eq!(dropped, 0, "exactly the ceiling fits");
+
+        // the first poll a fresh stack ever gets always raises its own
+        // "started" event by itself, and that is what has nowhere to go now
+        let result = poll(handle, 0);
+        assert_eq!(
+            result.events_delivered, 0,
+            "the pass already under way owns delivery, not this poll"
+        );
+        let after =
+            with_stack(handle, |state| Ok(state.events_dropped)).expect("the stack is live");
+        assert_eq!(after, 1, "the poll's own event had no room and was counted");
+
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A callback whose body floods the same stack from a second, real
+    /// thread — joined before the callback returns, the same shape
+    /// `poll_from_another_thread` above uses to make the race deterministic
+    /// — and records what that thread's own post reported.
+    struct Flooded {
+        entry: Arc<StackEntry>,
+        stack: SipralHandle,
+        dropped: AtomicUsize,
+        /// `1` if the flood found nobody delivering and became the deliverer
+        /// itself, which would mean it was folded into the pass already under
+        /// way rather than left for the next one.
+        joined_this_pass: AtomicUsize,
+    }
+
+    unsafe extern "C" fn flood_from_another_thread(
+        _event: *const SipralEvent,
+        user_data: *mut c_void,
+    ) {
+        let flooded = unsafe { &*user_data.cast::<Flooded>() };
+        let entry = Arc::clone(&flooded.entry);
+        let flood: Vec<Delivery> = (0..8)
+            .map(|_| Delivery::bare(crate::event::started(flooded.stack)))
+            .collect();
+        let (should_deliver, dropped) = std::thread::spawn(move || entry.post(flood))
+            .join()
+            .expect("the thread finished");
+        flooded.dropped.store(dropped, Ordering::SeqCst);
+        flooded
+            .joined_this_pass
+            .store(usize::from(should_deliver), Ordering::SeqCst);
+    }
+
+    /// The fix for the thread that used to be held for as long as other
+    /// threads kept posting: a pass hands over only what was there when it
+    /// began, and whatever a second thread posts while it runs — even from
+    /// inside the very callback this pass is calling — waits for the next
+    /// one instead of being folded into this one.
+    #[test]
+    fn a_delivery_pass_leaves_what_arrives_during_it_for_the_next_pass() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let entry = entry_of(handle).expect("the stack exists");
+
+        // one event to open a pass on
+        let (should_deliver, dropped) =
+            entry.post(vec![Delivery::bare(crate::event::started(handle))]);
+        assert!(should_deliver);
+        assert_eq!(dropped, 0);
+
+        let flooded = Flooded {
+            entry: Arc::clone(&entry),
+            stack: handle,
+            dropped: AtomicUsize::new(usize::MAX),
+            joined_this_pass: AtomicUsize::new(usize::MAX),
+        };
+        let speaker = Speaker {
+            callback: flood_from_another_thread,
+            user_data: ptr::from_ref(&flooded).cast::<c_void>().cast_mut(),
+        };
+        let (delivered, left_waiting) = entry.deliver(speaker);
+
+        assert_eq!(delivered, 1, "only what was waiting when this pass began");
+        assert!(left_waiting, "and it says the flood is still waiting");
+        assert_eq!(
+            flooded.joined_this_pass.load(Ordering::SeqCst),
+            0,
+            "the flood found this pass already delivering, and left its events \
+             to it rather than becoming a deliverer of its own"
+        );
+        assert_eq!(
+            flooded.dropped.load(Ordering::SeqCst),
+            0,
+            "eight events is nowhere near the ceiling"
+        );
+
+        let outbox = entry.outbox();
+        assert_eq!(outbox.waiting.len(), 8, "left for the next pass");
+        assert!(
+            !outbox.delivering,
+            "cleared once this pass returned, so the next poll notices and takes it"
+        );
+        drop(outbox);
+
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

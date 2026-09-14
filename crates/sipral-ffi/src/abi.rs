@@ -597,6 +597,7 @@ pub const SURFACE: Surface = Surface {
         crate::media::sipral_media_playback::ABI,
         crate::media::sipral_media_capture::ABI,
         crate::media::sipral_media_poll_rtcp::ABI,
+        crate::media::sipral_stack_poll_farewell::ABI,
         crate::media::sipral_media_dialling::ABI,
         crate::media::sipral_media_stop_dialling::ABI,
         crate::record::sipral_media_record_start::ABI,

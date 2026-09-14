@@ -79,6 +79,13 @@ record! {
         /// Calls with media running right now. The one gauge in this struct: it
         /// moves both ways, and it is what every other member here is not.
         pub active_calls: u64,
+        /// Events a poll raised and had nowhere to queue, because the
+        /// callback had not kept up and the outbox was already at its ceiling
+        /// (task 8.4.21). Appended here rather than woven in among the
+        /// others: it counts something about delivery itself rather than
+        /// about a call or a registration, and a build from before it existed
+        /// still reads every counter that did.
+        pub events_dropped: u64,
     }
 }
 
@@ -93,7 +100,7 @@ unsafe impl Versioned for SipralCounters {
     }
 }
 
-fn counters_of(counters: Counters) -> SipralCounters {
+fn counters_of(counters: Counters, events_dropped: u64) -> SipralCounters {
     SipralCounters {
         size: size_of::<SipralCounters>(),
         registrations_attempted: counters.registrations_attempted.get(),
@@ -114,6 +121,7 @@ fn counters_of(counters: Counters) -> SipralCounters {
         jitter_buffer_events: counters.jitter_buffer_events.get(),
         stream_transport_wanted: counters.stream_transport_wanted.get(),
         active_calls: counters.active_calls.get(),
+        events_dropped,
     }
 }
 
@@ -133,7 +141,9 @@ entry! {
         // checked before the handle is even looked up, so a caller that got
         // its size wrong is told that rather than something about the stack
         unsafe { declared_size(out_counters.cast_const()) }?;
-        let counters = with_stack(stack, |state| Ok(counters_of(state.engine.counters())))?;
+        let counters = with_stack(stack, |state| {
+            Ok(counters_of(state.engine.counters(), state.events_dropped))
+        })?;
         unsafe { write_versioned(out_counters, counters) }
     }
 }
@@ -168,6 +178,7 @@ mod tests {
             jitter_buffer_events: u64::MAX,
             stream_transport_wanted: u64::MAX,
             active_calls: u64::MAX,
+            events_dropped: u64::MAX,
         }
     }
 
@@ -189,6 +200,22 @@ mod tests {
         assert_eq!(read.jitter_buffer_events, 0);
         assert_eq!(read.stream_transport_wanted, 0);
         assert_eq!(read.active_calls, 0);
+        assert_eq!(read.events_dropped, 0);
+    }
+
+    /// The wiring this file owns: whatever a poll counted as dropped for want
+    /// of room in the outbox is what this reads back. `crates/sipral-ffi/src/stack.rs`
+    /// owns making that count correct in the first place.
+    #[test]
+    fn a_stack_reports_events_it_had_no_room_to_queue() {
+        let mut observed = Observed::default();
+        let stack = crate::stack::tests::stack(&mut observed);
+        crate::stack::with_stack(stack, |state| {
+            state.events_dropped = 3;
+            Ok(())
+        })
+        .expect("the stack is live");
+        assert_eq!(counters(stack).events_dropped, 3);
     }
 
     #[test]
@@ -230,7 +257,12 @@ mod tests {
         let mut observed = Observed::default();
         let stack = crate::stack::tests::stack(&mut observed);
         let mut out = zeroed();
-        out.size = size_of::<SipralCounters>() - 1;
+        // below the pinned minimum rather than `size_of::<SipralCounters>() -
+        // 1`: the struct has grown past that minimum since it was first
+        // published (`events_dropped`, task 8.4.21), and a size one short of
+        // the *current* build is a perfectly good caller compiled against an
+        // older header, not the wrong size this test means
+        out.size = crate::versioned::min_size::COUNTERS - 1;
         let status = unsafe { sipral_stack_counters(stack, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.registrations_attempted, u64::MAX, "nothing was written");

@@ -1327,6 +1327,56 @@ entry! {
     }
 }
 
+entry! {
+    /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
+    ///
+    /// `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+    /// the moment a call's session stops, but by then the call's media
+    /// handle is already gone — every `sipral_media_` entry point on it
+    /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
+    /// instead, the one place left that still knows the goodbye belonged to
+    /// that call.
+    ///
+    /// `out_call` is written with the handle of the call the goodbye
+    /// belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
+    /// call itself is already over; the handle is there only so the
+    /// application knows which media socket to send the datagram from, since
+    /// it owns that socket and this ABI never did. Passing it to any other
+    /// entry point answers whatever a stale handle of its kind already
+    /// answers.
+    ///
+    /// One at a time, like every other poll in this crate: call it after
+    /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
+    /// for a call this stack was running media on, and keep calling until
+    /// `out_packet` comes back with a `len` of zero. A call whose media never
+    /// ran leaves nothing here at all.
+    ///
+    /// # Safety
+    ///
+    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `sipral_media_packet_t` as [`sipral_media_capture`] describes.
+    fn sipral_stack_poll_farewell(
+        stack: SipralHandle,
+        out_call: *mut SipralHandle,
+        out_packet: *mut SipralMediaPacket,
+    ) {
+        if out_call.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
+        }
+        let mut out = unsafe { read_versioned(out_packet) }?;
+        prepare(&mut out)?;
+        let call = with_stack(stack, |state| {
+            let Some((call, destination, payload)) = state.farewells.pop_front() else {
+                return Ok(crate::handle::SIPRAL_HANDLE_NONE);
+            };
+            unsafe { put(&mut out, destination, &payload) }?;
+            Ok(call)
+        })?;
+        unsafe { out_call.write(call) };
+        unsafe { write_versioned(out_packet, out) }
+    }
+}
+
 /// Check the caller brought buffers big enough for anything this can produce,
 /// and empty the two lengths it is about to fill in.
 ///
@@ -1502,7 +1552,8 @@ pub(crate) mod tests {
         media_failed, named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
         sipral_codec_name, sipral_media_capture, sipral_media_dialling, sipral_media_info,
         sipral_media_playback, sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
-        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order, srtp_policy,
+        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
+        sipral_stack_poll_farewell, srtp_policy,
     };
     use crate::call::tests::{
         PEER_MEDIA, account_on, connected, hangup, media_call, media_call_offering,
@@ -3203,6 +3254,127 @@ a=sendrecv\r\n";
         release(media);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    // -- the goodbye a call's media owes when it ends (task 8.4.21) ----------
+
+    /// The first SSRC named in the one RTCP BYE (RFC 3550 §6.4.2, packet type
+    /// 203) inside a compound packet — enough to check what
+    /// `sipral_stack_poll_farewell` handed over against the session's own
+    /// wire output, without a second RTCP parser: a compound packet is
+    /// nothing but concatenated fixed-header sub-packets, each stating its
+    /// own length in 32-bit words, and that much is universal to every one of
+    /// them.
+    fn first_bye_ssrc(compound: &[u8]) -> Option<u32> {
+        const BYE: u8 = 203;
+        let mut rest = compound;
+        while rest.len() >= 4 {
+            let words = u16::from_be_bytes([*rest.get(2)?, *rest.get(3)?]);
+            let length = usize::from(words).saturating_add(1).saturating_mul(4);
+            let packet = rest.get(..length)?;
+            let header = *packet.first()?;
+            if header >> 6 == 2 && packet.get(1).copied() == Some(BYE) && (header & 0x1f) > 0 {
+                return Some(u32::from_be_bytes(packet.get(4..8)?.try_into().ok()?));
+            }
+            rest = rest.get(length..)?;
+        }
+        None
+    }
+
+    /// A call whose media is running leaves exactly one farewell when it
+    /// ends: the RTCP BYE RFC 3550 §6.3.7 owes the far end, addressed to its
+    /// RTCP port and naming this call's own SSRC, readable only through the
+    /// stack once the call's media handle has already gone.
+    #[test]
+    fn a_call_that_ends_with_media_running_leaves_exactly_one_farewell() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+
+        // this call's own SSRC, read off one outgoing RTP packet rather than
+        // reached for directly: the packet is what the far end actually sees
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        let status =
+            unsafe { sipral_media_capture(media, [0_i16; FRAME].as_ptr(), FRAME, &raw mut packet) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (rtp, _) = buffers.taken(&packet);
+        let ssrc = u32::from_be_bytes(
+            rtp.get(8..12)
+                .and_then(|bytes| bytes.try_into().ok())
+                .expect("a full RTP header"),
+        );
+
+        hangup(stack, call, 5_000);
+
+        let mut out_call = SIPRAL_HANDLE_NONE;
+        let mut farewell_buffers = Buffers::new();
+        let mut farewell = farewell_buffers.packet();
+        let status =
+            unsafe { sipral_stack_poll_farewell(stack, &raw mut out_call, &raw mut farewell) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(out_call, SIPRAL_HANDLE_NONE, "the call it belonged to");
+        assert_ne!(farewell.len, 0, "the call's session owed a goodbye");
+        let (bye, destination) = farewell_buffers.taken(&farewell);
+        assert_eq!(
+            destination, "203.0.113.5:41001",
+            "the far end's RTCP port, one past its media one"
+        );
+        assert_eq!(
+            first_bye_ssrc(&bye),
+            Some(ssrc),
+            "the goodbye should name this call's own SSRC: {bye:02x?}"
+        );
+
+        // and nothing after it
+        let mut second_call = SIPRAL_HANDLE_NONE;
+        let mut second = farewell_buffers.packet();
+        let status =
+            unsafe { sipral_stack_poll_farewell(stack, &raw mut second_call, &raw mut second) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(second.len, 0, "only one goodbye was owed");
+        assert_eq!(second_call, SIPRAL_HANDLE_NONE);
+
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A stack that never ran any call's media has nothing queued for it.
+    #[test]
+    fn a_stack_that_never_ran_media_has_no_farewell() {
+        let mut observed = Observed::default();
+        let handle = crate::stack::tests::stack(&mut observed);
+
+        let mut out_call = SIPRAL_HANDLE_NONE;
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        let status =
+            unsafe { sipral_stack_poll_farewell(handle, &raw mut out_call, &raw mut packet) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(packet.len, 0);
+        assert_eq!(out_call, SIPRAL_HANDLE_NONE);
+
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_null_out_call_is_a_bad_argument() {
+        let mut observed = Observed::default();
+        let handle = crate::stack::tests::stack(&mut observed);
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        let status =
+            unsafe { sipral_stack_poll_farewell(handle, ptr::null_mut(), &raw mut packet) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
             SipralStatus::Ok
         );
     }

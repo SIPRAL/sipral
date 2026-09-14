@@ -59,7 +59,10 @@ impl Handler for Callee {
             UaEvent::Registered { .. } => self.registered = true,
             UaEvent::IncomingCall { call, request, .. } => self.answer(agent, call, &request, now),
             UaEvent::CallConfirmed { .. } => self.narrowing.up = true,
-            UaEvent::CallEnded { .. } => self.done = true,
+            UaEvent::CallEnded { .. } => {
+                self.media.hang_up(now);
+                self.done = true;
+            }
             _ => (),
         }
     }

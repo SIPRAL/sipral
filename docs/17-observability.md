@@ -53,6 +53,14 @@ because C has no tuple struct to nest one `struct` inside another for free
 and a longer field name costs nothing a binding was not already going to
 spend regrouping them.
 
+One member of `sipral_counters_t` is not one of these, and has no
+`sipral::Counters` field behind it: `events_dropped` (task 8.4.21), appended
+at the struct's tail. Nothing above it comes from `MediaEngine::poll_event` —
+it counts something about delivery across the C ABI itself, not about a call
+or a registration, and it is fed by `crates/sipral-ffi/src/stack.rs`'s own
+outbox rather than by anything the facade drains. `docs/08-ffi.md` says what
+it counts and why the queue behind it has a ceiling at all.
+
 ### Counters are monotonic, gauges are not — in the type, not only here
 
 `sipral::Counter` only grows; `sipral::Gauge` moves both ways. The

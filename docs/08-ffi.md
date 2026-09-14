@@ -47,8 +47,10 @@ Rules for the ABI:
   device thread that asks for the frame that is due while the callback runs is
   not refused either. `sipral_stack_destroy` works from inside the callback as
   it always has: the poll that is delivering holds its share of the stack until
-  it returns, so the rest of the queue still arrives and nothing is freed
-  underneath it.
+  it returns, so the rest of that poll's pass still arrives and nothing is
+  freed underneath it. What was posted while that pass ran is freed with the
+  stack instead of delivered, since no poll can follow a destroy to deliver
+  it.
 
   The queue belongs to the stack, not to one poll. A poll made from inside the
   callback, or from a second thread while another poll is delivering, still
@@ -59,6 +61,24 @@ Rules for the ABI:
   a call whose media started and ended inside one poll is already gone when its
   first event arrives, and asking about it then answers
   `SIPRAL_STATUS_STALE_HANDLE`.
+
+  One pass of that queue hands over only what was already waiting when it
+  began (task 8.4.21). What is posted while it runs — from another thread, or
+  from the callback it is in the middle of calling — is still in the queue
+  when the pass returns, and the very next poll on this stack, even one that
+  raised nothing of its own, is what notices and delivers it. The poll whose
+  pass left something behind says so in its result, with `has_deadline` set
+  and `next_poll_in_ms` zero, so a caller that sleeps until input arrives or
+  the deadline passes polls again at once rather than leaving those events
+  until something else wakes it. Nothing here
+  loops for as long as other threads keep posting behind it, which is what
+  used to let one slow callback hold every thread on the stack open
+  indefinitely. And the queue itself holds at most `OUTBOX_CEILING` — four
+  thousand and ninety-six — events at once: a poll that finds it already full
+  drops what it would have added rather than growing the queue or waiting for
+  room, since signalling must never block on the application's callback, and
+  counts what it dropped in `sipral_counters_t::events_dropped`, appended at
+  that struct's tail.
 - **Signalling on one stack is one thread at a time, and a second thread is
   told so rather than made to wait.** Every entry point that names a stack
   takes its lock without blocking; one that finds it taken answers
@@ -598,6 +618,21 @@ capturing. Samples are 16-bit mono at `sipral_media_info_t::sample_rate`, a
 frame is exactly `frame_samples` of them, and outgoing packets are written into
 buffers the caller brings — checked before anything is built, so a frame is
 never encoded and then dropped for want of somewhere to put it.
+
+**A call that ends owes the far end an RTCP BYE, and by then its media handle
+is already gone** (task 8.4.21). `MediaEngine::release` builds the goodbye at
+the moment the call ends, but every `sipral_media_` entry point on that call's
+handle already answers `SIPRAL_STATUS_WRONG_STATE` by the time an application
+could ask for it, so `sipral_stack_poll_farewell(stack, out_call, out_packet)`
+is a stack-level call instead — the one place still able to say the goodbye
+belonged to that call. `out_call` carries the handle of the call it ended
+with, given only so the application knows which media socket to send the
+datagram from, since it owns that socket and this ABI never did; `out_packet`
+is the same shape `sipral_media_poll_rtcp` already fills. Call it after
+every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED` for a
+call this stack was running media on, and keep calling until it answers a
+`len` of zero — a goodbye that is never polled is a far end left to wait out
+its own timeout. A call whose media never ran leaves nothing here.
 
 **Recording is where a path becomes a file**, and the file belongs to the media
 session from then on. C never sees the file handle, so it cannot leak it or

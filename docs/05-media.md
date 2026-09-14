@@ -714,6 +714,17 @@ wait in `MediaEngine::poll_farewell`, which hands over one at a time like every
 other poll here, alongside the handle of the call that has ended. A goodbye
 that is never polled is a far end left to wait out its own timeout.
 
+Across the C ABI this is `sipral_stack_poll_farewell(stack, out_call,
+out_packet)` (task 8.4.21), a stack-level call rather than one more of the
+four on a media handle: by the time there is a goodbye to hand over, the call
+it belonged to has already ended, its media handle already answers
+`SIPRAL_STATUS_WRONG_STATE`, and only the stack still knows the call was ever
+there. `crates/sipral-ffi/src/stack.rs` gathers what `poll_farewell` produced
+into a queue of its own during every `sipral_stack_poll`, before the ended
+call's handle is forgotten — which is also where the `CallHandle` a farewell
+names becomes the `sipral_handle_t` the application already has for that call,
+stale as it now is. `docs/08-ffi.md` says when to call it.
+
 ## What a re-negotiation keeps
 
 A re-INVITE settles on a plan, and one of two things happens to the media.
@@ -867,8 +878,22 @@ that runs signalling, so whatever the processor owns has to be able to move
 between them; `docs/08-ffi.md` has the reasoning. It runs with that session
 held, so a processor that reaches back into its own call through the C ABI — by
 the call's media handle or by its stack — is refused rather than left waiting
-for itself. Through a `MediaEngine` it can reach, it would wait for itself, and
-must not.
+for itself.
+
+**Through a `MediaEngine` it can reach, and there it would wait for itself, and
+must not.** That is a rule of the `Processor` trait itself, stated in its own
+doc comment, and not a check the engine makes: `MediaEngine::session` and
+`SessionShare::with` refuse a thread that is already inside the call's own
+session, but `MediaEngine::handle_timeout`, `MediaEngine::poll_rtcp` and
+anything else that walks every session in turn to do its own work take each
+one's lock without asking whether the calling thread already holds it, because
+that is not a question those methods have ever had reason to ask — the poll
+thread that ordinarily calls them is never also inside a frame. A processor
+that keeps a handle on the engine and calls one of them from inside `process`
+or `reset` is the one caller that changes that, and it deadlocks: the session
+its own frame is running on is in that walk too, and the lock it would wait for
+is the one it is already holding, with no status to say so the way the C ABI's
+`SIPRAL_STATUS_BUSY` does.
 
 The trait takes two frames covering the same span of time — the microphone's,
 and the far end's audio as it left the loudspeaker while that microphone was

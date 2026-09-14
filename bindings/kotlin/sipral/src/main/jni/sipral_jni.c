@@ -489,7 +489,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
     counters_value.size = sizeof counters_value;
     sipral_status_t status = sipral_stack_counters((sipral_handle_t)stack, &counters_value);
     {
-        jlong slots[19];
+        jlong slots[20];
         slots[0] = (jlong)counters_value.size;
         slots[1] = (jlong)counters_value.registrations_attempted;
         slots[2] = (jlong)counters_value.registrations_succeeded;
@@ -509,7 +509,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
         slots[16] = (jlong)counters_value.jitter_buffer_events;
         slots[17] = (jlong)counters_value.stream_transport_wanted;
         slots[18] = (jlong)counters_value.active_calls;
-        (*env)->SetLongArrayRegion(env, counters, 0, 19, slots);
+        slots[19] = (jlong)counters_value.events_dropped;
+        (*env)->SetLongArrayRegion(env, counters, 0, 20, slots);
     }
     return (jint)status;
 }
@@ -1324,6 +1325,20 @@ Java_org_sipral_SipralNative_sipral_1media_1poll_1rtcp(JNIEnv *env, jobject self
     (void)env;
     (void)self;
     sipral_status_t status = sipral_media_poll_rtcp((sipral_handle_t)media, (uint64_t)nowMs, (sipral_media_packet_t *)(intptr_t)packet);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1poll_1farewell(JNIEnv *env, jobject self, jlong stack, jlongArray call, jlong outPacket)
+{
+    (void)env;
+    (void)self;
+    sipral_handle_t call_value = 0;
+    sipral_status_t status = sipral_stack_poll_farewell((sipral_handle_t)stack, &call_value, (sipral_media_packet_t *)(intptr_t)outPacket);
+    {
+        jlong slot = (jlong)call_value;
+        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+    }
     return (jint)status;
 }
 

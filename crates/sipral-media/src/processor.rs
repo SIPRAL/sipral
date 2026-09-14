@@ -35,6 +35,18 @@
 /// alternative was the library asserting that of an implementation somebody
 /// else wrote, which is a promise it has no way to keep; an implementation
 /// that cannot move is one no real audio device API could drive anyway.
+///
+/// **Never call back into the engine that owns this session, from inside
+/// [`Processor::process`] or [`Processor::reset`].** Both run with that
+/// session's own lock already held, and only the two calls that hand back a
+/// reach into one specific session — the equivalent of the C ABI's own media
+/// handle — check whether the calling thread is already inside it before
+/// they wait: everything else that walks every session in turn to do its own
+/// work, a timeout tick or a scheduled report among them, takes each one's
+/// lock without asking who already holds it, and none of it returns a status
+/// the way the C ABI's own re-entry guard does. A processor that closes over
+/// its call's engine and reaches back into it from here waits for a lock it
+/// is itself holding, on the very thread that would have to let it go.
 pub trait Processor: Send {
     /// Process one frame of near-end audio in place: the signal captured
     /// from the microphone, about to be encoded and sent.

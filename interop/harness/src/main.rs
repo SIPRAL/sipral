@@ -374,6 +374,7 @@ impl Handler for Script {
                         None => reason.to_string(),
                     });
                 }
+                self.media.hang_up(now);
                 self.finish(agent, now);
             }
             _ => (),

@@ -1884,6 +1884,40 @@ public enum Sipral {
         try check(status)
     }
 
+    /// The RTCP goodbye of a call whose media has ended (task 8.4.21).
+    ///
+    /// `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+    /// the moment a call's session stops, but by then the call's media
+    /// handle is already gone — every `sipral_media_` entry point on it
+    /// answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
+    /// instead, the one place left that still knows the goodbye belonged to
+    /// that call.
+    ///
+    /// `out_call` is written with the handle of the call the goodbye
+    /// belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
+    /// call itself is already over; the handle is there only so the
+    /// application knows which media socket to send the datagram from, since
+    /// it owns that socket and this ABI never did. Passing it to any other
+    /// entry point answers whatever a stale handle of its kind already
+    /// answers.
+    ///
+    /// One at a time, like every other poll in this crate: call it after
+    /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
+    /// for a call this stack was running media on, and keep calling until
+    /// `out_packet` comes back with a `len` of zero. A call whose media never
+    /// ran leaves nothing here at all.
+    ///
+    /// Safety
+    ///
+    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `sipral_media_packet_t` as sipral_media_capture describes.
+    public static func stackPollFarewell(stack: SipralHandle, outPacket: inout sipral_media_packet_t) throws -> SipralHandle {
+        var call = SipralHandle()
+        let status = sipral_stack_poll_farewell(stack, &call, &outPacket)
+        try check(status)
+        return call
+    }
+
     /// Whether a digit is going out or waiting to, and how many have not
     /// started yet.
     ///

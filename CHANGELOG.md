@@ -175,6 +175,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   identifying the referrer, rather than its `Contact`, which could name a
   temporary GRUU an anonymous call had no reason to hand out.
 
+- **A call's RTCP BYE was built and then dropped, and a slow callback could
+  hold every thread on a stack open for as long as other threads kept posting
+  behind it (task 8.4.21).** `MediaEngine::poll_farewell` had nothing in
+  `sipral-ffi` or `interop/harness` calling it, so the goodbye RFC 3550 §6.3.7
+  owes a call's far end was built at the moment the call ended and then
+  discarded with the session it came from; `sipral_stack_poll_farewell` is
+  the new stack-level entry point that hands it over, addressed to the far
+  end's RTCP socket and named to the call it belonged to, and the harness now
+  sends one from its own media socket on every call it ends. And the queue
+  behind `sipral_stack_poll`'s event callback grew without bound while a slow
+  callback ran and other threads kept posting: it is now capped at 4096
+  waiting deliveries, with the excess dropped and counted in the new
+  `sipral_counters_t::events_dropped` rather than queued or blocking the
+  poster, and one delivery pass now hands over only what was already waiting
+  when it began, leaving anything posted during it for the next pass instead
+  of holding the delivering thread open to chase it — and a poll whose pass
+  left something waiting answers a deadline already due, so a caller that
+  sleeps until input or the deadline does not strand it.
+
 ### Security
 
 - **No binding reads past the header fields it was handed.** The Swift and .NET

@@ -1129,6 +1129,15 @@ struct sipral_counters {
      * moves both ways, and it is what every other member here is not.
      */
     uint64_t active_calls;
+    /**
+     * Events a poll raised and had nowhere to queue, because the
+     * callback had not kept up and the outbox was already at its ceiling
+     * (task 8.4.21). Appended here rather than woven in among the
+     * others: it counts something about delivery itself rather than
+     * about a call or a registration, and a build from before it existed
+     * still reads every counter that did.
+     */
+    uint64_t events_dropped;
 };
 
 /**
@@ -3207,6 +3216,37 @@ sipral_status_t sipral_media_capture(sipral_handle_t media, const int16_t *sampl
  * sipral_media_capture describes.
  */
 sipral_status_t sipral_media_poll_rtcp(sipral_handle_t media, uint64_t now_ms, sipral_media_packet_t *packet);
+
+/**
+ * The RTCP goodbye of a call whose media has ended (task 8.4.21).
+ *
+ * `MediaEngine::release` builds the BYE RFC 3550 §6.3.7 owes the far end
+ * the moment a call's session stops, but by then the call's media
+ * handle is already gone — every `sipral_media_` entry point on it
+ * answers `SIPRAL_STATUS_WRONG_STATE` — so this is a stack-level call
+ * instead, the one place left that still knows the goodbye belonged to
+ * that call.
+ *
+ * `out_call` is written with the handle of the call the goodbye
+ * belonged to — `SIPRAL_HANDLE_NONE` when nothing was waiting. The
+ * call itself is already over; the handle is there only so the
+ * application knows which media socket to send the datagram from, since
+ * it owns that socket and this ABI never did. Passing it to any other
+ * entry point answers whatever a stale handle of its kind already
+ * answers.
+ *
+ * One at a time, like every other poll in this crate: call it after
+ * every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
+ * for a call this stack was running media on, and keep calling until
+ * `out_packet` comes back with a `len` of zero. A call whose media never
+ * ran leaves nothing here at all.
+ *
+ * Safety
+ *
+ * `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+ * `sipral_media_packet_t` as sipral_media_capture describes.
+ */
+sipral_status_t sipral_stack_poll_farewell(sipral_handle_t stack, sipral_handle_t *out_call, sipral_media_packet_t *out_packet);
 
 /**
  * Whether a digit is going out or waiting to, and how many have not

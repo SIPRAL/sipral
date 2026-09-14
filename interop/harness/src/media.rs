@@ -27,7 +27,7 @@ use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use sipral_core::sdp::MediaPlan;
+use sipral_core::sdp::{MediaPlan, RtcpPlan};
 use sipral_media::{g711::Law, g722};
 use sipral_rtp::{
     Activity, BufferConfig, PayloadTypes, Pull, Quality, Received, RtpSession, StreamConfig,
@@ -178,6 +178,10 @@ pub(crate) struct Heard {
 pub(crate) struct Media {
     socket: UdpSocket,
     session: Option<RtpSession>,
+    /// Where the negotiation said RTCP goes, which is where the goodbye goes.
+    rtcp: RtcpPlan,
+    /// Whether the goodbye has gone out, after which this end sends nothing.
+    said_goodbye: bool,
     codec: Codec,
     started: Instant,
     next: Instant,
@@ -206,6 +210,8 @@ impl Media {
         Ok(Self {
             socket,
             session: None,
+            rtcp: RtcpPlan::Off,
+            said_goodbye: false,
             codec: Codec::Companded(Law::Mu),
             started: now,
             next: now,
@@ -261,11 +267,16 @@ impl Media {
             },
             1.0,
         ));
+        self.rtcp = plan.rtcp;
+        self.said_goodbye = false;
         self.next = now;
     }
 
     /// Send what is due and take in what arrived.
     pub(crate) fn turn(&mut self, now: Instant) {
+        if self.said_goodbye {
+            return;
+        }
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -331,6 +342,49 @@ impl Media {
             if loud {
                 self.heard.audible = self.heard.audible.saturating_add(1);
             }
+        }
+    }
+
+    /// Say goodbye on this end's own RTP session (RFC 3550 §6.3.7), the
+    /// moment signalling reports the call over.
+    ///
+    /// The harness runs its media on a raw `RtpSession` rather than through
+    /// `sipral::MediaEngine`, so there is no `poll_farewell` to drain here —
+    /// this is that same obligation met at the layer the harness actually
+    /// runs on, and it is why the lab now sees a BYE on this socket rather
+    /// than a session that simply stops.
+    ///
+    /// A fixed unit interval rather than a fresh draw: RFC 3550 §6.2's
+    /// randomisation spreads many participants' reports across an interval so
+    /// they do not all land at once, and two peers sending one BYE each have
+    /// nothing to spread.
+    ///
+    /// Sent where the negotiation put RTCP rather than where the audio goes:
+    /// the same port only when both ends asked for `a=rtcp-mux` (RFC 5761),
+    /// otherwise the port of its own the plan names, and not at all when the
+    /// far end said it runs no RTCP.
+    ///
+    /// Once, and the last thing this stream sends: a source that has said
+    /// goodbye and then goes on sending audio is back in the session it just
+    /// left, so [`Media::turn`] sends nothing afterwards.
+    pub(crate) fn hang_up(&mut self, now: Instant) {
+        if self.said_goodbye {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        self.said_goodbye = true;
+        let destination = match self.rtcp {
+            RtcpPlan::Muxed => session.destination(),
+            RtcpPlan::SeparatePort { remote, .. } => remote,
+            RtcpPlan::Off => return,
+        };
+        let elapsed = now.saturating_duration_since(self.started);
+        if let Ok(length) = session.send_bye(&mut self.packet, elapsed, b"", 1.0)
+            && let Some(datagram) = self.packet.get(..length)
+        {
+            let _ = self.socket.send_to(datagram, destination);
         }
     }
 
@@ -422,6 +476,93 @@ mod tests {
                 "payload type {payload_type} came back inaudible"
             );
         }
+    }
+
+    /// A stream started against a far end on this machine, its RTP and its
+    /// RTCP on sockets of their own. The RTCP one is named by `a=rtcp`, so
+    /// nothing this stream sends can reach a port the test did not bind.
+    fn started(
+        now: std::time::Instant,
+        ssrc: u32,
+    ) -> (super::Media, std::net::UdpSocket, std::net::UdpSocket) {
+        let mut media = super::Media::bind(now).expect("a media socket");
+        let audio = std::net::UdpSocket::bind("127.0.0.1:0").expect("the far end's RTP socket");
+        let control = std::net::UdpSocket::bind("127.0.0.1:0").expect("the far end's RTCP socket");
+        let port_of = |socket: &std::net::UdpSocket| socket.local_addr().expect("bound").port();
+        let ours = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+            media.port().expect("a port")
+        );
+        let theirs = format!(
+            "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=rtcp:{} IN IP4 127.0.0.1\r\n",
+            port_of(&audio),
+            port_of(&control)
+        );
+        let theirs = sipral_core::sdp::parse(theirs.as_bytes()).expect("their answer");
+        let plan = sipral_core::sdp::parse(ours.as_bytes())
+            .expect("our offer")
+            .media_plan(&theirs, 0)
+            .expect("a plan")
+            .expect("a stream");
+        media.start(&plan, ssrc, now);
+        (media, audio, control)
+    }
+
+    /// Once the goodbye is out this end has left the session (RFC 3550
+    /// §6.3.7), and audio sent after it would bring back a source the far end
+    /// has just been told is gone.
+    #[test]
+    fn nothing_goes_out_after_the_goodbye() {
+        let now = std::time::Instant::now();
+        let (mut media, audio, _control) = started(now, 0x4259_4521);
+        media.hang_up(now);
+        media.turn(now + std::time::Duration::from_millis(100));
+
+        audio
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .expect("a timeout");
+        let mut inbox = [0_u8; 1500];
+        assert!(
+            audio.recv_from(&mut inbox).is_err(),
+            "no audio followed the goodbye"
+        );
+    }
+
+    /// A call's goodbye goes where the negotiation said its RTCP goes. Neither
+    /// description here asks for `a=rtcp-mux`, so that is a port of its own,
+    /// the one the answer's `a=rtcp` names, and not the port the audio goes
+    /// to: without the mux attribute on both sides, RTP and RTCP must not
+    /// share a port (RFC 5761 §5.1.1).
+    #[test]
+    fn the_goodbye_goes_to_the_rtcp_port_the_answer_named() {
+        let now = std::time::Instant::now();
+        let ssrc = 0x4259_4521_u32;
+        let (mut media, audio, control) = started(now, ssrc);
+        media.hang_up(now);
+
+        control
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .expect("a timeout");
+        let mut inbox = [0_u8; 1500];
+        let (length, _) = control
+            .recv_from(&mut inbox)
+            .expect("the goodbye reached the RTCP port");
+        let compound =
+            sipral_rtp::CompoundPacket::parse(&inbox[..length]).expect("a compound RTCP packet");
+        assert!(
+            compound.packets().any(|packet| matches!(
+                packet,
+                sipral_rtp::RtcpPacket::Goodbye(bye) if bye.sources().eq([ssrc])
+            )),
+            "a BYE naming this end's SSRC"
+        );
+        audio.set_nonblocking(true).expect("non-blocking");
+        assert!(
+            audio.recv_from(&mut inbox).is_err(),
+            "and nothing of it reached the audio port"
+        );
     }
 
     /// The tone has to stay at the same pitch when the rate doubles, or the
