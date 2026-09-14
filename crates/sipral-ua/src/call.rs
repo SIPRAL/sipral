@@ -444,6 +444,26 @@ pub(crate) struct ContactContext {
     pub(crate) plain: Box<[u8]>,
 }
 
+/// Who is on a call: the `From` and `To` of the request that opened it.
+///
+/// Fixed for the call's whole life, whichever end placed it: the `From` and
+/// the `To` of the INVITE this end sent, or of the one it answered. A fork's
+/// branches share one, since one INVITE is what opened every early dialog
+/// among them.
+#[derive(Clone, Debug)]
+pub struct CallIdentity {
+    /// The `From` URI, as written in the header: no angle brackets, no
+    /// header parameters such as `tag`.
+    pub from_uri: Box<[u8]>,
+    /// The `From` display name, quotes and backslash escapes resolved (RFC
+    /// 3261 §25.1). Empty when the header named none.
+    pub from_display: Box<[u8]>,
+    /// The `To` URI, as written in the header.
+    pub to_uri: Box<[u8]>,
+    /// The `Call-ID`.
+    pub call_id: Box<[u8]>,
+}
+
 impl Call {
     /// What "up" means for this one: an ordinary call, or the leg an attended
     /// transfer was placed to build.

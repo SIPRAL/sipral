@@ -275,6 +275,36 @@ wanted written and threw them away, and there was no way to hand back what
 arrived — media I/O was ahead of signalling I/O, so the boundary carried a call's
 audio and not its INVITE. `crates/sipral-ffi/src/transport.rs` is the other half.
 
+**A call event names both parties.** `sipral_call_event_t::from_uri`,
+`from_display`, `to_uri` and `call_id` are the `From` URI, the `From` display
+name, the `To` URI and the `Call-ID` of the request that opened the call — the
+INVITE this end sent, or the one it answered — read once, when the call is
+placed or arrives, and the same on every event of that call afterwards,
+including the one that reports its end. A branch a fork produced answers with
+its parent's, since one INVITE is what opened every early dialog among them.
+An application that wants to show who is calling, or who a call it placed is
+to, reads these off any event and never has to keep a table of its own or
+parse `sipral_event_t::message` itself. The URIs are as written in the header,
+without the angle brackets and without header parameters such as `tag`; the
+display name has its quotes removed and its backslash escapes resolved
+(RFC 3261 §25.1), and is null and zero, not merely empty, when the header
+named none — the same convention `local_sdp` and `remote_sdp` use for a
+description that is not there. **Their pointers are valid for the duration of
+the callback that carries them and no longer**, the same rule every pointer in
+`sipral_event_t` follows: the queued delivery (or, if the call has since ended
+and its own record forgotten, nothing but that delivery) owns the bytes, so a
+binding that wants them past the callback copies them the way it already
+copies `local_sdp` and `message`.
+
+Appending these four members to `sipral_call_event_t` grows the union they sit
+in and, with it, `sipral_event_t` itself — sixty-four bytes longer this build.
+That is not the growth the versioning rules below call out, because
+`sipral_event_t` carries no pinned length to begin with: it is the one struct
+the library alone fills in, handed to a callback as a `const` pointer that a
+caller reads no further into than the `size` member says, so a binding
+generated against last month's header still reads every member it knew about
+and never reaches for the four it did not.
+
 **Six calls, and no socket among them.** `sipral_stack_poll_transmit` takes what
 the stack wants written; `sipral_stack_receive_datagram` and
 `sipral_stack_receive_stream` hand bytes back; and

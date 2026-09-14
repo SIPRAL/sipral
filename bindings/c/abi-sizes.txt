@@ -14,7 +14,7 @@ sipral_call_config_t 80 104
 sipral_capabilities_t 24 24
 sipral_codec_info_t 32 32
 sipral_counters_t 152 152
-sipral_event_t - 128
+sipral_event_t - 192
 sipral_media_info_t 88 88
 sipral_media_packet_t 56 56
 sipral_poll_result_t 48 48

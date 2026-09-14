@@ -25,6 +25,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   built against an older header still works and gets the default. An
   out-of-range value is refused before anything is built.
 
+- **A call event now names who is on it** (task 8.4.7). `sipral_call_event_t`
+  gained `from_uri`, `from_display`, `to_uri` and `call_id`: the `From` URI,
+  the resolved `From` display name, the `To` URI and the `Call-ID` of the
+  request that opened the call, read once and the same on every event of that
+  call afterwards, including the one that reports its end. An application no
+  longer has to parse `sipral_event_t::message` itself, or keep a table of its
+  own, to know both parties from any event. Appended at the tail of the
+  struct, which grows `sipral_event_t` with it — sixty-four bytes this
+  build — but `sipral_event_t` carries no pinned length to begin with, so a
+  caller built against an older header is unaffected.
+
 ### Fixed
 
 - **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A

@@ -2087,6 +2087,43 @@ public struct SipralCallEvent
     /// not going to.
     /// </summary>
     public ulong RetryInMs;
+    /// <summary>
+    /// The `From` URI of the request that created this call: as written in
+    /// the header, without the angle brackets and without header
+    /// parameters such as `tag`. The same on every event of this call.
+    /// Null and zero when this build has none to report.
+    /// </summary>
+    public IntPtr FromUri;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint FromUriLen;
+    /// <summary>
+    /// That `From`'s display name, quotes and backslash escapes resolved
+    /// (RFC 3261 §25.1). Null and zero when the header named none.
+    /// </summary>
+    public IntPtr FromDisplay;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint FromDisplayLen;
+    /// <summary>
+    /// The `To` URI of the request that created this call, as written in
+    /// the header.
+    /// </summary>
+    public IntPtr ToUri;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ToUriLen;
+    /// <summary>
+    /// The `Call-ID` of the request that created this call.
+    /// </summary>
+    public IntPtr CallId;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint CallIdLen;
 }
 
 /// <summary>

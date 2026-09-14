@@ -80,7 +80,7 @@
 //! names, the ABI version — is callable from anywhere at any time, including
 //! from inside the callback and from any number of threads.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void};
 use std::net::SocketAddr;
 use std::ptr;
@@ -90,7 +90,7 @@ use std::time::{Duration, Instant};
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
 use sipral_core::transaction::TimerConfig;
-use sipral_ua::{AccountId, CallHandle, UaEvent, UserAgent};
+use sipral_ua::{AccountId, CallHandle, CallIdentity, UaEvent, UserAgent};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
@@ -523,7 +523,7 @@ struct Speaker {
 /// An event is translated while the stack is held and read after the lock is
 /// gone, so nothing it points at may be borrowed from the stack or from a
 /// local of the poll that raised it. Every pointer in it points into one of
-/// the three owners beside it, and all three reach their bytes through a
+/// the four owners beside it, and all four reach their bytes through a
 /// reference count or a heap buffer, which stay where they are when a
 /// delivery is moved into the outbox and out of it again.
 struct Delivery {
@@ -535,6 +535,11 @@ struct Delivery {
     _reason: Option<String>,
     /// Never read: the record a statistics event points at.
     _record: Option<Arc<SipralStreamStats>>,
+    /// Never read: the From, To and Call-ID a call event points at. Kept here
+    /// rather than trusted to still be in `StackState::identities` by the
+    /// time this is delivered, because a call event reporting the end of a
+    /// call arrives after that map has already forgotten it.
+    _identity: Option<Arc<CallIdentity>>,
 }
 
 impl Delivery {
@@ -545,6 +550,7 @@ impl Delivery {
             _raised: None,
             _reason: None,
             _record: None,
+            _identity: None,
         }
     }
 }
@@ -589,6 +595,11 @@ pub(crate) struct StackState {
     pub(crate) tag: StackTag,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
+    /// Who is on every call this stack still knows: the `From` and `To` of
+    /// the request that opened it, fixed since. Read once, at that moment,
+    /// because by the time a call has ended the layer below has already let
+    /// it go and has nothing left to ask.
+    identities: HashMap<CallHandle, Arc<CallIdentity>>,
     /// The transport every account and every call uses. There is one.
     pub(crate) transport: TransportId,
     /// What that transport speaks, kept so the settings can be read back and so
@@ -722,6 +733,11 @@ impl StackState {
 
     fn unmanage(&mut self, call: CallHandle) {
         self.managed.retain(|managed| *managed != call);
+    }
+
+    /// Say who is on a call, once, when it is placed or arrives.
+    pub(crate) fn record_identity(&mut self, call: CallHandle, identity: CallIdentity) {
+        self.identities.insert(call, Arc::new(identity));
     }
 }
 
@@ -1071,6 +1087,7 @@ pub(crate) unsafe fn create_on(
             managed: Vec::new(),
             accounts: Names::new(&tag, Kind::Account),
             calls: Names::new(&tag, Kind::Call),
+            identities: HashMap::new(),
             tag,
             transport: TRANSPORT,
             speaks,
@@ -1294,15 +1311,33 @@ fn drain(
     while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
         match event {
             Event::Signalling(said) => {
+                // read out of the INVITE this event carries, before the event
+                // itself is translated, since it is the first to report who is
+                // on the line. Not asked of the layer below: a CANCEL that
+                // arrived before this poll has already made it forget the call
+                if let UaEvent::IncomingCall {
+                    call, ref request, ..
+                } = said
+                    && let Some(identity) = CallIdentity::of_request(request)
+                {
+                    state.record_identity(call, identity);
+                }
+                if let UaEvent::CallForked { call, sibling } = said {
+                    // one INVITE opened every early dialog among them, so a
+                    // branch answers to the same From, To and Call-ID as the
+                    // parent it was forked from, read before either had one
+                    if let Some(identity) = state.identities.get(&call).cloned() {
+                        state.identities.insert(sibling, identity);
+                    }
+                    if state.manages(call) {
+                        // the branch was offered exactly what its parent was,
+                        // and the engine has already given it a stream of its
+                        // own
+                        state.manage(sibling);
+                    }
+                }
                 if let UaEvent::CallEnded { call, .. } = said {
                     ended.push(call);
-                }
-                if let UaEvent::CallForked { call, sibling } = said
-                    && state.manages(call)
-                {
-                    // the branch was offered exactly what its parent was, and
-                    // the engine has already given it a stream of its own
-                    state.manage(sibling);
                 }
                 signalling(stack, state, said, raised, unclaimed);
             }
@@ -1315,6 +1350,10 @@ fn drain(
     for call in ended {
         state.calls.forget(call);
         state.unmanage(call);
+        // the delivery already queued for this call's own ending keeps its
+        // own share of this alive; forgetting it here only stops a later
+        // event from finding it, which there is not going to be one of
+        state.identities.remove(&call);
     }
 }
 
@@ -1342,6 +1381,8 @@ fn signalling(
         agent: &state.agent,
         accounts: &mut state.accounts,
         calls: &mut state.calls,
+        identities: &state.identities,
+        raised_identity: None,
     };
     let Some(event) = crate::event::translate(&mut known, &said) else {
         *unclaimed = unclaimed.saturating_add(1);
@@ -1352,6 +1393,7 @@ fn signalling(
         _raised: Some(said),
         _reason: None,
         _record: None,
+        _identity: known.raised_identity,
     });
 }
 
@@ -1377,6 +1419,8 @@ fn media(
         agent: &state.agent,
         accounts: &mut state.accounts,
         calls: &mut state.calls,
+        identities: &state.identities,
+        raised_identity: None,
     };
     let Some(event) =
         crate::event::media(&mut known, call, said, reason.as_deref(), record.as_deref())
@@ -1389,6 +1433,7 @@ fn media(
         _raised: None,
         _reason: reason,
         _record: record,
+        _identity: None,
     });
 }
 
@@ -1435,6 +1480,21 @@ pub(crate) mod tests {
         pub(crate) statistics: Option<crate::media::SipralStreamStats>,
     }
 
+    /// What one call event said about who is on it, copied out while the
+    /// callback is still running.
+    ///
+    /// The pointers in an event are the library's and are valid for exactly
+    /// that long, so this is also what tests that promise.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Seen {
+        pub(crate) kind: SipralEventKind,
+        pub(crate) call: SipralHandle,
+        pub(crate) from_uri: Vec<u8>,
+        pub(crate) from_display: Vec<u8>,
+        pub(crate) to_uri: Vec<u8>,
+        pub(crate) call_id: Vec<u8>,
+    }
+
     /// What a caller of the C API would keep behind its user pointer.
     #[derive(Default)]
     pub(crate) struct Observed {
@@ -1443,6 +1503,9 @@ pub(crate) mod tests {
         pub(crate) named: Vec<(SipralHandle, SipralHandle)>,
         /// What every media event carried.
         pub(crate) media: Vec<Heard>,
+        /// Who every call event said was on the call, in the order the events
+        /// arrived.
+        pub(crate) calls: Vec<Seen>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -1464,6 +1527,15 @@ pub(crate) mod tests {
                 .cloned()
                 .collect()
         }
+
+        /// Every call event that named `call`, in the order they arrived.
+        pub(crate) fn identities_of(&self, call: SipralHandle) -> Vec<Seen> {
+            self.calls
+                .iter()
+                .filter(|seen| seen.call == call)
+                .cloned()
+                .collect()
+        }
     }
 
     const fn is_media(kind: SipralEventKind) -> bool {
@@ -1476,6 +1548,21 @@ pub(crate) mod tests {
                 | SipralEventKind::MediaFailed
                 | SipralEventKind::MediaStatistics
                 | SipralEventKind::RecordingStopped
+        )
+    }
+
+    const fn is_call_kind(kind: SipralEventKind) -> bool {
+        matches!(
+            kind,
+            SipralEventKind::IncomingCall
+                | SipralEventKind::CallProgress
+                | SipralEventKind::CallForked
+                | SipralEventKind::CallConfirmed
+                | SipralEventKind::SessionChanged
+                | SipralEventKind::SessionOffered
+                | SipralEventKind::SessionChangeFailed
+                | SipralEventKind::CallReplaced
+                | SipralEventKind::CallEnded
         )
     }
 
@@ -1508,6 +1595,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// A pointer and a length an event carries, copied while both are good
+    /// for reading: empty for the null-and-zero this ABI uses for absent.
+    fn owned(pointer: *const u8, len: usize) -> Vec<u8> {
+        if pointer.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(pointer, len) }.to_vec()
+        }
+    }
+
+    /// What one call event said about who is on it, read the way a binding
+    /// would: out of the union arm the kind names, before the callback
+    /// returns.
+    unsafe fn seen(event: &SipralEvent) -> Seen {
+        let payload = unsafe { event.payload.call };
+        Seen {
+            kind: event.kind,
+            call: event.call,
+            from_uri: owned(payload.from_uri, payload.from_uri_len),
+            from_display: owned(payload.from_display, payload.from_display_len),
+            to_uri: owned(payload.to_uri, payload.to_uri_len),
+            call_id: owned(payload.call_id, payload.call_id_len),
+        }
+    }
+
     pub(crate) unsafe extern "C" fn record(event: *const SipralEvent, user_data: *mut c_void) {
         let observed = unsafe { &mut *user_data.cast::<Observed>() };
         let event = unsafe { &*event };
@@ -1516,6 +1628,10 @@ pub(crate) mod tests {
         if is_media(event.kind) {
             let heard = unsafe { heard(event) };
             observed.media.push(heard);
+        }
+        if is_call_kind(event.kind) {
+            let seen = unsafe { seen(event) };
+            observed.calls.push(seen);
         }
     }
 

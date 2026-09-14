@@ -348,6 +348,9 @@ entry! {
                     .call(id, &outgoing, now)
                     .map_err(|error| ua_failed(&error))?,
             };
+            if let Some(identity) = state.agent.call_identity(placed) {
+                state.record_identity(placed, identity);
+            }
             state
                 .calls
                 .name_of(placed)
@@ -899,6 +902,9 @@ entry! {
                 .agent
                 .consult(id, &outgoing, now)
                 .map_err(|error| ua_failed(&error))?;
+            if let Some(identity) = state.agent.call_identity(placed) {
+                state.record_identity(placed, identity);
+            }
             state
                 .calls
                 .name_of(placed)
@@ -961,6 +967,9 @@ entry! {
                 .agent
                 .accept_transfer(id, None, now)
                 .map_err(|error| ua_failed(&error))?;
+            if let Some(identity) = state.agent.call_identity(placed) {
+                state.record_identity(placed, identity);
+            }
             state
                 .calls
                 .name_of(placed)
@@ -1061,10 +1070,11 @@ entry! {
 pub(crate) mod tests {
     use super::{
         SipralCallConfig, SipralDtmf, dtmf_body, dtmf_form, keypad, sipral_call_accept_session,
-        sipral_call_answer, sipral_call_answer_media, sipral_call_consult, sipral_call_hangup,
-        sipral_call_hold, sipral_call_hold_state, sipral_call_place, sipral_call_reject,
-        sipral_call_reject_session, sipral_call_resume, sipral_call_ring, sipral_call_send_dtmf,
-        sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
+        sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
+        sipral_call_consult, sipral_call_hangup, sipral_call_hold, sipral_call_hold_state,
+        sipral_call_place, sipral_call_reject, sipral_call_reject_session, sipral_call_resume,
+        sipral_call_ring, sipral_call_send_dtmf, sipral_call_state, sipral_call_transfer,
+        sipral_call_transfer_to, tone_length,
     };
     use crate::account::{
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
@@ -1236,6 +1246,18 @@ a=recvonly\r\n";
         account
     }
 
+    /// The same, presenting itself with a display name, which is what a call
+    /// it places writes in `From`.
+    fn account_named(handle: SipralHandle, display_name: &str) -> SipralHandle {
+        let mut config = account_config();
+        (config.display_name, config.display_name_len) = as_text(display_name);
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        account
+    }
+
     /// A stack with one account, ready to place a call.
     fn line(observed: &mut Observed) -> (SipralHandle, SipralHandle) {
         let handle = stack(observed);
@@ -1345,6 +1367,30 @@ a=recvonly\r\n";
         out.extend_from_slice(b"Content-Type: application/sdp\r\n");
         out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
         out.extend_from_slice(body);
+        out
+    }
+
+    /// A 180 the far end sends back for the INVITE this end placed.
+    fn ringing(invite: &[u8]) -> Vec<u8> {
+        let mut out = b"SIP/2.0 180 Ringing\r\n".to_vec();
+        for (name, value) in [
+            ("Via", field(invite, HeaderName::Via)),
+            ("From", field(invite, HeaderName::From)),
+            ("To", {
+                let mut to = field(invite, HeaderName::To);
+                to.extend_from_slice(b";tag=farend");
+                to
+            }),
+            ("Call-ID", field(invite, HeaderName::CallId)),
+            ("CSeq", field(invite, HeaderName::CSeq)),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"Contact: <sip:bob@203.0.113.5:5060>\r\n");
+        out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
         out
     }
 
@@ -1548,6 +1594,71 @@ Content-Type: application/sdp\r\n"
         out
     }
 
+    /// The same, with a `From` whose quoted display name escapes a quote of
+    /// its own, and a `To` whose URI carries a parameter that belongs to the
+    /// address rather than to the header.
+    fn invitation_with_identity() -> Vec<u8> {
+        let mut out = b"INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in-id\r\n\
+Max-Forwards: 70\r\n\
+From: \"Bob \\\"the Builder\\\"\" <sip:bob@example.com;transport=tcp>;tag=farend\r\n\
+To: <sip:alice@example.com;user=phone>\r\n\
+Call-ID: identity-in@203.0.113.5\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@203.0.113.5:5060>\r\n\
+Content-Type: application/sdp\r\n"
+            .to_vec();
+        out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", ANSWER.len()).as_bytes());
+        out.extend_from_slice(ANSWER);
+        out
+    }
+
+    /// The CANCEL the far end sends for [`invitation`] before it is answered:
+    /// the same Request-URI, `Via`, `From`, `To`, `Call-ID` and sequence
+    /// number (RFC 3261 §9.1).
+    fn cancellation() -> Vec<u8> {
+        b"CANCEL sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=farend\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: a-call-in@203.0.113.5\r\n\
+CSeq: 1 CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+            .to_vec()
+    }
+
+    /// A request the far end sends inside the dialog this end's 200 opened:
+    /// `From` and `To` exactly as that 200 wrote them, since the far end is the
+    /// one that sent the INVITE, and `more` written in before the body.
+    fn from_far_end(ours: &[u8], method: &str, branch: &str, cseq: u32, more: &str) -> Vec<u8> {
+        let mut out = format!(
+            "{method} sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-{branch}\r\n\
+Max-Forwards: 70\r\n"
+        )
+        .into_bytes();
+        for (name, value) in [
+            ("From", field(ours, HeaderName::From)),
+            ("To", field(ours, HeaderName::To)),
+            ("Call-ID", field(ours, HeaderName::CallId)),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(
+            format!(
+                "CSeq: {cseq} {method}\r\n\
+Contact: <sip:bob@203.0.113.5:5060>\r\n\
+{more}Content-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
     /// The handle the one incoming-call event named.
     fn called(observed: &Observed) -> SipralHandle {
         observed
@@ -1612,6 +1723,146 @@ Content-Type: application/sdp\r\n"
         assert!(start_line(&one(handle)).starts_with("SIP/2.0 603"));
         poll(handle, 1_100);
         assert!(observed.kinds().contains(&SipralEventKind::CallEnded));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_incoming_calls_event_names_its_from_display_and_to_exactly() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation_with_identity(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let seen = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::IncomingCall)
+            .expect("the incoming call event named who is on it");
+        assert_eq!(seen.from_uri, b"sip:bob@example.com;transport=tcp");
+        assert_eq!(seen.from_display, b"Bob \"the Builder\"");
+        assert_eq!(seen.to_uri, b"sip:alice@example.com;user=phone");
+        assert_eq!(seen.call_id, b"identity-in@203.0.113.5");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The map this comes from is forgotten in the same `drain` that
+    /// translates the call's own ending, so this is also the test that the
+    /// bytes a delivery already queued do not go with it.
+    #[test]
+    fn an_incoming_calls_identity_survives_into_its_own_ended_event() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        assert_eq!(
+            unsafe { sipral_call_reject(handle, call, 603, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = one(handle);
+        poll(handle, 1_100);
+        let ended = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::CallEnded)
+            .expect("the call ended");
+        assert_eq!(ended.from_uri, b"sip:bob@example.com");
+        assert!(ended.from_display.is_empty(), "the invite named no display");
+        assert_eq!(ended.to_uri, b"sip:alice@example.com");
+        assert_eq!(ended.call_id, b"a-call-in@203.0.113.5");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A caller who gives up at once: the INVITE and its CANCEL both arrive
+    /// before the application polls, so the layer below has already let the
+    /// call go when the event announcing it is translated.
+    #[test]
+    fn a_call_cancelled_before_the_poll_still_names_who_was_calling() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation(), 1_000);
+        deliver(handle, &cancellation(), 1_010);
+        poll(handle, 1_010);
+        let call = called(&observed);
+        let seen = observed.identities_of(call);
+        for kind in [SipralEventKind::IncomingCall, SipralEventKind::CallEnded] {
+            let one = seen
+                .iter()
+                .find(|one| one.kind == kind)
+                .unwrap_or_else(|| panic!("no {kind:?} among {seen:?}"));
+            assert_eq!(one.from_uri, b"sip:bob@example.com", "{kind:?}");
+            assert!(one.from_display.is_empty(), "{kind:?}");
+            assert_eq!(one.to_uri, b"sip:alice@example.com", "{kind:?}");
+            assert_eq!(one.call_id, b"a-call-in@203.0.113.5", "{kind:?}");
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The third way a call is placed through this ABI, beside
+    /// `sipral_call_place` and `sipral_call_consult`: the one a REFER asked
+    /// for, taken with `sipral_call_accept_transfer`.
+    #[test]
+    fn a_call_a_transfer_placed_names_its_own_from_and_to_and_call_id() {
+        let mut observed = Observed::default();
+        let (handle, _) = line(&mut observed);
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        assert_eq!(
+            unsafe { sipral_call_answer(handle, call, ANSWER.as_ptr(), ANSWER.len(), 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let ok = one(handle);
+        deliver(handle, &from_far_end(&ok, "ACK", "xfer-ack", 1, ""), 1_150);
+        poll(handle, 1_150);
+        deliver(
+            handle,
+            &from_far_end(
+                &ok,
+                "REFER",
+                "xfer-refer",
+                2,
+                "Refer-To: <sip:carol@example.com>\r\n",
+            ),
+            1_200,
+        );
+        poll(handle, 1_200);
+        assert!(
+            observed
+                .kinds()
+                .contains(&SipralEventKind::TransferRequested),
+            "the REFER was reported"
+        );
+        let _ = sent(handle);
+
+        let mut placed = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_accept_transfer(handle, call, &raw mut placed, 1_300) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let invite = sent(handle)
+            .into_iter()
+            .find(|bytes| start_line(bytes).starts_with("INVITE sip:carol@example.com"))
+            .expect("the call the REFER asked for went out");
+        deliver(handle, &ringing(&invite), 1_350);
+        poll(handle, 1_350);
+
+        let progress = observed
+            .identities_of(placed)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::CallProgress)
+            .expect("the transferred call rang");
+        assert_eq!(progress.from_uri, b"sip:alice@example.com");
+        assert_eq!(progress.to_uri, b"sip:carol@example.com");
+        assert_eq!(progress.call_id, field(&invite, HeaderName::CallId));
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -2051,6 +2302,48 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(
             unsafe { sipral_call_state(handle, call, &raw mut state) },
             SipralStatus::StaleHandle
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_placed_calls_events_all_carry_its_own_from_and_to_and_call_id() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = account_named(handle, "Alice");
+        let (status, call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+
+        deliver(handle, &ringing(&invite), 1_050);
+        poll(handle, 1_050);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle); // the ACK
+        hangup(handle, call, 1_200);
+
+        let seen = observed.identities_of(call);
+        assert!(
+            [
+                SipralEventKind::CallProgress,
+                SipralEventKind::CallConfirmed,
+                SipralEventKind::CallEnded,
+            ]
+            .iter()
+            .all(|kind| seen.iter().any(|one| one.kind == *kind)),
+            "expected progress, confirmed and ended among {:?}",
+            seen.iter().map(|one| one.kind).collect::<Vec<_>>()
+        );
+        for one in &seen {
+            assert_eq!(one.from_uri, b"sip:alice@example.com", "{:?}", one.kind);
+            assert_eq!(one.from_display, b"Alice", "{:?}", one.kind);
+            assert_eq!(one.to_uri, TARGET.as_bytes(), "{:?}", one.kind);
+        }
+        let call_id = &seen[0].call_id;
+        assert!(!call_id.is_empty());
+        assert!(
+            seen.iter().all(|one| one.call_id == *call_id),
+            "one call, one Call-ID, on every event of it"
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }

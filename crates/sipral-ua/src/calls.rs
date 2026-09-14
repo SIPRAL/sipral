@@ -35,7 +35,9 @@ use sipral_core::endpoint::{
     DialogEndReason, Event, FailureReason, OutgoingInDialogRequest, OutgoingRequest,
     OutgoingResponse, PrackError, TerminationReason,
 };
-use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode, Uri};
+use sipral_core::msg::{
+    HeaderName, Method, NameAddrRef, OwnedMessage, RawMessage, StatusCode, Uri,
+};
 use sipral_core::sdp;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TransactionId,
@@ -44,8 +46,8 @@ use sipral_core::transaction::{
 use crate::account::{Account, AccountId, Extra};
 use crate::agent::UserAgent;
 use crate::call::{
-    Call, CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall, Refusal,
-    RequestRefusal,
+    Call, CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
+    Refusal, RequestRefusal,
 };
 use crate::error::UaError;
 use crate::event::UaEvent;
@@ -547,6 +549,33 @@ impl UserAgent {
         self.calls.get(&call).and_then(|held| held.dialog)
     }
 
+    /// The `From` and `To` of the request that opened this call, and its
+    /// `Call-ID`.
+    ///
+    /// `None` once the call is gone: read it while the call is still known,
+    /// not from a report that arrives after it no longer is. A branch a fork
+    /// produced answers with its parent's own, read before either had one, for
+    /// the same reason a sibling shares the request that opened it rather than
+    /// carrying its own copy.
+    #[must_use]
+    pub fn call_identity(&self, call: CallHandle) -> Option<CallIdentity> {
+        let held = self.calls.get(&call)?;
+        match held.direction {
+            Direction::Incoming => CallIdentity::of_request(held.invited.as_ref()?),
+            Direction::Outgoing => {
+                let from = NameAddrRef::parse(&held.from).ok()?;
+                let target = held.placed.as_ref()?.target.as_bytes();
+                let call_id = held.id.as_ref()?.as_bytes();
+                Some(CallIdentity {
+                    from_uri: Box::from(from.uri_bytes()),
+                    from_display: display_of(&from),
+                    to_uri: Box::from(target),
+                    call_id: Box::from(call_id),
+                })
+            }
+        }
+    }
+
     /// The header fields to put on what this call sends at the application's
     /// request, from now until they are replaced.
     ///
@@ -812,6 +841,36 @@ fn bracketed(uri: &Uri) -> Box<[u8]> {
     out.extend_from_slice(uri.as_bytes());
     out.push(b'>');
     out.into_boxed_slice()
+}
+
+/// A `From` or `To`'s display name, resolved (RFC 3261 §25.1), or empty when
+/// it named none.
+fn display_of(addr: &NameAddrRef<'_>) -> Box<[u8]> {
+    addr.display_name()
+        .map_or_else(|| Box::from(&b""[..]), |name| Box::from(name.as_ref()))
+}
+
+impl CallIdentity {
+    /// Who is on the call an INVITE that arrived opens, read out of the INVITE
+    /// itself.
+    ///
+    /// Needs nothing but the request, so it answers for a call this agent has
+    /// already let go of: [`UaEvent::IncomingCall`] carries the INVITE whole,
+    /// and a CANCEL that followed it before the event was taken out has
+    /// already ended the call behind it. `None` when the `From`, the `To` or
+    /// the `Call-ID` cannot be read.
+    #[must_use]
+    pub fn of_request(request: &OwnedMessage) -> Option<Self> {
+        let raw = request.as_raw();
+        let from = raw.from().ok()?;
+        let to = raw.to().ok()?;
+        Some(Self {
+            from_uri: Box::from(from.uri_bytes()),
+            from_display: display_of(&from),
+            to_uri: Box::from(to.uri_bytes()),
+            call_id: Box::from(raw.call_id().ok()?),
+        })
+    }
 }
 
 // -- what comes back ---------------------------------------------------------

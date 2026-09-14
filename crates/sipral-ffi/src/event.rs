@@ -21,13 +21,15 @@
 //! the callback and no longer. A binding copies what it wants out before it
 //! returns; there is nothing to free.
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sipral::MediaEvent;
 use sipral_ua::{
-    CallEndReason, CallHandle, CallState, RegistrationFailure, RegistrationState, UaEvent,
-    UserAgent,
+    CallEndReason, CallHandle, CallIdentity, CallState, RegistrationFailure, RegistrationState,
+    UaEvent, UserAgent,
 };
 
 use crate::abi::{alias, codes, record};
@@ -428,6 +430,27 @@ record! {
         /// When a refused session change goes out again by itself, zero when it is
         /// not going to.
         pub retry_in_ms: u64,
+        /// The `From` URI of the request that created this call: as written in
+        /// the header, without the angle brackets and without header
+        /// parameters such as `tag`. The same on every event of this call.
+        /// Null and zero when this build has none to report.
+        pub from_uri: *const u8,
+        /// How many bytes of it.
+        pub from_uri_len: usize,
+        /// That `From`'s display name, quotes and backslash escapes resolved
+        /// (RFC 3261 §25.1). Null and zero when the header named none.
+        pub from_display: *const u8,
+        /// How many bytes of it.
+        pub from_display_len: usize,
+        /// The `To` URI of the request that created this call, as written in
+        /// the header.
+        pub to_uri: *const u8,
+        /// How many bytes of it.
+        pub to_uri_len: usize,
+        /// The `Call-ID` of the request that created this call.
+        pub call_id: *const u8,
+        /// How many bytes of it.
+        pub call_id_len: usize,
     }
 }
 
@@ -605,6 +628,14 @@ impl SipralCallEvent {
             remote_sdp: std::ptr::null(),
             remote_sdp_len: 0,
             retry_in_ms: 0,
+            from_uri: std::ptr::null(),
+            from_uri_len: 0,
+            from_display: std::ptr::null(),
+            from_display_len: 0,
+            to_uri: std::ptr::null(),
+            to_uri_len: 0,
+            call_id: std::ptr::null(),
+            call_id_len: 0,
         }
     }
 }
@@ -626,6 +657,13 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) agent: &'a UserAgent,
     pub(crate) accounts: &'a mut Names<sipral_ua::AccountId>,
     pub(crate) calls: &'a mut Names<CallHandle>,
+    /// Who is on every call this stack still knows, fixed when each was
+    /// created.
+    pub(crate) identities: &'a HashMap<CallHandle, Arc<CallIdentity>>,
+    /// The identity `call_payload` last attached, if any, so that whoever
+    /// queues the event this translation produces can keep its bytes alive
+    /// for as long as the delivery takes.
+    pub(crate) raised_identity: Option<Arc<CallIdentity>>,
 }
 
 /// Say a user agent event the way C says it.
@@ -995,11 +1033,34 @@ fn registration_event(
     out
 }
 
-fn call_payload(known: &Vocabulary<'_>, call: CallHandle) -> SipralCallEvent {
-    SipralCallEvent {
+fn call_payload(known: &mut Vocabulary<'_>, call: CallHandle) -> SipralCallEvent {
+    let mut payload = SipralCallEvent {
         state: call_state(known.agent.call_state(call)) as u32,
         ..SipralCallEvent::empty()
+    };
+    // read from this stack's own record, never from the layer below: by the
+    // time a call has ended, `known.agent` has already let it go (the state
+    // above just asked for is `None` for exactly that call), and an event
+    // reporting the end is the one place this matters
+    if let Some(identity) = known.identities.get(&call) {
+        let identity = Arc::clone(identity);
+        payload.from_uri = identity.from_uri.as_ptr();
+        payload.from_uri_len = identity.from_uri.len();
+        if !identity.from_display.is_empty() {
+            payload.from_display = identity.from_display.as_ptr();
+            payload.from_display_len = identity.from_display.len();
+        }
+        payload.to_uri = identity.to_uri.as_ptr();
+        payload.to_uri_len = identity.to_uri.len();
+        payload.call_id = identity.call_id.as_ptr();
+        payload.call_id_len = identity.call_id.len();
+        // kept on the vocabulary rather than dropped here, so that whoever
+        // queues this event can keep these bytes alive for as long as the
+        // delivery takes: the map this came from may be missing the entry by
+        // then, forgotten alongside a call that has ended in the meantime
+        known.raised_identity = Some(identity);
     }
+    payload
 }
 
 fn call_event(

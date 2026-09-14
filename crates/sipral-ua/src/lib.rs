@@ -71,7 +71,9 @@ mod transfer;
 pub use account::{Account, AccountId, Push};
 pub use agent::UserAgent;
 pub use announce::{Announced, Announcement, AnnouncementId};
-pub use call::{CallEndReason, CallHandle, CallState, Direction, ForkPolicy, OutgoingCall};
+pub use call::{
+    CallEndReason, CallHandle, CallIdentity, CallState, Direction, ForkPolicy, OutgoingCall,
+};
 pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
     WatchedDialog,
