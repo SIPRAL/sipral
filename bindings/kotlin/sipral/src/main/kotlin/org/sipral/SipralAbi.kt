@@ -505,6 +505,9 @@ enum class SipralDtmf(val value: Int) {
  * - 16: the set of audio devices changed (A2)
  * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
+ * - 27: a DTMF digit sent by SIP INFO was answered
+ * - 28: the stack recovered from a suspension or a network change
+ * - 29: the application is asked to resolve a destination
  */
 enum class SipralEventKind(val value: Int) {
     /**

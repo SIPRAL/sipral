@@ -265,6 +265,13 @@ event_kinds! {
         /// it for the events no keypad has a key for, and `held_ms` how long it
         /// lasted.
         26 = DigitReceived, c"digit received";
+
+        // Held for events the C ABI does not raise yet, each already planned
+        // behind an entry point of its own, so that the branches adding them
+        // cannot arrive holding the same number.
+        reserved 27 = "a DTMF digit sent by SIP INFO was answered";
+        reserved 28 = "the stack recovered from a suspension or a network change";
+        reserved 29 = "the application is asked to resolve a destination";
     }
 }
 

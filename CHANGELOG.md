@@ -12,6 +12,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **Event kinds 27, 28 and 29 are held for three events the C ABI does not
+  raise yet**: a DTMF digit sent by SIP INFO being answered, the stack
+  recovering from a suspension or a network change, and the application
+  being asked to resolve a destination. `sipral.h` lists them with the other
+  reserved numbers, so the branches that add them cannot collide.
+
 - **A transfer taken from C places its call the way `sipral_call_place`
   does** (task 8.4.4). `sipral_call_accept_transfer` used to place an
   offerless INVITE with no SRTP policy and no application headers on it,
