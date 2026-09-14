@@ -118,9 +118,12 @@ pub enum MediaEvent {
         /// when `source` is [`DigitSource::Info`] rather than an event RFC
         /// 4733 actually carried.
         event: u8,
-        /// How long the far end held it. `application/dtmf`'s INFO carries
-        /// no duration at all, and holds this at zero.
-        held: Duration,
+        /// How long the far end held it. `None` when nothing said: RFC
+        /// 4733 always carries a duration, but `application/dtmf`'s INFO
+        /// never does, and that is not the same fact as `Duration=0` on the
+        /// other form, which is `Some(Duration::ZERO)` — a peer that held a
+        /// key for no time at all still said so (8.3.11-ter).
+        held: Option<Duration>,
         /// Which of the two ways this stack accepts a digit reported this
         /// one.
         source: DigitSource,

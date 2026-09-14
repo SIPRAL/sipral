@@ -346,10 +346,12 @@ stream before it ever reaches the application, folds it into the same
 the media events already are — so the `UaEvent` itself is never forwarded as
 `Event::Signalling`. One new member, `DigitSource`, says which of the two
 carried it; everything else about the event — `digit`, `event`, `held` — reads
-the same regardless, with `held` at zero for the one INFO body that carries
-no duration at all (`application/dtmf`). An application that only ever
-watched `MediaEvent::DigitReceived` for RFC 4733 keeps working unchanged: the
-new member is additive, and nothing changes what was already there.
+the same regardless, with `held` at `None` for the one INFO body that carries
+no duration at all (`application/dtmf`) — not `Duration::ZERO`, which stays
+what a peer sending the other body actually said with its own `Duration=0`
+(8.3.11-ter). An application that only ever watched `MediaEvent::DigitReceived`
+for RFC 4733 keeps working unchanged: the new member is additive, and nothing
+changes what was already there.
 
 ### SRTP
 

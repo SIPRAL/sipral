@@ -5509,6 +5509,152 @@ fn a_transfer_that_failed_leaves_the_call_exactly_where_it_was() {
         "nothing was transferred, so nothing was given up"
     );
     assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+
+    // the terminated NOTIFY is the last word on the subscription the 202
+    // opened (§2.4.7), so the seat it took is free again
+    agent
+        .transfer(call, &uri("sip:dave@example.com"), t0)
+        .expect("the seat is free once the subscription itself has ended");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::ReferTo),
+        b"<sip:dave@example.com>"
+    );
+}
+
+#[test]
+fn a_refer_that_timed_out_leaves_the_call_able_to_ask_again() {
+    // Timer F expires with nothing back at all, and the far end never opened
+    // a subscription to free later: the seat has to go back here or the call
+    // could never transfer again
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    sent(&mut agent);
+    events(&mut agent);
+
+    // 64*T1 is 32 seconds at the default T1. Nothing drains the
+    // retransmissions Timer E queued along the way -- they are still
+    // sitting in the transmit queue, the same as any other timer jump this
+    // file makes in one bound rather than one retransmission at a time --
+    // so they are drained here rather than mistaken for the second REFER
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let second = agent.transfer(call, &uri("sip:dave@example.com"), t0);
+    assert!(second.is_ok(), "{second:?}");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::ReferTo),
+        b"<sip:dave@example.com>"
+    );
+}
+
+#[test]
+fn a_refer_whose_transport_failed_leaves_the_call_able_to_ask_again() {
+    // RFC 3261 §8.1.3.1's other unanswered case: the transport gave up
+    // rather than the timer, and the seat is owed back the same way.
+    //
+    // The call's own INVITE client transaction sits in RFC 6026's
+    // `Accepted` state for Timer M -- the same 64*T1 as the REFER's own
+    // Timer F -- so it is let run out first: failing the transport at the
+    // moment the call went up would fail that still-open transaction too,
+    // over the same transport, and end the call before the REFER's own
+    // seat could ever be asked about again.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    let t1 = t0 + Duration::from_secs(33);
+    agent.handle_timeout(t1);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .transfer(call, &uri("sip:carol@example.com"), t1)
+        .expect("the REFER goes");
+    sent(&mut agent);
+    events(&mut agent);
+
+    agent
+        .receive(
+            Input::TransportFailed {
+                transport: UDP,
+                error: sipral_core::endpoint::TransportErrorKind::Unreachable,
+            },
+            t1,
+        )
+        .expect("the failure is taken");
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(
+        agent.call_state(call),
+        Some(CallState::Confirmed),
+        "the REFER's own transaction was the only one left on that transport"
+    );
+
+    // the network came back, the way it would for a real flow
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t1,
+        )
+        .expect("binding a transport again");
+
+    let second = agent.transfer(call, &uri("sip:dave@example.com"), t1);
+    assert!(second.is_ok(), "{second:?}");
+    assert_eq!(
+        header(&sent(&mut agent), HeaderName::ReferTo),
+        b"<sip:dave@example.com>"
+    );
+}
+
+#[test]
+fn a_subscription_ended_before_any_final_status_leaves_the_call_able_to_ask_again() {
+    // RFC 3515 §2.4.4: "agents accepting REFER and not wishing to hold
+    // subscription state can terminate the subscription with this initial
+    // NOTIFY", and §2.4.5 has a NOTIFY sent while the reference is still
+    // pending carry a 100. Nothing follows a terminated subscription (RFC
+    // 6665 §4.1.3), so whatever its body said -- a provisional status, or one
+    // this end cannot read at all -- the seat that REFER held goes back.
+    for body in ["100 Trying", "not a status line"] {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (call, ack) = call_up(&mut agent, id, t0);
+        agent
+            .transfer(call, &uri("sip:carol@example.com"), t0)
+            .expect("the REFER goes");
+        let refer = sent(&mut agent);
+        deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+        events(&mut agent);
+
+        deliver(
+            &mut agent,
+            &notify(&ack, 1, body, "terminated;reason=noresource"),
+            t0,
+        );
+        transmits(&mut agent);
+        events(&mut agent);
+        assert_eq!(agent.call_state(call), Some(CallState::Confirmed), "{body}");
+
+        let second = agent.transfer(call, &uri("sip:dave@example.com"), t0);
+        assert!(second.is_ok(), "{body}: {second:?}");
+        assert_eq!(
+            header(&sent(&mut agent), HeaderName::ReferTo),
+            b"<sip:dave@example.com>",
+            "{body}"
+        );
+    }
 }
 
 #[test]
@@ -10626,6 +10772,61 @@ fn a_refusal_mid_string_discards_the_digits_still_waiting() {
     );
 }
 
+/// The far end answering the digit ahead of it is not the only way a queued
+/// digit's own INFO never goes out: `request_in_dialog` can refuse the
+/// dialog's own request too, and until now nothing told the application that
+/// digit was ever attempted.
+///
+/// The dialog is cleared by hand between the two, rather than through a
+/// message: it stands for whatever `request_in_dialog` would refuse the
+/// second digit's own send for, and no sequence of wire messages makes that
+/// send fail while leaving the first digit's own answer untouched, since the
+/// second is attempted synchronously while the first's answer is still being
+/// handled.
+#[test]
+fn a_digit_whose_own_send_fails_is_reported_undelivered_and_the_rest_are_dropped() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "123", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the string is accepted");
+    let first = sent(&mut agent);
+    events(&mut agent);
+
+    agent.calls.get_mut(&call).expect("the call").dialog = None;
+
+    deliver(&mut agent, &reply(&first, 200, "OK", ""), t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "the second digit could not go out, so the third never gets a turn"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '1', status, .. } if status.get() == 200
+        )),
+        "the first digit's own answer is unaffected: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent { digit: '2', status, .. } if status.get() == 503
+        )),
+        "the digit that could not be sent is 503, the status a request that \
+         could not even go out already stands for (RFC 3261 §8.1.3.1): {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, UaEvent::DtmfSent { digit: '3', .. })),
+        "the third digit was never attempted: {seen:?}"
+    );
+}
+
 /// The whole string is validated before anything goes out: one bad character
 /// anywhere refuses the call and sends nothing, not even the keys ahead of
 /// it.
@@ -10643,6 +10844,56 @@ fn an_invalid_character_anywhere_in_the_string_sends_nothing() {
     assert!(
         transmits(&mut agent).is_empty(),
         "a bad character anywhere in the string refuses the whole of it"
+    );
+}
+
+/// 8.3.11-ter(e): only the application can grow a call's DTMF queue, by
+/// handing over strings faster than the far end answers, so sixty-four —
+/// the one in flight and everything waiting behind it — is as far as one
+/// call's queue goes.
+#[test]
+fn a_call_holding_sixty_four_digits_refuses_a_sixty_fifth() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, "1", crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the first digit goes at once");
+    sent(&mut agent);
+    events(&mut agent);
+
+    let sixty_three_more = "2".repeat(63);
+    agent
+        .send_dtmf_info(call, &sixty_three_more, crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("one in flight and sixty-three waiting is sixty-four in all");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "every one of the sixty-three waits behind the first"
+    );
+
+    assert_eq!(
+        agent.send_dtmf_info(call, "9", crate::DtmfInfoForm::Relay, 0, t0),
+        Err(UaError::InvalidDtmf(crate::DtmfError::UnknownDigit)),
+        "a sixty-fifth takes the call's queue past sixty-four"
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "nothing of the refused digit went out"
+    );
+
+    // the same refusal on a call holding nothing yet: a string longer than
+    // the queue could ever hold sends not even its first character
+    let (other, _ack) = call_up(&mut agent, id, t0);
+    let too_long = "3".repeat(65);
+    assert_eq!(
+        agent.send_dtmf_info(other, &too_long, crate::DtmfInfoForm::Relay, 0, t0),
+        Err(UaError::InvalidDtmf(crate::DtmfError::UnknownDigit))
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a string too long for the queue to ever hold is refused before any of it is sent"
     );
 }
 

@@ -705,12 +705,20 @@ impl UserAgent {
             .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
             .ok();
         let raw = request.as_raw();
-        let Some(status) = sipfrag_status(raw.body()) else {
-            return;
-        };
         let over = raw
             .header(HeaderName::SubscriptionState)
             .is_some_and(|value| Params::split(value).0.eq_ignore_ascii_case(b"terminated"));
+        // a terminated subscription is over whatever its body says: §2.4.4
+        // lets the far end end it with the very first NOTIFY, which §2.4.5
+        // has carry a 100 while the reference is pending, and RFC 6665
+        // §4.1.3 leaves nothing after it to free the seat later
+        if over && let Some(held) = self.calls.get_mut(&call) {
+            held.referring = None;
+            held.refer_subscription = None;
+        }
+        let Some(status) = sipfrag_status(raw.body()) else {
+            return;
+        };
 
         if status.is_provisional() {
             self.events
@@ -721,11 +729,6 @@ impl UserAgent {
             .push_back(UaEvent::TransferDone { call, status });
         if let Some(held) = self.calls.get_mut(&call) {
             held.referring = None;
-            // §2.4.7 makes the terminated NOTIFY the last word, and RFC 6665
-            // §4.1.3 has everything after one answered rather than acted on
-            if over {
-                held.refer_subscription = None;
-            }
         }
         // the transfer worked, so this end is not in the call any more. A
         // failed one leaves it exactly where it was, which is the point of

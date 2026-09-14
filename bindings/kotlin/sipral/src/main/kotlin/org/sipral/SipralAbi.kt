@@ -637,10 +637,12 @@ enum class SipralEventKind(val value: Int) {
      * layer below collapses them on the timestamp that identifies the
      * event; an INFO is one request. `payload.media.digit` is the
      * character, `event_code` the number behind it for the events no
-     * keypad has a key for, `held_ms` how long it lasted (an
-     * `application/dtmf` INFO carries none, and this is zero), and
-     * `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
-     * it.
+     * keypad has a key for, `held_ms` how long it lasted, and `source`
+     * a `SIPRAL_DIGIT_SOURCE` naming which of the two reported it.
+     * `held_ms` zero means either of two different facts: an
+     * `application/dtmf` INFO never carries a duration at all, and a
+     * peer using the other form may have said `Duration=0` and held the
+     * key for no time at all — this C ABI does not tell the two apart.
      */
     DIGIT_RECEIVED(26),
     /**
@@ -649,7 +651,10 @@ enum class SipralEventKind(val value: Int) {
      * `payload.call.status_code` what the far end answered — a 415 from
      * a switch that does not take this `Content-Type` included, so the
      * application learns which of the two INFO forms to try without
-     * guessing from silence.
+     * guessing from silence. A digit that waited behind another and whose
+     * own INFO could then not be sent at all is reported the same way,
+     * with 503: nothing reached the far end for that one, and no digit
+     * after it is sent.
      */
     DTMF_SENT(27),
     ;
@@ -2959,7 +2964,11 @@ object Sipral {
      * `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
      * ones it took down with it. Digits handed over while an INFO of this
      * call is still unanswered queue behind the ones already waiting, as the
-     * media's do, rather than go out at once.
+     * media's do, rather than go out at once. A call holds at most sixty-four
+     * INFO digits at once, the one in flight included; a string that would
+     * take it past that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`,
+     * the same as one with a character no keypad has, and nothing of it is
+     * sent.
      *
      * `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
      * negotiation settled on no telephone event payload type: the key is a

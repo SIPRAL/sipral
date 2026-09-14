@@ -852,7 +852,7 @@ impl MediaEngine {
             MediaEvent::DigitReceived {
                 digit: Some(digit),
                 event,
-                held: held_ms.map_or(Duration::ZERO, |ms| Duration::from_millis(u64::from(ms))),
+                held: held_ms.map(|ms| Duration::from_millis(u64::from(ms))),
                 source: DigitSource::Info,
             },
         ));

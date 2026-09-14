@@ -842,7 +842,11 @@ entry! {
     /// `SIPRAL_EVENT_KIND_DTMF_SENT` names, and nothing is reported for the
     /// ones it took down with it. Digits handed over while an INFO of this
     /// call is still unanswered queue behind the ones already waiting, as the
-    /// media's do, rather than go out at once.
+    /// media's do, rather than go out at once. A call holds at most sixty-four
+    /// INFO digits at once, the one in flight included; a string that would
+    /// take it past that is refused whole with `SIPRAL_STATUS_INVALID_ARGUMENT`,
+    /// the same as one with a character no keypad has, and nothing of it is
+    /// sent.
     ///
     /// `SIPRAL_STATUS_NOT_SUPPORTED` from `SIPRAL_DTMF_RTP` on a call whose
     /// negotiation settled on no telephone event payload type: the key is a

@@ -1504,7 +1504,7 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     assert!(
         heard
             .first()
-            .is_some_and(|(_, held)| *held >= Duration::from_millis(80)),
+            .is_some_and(|(_, held)| held.is_some_and(|held| held >= Duration::from_millis(80))),
         "the digit was reported as lasting {:?}",
         heard.first().map(|(_, held)| *held)
     );
@@ -1561,7 +1561,7 @@ fn a_digit_dialled_at_the_default_length_lasts_a_hundred_milliseconds() {
         .collect();
     assert_eq!(
         heard,
-        vec![(Some('5'), Duration::from_millis(100))],
+        vec![(Some('5'), Some(Duration::from_millis(100)))],
         "the default digit as the far end heard it"
     );
 }
@@ -1608,6 +1608,91 @@ fn a_digit_sent_by_info_is_heard_as_the_same_event_rfc_4733_uses() {
         )),
         "{:?}",
         pair.caller.heard
+    );
+}
+
+/// The same datagram this stack wrote, with its body replaced and
+/// `Content-Type`/`Content-Length` corrected to match — the only way to put a
+/// literal `Duration=0` on the wire, since sending it through
+/// [`UserAgent::send_dtmf_info`](sipral_ua::UserAgent::send_dtmf_info) itself
+/// reads zero as "say nothing" and sends the hundred-millisecond default
+/// instead (8.3.11-ter(d)).
+fn with_body(datagram: &[u8], content_type: &str, body: &str) -> Vec<u8> {
+    let boundary = datagram
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a header/body boundary");
+    let mut out = Vec::new();
+    for line in datagram[..boundary].split(|&byte| byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with(b"content-type") || lower.starts_with(b"content-length") {
+            continue;
+        }
+        out.extend_from_slice(line);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+/// 8.3.11-ter(d): a peer that said `Duration=0` held the key for no time at
+/// all, and a peer sending `application/dtmf` never says how long it held one
+/// — two different facts the layer below this one keeps apart
+/// (`sipral_ua::dtmf::DtmfInfo::held_ms` is `Some(0)` for one and `None` for
+/// the other), and this facade used to fold back into one zero.
+#[test]
+fn a_duration_of_zero_and_no_duration_at_all_report_different_held_values() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+
+    pair.caller
+        .agent
+        .send_dtmf_info(call, "6", crate::DtmfInfoForm::Relay, 40, pair.now)
+        .expect("the INFO goes");
+    let relay_template = pair.caller.outbound();
+    assert_eq!(relay_template.len(), 1, "{relay_template:?}");
+    let zero_duration = with_body(
+        &relay_template[0],
+        "application/dtmf-relay",
+        "Signal=6\r\nDuration=0\r\n",
+    );
+    pair.callee.deliver(&zero_duration, caller_sip(), pair.now);
+    pair.callee.drain(pair.now, false);
+    // the caller's own queue has to see this digit answered before it will
+    // send the next one at all (8.3.11-bis(b))
+    let answered = pair.callee.outbound();
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    pair.caller.deliver(&answered[0], callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+
+    pair.caller
+        .agent
+        .send_dtmf_info(call, "7", crate::DtmfInfoForm::Relay, 40, pair.now)
+        .expect("the INFO goes");
+    let plain_template = pair.caller.outbound();
+    assert_eq!(plain_template.len(), 1, "{plain_template:?}");
+    let no_duration_at_all = with_body(&plain_template[0], "application/dtmf", "7");
+    pair.callee
+        .deliver(&no_duration_at_all, caller_sip(), pair.now);
+    pair.callee.drain(pair.now, false);
+
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, held, .. } => Some((*digit, *held)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        heard,
+        vec![(Some('6'), Some(Duration::ZERO)), (Some('7'), None)],
+        "{heard:?}"
     );
 }
 

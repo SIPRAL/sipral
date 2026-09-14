@@ -1348,12 +1348,12 @@ fn digit_heard(reported: &Reported, rate: u32) -> MediaEvent {
     MediaEvent::DigitReceived {
         digit: reported.digit,
         event: reported.event,
-        held: Duration::from_micros(
+        held: Some(Duration::from_micros(
             u64::from(reported.duration)
                 .saturating_mul(1_000_000)
                 .checked_div(u64::from(rate).max(1))
                 .unwrap_or(0),
-        ),
+        )),
         source: crate::event::DigitSource::Rtp,
     }
 }

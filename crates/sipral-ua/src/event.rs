@@ -500,13 +500,17 @@ pub enum UaEvent {
     /// was about. An INFO nobody answered is reported the way RFC 3261
     /// §8.1.3.1 says to treat one, as a 408 when it timed out and a 503 when
     /// its transport failed; one challenged on an account with nothing to
-    /// answer the challenge with, as that challenge's 401 or 407.
+    /// answer the challenge with, as that challenge's 401 or 407. A digit
+    /// that waited behind another and whose own INFO could then not be sent
+    /// at all is reported too, as a 503, the status §8.1.3.1 gives a request
+    /// that never went out; nothing reached the far end for that one.
     DtmfSent {
-        /// The call the INFO went out on.
+        /// The call the INFO went out on, or was to go out on.
         call: CallHandle,
-        /// The digit that was sent.
+        /// The digit that was sent, or could not be.
         digit: char,
-        /// What the far end answered.
+        /// What the far end answered, or the status that stands for the
+        /// answer that never came.
         status: StatusCode,
     },
     /// A digit arrived by SIP INFO (RFC 6086), carrying

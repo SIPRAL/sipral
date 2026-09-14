@@ -12,6 +12,41 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A REFER's transfer seat is freed on every way it can end** (task
+  8.3.11-ter(a)). A REFER that timed out or whose transport failed left the
+  call unable to transfer again for good: the core raises
+  `TransactionTerminated` before `RequestFailed` on both paths, so the
+  release that ran on the answer no longer found the transaction it keyed
+  on. The seat is released as the transaction itself retires unanswered now,
+  before the answer that never carried a status is even looked for. A NOTIFY
+  that terminates the subscription frees it too when its body is a 100 or
+  unreadable, as RFC 3515 §2.4.4 lets the first NOTIFY be.
+
+- **The 415 branch `on_dtmf_event` could no longer reach is gone** (task
+  8.3.11-ter(b)). `names_a_dtmf_body` already turns back every `Content-Type`
+  but the two this stack reads before a body is parsed, so the `Accept`
+  header a 415 used to add named a case that could not happen any more;
+  removed along with the constant it built.
+
+- **A queued digit whose own INFO could not be sent is reported** (task
+  8.3.11-ter(c)). `request_in_dialog` refusing a digit behind the one just
+  answered used to vanish silently; it is `UaEvent::DtmfSent` with 503 now —
+  the status RFC 3261 §8.1.3.1 already stands for a request that never went
+  out — and the digits still waiting are discarded the same as for any other
+  failure mid-sequence.
+
+- **`Duration=0` and no duration at all read apart again, at the facade**
+  (task 8.3.11-ter(d)). `MediaEvent::DigitReceived::held` is
+  `Option<Duration>`: `None` for the INFO body that never carries one,
+  `Some(Duration::ZERO)` for a peer that said `Duration=0` on the other. No
+  ABI change — `sipral_media_event_t::held_ms` still reads zero for both, and
+  its documentation now says so.
+
+- **A call's SIP INFO digit queue is bounded at sixty-four** (task
+  8.3.11-ter(e)) — the digit in flight and everything waiting behind it. A
+  string that would carry a call past that many is refused whole, before
+  anything of it is sent, with the same error an invalid digit already gets.
+
 - **Four follow-ups of DTMF by SIP INFO** (task 8.3.11-bis). An INFO whose
   `Content-Type` is not `application/dtmf-relay` or `application/dtmf` — RFC
   5168's media control, a vendor Info-Package, one with no body at all —

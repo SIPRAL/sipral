@@ -341,11 +341,6 @@ fn parse_relay(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
     })
 }
 
-/// The `Accept` a 415 carries, naming the two bodies this end reads (RFC
-/// 3261 §8.2.3: "The response MUST contain an Accept header field listing the
-/// types of all bodies it understands"; §21.4.13 says the same of a 415).
-const ACCEPTED_TYPES: &[u8] = b"application/dtmf-relay, application/dtmf";
-
 // -- sending -------------------------------------------------------------
 
 /// One key waiting to go out by INFO, with the body and length it was asked
@@ -370,6 +365,17 @@ pub(crate) struct QueuedKey {
 pub(crate) struct DtmfQueue {
     pub(crate) waiting: VecDeque<QueuedKey>,
 }
+
+/// The most one call may have outstanding at once — the digit in flight and
+/// everything [`DtmfQueue::waiting`] behind it.
+///
+/// Only the application can grow this, by handing [`UserAgent::send_dtmf_info`]
+/// strings faster than the far end answers them, and nothing else here paces
+/// it or drops a digit silently. Sixty-four is far more than one press of a
+/// keypad ever needs and far short of a mistake — a runaway loop, a whole
+/// file fed in at once — turning into a queue the size of whatever the caller
+/// handed over (8.3.11-ter(e)).
+const MAX_QUEUED_DIGITS: usize = 64;
 
 impl UserAgent {
     /// Send a string of digits over signalling instead of the media (RFC
@@ -403,9 +409,14 @@ impl UserAgent {
     /// `duration_ms` is checked against the same bound RFC 4733 sending
     /// reads through, and zero asks for [`DEFAULT_DTMF_MS`].
     ///
+    /// A string that would leave the call holding more than
+    /// `MAX_QUEUED_DIGITS` is refused whole, before anything of it is sent
+    /// or queued, the same as one with a bad character in it (8.3.11-ter(e)).
+    ///
     /// # Errors
     /// [`UaError::InvalidDtmf`] for a digit no keypad has, anywhere in
-    /// `digits`, or a duration outside [`MIN_DTMF_MS`] to [`MAX_DTMF_MS`];
+    /// `digits`, a duration outside [`MIN_DTMF_MS`] to [`MAX_DTMF_MS`], or a
+    /// string that would take the call's queue past `MAX_QUEUED_DIGITS`;
     /// [`UaError::NoSuchCall`]; [`UaError::WrongState`] for a call with no
     /// dialog to send an INFO in yet; or [`UaError::Send`]. Any of these
     /// leaves the whole string unsent.
@@ -418,6 +429,16 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let held_ms = self::duration_ms(duration_ms).map_err(UaError::InvalidDtmf)?;
+        // the digit in flight, when there is one, plus everything already
+        // waiting behind it — what this call already holds before this
+        // string adds to it
+        let occupied = self
+            .dtmf_queue
+            .get(&call)
+            .map_or(0, |queue| queue.waiting.len() + 1);
+        if occupied.saturating_add(digits.chars().count()) > MAX_QUEUED_DIGITS {
+            return Err(UaError::InvalidDtmf(DtmfError::UnknownDigit));
+        }
         let mut keys = VecDeque::with_capacity(digits.len());
         for pressed in digits.chars() {
             let byte =
@@ -525,10 +546,11 @@ impl UserAgent {
                 });
             }
             Err(refusal) => {
-                let mut answer = OutgoingResponse::new(refusal.status());
-                if refusal == InfoRefusal::UnsupportedType {
-                    answer = answer.header(HeaderName::Accept, ACCEPTED_TYPES);
-                }
+                // never `UnsupportedType`: the gate above already turned
+                // every other `Content-Type` back before `parse_incoming`
+                // saw it, so the only refusal this arm can carry is a body
+                // of the right type this stack still could not read
+                let answer = OutgoingResponse::new(refusal.status());
                 self.endpoint.respond(transaction, &answer, now).ok();
             }
         }

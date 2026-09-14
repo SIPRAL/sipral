@@ -264,17 +264,22 @@ event_kinds! {
         /// layer below collapses them on the timestamp that identifies the
         /// event; an INFO is one request. `payload.media.digit` is the
         /// character, `event_code` the number behind it for the events no
-        /// keypad has a key for, `held_ms` how long it lasted (an
-        /// `application/dtmf` INFO carries none, and this is zero), and
-        /// `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
-        /// it.
+        /// keypad has a key for, `held_ms` how long it lasted, and `source`
+        /// a `SIPRAL_DIGIT_SOURCE` naming which of the two reported it.
+        /// `held_ms` zero means either of two different facts: an
+        /// `application/dtmf` INFO never carries a duration at all, and a
+        /// peer using the other form may have said `Duration=0` and held the
+        /// key for no time at all — this C ABI does not tell the two apart.
         26 = DigitReceived, c"digit received";
         /// An INFO this end sent for `sipral_call_send_dtmf` reached a final
         /// answer. `payload.call.digit` is the character and
         /// `payload.call.status_code` what the far end answered — a 415 from
         /// a switch that does not take this `Content-Type` included, so the
         /// application learns which of the two INFO forms to try without
-        /// guessing from silence.
+        /// guessing from silence. A digit that waited behind another and whose
+        /// own INFO could then not be sent at all is reported the same way,
+        /// with 503: nothing reached the far end for that one, and no digit
+        /// after it is sent.
         27 = DtmfSent, c"dtmf sent";
 
         // Held for events the C ABI does not raise yet, each already planned
@@ -539,8 +544,10 @@ record! {
         /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
         /// real events that are not keys.
         pub event_code: u32,
-        /// How long the far end held it. Zero for an `application/dtmf` INFO,
-        /// which carries no duration.
+        /// How long the far end held it. Zero either for an `application/dtmf`
+        /// INFO, which carries no duration at all, or for the other form's
+        /// own `Duration=0` — a peer that held the key for no time at all.
+        /// The Rust facade keeps the two apart; this ABI does not.
         pub held_ms: u64,
         /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
         /// digit reported this one, for [`SipralEventKind::DigitReceived`].
@@ -1015,7 +1022,10 @@ pub(crate) fn media(
         } => {
             payload.digit = digit.map_or(0, u32::from);
             payload.event_code = u32::from(event);
-            payload.held_ms = millis(held);
+            // no ABI change here: a duration the peer never gave and a
+            // `Duration=0` it did give both read as zero on this side of the
+            // boundary, and `sipral_media_event_t::held_ms`'s own doc says so
+            payload.held_ms = held.map_or(0, millis);
             payload.source = digit_source(source) as u32;
             SipralEventKind::DigitReceived
         }

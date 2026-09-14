@@ -1742,8 +1742,19 @@ impl UserAgent {
         // with nothing in flight, nothing would ever move the rest on, and a
         // key handed over later would wait behind them for the life of the
         // call
+        let digit = char::from(next.key);
         if self.send_one_dtmf_info(call, next, now).is_err() {
             self.dtmf_queue.remove(&call);
+            // this digit never went out at all, and §8.1.3.1 is what a
+            // request that could not even be sent stands for: nobody else
+            // will ever tell the application this one is over, and dropping
+            // it silently would leave `send_dtmf_info` looking like it never
+            // returned for the rest of the string
+            self.events.push_back(UaEvent::DtmfSent {
+                call,
+                digit,
+                status: StatusCode::SERVICE_UNAVAILABLE,
+            });
         }
     }
 
@@ -1935,13 +1946,26 @@ impl UserAgent {
         reason: TerminationReason,
         now: Instant,
     ) {
-        let call = self.by_request.remove(&transaction).map(|(call, _)| call);
-        self.account_of.remove(&transaction);
         let failed = match reason {
             TerminationReason::TimedOut => unanswered(FailureReason::Timeout),
             TerminationReason::TransportFailed => unanswered(FailureReason::TransportFailed),
             _ => None,
         };
+        // a REFER that gave up here without ever being answered opened no
+        // subscription (§2.4.2 obliges that only on a 2xx), so the seat it
+        // took has to go back -- read before `by_request` forgets which call
+        // held it, because on the timer and the transport paths the core
+        // raises `TransactionTerminated` before `RequestFailed`, and the
+        // release that arm would otherwise do finds nothing left to key on.
+        // A transaction that instead completed normally (`reason` is
+        // `Completed`) already had its answer seen by `on_request_answered`,
+        // which is the one place a 2xx REFER's seat may be kept, so nothing
+        // here may re-run for it.
+        if failed.is_some() {
+            self.release_refer(transaction, false);
+        }
+        let call = self.by_request.remove(&transaction).map(|(call, _)| call);
+        self.account_of.remove(&transaction);
         match (call, failed) {
             // the timer or the transport that ended it retires the
             // transaction before it reports why, so this is where an INFO
