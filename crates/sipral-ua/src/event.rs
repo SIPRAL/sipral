@@ -489,6 +489,44 @@ pub enum UaEvent {
         /// instead, and a 380 carries an alternative service.
         response: Option<OwnedMessage>,
     },
+    /// An INFO sent for [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)
+    /// reached a final answer.
+    ///
+    /// `status` is whatever the far end gave it — a 200 from a switch that
+    /// read the body, a 415 from one that does not take this `Content-Type`,
+    /// or anything else a proxy in front of it chose to send instead. Either
+    /// way the application learns the digit and the code together, without
+    /// having to keep its own map from a fire-and-forget send back to what it
+    /// was about. An INFO nobody answered is reported the way RFC 3261
+    /// §8.1.3.1 says to treat one, as a 408 when it timed out and a 503 when
+    /// its transport failed; one challenged on an account with nothing to
+    /// answer the challenge with, as that challenge's 401 or 407.
+    DtmfSent {
+        /// The call the INFO went out on.
+        call: CallHandle,
+        /// The digit that was sent.
+        digit: char,
+        /// What the far end answered.
+        status: StatusCode,
+    },
+    /// A digit arrived by SIP INFO (RFC 6086), carrying
+    /// `application/dtmf-relay` or `application/dtmf` — see
+    /// `docs/04-ua.md` for the two conventions, neither of which has an RFC
+    /// of its own.
+    ///
+    /// Not an event of its own kind: the facade this layer sits under unifies
+    /// this with the RFC 4733 digit its media reports into one `DigitReceived`
+    /// the application reads, tagged with which of the two carried it. This
+    /// variant exists only because that unification cannot happen here — this
+    /// layer has no media of its own to unify with.
+    DtmfReceived {
+        /// The call the INFO arrived in.
+        call: CallHandle,
+        /// The digit.
+        digit: char,
+        /// `application/dtmf-relay`'s `Duration=`, when the body carried one.
+        held_ms: Option<u32>,
+    },
     /// The lifecycle machine moved: the machine was told it sleeps, that it
     /// woke, or that the network under it is a different one.
     ///

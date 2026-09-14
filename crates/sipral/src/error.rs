@@ -127,6 +127,14 @@ pub enum MediaError {
         /// The floor RFC 4733 §2.5.2.1 takes from ITU-T Q.24.
         least: std::time::Duration,
     },
+    /// A digit longer than any key is held: the same ceiling a digit sent or
+    /// received by INFO is held to.
+    DigitTooLong {
+        /// What was asked for.
+        asked: std::time::Duration,
+        /// The longest a digit may last.
+        most: std::time::Duration,
+    },
     /// More digits than one call will hold waiting.
     TooManyDigits,
     /// A dial string held a character no keypad has.
@@ -287,6 +295,12 @@ impl fmt::Display for MediaError {
                 "a digit of {} ms; equipment recognises {} ms and up",
                 asked.as_millis(),
                 least.as_millis()
+            ),
+            Self::DigitTooLong { asked, most } => write!(
+                f,
+                "a digit of {} ms; no key is held for more than {} ms",
+                asked.as_millis(),
+                most.as_millis()
             ),
             Self::TooManyDigits => f.write_str("too many digits are already waiting to be sent"),
             Self::UnknownDigit { key } => write!(f, "no keypad has {key:?}"),

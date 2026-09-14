@@ -1596,6 +1596,10 @@ pub(crate) mod tests {
         pub(crate) fault: u32,
         pub(crate) reason: String,
         pub(crate) statistics: Option<crate::media::SipralStreamStats>,
+        pub(crate) digit: u32,
+        pub(crate) event_code: u32,
+        pub(crate) held_ms: u64,
+        pub(crate) source: u32,
     }
 
     /// What one call event said about who is on it, copied out while the
@@ -1611,6 +1615,8 @@ pub(crate) mod tests {
         pub(crate) from_display: Vec<u8>,
         pub(crate) to_uri: Vec<u8>,
         pub(crate) call_id: Vec<u8>,
+        pub(crate) status_code: u32,
+        pub(crate) digit: u32,
     }
 
     /// What a caller of the C API would keep behind its user pointer.
@@ -1666,6 +1672,7 @@ pub(crate) mod tests {
                 | SipralEventKind::MediaFailed
                 | SipralEventKind::MediaStatistics
                 | SipralEventKind::RecordingStopped
+                | SipralEventKind::DigitReceived
         )
     }
 
@@ -1681,6 +1688,7 @@ pub(crate) mod tests {
                 | SipralEventKind::SessionChangeFailed
                 | SipralEventKind::CallReplaced
                 | SipralEventKind::CallEnded
+                | SipralEventKind::DtmfSent
         )
     }
 
@@ -1710,6 +1718,10 @@ pub(crate) mod tests {
             } else {
                 Some(unsafe { *payload.statistics })
             },
+            digit: payload.digit,
+            event_code: payload.event_code,
+            held_ms: payload.held_ms,
+            source: payload.source,
         }
     }
 
@@ -1735,6 +1747,8 @@ pub(crate) mod tests {
             from_display: owned(payload.from_display, payload.from_display_len),
             to_uri: owned(payload.to_uri, payload.to_uri_len),
             call_id: owned(payload.call_id, payload.call_id_len),
+            status_code: payload.status_code,
+            digit: payload.digit,
         }
     }
 

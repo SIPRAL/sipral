@@ -14,6 +14,7 @@ use sipral_core::endpoint::{AckError, RespondError, SendError};
 use sipral_core::sdp::SdpError;
 
 use crate::call::CallState;
+use crate::dtmf::DtmfError;
 use crate::headers::HeaderRefused;
 
 /// Why a user agent operation could not be started.
@@ -53,6 +54,9 @@ pub enum UaError {
     /// A header field the application supplied was refused, and nothing was
     /// built: see [`crate::HeadersFor`].
     Header(HeaderRefused),
+    /// A digit no keypad has, or a duration nothing holds a key for: see
+    /// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info).
+    InvalidDtmf(DtmfError),
 }
 
 impl fmt::Display for UaError {
@@ -73,6 +77,7 @@ impl fmt::Display for UaError {
             }
             Self::Sdp(ref error) => write!(f, "cannot read the description: {error}"),
             Self::Header(refused) => write!(f, "cannot take the header field: {refused}"),
+            Self::InvalidDtmf(reason) => write!(f, "cannot send that digit: {reason}"),
         }
     }
 }

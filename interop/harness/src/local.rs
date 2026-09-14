@@ -21,8 +21,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Account, CallHandle, CallMedia, Codec, Direction, Event, MediaConfig, MediaEvent, OutgoingCall,
-    UaEvent, Uri,
+    Account, CallHandle, CallMedia, Codec, DigitSource, Direction, DtmfInfoForm, Event,
+    MediaConfig, MediaEvent, OutgoingCall, UaEvent, Uri,
 };
 
 use crate::{Endpoint, Fact, Flow, Script, Step, catalog, place_call};
@@ -207,6 +207,54 @@ fn a_direct_call_between_two_of_this_harnesss_own_endpoints_carries_audio() {
             near_ended && far_ended
         },
     );
+}
+
+/// 8.3.11's `Flow::DtmfInfo`, the one piece of it this crate can check
+/// without the real lab: a digit sent by `UserAgent::send_dtmf_info` reaches
+/// the far end over a real socket and is reported as the same
+/// `MediaEvent::DigitReceived` an RFC 4733 one is, told apart by
+/// `DigitSource::Info` — not as a `UaEvent::DtmfReceived` of its own, which
+/// the facade folds in rather than forwards (see `sipral::Event`'s own
+/// module doc). How Asterisk's own dialplan takes it and names it back is
+/// `interop/asterisk`'s to say, and only the real lab confirms that half.
+#[test]
+fn a_digit_sent_by_info_reaches_the_far_end_over_real_loopback_sockets() {
+    let mut dialling = endpoint(203);
+    let mut answering = endpoint(204);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let call = dial(&mut dialling, answering.local);
+
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the call never connected over real loopback sockets",
+        |dialled, answered| confirmed(dialled) || confirmed(answered),
+    );
+
+    dialling
+        .agent
+        .send_dtmf_info(call, '7', DtmfInfoForm::Relay, 0, Instant::now())
+        .expect("the INFO goes");
+
+    let mut heard = None;
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the digit never reached the far end over real loopback sockets",
+        |_, answered| {
+            heard = answered.iter().find_map(|event| match event {
+                Event::Media {
+                    event: MediaEvent::DigitReceived { digit, source, .. },
+                    ..
+                } => Some((*digit, *source)),
+                _ => None,
+            });
+            heard.is_some()
+        },
+    );
+    assert_eq!(heard, Some((Some('7'), DigitSource::Info)));
 }
 
 /// `Flow::HoldCodecChange`'s own mechanism, in full: a call is held, and a

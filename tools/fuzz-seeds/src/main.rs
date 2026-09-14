@@ -4,7 +4,7 @@
 //! The seed corpus the fuzz targets start from, written out of this
 //! repository's own writers.
 //!
-//! A public clone that gets fifteen targets and no corpus gets fifteen
+//! A public clone that gets sixteen targets and no corpus gets sixteen
 //! targets that begin from the empty input, and a coverage-guided fuzzer
 //! spends its first hours rediscovering that a SIP message starts with a
 //! method name. So the seeds are committed -- and because they are committed
@@ -70,6 +70,7 @@ use sipral_rtp::{
     SenderReportBuilder, SourceDescriptionBuilder,
 };
 use sipral_ua::DialogInfo;
+use sipral_ua::dtmf::parse_info;
 
 /// Something this program will not write out, because it is not what it says
 /// it is.
@@ -1241,6 +1242,61 @@ fn dtls_seed_name(side: &str, msg_type: HandshakeType) -> Option<&'static str> {
     })
 }
 
+/// The one-octet length in front of the `Content-Type`, which is how the
+/// `dtmf_info` target cuts its input into the header and the body.
+fn encode_info(content_type: &[u8], body: &[u8]) -> Result<Vec<u8>, Wrong> {
+    let len = u8::try_from(content_type.len()).map_err(|_| {
+        Wrong(format!(
+            "a content type of {} bytes needs a longer prefix than dtmf_info reads",
+            content_type.len()
+        ))
+    })?;
+    let mut out = vec![len];
+    out.extend_from_slice(content_type);
+    out.extend_from_slice(body);
+    Ok(out)
+}
+
+/// 8.3.11's incoming INFO parser: a `Content-Type` and a body, read the way
+/// `dtmf_info` cuts its input. Each seed is checked against
+/// `sipral_ua::dtmf::parse_info`'s own answer before it is written, so a
+/// case that stopped meaning what its name says fails the generator rather
+/// than sitting in the corpus unread — a valid `Signal=` in each of the two
+/// bodies this stack takes, and the three ways RFC 3261 §21.4.13 and
+/// §21.4.1 refuse one: no `Content-Type` at all, one neither body uses, and
+/// the right one naming no digit.
+fn dtmf_info_seeds() -> Result<Vec<Seed>, Wrong> {
+    let cases: [(&str, &[u8], &[u8], bool); 5] = [
+        (
+            "relay",
+            b"application/dtmf-relay",
+            b"Signal=5\r\nDuration=160\r\n",
+            true,
+        ),
+        ("plain", b"application/dtmf", b"5", true),
+        ("unsupported-type", b"application/sdp", b"v=0\r\n", false),
+        (
+            "malformed",
+            b"application/dtmf-relay",
+            b"Duration=160\r\n",
+            false,
+        ),
+        ("no-content-type", b"", b"5", false),
+    ];
+    let mut out = Vec::new();
+    for (name, content_type, body, accepted) in cases {
+        let named = (!content_type.is_empty()).then_some(content_type);
+        let read = parse_info(named, body);
+        if read.is_ok() != accepted {
+            return Err(Wrong(format!(
+                "the {name} seed does not read the way it is meant to: {read:?}"
+            )));
+        }
+        out.push((name, encode_info(content_type, body)?));
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------- writing
 
 /// Every target, and the seeds it starts from.
@@ -1251,6 +1307,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("dialoginfo", dialoginfo_seeds()?),
         ("dtls_handshake", dtls_handshake_seeds()?),
         ("dtls_record", dtls_record_seeds()?),
+        ("dtmf_info", dtmf_info_seeds()?),
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
         ("parse", sip_seeds()?),

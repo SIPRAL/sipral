@@ -592,6 +592,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::Description(_)
         | MediaError::Recording(_)
         | MediaError::DigitTooShort { .. }
+        | MediaError::DigitTooLong { .. }
         | MediaError::UnknownDigit { .. }
         | MediaError::RenderDelayTooLong { .. } => SipralStatus::InvalidArgument,
         MediaError::TooManyDigits => SipralStatus::Exhausted,

@@ -652,7 +652,6 @@ enum {
  * - 16: the set of audio devices changed (A2)
  * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
- * - 27: a DTMF digit sent by SIP INFO was answered
  * - 28: the stack recovered from a suspension or a network change
  * - 29: the application is asked to resolve a destination
  */
@@ -778,16 +777,29 @@ enum {
      */
     SIPRAL_EVENT_KIND_RECORDING_STOPPED = 25,
     /**
-     * The far end pressed a key (RFC 4733).
+     * The far end pressed a key: an RFC 4733 named telephone event, or an
+     * INFO carrying `application/dtmf-relay` or `application/dtmf`.
      *
-     * One per keypress, not one per packet: a digit goes out as a run of
-     * updates and then its closing packet three times, and the layer below
-     * collapses them on the timestamp that identifies the event.
-     * `payload.media.digit` is the character, `event_code` the number behind
-     * it for the events no keypad has a key for, and `held_ms` how long it
-     * lasted.
+     * One per keypress, not one per packet: an RFC 4733 digit goes out as
+     * a run of updates and then its closing packet three times, and the
+     * layer below collapses them on the timestamp that identifies the
+     * event; an INFO is one request. `payload.media.digit` is the
+     * character, `event_code` the number behind it for the events no
+     * keypad has a key for, `held_ms` how long it lasted (an
+     * `application/dtmf` INFO carries none, and this is zero), and
+     * `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
+     * it.
      */
     SIPRAL_EVENT_KIND_DIGIT_RECEIVED = 26,
+    /**
+     * An INFO this end sent for `sipral_call_send_dtmf` reached a final
+     * answer. `payload.call.digit` is the character and
+     * `payload.call.status_code` what the far end answered — a 415 from
+     * a switch that does not take this `Content-Type` included, so the
+     * application learns which of the two INFO forms to try without
+     * guessing from silence.
+     */
+    SIPRAL_EVENT_KIND_DTMF_SENT = 27,
 };
 
 /**
@@ -967,6 +979,24 @@ enum {
      * The session timer ran out and no refresh arrived.
      */
     SIPRAL_CALL_END_REASON_EXPIRED = 8,
+};
+
+/**
+ * Which of the two ways this stack accepts a digit reported the one
+ * SIPRAL_EVENT_KIND_DIGIT_RECEIVED carries. Names for
+ * `sipral_media_event_t::source`.
+ */
+typedef uint32_t sipral_digit_source_t;
+enum {
+    /**
+     * RFC 4733: a named telephone event in the RTP stream.
+     */
+    SIPRAL_DIGIT_SOURCE_RTP = 0,
+    /**
+     * RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
+     * or `application/dtmf`.
+     */
+    SIPRAL_DIGIT_SOURCE_INFO = 1,
 };
 
 /**
@@ -2183,6 +2213,11 @@ struct sipral_call_event {
      * How many bytes of it.
      */
     size_t call_id_len;
+    /**
+     * The digit an INFO this end sent named, for
+     * SIPRAL_EVENT_KIND_DTMF_SENT. Zero for every other kind.
+     */
+    uint32_t digit;
 };
 
 /**
@@ -2264,9 +2299,15 @@ struct sipral_media_event {
      */
     uint32_t event_code;
     /**
-     * How long the far end held it.
+     * How long the far end held it. Zero for an `application/dtmf` INFO,
+     * which carries no duration.
      */
     uint64_t held_ms;
+    /**
+     * A sipral_digit_source_t: which of the two ways this stack accepts a
+     * digit reported this one, for SIPRAL_EVENT_KIND_DIGIT_RECEIVED.
+     */
+    uint32_t source;
 };
 
 /**

@@ -51,9 +51,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
     Account, AccountId, CallHandle, CallMedia, CallState, Codec, CodecCatalog, Credentials,
-    DEFAULT_DIGIT, Digit, EndpointConfig, Event, Input, MediaConfig, MediaEngine, MediaEvent,
-    OutgoingCall, Quality, SrtpPolicy, StreamStatistics, TransportId, TransportProtocol, UaError,
-    UaEvent, Uri, UserAgent, WallClock,
+    DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig, MediaEngine,
+    MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, TransportId,
+    TransportProtocol, UaError, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
 use sipral_core::sdp::{Connection, Direction, Origin, SessionDescription};
@@ -159,6 +159,12 @@ fn main() -> ExitCode {
     // five flows use is untouched by it
     let srtp_user = env::var("SIPRAL_USER_SRTP").unwrap_or_else(|_| "labuser-srtp".to_owned());
     let srtp_pass = env::var("SIPRAL_PASS_SRTP").unwrap_or_else(|_| pass.clone());
+    // the endpoint 8.3.11 added for INFO's own dtmf_mode (interop/asterisk's
+    // `labuser-infodtmf`), kept apart from `labuser` for the same reason the
+    // SDES one is
+    let infodtmf_user =
+        env::var("SIPRAL_USER_INFODTMF").unwrap_or_else(|_| "labuser-infodtmf".to_owned());
+    let infodtmf_pass = env::var("SIPRAL_PASS_INFODTMF").unwrap_or_else(|_| pass.clone());
     let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
 
     let Some(remote) = resolve(&server, port) else {
@@ -182,6 +188,7 @@ fn main() -> ExitCode {
     // found
     if server == "asterisk" {
         flows.push(Flow::Dtmf4733);
+        flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::HoldCodecChange);
     }
@@ -193,6 +200,7 @@ fn main() -> ExitCode {
         }
         let (this_user, this_pass) = match flow {
             Flow::Srtp => (srtp_user.as_str(), srtp_pass.as_str()),
+            Flow::DtmfInfo => (infodtmf_user.as_str(), infodtmf_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -247,6 +255,12 @@ enum Flow {
     /// interop/freeswitch/lab.xml) so this end can tell the exact digit
     /// crossed rather than merely that something did.
     Dtmf4733,
+    /// The same digit, sent as a SIP INFO instead (8.3.11), against
+    /// Asterisk's own `labuser-infodtmf` endpoint (interop/asterisk's own
+    /// endpoint config) so `SendDTMF()`'s own echo goes back over INFO too
+    /// and this end's receiving half is exercised against a real peer as
+    /// well as its sending one.
+    DtmfInfo,
     /// A call placed with SDES required, against the lab's own SRTP endpoint
     /// (interop/asterisk's own `labuser-srtp`).
     Srtp,
@@ -265,6 +279,7 @@ impl Flow {
             Self::Blind => "blind transfer",
             Self::Attended => "attended transfer",
             Self::Dtmf4733 => "DTMF, RFC 4733",
+            Self::DtmfInfo => "DTMF, SIP INFO",
             Self::Srtp => "SRTP",
             Self::HoldCodecChange => "hold with a codec change",
         }
@@ -279,6 +294,7 @@ impl Flow {
             Self::Blind => "blind",
             Self::Attended => "attended",
             Self::Dtmf4733 => "dtmf",
+            Self::DtmfInfo => "dtmfinfo",
             Self::Srtp => "srtp",
             Self::HoldCodecChange => "holdcodec",
         }
@@ -305,6 +321,9 @@ enum Fact {
     /// The digit this end sent came back named the same way, on the same
     /// call.
     DigitConfirmed,
+    /// `Flow::DtmfInfo`'s own INFO reached a final answer that says the far
+    /// end took it.
+    DigitSent,
     /// The session negotiated SDES and is actually running under it.
     Encrypted,
     /// The codec running after the resume differs from the one running
@@ -687,6 +706,13 @@ impl Script {
                 }
                 self.advance(endpoint, now);
             }
+            UaEvent::DtmfSent { status, .. } => {
+                if status.is_success() {
+                    self.seen.saw(Fact::DigitSent);
+                } else {
+                    self.seen.refused = Some(format!("the INFO was answered {}", status.get()));
+                }
+            }
             UaEvent::SessionChanged { hold, .. } => {
                 if hold.local {
                     self.seen.saw(Fact::Held);
@@ -898,6 +924,7 @@ impl Script {
                 // whichever answers first: the digit named back, or the timer
                 self.listen_until = Some(now + dwell() + Duration::from_secs(2));
             }
+            Step::Talking if self.flow == Flow::DtmfInfo => self.send_dtmf_by_info(endpoint, now),
             Step::Talking
             | Step::Resuming
             | Step::Reoffering
@@ -907,6 +934,26 @@ impl Script {
             }
             Step::Placing | Step::Ending | Step::Done => (),
         }
+    }
+
+    /// `Flow::DtmfInfo`'s own `Step::Talking`: send the test digit by INFO
+    /// instead of `Flow::Dtmf4733`'s media, and wait for it to be named back
+    /// the same way that flow does. Factored out of `advance` so that arm
+    /// does not push it past `clippy::too_many_lines`.
+    fn send_dtmf_by_info(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::Dialling;
+        if let Some(call) = self.call {
+            let asked = endpoint.agent.send_dtmf_info(
+                call,
+                TEST_DIGIT.as_char(),
+                DtmfInfoForm::Relay,
+                0,
+                now,
+            );
+            self.tried("send dtmf by info", asked);
+        }
+        // whichever answers first: the digit named back, or the timer
+        self.listen_until = Some(now + dwell() + Duration::from_secs(2));
     }
 
     /// Ask the stack for something, and remember it if it says no.
@@ -926,13 +973,15 @@ impl Script {
     }
 
     /// The extension this flow's primary call dials — `self.extension`
-    /// (9000 unless told otherwise) for every flow except the two that need
-    /// a dialplan entry of their own: `Flow::Dtmf4733` (interop/asterisk and
-    /// interop/freeswitch both add 9003) and `Flow::Srtp` (9004, Asterisk
-    /// only — see `interop/asterisk/extensions.conf`).
+    /// (9000 unless told otherwise) for every flow except the three that need
+    /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
+    /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
+    /// only Asterisk runs the second, over its own `labuser-infodtmf`
+    /// endpoint) and `Flow::Srtp` (9004, Asterisk only — see
+    /// `interop/asterisk/extensions.conf`).
     fn call_extension(&self) -> String {
         match self.flow {
-            Flow::Dtmf4733 => "9003".to_owned(),
+            Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             _ => self.extension.clone(),
         }
@@ -1047,6 +1096,17 @@ impl Script {
                 (
                     Fact::DigitConfirmed,
                     "the digit sent never came back named the same way",
+                ),
+                (Fact::Ours, "the far end ended the call before we asked"),
+                (Fact::Over, "the call did not end"),
+            ],
+            Flow::DtmfInfo => &[
+                (Fact::Registered, "no binding was granted"),
+                (Fact::Up, "the call did not connect"),
+                (Fact::DigitSent, "the INFO was never answered with success"),
+                (
+                    Fact::DigitConfirmed,
+                    "the digit sent by INFO never came back named the same way",
                 ),
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
@@ -1283,6 +1343,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Blind => [53; 32],
         Flow::Attended => [67; 32],
         Flow::Dtmf4733 => [79; 32],
+        Flow::DtmfInfo => [97; 32],
         Flow::Srtp => [83; 32],
         Flow::HoldCodecChange => [89; 32],
     }
@@ -1299,6 +1360,7 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Blind => [153; 32],
         Flow::Attended => [167; 32],
         Flow::Dtmf4733 => [179; 32],
+        Flow::DtmfInfo => [197; 32],
         Flow::Srtp => [183; 32],
         Flow::HoldCodecChange => [189; 32],
     }

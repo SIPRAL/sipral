@@ -517,6 +517,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralRegistrationFailure::ABI,
         crate::event::SipralCallState::ABI,
         crate::event::SipralCallEndReason::ABI,
+        crate::event::SipralDigitSource::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,

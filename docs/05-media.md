@@ -324,8 +324,27 @@ are properties rather than details:
   at all, because half an extension is worse than none: it reaches somebody.
 
 A digit shorter than 40 ms is refused where it is asked for rather than sent
-and not heard, and a call whose negotiation settled on no telephone-event
-payload type says so instead of swallowing the key.
+and not heard, as is one longer than ten seconds, and a call whose
+negotiation settled on no telephone-event payload type says so instead of
+swallowing the key. Both bounds are read through `sipral_ua::dtmf`, the same
+validation a digit sent or received by INFO goes through, so no form takes a
+length another refuses.
+
+**The other way a digit crosses, and where the two meet.** 8.3.11 gives
+`sipral-ua` its own INFO-based DTMF (`docs/04-ua.md`), sent and received
+without ever touching the media path this crate owns. What `sipral-ua`
+raises for an incoming one is `UaEvent::DtmfReceived`, not a `MediaEvent` —
+that layer has no media of its own to make one of. This crate is what joins
+the two: `MediaEngine::poll_event` reads that event off the signalling
+stream before it ever reaches the application, folds it into the same
+`MediaEvent::DigitReceived` an RFC 4733 event produces, and queues it where
+the media events already are — so the `UaEvent` itself is never forwarded as
+`Event::Signalling`. One new member, `DigitSource`, says which of the two
+carried it; everything else about the event — `digit`, `event`, `held` — reads
+the same regardless, with `held` at zero for the one INFO body that carries
+no duration at all (`application/dtmf`). An application that only ever
+watched `MediaEvent::DigitReceived` for RFC 4733 keeps working unchanged: the
+new member is additive, and nothing changes what was already there.
 
 ### SRTP
 

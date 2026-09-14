@@ -28,9 +28,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sipral::CallMedia;
-use sipral_core::endpoint::{OutgoingInDialogRequest, TransportId};
-use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
+use sipral_core::endpoint::TransportId;
+use sipral_core::msg::{HeaderName, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
+// only the tests below name the bound by number; the entry point delegates to
+// `sipral_ua::dtmf::duration_ms` without repeating it
+#[cfg(test)]
+use sipral_ua::dtmf::{DEFAULT_DTMF_MS, MAX_DTMF_MS};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
@@ -42,17 +46,6 @@ use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
 use crate::versioned::{Versioned, read_versioned};
-
-/// What one DTMF tone lasts when the caller does not say (RFC 4733 §2.5.2.2
-/// has no figure; every switch that generates one uses about this).
-const DEFAULT_DTMF_MS: u32 = 160;
-
-/// Longer than any key is held, and short enough that a caller who passed
-/// milliseconds where it meant seconds finds out.
-const MAX_DTMF_MS: u32 = 10_000;
-
-/// The sixteen events a keypad has (RFC 4733 §3.2, Table 3).
-const KEYPAD: &[u8] = b"0123456789*#ABCD";
 
 record! {
     /// What a call is placed with.
@@ -147,17 +140,12 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
         // would be taken, and no amount of waiting will change this one
-        UaError::Sdp(_) | UaError::NoRegistrar | UaError::Header(_) => {
+        UaError::Sdp(_) | UaError::NoRegistrar | UaError::Header(_) | UaError::InvalidDtmf(_) => {
             SipralStatus::InvalidArgument
         }
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())
-}
-
-/// The same, for the endpoint underneath when this ABI drives it directly.
-fn send_failed(error: &impl core::fmt::Display) -> Fail {
-    fail(SipralStatus::NotSent, error.to_string())
 }
 
 fn status_code(code: u32) -> Result<StatusCode, Fail> {
@@ -872,27 +860,15 @@ entry! {
                 let length = Duration::from_millis(u64::from(held));
                 return crate::media::dial_in_media(state, id, pressed, length);
             }
-            let Some(dialog) = state.agent.call_dialog(id) else {
-                return Err(fail(
-                    SipralStatus::WrongState,
-                    "the call has no dialog to send an INFO in, so it is not up yet",
-                ));
-            };
-            let kind: &[u8] = match form {
-                SipralDtmf::InfoPlain => b"application/dtmf",
-                _ => b"application/dtmf-relay",
+            let info_form = match form {
+                SipralDtmf::InfoPlain => sipral_ua::DtmfInfoForm::Plain,
+                _ => sipral_ua::DtmfInfoForm::Relay,
             };
             for key in keys {
-                let body = match form {
-                    SipralDtmf::InfoPlain => Arc::from(vec![key]),
-                    _ => dtmf_body(key, held),
-                };
-                let request = OutgoingInDialogRequest::new(Method::Info).body(kind, body);
                 state
                     .agent
-                    .endpoint()
-                    .request_in_dialog(dialog, &request, now)
-                    .map_err(|error| send_failed(&error))?;
+                    .send_dtmf_info(id, char::from(key), info_form, held, now)
+                    .map_err(|error| ua_failed(&error))?;
             }
             Ok(())
         })
@@ -931,17 +907,23 @@ fn describes_its_own(state: &StackState, call: sipral_ua::CallHandle) -> Result<
 }
 
 /// The digits, upper-cased, or which one was not a key.
+///
+/// Delegates to [`sipral_ua::dtmf::digit`], the one validation RFC 4733
+/// sending, INFO sending and INFO receiving all read through: the sixteen
+/// characters accepted here are the same sixteen an incoming INFO is read
+/// against.
 fn keypad(pressed: &str) -> Result<Vec<u8>, Fail> {
     let mut keys = Vec::with_capacity(pressed.len());
-    for (index, key) in pressed.bytes().enumerate() {
-        let key = key.to_ascii_uppercase();
-        if !KEYPAD.contains(&key) {
-            return Err(fail(
+    for (index, key) in pressed.chars().enumerate() {
+        let refused = || {
+            fail(
                 SipralStatus::InvalidArgument,
                 format!("digit {index} is not one of the sixteen a keypad has"),
-            ));
-        }
-        keys.push(key);
+            )
+        };
+        let byte = u8::try_from(key).map_err(|_| refused())?;
+        let byte = sipral_ua::dtmf::digit(byte).map_err(|_| refused())?;
+        keys.push(byte);
     }
     if keys.is_empty() {
         return Err(fail(
@@ -952,27 +934,13 @@ fn keypad(pressed: &str) -> Result<Vec<u8>, Fail> {
     Ok(keys)
 }
 
+/// Delegates to [`sipral_ua::dtmf::duration_ms`], the same bound
+/// [`keypad`]'s sixteen characters share with every other way a digit
+/// crosses this stack's boundary. Run before the form is looked at, so all
+/// three refuse a length with this one status and these same words.
 fn tone_length(duration_ms: u32) -> Result<u32, Fail> {
-    match duration_ms {
-        0 => Ok(DEFAULT_DTMF_MS),
-        held if held <= MAX_DTMF_MS => Ok(held),
-        held => Err(fail(
-            SipralStatus::InvalidArgument,
-            format!("a tone of {held} ms is longer than any key is held"),
-        )),
-    }
-}
-
-/// One key, in the two lines every switch that takes DTMF over signalling
-/// reads: which event it was, and for how long.
-fn dtmf_body(key: u8, duration_ms: u32) -> Arc<[u8]> {
-    let mut body = Vec::with_capacity(32);
-    body.extend_from_slice(b"Signal=");
-    body.push(key);
-    body.extend_from_slice(b"\r\nDuration=");
-    body.extend_from_slice(duration_ms.to_string().as_bytes());
-    body.extend_from_slice(b"\r\n");
-    Arc::from(body)
+    sipral_ua::dtmf::duration_ms(duration_ms)
+        .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))
 }
 
 entry! {
@@ -1303,7 +1271,7 @@ entry! {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        SipralCallConfig, SipralDtmf, dtmf_body, dtmf_form, keypad, sipral_call_accept_session,
+        SipralCallConfig, SipralDtmf, dtmf_form, keypad, sipral_call_accept_session,
         sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
         sipral_call_consult, sipral_call_hangup, sipral_call_hold, sipral_call_hold_state,
         sipral_call_place, sipral_call_reject, sipral_call_reject_session, sipral_call_resume,
@@ -1314,7 +1282,7 @@ pub(crate) mod tests {
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
     };
     use crate::error::last_error_text;
-    use crate::event::{SipralCallState, SipralEventKind};
+    use crate::event::{SipralCallState, SipralDigitSource, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags, split};
     use crate::media::{SipralSrtp, sipral_call_media, sipral_media_release};
     use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
@@ -1648,6 +1616,68 @@ a=recvonly\r\n";
         }
         out.extend_from_slice(b"Contact: <sip:bob@203.0.113.5:5060>\r\n");
         out.extend_from_slice(b"Content-Type: application/sdp\r\n");
+        out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// The far end's final answer to a non-INVITE request this end sent
+    /// inside the dialog `request` opened or travelled in — a BYE, a REFER,
+    /// or an INFO.
+    fn answered_with(request: &[u8], status: u32, reason: &str) -> Vec<u8> {
+        let mut out = format!("SIP/2.0 {status} {reason}\r\n").into_bytes();
+        for (name, value) in [
+            ("Via", field(request, HeaderName::Via)),
+            ("From", field(request, HeaderName::From)),
+            ("To", field(request, HeaderName::To)),
+            ("Call-ID", field(request, HeaderName::CallId)),
+            ("CSeq", field(request, HeaderName::CSeq)),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+        out
+    }
+
+    /// An INFO the far end sends inside a dialog this end placed the INVITE
+    /// for, carrying a body of the caller's own content type — `accepted`'s
+    /// only body is `application/sdp`, which the DTMF bodies never are.
+    ///
+    /// `branch` and `cseq` are the caller's rather than fixed, so a second
+    /// INFO in the same test does not read back as a retransmission of the
+    /// first.
+    fn incoming_info(
+        invite: &[u8],
+        branch: &str,
+        cseq: u32,
+        content_type: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut out = b"INFO sip:alice@203.0.113.5 SIP/2.0\r\n".to_vec();
+        out.extend_from_slice(
+            format!("Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-{branch}\r\n").as_bytes(),
+        );
+        out.extend_from_slice(b"Max-Forwards: 70\r\n");
+        for (name, value) in [
+            ("From", {
+                let mut to = field(invite, HeaderName::To);
+                to.extend_from_slice(b";tag=farend");
+                to
+            }),
+            ("To", field(invite, HeaderName::From)),
+            ("Call-ID", field(invite, HeaderName::CallId)),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("CSeq: {cseq} INFO\r\n").as_bytes());
+        out.extend_from_slice(b"Contact: <sip:bob@203.0.113.5:5060>\r\n");
+        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
         out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
         out.extend_from_slice(body);
         out
@@ -2706,6 +2736,138 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// 8.3.11(c): a tone length refused by one form is refused by all three,
+    /// with the same status and the same words, and nothing goes out. RFC
+    /// 4733 used to take a floor from the media that the two INFO forms did
+    /// not have, so 20 ms went out as an INFO and never as an event.
+    #[test]
+    fn a_tone_length_one_form_refuses_is_refused_by_all_three_alike() {
+        let mut observed = Observed::default();
+        let (handle, call) = media_call(&mut observed);
+        let _ = sent(handle);
+        let (digits, digits_len) = as_text("5");
+        let answers: Vec<(SipralStatus, String)> = [
+            SipralDtmf::Rtp,
+            SipralDtmf::InfoRelay,
+            SipralDtmf::InfoPlain,
+        ]
+        .into_iter()
+        .map(|via| {
+            let status = unsafe {
+                sipral_call_send_dtmf(handle, call, digits, digits_len, via as u32, 20, 2_000)
+            };
+            (status, last_error_text())
+        })
+        .collect();
+        assert!(sent(handle).is_empty(), "a refused tone length went out");
+        for answer in &answers {
+            assert_eq!(answer.0, SipralStatus::InvalidArgument, "{answers:?}");
+            assert_eq!(Some(answer), answers.first(), "{answers:?}");
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.3.11(a): a refusal of the INFO reaches the application named with
+    /// the digit and the status, not swallowed the way a BYE's or a REFER's
+    /// challenge-free answer is.
+    #[test]
+    fn a_refused_info_reaches_the_application_as_dtmf_sent() {
+        let mut observed = Observed::default();
+        let (handle, call) = connected(&mut observed);
+        let (digits, digits_len) = as_text("5");
+        assert_eq!(
+            unsafe {
+                sipral_call_send_dtmf(
+                    handle,
+                    call,
+                    digits,
+                    digits_len,
+                    SipralDtmf::InfoRelay as u32,
+                    0,
+                    2_000,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let info = one(handle);
+        deliver(
+            handle,
+            &answered_with(&info, 415, "Unsupported Media Type"),
+            2_100,
+        );
+        poll(handle, 2_100);
+        let sent = observed
+            .identities_of(call)
+            .into_iter()
+            .find(|seen| seen.kind == SipralEventKind::DtmfSent)
+            .expect("the refusal reached the application");
+        assert_eq!(sent.digit, u32::from('5'));
+        assert_eq!(sent.status_code, 415);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// 8.3.11(b): an INFO the far end sends is read against both content
+    /// types and reported as the same `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` an
+    /// RFC 4733 event is, `SIPRAL_DIGIT_SOURCE_INFO` naming which one this
+    /// was.
+    #[test]
+    fn an_incoming_info_of_either_content_type_is_a_digit_received_from_info() {
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let (status, call) = place(handle, account, &call_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle); // the ACK
+
+        deliver(
+            handle,
+            &incoming_info(
+                &invite,
+                "relay",
+                51,
+                "application/dtmf-relay",
+                b"Signal=7\r\nDuration=200\r\n",
+            ),
+            2_000,
+        );
+        poll(handle, 2_000);
+        let answer = one(handle);
+        assert!(start_line(&answer).starts_with("SIP/2.0 200 "));
+        let heard = observed
+            .of(SipralEventKind::DigitReceived)
+            .into_iter()
+            .find(|heard| heard.call == call)
+            .expect("the relay INFO was reported");
+        assert_eq!(heard.digit, u32::from('7'));
+        assert_eq!(heard.event_code, 7);
+        assert_eq!(heard.held_ms, 200);
+        assert_eq!(heard.source, SipralDigitSource::Info as u32);
+
+        deliver(
+            handle,
+            &incoming_info(&invite, "plain", 52, "application/dtmf", b"9"),
+            2_100,
+        );
+        poll(handle, 2_100);
+        let answer = one(handle);
+        assert!(start_line(&answer).starts_with("SIP/2.0 200 "));
+        let heard = observed
+            .of(SipralEventKind::DigitReceived)
+            .into_iter()
+            .rfind(|heard| heard.call == call)
+            .expect("the plain INFO was reported");
+        assert_eq!(heard.digit, u32::from('9'));
+        assert_eq!(heard.event_code, 9);
+        assert_eq!(heard.held_ms, 0);
+        assert_eq!(heard.source, SipralDigitSource::Info as u32);
+
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     #[test]
     fn only_the_sixteen_keys_a_keypad_has_are_digits() {
         assert_eq!(
@@ -2725,25 +2887,22 @@ Content-Length: 0\r\n\r\n";
     /// codes are Table 3 in 3.2. A doc comment pointing at a section that
     /// does not exist is a defect the generator copies into the public
     /// header verbatim, so it is checked here rather than left to be noticed
-    /// by eye.
+    /// by eye. `sipral_ua::dtmf`'s own test does the same for the `KEYPAD`
+    /// constant that used to live in this file.
     ///
-    /// The needles are assembled at runtime, not written as one literal, so
+    /// The needle is assembled at runtime, not written as one literal, so
     /// this test inspecting its own file does not just match itself.
     #[test]
-    fn the_keypad_doc_cites_a_section_rfc_4733_actually_has() {
+    fn the_send_dtmf_doc_cites_a_section_rfc_4733_actually_has() {
         // the needle spans a line break, and a Windows checkout puts a CR in
         // front of it
         let source = include_str!("call.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
-            source.contains(&format!("(RFC 4733 {section}3.2, Table 3)")),
-            "the KEYPAD constant should point at Table 3 in §3.2"
-        );
-        assert!(
             source.contains(&format!(
                 "RFC 4733 {section}3.2, in the order they were pressed"
             )),
-            "sipral_call_send_dtmf's doc should point at §3.2 as well"
+            "sipral_call_send_dtmf's doc should point at §3.2"
         );
     }
 
@@ -2757,12 +2916,6 @@ Content-Length: 0\r\n\r\n";
         );
         assert!(tone_length(super::MAX_DTMF_MS + 1).is_err());
         assert!(tone_length(u32::MAX).is_err());
-    }
-
-    #[test]
-    fn one_key_is_two_lines() {
-        let body = dtmf_body(b'5', 160);
-        assert_eq!(body.as_ref(), b"Signal=5\r\nDuration=160\r\n");
     }
 
     #[test]

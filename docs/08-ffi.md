@@ -201,10 +201,12 @@ Rules for the ABI:
   also take the five in front of it, and a number taken by a feature that does
   not exist is exactly the lie the reservation was meant to prevent. The media
   surface took 17 and 19 this way and left 15, 16, 18 and 20 where they were.
-  27, 28 and 29 are held the same way for three events no requirement numbers
-  but the C ABI already plans: a DTMF digit sent by SIP INFO being answered, the
-  stack recovering from a suspension or a network change, and a destination the
-  application is asked to resolve. Their lines name the event instead.
+  27, 28 and 29 were held the same way for three events no requirement numbers
+  but the C ABI already planned: a DTMF digit sent by SIP INFO being answered,
+  the stack recovering from a suspension or a network change, and a
+  destination the application is asked to resolve. 8.3.11 turned the first of
+  those into `SIPRAL_EVENT_KIND_DTMF_SENT`, in place at 27, and left 28 and 29
+  where they were for the two that follow it.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every

@@ -26,7 +26,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sipral::MediaEvent;
+use sipral::{DigitSource, MediaEvent};
 use sipral_ua::{
     CallEndReason, CallHandle, CallIdentity, CallState, RegistrationFailure, RegistrationState,
     UaEvent, UserAgent,
@@ -256,20 +256,30 @@ event_kinds! {
         /// Never an abort. `payload.media.recorded_ms` says how much audio reached
         /// the file before it stopped, and the call carries on without it.
         25 = RecordingStopped, c"recording stopped";
-        /// The far end pressed a key (RFC 4733).
+        /// The far end pressed a key: an RFC 4733 named telephone event, or an
+        /// INFO carrying `application/dtmf-relay` or `application/dtmf`.
         ///
-        /// One per keypress, not one per packet: a digit goes out as a run of
-        /// updates and then its closing packet three times, and the layer below
-        /// collapses them on the timestamp that identifies the event.
-        /// `payload.media.digit` is the character, `event_code` the number behind
-        /// it for the events no keypad has a key for, and `held_ms` how long it
-        /// lasted.
+        /// One per keypress, not one per packet: an RFC 4733 digit goes out as
+        /// a run of updates and then its closing packet three times, and the
+        /// layer below collapses them on the timestamp that identifies the
+        /// event; an INFO is one request. `payload.media.digit` is the
+        /// character, `event_code` the number behind it for the events no
+        /// keypad has a key for, `held_ms` how long it lasted (an
+        /// `application/dtmf` INFO carries none, and this is zero), and
+        /// `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
+        /// it.
         26 = DigitReceived, c"digit received";
+        /// An INFO this end sent for `sipral_call_send_dtmf` reached a final
+        /// answer. `payload.call.digit` is the character and
+        /// `payload.call.status_code` what the far end answered — a 415 from
+        /// a switch that does not take this `Content-Type` included, so the
+        /// application learns which of the two INFO forms to try without
+        /// guessing from silence.
+        27 = DtmfSent, c"dtmf sent";
 
         // Held for events the C ABI does not raise yet, each already planned
         // behind an entry point of its own, so that the branches adding them
         // cannot arrive holding the same number.
-        reserved 27 = "a DTMF digit sent by SIP INFO was answered";
         reserved 28 = "the stack recovered from a suspension or a network change";
         reserved 29 = "the application is asked to resolve a destination";
     }
@@ -386,6 +396,20 @@ codes! {
     }
 }
 
+codes! {
+    /// Which of the two ways this stack accepts a digit reported the one
+    /// [`SipralEventKind::DigitReceived`] carries. Names for
+    /// `sipral_media_event_t::source`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralDigitSource: u32 {
+        /// RFC 4733: a named telephone event in the RTP stream.
+        Rtp = 0,
+        /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
+        /// or `application/dtmf`.
+        Info = 1,
+    }
+}
+
 record! {
     /// What a [`SipralEventKind::RegistrationChanged`] carries.
     #[derive(Clone, Copy)]
@@ -458,6 +482,9 @@ record! {
         pub call_id: *const u8,
         /// How many bytes of it.
         pub call_id_len: usize,
+        /// The digit an INFO this end sent named, for
+        /// [`SipralEventKind::DtmfSent`]. Zero for every other kind.
+        pub digit: u32,
     }
 }
 
@@ -512,8 +539,12 @@ record! {
         /// The RFC 4733 event code behind `digit`. Codes at and above sixteen are
         /// real events that are not keys.
         pub event_code: u32,
-        /// How long the far end held it.
+        /// How long the far end held it. Zero for an `application/dtmf` INFO,
+        /// which carries no duration.
         pub held_ms: u64,
+        /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
+        /// digit reported this one, for [`SipralEventKind::DigitReceived`].
+        pub source: u32,
     }
 }
 
@@ -616,6 +647,7 @@ impl SipralMediaEvent {
             digit: 0,
             event_code: 0,
             held_ms: 0,
+            source: SipralDigitSource::Rtp as u32,
         }
     }
 }
@@ -643,6 +675,7 @@ impl SipralCallEvent {
             to_uri_len: 0,
             call_id: std::ptr::null(),
             call_id_len: 0,
+            digit: 0,
         }
     }
 }
@@ -786,6 +819,16 @@ fn about_a_call(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEve
             let mut out = call_event(known, SipralEventKind::CallConfirmed, call, payload);
             attach(&mut out, response.as_ref());
             Some(out)
+        }
+        UaEvent::DtmfSent {
+            call,
+            digit,
+            status,
+        } => {
+            let mut payload = call_payload(known, call);
+            payload.digit = u32::from(digit);
+            payload.status_code = u32::from(status.get());
+            Some(call_event(known, SipralEventKind::DtmfSent, call, payload))
         }
         _ => None,
     }
@@ -964,10 +1007,16 @@ pub(crate) fn media(
             payload.fault = fault_of(error) as u32;
             SipralEventKind::MediaFailed
         }
-        MediaEvent::DigitReceived { digit, event, held } => {
+        MediaEvent::DigitReceived {
+            digit,
+            event,
+            held,
+            source,
+        } => {
             payload.digit = digit.map_or(0, u32::from);
             payload.event_code = u32::from(event);
             payload.held_ms = millis(held);
+            payload.source = digit_source(source) as u32;
             SipralEventKind::DigitReceived
         }
         MediaEvent::RecordingStopped {
@@ -1178,6 +1227,13 @@ fn end_reason(reason: CallEndReason) -> SipralCallEndReason {
     }
 }
 
+fn digit_source(source: DigitSource) -> SipralDigitSource {
+    match source {
+        DigitSource::Info => SipralDigitSource::Info,
+        _ => SipralDigitSource::Rtp,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1358,13 +1414,14 @@ mod tests {
         assert_eq!(SipralEventKind::MediaFailed as u32, 24);
         assert_eq!(SipralEventKind::RecordingStopped as u32, 25);
         assert_eq!(SipralEventKind::DigitReceived as u32, 26);
-        assert_eq!(SipralEventKind::ALL.len(), 22, "and there are no others");
+        assert_eq!(SipralEventKind::DtmfSent as u32, 27);
+        assert_eq!(SipralEventKind::ALL.len(), 23, "and there are no others");
     }
 
-    /// The two numbers this media surface took were spoken for before it was
-    /// written, and it took them where they were rather than appending. A
-    /// feature that had chosen the next free number instead would have renamed
-    /// one of the four still reserved.
+    /// The numbers this DTMF surface and the media one before it took were
+    /// spoken for before either was written, and each took them where they
+    /// were rather than appending. A feature that had chosen the next free
+    /// number instead would have renamed one of the two still reserved.
     #[test]
     fn the_numbers_that_were_reserved_for_this_are_the_ones_it_took() {
         assert_eq!(
@@ -1376,6 +1433,11 @@ mod tests {
             SipralEventKind::MediaStalled as u32,
             19,
             "19 was held for media that stopped arriving (B5)"
+        );
+        assert_eq!(
+            SipralEventKind::DtmfSent as u32,
+            27,
+            "27 was held for a DTMF digit sent by SIP INFO being answered (8.3.11)"
         );
     }
 
@@ -1397,10 +1459,10 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [15, 16, 18, 20_u32] {
+        for held in [15, 16, 18, 20, 28, 29_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
-        assert_eq!(name(27), None, "past the last kind");
+        assert_eq!(name(30), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

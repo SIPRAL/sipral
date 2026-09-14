@@ -10,13 +10,47 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- **DTMF by SIP INFO, both ways, owned by the user agent** (task 8.3.11).
+  `UserAgent::send_dtmf_info` builds and sends the INFO in `sipral-ua` now —
+  the construction moved out of `sipral-ffi`, which used to build it by hand
+  with no transaction ownership and no report of the answer — and reports the
+  far end's final status as `UaEvent::DtmfSent`, so a 415 from a switch that
+  does not read the `Content-Type` reaches the application with the digit and
+  the code rather than vanishing — as does an INFO nobody answered, reported
+  as the 408 or 503 RFC 3261 §8.1.3.1 treats a timeout or a transport failure
+  as, and one whose challenge nothing could answer, as its 401 or 407.
+  `sipral_call_send_dtmf`'s two INFO forms
+  call it once per digit; its own signature is unchanged. An incoming INFO in
+  a dialog, `application/dtmf-relay` or `application/dtmf`, is read by a
+  small panic-free parser in `sipral-ua`, answered 200 when it names a digit
+  (and, reporting nothing, when it has no body at all, RFC 6086 §4.2.2)
+  and 415 or 400 otherwise (RFC 3261 §21.4.13, §21.4.1), and reported as the
+  same `DigitReceived` an RFC 4733 event already is — `MediaEvent` and
+  `sipral_media_event_t` both gained a `source` member saying which of the
+  two carried it, rather than a second event for the same fact. All three
+  forms — RFC 4733 sending, INFO sending, INFO receiving — share one
+  validation (`sipral_ua::dtmf`) for the sixteen keys a keypad has and the
+  bounds on how long a tone lasts, 40 ms to ten seconds, refused identically
+  before anything is sent; `MediaSession::dial` and `send_dtmf` gained the
+  ceiling (`MediaError::DigitTooLong`, `LONGEST_DIGIT`) and INFO the floor
+  RFC 4733 already had. Reserved event kind 27 becomes `SIPRAL_EVENT_KIND_DTMF_SENT` in
+  place, taking a `digit` member appended to `sipral_call_event_t`; nothing
+  else in the ABI moved and no minor version was bumped. A new fuzz target,
+  `dtmf_info`, exercises the incoming parser. `interop/harness` gained a
+  `DtmfInfo` flow against Asterisk's own `labuser-infodtmf` endpoint
+  (`dtmf_mode=info`), so the lab dialplan's echo now exercises this stack's
+  receiving half as well as its sending one.
+
 ### Changed
 
-- **Event kinds 27, 28 and 29 are held for three events the C ABI does not
-  raise yet**: a DTMF digit sent by SIP INFO being answered, the stack
-  recovering from a suspension or a network change, and the application
-  being asked to resolve a destination. `sipral.h` lists them with the other
-  reserved numbers, so the branches that add them cannot collide.
+- **Event kinds 28 and 29 are held for two events the C ABI does not raise
+  yet**: the stack recovering from a suspension or a network change, and the
+  application being asked to resolve a destination. `sipral.h` lists them
+  with the other reserved numbers, so the branches that add them cannot
+  collide. 27 was held the same way, for a DTMF digit sent by SIP INFO being
+  answered, and 8.3.11 turned it into a kind in place.
 
 - **A transfer taken from C places its call the way `sipral_call_place`
   does** (task 8.4.4). `sipral_call_accept_transfer` used to place an

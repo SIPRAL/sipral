@@ -10,8 +10,14 @@
 //! answers looks like it is working.
 //!
 //! So there is one drain, and a media event names the call it is about. What
-//! the user agent said travels through untouched: this crate has no policy
-//! about registration or transfer and does not pretend to.
+//! the user agent said travels through untouched — this crate has no policy
+//! about registration or transfer and does not pretend to — with one
+//! exception: a digit that arrived by SIP INFO is [`sipral_ua::UaEvent`]'s
+//! own, but it is not forwarded as [`Event::Signalling`]. RFC 4733's digit
+//! already has an event of its own here, and a second one for the other way
+//! a digit crosses the wire would be the split every application then has to
+//! undo. So it is folded into the same [`MediaEvent::DigitReceived`] instead,
+//! told apart by [`DigitSource`].
 
 use std::time::Duration;
 
@@ -35,6 +41,18 @@ pub enum Event {
         /// What happened to it.
         event: MediaEvent,
     },
+}
+
+/// Which of the two ways this stack accepts a digit carried the one
+/// [`MediaEvent::DigitReceived`] reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DigitSource {
+    /// RFC 4733: a named telephone event in the RTP stream.
+    Rtp,
+    /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
+    /// or `application/dtmf` — see `docs/04-ua.md` for the two conventions.
+    Info,
 }
 
 /// What one call's audio is doing.
@@ -92,12 +110,20 @@ pub enum MediaEvent {
     /// makes collapsing them possible at all.
     DigitReceived {
         /// The key, where the event names one. Event codes at and above 16
-        /// are real events that no keypad has a key for.
+        /// are real events that no keypad has a key for. Always `Some` when
+        /// `source` is [`DigitSource::Info`]: an INFO never names anything
+        /// but a keypad character.
         digit: Option<char>,
-        /// The event code itself (§3.2).
+        /// The event code itself (§3.2), or the one that character names
+        /// when `source` is [`DigitSource::Info`] rather than an event RFC
+        /// 4733 actually carried.
         event: u8,
-        /// How long the far end held it.
+        /// How long the far end held it. `application/dtmf`'s INFO carries
+        /// no duration at all, and holds this at zero.
         held: Duration,
+        /// Which of the two ways this stack accepts a digit reported this
+        /// one.
+        source: DigitSource,
     },
     /// Media could not be started or could not be kept: an answer naming a
     /// codec this build has no decoder for, a description that could not be

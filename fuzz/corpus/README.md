@@ -5,7 +5,7 @@
 
 One directory per fuzz target, holding the inputs a run starts from. They are
 committed, which the rest of a fuzzing corpus is not, for one reason: a clone
-that gets fifteen targets and no corpus gets fifteen targets that begin from
+that gets sixteen targets and no corpus gets sixteen targets that begin from
 the empty input, and a coverage-guided fuzzer then spends its first hours
 rediscovering that a SIP message starts with a method name.
 
@@ -17,13 +17,16 @@ traffic, and nothing came from another codebase.
 - **Written by `tools/fuzz-seeds`**, which builds each seed with the library's
   own builders and encoders — `RequestBuilder`, `CompoundBuilder`,
   `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector`,
-  `Connection` — or writes it out as text in that file, from the RFC. A seed
-  is then handed to the same reader its target hands it to before it is
-  written out, so one that is not the thing it claims to be fails the
-  generator instead of sitting here doing nothing: the framer seeds go through
-  the framer, the control-channel seeds through the frame decoder and the
-  JSON, the protected runs through an unprotector holding the target's own
-  key, the DTLS runs through ends built as the target builds them.
+  `Connection` — or writes it out as text in that file, from the RFC or, for
+  `dtmf_info`'s two bodies, from the ad hoc convention `docs/04-ua.md`
+  names in its place. A seed is then handed to the same reader its target
+  hands it to before it is written out, so one that is not the thing it
+  claims to be fails the generator instead of sitting here doing nothing:
+  the framer seeds go through the framer, the control-channel seeds through
+  the frame decoder and the JSON, the protected runs through an unprotector
+  holding the target's own key, the DTLS runs through ends built as the
+  target builds them, and the `dtmf_info` seeds through
+  `sipral_ua::dtmf::parse_info` itself.
 - **One family is not read that way, and it is `builder`.** Its target does
   not parse its input at all: it cuts it into the five field values a caller
   controls and hands them to `RequestBuilder`. So what the generator checks

@@ -299,7 +299,6 @@ public enum SipralDtmf: UInt32, Sendable {
 /// - 16: the set of audio devices changed (A2)
 /// - 18: a request was promoted to a stream transport (B1)
 /// - 20: a call was announced and never arrived (C2)
-/// - 27: a DTMF digit sent by SIP INFO was answered
 /// - 28: the stack recovered from a suspension or a network change
 /// - 29: the application is asked to resolve a destination
 public enum SipralEventKind: UInt32, Sendable {
@@ -380,15 +379,26 @@ public enum SipralEventKind: UInt32, Sendable {
     /// Never an abort. `payload.media.recorded_ms` says how much audio reached
     /// the file before it stopped, and the call carries on without it.
     case recordingStopped = 25
-    /// The far end pressed a key (RFC 4733).
+    /// The far end pressed a key: an RFC 4733 named telephone event, or an
+    /// INFO carrying `application/dtmf-relay` or `application/dtmf`.
     ///
-    /// One per keypress, not one per packet: a digit goes out as a run of
-    /// updates and then its closing packet three times, and the layer below
-    /// collapses them on the timestamp that identifies the event.
-    /// `payload.media.digit` is the character, `event_code` the number behind
-    /// it for the events no keypad has a key for, and `held_ms` how long it
-    /// lasted.
+    /// One per keypress, not one per packet: an RFC 4733 digit goes out as
+    /// a run of updates and then its closing packet three times, and the
+    /// layer below collapses them on the timestamp that identifies the
+    /// event; an INFO is one request. `payload.media.digit` is the
+    /// character, `event_code` the number behind it for the events no
+    /// keypad has a key for, `held_ms` how long it lasted (an
+    /// `application/dtmf` INFO carries none, and this is zero), and
+    /// `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
+    /// it.
     case digitReceived = 26
+    /// An INFO this end sent for `sipral_call_send_dtmf` reached a final
+    /// answer. `payload.call.digit` is the character and
+    /// `payload.call.status_code` what the far end answered — a 415 from
+    /// a switch that does not take this `Content-Type` included, so the
+    /// application learns which of the two INFO forms to try without
+    /// guessing from silence.
+    case dtmfSent = 27
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -488,6 +498,17 @@ public enum SipralCallEndReason: UInt32, Sendable {
     case abandoned = 7
     /// The session timer ran out and no refresh arrived.
     case expired = 8
+}
+
+/// Which of the two ways this stack accepts a digit reported the one
+/// SipralEventKind.digitReceived carries. Names for
+/// `sipral_media_event_t::source`.
+public enum SipralDigitSource: UInt32, Sendable {
+    /// RFC 4733: a named telephone event in the RTP stream.
+    case rtp = 0
+    /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
+    /// or `application/dtmf`.
+    case info = 1
 }
 
 /// What a call across the boundary answered, when it did not answer

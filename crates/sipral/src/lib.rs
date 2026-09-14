@@ -148,11 +148,11 @@ pub use capabilities::{Capabilities, SrtpKeying};
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
-pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, SHORTEST_DIGIT};
+pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, LONGEST_DIGIT, SHORTEST_DIGIT};
 pub use echo::MAX_RENDER_DELAY;
 pub use engine::{CallMedia, MediaEngine};
 pub use error::MediaError;
-pub use event::{Event, MediaEvent};
+pub use event::{DigitSource, Event, MediaEvent};
 pub use keying::SrtpPolicy;
 pub use record::RecordingSink;
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
@@ -184,10 +184,11 @@ pub use sipral_ua::Direction as CallDirection;
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
 pub use sipral_ua::{
-    Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, EndpointConfig,
-    ForkPolicy, Hold, Incoming, Input, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError,
-    Refusals, RegistrationFailure, RegistrationState, Replacing, Screen, Screening, StatusCode,
-    Transmit, TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+    Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
+    EndpointConfig, ForkPolicy, Hold, Incoming, Input, OutgoingCall, OutgoingExtras, Rate,
+    RateError, ReceiveError, Refusals, RegistrationFailure, RegistrationState, Replacing, Screen,
+    Screening, StatusCode, Transmit, TransportId, TransportProtocol, UaError, UaEvent, Uri,
+    UserAgent,
 };
 
 /// Crate version.

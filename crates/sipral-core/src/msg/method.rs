@@ -131,6 +131,9 @@ impl StatusCode {
     pub const SESSION_PROGRESS: Self = Self(183);
     /// 200 OK.
     pub const OK: Self = Self(200);
+    /// 400, "the request could not be understood due to malformed syntax"
+    /// (§21.4.1).
+    pub const BAD_REQUEST: Self = Self(400);
     /// 401 Unauthorized.
     pub const UNAUTHORIZED: Self = Self(401);
     /// 407 Proxy Authentication Required.
@@ -139,6 +142,10 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
+    /// 415, "The server is refusing to service the request because the
+    /// message body of the request is in a format not supported by the server
+    /// for the requested method" (§21.4.13).
+    pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
     /// 488, which refuses a session description rather than the request that
     /// carried it (RFC 3264 §6, RFC 3311 §5.2).
     pub const NOT_ACCEPTABLE_HERE: Self = Self(488);

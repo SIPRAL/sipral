@@ -973,12 +973,21 @@ impl UserAgent {
                 status,
                 ..
             } => self.on_request_answered(transaction, status, event),
-            Event::RequestFailed { transaction, .. } => {
+            Event::RequestFailed {
+                transaction,
+                reason,
+            } => {
                 let id = AnyTransactionId::NonInviteClient(transaction);
-                if !self.by_request.contains_key(&id) {
+                let Some(&(call, _)) = self.by_request.get(&id) else {
                     return Some(event);
-                }
+                };
                 self.release_refer(id, false);
+                // no response arrived, and §8.1.3.1 says what stands for one;
+                // where the transaction was retired first, `on_transaction_over`
+                // has already said it
+                if let Some(status) = unanswered(reason) {
+                    self.dtmf_info_over(id, call, status);
+                }
                 None
             }
             Event::TransactionTerminated {
@@ -1349,7 +1358,8 @@ impl UserAgent {
             self.release_refer(id, false);
             self.by_request.remove(&id);
             self.account_of.remove(&id);
-            // Only the REFER needs an event of its own. RFC 3515 §2.4.2 has
+            // Only the REFER and an INFO carrying a digit need an event of
+            // their own; the INFO's follows this one. RFC 3515 §2.4.2 has
             // only a 2xx oblige the far end to open the subscription that
             // would have reported how the transfer went, so a REFER that was
             // never authenticated leaves nothing that will ever report it:
@@ -1376,6 +1386,15 @@ impl UserAgent {
                     status,
                 });
             }
+            // an INFO carrying a digit, for the reason its 415 is reported at
+            // all: the refusal is news the application gets no other way.
+            // Whatever the method, a digit this was carrying goes with it
+            if refusal.method == Method::Info
+                && let Some(status) = refusal.status
+            {
+                self.dtmf_info_over(id, refusal.call, status);
+            }
+            self.by_dtmf_info.remove(&id);
         }
     }
 
@@ -1604,6 +1623,9 @@ impl UserAgent {
         self.challenged_requests.remove(&transaction);
         self.by_request.remove(&transaction);
         self.account_of.remove(&transaction);
+        if let Some(digit) = self.by_dtmf_info.remove(&transaction) {
+            self.by_dtmf_info.insert(retried, digit);
+        }
         self.by_request.insert(retried, (call, method));
         if let Some(account) = account {
             self.account_of.insert(retried, account);
@@ -1661,6 +1683,20 @@ impl UserAgent {
         {
             held.referring = None;
             held.refer_subscription = None;
+        }
+    }
+
+    /// The last word on an INFO carrying a digit, told to the application
+    /// once: whichever of its answer, a challenge nothing could answer, or a
+    /// transaction that gave up without either gets here first takes the
+    /// digit with it.
+    fn dtmf_info_over(&mut self, id: AnyTransactionId, call: CallHandle, status: StatusCode) {
+        if let Some(digit) = self.by_dtmf_info.remove(&id) {
+            self.events.push_back(UaEvent::DtmfSent {
+                call,
+                digit,
+                status,
+            });
         }
     }
 
@@ -1833,6 +1869,13 @@ impl UserAgent {
         }
         if status.is_final() {
             self.release_refer(id, status.is_success());
+            // an INFO carrying a digit is the one request in this map whose
+            // answer the application is owed: BYE, CANCEL, PRACK, REFER and
+            // NOTIFY are all this layer's own business, but a 415 to a digit
+            // is news the caller cannot get any other way
+            if method == Method::Info {
+                self.dtmf_info_over(id, call, status);
+            }
         }
         None
     }
@@ -1844,8 +1887,26 @@ impl UserAgent {
         reason: TerminationReason,
         now: Instant,
     ) {
-        self.by_request.remove(&transaction);
+        let call = self.by_request.remove(&transaction).map(|(call, _)| call);
         self.account_of.remove(&transaction);
+        let failed = match reason {
+            TerminationReason::TimedOut => unanswered(FailureReason::Timeout),
+            TerminationReason::TransportFailed => unanswered(FailureReason::TransportFailed),
+            _ => None,
+        };
+        match (call, failed) {
+            // the timer or the transport that ended it retires the
+            // transaction before it reports why, so this is where an INFO
+            // that got no answer is first seen to be over
+            (Some(call), Some(status)) => self.dtmf_info_over(transaction, call, status),
+            // a challenge still parked is `settle_request_challenges`' to
+            // report, and a reliable transport's zero Timer K retires the
+            // transaction before that settle has run
+            _ if self.challenged_requests.contains_key(&transaction) => {}
+            _ => {
+                self.by_dtmf_info.remove(&transaction);
+            }
+        }
         let AnyTransactionId::InviteServer(id) = transaction else {
             // the INVITE this end sent keeps its mapping until the call goes:
             // a fork's late 2xx is reported after the transaction is retired,
@@ -1890,6 +1951,19 @@ impl UserAgent {
         // reported before the BYE's own dialog event arrives, so the reason
         // says what happened rather than who sent the last message
         self.finish(call, CallEndReason::Unreachable, None, None, now);
+    }
+}
+
+/// The status RFC 3261 §8.1.3.1 has a request that got no response treated
+/// as: a timeout "as if a 408 (Request Timeout) status code has been
+/// received", a fatal transport error "as a 503 (Service Unavailable) status
+/// code". `None` for a failure that was a response after all.
+const fn unanswered(reason: FailureReason) -> Option<StatusCode> {
+    match reason {
+        FailureReason::Timeout => Some(StatusCode::REQUEST_TIMEOUT),
+        FailureReason::TransportFailed => Some(StatusCode::SERVICE_UNAVAILABLE),
+        // non-exhaustive across crate versions; a refusal carried its own code
+        FailureReason::Refused | _ => None,
     }
 }
 

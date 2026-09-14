@@ -1518,6 +1518,93 @@ fn a_digit_dialled_on_one_end_is_heard_once_on_the_other() {
     );
 }
 
+/// 8.3.11: an INFO's digit is the same [`Event::Media`] an RFC 4733 one is,
+/// told apart only by [`crate::DigitSource`] — not a signalling event of its
+/// own on the way through the facade.
+#[test]
+fn a_digit_sent_by_info_is_heard_as_the_same_event_rfc_4733_uses() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+
+    pair.caller
+        .agent
+        .send_dtmf_info(call, '7', crate::DtmfInfoForm::Relay, 0, pair.now)
+        .expect("the INFO goes");
+    pair.settle();
+
+    let heard: Vec<_> = pair
+        .callee
+        .media_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            MediaEvent::DigitReceived { digit, source, .. } => Some((*digit, *source)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(heard, vec![(Some('7'), crate::DigitSource::Info)]);
+    assert!(
+        pair.callee
+            .heard
+            .iter()
+            .all(|event| !matches!(event, Event::Signalling(UaEvent::DtmfReceived { .. }))),
+        "the INFO's own event does not also reach the application: {:?}",
+        pair.callee.heard
+    );
+
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::DtmfSent { status, digit: '7', .. })
+                if status.get() == 200
+        )),
+        "{:?}",
+        pair.caller.heard
+    );
+}
+
+/// 8.3.11(c): RFC 4733 sending, INFO sending and INFO receiving refuse the
+/// same tone lengths. The media used to refuse anything under 40 ms and queue
+/// a digit a minute long, while an INFO took one of 1 ms and refused anything
+/// over ten seconds. Zero is left out on purpose: where a length is a number
+/// of milliseconds it asks for the default, and where it is a `Duration` it is
+/// simply too short.
+#[test]
+fn every_form_a_digit_takes_refuses_the_same_tone_lengths() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+
+    for held_ms in [1_u32, 20, 39, 40, 160, 10_000, 10_001, 60_000] {
+        let in_media = {
+            let mut session = pair
+                .caller
+                .engine
+                .session(call)
+                .expect("the caller's media");
+            let dialled = session
+                .dial("5", Duration::from_millis(u64::from(held_ms)))
+                .is_ok();
+            session.stop_dialling();
+            dialled
+        };
+        let by_info = pair
+            .caller
+            .agent
+            .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, held_ms, pair.now)
+            .is_ok();
+        let body = format!("Signal=5\r\nDuration={held_ms}\r\n");
+        let received =
+            sipral_ua::dtmf::parse_info(Some(b"application/dtmf-relay"), body.as_bytes()).is_ok();
+        let taken = (40..=10_000).contains(&held_ms);
+        assert_eq!(
+            (in_media, by_info, received),
+            (taken, taken, taken),
+            "{held_ms} ms, as (RFC 4733 sending, INFO sending, INFO receiving)"
+        );
+    }
+}
+
 /// A call whose far end offered no telephone event type is told so, rather
 /// than swallowing the digit. B2: applied, rejected with a reason, or not
 /// supported — never accepted and ignored.

@@ -111,6 +111,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dtmf_info"
+path = "fuzz_targets/dtmf_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "srtp_unprotect"
 path = "fuzz_targets/srtp_unprotect.rs"
 test = false

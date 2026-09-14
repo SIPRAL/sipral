@@ -2302,8 +2302,11 @@ fn unregistering_removes_this_binding_and_not_everybody_elses() {
 
 #[test]
 fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
-    // an INFO inside a call: nothing here has an opinion about it, so it
-    // reaches the application as the core wrote it rather than being dropped
+    // a MESSAGE inside a call (RFC 3428): nothing here has an opinion about
+    // it, so it reaches the application as the core wrote it rather than
+    // being dropped. INFO used to be this test's example; 8.3.11 gave it a
+    // policy of its own, so it no longer proves the point this test exists
+    // for
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
@@ -2323,7 +2326,7 @@ fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
     deliver(&mut agent, &in_dialog(&ok, "ACK", "in1ack", 1), t0);
     events(&mut agent);
 
-    deliver(&mut agent, &in_dialog(&ok, "INFO", "in1info", 2), t0);
+    deliver(&mut agent, &in_dialog(&ok, "MESSAGE", "in1msg", 2), t0);
     assert!(
         events(&mut agent).iter().any(|event| matches!(
             *event,
@@ -2481,6 +2484,39 @@ fn reversed(ours: &[u8], method: &str, branch: &str, cseq: u32, body: Option<&[u
         cseq,
         body,
     )
+}
+
+/// An INFO from the far end, inside a dialog this end opened (mirroring
+/// `reversed`'s tags), carrying a body of whatever `Content-Type` the caller
+/// names — `reversed`'s own body is always `application/sdp`, which the DTMF
+/// bodies never are.
+fn incoming_info(
+    ack: &[u8],
+    branch: &str,
+    cseq: u32,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut out = format!(
+        "INFO sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: {}\r\n\
+To: {}\r\n\
+Call-ID: {}\r\n\
+CSeq: {cseq} INFO\r\n\
+Contact: <sip:bob@192.0.2.9>\r\n",
+        text(ack, HeaderName::To),
+        text(ack, HeaderName::From),
+        text(ack, HeaderName::CallId),
+    )
+    .into_bytes();
+    if let Some(content_type) = content_type {
+        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    }
+    out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    out.extend_from_slice(body);
+    out
 }
 
 fn body_of(bytes: &[u8]) -> String {
@@ -10065,5 +10101,435 @@ fn a_name_that_is_not_a_token_is_refused() {
     assert_eq!(
         crate::HeadersFor::Call.check(b"X-Colon:", b"1"),
         Err(crate::HeaderRefused::NotAName)
+    );
+}
+
+// -- DTMF by SIP INFO (8.3.11) -----------------------------------------------
+
+#[test]
+fn a_refusal_of_the_info_reaches_the_application_named_with_the_digit_and_the_status() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the INFO goes");
+    let info = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&info).starts_with("INFO "));
+    assert_eq!(
+        header(&info, HeaderName::ContentType),
+        b"application/dtmf-relay"
+    );
+
+    deliver(
+        &mut agent,
+        &reply(&info, 415, "Unsupported Media Type", ""),
+        t0,
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '5',
+                status,
+            } if reported == call && status.get() == 415
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_success_of_the_info_is_also_reported_as_dtmf_sent() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '#', crate::DtmfInfoForm::Plain, 0, t0)
+        .expect("the INFO goes");
+    let info = sent(&mut agent);
+    assert_eq!(header(&info, HeaderName::ContentType), b"application/dtmf");
+    assert!(body_of(&info).ends_with('#'), "{}", body_of(&info));
+
+    deliver(&mut agent, &reply(&info, 200, "OK", ""), t0);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '#',
+                status,
+            } if reported == call && status.get() == 200
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_incoming_relay_and_an_incoming_plain_info_are_each_reported_as_a_received_digit() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &incoming_info(
+            &ack,
+            "relayin",
+            51,
+            Some("application/dtmf-relay"),
+            b"Signal=7\r\nDuration=200\r\n",
+        ),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&answer).starts_with("SIP/2.0 200 OK"));
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfReceived {
+                call: reported,
+                digit: '7',
+                held_ms: Some(200),
+            } if reported == call
+        )),
+        "{seen:?}"
+    );
+
+    deliver(
+        &mut agent,
+        &incoming_info(&ack, "plainin", 52, Some("application/dtmf"), b"9"),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(String::from_utf8_lossy(&answer).starts_with("SIP/2.0 200 OK"));
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfReceived {
+                call: reported,
+                digit: '9',
+                held_ms: None,
+            } if reported == call
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_content_type_neither_form_uses_is_415_and_reports_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &incoming_info(&ack, "wrongtype", 51, Some("application/sdp"), b"v=0\r\n"),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 415 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        !header(&answer, HeaderName::Accept).is_empty(),
+        "a 415 names what it does take (§21.4.13)"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
+        "nothing is reported for a body this stack never read"
+    );
+}
+
+#[test]
+fn a_malformed_relay_body_is_400_and_reports_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    // no Signal= at all, which names no digit
+    deliver(
+        &mut agent,
+        &incoming_info(
+            &ack,
+            "malformed",
+            51,
+            Some("application/dtmf-relay"),
+            b"Duration=160\r\n",
+        ),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
+        "nothing is reported for a body that names no digit"
+    );
+}
+
+#[test]
+fn an_oversized_body_is_400_and_reports_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    // large enough to be nothing this convention ever carries, and comfortably
+    // inside the message-size limit parsing enforces beneath this layer, so
+    // it is this parser's own bound that is being exercised here rather than
+    // the transport's
+    let huge = vec![b'5'; 8_192];
+    deliver(
+        &mut agent,
+        &incoming_info(&ack, "huge", 51, Some("application/dtmf"), &huge),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::DtmfReceived { .. }))
+    );
+}
+
+#[test]
+fn an_invalid_digit_or_duration_is_refused_before_anything_is_sent() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    assert_eq!(
+        agent.send_dtmf_info(call, 'E', crate::DtmfInfoForm::Relay, 0, t0),
+        Err(UaError::InvalidDtmf(crate::DtmfError::UnknownDigit))
+    );
+    assert_eq!(
+        agent.send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 10_001, t0),
+        Err(UaError::InvalidDtmf(crate::DtmfError::ToneTooLong(10_001)))
+    );
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "a refused digit or duration sends nothing"
+    );
+}
+
+#[test]
+fn a_401_challenge_to_the_info_still_reports_dtmf_sent_on_the_retry() {
+    // the retry is a new transaction, so the digit it carries has to follow
+    // it there too, or a PBX that challenges mid-dialog requests would leave
+    // every INFO's answer unreported
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(credentialled());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '3', crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the INFO goes");
+    let first = only(&transmits(&mut agent), "INFO ");
+    deliver(&mut agent, &unauthorized(&first), t0);
+    events(&mut agent);
+
+    let retry = only(&transmits(&mut agent), "INFO ");
+    credentials_of(&retry, HeaderName::Authorization);
+    deliver(&mut agent, &reply(&retry, 200, "OK", ""), t0);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '3',
+                status,
+            } if reported == call && status.get() == 200
+        )),
+        "the digit followed the retried transaction: {seen:?}"
+    );
+}
+
+#[test]
+fn an_info_nobody_answers_reaches_the_application_as_a_408() {
+    // RFC 3261 §8.1.3.1: "When a timeout error is received from the
+    // transaction layer, it MUST be treated as if a 408 (Request Timeout)
+    // status code has been received"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '5', crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the INFO goes");
+    only(&transmits(&mut agent), "INFO ");
+    events(&mut agent);
+
+    // past Timer F, 64·T1 (§17.1.2.2), with nothing back
+    let later = t0 + Duration::from_secs(33);
+    agent.handle_timeout(later);
+    transmits(&mut agent);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '5',
+                status,
+            } if reported == call && status.get() == 408
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_info_challenged_on_an_account_with_no_password_reaches_the_application_as_its_401() {
+    // nothing can answer the challenge, so the 401 is the last word on this
+    // digit, and it is as much the application's news as a 415 would be
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '9', crate::DtmfInfoForm::Plain, 0, t0)
+        .expect("the INFO goes");
+    let info = only(&transmits(&mut agent), "INFO ");
+    deliver(&mut agent, &unauthorized(&info), t0);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "there is no password, so nothing goes again"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '9',
+                status,
+            } if reported == call && status.get() == 401
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_info_whose_transport_failed_reaches_the_application_as_a_503() {
+    // RFC 3261 §8.1.3.1: a fatal transport error "MUST be treated as a 503
+    // (Service Unavailable) status code"
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack) = call_up(&mut agent, id, t0);
+
+    agent
+        .send_dtmf_info(call, '1', crate::DtmfInfoForm::Relay, 0, t0)
+        .expect("the INFO goes");
+    only(&transmits(&mut agent), "INFO ");
+    events(&mut agent);
+
+    agent
+        .receive(
+            Input::TransportFailed {
+                transport: UDP,
+                error: sipral_core::endpoint::TransportErrorKind::Unreachable,
+            },
+            t0,
+        )
+        .expect("the failure is taken");
+    transmits(&mut agent);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::DtmfSent {
+                call: reported,
+                digit: '1',
+                status,
+            } if reported == call && status.get() == 503
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn an_oversized_relay_body_is_400_even_when_it_names_a_digit() {
+    // a good Signal= on top of kilobytes of padding: the plain form's
+    // one-character rule refuses an oversized body of its own by accident,
+    // and nothing refused the relay form's
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    let mut huge = b"Signal=5\r\nDuration=160\r\n".to_vec();
+    huge.resize(8_192, b' ');
+    deliver(
+        &mut agent,
+        &incoming_info(&ack, "hugerelay", 51, Some("application/dtmf-relay"), &huge),
+        t0,
+    );
+    let answer = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 400 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
+        "nothing is reported for a body no one digit needs"
+    );
+}
+
+#[test]
+fn an_info_with_no_body_at_all_is_200_and_reports_nothing() {
+    // RFC 3261 §21.4.13's 415 refuses "the message body of the request", and
+    // an INFO with none has no body to refuse; RFC 6086 §4.2.2 answers one
+    // that is "syntactically correct and well structured" 200
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (_call, ack) = call_up(&mut agent, id, t0);
+
+    deliver(&mut agent, &incoming_info(&ack, "empty", 51, None, b""), t0);
+    let answer = sent(&mut agent);
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("SIP/2.0 200 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
+        "an INFO with no body names no digit"
     );
 }

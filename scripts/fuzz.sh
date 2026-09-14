@@ -8,7 +8,7 @@
 #   scripts/fuzz.sh 3600       an hour a target
 #   scripts/fuzz.sh 60 parse   one target, one minute
 #
-# Not a part of scripts/check.sh: fifteen targets at five minutes each would
+# Not a part of scripts/check.sh: sixteen targets at five minutes each would
 # add an hour to every commit and buy very little, since the corpus only grows
 # when something new reaches it. The gate builds them instead, so they cannot
 # rot uncompiled. Run this before a release, and overnight on a machine that

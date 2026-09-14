@@ -104,7 +104,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Fifteen targets, one per door an attacker's bytes come through.
+Sixteen targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -160,6 +160,15 @@ what it received; then through what a handshake reads next from that message:
 the cookie check, the certificate's key and fingerprint, the key exchange
 point, the signatures.
 
+One more, added for 8.3.11's incoming DTMF over signalling. `dtmf_info` takes
+a `Content-Type` and a body — the first byte says how many of the rest name
+the header, capped at what is left, and the remainder is the body — through
+`sipral_ua::dtmf::parse_info`, the reader an incoming INFO answers 200, 415
+or 400 with. Neither body it reads has an RFC of its own (`docs/04-ua.md`),
+so nothing but this parser's own bound on the accepted characters and on how
+long a tone lasts says what a peer may claim, and this is what proves it
+never panics on a claim that breaks it.
+
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
 ./scripts/fuzz.sh 600              # every target, ten minutes each
@@ -179,14 +188,14 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than fifteen runs beginning at
+targets with something to start from rather than sixteen runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Fourteen of the
-fifteen families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing. Fifteen of the
+sixteen families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -212,7 +221,7 @@ The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
 five minutes each by default — before a release and overnight, not before
 every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all fifteen, under the nightly that `fuzz/` pins, so
+do on every run is **build** all sixteen, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -295,6 +304,7 @@ kamailio` / `asterisk`), unless a column below says one server only:
 | blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | both |
 | attended transfer | as blind, plus the consultation leg itself connected first | both |
 | DTMF, RFC 4733 | connected, a digit sent as a named telephone event named back the same way by the lab's own dialplan (`interop/asterisk/extensions.conf`'s 9003), hung up, ended. Not run through the proxy to FreeSWITCH yet: its 9003 in `interop/freeswitch/lab.xml` never named the digit back, dialled at once or after a pause, and a flow is not run where it is known not to pass until the reason is found | Asterisk only |
+| DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` (8.3.11) instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
 | hold with a codec change | as hold, but the resume re-offers a narrower codec list than the call held on (the 8.2.1 case) and the far end's answer actually moves — see `crate::reoffer_onto` in the harness for how, and its own doc comment for what is not yet a facade capability | Asterisk only |
 | inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |
@@ -347,7 +357,7 @@ in the C library that build produces, `bindings/c/smoke.c` compiled against the
 header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all fifteen fuzz targets under their own nightly — which nothing else
+over all sixteen fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

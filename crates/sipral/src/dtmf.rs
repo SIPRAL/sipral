@@ -45,6 +45,11 @@ pub const SHORTEST_DIGIT: Duration = Duration::from_millis(40);
 /// of a lossy path will reliably pick out.
 pub const DEFAULT_DIGIT: Duration = Duration::from_millis(100);
 
+/// The longest digit any form sends: `sipral_ua::dtmf::MAX_DTMF_MS`, the
+/// ceiling a digit sent or received by INFO is held to, so that no form of
+/// DTMF takes a length another refuses (8.3.11).
+pub const LONGEST_DIGIT: Duration = Duration::from_millis(10_000);
+
 /// The pause held between one digit and the next, from the same table.
 pub const DIGIT_GAP: Duration = Duration::from_millis(60);
 
@@ -323,7 +328,9 @@ fn rescale(ticks: u32, was: u32, now: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_DIGIT, Dialling, Digit, Due, SHORTEST_DIGIT};
+    use std::time::Duration;
+
+    use super::{DEFAULT_DIGIT, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST_DIGIT};
     use sipral_rtp::EventSender;
 
     /// The timestamp the audio stream had when the digit began.
@@ -389,6 +396,20 @@ mod tests {
     fn the_shortest_digit_is_the_one_legacy_equipment_recognises() {
         assert_eq!(SHORTEST_DIGIT.as_millis(), 40);
         assert!(DEFAULT_DIGIT > SHORTEST_DIGIT);
+    }
+
+    /// The two lengths an error here names are the bounds the user agent
+    /// validates every form against, not a second pair that could drift.
+    #[test]
+    fn the_bounds_named_here_are_the_ones_every_form_is_held_to() {
+        assert_eq!(
+            SHORTEST_DIGIT,
+            Duration::from_millis(u64::from(sipral_ua::dtmf::MIN_DTMF_MS))
+        );
+        assert_eq!(
+            LONGEST_DIGIT,
+            Duration::from_millis(u64::from(sipral_ua::dtmf::MAX_DTMF_MS))
+        );
     }
 
     /// A hundred milliseconds at eight kilohertz is 800 ticks and a frame is

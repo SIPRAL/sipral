@@ -54,7 +54,7 @@ use sipral_rtp::{
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate};
-use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, SHORTEST_DIGIT};
+use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST_DIGIT};
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
@@ -1248,18 +1248,14 @@ impl MediaSession {
     /// [`MediaError::NoDtmf`] when the negotiation settled on no telephone
     /// event payload type, which is the honest answer for a call whose far end
     /// never offered one; [`MediaError::DigitTooShort`] below the length legacy
-    /// equipment recognises; and [`MediaError::TooManyDigits`] when the queue
-    /// is full.
+    /// equipment recognises; [`MediaError::DigitTooLong`] above the longest
+    /// any form of DTMF sends; and [`MediaError::TooManyDigits`] when the
+    /// queue is full.
     pub fn send_dtmf(&mut self, digit: Digit, length: Duration) -> Result<(), MediaError> {
         if self.plan.dtmf.is_none() {
             return Err(MediaError::NoDtmf);
         }
-        if length < SHORTEST_DIGIT {
-            return Err(MediaError::DigitTooShort {
-                asked: length,
-                least: SHORTEST_DIGIT,
-            });
-        }
+        digit_length(length)?;
         if self
             .dialling
             .push(digit, ticks_of(length, self.plan.codec.clock_rate()))
@@ -1287,12 +1283,7 @@ impl MediaSession {
         if self.plan.dtmf.is_none() {
             return Err(MediaError::NoDtmf);
         }
-        if length < SHORTEST_DIGIT {
-            return Err(MediaError::DigitTooShort {
-                asked: length,
-                least: SHORTEST_DIGIT,
-            });
-        }
+        digit_length(length)?;
         if self.dialling.waiting() + digits.len() > crate::dtmf::WAITING {
             return Err(MediaError::TooManyDigits);
         }
@@ -1327,6 +1318,29 @@ impl MediaSession {
     }
 }
 
+/// Whether a digit this long is one any form of DTMF sends.
+///
+/// Read through `sipral_ua::dtmf::duration_ms`, the one bound INFO sending
+/// and INFO receiving are held to as well, so that RFC 4733 refuses exactly
+/// the lengths they do (8.3.11). A zero `Duration` is a length here and too
+/// short, where zero milliseconds there asks for the default, so it is read
+/// as the shortest length that is not zero.
+fn digit_length(length: Duration) -> Result<(), MediaError> {
+    let millis = u32::try_from(length.as_millis()).unwrap_or(u32::MAX).max(1);
+    match sipral_ua::dtmf::duration_ms(millis) {
+        Ok(_) => Ok(()),
+        Err(sipral_ua::DtmfError::ToneTooShort(_)) => Err(MediaError::DigitTooShort {
+            asked: length,
+            least: SHORTEST_DIGIT,
+        }),
+        // the only other refusal a length can get; a digit is not read here
+        Err(_) => Err(MediaError::DigitTooLong {
+            asked: length,
+            most: LONGEST_DIGIT,
+        }),
+    }
+}
+
 /// One reported event, as the application hears about it.
 fn digit_heard(reported: &Reported, rate: u32) -> MediaEvent {
     MediaEvent::DigitReceived {
@@ -1338,6 +1352,7 @@ fn digit_heard(reported: &Reported, rate: u32) -> MediaEvent {
                 .checked_div(u64::from(rate).max(1))
                 .unwrap_or(0),
         ),
+        source: crate::event::DigitSource::Rtp,
     }
 }
 

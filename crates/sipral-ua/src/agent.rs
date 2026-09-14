@@ -93,6 +93,12 @@ pub struct UserAgent {
     /// call: a BYE outlives the call it ended, and a challenge to it can only
     /// be answered by whoever still knows the password.
     pub(crate) account_of: HashMap<AnyTransactionId, AccountId>,
+    /// The digit an INFO in `by_request` is carrying, so that its final
+    /// answer can be reported as [`UaEvent::DtmfSent`] naming the digit it
+    /// was about. Kept beside `by_request` rather than inside it because
+    /// every other method that map holds — BYE, CANCEL, PRACK, REFER, NOTIFY —
+    /// has nothing to put here.
+    pub(crate) by_dtmf_info: HashMap<AnyTransactionId, char>,
     /// The re-INVITEs and UPDATEs offering a session change.
     pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
     /// Refusals of an INVITE that carried a challenge, held until the drain
@@ -176,6 +182,7 @@ impl UserAgent {
             by_dialog: HashMap::new(),
             by_request: HashMap::new(),
             account_of: HashMap::new(),
+            by_dtmf_info: HashMap::new(),
             by_offer: HashMap::new(),
             challenged: HashMap::new(),
             challenged_requests: HashMap::new(),
@@ -570,6 +577,10 @@ impl UserAgent {
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;
         let event = self.on_transfer_event(event, now)?;
+        // A digit by INFO, claimed by method rather than by dialog state, so
+        // it runs wherever in this run it does not collide with the two
+        // handlers either side of it — neither reads an INFO.
+        let event = self.on_dtmf_event(event, now)?;
         // Below transfer, and it has to be: both claim NOTIFYs, and they
         // divide them by the `Event` header. Transfer claims the `refer`
         // package inside a call it is running -- a subscription this machine

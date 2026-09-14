@@ -47,6 +47,13 @@ mod audit_tests;
 mod call;
 mod calls;
 mod dialoginfo;
+/// Validation shared by every way a digit crosses this stack's boundary, and
+/// the two ad hoc `Content-Type`s an INFO carries one in — grouped under its
+/// own path rather than flattened like the rest of this crate's surface,
+/// because [`UserAgent::send_dtmf_info`] and the incoming parser are the only
+/// callers most applications ever need and the bound and the parser are what
+/// a binding or a fuzz target reaches for by name.
+pub mod dtmf;
 mod error;
 mod event;
 mod headers;
@@ -79,6 +86,7 @@ pub use dialoginfo::{
     DialogEnded, DialogInfo, DialogInfoError, DialogInfoTable, DialogPhase, Initiated, Participant,
     WatchedDialog,
 };
+pub use dtmf::{DtmfError, DtmfInfo, DtmfInfoForm, InfoRefusal};
 pub use error::UaError;
 pub use event::{RegistrationFailure, RegistrationState, UaEvent};
 pub use headers::{HeaderRefused, HeadersFor};

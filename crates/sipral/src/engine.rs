@@ -60,7 +60,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{Ordering, compiler_fence};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sipral_core::auth::KeySource;
 use sipral_core::msg::OwnedMessage;
@@ -77,8 +77,9 @@ use sipral_ua::{
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog};
 use crate::counters::Counters;
+use crate::dtmf::Digit;
 use crate::error::MediaError;
-use crate::event::{Event, MediaEvent};
+use crate::event::{DigitSource, Event, MediaEvent};
 use crate::keying::{self, SrtpPolicy};
 use crate::session::{MediaConfig, MediaSession, StreamIdentity};
 use crate::share::{self, Held, SessionGuard, SessionShare};
@@ -718,6 +719,13 @@ impl MediaEngine {
         let signalling = agent.poll_event()?;
         self.counters.observe_signalling(&signalling);
         self.absorb(&signalling, agent, now);
+        // folded into a media event by `absorb`, above, rather than forwarded
+        // as this one: the next turn of this same loop returns what that just
+        // queued, since the media checks at the top of this function run
+        // before the signalling drain does
+        if matches!(signalling, UaEvent::DtmfReceived { .. }) {
+            return self.poll_event(agent, now);
+        }
         Some(Event::Signalling(signalling))
     }
 
@@ -820,8 +828,34 @@ impl MediaEngine {
             } => self.redescribed(*call, local.as_deref(), remote.as_deref(), now),
             UaEvent::Reoffer { call, request } => self.answer_reoffer(*call, request, agent, now),
             UaEvent::CallEnded { call, .. } => self.release(*call, now),
+            UaEvent::DtmfReceived {
+                call,
+                digit,
+                held_ms,
+            } => self.dtmf_received(*call, *digit, *held_ms),
             _ => {}
         }
+    }
+
+    /// A digit arrived by SIP INFO. Folded into the same
+    /// [`MediaEvent::DigitReceived`] the media reports RFC 4733 events with —
+    /// `crate::event`'s own module doc says why — rather than forwarded as
+    /// its own [`UaEvent`].
+    fn dtmf_received(&mut self, call: CallHandle, digit: char, held_ms: Option<u32>) {
+        // an INFO's digit always names one of the sixteen keys RFC 4733
+        // §3.2 does too, because `sipral_ua`'s own parser refused anything
+        // else before this ever arrived; the fallback exists so this reads
+        // an event code rather than reaching for one it cannot get
+        let event = Digit::from_char(digit).map_or(0, Digit::event);
+        self.events.push_back((
+            call,
+            MediaEvent::DigitReceived {
+                digit: Some(digit),
+                event,
+                held: held_ms.map_or(Duration::ZERO, |ms| Duration::from_millis(u64::from(ms))),
+                source: DigitSource::Info,
+            },
+        ));
     }
 }
 

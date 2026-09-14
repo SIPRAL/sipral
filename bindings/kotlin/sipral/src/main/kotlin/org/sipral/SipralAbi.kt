@@ -505,7 +505,6 @@ enum class SipralDtmf(val value: Int) {
  * - 16: the set of audio devices changed (A2)
  * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
- * - 27: a DTMF digit sent by SIP INFO was answered
  * - 28: the stack recovered from a suspension or a network change
  * - 29: the application is asked to resolve a destination
  */
@@ -630,16 +629,29 @@ enum class SipralEventKind(val value: Int) {
      */
     RECORDING_STOPPED(25),
     /**
-     * The far end pressed a key (RFC 4733).
+     * The far end pressed a key: an RFC 4733 named telephone event, or an
+     * INFO carrying `application/dtmf-relay` or `application/dtmf`.
      *
-     * One per keypress, not one per packet: a digit goes out as a run of
-     * updates and then its closing packet three times, and the layer below
-     * collapses them on the timestamp that identifies the event.
-     * `payload.media.digit` is the character, `event_code` the number behind
-     * it for the events no keypad has a key for, and `held_ms` how long it
-     * lasted.
+     * One per keypress, not one per packet: an RFC 4733 digit goes out as
+     * a run of updates and then its closing packet three times, and the
+     * layer below collapses them on the timestamp that identifies the
+     * event; an INFO is one request. `payload.media.digit` is the
+     * character, `event_code` the number behind it for the events no
+     * keypad has a key for, `held_ms` how long it lasted (an
+     * `application/dtmf` INFO carries none, and this is zero), and
+     * `source` a `SIPRAL_DIGIT_SOURCE` naming which of the two reported
+     * it.
      */
     DIGIT_RECEIVED(26),
+    /**
+     * An INFO this end sent for `sipral_call_send_dtmf` reached a final
+     * answer. `payload.call.digit` is the character and
+     * `payload.call.status_code` what the far end answered — a 415 from
+     * a switch that does not take this `Content-Type` included, so the
+     * application learns which of the two INFO forms to try without
+     * guessing from silence.
+     */
+    DTMF_SENT(27),
     ;
 
     companion object {
@@ -839,6 +851,28 @@ enum class SipralCallEndReason(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralCallEndReason? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Which of the two ways this stack accepts a digit reported the one
+ * SipralEventKind.DIGIT_RECEIVED carries. Names for
+ * `sipral_media_event_t::source`.
+ */
+enum class SipralDigitSource(val value: Int) {
+    /**
+     * RFC 4733: a named telephone event in the RTP stream.
+     */
+    RTP(0),
+    /**
+     * RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
+     * or `application/dtmf`.
+     */
+    INFO(1),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralDigitSource? = entries.firstOrNull { it.value == value }
     }
 }
 
