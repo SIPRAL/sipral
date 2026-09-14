@@ -608,6 +608,77 @@ one re-INVITE gets an answer RFC 3264 §6.1 would not have written. It cannot
 happen under *required*, where the offer is refused before an answer is
 composed; under the other two it is a shape nothing has been seen to send.
 
+## Ringing with media (task 8.4.9)
+
+`MediaEngine::ring` and `MediaEngine::ring_with` are `MediaEngine::place` and
+`MediaEngine::place_with`'s mirror on the other side of the call: an incoming
+INVITE this stack has not answered yet, put through the same offer/answer
+machinery `answer`/`answer_with` use, and sent in a 183 rather than a 200 OK.
+The session opens the moment `ring_with` returns — not on the ACK, which is
+how `answer_with` opens one, because a 183 is never acknowledged the way a
+2xx is and there is no later event to hang it on — so the far end hears
+whatever the application plays on the session before anybody answers, and
+`MediaEvent::Started` follows exactly as it does after `answer`.
+
+`UserAgent::ring` already decides, from the INVITE's own `Require` or
+`Supported`, whether the 183 goes out reliably (RFC 3262 §3); `ring_with`
+does not add a policy of its own here, it only writes what goes in the body.
+
+**An INVITE that carried no offer is not rung with media**:
+`MediaError::NoDescription`, with nothing sent. The offer this end would
+have to make instead has one legal place among the responses, RFC 3261
+§13.2.1's "first reliable non-failure message", and RFC 6337 §3.1.2 keeps
+it out of every other response — so an unreliable 183 may not carry it at
+all. A reliable one may, but then RFC 3262 §5 puts the far end's answer in
+the PRACK, and nothing hands a PRACK's body to this engine: the session
+would never open, and nothing would say so. `answer`/`answer_with` stay the
+way to take such a call.
+
+**A later `answer` or `answer_with` on the same call reuses that session and
+that description.** There is no second negotiation: the catalogue and the
+configuration `ring_with` recorded stay this call's own, the `o=` session id
+and version are unmoved, and neither `local` nor `media` given to `answer`/
+`answer_with` at that point is read — ringing with media already settled
+both. What changes is only whether anything goes in the 200 OK, and that is
+exactly what RFC 3262 §5 and RFC 6337 §3.1.1 say, for the two ways the 183
+could have gone out:
+
+- **Sent reliably.** §5: "the UAS MUST delay sending the 2xx until the
+  provisional response is acknowledged" — `UserAgent::answer` already does
+  that regardless of what body it is given, holding the 2xx until the PRACK
+  arrives. RFC 6337 §3.1.1's UAS rule #2 covers the body: "After the UAS has
+  sent the answer in a reliable provisional response ... the UAS should not
+  include any SDPs in subsequent responses." The 183 already carried the
+  real answer, so the 200 OK that follows the PRACK carries none.
+- **Sent unreliably.** RFC 3261 §13.2.1 makes the answer to an offer real
+  only in a reliable non-failure message; an unreliable 183 is, in RFC
+  6337's words, "only a preview of the answer that will be coming." The
+  offer/answer exchange is not complete yet, and the 200 OK — the exchange's
+  first reliable non-failure response — is where it has to finish: it
+  repeats the same description, unchanged, rather than writing a new one.
+
+Both cases end with exactly one session for the call and exactly one
+`MediaEvent::Started`, whichever of `ring_with`/`ring` or `answer`/
+`answer_with` came first.
+
+**Ringing with media twice on one call is refused**, with the same error
+`answer` uses for a call in the wrong state: once early media has been
+offered, that is a one-way door, not a value to keep changing while the
+call is still ringing. A plain `UserAgent::ring` with no description — a
+180 — first is no obstacle. One that carried a description the application
+wrote itself is, and for the RFC's reason rather than this engine's: RFC 3261
+§13.2.1 allows only "that same exact answer" in any other response to the
+INVITE, and RFC 6337 §3.1.1 has every description in those responses
+identical, so an answer this engine writes after it would be a second,
+different one. `UserAgent::has_described` is what `ring_with` asks, and the
+refusal is the same error, with nothing sent.
+
+`sipral_call_ring_media` (`docs/08-ffi.md`) is the C entry point, and the one
+place SRTP on an incoming call's own terms was still missing after 8.4.6:
+`sipral_call_answer_media` reads no configuration of its own, so a call this
+stack describes the media of had no way to choose anything but the stack's
+SRTP policy until it could ring with one first.
+
 ## What the end of a call sends
 
 RFC 3550 §6.6 has a participant that leaves send an RTCP BYE, and the engine

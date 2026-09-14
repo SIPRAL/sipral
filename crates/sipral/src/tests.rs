@@ -478,6 +478,131 @@ fn a_call_that_is_answered_has_media_on_it() {
     }
 }
 
+/// The raw bytes of a message's body, straight off the wire — what a test
+/// needs for a datagram captured from [`Stack::outbound`] rather than read
+/// out of a [`UaEvent`].
+fn wire_message_body(datagram: &[u8]) -> Vec<u8> {
+    let mut scratch = sipral_core::msg::ParseScratch::new();
+    let message =
+        sipral_core::msg::parse(datagram, &mut scratch, sipral_core::msg::ParseMode::Lenient)
+            .expect("a well-formed message");
+    message.body().to_vec()
+}
+
+/// 8.4.9: an incoming call may be rung with media before it is answered, and
+/// [`MediaEngine::answer`] on one that was must not negotiate a second time —
+/// same session, same `o=` id and version.
+///
+/// Every INVITE this build sends carries `Supported: 100rel`
+/// (`sipral-core`'s endpoint adds it unconditionally), so a call this
+/// harness's own caller places always makes the callee's 183 a reliable one —
+/// [`Pair::ring`] cannot produce the other half of RFC 3262 §5 / RFC 6337
+/// §3.1.1's rule, an early answer sent unreliably; a hand-written INVITE can,
+/// and `crates/sipral-ffi/src/call.rs`'s tests cover it. What this proves
+/// instead is the reliable half from both sides of one exchange: the far end
+/// PRACKs the 183 the way this stack's own caller always would, and the 200
+/// OK that follows carries nothing, because RFC 6337 §3.1.1's UAS rule #2 is
+/// that nothing sent reliably is repeated.
+#[test]
+fn ringing_with_media_then_answering_reuses_the_session_and_the_description() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let remote = pair.ring();
+    // whatever provisional response the core sent on its own before the
+    // application had a chance to
+    let _ = pair.callee.outbound();
+
+    pair.callee
+        .engine
+        .ring(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the 183 goes");
+    pair.callee.drain(pair.now, false);
+    assert_eq!(
+        pair.callee
+            .media_events()
+            .iter()
+            .filter(|event| matches!(event, MediaEvent::Started { .. }))
+            .count(),
+        1,
+        "ringing with media should start the session once: {:?}",
+        pair.callee.media_events()
+    );
+    assert!(
+        pair.callee.engine.session(remote).is_some(),
+        "the far end should hear something before anybody answers"
+    );
+
+    let progress = pair.callee.outbound();
+    assert_eq!(progress.len(), 1, "one 183 goes out");
+    assert!(progress[0].starts_with(b"SIP/2.0 183"));
+    assert!(
+        !wire_message_body(&progress[0]).is_empty(),
+        "the 183 carries the description this stack wrote"
+    );
+
+    // the far end's own stack already placed this call with an offer, so
+    // RFC 3262 §5's "MAY generate an additional offer in the PRACK" is
+    // declined and `on_reliable_progress` PRACKs the answer by itself, the
+    // same way an application-driven far end would once told the 183 arrived
+    for datagram in &progress {
+        pair.caller.deliver(datagram, callee_sip(), pair.now);
+    }
+    pair.settle();
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the 200 OK goes");
+    pair.callee.drain(pair.now, false);
+    let confirmed = pair.callee.outbound();
+    assert_eq!(confirmed.len(), 1, "one 200 OK goes out");
+    assert!(confirmed[0].starts_with(b"SIP/2.0 200"));
+    assert!(
+        wire_message_body(&confirmed[0]).is_empty(),
+        "the answer already went out reliably in the 183; RFC 6337 §3.1.1 \
+         forbids repeating it in the 200 OK"
+    );
+    assert_eq!(
+        pair.callee
+            .media_events()
+            .iter()
+            .filter(|event| matches!(event, MediaEvent::Started { .. }))
+            .count(),
+        1,
+        "answering a call already rung with media must not start a second session"
+    );
+}
+
+/// Ringing with media twice on one call is refused, with the error
+/// [`MediaEngine::answer`] itself uses for a call in the wrong state.
+#[test]
+fn ringing_with_media_twice_is_refused() {
+    let mut pair = Pair::new(CodecCatalog::new());
+    let remote = pair.ring();
+    let _ = pair.callee.outbound();
+
+    pair.callee
+        .engine
+        .ring(&mut pair.callee.agent, remote, callee_media(), pair.now)
+        .expect("the first 183 goes");
+    let _ = pair.callee.outbound();
+
+    let refused = pair
+        .callee
+        .engine
+        .ring(&mut pair.callee.agent, remote, callee_media(), pair.now);
+    assert!(
+        matches!(
+            refused,
+            Err(MediaError::Signalling(sipral_ua::UaError::WrongState(_)))
+        ),
+        "ringing with media twice should be refused the way answering twice is: {refused:?}"
+    );
+    assert!(
+        pair.callee.outbound().is_empty(),
+        "nothing goes out for a refused second 183"
+    );
+}
+
 /// A4's reporting half. Both ends have the same catalogue, so both should land
 /// on the codec at the top of it — and the top of it is not the one a stack
 /// falls back to by accident, which is what makes this test say something.

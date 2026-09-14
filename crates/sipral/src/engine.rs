@@ -37,15 +37,22 @@
 //! this engine has never described anything for, and it is left alone rather
 //! than guessed at.
 //!
+//! An incoming call may also be rung with [`MediaEngine::ring`] before it is
+//! answered: the far end hears the answer to its offer, and this end's
+//! session, before anybody picks up. [`MediaEngine::answer`] on a call rung
+//! this way does not negotiate a second time — it reuses the session and the
+//! description [`MediaEngine::ring`] already wrote, and RFC 3262 §5 together
+//! with RFC 6337 §3.1.1 decide what, if anything, the 200 OK repeats.
+//!
 //! # One call, its own catalogue
 //!
 //! [`MediaEngine::place`] and [`MediaEngine::answer`] draw the codec
 //! catalogue and the [`MediaConfig`] a call opens with from this engine's own
 //! defaults, but neither is copied into the call as a standing reference to
 //! them — a call keeps what it started with even if the engine's defaults
-//! change under it later. [`MediaEngine::place_with`] and
-//! [`MediaEngine::answer_with`] take a [`CallMedia`] naming both for one call
-//! alone, which is what an attended transfer needs: `UserAgent::consult`
+//! change under it later. [`MediaEngine::place_with`], [`MediaEngine::ring_with`]
+//! and [`MediaEngine::answer_with`] take a [`CallMedia`] naming both for one
+//! call alone, which is what an attended transfer needs: `UserAgent::consult`
 //! holds two calls at once, and a global codec order or a global render delay
 //! would make the second one a race against whichever call touches it last.
 
@@ -62,7 +69,9 @@ use sipral_core::sdp::{
     MediaDescription, MediaPlan, NegotiatedCodec, Origin, SessionDescription, StreamAnswer, parse,
     static_rtpmap,
 };
-use sipral_ua::{AccountId, CallHandle, OutgoingCall, StatusCode, UaEvent, UserAgent};
+use sipral_ua::{
+    AccountId, CallHandle, CallState, OutgoingCall, StatusCode, UaError, UaEvent, UserAgent,
+};
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog};
@@ -109,6 +118,17 @@ struct Managed {
     /// D6: how this call's session is opened — this engine's default unless
     /// overridden the same way.
     config: MediaConfig,
+    /// Whether [`MediaEngine::ring_with`] has already described and opened
+    /// this call's session, before it was answered.
+    ///
+    /// What [`MediaEngine::answer_with`] reads to tell early media it wrote
+    /// itself from a call answered without ever ringing: the first writes
+    /// `local` and starts the session on the spot, since there is no later
+    /// event to hang that on the way there is for an answer, so `local` alone
+    /// cannot say which one happened. Once true, it stays true for the life
+    /// of the call — this is a one-way door, and ringing with media a second
+    /// time is refused rather than reopened.
+    rung_with_media: bool,
 }
 
 /// What one call opens with, when it is not this engine's defaults.
@@ -368,9 +388,120 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config,
+                // an outgoing call rings the far end's phone, not this one's
+                rung_with_media: false,
             },
         );
         Ok(call)
+    }
+
+    /// Say a call that came in is ringing, with the answer to the offer it
+    /// carried written from this call's own catalogue and the session opened
+    /// on this engine's default [`MediaConfig`] — before anybody answers.
+    ///
+    /// # Errors
+    /// The same as [`MediaEngine::ring_with`].
+    pub fn ring(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let catalog = self
+            .calls
+            .get(&call)
+            .ok_or(MediaError::NoSuchCall)?
+            .catalog
+            .clone();
+        let media = CallMedia::new(catalog, self.config.clone());
+        self.ring_with(agent, call, local, media, now)
+    }
+
+    /// The same as [`MediaEngine::ring`], keeping `media`'s catalogue for this
+    /// call from here on and opening the session on `media`'s configuration
+    /// instead of this engine's default.
+    ///
+    /// The session opens the moment this returns, not when the call is later
+    /// confirmed: a 183 is never acknowledged the way a 2xx is, so there is no
+    /// later event for [`MediaEngine::answer_with`]'s own way of opening one —
+    /// off the ACK — to hang on, and the whole point of early media is that
+    /// the far end hears it before anybody answers. [`MediaEvent::Started`]
+    /// follows here, the same as it does after [`MediaEngine::answer`].
+    ///
+    /// [`UserAgent::ring`] decides, from the INVITE's own `Require` or
+    /// `Supported`, whether the 183 carrying this description goes out
+    /// reliably (RFC 3262 §3). That choice is also what decides what a later
+    /// [`MediaEngine::answer`] or [`MediaEngine::answer_with`] on this call
+    /// may put in the 200 OK (RFC 3262 §5, RFC 6337 §3.1.1): sent reliably,
+    /// this description is already the real answer and the 200 OK must not
+    /// repeat it; sent unreliably, it was only a preview, and the 200 OK — the
+    /// exchange's first reliable non-failure response — still owes the far
+    /// end the same answer, unchanged. Either way that later call reuses this
+    /// session and this description rather than negotiating a second one: the
+    /// same `o=` id and version, described once.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine never saw arrive,
+    /// [`MediaError::Signalling`] wrapping [`sipral_ua::UaError::WrongState`]
+    /// for a call this has already been called on — once is all a call gets,
+    /// though a plain [`UserAgent::ring`] with no description first is no
+    /// obstacle — and the same for a call whose provisional response already
+    /// carried a description [`UserAgent::ring`] was handed, since RFC 3261
+    /// §13.2.1 allows only "that same exact answer" in any response after it,
+    /// [`MediaError::NoDescription`] for an INVITE that carried no
+    /// offer, since the offer this end would make instead belongs in no
+    /// provisional response this engine can follow up (RFC 3261 §13.2.1,
+    /// RFC 6337 §3.1.2), [`MediaError::Description`] when the answer cannot be
+    /// built, [`MediaError::SrtpRequired`] when `media`'s catalogue requires
+    /// SRTP and the INVITE offered a stream that cannot carry it, and
+    /// [`MediaError::Signalling`] for whatever else the user agent refuses to
+    /// send it over.
+    pub fn ring_with(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        local: SocketAddr,
+        media: CallMedia,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let CallMedia { catalog, config } = media;
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        if managed.rung_with_media || agent.has_described(call) {
+            let state = agent.call_state(call).unwrap_or(CallState::EarlyMedia);
+            return Err(MediaError::from(UaError::WrongState(state)));
+        }
+        let (session_id, version) = (managed.session_id, managed.version);
+        // an INVITE with no offer leaves this end to make one, and RFC 3261
+        // §13.2.1 puts it in "the first reliable non-failure message" while
+        // RFC 6337 §3.1.2 keeps it out of every other response; sent reliably,
+        // the answer to it comes back in the PRACK (RFC 3262 §5), and nothing
+        // hands a PRACK's body to this engine
+        let Some(offer) = managed.remote.clone() else {
+            return Err(MediaError::NoDescription);
+        };
+        if !keying_allows(&catalog, Some(&offer)) {
+            return Err(MediaError::SrtpRequired);
+        }
+        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
+        let description =
+            write_answer(&catalog, &offer, local, session_id, version, keys.as_ref())?;
+        let bytes = description.to_bytes();
+        agent.ring(call, Some(Arc::from(bytes)), now)?;
+        if let Some(managed) = self.calls.get_mut(&call) {
+            managed.local = Some(description);
+            managed.address = Some(local);
+            managed.version = version;
+            managed.catalog = catalog;
+            managed.config = config;
+            managed.rung_with_media = true;
+        }
+        // no event tells this engine when a 183 has gone out the way
+        // `UaEvent::CallConfirmed` tells `answer_with` when a 2xx has, so
+        // this is the one call in this module that settles a call itself
+        // rather than waiting to be told to
+        self.settle(call, now);
+        Ok(())
     }
 
     /// Answer a call that came in, with the answer to the offer it carried,
@@ -417,6 +548,12 @@ impl MediaEngine {
     /// offered a stream that cannot be keyed. Nothing is sent in that case:
     /// the call is still ringing, and rejecting it with a status code of the
     /// application's choosing is the next move.
+    ///
+    /// For a call [`MediaEngine::ring_with`] already described, `local` and
+    /// `media` are not read: there is no second negotiation, and reusing that
+    /// session and that description is the whole point. What the 200 OK
+    /// carries then is decided by how the 183 went out, not by anything
+    /// passed here — see [`MediaEngine::ring_with`].
     pub fn answer_with(
         &mut self,
         agent: &mut UserAgent,
@@ -425,6 +562,10 @@ impl MediaEngine {
         media: CallMedia,
         now: Instant,
     ) -> Result<(), MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        if managed.rung_with_media {
+            return self.answer_after_ring(agent, call, now);
+        }
         let CallMedia { catalog, config } = media;
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
@@ -448,6 +589,40 @@ impl MediaEngine {
             managed.catalog = catalog;
             managed.config = config;
         }
+        Ok(())
+    }
+
+    /// The 200 OK for a call [`MediaEngine::ring_with`] already described: no
+    /// new description is written, no new session opened — the session
+    /// `ring_with` opened is still the one running, on the same `o=` id and
+    /// version it opened with.
+    ///
+    /// What goes in the body is RFC 3262 §5 and RFC 6337 §3.1.1's rule, and
+    /// [`UserAgent::reliably`] is the one fact it turns on: the 183 sent
+    /// reliably already carried the real answer, and nothing after it may
+    /// repeat it (RFC 6337 §3.1.1, UAS behaviour #2); sent unreliably, that
+    /// description was only a preview, and the 2xx — the exchange's first
+    /// reliable non-failure response — still owes the far end the same
+    /// answer, unchanged (§3.1.1, UAS behaviour #1: every SDP in a response to
+    /// one INVITE has to be identical). Either way [`UserAgent::answer`]
+    /// itself still holds the 2xx for an unacknowledged reliable provisional
+    /// (RFC 3262 §5) — this passes it what to send once that gate opens, not
+    /// whether to.
+    fn answer_after_ring(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let repeated = if agent.reliably(call) {
+            None
+        } else {
+            self.calls
+                .get(&call)
+                .and_then(|managed| managed.local.as_ref())
+                .map(|description| Arc::from(description.to_bytes()))
+        };
+        agent.answer(call, repeated, now)?;
         Ok(())
     }
 }
@@ -604,6 +779,7 @@ impl MediaEngine {
                 version: 1,
                 catalog: self.catalog.clone(),
                 config: self.config.clone(),
+                rung_with_media: false,
             },
         );
     }

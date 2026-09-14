@@ -36,6 +36,28 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   build — but `sipral_event_t` carries no pinned length to begin with, so a
   caller built against an older header is unaffected.
 
+- **Early media when this stack runs the audio** (task 8.4.9). An incoming
+  call could be answered with audio (`sipral_call_answer_media`,
+  `MediaEngine::answer`) but not rung with it: `sipral_call_ring` only sent a
+  183 with whatever description the application wrote itself.
+  `sipral_call_ring_media`/`MediaEngine::ring`/`MediaEngine::ring_with` write
+  the answer from this stack's codec order and open the session on it right
+  away, so the far end hears whatever the application plays before anybody
+  answers. `sipral_call_answer_media`/`MediaEngine::answer` afterwards reuses
+  that session and description rather than negotiating a second one — the
+  same `o=` id and version — and what the 200 OK carries then follows RFC
+  3262 §5 and RFC 6337 §3.1.1 exactly, from whether the 183 went out reliably.
+  `sipral_call_ring_media` also takes `sipral_call_config_t::srtp`, closing
+  the gap 8.4.6 left: an answered call could not override the stack's SRTP
+  policy at all. Ringing with media twice is `SIPRAL_STATUS_WRONG_STATE`;
+  ringing with media after a `sipral_call_ring` that sent no description is
+  not, and after one that sent the application's own it is, since every
+  description in the responses to one INVITE has to be that same one (RFC
+  3261 §13.2.1, RFC 6337 §3.1.1). An INVITE that
+  carried no offer is not rung with media (`SIPRAL_STATUS_WRONG_STATE`,
+  nothing sent): RFC 3261 §13.2.1 and RFC 6337 §3.1.2 leave an offer from
+  this end no provisional response this stack can follow up.
+
 ### Fixed
 
 - **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A

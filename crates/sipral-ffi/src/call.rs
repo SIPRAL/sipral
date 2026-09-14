@@ -224,6 +224,54 @@ unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>,
     Ok(Some(address))
 }
 
+/// The one member of `sipral_call_config_t` that names anything for
+/// [`sipral_call_ring_media`]: where this end will receive media.
+///
+/// Every other member names something a call to place would need — who to
+/// call, where to send the INVITE, which forks to keep, what headers to
+/// add — and a call this old already has one. Each is refused by name rather
+/// than read and ignored, so a caller who set one learns that it has no
+/// effect here instead of finding out from a call that behaved as though it
+/// had not been set.
+///
+/// # Safety
+///
+/// `config.media_address` must be readable for `config.media_address_len`
+/// bytes.
+unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fail> {
+    fn refused(member: &str) -> Fail {
+        fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "{member} is not read here: sipral_call_ring_media names a call that already \
+                 exists, and only media_address and srtp apply to one"
+            ),
+        )
+    }
+    if !config.target.is_null() || config.target_len != 0 {
+        return Err(refused("target"));
+    }
+    if !config.sdp.is_null() || config.sdp_len != 0 {
+        return Err(refused("sdp"));
+    }
+    if !config.destination.is_null() || config.destination_len != 0 {
+        return Err(refused("destination"));
+    }
+    if config.keep_all_forks != 0 {
+        return Err(refused("keep_all_forks"));
+    }
+    if !config.headers.is_null() || config.headers_len != 0 {
+        return Err(refused("headers"));
+    }
+    unsafe {
+        address(
+            config.media_address,
+            config.media_address_len,
+            "media_address",
+        )
+    }
+}
+
 /// Turn what crossed the boundary into a call to place.
 ///
 /// `managed` says the description is this stack's to write, so the one in the
@@ -390,6 +438,81 @@ entry! {
 }
 
 entry! {
+    /// Say a call that came in is ringing, with this stack running the audio
+    /// before anybody answers.
+    ///
+    /// The answer to the offer the INVITE carried is written from this
+    /// stack's codec order, against `config.media_address` — where this end
+    /// will receive media, which only the application can say because it owns
+    /// the socket — and the session opens on it there and then: the far end
+    /// hears whatever the application plays before anybody picks up.
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows.
+    ///
+    /// `config.srtp` overrides the stack's own SRTP policy for this call, the
+    /// same way it does on `sipral_call_place`; it is the one way an incoming
+    /// call can choose its own SRTP policy at all, since
+    /// `sipral_call_answer_media` reads no configuration of its own. Once
+    /// this has set it, `sipral_call_answer_media` keeps it: it is answering
+    /// a call that already has a catalogue, not choosing one.
+    ///
+    /// `sipral_call_answer_media` after this reuses the session and the
+    /// description written here rather than negotiating a second one. What
+    /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
+    /// §3.1.1 exactly, from whether this call's 183 went out reliably — see
+    /// `docs/05-media.md`, "Ringing with media".
+    ///
+    /// Every other member of `config` — `target`, `sdp`, `destination`,
+    /// `keep_all_forks`, `headers` — names something a call to place would
+    /// need, and this call already exists; setting one of them is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    ///
+    /// An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
+    /// nothing sent: the offer this end would make instead belongs in no
+    /// provisional response this stack can follow up (RFC 3261 §13.2.1,
+    /// RFC 6337 §3.1.2).
+    ///
+    /// Calling this twice on one call is `SIPRAL_STATUS_WRONG_STATE`, and so is
+    /// calling it after a `sipral_call_ring` that sent a description of the
+    /// application's own: every description in the responses to one INVITE
+    /// has to be that same one (RFC 3261 §13.2.1, RFC 6337 §3.1.1). After a
+    /// `sipral_call_ring` that sent none, it is not.
+    ///
+    /// # Safety
+    ///
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with `media_address` readable for
+    /// `media_address_len` bytes.
+    fn sipral_call_ring_media(
+        stack: SipralHandle,
+        call: SipralHandle,
+        config: *const SipralCallConfig,
+        now_ms: u64,
+    ) {
+        let config = unsafe { read_versioned(config) }?;
+        let local = unsafe { ring_media_address(&config) }?;
+        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            match srtp {
+                // the stack's own catalogue, untouched: this is what `srtp`
+                // being unspecified on the call has to mean
+                None => state.engine.ring(&mut state.agent, id, local, now),
+                Some(policy) => {
+                    let catalog = state.engine.catalog().clone().with_srtp(policy);
+                    let media = CallMedia::new(catalog, state.media_config());
+                    state
+                        .engine
+                        .ring_with(&mut state.agent, id, local, media, now)
+                }
+            }
+            .map_err(|error| media_failed(&error))?;
+            state.manage(id);
+            Ok(())
+        })
+    }
+}
+
+entry! {
     /// Answer a call that came in.
     ///
     /// `sdp` is the answer to the offer the INVITE carried, and is required:
@@ -433,6 +556,13 @@ entry! {
     /// The other half of `sipral_call_place` with `media_address` set, and the
     /// alternative to `sipral_call_answer`, which answers with a description
     /// the application wrote and leaves the audio to it.
+    ///
+    /// On a call `sipral_call_ring_media` already rang, nothing is written and
+    /// no second session opens: the 183's description and session stand,
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` has already been reported, and
+    /// `media_address` must still be an address and a port but is not used.
+    /// The 200 OK repeats that description when the 183 went out unreliably and
+    /// carries none when it went out reliably (RFC 6337 §3.1.1).
     ///
     /// # Safety
     ///
@@ -1073,8 +1203,8 @@ pub(crate) mod tests {
         sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
         sipral_call_consult, sipral_call_hangup, sipral_call_hold, sipral_call_hold_state,
         sipral_call_place, sipral_call_reject, sipral_call_reject_session, sipral_call_resume,
-        sipral_call_ring, sipral_call_send_dtmf, sipral_call_state, sipral_call_transfer,
-        sipral_call_transfer_to, tone_length,
+        sipral_call_ring, sipral_call_ring_media, sipral_call_send_dtmf, sipral_call_state,
+        sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
     use crate::account::{
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
@@ -1236,6 +1366,28 @@ a=recvonly\r\n";
         }
     }
 
+    /// What `sipral_call_ring_media` reads: `media_address` and, when asked,
+    /// `srtp` — every other member zeroed, since a call this old already has
+    /// them.
+    pub(crate) fn ring_media_config() -> SipralCallConfig {
+        let (media_address, media_address_len) = as_text(MEDIA);
+        SipralCallConfig {
+            size: size_of::<SipralCallConfig>(),
+            target: ptr::null(),
+            target_len: 0,
+            sdp: ptr::null(),
+            sdp_len: 0,
+            destination: ptr::null(),
+            destination_len: 0,
+            keep_all_forks: 0,
+            media_address,
+            media_address_len,
+            headers: ptr::null(),
+            headers_len: 0,
+            srtp: 0,
+        }
+    }
+
     /// Name an account on a stack that already exists.
     pub(crate) fn account_on(handle: SipralHandle) -> SipralHandle {
         let config = account_config();
@@ -1325,6 +1477,13 @@ a=recvonly\r\n";
         let mut scratch = ParseScratch::new();
         let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
         message.header(name).unwrap_or_default().to_vec()
+    }
+
+    /// The body of a message, whatever it holds — empty when there is none.
+    fn body(bytes: &[u8]) -> Vec<u8> {
+        let mut scratch = ParseScratch::new();
+        let message = parse(bytes, &mut scratch, ParseMode::Lenient).expect("a message");
+        message.body().to_vec()
     }
 
     fn start_line(bytes: &[u8]) -> String {
@@ -1611,6 +1770,41 @@ Content-Type: application/sdp\r\n"
         out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", ANSWER.len()).as_bytes());
         out.extend_from_slice(ANSWER);
         out
+    }
+
+    /// The same message with an extra header field, inserted right after the
+    /// start line.
+    fn insert_header(message: &[u8], extra: &str) -> Vec<u8> {
+        let head = message
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(message.len(), |at| at + 1);
+        let mut out = message[..head].to_vec();
+        out.extend_from_slice(extra.as_bytes());
+        out.extend_from_slice(&message[head..]);
+        out
+    }
+
+    /// [`invitation`] with no body at all: the far end leaves the offer to
+    /// this end (RFC 3261 §13.2.1).
+    fn invitation_without_offer() -> Vec<u8> {
+        b"INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:bob@example.com>;tag=farend\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: a-call-in@203.0.113.5\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@203.0.113.5:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+            .to_vec()
+    }
+
+    /// [`invitation`], asking for reliable provisional responses (RFC 3262
+    /// §3): `Require: 100rel` when `require`, `Supported: 100rel` otherwise.
+    fn invitation_with_100rel(require: bool) -> Vec<u8> {
+        let list = if require { "Require" } else { "Supported" };
+        insert_header(&invitation(), &format!("{list}: 100rel\r\n"))
     }
 
     /// The CANCEL the far end sends for [`invitation`] before it is answered:
@@ -3405,6 +3599,359 @@ Content-Length: 0\r\n\r\n";
             "a member appended after the old MIN_SIZE must not be read from a stack \
              declared that short, so this call was supposed to get the built-in default: {body}"
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    // -- 8.4.9: early media when answering, with this stack running the
+    // audio ---------------------------------------------------------------
+
+    /// This INVITE asks for neither `Require` nor `Supported: 100rel`, so the
+    /// 183 goes unreliably: RFC 6337 §3.1.1 calls it only a preview, and the
+    /// 200 OK — the exchange's first reliable non-failure response — has to
+    /// repeat it unchanged.
+    #[test]
+    fn ringing_with_media_unreliably_is_repeated_in_the_200_ok() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        // the 100 Trying the core sent by itself
+        let _ = sent(handle);
+
+        let config = ring_media_config();
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let progress = one(handle);
+        assert!(start_line(&progress).starts_with("SIP/2.0 183"));
+        assert!(
+            field(&progress, HeaderName::Require).is_empty(),
+            "nothing here asked for 100rel, so this must not go reliably"
+        );
+        let early = body(&progress);
+        assert!(
+            !early.is_empty(),
+            "the 183 should carry the description this stack wrote"
+        );
+        poll(handle, 1_100);
+        assert_eq!(
+            observed.of(SipralEventKind::MediaStarted).len(),
+            1,
+            "ringing with media should start the session once"
+        );
+
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let status = unsafe {
+            sipral_call_answer_media(handle, call, media_address, media_address_len, 1_200)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let confirmed = one(handle);
+        assert!(start_line(&confirmed).starts_with("SIP/2.0 200"));
+        assert_eq!(
+            body(&confirmed),
+            early,
+            "an early answer sent unreliably is only a preview (RFC 6337 §3.1.1); the 200 OK \
+             must repeat it unchanged"
+        );
+        poll(handle, 1_200);
+        assert_eq!(
+            observed.of(SipralEventKind::MediaStarted).len(),
+            1,
+            "answering a call already rung with media must not start a second session"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The same, with the INVITE requiring 100rel: the 183 goes reliably, the
+    /// far end's PRACK completes it, and RFC 6337 §3.1.1's UAS rule #2 —
+    /// nothing sent reliably is repeated — means the 200 OK that follows
+    /// carries nothing at all.
+    #[test]
+    fn ringing_with_media_reliably_holds_the_200_ok_for_the_prack() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation_with_100rel(true), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let config = ring_media_config();
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let progress = one(handle);
+        assert!(start_line(&progress).starts_with("SIP/2.0 183"));
+        assert!(
+            String::from_utf8_lossy(&field(&progress, HeaderName::Require)).contains("100rel"),
+            "the INVITE required 100rel, so this must go reliably"
+        );
+        let rseq = field(&progress, HeaderName::RSeq);
+        assert!(!rseq.is_empty(), "a reliable provisional carries an RSeq");
+        poll(handle, 1_100);
+        assert_eq!(observed.of(SipralEventKind::MediaStarted).len(), 1);
+
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let status = unsafe {
+            sipral_call_answer_media(handle, call, media_address, media_address_len, 1_200)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(
+            sent(handle).is_empty(),
+            "RFC 3262 §5 holds the 200 OK until the 183 is acknowledged"
+        );
+
+        let rseq_text = String::from_utf8_lossy(&rseq).into_owned();
+        let prack = from_far_end(
+            &progress,
+            "PRACK",
+            "ring-media-prack",
+            2,
+            &format!("RAck: {rseq_text} 1 INVITE\r\n"),
+        );
+        deliver(handle, &prack, 1_300);
+        let mut messages = sent(handle);
+        let at = messages
+            .iter()
+            .position(|message| field(message, HeaderName::CSeq) == b"1 INVITE")
+            .expect("the 200 OK to the INVITE followed the PRACK");
+        let final_ok = messages.remove(at);
+        assert!(start_line(&final_ok).starts_with("SIP/2.0 200"));
+        assert!(
+            body(&final_ok).is_empty(),
+            "the answer already went out reliably; RFC 6337 §3.1.1 forbids repeating it"
+        );
+        let prack_ok = messages.pop().expect("the 2xx to the PRACK itself");
+        assert!(start_line(&prack_ok).starts_with("SIP/2.0 200"));
+        assert_eq!(field(&prack_ok, HeaderName::CSeq), b"2 PRACK");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Ringing with media twice on one call is refused, with the error
+    /// answering twice would use.
+    #[test]
+    fn ringing_with_media_twice_is_refused() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let config = ring_media_config();
+        assert_eq!(
+            unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = sent(handle);
+
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_150) };
+        assert_eq!(status, SipralStatus::WrongState, "{}", last_error_text());
+        assert!(
+            sent(handle).is_empty(),
+            "nothing goes out for a refused second 183"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Ringing with media after a plain `sipral_call_ring` 180 is no
+    /// obstacle — only ringing with media twice is refused.
+    #[test]
+    fn ringing_with_media_after_a_plain_ring_is_allowed() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        assert_eq!(
+            unsafe { sipral_call_ring(handle, call, ptr::null(), 0, 1_050) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert!(start_line(&one(handle)).starts_with("SIP/2.0 180"));
+
+        let config = ring_media_config();
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(start_line(&one(handle)).starts_with("SIP/2.0 183"));
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// An INVITE that carried no offer cannot be rung with media. RFC 3261
+    /// §13.2.1 puts the offer this end would have to make in "the first
+    /// reliable non-failure message", and RFC 6337 §3.1.2 has the UAS put no
+    /// description in any other response; the far end's answer to one sent
+    /// reliably would come back in the PRACK (RFC 3262 §5), which nothing here
+    /// hands to the engine. Refused, with nothing on the wire.
+    #[test]
+    fn ringing_with_media_an_invite_that_carried_no_offer_is_refused() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation_without_offer(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let config = ring_media_config();
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::WrongState, "{}", last_error_text());
+        assert!(
+            sent(handle).is_empty(),
+            "an offer went out in a provisional response to an INVITE that carried none"
+        );
+        assert_eq!(
+            state_of(handle, call),
+            SipralCallState::Incoming as u32,
+            "the call is still the application's to answer or reject"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A 183 the application described itself already carried the answer, or
+    /// its preview: RFC 3261 §13.2.1 allows only "that same exact answer" in
+    /// any other response, and RFC 6337 §3.1.1 has every description in the
+    /// responses to one INVITE identical. A second one written by this stack is
+    /// a different answer, so ringing with media after it is refused.
+    #[test]
+    fn ringing_with_media_after_a_183_the_application_described_is_refused() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        assert_eq!(
+            unsafe { sipral_call_ring(handle, call, OFFER.as_ptr(), OFFER.len(), 1_050) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert!(start_line(&one(handle)).starts_with("SIP/2.0 183"));
+
+        let config = ring_media_config();
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::WrongState, "{}", last_error_text());
+        assert!(
+            sent(handle).is_empty(),
+            "a second, different description went out in response to the same INVITE"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `srtp` on the ringing config overrides the stack's own, closing the
+    /// gap 8.4.6 left: an incoming call answered directly had no way to
+    /// choose its own SRTP policy at all. The stack requires SRTP; the
+    /// ringing config asks for `OFFERED` instead, so a plain offer — which
+    /// the stack's own REQUIRED would refuse outright — is answered plainly.
+    #[test]
+    fn ringing_config_srtp_overrides_the_stacks_own() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+        });
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let mut config = ring_media_config();
+        config.srtp = SipralSrtp::Offered as u32;
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let progress = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            progress.starts_with("SIP/2.0 183")
+                && progress.contains("RTP/AVP")
+                && !progress.contains("a=crypto"),
+            "the ringing config's OFFERED should have overridden the stack's REQUIRED: {progress}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The other half: `srtp` REQUIRED on the ringing config is not a softer
+    /// promise than REQUIRED on the stack — a plain INVITE offering no keyed
+    /// stream is refused exactly as `sipral_call_answer_media` refuses it
+    /// today, with nothing sent.
+    #[test]
+    fn ringing_config_srtp_required_refuses_a_plain_invite_offering_no_key() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let mut config = ring_media_config();
+        config.srtp = SipralSrtp::Required as u32;
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(&config), 1_100) };
+        assert_ne!(
+            status,
+            SipralStatus::Ok,
+            "a plain offer under REQUIRED was rung"
+        );
+        assert!(
+            sent(handle).is_empty(),
+            "nothing is sent for a refused ring"
+        );
+        assert_eq!(
+            state_of(handle, call),
+            SipralCallState::Incoming as u32,
+            "the call is still the application's to reject"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Refuse `sipral_call_ring_media` for a member it does not read, naming
+    /// it, rather than reading it and having it do nothing.
+    fn assert_ring_media_refuses(
+        handle: SipralHandle,
+        call: SipralHandle,
+        config: &SipralCallConfig,
+        member: &str,
+    ) {
+        let status = unsafe { sipral_call_ring_media(handle, call, ptr::from_ref(config), 1_100) };
+        assert_eq!(
+            status,
+            SipralStatus::InvalidArgument,
+            "{member}: {}",
+            last_error_text()
+        );
+        assert!(sent(handle).is_empty(), "{member}: nothing was built");
+    }
+
+    #[test]
+    fn ringing_media_config_refuses_everything_but_media_address_and_srtp() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |_| {});
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+
+        let mut with_target = ring_media_config();
+        (with_target.target, with_target.target_len) = as_text(TARGET);
+        assert_ring_media_refuses(handle, call, &with_target, "target");
+
+        let mut with_sdp = ring_media_config();
+        with_sdp.sdp = OFFER.as_ptr();
+        with_sdp.sdp_len = OFFER.len();
+        assert_ring_media_refuses(handle, call, &with_sdp, "sdp");
+
+        let mut with_destination = ring_media_config();
+        (
+            with_destination.destination,
+            with_destination.destination_len,
+        ) = as_text(PEER);
+        assert_ring_media_refuses(handle, call, &with_destination, "destination");
+
+        let mut with_forks = ring_media_config();
+        with_forks.keep_all_forks = 1;
+        assert_ring_media_refuses(handle, call, &with_forks, "keep_all_forks");
+
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

@@ -528,6 +528,43 @@ existed still works, unlike `media_seed`, and what it never sent reads as the
 zero that means "unspecified" — exactly what leaving it alone on a current
 header does too.
 
+**`sipral_call_ring_media` rings an incoming call with this stack running the
+audio** (task 8.4.9): the answer to the offer the INVITE carried is written
+from this stack's codec order against `config.media_address`, and the session
+opens on it there and then, before anybody answers — the far end hears
+whatever the application plays on it, `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+follows, and the 183 goes reliably exactly when `sipral_call_ring` would send
+one reliably (RFC 3262 §3, decided from the INVITE's own `Require` or
+`Supported`, not from anything this entry point reads). `config.srtp`
+overrides the stack's own SRTP policy for the call, applied through the
+facade the same way `sipral_call_place` applies it — the one way an incoming
+call can choose its own SRTP policy at all, since `sipral_call_answer_media`
+takes no configuration of its own and so could not before this. Every other
+member of `config` names something a call to place needs — `target`, `sdp`,
+`destination`, `keep_all_forks`, `headers` — and this call already exists, so
+each is `SIPRAL_STATUS_INVALID_ARGUMENT` by name if set, the same struct read
+through the same versioned reader and `MIN_SIZE` as `sipral_call_place`. An
+INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with nothing
+sent: the offer this end would make instead does not belong in a
+provisional response this stack can follow up (`docs/05-media.md`).
+
+`sipral_call_answer_media` after `sipral_call_ring_media` reuses the session
+and the description rather than negotiating a second one: no second `o=` id
+or version, and `media_address` is not used a second time — it must still be
+an address and a port, the same check any call to it gets, but the one given
+to `sipral_call_ring_media` is the one the session keeps. What the 200 OK it
+sends then carries is RFC 3262 §5 and RFC 6337 §3.1.1's rule, from whether
+the 183 went out reliably — nothing, when it did, since RFC 6337 forbids
+repeating an answer already sent reliably; the same description again,
+unchanged, when it did not, since an early answer sent unreliably is only a
+preview and the 200 OK is where the exchange actually completes. Ringing
+with media twice on one call is `SIPRAL_STATUS_WRONG_STATE`, and so is
+ringing with media after a `sipral_call_ring` that sent a description of the
+application's own, since every description in the responses to one INVITE
+has to be that same one; after a `sipral_call_ring` that sent none it is
+not — see `docs/05-media.md`, "Ringing with media", for the reasoning in
+full.
+
 **Four calls carry the packets**, each on a call's media handle, and none of
 them opens a socket or touches a device: `sipral_media_receive` for a datagram
 that arrived, `sipral_media_playback` for the frame due for the earpiece,

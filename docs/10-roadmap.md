@@ -149,7 +149,10 @@ and each is cheaper before the ABI carries it than after:
   public address from `sipral-nat`, which is written, tested and linked by
   nothing; ICE-lite stays where `06-nat.md` puts it, on a public server;
 - **early media on the answering side**, so a stack that answers can speak
-  before 200 OK through its own engine rather than through a second one;
+  before 200 OK through its own engine rather than through a second one.
+  *Built* (task 8.4.9): `MediaEngine::ring`/`ring_with`, and
+  `sipral_call_ring_media` in C, open the session on the 183 itself and the
+  200 OK that follows reuses it, per RFC 3262 §5 and RFC 6337 §3.1.1;
 - **the 200 OK to REGISTER kept**, and with it Service-Route (RFC 3608) in the
   route set, GRUU (RFC 5627) learned and used, P-Associated-URI reported.
   *Built*: the route on what an account starts and never on its REGISTER, the

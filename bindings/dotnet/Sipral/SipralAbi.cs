@@ -2485,6 +2485,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_ring(ulong stack, ulong call, byte[] sdp, nuint sdpLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_ring_media(ulong stack, ulong call, in SipralCallConfig config, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_answer(ulong stack, ulong call, byte[] sdp, nuint sdpLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -3204,6 +3207,61 @@ public static class Sipral
     }
 
     /// <summary>
+    /// Say a call that came in is ringing, with this stack running the audio
+    /// before anybody answers.
+    ///
+    /// The answer to the offer the INVITE carried is written from this
+    /// stack's codec order, against `config.media_address` — where this end
+    /// will receive media, which only the application can say because it owns
+    /// the socket — and the session opens on it there and then: the far end
+    /// hears whatever the application plays before anybody picks up.
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` follows.
+    ///
+    /// `config.srtp` overrides the stack's own SRTP policy for this call, the
+    /// same way it does on `sipral_call_place`; it is the one way an incoming
+    /// call can choose its own SRTP policy at all, since
+    /// `sipral_call_answer_media` reads no configuration of its own. Once
+    /// this has set it, `sipral_call_answer_media` keeps it: it is answering
+    /// a call that already has a catalogue, not choosing one.
+    ///
+    /// `sipral_call_answer_media` after this reuses the session and the
+    /// description written here rather than negotiating a second one. What
+    /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
+    /// §3.1.1 exactly, from whether this call's 183 went out reliably — see
+    /// `docs/05-media.md`, "Ringing with media".
+    ///
+    /// Every other member of `config` — `target`, `sdp`, `destination`,
+    /// `keep_all_forks`, `headers` — names something a call to place would
+    /// need, and this call already exists; setting one of them is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    ///
+    /// An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
+    /// nothing sent: the offer this end would make instead belongs in no
+    /// provisional response this stack can follow up (RFC 3261 §13.2.1,
+    /// RFC 6337 §3.1.2).
+    ///
+    /// Calling this twice on one call is `SIPRAL_STATUS_WRONG_STATE`, and so is
+    /// calling it after a `sipral_call_ring` that sent a description of the
+    /// application's own: every description in the responses to one INVITE
+    /// has to be that same one (RFC 3261 §13.2.1, RFC 6337 §3.1.1). After a
+    /// `sipral_call_ring` that sent none, it is not.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_call_config_t` whose `size` member
+    /// says how long it is, with `media_address` readable for
+    /// `media_address_len` bytes.
+    /// </summary>
+    public static void CallRingMedia(ulong stack, ulong call, in SipralCallConfig config, (string Name, string Value)[]? configHeaders, ulong nowMs)
+    {
+        using var configHeadersArray = new SipralHeaderArray(configHeaders);
+        var configValue = config;
+        configValue.Headers = configHeadersArray.Address;
+        configValue.HeadersLen = configHeadersArray.Count;
+        Check(NativeMethods.sipral_call_ring_media(stack, call, in configValue, nowMs));
+    }
+
+    /// <summary>
     /// Answer a call that came in.
     ///
     /// `sdp` is the answer to the offer the INVITE carried, and is required:
@@ -3230,6 +3288,13 @@ public static class Sipral
     /// The other half of `sipral_call_place` with `media_address` set, and the
     /// alternative to `sipral_call_answer`, which answers with a description
     /// the application wrote and leaves the audio to it.
+    ///
+    /// On a call `sipral_call_ring_media` already rang, nothing is written and
+    /// no second session opens: the 183's description and session stand,
+    /// `SIPRAL_EVENT_KIND_MEDIA_STARTED` has already been reported, and
+    /// `media_address` must still be an address and a port but is not used.
+    /// The 200 OK repeats that description when the 183 went out unreliably and
+    /// carries none when it went out reliably (RFC 6337 §3.1.1).
     ///
     /// Safety
     ///

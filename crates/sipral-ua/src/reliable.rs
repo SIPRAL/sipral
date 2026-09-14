@@ -99,7 +99,20 @@ fn lists(request: &RawMessage<'_>, name: HeaderName<'_>) -> bool {
 
 impl UserAgent {
     /// Whether a provisional response to this call has to go reliably (§3).
-    pub(crate) fn reliably(&self, call: CallHandle) -> bool {
+    ///
+    /// Public, and not only for [`UserAgent::ring`]'s own use: a layer that
+    /// joins media to this agent — `sipral::MediaEngine`, in this tree — has
+    /// to make the same choice RFC 6337 §3.1.1 makes about what a later 2xx
+    /// may carry, once a description already went out in a provisional
+    /// response. Sent reliably, that description is the real answer and
+    /// nothing after it may repeat it; sent unreliably, it was only a
+    /// preview, and the 2xx — the exchange's first reliable non-failure
+    /// response — still owes the far end the answer. This is the one fact
+    /// that decision turns on, and it is already computed here from the
+    /// INVITE's own `Require`/`Supported`, so it is exposed rather than
+    /// recomputed.
+    #[must_use]
+    pub fn reliably(&self, call: CallHandle) -> bool {
         self.calls
             .get(&call)
             .and_then(|held| held.invited.as_ref())

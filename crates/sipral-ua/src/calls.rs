@@ -543,6 +543,23 @@ impl UserAgent {
         self.calls.get(&call).map(|held| held.state)
     }
 
+    /// Whether this end has a session description of its own on record for
+    /// this call — for one that came in, whether [`UserAgent::ring`] or
+    /// [`UserAgent::answer`] has already sent one that parsed.
+    ///
+    /// What a layer that writes an early answer of its own has to ask first.
+    /// RFC 3261 §13.2.1 allows only "that same exact answer" in any other
+    /// response to one INVITE, and RFC 6337 §3.1.1 has every description in
+    /// those responses identical, so a call whose provisional response
+    /// already carried bytes somebody else wrote cannot be given a second,
+    /// different one.
+    #[must_use]
+    pub fn has_described(&self, call: CallHandle) -> bool {
+        self.calls
+            .get(&call)
+            .is_some_and(|held| held.session.has_local())
+    }
+
     /// The dialog a call is in, once there is one.
     #[must_use]
     pub fn call_dialog(&self, call: CallHandle) -> Option<DialogId> {
