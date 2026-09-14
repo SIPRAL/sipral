@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sipral::CallMedia;
 use sipral_core::endpoint::OutgoingInDialogRequest;
 use sipral_core::msg::{HeaderName, Method, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, UaError};
@@ -108,6 +109,16 @@ record! {
         pub headers: *const SipralHeader,
         /// How many elements `headers` has.
         pub headers_len: usize,
+        /// What this call does about SRTP, overriding
+        /// `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
+        /// take the stack's own setting. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        ///
+        /// Read only for a call this stack describes the media of —
+        /// `media_address` set — and otherwise not this ABI's to act on: a
+        /// call placed with `sdp` is a session the application wrote, and
+        /// SRTP in it is the application's own line to write or not.
+        pub srtp: u32,
     }
 }
 
@@ -280,7 +291,9 @@ entry! {
     ///
     /// With `media_address` set, the offer is this stack's to write and the
     /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-    /// and `crate::media` carries the packets from then on.
+    /// and `crate::media` carries the packets from then on. `config.srtp`
+    /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
+    /// no other kind.
     ///
     /// # Safety
     ///
@@ -299,15 +312,34 @@ entry! {
         }
         let config = unsafe { read_versioned(config) }?;
         let media = unsafe { managed_media(&config) }?;
+        // checked here, before the account is even looked up, so a bad value
+        // never reaches the point of building anything
+        let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let placed = state
-                        .engine
-                        .place(&mut state.agent, id, outgoing, local, now)
-                        .map_err(|error| media_failed(&error))?;
+                    let placed = match srtp {
+                        // the stack's own catalogue, untouched: this is what
+                        // `srtp` being unspecified on the call has to mean
+                        None => {
+                            state.engine.place(&mut state.agent, id, outgoing, local, now)
+                        }
+                        Some(policy) => {
+                            let catalog = state.engine.catalog().clone().with_srtp(policy);
+                            let media = CallMedia::new(catalog, state.media_config());
+                            state.engine.place_with(
+                                &mut state.agent,
+                                id,
+                                outgoing,
+                                local,
+                                media,
+                                now,
+                            )
+                        }
+                    }
+                    .map_err(|error| media_failed(&error))?;
                     state.manage(placed);
                     placed
                 }
@@ -857,6 +889,9 @@ entry! {
                  leg; place it with sdp and run its audio in the application",
             ));
         }
+        // no catalogue here to apply it to, but the same refusal as
+        // `sipral_call_place` for a value this ABI names nothing for
+        crate::media::srtp_policy(config.srtp, "srtp")?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let outgoing = unsafe { outgoing_from(state, &config, false) }?;
@@ -1037,7 +1072,7 @@ pub(crate) mod tests {
     use crate::error::last_error_text;
     use crate::event::{SipralCallState, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle, StackTags, split};
-    use crate::media::{sipral_call_media, sipral_media_release};
+    use crate::media::{SipralSrtp, sipral_call_media, sipral_media_release};
     use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
     use crate::stack::{sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
@@ -1175,6 +1210,7 @@ a=recvonly\r\n";
             media_address_len: 0,
             headers: ptr::null(),
             headers_len: 0,
+            srtp: 0,
         }
     }
 
@@ -2830,6 +2866,252 @@ Content-Length: 0\r\n\r\n";
             last_error_text()
         );
         assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `SIPRAL_SRTP_REQUIRED` reaches the offer through `catalog_of` and
+    /// `with_srtp` exactly as `SIPRAL_SRTP_OFFERED` does — both write the
+    /// secure profile with a key; only a plain re-offer or a plain answer is
+    /// where the two differ, and this is not that (`docs/05-media.md`, "SRTP
+    /// through the facade").
+    #[test]
+    fn a_stack_set_to_srtp_required_offers_the_secure_profile_with_a_key() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+        });
+        let (status, _) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/SAVP"),
+            "no secure profile offered: {body}"
+        );
+        assert!(body.contains("a=crypto:"), "no key offered: {body}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_stack_set_to_srtp_offered_writes_the_same_offer_as_required() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Offered as u32;
+        });
+        let (status, _) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/SAVP"),
+            "no secure profile offered: {body}"
+        );
+        assert!(body.contains("a=crypto:"), "no key offered: {body}");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// This build's own built-in default (`SrtpPolicy::default()`,
+    /// `docs/08-ffi.md`), and what `sipral_stack_config_t::srtp` left at zero
+    /// has always meant, before this member existed to say so explicitly.
+    #[test]
+    fn a_stack_set_to_srtp_not_offered_offers_the_plain_profile() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::NotOffered as u32;
+        });
+        let (status, _) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(body.contains("RTP/AVP"), "{body}");
+        assert!(
+            !body.contains("a=crypto"),
+            "offered when it should not: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_calls_own_srtp_overrides_the_stacks() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::NotOffered as u32;
+        });
+        let mut call_config = managed_config();
+        call_config.srtp = SipralSrtp::Required as u32;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
+            "the call's own REQUIRED did not override the stack's NOT_OFFERED: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_calls_srtp_of_zero_takes_the_stacks_value() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+        });
+        let mut call_config = managed_config();
+        call_config.srtp = 0;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
+            "zero on the call did not fall back to the stack's REQUIRED: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn an_out_of_range_call_srtp_is_invalid_argument_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        call_config.srtp = 4;
+        let (status, call) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(call, SIPRAL_HANDLE_NONE);
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `sipral_call_consult` takes the same `sipral_call_config_t`, and the
+    /// member's own documentation promises the same refusal wherever the
+    /// struct is read: a value this ABI names nothing for is not quietly
+    /// accepted by one entry point and refused by its sibling.
+    #[test]
+    fn an_out_of_range_srtp_on_a_consultation_is_invalid_argument_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, first) = connected(&mut observed);
+        let _ = sent(handle);
+        let mut config = call_config();
+        config.srtp = 4;
+        let mut second = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_call_consult(
+                handle,
+                first,
+                ptr::from_ref(&config),
+                &raw mut second,
+                2_000,
+            )
+        };
+        assert_eq!(
+            status,
+            SipralStatus::InvalidArgument,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(second, SIPRAL_HANDLE_NONE);
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Where `SIPRAL_SRTP_OFFERED` and `SIPRAL_SRTP_REQUIRED` part ways, reached
+    /// through the C entry points: the stack's policy is also what a call that
+    /// comes in is answered under, and a plain offer is answered plainly under
+    /// the first and not answered at all under the second (`docs/05-media.md`,
+    /// "SRTP through the facade").
+    #[test]
+    fn a_plain_offer_is_answered_under_srtp_offered_and_not_under_srtp_required() {
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Offered as u32;
+        });
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        let (media_address, media_address_len) = as_text(MEDIA);
+        let status = unsafe {
+            sipral_call_answer_media(handle, call, media_address, media_address_len, 1_100)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let answered = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            answered.starts_with("SIP/2.0 200")
+                && answered.contains("RTP/AVP")
+                && !answered.contains("a=crypto"),
+            "a plain offer under OFFERED is answered plainly: {answered}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let (handle, _) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+        });
+        deliver(handle, &invitation(), 1_000);
+        poll(handle, 1_000);
+        let call = called(&observed);
+        let _ = sent(handle);
+        let status = unsafe {
+            sipral_call_answer_media(handle, call, media_address, media_address_len, 1_100)
+        };
+        assert_ne!(
+            status,
+            SipralStatus::Ok,
+            "a plain offer under REQUIRED was answered"
+        );
+        assert!(
+            sent(handle).is_empty(),
+            "nothing is sent for a refused answer"
+        );
+        assert_eq!(
+            state_of(handle, call),
+            SipralCallState::Incoming as u32,
+            "the call is still the application's to reject"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A caller compiled against a header from before this member existed
+    /// declares a `sipral_call_config_t` no longer than
+    /// `crate::versioned::min_size::CALL_CONFIG`, so `srtp` is never among the
+    /// bytes it sent — even when, as here, live bytes happen to sit past the
+    /// declared length. It must read as the zero that means "unspecified" and
+    /// take the stack's own setting, exactly as a header that never grew this
+    /// member would.
+    #[test]
+    fn a_call_config_at_its_old_min_size_takes_the_stacks_srtp() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+        });
+        let mut call_config = managed_config();
+        call_config.srtp = SipralSrtp::NotOffered as u32;
+        call_config.size = crate::versioned::min_size::CALL_CONFIG;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
+            "a member appended after the old MIN_SIZE must not be read from a struct \
+             declared that short, so this call was supposed to take the stack's REQUIRED: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The same, the other way round: the stack's own `srtp` appended past its
+    /// old MIN_SIZE must not be read from a `sipral_stack_config_t` declared
+    /// that short either, so a call on it gets this build's built-in default
+    /// rather than the value still sitting in memory past the declared size.
+    #[test]
+    fn a_stack_config_at_its_old_min_size_gets_the_default_srtp() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::Required as u32;
+            config.size = crate::versioned::min_size::STACK_CONFIG;
+        });
+        let (status, _) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("RTP/AVP") && !body.contains("a=crypto"),
+            "a member appended after the old MIN_SIZE must not be read from a stack \
+             declared that short, so this call was supposed to get the built-in default: {body}"
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

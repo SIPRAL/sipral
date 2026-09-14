@@ -96,7 +96,7 @@ use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{HandleTable, Kind, Refused, STACK_TAGS, SipralHandle, StackTag, StackTags};
-use crate::media::{SipralStreamStats, catalog_of, stream_stats, toggle_of, toggled};
+use crate::media::{SipralStreamStats, catalog_of, srtp_policy, stream_stats, toggle_of, toggled};
 use crate::names::Names;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -317,6 +317,13 @@ record! {
         pub media_seed: *const u8,
         /// How many bytes of it. Thirty-two.
         pub media_seed_len: usize,
+        /// What every call on this stack does about SRTP unless
+        /// `sipral_call_config_t::srtp` says otherwise for it: a
+        /// `SipralSrtp`, or zero for this build's own built-in default, which
+        /// is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
+        /// until it is asked to. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        pub srtp: u32,
     }
 }
 
@@ -690,6 +697,17 @@ impl StackState {
         Ok(now)
     }
 
+    /// What a call on this stack opens its session with, unless
+    /// `sipral_call_place` was asked to override the catalogue for it.
+    ///
+    /// Cloned rather than borrowed, because the one caller of this —
+    /// `sipral_call_place`'s per-call SRTP override — pairs it with a
+    /// catalogue of its own to build the `CallMedia` `MediaEngine::place_with`
+    /// takes, and that bundle owns both halves.
+    pub(crate) fn media_config(&self) -> MediaConfig {
+        self.media.clone()
+    }
+
     /// Say that this stack writes the descriptions for a call.
     pub(crate) fn manage(&mut self, call: CallHandle) {
         if !self.manages(call) {
@@ -923,6 +941,7 @@ unsafe fn engine_for(
         config.frame_ms,
         toggled(config.offer_dtmf, "offer_dtmf", true)?,
         toggled(config.offer_rtcp_mux, "offer_rtcp_mux", false)?,
+        srtp_policy(config.srtp, "srtp")?,
     )?;
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
     Ok(MediaEngine::new(catalog, media, clock, media_seed))
@@ -1564,6 +1583,7 @@ pub(crate) mod tests {
             media_stall_watchdog: 0,
             media_stall_ms: 0,
             media_clock_unix_seconds: 0,
+            srtp: 0,
         }
     }
 
@@ -1655,7 +1675,12 @@ pub(crate) mod tests {
     fn a_config_that_declares_the_wrong_size_is_refused() {
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        config.size = size_of::<SipralStackConfig>() - 1;
+        // below the pinned minimum rather than `size_of::<SipralStackConfig>() -
+        // 1`: the struct has grown past that minimum since it was first
+        // published, and a size one short of the *current* build is a
+        // perfectly good caller compiled against an older header, not the
+        // wrong size this test means
+        config.size = crate::versioned::min_size::STACK_CONFIG - 1;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(handle, SIPRAL_HANDLE_NONE);
@@ -1917,6 +1942,30 @@ pub(crate) mod tests {
             message.contains("G729") && message.contains("PCMA"),
             "the message names neither what was asked for nor what there is: {message}"
         );
+    }
+
+    #[test]
+    fn every_named_srtp_value_is_taken_and_anything_else_builds_nothing() {
+        for value in [
+            0,
+            crate::media::SipralSrtp::NotOffered as u32,
+            crate::media::SipralSrtp::Offered as u32,
+            crate::media::SipralSrtp::Required as u32,
+        ] {
+            let mut observed = Observed::default();
+            let mut config = config(record, &mut observed);
+            config.srtp = value;
+            let (status, handle) = create(&config);
+            assert_eq!(status, SipralStatus::Ok, "{value}: {}", last_error_text());
+            assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        }
+
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.srtp = 4;
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert_eq!(handle, SIPRAL_HANDLE_NONE, "nothing was built");
     }
 
     #[test]

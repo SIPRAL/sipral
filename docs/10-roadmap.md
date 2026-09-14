@@ -262,7 +262,10 @@ shape is permanent once published:
   announce and freeze, D1 the diagnostic record, D2 recording, D5 why each
   codec lost — each gets its entry points;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
-  reports it; it becomes a member of the stack and call configuration;
+  reports it; it becomes a member of the stack and call configuration.
+  *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on
+  `sipral_call_config_t` as a call's own, a `sipral_srtp_t` or zero for
+  unspecified;
 - no event says who is calling; `From`, `To` and `Call-ID` join the call event,
   from the core's own parse, so no binding writes a SIP parser to show a
   caller;

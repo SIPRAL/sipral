@@ -10,6 +10,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- **The SRTP policy is now chosen from C** (task 8.4.6). An application
+  linking `sipral.h` could not ask for SRTP at all, although the facade
+  underneath always could: `sipral_stack_config_t::srtp` sets the stack's
+  default and `sipral_call_config_t::srtp` overrides it for one call, both a
+  `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`, `SIPRAL_SRTP_OFFERED` or
+  `SIPRAL_SRTP_REQUIRED` — reaching `sipral::SrtpPolicy` through `catalog_of`
+  and `with_srtp` with the same three meanings. Zero keeps today's behaviour:
+  unspecified on the stack is this build's own default, and unspecified on a
+  call is the stack's own setting. Both members are appended at the tail of
+  their structs with the pinned oldest length left where it was, so a caller
+  built against an older header still works and gets the default. An
+  out-of-range value is refused before anything is built.
+
 ### Fixed
 
 - **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A

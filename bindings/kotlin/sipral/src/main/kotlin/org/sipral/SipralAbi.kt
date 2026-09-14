@@ -199,6 +199,41 @@ enum class SipralToggle(val value: Int) {
 }
 
 /**
+ * What a call or a stack says about SRTP. Names for
+ * `sipral_stack_config_t::srtp` (the stack's default) and
+ * `sipral_call_config_t::srtp` (a per-call override).
+ *
+ * Zero is not one of them, and it is not the same absence on the two
+ * structs: on the stack it means this build's own built-in default
+ * (`SrtpPolicy::default()`, which is SipralSrtp.NOT_OFFERED); on a
+ * call it means the stack's own setting, whatever that came to. The three
+ * values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
+ * see there for what each writes and what each answers.
+ */
+enum class SipralSrtp(val value: Int) {
+    /**
+     * SrtpPolicy::NotOffered: do not offer it, but answer an offer
+     * that arrives on the secure profile with keys anyway.
+     */
+    NOT_OFFERED(1),
+    /**
+     * SrtpPolicy::Offered: offer it, and answer a plain offer
+     * plainly.
+     */
+    OFFERED(2),
+    /**
+     * SrtpPolicy::Required: offer it, and let no stream on this call
+     * carry audio unencrypted.
+     */
+    REQUIRED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralSrtp? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * One codec this ABI has a number for. Names for every member that says
  * which.
  *
@@ -1672,6 +1707,15 @@ class SipralStackConfig(
      * quietly. This is the only place in the library that can see both.
      */
     val mediaSeed: ByteArray? = null,
+    /**
+     * What every call on this stack does about SRTP unless
+     * `sipral_call_config_t::srtp` says otherwise for it: a
+     * `SipralSrtp`, or zero for this build's own built-in default, which
+     * is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
+     * until it is asked to. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     */
+    val srtp: Long = 0,
 )
 
 /**
@@ -1812,6 +1856,18 @@ class SipralCallConfig(
      * and no call.
      */
     val headers: List<SipralHeader>? = null,
+    /**
+     * What this call does about SRTP, overriding
+     * `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
+     * take the stack's own setting. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     *
+     * Read only for a call this stack describes the media of —
+     * `media_address` set — and otherwise not this ABI's to act on: a
+     * call placed with `sdp` is a session the application wrote, and
+     * SRTP in it is the application's own line to write or not.
+     */
+    val srtp: Long = 0,
 )
 
 /**
@@ -1979,7 +2035,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -1989,7 +2045,7 @@ internal object SipralNative {
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
@@ -2002,7 +2058,7 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer(stack: Long, call: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -2346,7 +2402,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -2558,7 +2614,9 @@ object Sipral {
      *
      * With `media_address` set, the offer is this stack's to write and the
      * call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-     * and `crate::media` carries the packets from then on.
+     * and `crate::media` carries the packets from then on. `config.srtp`
+     * overrides `sipral_stack_config_t::srtp` for such a call; it is read for
+     * no other kind.
      *
      * Safety
      *
@@ -2572,7 +2630,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -2831,7 +2889,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 

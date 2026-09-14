@@ -187,6 +187,37 @@ public enum SipralToggle : uint
 }
 
 /// <summary>
+/// What a call or a stack says about SRTP. Names for
+/// `sipral_stack_config_t::srtp` (the stack's default) and
+/// `sipral_call_config_t::srtp` (a per-call override).
+///
+/// Zero is not one of them, and it is not the same absence on the two
+/// structs: on the stack it means this build's own built-in default
+/// (`SrtpPolicy::default()`, which is SipralSrtp.NotOffered); on a
+/// call it means the stack's own setting, whatever that came to. The three
+/// values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
+/// see there for what each writes and what each answers.
+/// </summary>
+public enum SipralSrtp : uint
+{
+    /// <summary>
+    /// SrtpPolicy::NotOffered: do not offer it, but answer an offer
+    /// that arrives on the secure profile with keys anyway.
+    /// </summary>
+    NotOffered = 1,
+    /// <summary>
+    /// SrtpPolicy::Offered: offer it, and answer a plain offer
+    /// plainly.
+    /// </summary>
+    Offered = 2,
+    /// <summary>
+    /// SrtpPolicy::Required: offer it, and let no stream on this call
+    /// carry audio unencrypted.
+    /// </summary>
+    Required = 3,
+}
+
+/// <summary>
 /// One codec this ABI has a number for. Names for every member that says
 /// which.
 ///
@@ -1135,6 +1166,15 @@ public struct SipralStackConfig
     /// How many bytes of it. Thirty-two.
     /// </summary>
     public nuint MediaSeedLen;
+    /// <summary>
+    /// What every call on this stack does about SRTP unless
+    /// `sipral_call_config_t::srtp` says otherwise for it: a
+    /// `SipralSrtp`, or zero for this build's own built-in default, which
+    /// is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers encryption
+    /// until it is asked to. Any other value is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+    /// </summary>
+    public uint Srtp;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -1521,6 +1561,18 @@ public struct SipralCallConfig
     /// How many elements `headers` has.
     /// </summary>
     public nuint HeadersLen;
+    /// <summary>
+    /// What this call does about SRTP, overriding
+    /// `sipral_stack_config_t::srtp` for it: a `SipralSrtp`, or zero to
+    /// take the stack's own setting. Any other value is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+    ///
+    /// Read only for a call this stack describes the media of —
+    /// `media_address` set — and otherwise not this ABI's to act on: a
+    /// call placed with `sdp` is a session the application wrote, and
+    /// SRTP in it is the application's own line to write or not.
+    /// </summary>
+    public uint Srtp;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3078,7 +3130,9 @@ public static class Sipral
     ///
     /// With `media_address` set, the offer is this stack's to write and the
     /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-    /// and `crate::media` carries the packets from then on.
+    /// and `crate::media` carries the packets from then on. `config.srtp`
+    /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
+    /// no other kind.
     ///
     /// Safety
     ///

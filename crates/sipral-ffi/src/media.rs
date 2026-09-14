@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Arrival, Codec, CodecCatalog, Direction, MediaError, MediaSession, Playback, RtcpPlan,
-    SessionShare, SessionUnavailable, StreamStatistics,
+    SessionShare, SessionUnavailable, SrtpPolicy, StreamStatistics,
 };
 use sipral_core::sdp::SdpError;
 
@@ -104,6 +104,31 @@ codes! {
         On = 1,
         /// Off.
         Off = 2,
+    }
+}
+
+codes! {
+    /// What a call or a stack says about SRTP. Names for
+    /// `sipral_stack_config_t::srtp` (the stack's default) and
+    /// `sipral_call_config_t::srtp` (a per-call override).
+    ///
+    /// Zero is not one of them, and it is not the same absence on the two
+    /// structs: on the stack it means this build's own built-in default
+    /// (`SrtpPolicy::default()`, which is [`SipralSrtp::NotOffered`]); on a
+    /// call it means the stack's own setting, whatever that came to. The three
+    /// values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
+    /// see there for what each writes and what each answers.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralSrtp: u32 {
+        /// [`SrtpPolicy::NotOffered`]: do not offer it, but answer an offer
+        /// that arrives on the secure profile with keys anyway.
+        NotOffered = 1,
+        /// [`SrtpPolicy::Offered`]: offer it, and answer a plain offer
+        /// plainly.
+        Offered = 2,
+        /// [`SrtpPolicy::Required`]: offer it, and let no stream on this call
+        /// carry audio unencrypted.
+        Required = 3,
     }
 }
 
@@ -644,8 +669,29 @@ pub(crate) const fn toggle_of(value: bool) -> u32 {
     }
 }
 
-/// The catalogue a stack was asked for: an order, a frame length, and the two
-/// things an offer says about itself.
+/// A `sipral_stack_config_t::srtp` or `sipral_call_config_t::srtp` value, as a
+/// [`SrtpPolicy`] the caller actually named — `None` for the zero that means
+/// "unspecified", which the two structs resolve differently: the stack's own
+/// built-in default on one, the stack's own setting on the other. Neither
+/// meaning is decided here, only the value itself.
+pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpPolicy>, Fail> {
+    match value {
+        0 => Ok(None),
+        1 => Ok(Some(SrtpPolicy::NotOffered)),
+        2 => Ok(Some(SrtpPolicy::Offered)),
+        3 => Ok(Some(SrtpPolicy::Required)),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "{name} is {other}, and srtp is 0 to leave it unspecified, 1 for not offered, 2 \
+                 for offered or 3 for required"
+            ),
+        )),
+    }
+}
+
+/// The catalogue a stack was asked for: an order, a frame length, what an
+/// offer says about itself, and what it says about SRTP.
 ///
 /// A name this build has no encoder for is refused here, where the caller still
 /// knows which string it passed, rather than ignored later where nothing can
@@ -655,6 +701,7 @@ pub(crate) fn catalog_of(
     frame_ms: u32,
     dtmf: bool,
     rtcp_mux: bool,
+    srtp: Option<SrtpPolicy>,
 ) -> Result<CodecCatalog, Fail> {
     let mut catalog = match order {
         Some(list) => ordered(list)?,
@@ -664,6 +711,9 @@ pub(crate) fn catalog_of(
         catalog = catalog
             .with_frame_length(frame_ms)
             .map_err(|error| media_failed(&error))?;
+    }
+    if let Some(policy) = srtp {
+        catalog = catalog.with_srtp(policy);
     }
     Ok(catalog.with_dtmf(dtmf).with_rtcp_mux(rtcp_mux))
 }
@@ -1448,11 +1498,11 @@ pub(crate) mod tests {
     use super::{
         Codec, SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralArrival, SipralCodec,
         SipralCodecInfo, SipralDirection, SipralMediaFault, SipralMediaInfo, SipralMediaPacket,
-        SipralPlayback, SipralRtcp, SipralStreamStats, SipralToggle, catalog_of, media_failed,
-        named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
+        SipralPlayback, SipralRtcp, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of,
+        media_failed, named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
         sipral_codec_name, sipral_media_capture, sipral_media_dialling, sipral_media_info,
         sipral_media_playback, sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
-        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
+        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order, srtp_policy,
     };
     use crate::call::tests::{
         PEER_MEDIA, account_on, connected, hangup, media_call, media_call_offering,
@@ -1463,7 +1513,7 @@ pub(crate) mod tests {
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
     use crate::stack::tests::Observed;
     use crate::status::SipralStatus;
-    use sipral::{Capabilities, MediaError, Processor};
+    use sipral::{Capabilities, MediaError, Processor, SrtpPolicy};
     use std::ffi::{CStr, c_char, c_void};
     use std::net::SocketAddr;
     use std::ptr;
@@ -1897,7 +1947,7 @@ a=sendrecv\r\n";
     /// `an_order_that_names_opus_follows_the_catalogue` gives.
     #[test]
     fn an_order_naming_a_codec_that_cannot_cut_the_frame_length_is_refused() {
-        let refused = catalog_of(Some("opus"), 7, true, false)
+        let refused = catalog_of(Some("opus"), 7, true, false, None)
             .expect_err("no build here cuts a seven-millisecond Opus frame");
         assert_eq!(
             refused.status,
@@ -1915,9 +1965,48 @@ a=sendrecv\r\n";
     /// the setting itself.
     #[test]
     fn a_frame_length_every_codec_in_the_order_cuts_is_taken() {
-        let taken = catalog_of(Some("PCMU"), 7, true, false)
+        let taken = catalog_of(Some("PCMU"), 7, true, false, None)
             .expect("G.711 cuts a whole number of samples at any millisecond");
         assert_eq!(taken.frame_length(), 7);
+    }
+
+    /// Zero is unspecified rather than a fourth policy, and the three named
+    /// values are `sipral::SrtpPolicy`'s three, in the same order this ABI
+    /// gives them numbers.
+    #[test]
+    fn srtp_policy_reads_the_three_named_values_and_zero_as_unspecified() {
+        assert_eq!(srtp_policy(0, "srtp").expect("zero is valid"), None);
+        assert_eq!(
+            srtp_policy(SipralSrtp::NotOffered as u32, "srtp").expect("named"),
+            Some(SrtpPolicy::NotOffered)
+        );
+        assert_eq!(
+            srtp_policy(SipralSrtp::Offered as u32, "srtp").expect("named"),
+            Some(SrtpPolicy::Offered)
+        );
+        assert_eq!(
+            srtp_policy(SipralSrtp::Required as u32, "srtp").expect("named"),
+            Some(SrtpPolicy::Required)
+        );
+    }
+
+    #[test]
+    fn srtp_policy_refuses_anything_else() {
+        let refused = srtp_policy(4, "srtp").expect_err("4 names no policy");
+        assert_eq!(refused.status, SipralStatus::InvalidArgument);
+    }
+
+    /// What reaches the facade: `catalog_of` leaves the catalogue's own
+    /// default alone for `None`, and calls `with_srtp` for `Some`, which is
+    /// the one door this ABI has into `sipral::SrtpPolicy`.
+    #[test]
+    fn catalog_of_applies_srtp_only_when_one_was_named() {
+        let default = catalog_of(None, 0, true, false, None).expect("a plain catalogue");
+        assert_eq!(default.srtp(), SrtpPolicy::default());
+
+        let required =
+            catalog_of(None, 0, true, false, Some(SrtpPolicy::Required)).expect("a catalogue");
+        assert_eq!(required.srtp(), SrtpPolicy::Required);
     }
 
     /// The codec's own refusal: the one media error both answers to the C

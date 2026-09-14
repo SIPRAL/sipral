@@ -465,6 +465,39 @@ the same codec order, inside the poll that saw the request — so
 `sipral_call_accept_session` on it is `SIPRAL_STATUS_WRONG_STATE`. The
 application hears the outcome as `SIPRAL_EVENT_KIND_MEDIA_CHANGED`.
 
+**SRTP is a policy, chosen from C, for a call this stack describes.**
+`sipral_stack_config_t::srtp` is the stack's default and `sipral_call_config_t::srtp`
+overrides it for one call; both are a `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`,
+`SIPRAL_SRTP_OFFERED` or `SIPRAL_SRTP_REQUIRED` — or zero, which is not a fourth
+value but means "unspecified" and resolves differently on the two structs: on the
+stack it is this build's own built-in default, `SrtpPolicy::default()`
+(`crates/sipral`), which is `SIPRAL_SRTP_NOT_OFFERED` — nothing here offers
+encryption until it is asked to, for the reason `SrtpPolicy::NotOffered`'s own
+documentation gives; on a call it is the stack's own setting, whatever that came
+to. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT` before anything is
+built, and `srtp` is read for no call but one this stack describes the media
+of — a call placed with `sdp` instead is a session the application wrote, and
+what goes on its own `m=` line is the application's to decide. The three named
+values mean exactly what the three `sipral::SrtpPolicy` variants mean: what
+`SIPRAL_SRTP_REQUIRED` and `SIPRAL_SRTP_OFFERED` write to the offer is the
+same secure profile with one key, and the two differ only in what each does
+with a plain re-offer or a plain answer, which is `docs/05-media.md`'s to
+explain and not this ABI's to duplicate. `sipral_media_info_t::secured`
+already reports the outcome a session actually reached; `srtp` is only ever
+the request. `SIPRAL_FEATURE_SRTP` in `sipral_capabilities_t::features`
+answers whether this path exists in the build at all, from the same
+`sipral::Capabilities::srtp` this crate has always read it from — true in
+every build today, because SDES keying is compiled in unconditionally and not
+behind a Cargo feature. Choosing between SDES and DTLS-SRTP keying is a
+separate, later addition; `srtp` says nothing about it and does not need to
+change shape to grow one.
+
+`srtp` is appended at the tail of both structs, and the pinned `MIN_SIZE` of
+each is unmoved: a caller built against a header from before this member
+existed still works, unlike `media_seed`, and what it never sent reads as the
+zero that means "unspecified" — exactly what leaving it alone on a current
+header does too.
+
 **Four calls carry the packets**, each on a call's media handle, and none of
 them opens a socket or touches a device: `sipral_media_receive` for a datagram
 that arrived, `sipral_media_playback` for the frame due for the earpiece,

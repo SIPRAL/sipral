@@ -355,7 +355,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -395,6 +395,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     jsize configMediaSeed_size = configMediaSeed ? (*env)->GetArrayLength(env, configMediaSeed) : 0;
     config_value.media_seed = (const uint8_t *)configMediaSeed_data;
     config_value.media_seed_len = (size_t)configMediaSeed_size;
+    config_value.srtp = (uint32_t)configSrtp;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -645,7 +646,7 @@ Java_org_sipral_SipralNative_sipral_1account_1registration_1state(JNIEnv *env, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray call, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -669,6 +670,7 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     jsize configMediaAddress_size = configMediaAddress ? (*env)->GetArrayLength(env, configMediaAddress) : 0;
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
+    config_value.srtp = (uint32_t)configSrtp;
     sipral_handle_t call_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -857,7 +859,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray consultation, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray consultation, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -881,6 +883,7 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     jsize configMediaAddress_size = configMediaAddress ? (*env)->GetArrayLength(env, configMediaAddress) : 0;
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
+    config_value.srtp = (uint32_t)configSrtp;
     sipral_handle_t consultation_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;

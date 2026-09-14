@@ -129,6 +129,28 @@ public enum SipralToggle: UInt32, Sendable {
     case off = 2
 }
 
+/// What a call or a stack says about SRTP. Names for
+/// `sipral_stack_config_t::srtp` (the stack's default) and
+/// `sipral_call_config_t::srtp` (a per-call override).
+///
+/// Zero is not one of them, and it is not the same absence on the two
+/// structs: on the stack it means this build's own built-in default
+/// (`SrtpPolicy::default()`, which is SipralSrtp.notOffered); on a
+/// call it means the stack's own setting, whatever that came to. The three
+/// values mean exactly what `sipral::SrtpPolicy`'s three variants mean —
+/// see there for what each writes and what each answers.
+public enum SipralSrtp: UInt32, Sendable {
+    /// SrtpPolicy::NotOffered: do not offer it, but answer an offer
+    /// that arrives on the secure profile with keys anyway.
+    case notOffered = 1
+    /// SrtpPolicy::Offered: offer it, and answer a plain offer
+    /// plainly.
+    case offered = 2
+    /// SrtpPolicy::Required: offer it, and let no stream on this call
+    /// carry audio unencrypted.
+    case required = 3
+}
+
 /// One codec this ABI has a number for. Names for every member that says
 /// which.
 ///
@@ -1152,7 +1174,9 @@ public enum Sipral {
     ///
     /// With `media_address` set, the offer is this stack's to write and the
     /// call gets audio of its own: `SIPRAL_EVENT_KIND_MEDIA_STARTED` says when,
-    /// and `crate::media` carries the packets from then on.
+    /// and `crate::media` carries the packets from then on. `config.srtp`
+    /// overrides `sipral_stack_config_t::srtp` for such a call; it is read for
+    /// no other kind.
     ///
     /// Safety
     ///

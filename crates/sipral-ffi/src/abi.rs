@@ -504,6 +504,7 @@ pub const SURFACE: Surface = Surface {
         crate::stack::SipralTransport::ABI,
         crate::transport::SipralTransportError::ABI,
         crate::media::SipralToggle::ABI,
+        crate::media::SipralSrtp::ABI,
         crate::media::SipralCodec::ABI,
         crate::media::SipralDirection::ABI,
         crate::media::SipralRtcp::ABI,
