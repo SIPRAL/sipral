@@ -83,7 +83,7 @@ use crate::text::text;
 ///
 /// `buffer` must be writable for `capacity` bytes or be null with a capacity
 /// of zero, and `out_len` must point at one `size_t` or be null.
-unsafe fn copy_out(
+pub(crate) unsafe fn copy_out(
     text: &str,
     buffer: *mut c_char,
     capacity: usize,

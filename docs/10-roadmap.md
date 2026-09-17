@@ -269,8 +269,11 @@ shape is permanent once published:
   `SIPRAL_EVENT_KIND_RECOVERY` reporting every rung), A8 and D7
   (`sipral_stack_screen`, `sipral_stack_invite_limit` and the four
   `screened_*` counters), D1 (`sipral_call_record_json`,
-  `sipral_stack_diagnostics_json`) and D2 (`sipral_stack_recording_start`,
-  `_stop`). Left: A1, C2, C3 and D5;
+  `sipral_stack_diagnostics_json`), D2 (`sipral_stack_recording_start`,
+  `_stop`) and A1 (`sipral_account_subscribe`, `sipral_subscription_end`,
+  `sipral_subscription_lamp` and the three dialog readers, with event kinds 15
+  and 30 behind them and `SIPRAL_FEATURE_SUBSCRIPTIONS` set). Left: C2, C3
+  and D5;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
   reports it; it becomes a member of the stack and call configuration.
   *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on

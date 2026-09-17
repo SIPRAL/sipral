@@ -38,6 +38,7 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
+use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
 ///
@@ -211,10 +212,19 @@ event_kinds! {
         /// The call is over, and its handle is stale from here on.
         14 = CallEnded, c"call ended";
 
+        /// A subscription moved: it was asked for, granted, put on probation,
+        /// scheduled for another attempt, or ended.
+        ///
+        /// A1. `payload.subscription` says which one and where it is now, and
+        /// `reason` why it is not live when it is not. Not sent on every
+        /// refresh — a lamp does not move because a refresh was scheduled —
+        /// and not sent for a notification arriving, which is
+        /// [`SipralEventKind::Notified`] instead.
+        15 = SubscriptionChanged, c"subscription changed";
+
         // Held for what `docs/13-client-requirements.md` already commits to, so
         // that features written in separate branches cannot arrive holding the same
         // number. Taking one means turning its line into a kind, in place.
-        reserved 15 = "a subscription's state changed (A1)";
         reserved 16 = "the set of audio devices changed (A2)";
 
         /// What one call's media cost, delivered once, after
@@ -305,6 +315,20 @@ event_kinds! {
         // behind an entry point of its own, so that the branch adding it
         // cannot arrive holding the same number.
         reserved 29 = "the application is asked to resolve a destination";
+
+        /// A notification arrived on a subscription, and has been answered.
+        ///
+        /// A1's other half. The NOTIFY is in `message`, whole and unparsed,
+        /// which is where every package this ABI has no reader for is read
+        /// from. `payload.subscription.has_dialog_info` says the body was
+        /// `application/dialog-info+xml` and could be read, and the picture it
+        /// updated is behind
+        /// [`sipral_subscription_dialog_count`](crate::subscription::sipral_subscription_dialog_count).
+        /// A body that could not be read arrives here all the same, with that
+        /// member zero and the request whole: a lamp showing what was last
+        /// known beats one showing what a malformed document happened to
+        /// contain.
+        30 = Notified, c"notified";
     }
 }
 
@@ -650,6 +674,52 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::SubscriptionChanged`] and a
+    /// [`SipralEventKind::Notified`] carry.
+    ///
+    /// The subscription names itself here rather than in `sipral_event_t`,
+    /// which has room for an account and a call and not for every kind of
+    /// handle this ABI mints. The account is not carried at all: a caller
+    /// asked for the subscription on one, and a sibling from a fork belongs
+    /// to the same one as the subscription it forked from.
+    #[derive(Clone, Copy)]
+    pub struct SipralSubscriptionEvent {
+        /// Which subscription. Minted by `sipral_account_subscribe`, or by
+        /// this ABI when a fork made one nobody asked for.
+        pub subscription: SipralHandle,
+        /// A [`SipralSubscriptionState`].
+        pub state: u32,
+        /// A [`SipralSubscriptionEnd`](crate::subscription::SipralSubscriptionEnd):
+        /// why it is not live. Zero while it is.
+        pub reason: u32,
+        /// The SIP status a response gave for it, when one did. Zero
+        /// otherwise.
+        pub status_code: u32,
+        /// Whether the notification carried dialog state this build could
+        /// read. Zero on every kind but [`SipralEventKind::Notified`], and
+        /// zero there for a body in any other form or none at all.
+        pub has_dialog_info: u32,
+        /// What the notifier granted, in milliseconds. Zero until one has.
+        pub expires_ms: u64,
+        /// How long until this stack refreshes it, in milliseconds.
+        pub refresh_in_ms: u64,
+        /// How long until the next attempt, in milliseconds, when the state
+        /// is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
+        /// includes every subscription that has ended for good.
+        pub retry_in_ms: u64,
+        /// The subscription this one forked from
+        /// ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
+        /// subscription of its own from here on, with its own dialog, its own
+        /// refresh and its own state; RFC 4235 §3.9 makes this the normal case
+        /// for dialog state, one per device the watched address is registered
+        /// on.
+        ///
+        /// [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+        pub forked_from: SipralHandle,
+    }
+}
+
+record! {
     /// What a [`SipralEventKind::TransportWanted`] carries: a request RFC
     /// 3261 §18.1.1 would not let out over a datagram, and nowhere open to
     /// send it instead.
@@ -698,6 +768,9 @@ record! {
         pub recovery: SipralRecoveryEvent,
         /// For [`SipralEventKind::TransportWanted`].
         pub transport_wanted: SipralTransportWantedEvent,
+        /// For [`SipralEventKind::SubscriptionChanged`] and
+        /// [`SipralEventKind::Notified`].
+        pub subscription: SipralSubscriptionEvent,
     }
 }
 
@@ -830,6 +903,7 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) agent: &'a UserAgent,
     pub(crate) accounts: &'a mut Names<sipral_ua::AccountId>,
     pub(crate) calls: &'a mut Names<CallHandle>,
+    pub(crate) subscriptions: &'a mut Names<sipral_ua::SubscriptionHandle>,
     /// Who is on every call this stack still knows, fixed when each was
     /// created.
     pub(crate) identities: &'a HashMap<CallHandle, Arc<CallIdentity>>,
@@ -875,7 +949,157 @@ pub(crate) fn translate(
     if let Some(out) = about_a_transport(known, event, transport) {
         return Some(out);
     }
+    if let Some(out) = about_a_subscription(known, event) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
+}
+
+/// An event with nothing in it but the subscription it is about.
+fn subscription_payload(
+    subscription: SipralHandle,
+    state: SipralSubscriptionState,
+) -> SipralSubscriptionEvent {
+    SipralSubscriptionEvent {
+        subscription,
+        state: state as u32,
+        reason: 0,
+        status_code: 0,
+        has_dialog_info: 0,
+        expires_ms: 0,
+        refresh_in_ms: 0,
+        retry_in_ms: 0,
+        forked_from: SIPRAL_HANDLE_NONE,
+    }
+}
+
+/// The handle one subscription of the layer below is known by here, minting
+/// one for a subscription nobody asked for: a sibling a fork produced arrives
+/// in an event rather than as the result of a call, the way an incoming call
+/// does.
+fn subscription_named(
+    known: &mut Vocabulary<'_>,
+    subscription: sipral_ua::SubscriptionHandle,
+) -> SipralHandle {
+    known
+        .subscriptions
+        .name_of(subscription)
+        .unwrap_or(SIPRAL_HANDLE_NONE)
+}
+
+/// Where a subscription is now, asked of the layer below rather than inferred:
+/// the event that says a state changed is raised from the same drain that
+/// changed it.
+fn subscription_state_now(
+    known: &Vocabulary<'_>,
+    subscription: sipral_ua::SubscriptionHandle,
+) -> SipralSubscriptionState {
+    known
+        .agent
+        .subscription_state(subscription)
+        .map_or(SipralSubscriptionState::Unknown, named_state)
+}
+
+fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::Subscribing { subscription, .. } => {
+            let named = subscription_named(known, subscription);
+            let payload = subscription_payload(named, SipralSubscriptionState::Requesting);
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::SubscriptionChanged,
+                SipralEventPayload {
+                    subscription: payload,
+                },
+            ))
+        }
+        UaEvent::Subscribed {
+            subscription,
+            state,
+            expires,
+            refresh_in,
+        } => {
+            let named = subscription_named(known, subscription);
+            let mut payload = subscription_payload(named, named_state(state));
+            payload.expires_ms = millis(expires);
+            payload.refresh_in_ms = millis(refresh_in);
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::SubscriptionChanged,
+                SipralEventPayload {
+                    subscription: payload,
+                },
+            ))
+        }
+        UaEvent::SubscriptionForked {
+            subscription,
+            sibling,
+        } => {
+            // the sibling is what this event is about: it is new, and the one
+            // it forked from carries on unchanged
+            let from = subscription_named(known, subscription);
+            let named = subscription_named(known, sibling);
+            let mut payload = subscription_payload(named, subscription_state_now(known, sibling));
+            payload.forked_from = from;
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::SubscriptionChanged,
+                SipralEventPayload {
+                    subscription: payload,
+                },
+            ))
+        }
+        UaEvent::Notified {
+            subscription,
+            ref request,
+            ref info,
+        } => {
+            let named = subscription_named(known, subscription);
+            let mut payload =
+                subscription_payload(named, subscription_state_now(known, subscription));
+            payload.has_dialog_info = u32::from(info.is_some());
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::Notified,
+                SipralEventPayload {
+                    subscription: payload,
+                },
+            );
+            attach(&mut out, Some(request));
+            Some(out)
+        }
+        UaEvent::SubscriptionEnded {
+            subscription,
+            reason,
+            status,
+            retry_in,
+            ref response,
+        } => {
+            let named = subscription_named(known, subscription);
+            // said here rather than asked for: a subscription that has ended
+            // for good is one the layer below has already let go of, and a
+            // state read now would be no state at all
+            let state = if retry_in.is_some() {
+                SipralSubscriptionState::Retrying
+            } else {
+                SipralSubscriptionState::Ended
+            };
+            let mut payload = subscription_payload(named, state);
+            payload.reason = named_end(reason) as u32;
+            payload.status_code = status_of(status);
+            payload.retry_in_ms = retry_in.map_or(0, millis);
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::SubscriptionChanged,
+                SipralEventPayload {
+                    subscription: payload,
+                },
+            );
+            attach(&mut out, response.as_ref());
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// A request RFC 3261 §18.1.1 would not let out over a datagram, with
@@ -1679,6 +1903,7 @@ mod tests {
         assert_eq!(SipralEventKind::TransferDone as u32, 12);
         assert_eq!(SipralEventKind::CallReplaced as u32, 13);
         assert_eq!(SipralEventKind::CallEnded as u32, 14);
+        assert_eq!(SipralEventKind::SubscriptionChanged as u32, 15);
         assert_eq!(SipralEventKind::MediaStatistics as u32, 17);
         assert_eq!(SipralEventKind::TransportWanted as u32, 18);
         assert_eq!(SipralEventKind::MediaStalled as u32, 19);
@@ -1690,7 +1915,8 @@ mod tests {
         assert_eq!(SipralEventKind::DigitReceived as u32, 26);
         assert_eq!(SipralEventKind::DtmfSent as u32, 27);
         assert_eq!(SipralEventKind::Recovery as u32, 28);
-        assert_eq!(SipralEventKind::ALL.len(), 25, "and there are no others");
+        assert_eq!(SipralEventKind::Notified as u32, 30);
+        assert_eq!(SipralEventKind::ALL.len(), 27, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -1744,10 +1970,10 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [15, 16, 20, 29_u32] {
+        for held in [16, 20, 29_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
-        assert_eq!(name(30), None, "past the last kind");
+        assert_eq!(name(31), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

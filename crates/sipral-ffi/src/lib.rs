@@ -75,6 +75,7 @@ pub mod record;
 pub mod screening;
 pub mod stack;
 pub mod status;
+pub mod subscription;
 mod text;
 pub mod transport;
 pub mod version;

@@ -138,6 +138,8 @@ pub(crate) enum Kind {
     Call,
     /// `sipral_call_media`'s.
     Media,
+    /// `sipral_account_subscribe`'s.
+    Subscription,
 }
 
 impl Kind {
@@ -147,18 +149,20 @@ impl Kind {
             Self::Account => 1,
             Self::Call => 2,
             Self::Media => 3,
+            Self::Subscription => 4,
         }
     }
 
     /// The kind these four bits name, or none for a pattern no table mints —
     /// which is most of them: four bits hold sixteen values and this library
-    /// has four kinds.
+    /// has five kinds.
     const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
             0 => Some(Self::Stack),
             1 => Some(Self::Account),
             2 => Some(Self::Call),
             3 => Some(Self::Media),
+            4 => Some(Self::Subscription),
             _ => None,
         }
     }
@@ -171,6 +175,7 @@ impl Kind {
             Self::Account => "an account",
             Self::Call => "a call",
             Self::Media => "a call's media",
+            Self::Subscription => "a subscription",
         }
     }
 }

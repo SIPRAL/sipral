@@ -92,8 +92,12 @@ pub(crate) mod min_size {
     pub const STACK_SETTINGS: usize = 72;
     /// `sipral_stream_stats_t`
     pub const STREAM_STATS: usize = 152;
+    /// `sipral_subscribe_config_t`
+    pub const SUBSCRIBE_CONFIG: usize = 88;
     /// `sipral_transmit_t`
     pub const TRANSMIT: usize = 88;
+    /// `sipral_watched_dialog_t`
+    pub const WATCHED_DIALOG: usize = 32;
 }
 
 /// More than any struct here will ever be, and small enough that a size

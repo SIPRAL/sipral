@@ -112,7 +112,7 @@ use std::time::{Duration, Instant};
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
 use sipral_core::transaction::TimerConfig;
-use sipral_ua::{AccountId, CallHandle, CallIdentity, UaEvent, UserAgent};
+use sipral_ua::{AccountId, CallHandle, CallIdentity, SubscriptionHandle, UaEvent, UserAgent};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
@@ -706,6 +706,11 @@ pub(crate) struct StackState {
     pub(crate) tag: StackTag,
     pub(crate) accounts: Names<AccountId>,
     pub(crate) calls: Names<CallHandle>,
+    /// Every subscription this stack has handed a handle out for, including
+    /// the ones that appeared by themselves: RFC 6665 §4.1.4 lets one
+    /// SUBSCRIBE be answered by two notifiers, and the sibling is named here
+    /// when its event is translated rather than when a call asked for it.
+    pub(crate) subscriptions: Names<SubscriptionHandle>,
     /// Who is on every call this stack still knows: the `From` and `To` of
     /// the request that opened it, fixed since. Read once, at that moment,
     /// because by the time a call has ended the layer below has already let
@@ -1215,6 +1220,7 @@ pub(crate) unsafe fn create_on(
             managed: Vec::new(),
             accounts: Names::new(&tag, Kind::Account),
             calls: Names::new(&tag, Kind::Call),
+            subscriptions: Names::new(&tag, Kind::Subscription),
             identities: HashMap::new(),
             tag,
             transports: Transports::new(speaks.protocol()),
@@ -1547,6 +1553,7 @@ fn signalling(
         agent: &state.agent,
         accounts: &mut state.accounts,
         calls: &mut state.calls,
+        subscriptions: &mut state.subscriptions,
         identities: &state.identities,
         raised_identity: None,
     };
@@ -1585,6 +1592,7 @@ fn media(
         agent: &state.agent,
         accounts: &mut state.accounts,
         calls: &mut state.calls,
+        subscriptions: &mut state.subscriptions,
         identities: &state.identities,
         raised_identity: None,
     };
@@ -1681,6 +1689,8 @@ pub(crate) mod tests {
         /// Who every call event said was on the call, in the order the events
         /// arrived.
         pub(crate) calls: Vec<Seen>,
+        /// What every subscription event carried, in the order they arrived.
+        pub(crate) subscriptions: Vec<Watched>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -1803,6 +1813,48 @@ pub(crate) mod tests {
         }
     }
 
+    /// What one subscription event said, read inside the callback the way an
+    /// application reads it: the payload belongs to the library and is gone
+    /// the moment this returns.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Watched {
+        pub(crate) kind: SipralEventKind,
+        pub(crate) subscription: SipralHandle,
+        pub(crate) state: u32,
+        pub(crate) reason: u32,
+        pub(crate) status_code: u32,
+        pub(crate) has_dialog_info: u32,
+        pub(crate) expires_ms: u64,
+        pub(crate) retry_in_ms: u64,
+        pub(crate) forked_from: SipralHandle,
+        /// How long until the next refresh, in milliseconds.
+        pub(crate) refresh_in_ms: u64,
+        /// How many bytes of NOTIFY, or of a refusal, came with it.
+        pub(crate) message_len: usize,
+    }
+
+    /// The subscription arm of one event's payload.
+    ///
+    /// # Safety
+    ///
+    /// `event` must be one of the two kinds that fill that arm in.
+    unsafe fn watched(event: &SipralEvent) -> Watched {
+        let payload = unsafe { event.payload.subscription };
+        Watched {
+            kind: event.kind,
+            subscription: payload.subscription,
+            state: payload.state,
+            reason: payload.reason,
+            status_code: payload.status_code,
+            has_dialog_info: payload.has_dialog_info,
+            expires_ms: payload.expires_ms,
+            retry_in_ms: payload.retry_in_ms,
+            forked_from: payload.forked_from,
+            refresh_in_ms: payload.refresh_in_ms,
+            message_len: event.message_len,
+        }
+    }
+
     pub(crate) unsafe extern "C" fn record(event: *const SipralEvent, user_data: *mut c_void) {
         let observed = unsafe { &mut *user_data.cast::<Observed>() };
         let event = unsafe { &*event };
@@ -1815,6 +1867,13 @@ pub(crate) mod tests {
         if is_call_kind(event.kind) {
             let seen = unsafe { seen(event) };
             observed.calls.push(seen);
+        }
+        if matches!(
+            event.kind,
+            SipralEventKind::SubscriptionChanged | SipralEventKind::Notified
+        ) {
+            let watched = unsafe { watched(event) };
+            observed.subscriptions.push(watched);
         }
     }
 

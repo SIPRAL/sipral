@@ -12,6 +12,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Subscriptions and the busy lamp field reach C.** Everything RFC 6665 needs
+  was already written and tested — the transaction, the dialog, timer N, the
+  refresh at a fraction of what the notifier granted, the fork that turns one
+  SUBSCRIBE into two subscriptions, the retry with a fresh `Call-ID` — and none
+  of it could be reached from an application. `sipral_account_subscribe` mints
+  a subscription, which is a handle of its own because a desk phone holds
+  thirty of them on one account, and `sipral_subscription_end` gives one up.
+  Two events report what becomes of it: `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED`
+  for the state, which is what a lamp goes grey on, and
+  `SIPRAL_EVENT_KIND_NOTIFIED` for a notification arriving, which is what it
+  changes colour on — with the NOTIFY whole, for every package this ABI has no
+  reader for.
+
+  For `dialog`, it does have one: `sipral_subscription_lamp` is RFC 4235
+  §3.7.2's virtual state machine over every dialog of the watched extension, in
+  one call and one number, and `sipral_subscription_dialog_count`, `_at` and
+  `_text` are for showing who is on the call as well. Text is copied into the
+  caller's buffer rather than pointed at, because a pointer into this library's
+  memory is one a caller could outlive. `sipral_capabilities` sets
+  `SIPRAL_FEATURE_SUBSCRIPTIONS` now that all of it is reachable — the bit was
+  deliberately clear for two phases while the feature existed underneath and
+  the ABI could not reach it.
+
 - **An INVITE can be refused before it has had any effect, from C.**
   `sipral_stack_screen` installs a policy that is asked about every INVITE
   before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL`, and before a call

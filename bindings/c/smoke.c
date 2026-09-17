@@ -37,7 +37,8 @@
     X(sipral_account_config) X(sipral_call_config) X(sipral_codec_info)       \
     X(sipral_media_info) X(sipral_stream_stats) X(sipral_media_packet)        \
     X(sipral_transmit) X(sipral_event) X(sipral_suspending)                  \
-    X(sipral_screen_request)
+    X(sipral_screen_request) X(sipral_subscribe_config)                       \
+    X(sipral_watched_dialog)
 
 static int failures;
 
@@ -127,6 +128,7 @@ struct fixture {
     sipral_handle_t stack;
     sipral_handle_t account;
     sipral_handle_t call;
+    sipral_handle_t subscription;
 };
 
 static uint8_t message_buffer[SIPRAL_MESSAGE_BYTES];
@@ -142,6 +144,16 @@ static const char fixture_registrar_address[] = "203.0.113.5:5060";
 static const char fixture_target[] = "sip:dave@example.com";
 static const char fixture_media[] = "192.0.2.30:40000";
 static const char fixture_peer[] = "203.0.113.5:5060";
+static const char fixture_watched[] = "sip:dave@example.com";
+
+/* One dialog on the watched extension, ringing, so that the table a busy
+ * lamp field reads has a row in it. */
+static const char fixture_dialog_info[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<dialog-info xmlns=\"urn:ietf:params:xml:ns:dialog-info\" version=\"1\" state=\"full\" "
+    "entity=\"sip:dave@example.com\">\n"
+    "  <dialog id=\"smoke\"><state>early</state></dialog>\n"
+    "</dialog-info>";
 
 /* A call that comes in with an offer and is answered with media of this
  * stack's own, because two of the structs describe a call's media and a call
@@ -173,6 +185,10 @@ static void on_event_ignored(const sipral_event_t *event, void *user_data)
     (void)event;
     (void)user_data;
 }
+
+/* Below, beside the two structs a busy lamp field reads, because it is what
+ * fills their table in. */
+static int fixture_subscribe(struct fixture *fixture);
 
 /* The one thing the fixture's own stack reports that it keeps: the call that
  * came in. */
@@ -343,6 +359,8 @@ static int fixture_up(struct fixture *fixture)
                                          0) == SIPRAL_STATUS_OK);
     expect("the stack the oldest lengths are tried on would not poll after the ACK",
            sipral_stack_poll(fixture->stack, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the subscription the oldest lengths are tried on was never told about a dialog",
+           fixture_subscribe(fixture));
     return 1;
 }
 
@@ -441,6 +459,211 @@ static sipral_status_t call_config_at(struct fixture *fixture, size_t declared)
     return status;
 }
 
+/* One header field of a message this stack wrote, copied out by name: the
+ * answer to a SUBSCRIBE has to carry the branch, the tags and the Call-ID
+ * that request chose, and there is no parser here to ask. */
+static int header_of(const char *text, const char *name, char *out, size_t room)
+{
+    char wanted[64];
+    if ((size_t)snprintf(wanted, sizeof wanted, "\r\n%s: ", name) >= sizeof wanted) {
+        return 0;
+    }
+    const char *found = strstr(text, wanted);
+    if (found == NULL) {
+        return 0;
+    }
+    const char *value = found + strlen(wanted);
+    const char *end = strstr(value, "\r\n");
+    if (end == NULL || (size_t)(end - value) >= room) {
+        return 0;
+    }
+    memcpy(out, value, (size_t)(end - value));
+    out[end - value] = '\0';
+    return 1;
+}
+
+/* The SUBSCRIBE this stack last wrote, if it wrote one. */
+static int drain_for_subscribe(struct fixture *fixture, char *into, size_t room)
+{
+    for (int drained = 0; drained < 8; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(fixture->stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            return 0;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (strncmp((const char *)message_buffer, "SUBSCRIBE ", strlen("SUBSCRIBE ")) != 0) {
+            continue;
+        }
+        if (transmit.len >= room) {
+            return 0;
+        }
+        memcpy(into, message_buffer, transmit.len);
+        into[transmit.len] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+static sipral_subscribe_config_t fixture_subscribe_config(size_t declared)
+{
+    sipral_subscribe_config_t config = { 0 };
+    config.size = declared;
+    config.target = fixture_watched;
+    config.target_len = strlen(fixture_watched);
+    config.package = "dialog";
+    config.package_len = strlen("dialog");
+    return config;
+}
+
+/* A subscription of the fixture's own, granted and told about one dialog, so
+ * that the struct a busy lamp field reads can be handed over at its oldest
+ * published length. */
+static int fixture_subscribe(struct fixture *fixture)
+{
+    /* Emptied first, so that the SUBSCRIBE read back below is this one's and
+     * not something the stack had already queued: waking up refreshes every
+     * subscription it already holds, and answering one of those would leave
+     * the one asked for here unanswered. */
+    for (int drained = 0; drained < 16; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(fixture->stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+    }
+    sipral_subscribe_config_t config = fixture_subscribe_config(sizeof config);
+    if (sipral_account_subscribe(fixture->stack, fixture->account, &config,
+                                 &fixture->subscription, 0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    char subscribe[2048];
+    if (!drain_for_subscribe(fixture, subscribe, sizeof subscribe)) {
+        return 0;
+    }
+    char via[256];
+    char from[256];
+    char to[256];
+    char call_id[256];
+    char cseq[64];
+    if (!header_of(subscribe, "Via", via, sizeof via) ||
+        !header_of(subscribe, "From", from, sizeof from) ||
+        !header_of(subscribe, "To", to, sizeof to) ||
+        !header_of(subscribe, "Call-ID", call_id, sizeof call_id) ||
+        !header_of(subscribe, "CSeq", cseq, sizeof cseq)) {
+        return 0;
+    }
+
+    char answer[1024];
+    int length = snprintf(answer, sizeof answer,
+                          "SIP/2.0 200 OK\r\n"
+                          "Via: %s\r\n"
+                          "From: %s\r\n"
+                          "To: %s;tag=smoke-notifier\r\n"
+                          "Call-ID: %s\r\n"
+                          "CSeq: %s\r\n"
+                          "Expires: 600\r\n"
+                          "Contact: <sip:pbx@203.0.113.5:5060>\r\n"
+                          "Content-Length: 0\r\n\r\n",
+                          via, from, to, call_id, cseq);
+    if (length <= 0 || (size_t)length >= sizeof answer) {
+        return 0;
+    }
+    if (sipral_stack_receive_datagram(fixture->stack, SIPRAL_TRANSPORT_MAIN,
+                                      (const uint8_t *)answer, (size_t)length, fixture_peer,
+                                      strlen(fixture_peer), fixture_bind, strlen(fixture_bind),
+                                      0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+
+    char notify[2048];
+    /* A branch of its own per subscription, because this runs more than once
+     * -- what a notifier said stops being evidence the moment the machine
+     * suspends, and one of the structs tried before this one suspends it --
+     * and a NOTIFY reusing a branch would read as a retransmission of the
+     * first. */
+    static unsigned notified;
+    notified++;
+    length = snprintf(notify, sizeof notify,
+                      "NOTIFY %s SIP/2.0\r\n"
+                      "Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-smoke-notify-%u\r\n"
+                      "Max-Forwards: 70\r\n"
+                      "From: %s;tag=smoke-notifier\r\n"
+                      "To: %s\r\n"
+                      "Call-ID: %s\r\n"
+                      "CSeq: 1 NOTIFY\r\n"
+                      "Contact: <sip:pbx@203.0.113.5:5060>\r\n"
+                      "Event: dialog\r\n"
+                      "Subscription-State: active;expires=600\r\n"
+                      "Content-Type: application/dialog-info+xml\r\n"
+                      "Content-Length: %zu\r\n\r\n%s",
+                      fixture_contact, notified, to, from, call_id,
+                      strlen(fixture_dialog_info), fixture_dialog_info);
+    if (length <= 0 || (size_t)length >= sizeof notify) {
+        return 0;
+    }
+    if (sipral_stack_receive_datagram(fixture->stack, SIPRAL_TRANSPORT_MAIN,
+                                      (const uint8_t *)notify, (size_t)length, fixture_peer,
+                                      strlen(fixture_peer), fixture_bind, strlen(fixture_bind),
+                                      0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    if (sipral_stack_poll(fixture->stack, 0, &poll) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    size_t dialogs = 0;
+    return sipral_subscription_dialog_count(fixture->stack, fixture->subscription, &dialogs) ==
+               SIPRAL_STATUS_OK &&
+           dialogs == 1;
+}
+
+static sipral_status_t subscribe_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_subscribe_config_t config = fixture_subscribe_config(declared);
+    sipral_handle_t subscription = SIPRAL_HANDLE_NONE;
+    return sipral_account_subscribe(fixture->stack, fixture->account, &config, &subscription, 0);
+}
+
+static sipral_status_t watched_dialog_at(struct fixture *fixture, size_t declared)
+{
+    /* Something tried before this one may have taken the table away:
+     * sipral_stack_suspending is defined to, because what a notifier said
+     * stops being evidence the moment the machine sleeps. So the subscription
+     * is made again here rather than relied on, and the order the lengths are
+     * tried in stops mattering. */
+    size_t dialogs = 0;
+    if (sipral_subscription_dialog_count(fixture->stack, fixture->subscription, &dialogs) !=
+            SIPRAL_STATUS_OK ||
+        dialogs == 0) {
+        /* and a stack that was told the machine is going to sleep sends
+         * nothing until it is told it woke up, which is what the one before
+         * this left it believing */
+        if (sipral_stack_resumed(fixture->stack, 0) != SIPRAL_STATUS_OK ||
+            !fixture_subscribe(fixture)) {
+            return SIPRAL_STATUS_WRONG_STATE;
+        }
+    }
+    sipral_watched_dialog_t dialog = { 0 };
+    dialog.size = declared;
+    return sipral_subscription_dialog_at(fixture->stack, fixture->subscription, 0, &dialog);
+}
+
 static sipral_status_t codec_info_at(struct fixture *fixture, size_t declared)
 {
     (void)fixture;
@@ -536,6 +759,8 @@ static const struct {
     { "sipral_media_packet_t", media_packet_at },
     { "sipral_transmit_t", transmit_at },
     { "sipral_suspending_t", suspending_at },
+    { "sipral_subscribe_config_t", subscribe_config_at },
+    { "sipral_watched_dialog_t", watched_dialog_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

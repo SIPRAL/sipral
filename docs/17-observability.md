@@ -155,18 +155,21 @@ TLS connection" are two different questions, and this answers only the first.
 A capability list that can drift from the build it describes is worse than
 none, because it is believed.
 
-### One capability that answers differently at the two layers, on purpose
+### The two layers may answer differently, on purpose
 
-`sipral_ua::UserAgent::subscribe` is implemented — RFC 6665 subscriptions and
-the busy-lamp field built on top of them — so
-`Capabilities::of_this_build().subscriptions` reads `true`. The C ABI's
-`SIPRAL_FEATURE_SUBSCRIPTIONS` bit is never set, because `sipral-ffi` has no
-entry point that reaches a subscription yet: `SIPRAL_EVENT_KIND` 15 is still
-reserved for it (`docs/08-ffi.md`), and an application built against this ABI
-genuinely cannot subscribe to anything, whatever the Rust crate underneath can
-do. This is the case D8 exists for — two honest answers about two different
-surfaces of the same build, rather than one aspirational answer that is
-believed by whichever side turns out to be wrong.
+Every bit `sipral_capabilities` reports is the facade's own answer today, but
+it is not required to be: a feature `sipral_ua::UserAgent` has and this ABI has
+no entry point in front of reads absent here, whatever the crate underneath
+says. `SIPRAL_FEATURE_SUBSCRIPTIONS` was that case for two phases —
+`UserAgent::subscribe` was implemented, `Capabilities::of_this_build()
+.subscriptions` read `true`, and an application built against the C ABI
+genuinely could not subscribe to anything, so the bit stayed clear. It is set
+now that `sipral_account_subscribe` exists with event kind 15 behind it.
+
+This is the case D8 exists for, and the rule outlives the example: two honest
+answers about two different surfaces of the same build beat one aspirational
+answer that is believed by whichever side turns out to be wrong. The next
+feature built below before it is built here gets the same treatment.
 
 ## B2, audited
 

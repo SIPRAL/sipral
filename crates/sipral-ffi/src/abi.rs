@@ -502,6 +502,14 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         "SipralStreamStats",
         crate::versioned::min_size::STREAM_STATS,
     ),
+    (
+        "SipralSubscribeConfig",
+        crate::versioned::min_size::SUBSCRIBE_CONFIG,
+    ),
+    (
+        "SipralWatchedDialog",
+        crate::versioned::min_size::WATCHED_DIALOG,
+    ),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
     // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
@@ -560,6 +568,12 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralRecoveryFailure::ABI,
         crate::lifecycle::SipralLink::ABI,
         crate::lifecycle::SipralRecovery::ABI,
+        crate::subscription::SipralSubscriptionState::ABI,
+        crate::subscription::SipralSubscriptionEnd::ABI,
+        crate::subscription::SipralDialogPhase::ABI,
+        crate::subscription::SipralDialogDirection::ABI,
+        crate::subscription::SipralDialogEnded::ABI,
+        crate::subscription::SipralDialogText::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -582,10 +596,13 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralMediaEvent::ABI,
         crate::event::SipralRecoveryEvent::ABI,
         crate::event::SipralTransportWantedEvent::ABI,
+        crate::event::SipralSubscriptionEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
         crate::screening::SipralScreenRequest::ABI,
+        crate::subscription::SipralSubscribeConfig::ABI,
+        crate::subscription::SipralWatchedDialog::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -610,6 +627,13 @@ pub const SURFACE: Surface = Surface {
         crate::counters::sipral_stack_counters::ABI,
         crate::screening::sipral_stack_screen::ABI,
         crate::screening::sipral_stack_invite_limit::ABI,
+        crate::subscription::sipral_account_subscribe::ABI,
+        crate::subscription::sipral_subscription_end::ABI,
+        crate::subscription::sipral_subscription_state::ABI,
+        crate::subscription::sipral_subscription_lamp::ABI,
+        crate::subscription::sipral_subscription_dialog_count::ABI,
+        crate::subscription::sipral_subscription_dialog_at::ABI,
+        crate::subscription::sipral_subscription_dialog_text::ABI,
         crate::account::sipral_account_add::ABI,
         crate::account::sipral_account_remove::ABI,
         crate::account::sipral_account_register::ABI,
@@ -846,6 +870,7 @@ mod tests {
             "SipralMediaEvent",
             "SipralRecoveryEvent",
             "SipralTransportWantedEvent",
+            "SipralSubscriptionEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

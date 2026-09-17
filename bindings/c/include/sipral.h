@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)13)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)14)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -124,8 +124,9 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_SRTP ((uint32_t)16)
 
 /**
- * See SIPRAL_FEATURE_DTMF, and the module documentation for why this
- * build never sets it.
+ * See SIPRAL_FEATURE_DTMF. RFC 6665 subscriptions and the
+ * dialog-state package a busy lamp field is built on, reached with
+ * sipral_account_subscribe.
  */
 #define SIPRAL_FEATURE_SUBSCRIPTIONS ((uint32_t)32)
 
@@ -235,10 +236,13 @@ typedef struct sipral_transfer_event sipral_transfer_event_t;
 typedef struct sipral_media_event sipral_media_event_t;
 typedef struct sipral_recovery_event sipral_recovery_event_t;
 typedef struct sipral_transport_wanted_event sipral_transport_wanted_event_t;
+typedef struct sipral_subscription_event sipral_subscription_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
 typedef struct sipral_screen_request sipral_screen_request_t;
+typedef struct sipral_subscribe_config sipral_subscribe_config_t;
+typedef struct sipral_watched_dialog sipral_watched_dialog_t;
 
 /**
  * The result of a call across the C ABI.
@@ -692,7 +696,6 @@ enum {
  * refuse it, which is what makes adding one safe.
  *
  * Numbers already spent on features this build does not have:
- * - 15: a subscription's state changed (A1)
  * - 16: the set of audio devices changed (A2)
  * - 20: a call was announced and never arrived (C2)
  * - 29: the application is asked to resolve a destination
@@ -766,6 +769,17 @@ enum {
      * The call is over, and its handle is stale from here on.
      */
     SIPRAL_EVENT_KIND_CALL_ENDED = 14,
+    /**
+     * A subscription moved: it was asked for, granted, put on probation,
+     * scheduled for another attempt, or ended.
+     *
+     * A1. `payload.subscription` says which one and where it is now, and
+     * `reason` why it is not live when it is not. Not sent on every
+     * refresh — a lamp does not move because a refresh was scheduled —
+     * and not sent for a notification arriving, which is
+     * SIPRAL_EVENT_KIND_NOTIFIED instead.
+     */
+    SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED = 15,
     /**
      * What one call's media cost, delivered once, after
      * `SIPRAL_EVENT_KIND_CALL_ENDED`.
@@ -870,6 +884,21 @@ enum {
      * and `docs/16-lifecycle.md` are the ladder this reports on.
      */
     SIPRAL_EVENT_KIND_RECOVERY = 28,
+    /**
+     * A notification arrived on a subscription, and has been answered.
+     *
+     * A1's other half. The NOTIFY is in `message`, whole and unparsed,
+     * which is where every package this ABI has no reader for is read
+     * from. `payload.subscription.has_dialog_info` says the body was
+     * `application/dialog-info+xml` and could be read, and the picture it
+     * updated is behind
+     * sipral_subscription_dialog_count.
+     * A body that could not be read arrives here all the same, with that
+     * member zero and the request whole: a lamp showing what was last
+     * known beats one showing what a malformed document happened to
+     * contain.
+     */
+    SIPRAL_EVENT_KIND_NOTIFIED = 30,
 };
 
 /**
@@ -1228,6 +1257,285 @@ enum {
      * There is no interface. Nothing is tried until there is one.
      */
     SIPRAL_RECOVERY_DETACH = 6,
+};
+
+/**
+ * Where a subscription is. Names for
+ * `sipral_subscription_event_t::state` and for
+ * sipral_subscription_state's `out_state`.
+ */
+typedef uint32_t sipral_subscription_state_t;
+enum {
+    /**
+     * The handle names nothing: never minted here, or ended and let go.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_UNKNOWN = 0,
+    /**
+     * A SUBSCRIBE is on its way and nothing has answered it yet.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_REQUESTING = 1,
+    /**
+     * The notifier has it and has not decided. RFC 6665 §4.1.3's
+     * `pending` is "insufficient policy information to grant or deny the
+     * subscription yet", and nothing is known about the watched thing
+     * until this becomes SIPRAL_SUBSCRIPTION_STATE_ACTIVE.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_PENDING = 2,
+    /**
+     * Granted, and notifications are arriving.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_ACTIVE = 3,
+    /**
+     * Not live, and a fresh attempt is scheduled. The handle stays
+     * valid: §4.1.2.2's new attempt is "an unrelated initial SUBSCRIBE
+     * request with a freshly generated Call-ID and a new, unique From
+     * tag", and this ABI keeps one name over both of them.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_RETRYING = 4,
+    /**
+     * Over, with nothing more coming. The handle names nothing from
+     * here on.
+     */
+    SIPRAL_SUBSCRIPTION_STATE_ENDED = 5,
+};
+
+/**
+ * Why a subscription is not live. Names for
+ * `sipral_subscription_event_t::reason`.
+ *
+ * Zero unless the state is SIPRAL_SUBSCRIPTION_STATE_RETRYING or
+ * SIPRAL_SUBSCRIPTION_STATE_ENDED. The first nine are what a
+ * `Subscription-State: terminated` said in its `reason` parameter (RFC
+ * 6665 §4.1.3), and the rest are what happened here instead.
+ */
+typedef uint32_t sipral_subscription_end_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_SUBSCRIPTION_END_UNKNOWN = 0,
+    /**
+     * `deactivated`: the notifier wants this subscription started again
+     * at once.
+     */
+    SIPRAL_SUBSCRIPTION_END_DEACTIVATED = 1,
+    /**
+     * `probation`: started again, but not immediately.
+     */
+    SIPRAL_SUBSCRIPTION_END_PROBATION = 2,
+    /**
+     * `rejected`: the notifier will not serve it, and asking again is
+     * pointless.
+     */
+    SIPRAL_SUBSCRIPTION_END_REJECTED = 3,
+    /**
+     * `timeout`: it ran out rather than being refreshed.
+     */
+    SIPRAL_SUBSCRIPTION_END_TIMEOUT = 4,
+    /**
+     * `giveup`: the notifier could not decide and stopped trying.
+     */
+    SIPRAL_SUBSCRIPTION_END_GAVE_UP = 5,
+    /**
+     * `noresource`: what was being watched does not exist any more.
+     */
+    SIPRAL_SUBSCRIPTION_END_NO_RESOURCE = 6,
+    /**
+     * `invariant`: the watched thing cannot change, so there is nothing
+     * to notify about.
+     */
+    SIPRAL_SUBSCRIPTION_END_INVARIANT = 7,
+    /**
+     * `terminated` with no reason parameter at all.
+     */
+    SIPRAL_SUBSCRIPTION_END_UNSTATED = 8,
+    /**
+     * This end gave it up: sipral_subscription_end. It wins over
+     * whatever the notifier's closing notification said its own reason
+     * was, because the application asked for this one to stop and that
+     * is the answer to why it is not live.
+     */
+    SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED = 9,
+    /**
+     * The notifier answered 489: it does not know this event package.
+     */
+    SIPRAL_SUBSCRIPTION_END_BAD_EVENT = 10,
+    /**
+     * The notifier refused the SUBSCRIBE with a status trying again
+     * cannot fix.
+     */
+    SIPRAL_SUBSCRIPTION_END_REFUSED = 11,
+    /**
+     * The SUBSCRIBE was redirected, and following a redirect for one is
+     * not something this stack does by itself.
+     */
+    SIPRAL_SUBSCRIPTION_END_REDIRECTED = 12,
+    /**
+     * Nothing answered: the notifier could not be reached at all.
+     */
+    SIPRAL_SUBSCRIPTION_END_UNREACHABLE = 13,
+    /**
+     * The SUBSCRIBE was answered and the first NOTIFY never arrived
+     * (§4.1.2.4's timer N, 64·T1).
+     */
+    SIPRAL_SUBSCRIPTION_END_NO_NOTIFY = 14,
+    /**
+     * What the notifier granted ran out with no refresh answered.
+     */
+    SIPRAL_SUBSCRIPTION_END_EXPIRED = 15,
+};
+
+/**
+ * What one watched dialog is doing, and what a lamp is lit from. Names
+ * for `sipral_watched_dialog_t::phase` and for
+ * sipral_subscription_lamp's `out_phase`.
+ *
+ * RFC 4235 §3.7.1's states, with the order they rank in for a lamp:
+ * anything ringing beats anything settled, which is §3.7.2's virtual
+ * state machine over every dialog of one resource.
+ */
+typedef uint32_t sipral_dialog_phase_t;
+enum {
+    /**
+     * Nothing is going on: no dialog, or every one of them terminated.
+     * This is what an idle lamp shows.
+     */
+    SIPRAL_DIALOG_PHASE_IDLE = 0,
+    /**
+     * A request went out and nothing has answered.
+     */
+    SIPRAL_DIALOG_PHASE_TRYING = 1,
+    /**
+     * Something answered without ringing yet.
+     */
+    SIPRAL_DIALOG_PHASE_PROCEEDING = 2,
+    /**
+     * Ringing.
+     */
+    SIPRAL_DIALOG_PHASE_EARLY = 3,
+    /**
+     * A call is up.
+     */
+    SIPRAL_DIALOG_PHASE_CONFIRMED = 4,
+    /**
+     * This dialog is over. Never sipral_subscription_lamp's answer,
+     * which is SIPRAL_DIALOG_PHASE_IDLE when every dialog has ended.
+     */
+    SIPRAL_DIALOG_PHASE_TERMINATED = 5,
+    /**
+     * The notifier named a state this build has no number for.
+     */
+    SIPRAL_DIALOG_PHASE_UNKNOWN = 6,
+};
+
+/**
+ * Which end started a watched dialog. Names for
+ * `sipral_watched_dialog_t::direction`.
+ */
+typedef uint32_t sipral_dialog_direction_t;
+enum {
+    /**
+     * The notifier did not say.
+     */
+    SIPRAL_DIALOG_DIRECTION_UNKNOWN = 0,
+    /**
+     * The watched end placed the call.
+     */
+    SIPRAL_DIALOG_DIRECTION_LOCALLY = 1,
+    /**
+     * The watched end was called.
+     */
+    SIPRAL_DIALOG_DIRECTION_REMOTELY = 2,
+};
+
+/**
+ * How a watched dialog ended. Names for
+ * `sipral_watched_dialog_t::ended`, and zero while it has not.
+ */
+typedef uint32_t sipral_dialog_ended_t;
+enum {
+    /**
+     * It has not ended, or the notifier did not say how.
+     */
+    SIPRAL_DIALOG_ENDED_UNKNOWN = 0,
+    /**
+     * The caller gave up before it was answered.
+     */
+    SIPRAL_DIALOG_ENDED_CANCELLED = 1,
+    /**
+     * The called end refused it.
+     */
+    SIPRAL_DIALOG_ENDED_REJECTED = 2,
+    /**
+     * A `Replaces` took it over.
+     */
+    SIPRAL_DIALOG_ENDED_REPLACED = 3,
+    /**
+     * The watched end hung up.
+     */
+    SIPRAL_DIALOG_ENDED_LOCAL_BYE = 4,
+    /**
+     * The far end hung up.
+     */
+    SIPRAL_DIALOG_ENDED_REMOTE_BYE = 5,
+    /**
+     * Something went wrong with it.
+     */
+    SIPRAL_DIALOG_ENDED_ERROR = 6,
+    /**
+     * Nothing answered in time.
+     */
+    SIPRAL_DIALOG_ENDED_TIMEOUT = 7,
+};
+
+/**
+ * Which piece of text sipral_subscription_dialog_text is being asked
+ * for.
+ *
+ * Every one of them is what the notifier wrote, unparsed: a display name
+ * is whatever it put there, and an identity is a URI in the form it sent
+ * it in.
+ */
+typedef uint32_t sipral_dialog_text_t;
+enum {
+    /**
+     * Never asked for.
+     */
+    SIPRAL_DIALOG_TEXT_UNKNOWN = 0,
+    /**
+     * The notifier's own name for this dialog, which is what it will
+     * keep using for it.
+     */
+    SIPRAL_DIALOG_TEXT_ID = 1,
+    /**
+     * The dialog's `Call-ID`, when the notifier sent one.
+     */
+    SIPRAL_DIALOG_TEXT_CALL_ID = 2,
+    /**
+     * Who the watched end is, as a URI.
+     */
+    SIPRAL_DIALOG_TEXT_LOCAL_IDENTITY = 3,
+    /**
+     * And the display name beside it.
+     */
+    SIPRAL_DIALOG_TEXT_LOCAL_DISPLAY = 4,
+    /**
+     * Who the other end is, as a URI. This is the one a lamp shows
+     * beside a ringing extension.
+     */
+    SIPRAL_DIALOG_TEXT_REMOTE_IDENTITY = 5,
+    /**
+     * And the display name beside it.
+     */
+    SIPRAL_DIALOG_TEXT_REMOTE_DISPLAY = 6,
+    /**
+     * Where requests for the watched end would be sent.
+     */
+    SIPRAL_DIALOG_TEXT_LOCAL_TARGET = 7,
+    /**
+     * And for the other end.
+     */
+    SIPRAL_DIALOG_TEXT_REMOTE_TARGET = 8,
 };
 
 /**
@@ -2699,6 +3007,69 @@ struct sipral_transport_wanted_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED and a
+ * SIPRAL_EVENT_KIND_NOTIFIED carry.
+ *
+ * The subscription names itself here rather than in `sipral_event_t`,
+ * which has room for an account and a call and not for every kind of
+ * handle this ABI mints. The account is not carried at all: a caller
+ * asked for the subscription on one, and a sibling from a fork belongs
+ * to the same one as the subscription it forked from.
+ */
+struct sipral_subscription_event {
+    /**
+     * Which subscription. Minted by `sipral_account_subscribe`, or by
+     * this ABI when a fork made one nobody asked for.
+     */
+    sipral_handle_t subscription;
+    /**
+     * A sipral_subscription_state_t.
+     */
+    uint32_t state;
+    /**
+     * A sipral_subscription_end_t:
+     * why it is not live. Zero while it is.
+     */
+    uint32_t reason;
+    /**
+     * The SIP status a response gave for it, when one did. Zero
+     * otherwise.
+     */
+    uint32_t status_code;
+    /**
+     * Whether the notification carried dialog state this build could
+     * read. Zero on every kind but SIPRAL_EVENT_KIND_NOTIFIED, and
+     * zero there for a body in any other form or none at all.
+     */
+    uint32_t has_dialog_info;
+    /**
+     * What the notifier granted, in milliseconds. Zero until one has.
+     */
+    uint64_t expires_ms;
+    /**
+     * How long until this stack refreshes it, in milliseconds.
+     */
+    uint64_t refresh_in_ms;
+    /**
+     * How long until the next attempt, in milliseconds, when the state
+     * is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
+     * includes every subscription that has ended for good.
+     */
+    uint64_t retry_in_ms;
+    /**
+     * The subscription this one forked from
+     * ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
+     * subscription of its own from here on, with its own dialog, its own
+     * refresh and its own state; RFC 4235 §3.9 makes this the normal case
+     * for dialog state, one per device the watched address is registered
+     * on.
+     *
+     * [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+     */
+    sipral_handle_t forked_from;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -2731,6 +3102,11 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_TRANSPORT_WANTED.
      */
     sipral_transport_wanted_event_t transport_wanted;
+    /**
+     * For SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED and
+     * SIPRAL_EVENT_KIND_NOTIFIED.
+     */
+    sipral_subscription_event_t subscription;
 };
 
 /**
@@ -2856,6 +3232,118 @@ struct sipral_screen_request {
      * How many bytes of it.
      */
     size_t message_len;
+};
+
+/**
+ * What to watch, and how. Handed to sipral_account_subscribe.
+ *
+ * Set `size` to `sizeof(sipral_subscribe_config_t)` before the call.
+ * Everything but `target` and `package` may be left zero.
+ */
+struct sipral_subscribe_config {
+    /**
+     * How long this struct is, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * What to watch, as a SIP URI: `sip:2001@pbx.example.com`.
+     */
+    const char *target;
+    /**
+     * How many bytes of it.
+     */
+    size_t target_len;
+    /**
+     * The event package, as the token that names it: `dialog` for a busy
+     * lamp field (RFC 4235 §3.1), `message-summary` for message waiting
+     * (RFC 3842 §3), `presence` (RFC 3856 §6.1).
+     *
+     * It goes out exactly as written here, because §8.2.1 compares it
+     * byte for byte.
+     */
+    const char *package;
+    /**
+     * How many bytes of it.
+     */
+    size_t package_len;
+    /**
+     * The `Accept` value, when the package's default body type is not
+     * the one wanted. Null sends no `Accept` at all, which §3.1.3 makes
+     * the package's default — `application/dialog-info+xml` for
+     * `dialog`.
+     *
+     * Sending the wrong one is worse than sending none: §4.1.2.1 has the
+     * notifier answer 406 for a type it cannot generate, so nothing is
+     * guessed on a caller's behalf.
+     */
+    const char *accept;
+    /**
+     * How many bytes of it.
+     */
+    size_t accept_len;
+    /**
+     * How long to ask for, in seconds, or zero for this build's default
+     * of one hour.
+     *
+     * What the notifier grants wins (§3.1.1: "The period of time in the
+     * response is the one that defines the duration of the
+     * subscription"), and the refresh is scheduled against that rather
+     * than against this.
+     */
+    uint32_t expires_seconds;
+    /**
+     * Where to send the SUBSCRIBE, as `host:port`, or null to send it
+     * where the account registers — which is the outbound proxy for a
+     * registered line, and the reason a phone behind a NAT is reachable
+     * at all.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * Which transport it goes out on, read only together with
+     * `destination`, exactly as `sipral_call_config_t::transport` is.
+     * Nonzero with `destination` null is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     */
+    uint32_t transport;
+};
+
+/**
+ * One dialog a `dialog` subscription has been told about, with the text
+ * left behind: sipral_subscription_dialog_text reads that, because a
+ * pointer into this library's own memory would be a pointer a caller
+ * could outlive.
+ */
+struct sipral_watched_dialog {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_dialog_phase_t.
+     */
+    uint32_t phase;
+    /**
+     * A sipral_dialog_direction_t.
+     */
+    uint32_t direction;
+    /**
+     * A sipral_dialog_ended_t, and zero while the dialog has not.
+     */
+    uint32_t ended;
+    /**
+     * The SIP status behind how it ended, when the notifier sent one.
+     * Zero otherwise.
+     */
+    uint32_t status_code;
+    /**
+     * How long it has been up, in milliseconds, when the notifier sent a
+     * duration. Zero otherwise.
+     */
+    uint64_t duration_ms;
 };
 
 /**
@@ -3159,6 +3647,132 @@ sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callbac
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_stack_invite_limit(sipral_handle_t stack, uint64_t every_ms, uint32_t burst);
+
+/**
+ * Watch something at the far end (A1).
+ *
+ * One SUBSCRIBE goes out on `account`'s transport, to `account`'s
+ * address, and the handle written back names the subscription from now
+ * until it ends. Nothing has happened yet when this returns: the request
+ * is in the transmit queue, and
+ * `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step of what
+ * becomes of it.
+ *
+ * A subscription refreshes itself for as long as it is live, at a
+ * fraction of what the notifier granted, and starts a fresh one by itself
+ * after something recoverable — both under this same handle. What ends
+ * it for good is sipral_subscription_end, or an event saying it
+ * ended with no retry, and the handle names nothing after that.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_subscribe_config_t` whose `size`
+ * member says how long it is, with every pointer in it readable for the
+ * length beside it. `out_subscription` must point at one
+ * `sipral_handle_t`.
+ */
+sipral_status_t sipral_account_subscribe(sipral_handle_t stack, sipral_handle_t account, const sipral_subscribe_config_t *config, sipral_handle_t *out_subscription, uint64_t now_ms);
+
+/**
+ * Give a subscription up.
+ *
+ * A SUBSCRIBE with `Expires: 0` (§4.1.2.3), and the subscription is not
+ * over when this returns: §4.4.1 makes it live "until the NOTIFY
+ * transaction with a `Subscription-State` of `terminated` completes", so
+ * the closing notification is still answered and
+ * `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` with
+ * `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when it has. One that has
+ * no dialog yet has nothing to send this in and ends at once.
+ *
+ * The handle stays usable until that event arrives, and names nothing
+ * after it.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_subscription_end(sipral_handle_t stack, sipral_handle_t subscription, uint64_t now_ms);
+
+/**
+ * Where a subscription is, without waiting for its next event.
+ *
+ * SIPRAL_SUBSCRIPTION_STATE_UNKNOWN for a handle that names nothing,
+ * which is what a subscription that has ended leaves behind — and a
+ * status of `SIPRAL_STATUS_OK` all the same, because "it is over" is an
+ * answer to this question rather than a failure of it.
+ *
+ * Safety
+ *
+ * `out_state` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_subscription_state(sipral_handle_t stack, sipral_handle_t subscription, uint32_t *out_state);
+
+/**
+ * What a lamp for this subscription should show (A1).
+ *
+ * RFC 4235 §3.7.2's virtual state machine over every dialog the notifier
+ * has told this subscription about: anything ringing beats anything
+ * settled, and SIPRAL_DIALOG_PHASE_IDLE is what is left once they
+ * have all ended. One call and one number, which is what a busy lamp
+ * field is; sipral_subscription_dialog_count and the two after it
+ * are for an application that wants to show who is on the call as well.
+ *
+ * `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that has no dialog
+ * state at all — one to another package, or one that is not live, whose
+ * last notification stopped being evidence the moment it stopped being
+ * refreshed.
+ *
+ * Safety
+ *
+ * `out_phase` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_subscription_lamp(sipral_handle_t stack, sipral_handle_t subscription, uint32_t *out_phase);
+
+/**
+ * How many dialogs this subscription has been told about.
+ *
+ * They are in the order they were first heard of, and the index one has
+ * here is stable only until the next notification arrives: a dialog that
+ * ended is dropped from the table, and the numbering closes up behind
+ * it. Read a dialog out in the same breath as the count, and read them
+ * both again on the next
+ * SIPRAL_EVENT_KIND_NOTIFIED.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_subscription_dialog_count(sipral_handle_t stack, sipral_handle_t subscription, size_t *out_count);
+
+/**
+ * One of them, by index.
+ *
+ * Safety
+ *
+ * `out_dialog` must point at a `sipral_watched_dialog_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_subscription_dialog_at(sipral_handle_t stack, sipral_handle_t subscription, size_t index, sipral_watched_dialog_t *out_dialog);
+
+/**
+ * A piece of text about one of them, copied into the caller's buffer.
+ *
+ * The same shape `sipral_last_error_message` has, and for the same
+ * reason: the text belongs to the library and a pointer to it would be
+ * one a caller could outlive. `out_needed` always receives the number of
+ * bytes the text needs including the trailing NUL, so a caller that
+ * brought nothing can ask with `capacity` zero and then ask again with
+ * room. A buffer too small for the whole of it is
+ * `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
+ *
+ * A piece the notifier did not send is one byte: the NUL.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes, and `out_needed` must
+ * point at one `size_t`.
+ */
+sipral_status_t sipral_subscription_dialog_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Configure an account, and write its handle to `out_account`.

@@ -18,14 +18,15 @@
 //! [`sipral::Capabilities::of_this_build`] answers for the `sipral` crate:
 //! what `sipral_ua::UserAgent` can do, whether or not this ABI has grown an
 //! entry point for it yet. This module answers for the ABI itself, and the
-//! two are not always the same build — subscriptions are wired into
-//! `UserAgent` (RFC 6665, and the busy-lamp field on top of it) with no C
-//! entry point in front of them, because `SIPRAL_EVENT_KIND` 15 is still
-//! reserved (`docs/08-ffi.md`) and nothing here can deliver the event a
-//! binding would need to use one. [`SIPRAL_FEATURE_SUBSCRIPTIONS`] is
-//! therefore never set by this build, and will be the day event 15 stops
-//! being reserved and starts being a kind — the derivation changes with the
-//! ABI, not with a note in this comment.
+//! two are always allowed to differ: a thing `UserAgent` can do and this ABI
+//! has no entry point in front of reads absent here, whatever the crate
+//! underneath answers. [`SIPRAL_FEATURE_SUBSCRIPTIONS`] was the one that did,
+//! from the first version of this module until
+//! [`crate::subscription::sipral_account_subscribe`] arrived with event kind
+//! 15 behind it; it now reads whatever the facade says, and every bit here is
+//! once again the facade's own answer. The next feature to be built below
+//! before it is built here takes its place, and this paragraph is the shape of
+//! the answer for it.
 
 use sipral::Capabilities;
 use sipral_ua::TransportProtocol;
@@ -65,8 +66,9 @@ constants! {
     pub const SIPRAL_FEATURE_MEDIA_STALL_WATCHDOG: u32 = 1 << 3;
     /// See [`SIPRAL_FEATURE_DTMF`].
     pub const SIPRAL_FEATURE_SRTP: u32 = 1 << 4;
-    /// See [`SIPRAL_FEATURE_DTMF`], and the module documentation for why this
-    /// build never sets it.
+    /// See [`SIPRAL_FEATURE_DTMF`]. RFC 6665 subscriptions and the
+    /// dialog-state package a busy lamp field is built on, reached with
+    /// [`sipral_account_subscribe`](crate::subscription::sipral_account_subscribe).
     pub const SIPRAL_FEATURE_SUBSCRIPTIONS: u32 = 1 << 5;
     /// See [`SIPRAL_FEATURE_DTMF`]. Opus is behind a compile-time feature,
     /// because libopus is the one part of the audio path that is licensed
@@ -164,10 +166,11 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     if capabilities.opus {
         features |= SIPRAL_FEATURE_OPUS;
     }
-    // subscriptions: sipral_ua::UserAgent has them, this ABI has no entry
-    // point that reaches one yet (event kind 15 is reserved), so the honest
-    // answer here is the ABI's and not the crate underneath it — see the
-    // module documentation
+    // subscriptions: reached from C since `sipral_account_subscribe`, so the
+    // bit is the facade's answer like every other one here
+    if capabilities.subscriptions {
+        features |= SIPRAL_FEATURE_SUBSCRIPTIONS;
+    }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
         codec_count: capabilities.codecs.len(),
@@ -290,11 +293,18 @@ mod tests {
     }
 
     #[test]
-    fn subscriptions_read_absent_because_this_abi_has_no_entry_point_for_one() {
-        // sipral_ua::UserAgent can subscribe; this crate cannot yet ask it
-        // to, so the honest answer for the ABI is off, not the crate
-        // underneath it
-        assert_eq!(read().features & SIPRAL_FEATURE_SUBSCRIPTIONS, 0);
+    fn subscriptions_read_present_now_that_this_abi_reaches_one() {
+        // the bit was off for as long as `sipral_ua::UserAgent` could
+        // subscribe and this crate had no way to ask it to; it is the
+        // facade's answer again now that `sipral_account_subscribe` exists,
+        // and this test is what would catch an entry point removed without
+        // the bit following it
+        assert_eq!(
+            read().features & SIPRAL_FEATURE_SUBSCRIPTIONS != 0,
+            Capabilities::of_this_build().subscriptions,
+            "the bit is the facade's answer and not a second opinion"
+        );
+        assert!(read().features & SIPRAL_FEATURE_SUBSCRIPTIONS != 0);
     }
 
     #[test]

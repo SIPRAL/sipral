@@ -301,7 +301,6 @@ public enum SipralDtmf: UInt32, Sendable {
 /// refuse it, which is what makes adding one safe.
 ///
 /// Numbers already spent on features this build does not have:
-/// - 15: a subscription's state changed (A1)
 /// - 16: the set of audio devices changed (A2)
 /// - 20: a call was announced and never arrived (C2)
 /// - 29: the application is asked to resolve a destination
@@ -345,6 +344,15 @@ public enum SipralEventKind: UInt32, Sendable {
     case callReplaced = 13
     /// The call is over, and its handle is stale from here on.
     case callEnded = 14
+    /// A subscription moved: it was asked for, granted, put on probation,
+    /// scheduled for another attempt, or ended.
+    ///
+    /// A1. `payload.subscription` says which one and where it is now, and
+    /// `reason` why it is not live when it is not. Not sent on every
+    /// refresh — a lamp does not move because a refresh was scheduled —
+    /// and not sent for a notification arriving, which is
+    /// SipralEventKind.notified instead.
+    case subscriptionChanged = 15
     /// What one call's media cost, delivered once, after
     /// `SIPRAL_EVENT_KIND_CALL_ENDED`.
     ///
@@ -427,6 +435,19 @@ public enum SipralEventKind: UInt32, Sendable {
     /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
     /// and `docs/16-lifecycle.md` are the ladder this reports on.
     case recovery = 28
+    /// A notification arrived on a subscription, and has been answered.
+    ///
+    /// A1's other half. The NOTIFY is in `message`, whole and unparsed,
+    /// which is where every package this ABI has no reader for is read
+    /// from. `payload.subscription.has_dialog_info` says the body was
+    /// `application/dialog-info+xml` and could be read, and the picture it
+    /// updated is behind
+    /// sipral_subscription_dialog_count.
+    /// A body that could not be read arrives here all the same, with that
+    /// member zero and the request whole: a lamp showing what was last
+    /// known beats one showing what a malformed document happened to
+    /// contain.
+    case notified = 30
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -637,6 +658,169 @@ public enum SipralRecovery: UInt32, Sendable {
     case detach = 6
 }
 
+/// Where a subscription is. Names for
+/// `sipral_subscription_event_t::state` and for
+/// sipral_subscription_state's `out_state`.
+public enum SipralSubscriptionState: UInt32, Sendable {
+    /// The handle names nothing: never minted here, or ended and let go.
+    case unknown = 0
+    /// A SUBSCRIBE is on its way and nothing has answered it yet.
+    case requesting = 1
+    /// The notifier has it and has not decided. RFC 6665 §4.1.3's
+    /// `pending` is "insufficient policy information to grant or deny the
+    /// subscription yet", and nothing is known about the watched thing
+    /// until this becomes SipralSubscriptionState.active.
+    case pending = 2
+    /// Granted, and notifications are arriving.
+    case active = 3
+    /// Not live, and a fresh attempt is scheduled. The handle stays
+    /// valid: §4.1.2.2's new attempt is "an unrelated initial SUBSCRIBE
+    /// request with a freshly generated Call-ID and a new, unique From
+    /// tag", and this ABI keeps one name over both of them.
+    case retrying = 4
+    /// Over, with nothing more coming. The handle names nothing from
+    /// here on.
+    case ended = 5
+}
+
+/// Why a subscription is not live. Names for
+/// `sipral_subscription_event_t::reason`.
+///
+/// Zero unless the state is SipralSubscriptionState.retrying or
+/// SipralSubscriptionState.ended. The first nine are what a
+/// `Subscription-State: terminated` said in its `reason` parameter (RFC
+/// 6665 §4.1.3), and the rest are what happened here instead.
+public enum SipralSubscriptionEnd: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// `deactivated`: the notifier wants this subscription started again
+    /// at once.
+    case deactivated = 1
+    /// `probation`: started again, but not immediately.
+    case probation = 2
+    /// `rejected`: the notifier will not serve it, and asking again is
+    /// pointless.
+    case rejected = 3
+    /// `timeout`: it ran out rather than being refreshed.
+    case timeout = 4
+    /// `giveup`: the notifier could not decide and stopped trying.
+    case gaveUp = 5
+    /// `noresource`: what was being watched does not exist any more.
+    case noResource = 6
+    /// `invariant`: the watched thing cannot change, so there is nothing
+    /// to notify about.
+    case invariant = 7
+    /// `terminated` with no reason parameter at all.
+    case unstated = 8
+    /// This end gave it up: sipral_subscription_end. It wins over
+    /// whatever the notifier's closing notification said its own reason
+    /// was, because the application asked for this one to stop and that
+    /// is the answer to why it is not live.
+    case unsubscribed = 9
+    /// The notifier answered 489: it does not know this event package.
+    case badEvent = 10
+    /// The notifier refused the SUBSCRIBE with a status trying again
+    /// cannot fix.
+    case refused = 11
+    /// The SUBSCRIBE was redirected, and following a redirect for one is
+    /// not something this stack does by itself.
+    case redirected = 12
+    /// Nothing answered: the notifier could not be reached at all.
+    case unreachable = 13
+    /// The SUBSCRIBE was answered and the first NOTIFY never arrived
+    /// (§4.1.2.4's timer N, 64·T1).
+    case noNotify = 14
+    /// What the notifier granted ran out with no refresh answered.
+    case expired = 15
+}
+
+/// What one watched dialog is doing, and what a lamp is lit from. Names
+/// for `sipral_watched_dialog_t::phase` and for
+/// sipral_subscription_lamp's `out_phase`.
+///
+/// RFC 4235 §3.7.1's states, with the order they rank in for a lamp:
+/// anything ringing beats anything settled, which is §3.7.2's virtual
+/// state machine over every dialog of one resource.
+public enum SipralDialogPhase: UInt32, Sendable {
+    /// Nothing is going on: no dialog, or every one of them terminated.
+    /// This is what an idle lamp shows.
+    case idle = 0
+    /// A request went out and nothing has answered.
+    case trying = 1
+    /// Something answered without ringing yet.
+    case proceeding = 2
+    /// Ringing.
+    case early = 3
+    /// A call is up.
+    case confirmed = 4
+    /// This dialog is over. Never sipral_subscription_lamp's answer,
+    /// which is SipralDialogPhase.idle when every dialog has ended.
+    case terminated = 5
+    /// The notifier named a state this build has no number for.
+    case unknown = 6
+}
+
+/// Which end started a watched dialog. Names for
+/// `sipral_watched_dialog_t::direction`.
+public enum SipralDialogDirection: UInt32, Sendable {
+    /// The notifier did not say.
+    case unknown = 0
+    /// The watched end placed the call.
+    case locally = 1
+    /// The watched end was called.
+    case remotely = 2
+}
+
+/// How a watched dialog ended. Names for
+/// `sipral_watched_dialog_t::ended`, and zero while it has not.
+public enum SipralDialogEnded: UInt32, Sendable {
+    /// It has not ended, or the notifier did not say how.
+    case unknown = 0
+    /// The caller gave up before it was answered.
+    case cancelled = 1
+    /// The called end refused it.
+    case rejected = 2
+    /// A `Replaces` took it over.
+    case replaced = 3
+    /// The watched end hung up.
+    case localBye = 4
+    /// The far end hung up.
+    case remoteBye = 5
+    /// Something went wrong with it.
+    case error = 6
+    /// Nothing answered in time.
+    case timeout = 7
+}
+
+/// Which piece of text sipral_subscription_dialog_text is being asked
+/// for.
+///
+/// Every one of them is what the notifier wrote, unparsed: a display name
+/// is whatever it put there, and an identity is a URI in the form it sent
+/// it in.
+public enum SipralDialogText: UInt32, Sendable {
+    /// Never asked for.
+    case unknown = 0
+    /// The notifier's own name for this dialog, which is what it will
+    /// keep using for it.
+    case id = 1
+    /// The dialog's `Call-ID`, when the notifier sent one.
+    case callId = 2
+    /// Who the watched end is, as a URI.
+    case localIdentity = 3
+    /// And the display name beside it.
+    case localDisplay = 4
+    /// Who the other end is, as a URI. This is the one a lamp shows
+    /// beside a ringing extension.
+    case remoteIdentity = 5
+    /// And the display name beside it.
+    case remoteDisplay = 6
+    /// Where requests for the watched end would be sent.
+    case localTarget = 7
+    /// And for the other end.
+    case remoteTarget = 8
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -811,6 +995,26 @@ public extension sipral_screen_request_t {
     }
 }
 
+public extension sipral_subscribe_config_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_watched_dialog_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -915,7 +1119,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 13
+    public static let abiVersionMinor: UInt32 = 14
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -958,8 +1162,9 @@ public enum Sipral {
     /// See SIPRAL_FEATURE_DTMF.
     public static let featureSrtp: UInt32 = 16
 
-    /// See SIPRAL_FEATURE_DTMF, and the module documentation for why this
-    /// build never sets it.
+    /// See SIPRAL_FEATURE_DTMF. RFC 6665 subscriptions and the
+    /// dialog-state package a busy lamp field is built on, reached with
+    /// sipral_account_subscribe.
     public static let featureSubscriptions: UInt32 = 32
 
     /// See SIPRAL_FEATURE_DTMF. Opus is behind a compile-time feature,
@@ -1418,6 +1623,162 @@ public enum Sipral {
         try ensureAbi()
         let status = sipral_stack_invite_limit(stack, everyMs, burst)
         try check(status)
+    }
+
+    /// Watch something at the far end (A1).
+    ///
+    /// One SUBSCRIBE goes out on `account`'s transport, to `account`'s
+    /// address, and the handle written back names the subscription from now
+    /// until it ends. Nothing has happened yet when this returns: the request
+    /// is in the transmit queue, and
+    /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` reports each step of what
+    /// becomes of it.
+    ///
+    /// A subscription refreshes itself for as long as it is live, at a
+    /// fraction of what the notifier granted, and starts a fresh one by itself
+    /// after something recoverable — both under this same handle. What ends
+    /// it for good is sipral_subscription_end, or an event saying it
+    /// ended with no retry, and the handle names nothing after that.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_subscribe_config_t` whose `size`
+    /// member says how long it is, with every pointer in it readable for the
+    /// length beside it. `out_subscription` must point at one
+    /// `sipral_handle_t`.
+    public static func accountSubscribe(stack: SipralHandle, account: SipralHandle, config: sipral_subscribe_config_t, nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
+        var config = config
+        var subscription = SipralHandle()
+        let status = sipral_account_subscribe(stack, account, &config, &subscription, nowMs)
+        try check(status)
+        return subscription
+    }
+
+    /// Give a subscription up.
+    ///
+    /// A SUBSCRIBE with `Expires: 0` (§4.1.2.3), and the subscription is not
+    /// over when this returns: §4.4.1 makes it live "until the NOTIFY
+    /// transaction with a `Subscription-State` of `terminated` completes", so
+    /// the closing notification is still answered and
+    /// `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` with
+    /// `SIPRAL_SUBSCRIPTION_END_UNSUBSCRIBED` says when it has. One that has
+    /// no dialog yet has nothing to send this in and ends at once.
+    ///
+    /// The handle stays usable until that event arrives, and names nothing
+    /// after it.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func subscriptionEnd(stack: SipralHandle, subscription: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_subscription_end(stack, subscription, nowMs)
+        try check(status)
+    }
+
+    /// Where a subscription is, without waiting for its next event.
+    ///
+    /// SipralSubscriptionState.unknown for a handle that names nothing,
+    /// which is what a subscription that has ended leaves behind — and a
+    /// status of `SIPRAL_STATUS_OK` all the same, because "it is over" is an
+    /// answer to this question rather than a failure of it.
+    ///
+    /// Safety
+    ///
+    /// `out_state` must point at one `uint32_t`.
+    public static func subscriptionState(stack: SipralHandle, subscription: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
+        var state = UInt32()
+        let status = sipral_subscription_state(stack, subscription, &state)
+        try check(status)
+        return state
+    }
+
+    /// What a lamp for this subscription should show (A1).
+    ///
+    /// RFC 4235 §3.7.2's virtual state machine over every dialog the notifier
+    /// has told this subscription about: anything ringing beats anything
+    /// settled, and SipralDialogPhase.idle is what is left once they
+    /// have all ended. One call and one number, which is what a busy lamp
+    /// field is; sipral_subscription_dialog_count and the two after it
+    /// are for an application that wants to show who is on the call as well.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for a subscription that has no dialog
+    /// state at all — one to another package, or one that is not live, whose
+    /// last notification stopped being evidence the moment it stopped being
+    /// refreshed.
+    ///
+    /// Safety
+    ///
+    /// `out_phase` must point at one `uint32_t`.
+    public static func subscriptionLamp(stack: SipralHandle, subscription: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
+        var phase = UInt32()
+        let status = sipral_subscription_lamp(stack, subscription, &phase)
+        try check(status)
+        return phase
+    }
+
+    /// How many dialogs this subscription has been told about.
+    ///
+    /// They are in the order they were first heard of, and the index one has
+    /// here is stable only until the next notification arrives: a dialog that
+    /// ended is dropped from the table, and the numbering closes up behind
+    /// it. Read a dialog out in the same breath as the count, and read them
+    /// both again on the next
+    /// SIPRAL_EVENT_KIND_NOTIFIED.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func subscriptionDialogCount(stack: SipralHandle, subscription: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_subscription_dialog_count(stack, subscription, &count)
+        try check(status)
+        return count
+    }
+
+    /// One of them, by index.
+    ///
+    /// Safety
+    ///
+    /// `out_dialog` must point at a `sipral_watched_dialog_t` whose `size`
+    /// member says how long it is.
+    public static func subscriptionDialogAt(stack: SipralHandle, subscription: SipralHandle, index: Int) throws -> sipral_watched_dialog_t {
+        try ensureAbi()
+        var dialog = sipral_watched_dialog_t.sized()
+        let status = sipral_subscription_dialog_at(stack, subscription, index, &dialog)
+        try check(status)
+        return dialog
+    }
+
+    /// A piece of text about one of them, copied into the caller's buffer.
+    ///
+    /// The same shape `sipral_last_error_message` has, and for the same
+    /// reason: the text belongs to the library and a pointer to it would be
+    /// one a caller could outlive. `out_needed` always receives the number of
+    /// bytes the text needs including the trailing NUL, so a caller that
+    /// brought nothing can ask with `capacity` zero and then ask again with
+    /// room. A buffer too small for the whole of it is
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
+    ///
+    /// A piece the notifier did not send is one byte: the NUL.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
+    /// point at one `size_t`.
+    public static func subscriptionDialogText(stack: SipralHandle, subscription: SipralHandle, index: Int, which: UInt32, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var needed = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p4 in
+                sipral_subscription_dialog_text(stack, subscription, index, which, p4.baseAddress, p4.count, &needed)
+            }
+        try check(status)
+        return needed
     }
 
     /// Configure an account, and write its handle to `out_account`.
