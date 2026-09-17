@@ -83,9 +83,13 @@ panic and without unbounded work; the 14 semantic cases are well formed and test
 what the transaction and UA layers do with them, not the parser.
 
 A rejection is either the parser refusing the message or `RawMessage::validate`
-refusing a field in it, and the corpus does not distinguish: both are the stack
-answering 400, and which one happens depends on whether the fault is in the
-framing or in a field. Three messages carry a per-message outcome that differs
+refusing a field in it, and the corpus does not distinguish: both end with the
+message not acted on, and which one happens depends on whether the fault is in
+the framing or in a field. What a live endpoint does with the second kind is
+answer 400 naming the field, before anything matches a transaction to it
+(RFC 3261 §8.2.x); an ACK is dropped instead, because nothing answers an ACK.
+The corpus test calls `validate` directly rather than through an endpoint, so
+what it proves is the judgement, and `endpoint::tests` proves the answer. Three messages carry a per-message outcome that differs
 from their group's — `insuf`, `multi01` and `mcl01` sit in the application
 section but their RFC text asks for a 400 outright — with the reason written
 beside them in the manifest.

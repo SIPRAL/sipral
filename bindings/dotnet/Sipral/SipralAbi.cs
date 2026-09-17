@@ -466,7 +466,6 @@ public enum SipralDtmf : uint
 /// - 16: the set of audio devices changed (A2)
 /// - 18: a request was promoted to a stream transport (B1)
 /// - 20: a call was announced and never arrived (C2)
-/// - 28: the stack recovered from a suspension or a network change
 /// - 29: the application is asked to resolve a destination
 /// </summary>
 public enum SipralEventKind : uint
@@ -619,6 +618,15 @@ public enum SipralEventKind : uint
     /// after it is sent.
     /// </summary>
     DtmfSent = 27,
+    /// <summary>
+    /// The lifecycle machine settled: a registrar answered again and
+    /// proved a path this stack had stopped believing in, or every rung
+    /// of a recovery ladder was climbed and none of them worked.
+    /// `payload.recovery` says which, and carries what the ladder that
+    /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
+    /// and `docs/16-lifecycle.md` are the ladder this reports on.
+    /// </summary>
+    Recovery = 28,
 }
 
 /// <summary>
@@ -816,6 +824,167 @@ public enum SipralDigitSource : uint
     /// or `application/dtmf`.
     /// </summary>
     Info = 1,
+}
+
+/// <summary>
+/// What a SipralEventKind.Recovery reports happened, for
+/// `payload.recovery.state`. Names for the two ways `sipral_ua`'s
+/// lifecycle machine settles: a registrar answered again, or a recovery
+/// ladder ran out of rungs.
+/// </summary>
+public enum SipralRecoveryOutcome : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// A registrar answered again: what was distrusted is proved.
+    /// </summary>
+    Running = 1,
+    /// <summary>
+    /// Every rung was climbed and none of them worked.
+    /// </summary>
+    GaveUp = 2,
+}
+
+/// <summary>
+/// The last rung a recovery ladder tried before it gave up, for
+/// SipralEventKind.Recovery's `payload.recovery.rung`. Meaningful
+/// only when `payload.recovery.state` is
+/// SipralRecoveryOutcome.GaveUp. Names for `sipral_ua::Rung`, minus
+/// Rung::GiveUp itself: `sipral_ua` reports the rung before it that
+/// asked for something and went unanswered, not the give-up rung that
+/// follows it.
+/// </summary>
+public enum SipralRecoveryRung : uint
+{
+    /// <summary>
+    /// The ladder did not give up.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// Nothing was believed any more, and nothing was sent.
+    /// </summary>
+    Distrust = 1,
+    /// <summary>
+    /// A REGISTER, and a re-SUBSCRIBE for what was demoted alongside it,
+    /// went out or could not.
+    /// </summary>
+    Reregister = 2,
+    /// <summary>
+    /// The application was asked for a transport.
+    /// </summary>
+    WantTransport = 3,
+    /// <summary>
+    /// The application was asked for an address.
+    /// </summary>
+    WantAddress = 4,
+}
+
+/// <summary>
+/// Why a recovery ladder gave up, for SipralEventKind.Recovery's
+/// `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+/// </summary>
+public enum SipralRecoveryFailure : uint
+{
+    /// <summary>
+    /// The ladder did not give up.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// Every REGISTER that could be sent was sent and none of them was
+    /// answered.
+    /// </summary>
+    Unreachable = 1,
+    /// <summary>
+    /// A transport was asked for and the application did not bind one.
+    /// </summary>
+    NoTransport = 2,
+    /// <summary>
+    /// An address was asked for and the application did not supply one.
+    /// </summary>
+    Unresolved = 3,
+}
+
+/// <summary>
+/// What kind of link the application is on. Names for `from_link` and
+/// `to_link` on sipral_stack_network_changed.
+///
+/// Coarse on purpose: nothing here changes what is sent, and the one
+/// value that changes what is *done* is SipralLink.Down. The rest is
+/// carried so that a change of kind over an unchanged address — a tunnel
+/// coming up, a phone moving from Wi-Fi to a mobile network that kept the
+/// address — is visible as a change at all.
+/// </summary>
+public enum SipralLink : uint
+{
+    /// <summary>
+    /// There is no usable interface.
+    /// </summary>
+    Down = 0,
+    /// <summary>
+    /// Cable.
+    /// </summary>
+    Wired = 1,
+    /// <summary>
+    /// Wireless local network.
+    /// </summary>
+    Wifi = 2,
+    /// <summary>
+    /// A mobile network.
+    /// </summary>
+    Cellular = 3,
+    /// <summary>
+    /// A tunnel over one of the others.
+    /// </summary>
+    Tunnel = 4,
+}
+
+/// <summary>
+/// What a change of network is worth doing about. Names for
+/// sipral_stack_network_changed's `out_recovery`.
+///
+/// Returned from the call itself, so an application does not have to read
+/// an event to find out whether anything happened: a laptop that flips
+/// between two access points all day gets SipralRecovery.Nothing
+/// every time and never sends a REGISTER over it.
+/// </summary>
+public enum SipralRecovery : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// Nothing this stack uses is different. Nothing is done and nothing
+    /// is sent.
+    /// </summary>
+    Nothing = 1,
+    /// <summary>
+    /// The address still stands, so the transports do. What is upstream
+    /// of it may not.
+    /// </summary>
+    Reregister = 2,
+    /// <summary>
+    /// A wake: the transport already there is used first, and a new one
+    /// is asked for only once it turns out to be dead. Never returned by
+    /// this entry point; it is what sipral_stack_resumed starts.
+    /// </summary>
+    Reprove = 3,
+    /// <summary>
+    /// The address is gone. Everything bound to it is unusable and the
+    /// application has to open a transport again.
+    /// </summary>
+    Rebuild = 4,
+    /// <summary>
+    /// Packets can leave and names cannot be turned into addresses.
+    /// </summary>
+    Resolve = 5,
+    /// <summary>
+    /// There is no interface. Nothing is tried until there is one.
+    /// </summary>
+    Detach = 6,
 }
 
 /// <summary>
@@ -2289,6 +2458,34 @@ public struct SipralMediaEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.Recovery carries: the lifecycle machine
+/// settling, either by proving the path again or by giving the ladder up.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralRecoveryEvent
+{
+    /// <summary>
+    /// A SipralRecoveryOutcome.
+    /// </summary>
+    public uint State;
+    /// <summary>
+    /// A SipralRecoveryRung: the last rung tried. Zero unless `state`
+    /// is SipralRecoveryOutcome.GaveUp.
+    /// </summary>
+    public uint Rung;
+    /// <summary>
+    /// A SipralRecoveryFailure. Zero unless `state` is
+    /// SipralRecoveryOutcome.GaveUp.
+    /// </summary>
+    public uint Reason;
+    /// <summary>
+    /// Bindings the ladder never proved. Meaningful only when `state` is
+    /// SipralRecoveryOutcome.GaveUp.
+    /// </summary>
+    public uint Unverified;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -2319,6 +2516,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralMediaEvent Media;
+    /// <summary>
+    /// For SipralEventKind.Recovery.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralRecoveryEvent Recovery;
 }
 
 /// <summary>
@@ -2376,6 +2578,51 @@ public struct SipralEvent
     {
         var value = default(SipralEvent);
         value.Size = (nuint)Marshal.SizeOf<SipralEvent>();
+        return value;
+    }
+}
+
+/// <summary>
+/// What was standing when the process was told it is about to stop
+/// (sipral_stack_suspending's `out_report`).
+///
+/// Set `size` to `sizeof(sipral_suspending_t)` before the call. Counts
+/// and nothing else, because the window this is produced in is one where
+/// an allocation that grows with the number of accounts is a cost with no
+/// upper bound worth paying. Everything in it is already past tense by
+/// the time it is read: the bindings have stopped being evidence, the
+/// subscriptions have stopped being evidence, and nothing was sent about
+/// either.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralSuspending
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// Bindings that read as live and do not any more.
+    /// </summary>
+    public nuint Unverified;
+    /// <summary>
+    /// Subscriptions whose last notification stopped being evidence.
+    /// </summary>
+    public nuint Subscriptions;
+    /// <summary>
+    /// Calls that were up. Nothing was sent about them and nothing was
+    /// changed: a lid closing and opening again is seconds, and hanging
+    /// up a live call because the machine blinked is worse than finding
+    /// out a few seconds later that it is gone.
+    /// </summary>
+    public nuint Calls;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralSuspending Sized()
+    {
+        var value = default(SipralSuspending);
+        value.Size = (nuint)Marshal.SizeOf<SipralSuspending>();
         return value;
     }
 }
@@ -2699,6 +2946,36 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_message_header_element(byte[] message, nuint messageLen, sbyte[] name, nuint nameLen, nuint index, out nuint offset, out nuint len);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_suspending(ulong stack, ulong nowMs, ref SipralSuspending outReport);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_resumed(ulong stack, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_network_changed(ulong stack, uint fromLink, sbyte[] fromAddress, nuint fromAddressLen, sbyte[] fromInterface, nuint fromInterfaceLen, uint fromResolves, uint toLink, sbyte[] toAddress, nuint toAddressLen, sbyte[] toInterface, nuint toInterfaceLen, uint toResolves, ulong nowMs, out uint recovery);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_interface_lost(ulong stack, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_name_resolution_lost(ulong stack, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_rebind(ulong stack, ulong account, uint transport, sbyte[] remote, nuint remoteLen, sbyte[] contact, nuint contactLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_record_json(ulong stack, ulong call, sbyte[] buffer, nuint capacity, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_diagnostics_json(ulong stack, sbyte[] buffer, nuint capacity, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_recording_start(ulong stack, sbyte[] note, nuint noteLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_recording_stop(ulong stack, sbyte[] buffer, nuint capacity, out nuint len);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -2744,7 +3021,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 10;
+    public const uint AbiVersionMinor = 11;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -4406,6 +4683,294 @@ public static class Sipral
         Buffer.BlockCopy(nameBytes, 0, nameSigned, 0, nameBytes.Length);
         Check(NativeMethods.sipral_message_header_element(message, (nuint)message.Length, nameSigned, (nuint)nameSigned.Length, index, out var offset, out var len));
         return (offset, len);
+    }
+
+    /// <summary>
+    /// The operating system says this process stops shortly.
+    ///
+    /// Everything reached from here is synchronous, bounded by the number of
+    /// accounts and subscriptions, and cannot fail. Nothing is sent — see
+    /// `docs/16-lifecycle.md` for why a graceful de-registration is the wrong
+    /// thing to attempt in this window rather than the obvious one — and
+    /// nothing stays scheduled: a stack that is suspended and never resumed
+    /// has no deadline to fire and no work left behind.
+    ///
+    /// Calls that are up are left exactly as they are. A lid closing and
+    /// opening again is seconds, and hanging up a live call because the
+    /// machine blinked is worse than finding out a few seconds later that it
+    /// is gone.
+    ///
+    /// `out_report` receives what was found: bindings that stopped being
+    /// evidence, subscriptions whose last notification stopped being
+    /// evidence, and calls left untouched.
+    ///
+    /// Safety
+    ///
+    /// `out_report` must point at a `sipral_suspending_t` whose `size` member
+    /// says how long it is.
+    /// </summary>
+    public static SipralSuspending StackSuspending(ulong stack, ulong nowMs)
+    {
+        var report = SipralSuspending.Sized();
+        Check(NativeMethods.sipral_stack_suspending(stack, nowMs, ref report));
+        return report;
+    }
+
+    /// <summary>
+    /// The process is awake again.
+    ///
+    /// Arbitrary time has passed — arbitrary, not measurable, because the
+    /// clock this stack is driven by did not run while the machine was
+    /// suspended — and every transport may be dead. What was believed is
+    /// dropped and proved again: the transport already there is used first,
+    /// because most wakes are short and it still works, and
+    /// sipral_account_rebind is how the application hands over a new one
+    /// once this stack says it needs one.
+    ///
+    /// Safe to call without a matching sipral_stack_suspending. Some
+    /// platforms only notify on the way back.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void StackResumed(ulong stack, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_stack_resumed(stack, nowMs));
+    }
+
+    /// <summary>
+    /// The network is a different one, described before and after in as much
+    /// detail as the decision needs.
+    ///
+    /// `from_link`/`to_link` is a SipralLink. `*_address` is the local
+    /// address this stack's transports are bound to, as an IPv4 or IPv6
+    /// literal with no port — a change of it invalidates every transport and
+    /// every binding at once. `*_interface` is the platform's own identity
+    /// for the interface, never parsed and only ever compared to another one
+    /// of itself; two networks can hand out the same address, and a phone
+    /// that walks from one office to another gets away with it until a call
+    /// comes in. `*_resolves` is whether a name can become an address there,
+    /// because that is the one failure that leaves everything else looking
+    /// healthy. Any of the four address or interface arguments may be null
+    /// with a length of zero, for a fact the application has none to give.
+    ///
+    /// `out_recovery` receives what was decided, as a SipralRecovery, so
+    /// this is safe to call as often as the platform delivers the
+    /// notification — most of the time nothing this stack uses is different,
+    /// and `SIPRAL_RECOVERY_NOTHING` is the whole of what happens. It may be
+    /// null.
+    ///
+    /// Safety
+    ///
+    /// Every address and interface pointer must be readable for the length
+    /// beside it or null with a length of zero, and `out_recovery` must point
+    /// at one `uint32_t` or be null.
+    /// </summary>
+    public static uint StackNetworkChanged(ulong stack, uint fromLink, string fromAddress, string fromInterface, uint fromResolves, uint toLink, string toAddress, string toInterface, uint toResolves, ulong nowMs)
+    {
+        var fromAddressBytes = Encoding.UTF8.GetBytes(fromAddress);
+        var fromAddressSigned = new sbyte[fromAddressBytes.Length];
+        Buffer.BlockCopy(fromAddressBytes, 0, fromAddressSigned, 0, fromAddressBytes.Length);
+        var fromInterfaceBytes = Encoding.UTF8.GetBytes(fromInterface);
+        var fromInterfaceSigned = new sbyte[fromInterfaceBytes.Length];
+        Buffer.BlockCopy(fromInterfaceBytes, 0, fromInterfaceSigned, 0, fromInterfaceBytes.Length);
+        var toAddressBytes = Encoding.UTF8.GetBytes(toAddress);
+        var toAddressSigned = new sbyte[toAddressBytes.Length];
+        Buffer.BlockCopy(toAddressBytes, 0, toAddressSigned, 0, toAddressBytes.Length);
+        var toInterfaceBytes = Encoding.UTF8.GetBytes(toInterface);
+        var toInterfaceSigned = new sbyte[toInterfaceBytes.Length];
+        Buffer.BlockCopy(toInterfaceBytes, 0, toInterfaceSigned, 0, toInterfaceBytes.Length);
+        Check(NativeMethods.sipral_stack_network_changed(stack, fromLink, fromAddressSigned, (nuint)fromAddressSigned.Length, fromInterfaceSigned, (nuint)fromInterfaceSigned.Length, fromResolves, toLink, toAddressSigned, (nuint)toAddressSigned.Length, toInterfaceSigned, (nuint)toInterfaceSigned.Length, toResolves, nowMs, out var recovery));
+        return recovery;
+    }
+
+    /// <summary>
+    /// There is no usable interface.
+    ///
+    /// Distinct from sipral_stack_name_resolution_lost because the
+    /// recovery is the opposite one: with nothing that can leave, nothing is
+    /// tried and nothing is scheduled, which is the cheapest this stack ever
+    /// is. The way out is sipral_stack_network_changed, the notification
+    /// every platform delivers when an interface comes back.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void StackInterfaceLost(ulong stack, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_stack_interface_lost(stack, nowMs));
+    }
+
+    /// <summary>
+    /// Names no longer become addresses.
+    ///
+    /// The dangerous one: the interface is up and packets leave, so
+    /// everything reads healthy, while every address this stack learned from
+    /// a name may now stand for somewhere else. A binding whose registrar was
+    /// written as a name stops being evidence; one pointed at a literal
+    /// address never needed a resolver and is left running.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void StackNameResolutionLost(ulong stack, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_stack_name_resolution_lost(stack, nowMs));
+    }
+
+    /// <summary>
+    /// Point an account at a transport and an address again.
+    ///
+    /// `remote` is the far end this account's requests go to now, as
+    /// `host:port`. `contact` is where this endpoint can be reached, as it
+    /// goes in `Contact`; it is not optional, because after a change of
+    /// address the old one names somewhere the far end cannot reach, and a
+    /// stack that let it stand would register a binding that silently
+    /// receives nothing.
+    ///
+    /// `transport` is SIPRAL_TRANSPORT_MAIN,
+    /// the only one a stack of this build binds; every other number is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Safe to call whether or not this stack is waiting for it. When it is,
+    /// answering climbs the next rung at once rather than waiting out the
+    /// rest of the back-off — the application answering in milliseconds is
+    /// the normal case, and there is nothing to be gained by making a wake
+    /// take a further half minute. When it is not, this still repoints the
+    /// account, and the next REGISTER this stack sends for it — a refresh, or
+    /// the next rung of a ladder started afterwards — uses what was given
+    /// here.
+    ///
+    /// Safety
+    ///
+    /// `remote` must be readable for `remote_len` bytes and `contact` for
+    /// `contact_len` bytes.
+    /// </summary>
+    public static void AccountRebind(ulong stack, ulong account, uint transport, string remote, string contact, ulong nowMs)
+    {
+        var remoteBytes = Encoding.UTF8.GetBytes(remote);
+        var remoteSigned = new sbyte[remoteBytes.Length];
+        Buffer.BlockCopy(remoteBytes, 0, remoteSigned, 0, remoteBytes.Length);
+        var contactBytes = Encoding.UTF8.GetBytes(contact);
+        var contactSigned = new sbyte[contactBytes.Length];
+        Buffer.BlockCopy(contactBytes, 0, contactSigned, 0, contactBytes.Length);
+        Check(NativeMethods.sipral_account_rebind(stack, account, transport, remoteSigned, (nuint)remoteSigned.Length, contactSigned, (nuint)contactSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Copy one call's diagnostic record into `buffer`, as the JSON
+    /// `docs/14-diagnostics.md` describes.
+    ///
+    /// Readable at any point in the call's life, and for as long after it as
+    /// the endpoint has not evicted the record to make room for a newer one —
+    /// `sipral_stack_config_t` has no member for the ceiling yet, so today
+    /// that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+    /// record has been evicted, or that has had nothing decided about it yet,
+    /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
+    /// record, and refusing to read one that happens to be empty would make
+    /// a caller unable to tell "nothing yet" from "something went wrong".
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// document, with the length needed in `out_len`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint CallRecordJson(ulong stack, ulong call, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_call_record_json(stack, call, buffer, (nuint)buffer.Length, out var len));
+        return len;
+    }
+
+    /// <summary>
+    /// Copy the whole diagnostic document into `buffer`: what a bug report
+    /// carries, as the JSON `docs/14-diagnostics.md` describes.
+    ///
+    /// That is the endpoint's own record — everything decided outside any
+    /// call — and then one record per call still held, in the same document,
+    /// with the number of records evicted to make room. It is deliberately
+    /// the whole of it rather than the endpoint's half: a report that arrives
+    /// without the calls it is about answers nothing, and
+    /// sipral_call_record_json is already the way to ask about one call.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// document, with the length needed in `out_len`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint StackDiagnosticsJson(ulong stack, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_stack_diagnostics_json(stack, buffer, (nuint)buffer.Length, out var len));
+        return len;
+    }
+
+    /// <summary>
+    /// Start recording the signalling this stack is fed from here on
+    /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
+    /// it with. Read crate::diagnostics before reaching for this: what it
+    /// records and what it deliberately never does is written down there
+    /// once rather than repeated at each of these three entry points.
+    ///
+    /// `note` is one line of prose for whoever opens the file later, or null
+    /// for none.
+    ///
+    /// A recording already running is replaced, not refused: see
+    /// crate::diagnostics for why that is the right answer here and the
+    /// wrong one for `sipral_media_record_start`.
+    ///
+    /// Safety
+    ///
+    /// `note` must be readable for `note_len` bytes or be null with a length
+    /// of zero.
+    /// </summary>
+    public static void StackRecordingStart(ulong stack, string note)
+    {
+        var noteBytes = Encoding.UTF8.GetBytes(note);
+        var noteSigned = new sbyte[noteBytes.Length];
+        Buffer.BlockCopy(noteBytes, 0, noteSigned, 0, noteBytes.Length);
+        Check(NativeMethods.sipral_stack_recording_start(stack, noteSigned, (nuint)noteSigned.Length));
+    }
+
+    /// <summary>
+    /// Stop the recording sipral_stack_recording_start began, and copy
+    /// the text of it into `buffer` (`docs/18-replay.md`).
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running, the same
+    /// answer `sipral_media_record_stop` gives for the same question about
+    /// an audio recording. `SIPRAL_STATUS_WRONG_STATE` again, with the reason
+    /// in the last error, when something this session was fed could not go
+    /// in the recording — a message with a body that is not text is the one
+    /// way that happens — in which case nothing is written to `buffer` and
+    /// the recording is not produced at all: a text format that quietly left
+    /// out the one message it could not spell would replay into a different
+    /// session and say nothing about it.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// text, with the length needed in `out_len` — asking again with a bigger
+    /// buffer answers the same recording rather than stopping a new one,
+    /// so a caller that does not yet know how big a buffer to bring may ask
+    /// twice: once to be told, once to be handed the text. Once a call here
+    /// copies the whole of it out, the recording is gone from the stack, the
+    /// same as `sipral_last_error_message` empties the slot it reads on a
+    /// call that succeeds.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint StackRecordingStop(ulong stack, sbyte[] buffer)
+    {
+        Check(NativeMethods.sipral_stack_recording_stop(stack, buffer, (nuint)buffer.Length, out var len));
+        return len;
     }
 
 }

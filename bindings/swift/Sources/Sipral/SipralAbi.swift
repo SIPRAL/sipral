@@ -305,7 +305,6 @@ public enum SipralDtmf: UInt32, Sendable {
 /// - 16: the set of audio devices changed (A2)
 /// - 18: a request was promoted to a stream transport (B1)
 /// - 20: a call was announced and never arrived (C2)
-/// - 28: the stack recovered from a suspension or a network change
 /// - 29: the application is asked to resolve a destination
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
@@ -410,6 +409,13 @@ public enum SipralEventKind: UInt32, Sendable {
     /// with 503: nothing reached the far end for that one, and no digit
     /// after it is sent.
     case dtmfSent = 27
+    /// The lifecycle machine settled: a registrar answered again and
+    /// proved a path this stack had stopped believing in, or every rung
+    /// of a recovery ladder was climbed and none of them worked.
+    /// `payload.recovery` says which, and carries what the ladder that
+    /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
+    /// and `docs/16-lifecycle.md` are the ladder this reports on.
+    case recovery = 28
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -520,6 +526,104 @@ public enum SipralDigitSource: UInt32, Sendable {
     /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
     /// or `application/dtmf`.
     case info = 1
+}
+
+/// What a SipralEventKind.recovery reports happened, for
+/// `payload.recovery.state`. Names for the two ways `sipral_ua`'s
+/// lifecycle machine settles: a registrar answered again, or a recovery
+/// ladder ran out of rungs.
+public enum SipralRecoveryOutcome: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// A registrar answered again: what was distrusted is proved.
+    case running = 1
+    /// Every rung was climbed and none of them worked.
+    case gaveUp = 2
+}
+
+/// The last rung a recovery ladder tried before it gave up, for
+/// SipralEventKind.recovery's `payload.recovery.rung`. Meaningful
+/// only when `payload.recovery.state` is
+/// SipralRecoveryOutcome.gaveUp. Names for `sipral_ua::Rung`, minus
+/// Rung::GiveUp itself: `sipral_ua` reports the rung before it that
+/// asked for something and went unanswered, not the give-up rung that
+/// follows it.
+public enum SipralRecoveryRung: UInt32, Sendable {
+    /// The ladder did not give up.
+    case none = 0
+    /// Nothing was believed any more, and nothing was sent.
+    case distrust = 1
+    /// A REGISTER, and a re-SUBSCRIBE for what was demoted alongside it,
+    /// went out or could not.
+    case reregister = 2
+    /// The application was asked for a transport.
+    case wantTransport = 3
+    /// The application was asked for an address.
+    case wantAddress = 4
+}
+
+/// Why a recovery ladder gave up, for SipralEventKind.recovery's
+/// `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+public enum SipralRecoveryFailure: UInt32, Sendable {
+    /// The ladder did not give up.
+    case none = 0
+    /// Every REGISTER that could be sent was sent and none of them was
+    /// answered.
+    case unreachable = 1
+    /// A transport was asked for and the application did not bind one.
+    case noTransport = 2
+    /// An address was asked for and the application did not supply one.
+    case unresolved = 3
+}
+
+/// What kind of link the application is on. Names for `from_link` and
+/// `to_link` on sipral_stack_network_changed.
+///
+/// Coarse on purpose: nothing here changes what is sent, and the one
+/// value that changes what is *done* is SipralLink.down. The rest is
+/// carried so that a change of kind over an unchanged address — a tunnel
+/// coming up, a phone moving from Wi-Fi to a mobile network that kept the
+/// address — is visible as a change at all.
+public enum SipralLink: UInt32, Sendable {
+    /// There is no usable interface.
+    case down = 0
+    /// Cable.
+    case wired = 1
+    /// Wireless local network.
+    case wifi = 2
+    /// A mobile network.
+    case cellular = 3
+    /// A tunnel over one of the others.
+    case tunnel = 4
+}
+
+/// What a change of network is worth doing about. Names for
+/// sipral_stack_network_changed's `out_recovery`.
+///
+/// Returned from the call itself, so an application does not have to read
+/// an event to find out whether anything happened: a laptop that flips
+/// between two access points all day gets SipralRecovery.nothing
+/// every time and never sends a REGISTER over it.
+public enum SipralRecovery: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// Nothing this stack uses is different. Nothing is done and nothing
+    /// is sent.
+    case nothing = 1
+    /// The address still stands, so the transports do. What is upstream
+    /// of it may not.
+    case reregister = 2
+    /// A wake: the transport already there is used first, and a new one
+    /// is asked for only once it turns out to be dead. Never returned by
+    /// this entry point; it is what sipral_stack_resumed starts.
+    case reprove = 3
+    /// The address is gone. Everything bound to it is unusable and the
+    /// application has to open a transport again.
+    case rebuild = 4
+    /// Packets can leave and names cannot be turned into addresses.
+    case resolve = 5
+    /// There is no interface. Nothing is tried until there is one.
+    case detach = 6
 }
 
 /// What a call across the boundary answered, when it did not answer
@@ -676,6 +780,16 @@ public extension sipral_event_t {
     }
 }
 
+public extension sipral_suspending_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -780,7 +894,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 10
+    public static let abiVersionMinor: UInt32 = 11
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2473,6 +2587,307 @@ public enum Sipral {
             }
         try check(status)
         return (offset: offset, len: len)
+    }
+
+    /// The operating system says this process stops shortly.
+    ///
+    /// Everything reached from here is synchronous, bounded by the number of
+    /// accounts and subscriptions, and cannot fail. Nothing is sent — see
+    /// `docs/16-lifecycle.md` for why a graceful de-registration is the wrong
+    /// thing to attempt in this window rather than the obvious one — and
+    /// nothing stays scheduled: a stack that is suspended and never resumed
+    /// has no deadline to fire and no work left behind.
+    ///
+    /// Calls that are up are left exactly as they are. A lid closing and
+    /// opening again is seconds, and hanging up a live call because the
+    /// machine blinked is worse than finding out a few seconds later that it
+    /// is gone.
+    ///
+    /// `out_report` receives what was found: bindings that stopped being
+    /// evidence, subscriptions whose last notification stopped being
+    /// evidence, and calls left untouched.
+    ///
+    /// Safety
+    ///
+    /// `out_report` must point at a `sipral_suspending_t` whose `size` member
+    /// says how long it is.
+    public static func stackSuspending(stack: SipralHandle, nowMs: UInt64) throws -> sipral_suspending_t {
+        try ensureAbi()
+        var report = sipral_suspending_t.sized()
+        let status = sipral_stack_suspending(stack, nowMs, &report)
+        try check(status)
+        return report
+    }
+
+    /// The process is awake again.
+    ///
+    /// Arbitrary time has passed — arbitrary, not measurable, because the
+    /// clock this stack is driven by did not run while the machine was
+    /// suspended — and every transport may be dead. What was believed is
+    /// dropped and proved again: the transport already there is used first,
+    /// because most wakes are short and it still works, and
+    /// sipral_account_rebind is how the application hands over a new one
+    /// once this stack says it needs one.
+    ///
+    /// Safe to call without a matching sipral_stack_suspending. Some
+    /// platforms only notify on the way back.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackResumed(stack: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_stack_resumed(stack, nowMs)
+        try check(status)
+    }
+
+    /// The network is a different one, described before and after in as much
+    /// detail as the decision needs.
+    ///
+    /// `from_link`/`to_link` is a SipralLink. `*_address` is the local
+    /// address this stack's transports are bound to, as an IPv4 or IPv6
+    /// literal with no port — a change of it invalidates every transport and
+    /// every binding at once. `*_interface` is the platform's own identity
+    /// for the interface, never parsed and only ever compared to another one
+    /// of itself; two networks can hand out the same address, and a phone
+    /// that walks from one office to another gets away with it until a call
+    /// comes in. `*_resolves` is whether a name can become an address there,
+    /// because that is the one failure that leaves everything else looking
+    /// healthy. Any of the four address or interface arguments may be null
+    /// with a length of zero, for a fact the application has none to give.
+    ///
+    /// `out_recovery` receives what was decided, as a SipralRecovery, so
+    /// this is safe to call as often as the platform delivers the
+    /// notification — most of the time nothing this stack uses is different,
+    /// and `SIPRAL_RECOVERY_NOTHING` is the whole of what happens. It may be
+    /// null.
+    ///
+    /// Safety
+    ///
+    /// Every address and interface pointer must be readable for the length
+    /// beside it or null with a length of zero, and `out_recovery` must point
+    /// at one `uint32_t` or be null.
+    public static func stackNetworkChanged(stack: SipralHandle, fromLink: UInt32, fromAddress: String, fromInterface: String, fromResolves: UInt32, toLink: UInt32, toAddress: String, toInterface: String, toResolves: UInt32, nowMs: UInt64) throws -> UInt32 {
+        try ensureAbi()
+        var recovery = UInt32()
+        let status =
+            Array(fromAddress.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    Array(fromInterface.utf8).withUnsafeBufferPointer { raw3 in
+                        raw3.withMemoryRebound(to: CChar.self) { p3 in
+                            Array(toAddress.utf8).withUnsafeBufferPointer { raw6 in
+                                raw6.withMemoryRebound(to: CChar.self) { p6 in
+                                    Array(toInterface.utf8).withUnsafeBufferPointer { raw7 in
+                                        raw7.withMemoryRebound(to: CChar.self) { p7 in
+                                            sipral_stack_network_changed(stack, fromLink, p2.baseAddress, p2.count, p3.baseAddress, p3.count, fromResolves, toLink, p6.baseAddress, p6.count, p7.baseAddress, p7.count, toResolves, nowMs, &recovery)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        try check(status)
+        return recovery
+    }
+
+    /// There is no usable interface.
+    ///
+    /// Distinct from sipral_stack_name_resolution_lost because the
+    /// recovery is the opposite one: with nothing that can leave, nothing is
+    /// tried and nothing is scheduled, which is the cheapest this stack ever
+    /// is. The way out is sipral_stack_network_changed, the notification
+    /// every platform delivers when an interface comes back.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackInterfaceLost(stack: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_stack_interface_lost(stack, nowMs)
+        try check(status)
+    }
+
+    /// Names no longer become addresses.
+    ///
+    /// The dangerous one: the interface is up and packets leave, so
+    /// everything reads healthy, while every address this stack learned from
+    /// a name may now stand for somewhere else. A binding whose registrar was
+    /// written as a name stops being evidence; one pointed at a literal
+    /// address never needed a resolver and is left running.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackNameResolutionLost(stack: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_stack_name_resolution_lost(stack, nowMs)
+        try check(status)
+    }
+
+    /// Point an account at a transport and an address again.
+    ///
+    /// `remote` is the far end this account's requests go to now, as
+    /// `host:port`. `contact` is where this endpoint can be reached, as it
+    /// goes in `Contact`; it is not optional, because after a change of
+    /// address the old one names somewhere the far end cannot reach, and a
+    /// stack that let it stand would register a binding that silently
+    /// receives nothing.
+    ///
+    /// `transport` is SIPRAL_TRANSPORT_MAIN,
+    /// the only one a stack of this build binds; every other number is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    ///
+    /// Safe to call whether or not this stack is waiting for it. When it is,
+    /// answering climbs the next rung at once rather than waiting out the
+    /// rest of the back-off — the application answering in milliseconds is
+    /// the normal case, and there is nothing to be gained by making a wake
+    /// take a further half minute. When it is not, this still repoints the
+    /// account, and the next REGISTER this stack sends for it — a refresh, or
+    /// the next rung of a ladder started afterwards — uses what was given
+    /// here.
+    ///
+    /// Safety
+    ///
+    /// `remote` must be readable for `remote_len` bytes and `contact` for
+    /// `contact_len` bytes.
+    public static func accountRebind(stack: SipralHandle, account: SipralHandle, transport: UInt32, remote: String, contact: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(remote.utf8).withUnsafeBufferPointer { raw3 in
+                raw3.withMemoryRebound(to: CChar.self) { p3 in
+                    Array(contact.utf8).withUnsafeBufferPointer { raw4 in
+                        raw4.withMemoryRebound(to: CChar.self) { p4 in
+                            sipral_account_rebind(stack, account, transport, p3.baseAddress, p3.count, p4.baseAddress, p4.count, nowMs)
+                        }
+                    }
+                }
+            }
+        try check(status)
+    }
+
+    /// Copy one call's diagnostic record into `buffer`, as the JSON
+    /// `docs/14-diagnostics.md` describes.
+    ///
+    /// Readable at any point in the call's life, and for as long after it as
+    /// the endpoint has not evicted the record to make room for a newer one —
+    /// `sipral_stack_config_t` has no member for the ceiling yet, so today
+    /// that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+    /// record has been evicted, or that has had nothing decided about it yet,
+    /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
+    /// record, and refusing to read one that happens to be empty would make
+    /// a caller unable to tell "nothing yet" from "something went wrong".
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// document, with the length needed in `out_len`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    public static func callRecordJson(stack: SipralHandle, call: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var len = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p2 in
+                sipral_call_record_json(stack, call, p2.baseAddress, p2.count, &len)
+            }
+        try check(status)
+        return len
+    }
+
+    /// Copy the whole diagnostic document into `buffer`: what a bug report
+    /// carries, as the JSON `docs/14-diagnostics.md` describes.
+    ///
+    /// That is the endpoint's own record — everything decided outside any
+    /// call — and then one record per call still held, in the same document,
+    /// with the number of records evicted to make room. It is deliberately
+    /// the whole of it rather than the endpoint's half: a report that arrives
+    /// without the calls it is about answers nothing, and
+    /// sipral_call_record_json is already the way to ask about one call.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// document, with the length needed in `out_len`.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    public static func stackDiagnosticsJson(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var len = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_diagnostics_json(stack, p1.baseAddress, p1.count, &len)
+            }
+        try check(status)
+        return len
+    }
+
+    /// Start recording the signalling this stack is fed from here on
+    /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
+    /// it with. Read crate::diagnostics before reaching for this: what it
+    /// records and what it deliberately never does is written down there
+    /// once rather than repeated at each of these three entry points.
+    ///
+    /// `note` is one line of prose for whoever opens the file later, or null
+    /// for none.
+    ///
+    /// A recording already running is replaced, not refused: see
+    /// crate::diagnostics for why that is the right answer here and the
+    /// wrong one for `sipral_media_record_start`.
+    ///
+    /// Safety
+    ///
+    /// `note` must be readable for `note_len` bytes or be null with a length
+    /// of zero.
+    public static func stackRecordingStart(stack: SipralHandle, note: String) throws {
+        try ensureAbi()
+        let status =
+            Array(note.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_recording_start(stack, p1.baseAddress, p1.count)
+                }
+            }
+        try check(status)
+    }
+
+    /// Stop the recording sipral_stack_recording_start began, and copy
+    /// the text of it into `buffer` (`docs/18-replay.md`).
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when no recording is running, the same
+    /// answer `sipral_media_record_stop` gives for the same question about
+    /// an audio recording. `SIPRAL_STATUS_WRONG_STATE` again, with the reason
+    /// in the last error, when something this session was fed could not go
+    /// in the recording — a message with a body that is not text is the one
+    /// way that happens — in which case nothing is written to `buffer` and
+    /// the recording is not produced at all: a text format that quietly left
+    /// out the one message it could not spell would replay into a different
+    /// session and say nothing about it.
+    ///
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+    /// text, with the length needed in `out_len` — asking again with a bigger
+    /// buffer answers the same recording rather than stopping a new one,
+    /// so a caller that does not yet know how big a buffer to bring may ask
+    /// twice: once to be told, once to be handed the text. Once a call here
+    /// copies the whole of it out, the recording is gone from the stack, the
+    /// same as `sipral_last_error_message` empties the slot it reads on a
+    /// call that succeeds.
+    ///
+    /// Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    public static func stackRecordingStop(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
+        try ensureAbi()
+        var len = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_recording_stop(stack, p1.baseAddress, p1.count, &len)
+            }
+        try check(status)
+        return len
     }
 
 }

@@ -511,7 +511,6 @@ enum class SipralDtmf(val value: Int) {
  * - 16: the set of audio devices changed (A2)
  * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
- * - 28: the stack recovered from a suspension or a network change
  * - 29: the application is asked to resolve a destination
  */
 enum class SipralEventKind(val value: Int) {
@@ -663,6 +662,15 @@ enum class SipralEventKind(val value: Int) {
      * after it is sent.
      */
     DTMF_SENT(27),
+    /**
+     * The lifecycle machine settled: a registrar answered again and
+     * proved a path this stack had stopped believing in, or every rung
+     * of a recovery ladder was climbed and none of them worked.
+     * `payload.recovery` says which, and carries what the ladder that
+     * got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
+     * and `docs/16-lifecycle.md` are the ladder this reports on.
+     */
+    RECOVERY(28),
     ;
 
     companion object {
@@ -884,6 +892,187 @@ enum class SipralDigitSource(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralDigitSource? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a SipralEventKind.RECOVERY reports happened, for
+ * `payload.recovery.state`. Names for the two ways `sipral_ua`'s
+ * lifecycle machine settles: a registrar answered again, or a recovery
+ * ladder ran out of rungs.
+ */
+enum class SipralRecoveryOutcome(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * A registrar answered again: what was distrusted is proved.
+     */
+    RUNNING(1),
+    /**
+     * Every rung was climbed and none of them worked.
+     */
+    GAVE_UP(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecoveryOutcome? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * The last rung a recovery ladder tried before it gave up, for
+ * SipralEventKind.RECOVERY's `payload.recovery.rung`. Meaningful
+ * only when `payload.recovery.state` is
+ * SipralRecoveryOutcome.GAVE_UP. Names for `sipral_ua::Rung`, minus
+ * Rung::GiveUp itself: `sipral_ua` reports the rung before it that
+ * asked for something and went unanswered, not the give-up rung that
+ * follows it.
+ */
+enum class SipralRecoveryRung(val value: Int) {
+    /**
+     * The ladder did not give up.
+     */
+    NONE(0),
+    /**
+     * Nothing was believed any more, and nothing was sent.
+     */
+    DISTRUST(1),
+    /**
+     * A REGISTER, and a re-SUBSCRIBE for what was demoted alongside it,
+     * went out or could not.
+     */
+    REREGISTER(2),
+    /**
+     * The application was asked for a transport.
+     */
+    WANT_TRANSPORT(3),
+    /**
+     * The application was asked for an address.
+     */
+    WANT_ADDRESS(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecoveryRung? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why a recovery ladder gave up, for SipralEventKind.RECOVERY's
+ * `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+ */
+enum class SipralRecoveryFailure(val value: Int) {
+    /**
+     * The ladder did not give up.
+     */
+    NONE(0),
+    /**
+     * Every REGISTER that could be sent was sent and none of them was
+     * answered.
+     */
+    UNREACHABLE(1),
+    /**
+     * A transport was asked for and the application did not bind one.
+     */
+    NO_TRANSPORT(2),
+    /**
+     * An address was asked for and the application did not supply one.
+     */
+    UNRESOLVED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecoveryFailure? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What kind of link the application is on. Names for `from_link` and
+ * `to_link` on sipral_stack_network_changed.
+ *
+ * Coarse on purpose: nothing here changes what is sent, and the one
+ * value that changes what is *done* is SipralLink.DOWN. The rest is
+ * carried so that a change of kind over an unchanged address — a tunnel
+ * coming up, a phone moving from Wi-Fi to a mobile network that kept the
+ * address — is visible as a change at all.
+ */
+enum class SipralLink(val value: Int) {
+    /**
+     * There is no usable interface.
+     */
+    DOWN(0),
+    /**
+     * Cable.
+     */
+    WIRED(1),
+    /**
+     * Wireless local network.
+     */
+    WIFI(2),
+    /**
+     * A mobile network.
+     */
+    CELLULAR(3),
+    /**
+     * A tunnel over one of the others.
+     */
+    TUNNEL(4),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralLink? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a change of network is worth doing about. Names for
+ * sipral_stack_network_changed's `out_recovery`.
+ *
+ * Returned from the call itself, so an application does not have to read
+ * an event to find out whether anything happened: a laptop that flips
+ * between two access points all day gets SipralRecovery.NOTHING
+ * every time and never sends a REGISTER over it.
+ */
+enum class SipralRecovery(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * Nothing this stack uses is different. Nothing is done and nothing
+     * is sent.
+     */
+    NOTHING(1),
+    /**
+     * The address still stands, so the transports do. What is upstream
+     * of it may not.
+     */
+    REREGISTER(2),
+    /**
+     * A wake: the transport already there is used first, and a new one
+     * is asked for only once it turns out to be dead. Never returned by
+     * this entry point; it is what sipral_stack_resumed starts.
+     */
+    REPROVE(3),
+    /**
+     * The address is gone. Everything bound to it is unusable and the
+     * application has to open a transport again.
+     */
+    REBUILD(4),
+    /**
+     * Packets can leave and names cannot be turned into addresses.
+     */
+    RESOLVE(5),
+    /**
+     * There is no interface. Nothing is tried until there is one.
+     */
+    DETACH(6),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralRecovery? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -1555,6 +1744,51 @@ data class SipralStreamStats(
 }
 
 /**
+ * What was standing when the process was told it is about to stop
+ * (sipral_stack_suspending's `out_report`).
+ *
+ * Set `size` to `sizeof(sipral_suspending_t)` before the call. Counts
+ * and nothing else, because the window this is produced in is one where
+ * an allocation that grows with the number of accounts is a cost with no
+ * upper bound worth paying. Everything in it is already past tense by
+ * the time it is read: the bindings have stopped being evidence, the
+ * subscriptions have stopped being evidence, and nothing was sent about
+ * either.
+ */
+data class SipralSuspending(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * Bindings that read as live and do not any more.
+     */
+    val unverified: Long,
+    /**
+     * Subscriptions whose last notification stopped being evidence.
+     */
+    val subscriptions: Long,
+    /**
+     * Calls that were up. Nothing was sent about them and nothing was
+     * changed: a lid closing and opening again is seconds, and hanging
+     * up a live call because the machine blinked is worse than finding
+     * out a few seconds later that it is gone.
+     */
+    val calls: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 4
+
+        fun of(slots: LongArray): SipralSuspending = SipralSuspending(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -2078,7 +2312,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 10)
+        agree(0, 11)
     }
 
     /**
@@ -2161,6 +2395,16 @@ internal object SipralNative {
     external fun sipral_message_header(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
     external fun sipral_message_header_element_count(message: ByteArray, name: ByteArray, count: LongArray): Int
     external fun sipral_message_header_element(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
+    external fun sipral_stack_suspending(stack: Long, nowMs: Long, report: LongArray): Int
+    external fun sipral_stack_resumed(stack: Long, nowMs: Long): Int
+    external fun sipral_stack_network_changed(stack: Long, fromLink: Long, fromAddress: ByteArray, fromInterface: ByteArray, fromResolves: Long, toLink: Long, toAddress: ByteArray, toInterface: ByteArray, toResolves: Long, nowMs: Long, recovery: LongArray): Int
+    external fun sipral_stack_interface_lost(stack: Long, nowMs: Long): Int
+    external fun sipral_stack_name_resolution_lost(stack: Long, nowMs: Long): Int
+    external fun sipral_account_rebind(stack: Long, account: Long, transport: Long, remote: ByteArray, contact: ByteArray, nowMs: Long): Int
+    external fun sipral_call_record_json(stack: Long, call: Long, buffer: ByteArray, len: LongArray): Int
+    external fun sipral_stack_diagnostics_json(stack: Long, buffer: ByteArray, len: LongArray): Int
+    external fun sipral_stack_recording_start(stack: Long, note: ByteArray): Int
+    external fun sipral_stack_recording_stop(stack: Long, buffer: ByteArray, len: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -2184,7 +2428,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 10
+    const val ABI_VERSION_MINOR: Long = 11
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -3792,6 +4036,274 @@ object Sipral {
         val lenSlot = LongArray(1)
         check(SipralNative.sipral_message_header_element(message, nameBytes, index, offsetSlot, lenSlot))
         return Pair(offsetSlot[0], lenSlot[0])
+    }
+
+    /**
+     * The operating system says this process stops shortly.
+     *
+     * Everything reached from here is synchronous, bounded by the number of
+     * accounts and subscriptions, and cannot fail. Nothing is sent — see
+     * `docs/16-lifecycle.md` for why a graceful de-registration is the wrong
+     * thing to attempt in this window rather than the obvious one — and
+     * nothing stays scheduled: a stack that is suspended and never resumed
+     * has no deadline to fire and no work left behind.
+     *
+     * Calls that are up are left exactly as they are. A lid closing and
+     * opening again is seconds, and hanging up a live call because the
+     * machine blinked is worse than finding out a few seconds later that it
+     * is gone.
+     *
+     * `out_report` receives what was found: bindings that stopped being
+     * evidence, subscriptions whose last notification stopped being
+     * evidence, and calls left untouched.
+     *
+     * Safety
+     *
+     * `out_report` must point at a `sipral_suspending_t` whose `size` member
+     * says how long it is.
+     */
+    fun stackSuspending(stack: Long, nowMs: Long): SipralSuspending {
+        val reportSlots = LongArray(SipralSuspending.SLOTS)
+        check(SipralNative.sipral_stack_suspending(stack, nowMs, reportSlots))
+        return SipralSuspending.of(reportSlots)
+    }
+
+    /**
+     * The process is awake again.
+     *
+     * Arbitrary time has passed — arbitrary, not measurable, because the
+     * clock this stack is driven by did not run while the machine was
+     * suspended — and every transport may be dead. What was believed is
+     * dropped and proved again: the transport already there is used first,
+     * because most wakes are short and it still works, and
+     * sipral_account_rebind is how the application hands over a new one
+     * once this stack says it needs one.
+     *
+     * Safe to call without a matching sipral_stack_suspending. Some
+     * platforms only notify on the way back.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun stackResumed(stack: Long, nowMs: Long) {
+        check(SipralNative.sipral_stack_resumed(stack, nowMs))
+    }
+
+    /**
+     * The network is a different one, described before and after in as much
+     * detail as the decision needs.
+     *
+     * `from_link`/`to_link` is a SipralLink. `*_address` is the local
+     * address this stack's transports are bound to, as an IPv4 or IPv6
+     * literal with no port — a change of it invalidates every transport and
+     * every binding at once. `*_interface` is the platform's own identity
+     * for the interface, never parsed and only ever compared to another one
+     * of itself; two networks can hand out the same address, and a phone
+     * that walks from one office to another gets away with it until a call
+     * comes in. `*_resolves` is whether a name can become an address there,
+     * because that is the one failure that leaves everything else looking
+     * healthy. Any of the four address or interface arguments may be null
+     * with a length of zero, for a fact the application has none to give.
+     *
+     * `out_recovery` receives what was decided, as a SipralRecovery, so
+     * this is safe to call as often as the platform delivers the
+     * notification — most of the time nothing this stack uses is different,
+     * and `SIPRAL_RECOVERY_NOTHING` is the whole of what happens. It may be
+     * null.
+     *
+     * Safety
+     *
+     * Every address and interface pointer must be readable for the length
+     * beside it or null with a length of zero, and `out_recovery` must point
+     * at one `uint32_t` or be null.
+     */
+    fun stackNetworkChanged(stack: Long, fromLink: Long, fromAddress: String, fromInterface: String, fromResolves: Long, toLink: Long, toAddress: String, toInterface: String, toResolves: Long, nowMs: Long): Long {
+        val fromAddressBytes = fromAddress.toByteArray(Charsets.UTF_8)
+        val fromInterfaceBytes = fromInterface.toByteArray(Charsets.UTF_8)
+        val toAddressBytes = toAddress.toByteArray(Charsets.UTF_8)
+        val toInterfaceBytes = toInterface.toByteArray(Charsets.UTF_8)
+        val recoverySlot = LongArray(1)
+        check(SipralNative.sipral_stack_network_changed(stack, fromLink, fromAddressBytes, fromInterfaceBytes, fromResolves, toLink, toAddressBytes, toInterfaceBytes, toResolves, nowMs, recoverySlot))
+        return recoverySlot[0]
+    }
+
+    /**
+     * There is no usable interface.
+     *
+     * Distinct from sipral_stack_name_resolution_lost because the
+     * recovery is the opposite one: with nothing that can leave, nothing is
+     * tried and nothing is scheduled, which is the cheapest this stack ever
+     * is. The way out is sipral_stack_network_changed, the notification
+     * every platform delivers when an interface comes back.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun stackInterfaceLost(stack: Long, nowMs: Long) {
+        check(SipralNative.sipral_stack_interface_lost(stack, nowMs))
+    }
+
+    /**
+     * Names no longer become addresses.
+     *
+     * The dangerous one: the interface is up and packets leave, so
+     * everything reads healthy, while every address this stack learned from
+     * a name may now stand for somewhere else. A binding whose registrar was
+     * written as a name stops being evidence; one pointed at a literal
+     * address never needed a resolver and is left running.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun stackNameResolutionLost(stack: Long, nowMs: Long) {
+        check(SipralNative.sipral_stack_name_resolution_lost(stack, nowMs))
+    }
+
+    /**
+     * Point an account at a transport and an address again.
+     *
+     * `remote` is the far end this account's requests go to now, as
+     * `host:port`. `contact` is where this endpoint can be reached, as it
+     * goes in `Contact`; it is not optional, because after a change of
+     * address the old one names somewhere the far end cannot reach, and a
+     * stack that let it stand would register a binding that silently
+     * receives nothing.
+     *
+     * `transport` is SIPRAL_TRANSPORT_MAIN,
+     * the only one a stack of this build binds; every other number is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     *
+     * Safe to call whether or not this stack is waiting for it. When it is,
+     * answering climbs the next rung at once rather than waiting out the
+     * rest of the back-off — the application answering in milliseconds is
+     * the normal case, and there is nothing to be gained by making a wake
+     * take a further half minute. When it is not, this still repoints the
+     * account, and the next REGISTER this stack sends for it — a refresh, or
+     * the next rung of a ladder started afterwards — uses what was given
+     * here.
+     *
+     * Safety
+     *
+     * `remote` must be readable for `remote_len` bytes and `contact` for
+     * `contact_len` bytes.
+     */
+    fun accountRebind(stack: Long, account: Long, transport: Long, remote: String, contact: String, nowMs: Long) {
+        val remoteBytes = remote.toByteArray(Charsets.UTF_8)
+        val contactBytes = contact.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_account_rebind(stack, account, transport, remoteBytes, contactBytes, nowMs))
+    }
+
+    /**
+     * Copy one call's diagnostic record into `buffer`, as the JSON
+     * `docs/14-diagnostics.md` describes.
+     *
+     * Readable at any point in the call's life, and for as long after it as
+     * the endpoint has not evicted the record to make room for a newer one —
+     * `sipral_stack_config_t` has no member for the ceiling yet, so today
+     * that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+     * record has been evicted, or that has had nothing decided about it yet,
+     * answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
+     * record, and refusing to read one that happens to be empty would make
+     * a caller unable to tell "nothing yet" from "something went wrong".
+     *
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+     * document, with the length needed in `out_len`.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes or be null with a
+     * capacity of zero, and `out_len` must point at one `size_t` or be null.
+     */
+    fun callRecordJson(stack: Long, call: Long, buffer: ByteArray): Long {
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_call_record_json(stack, call, buffer, lenSlot))
+        return lenSlot[0]
+    }
+
+    /**
+     * Copy the whole diagnostic document into `buffer`: what a bug report
+     * carries, as the JSON `docs/14-diagnostics.md` describes.
+     *
+     * That is the endpoint's own record — everything decided outside any
+     * call — and then one record per call still held, in the same document,
+     * with the number of records evicted to make room. It is deliberately
+     * the whole of it rather than the endpoint's half: a report that arrives
+     * without the calls it is about answers nothing, and
+     * sipral_call_record_json is already the way to ask about one call.
+     *
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+     * document, with the length needed in `out_len`.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes or be null with a
+     * capacity of zero, and `out_len` must point at one `size_t` or be null.
+     */
+    fun stackDiagnosticsJson(stack: Long, buffer: ByteArray): Long {
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_stack_diagnostics_json(stack, buffer, lenSlot))
+        return lenSlot[0]
+    }
+
+    /**
+     * Start recording the signalling this stack is fed from here on
+     * (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
+     * it with. Read crate::diagnostics before reaching for this: what it
+     * records and what it deliberately never does is written down there
+     * once rather than repeated at each of these three entry points.
+     *
+     * `note` is one line of prose for whoever opens the file later, or null
+     * for none.
+     *
+     * A recording already running is replaced, not refused: see
+     * crate::diagnostics for why that is the right answer here and the
+     * wrong one for `sipral_media_record_start`.
+     *
+     * Safety
+     *
+     * `note` must be readable for `note_len` bytes or be null with a length
+     * of zero.
+     */
+    fun stackRecordingStart(stack: Long, note: String) {
+        val noteBytes = note.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_recording_start(stack, noteBytes))
+    }
+
+    /**
+     * Stop the recording sipral_stack_recording_start began, and copy
+     * the text of it into `buffer` (`docs/18-replay.md`).
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` when no recording is running, the same
+     * answer `sipral_media_record_stop` gives for the same question about
+     * an audio recording. `SIPRAL_STATUS_WRONG_STATE` again, with the reason
+     * in the last error, when something this session was fed could not go
+     * in the recording — a message with a body that is not text is the one
+     * way that happens — in which case nothing is written to `buffer` and
+     * the recording is not produced at all: a text format that quietly left
+     * out the one message it could not spell would replay into a different
+     * session and say nothing about it.
+     *
+     * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
+     * text, with the length needed in `out_len` — asking again with a bigger
+     * buffer answers the same recording rather than stopping a new one,
+     * so a caller that does not yet know how big a buffer to bring may ask
+     * twice: once to be told, once to be handed the text. Once a call here
+     * copies the whole of it out, the recording is gone from the stack, the
+     * same as `sipral_last_error_message` empties the slot it reads on a
+     * call that succeeds.
+     *
+     * Safety
+     *
+     * `buffer` must be writable for `capacity` bytes or be null with a
+     * capacity of zero, and `out_len` must point at one `size_t` or be null.
+     */
+    fun stackRecordingStop(stack: Long, buffer: ByteArray): Long {
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_stack_recording_stop(stack, buffer, lenSlot))
+        return lenSlot[0]
     }
 
 }

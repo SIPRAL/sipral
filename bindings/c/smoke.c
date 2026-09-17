@@ -36,7 +36,7 @@
     X(sipral_stack_config) X(sipral_poll_result) X(sipral_stack_settings)     \
     X(sipral_account_config) X(sipral_call_config) X(sipral_codec_info)       \
     X(sipral_media_info) X(sipral_stream_stats) X(sipral_media_packet)        \
-    X(sipral_transmit) X(sipral_event)
+    X(sipral_transmit) X(sipral_event) X(sipral_suspending)
 
 static int failures;
 
@@ -371,6 +371,17 @@ static sipral_status_t counters_at(struct fixture *fixture, size_t declared)
     return sipral_stack_counters(fixture->stack, &counters);
 }
 
+/* What a stack hands back when it is told the machine is going to sleep:
+ * how much of what it holds has stopped being evidence. Asked at an old
+ * length here like every other versioned struct, which is the whole of what
+ * this table is for. */
+static sipral_status_t suspending_at(struct fixture *fixture, size_t declared)
+{
+    sipral_suspending_t suspending = { 0 };
+    suspending.size = declared;
+    return sipral_stack_suspending(fixture->stack, 0, &suspending);
+}
+
 static sipral_status_t stack_config_at(struct fixture *fixture, size_t declared)
 {
     (void)fixture;
@@ -523,6 +534,7 @@ static const struct {
     { "sipral_stream_stats_t", stream_stats_at },
     { "sipral_media_packet_t", media_packet_at },
     { "sipral_transmit_t", transmit_at },
+    { "sipral_suspending_t", suspending_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

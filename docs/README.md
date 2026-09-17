@@ -38,6 +38,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [16-lifecycle.md](16-lifecycle.md) | suspend, resume, a network that changed, and what the stack costs when idle |
 | [17-observability.md](17-observability.md) | health counters, capability reporting, and the B2 audit of configuration entry points |
 | [18-replay.md](18-replay.md) | the recorded-session format, what it cannot hold, and what a replay reproduces |
+| [20-security-model.md](20-security-model.md) | the threat model: what a hostile peer can do, what refuses it, where the keys come from, what is not read yet |
 
 ## Conventions
 

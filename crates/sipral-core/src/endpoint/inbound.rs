@@ -30,8 +30,8 @@ use super::via;
 use crate::diag::{Decision, Direction, Reason, WireEvent};
 use crate::dialog::{CallId, Dialog, DialogKey, DialogState, Fork, Incoming};
 use crate::msg::{
-    HeaderName, Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder, StatusCode,
-    parse_with_limits,
+    HeaderName, Invalid, Method, OwnedMessage, ParseScratch, RawMessage, ResponseBuilder,
+    StatusCode, parse_with_limits,
 };
 use crate::transaction::{
     AnyTransactionId, Client, DialogId, Effects, InviteClient, NonInviteClient, NonInviteServer,
@@ -512,8 +512,20 @@ impl Endpoint {
 
 impl Endpoint {
     fn on_request(&mut self, request: &RawMessage<'_>, flow: Flow, now: Instant) {
-        // 17.2.3 first: a retransmission is answered from what was already
-        // sent, not handed up again
+        // §8.2.x, before anything acts on it: "If the UAS detects a syntax
+        // error, it MUST respond with a 400". The parser does not ask this
+        // question -- it does not know which fields will be read -- so this is
+        // where it is asked, once, by the end that is about to answer. Before
+        // the retransmission check too: a request this endpoint never accepted
+        // has no server transaction to be answered from, and matching one on a
+        // CSeq that disagrees with its own start line is exactly the confusion
+        // being refused.
+        if let Err(invalid) = request.validate() {
+            self.refuse_as_malformed(request, flow, &invalid);
+            return;
+        }
+        // 17.2.3: a retransmission is answered from what was already sent, not
+        // handed up again
         if let Some(server) = self.transactions.server_for(request) {
             self.on_known_request(server, request, flow, now);
             return;
@@ -534,6 +546,51 @@ impl Endpoint {
             Some(Method::Invite) => self.on_invite(request, flow, now),
             Some(_) => self.on_other_request(request, flow, now),
             None => (),
+        }
+    }
+
+    /// Answer 400 to a request that arrived whole and cannot be acted on, and
+    /// say which field it was.
+    ///
+    /// §8.2.x asks for "a Reason-Phrase that identifies the syntax problem",
+    /// so the field's own name goes in it: a peer that gets `Bad CSeq` knows
+    /// where to look, and one that gets `Bad Request` has to guess. The
+    /// answer is stateless, for the same reason the overload refusal is: there
+    /// is nothing here worth remembering about a message this end could not
+    /// read, and a retransmission of it earns the same answer again.
+    ///
+    /// Three of them are answered with nothing at all. An ACK is never
+    /// answered (§17.1.1.3), so a malformed one is dropped where it stands.
+    /// A request whose own `Via` cannot be read names no place to send an
+    /// answer to, and §18.2.2 has the response go to where the `Via` says;
+    /// `ResponseBuilder::for_request` refuses to build one, and the refusal is
+    /// the drop. And a response is not judged here at all: §18.1.2 already
+    /// discards one whose `Via` is not ours, and each reader of a response
+    /// handles the field it reads, so a response carrying a fault in a field
+    /// nobody reads stays usable rather than becoming a call that never
+    /// connects.
+    fn refuse_as_malformed(&mut self, request: &RawMessage<'_>, flow: Flow, invalid: &Invalid) {
+        let mut decision =
+            Decision::of(Reason::RequestRefusedAsMalformed).at_address(flow.destination);
+        if let Some(method) = request.method() {
+            decision = decision.caused_by(WireEvent::request(
+                method,
+                Direction::Inbound,
+                request.as_bytes().len(),
+            ));
+        }
+        self.note(None, decision);
+        if request.method() == Some(Method::Ack) {
+            return;
+        }
+        let phrase = format!("Bad {}", invalid.field);
+        let tag = self.mint_tag();
+        let built = ResponseBuilder::for_request(request, StatusCode::BAD_REQUEST)
+            .to_tag(&tag)
+            .reason(phrase.as_bytes())
+            .build();
+        if let Ok(message) = built {
+            self.queue(flow.transmit(message.bytes()));
         }
     }
 

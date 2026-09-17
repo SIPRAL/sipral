@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use sipral::{DigitSource, MediaEvent};
 use sipral_ua::{
-    CallEndReason, CallHandle, CallIdentity, CallState, RegistrationFailure, RegistrationState,
-    UaEvent, UserAgent,
+    CallEndReason, CallHandle, CallIdentity, CallState, LifecycleState, RecoveryFailure,
+    RegistrationFailure, RegistrationState, Rung, UaEvent, UserAgent,
 };
 
 use crate::abi::{alias, codes, record};
@@ -281,11 +281,17 @@ event_kinds! {
         /// with 503: nothing reached the far end for that one, and no digit
         /// after it is sent.
         27 = DtmfSent, c"dtmf sent";
+        /// The lifecycle machine settled: a registrar answered again and
+        /// proved a path this stack had stopped believing in, or every rung
+        /// of a recovery ladder was climbed and none of them worked.
+        /// `payload.recovery` says which, and carries what the ladder that
+        /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
+        /// and `docs/16-lifecycle.md` are the ladder this reports on.
+        28 = Recovery, c"recovery";
 
-        // Held for events the C ABI does not raise yet, each already planned
-        // behind an entry point of its own, so that the branches adding them
+        // Held for the event the C ABI does not raise yet, already planned
+        // behind an entry point of its own, so that the branch adding it
         // cannot arrive holding the same number.
-        reserved 28 = "the stack recovered from a suspension or a network change";
         reserved 29 = "the application is asked to resolve a destination";
     }
 }
@@ -412,6 +418,63 @@ codes! {
         /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
         /// or `application/dtmf`.
         Info = 1,
+    }
+}
+
+codes! {
+    /// What a [`SipralEventKind::Recovery`] reports happened, for
+    /// `payload.recovery.state`. Names for the two ways `sipral_ua`'s
+    /// lifecycle machine settles: a registrar answered again, or a recovery
+    /// ladder ran out of rungs.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRecoveryOutcome: u32 {
+        /// Never written by this build.
+        Unknown = 0,
+        /// A registrar answered again: what was distrusted is proved.
+        Running = 1,
+        /// Every rung was climbed and none of them worked.
+        GaveUp = 2,
+    }
+}
+
+codes! {
+    /// The last rung a recovery ladder tried before it gave up, for
+    /// [`SipralEventKind::Recovery`]'s `payload.recovery.rung`. Meaningful
+    /// only when `payload.recovery.state` is
+    /// [`SipralRecoveryOutcome::GaveUp`]. Names for `sipral_ua::Rung`, minus
+    /// [`Rung::GiveUp`] itself: `sipral_ua` reports the rung before it that
+    /// asked for something and went unanswered, not the give-up rung that
+    /// follows it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRecoveryRung: u32 {
+        /// The ladder did not give up.
+        None = 0,
+        /// Nothing was believed any more, and nothing was sent.
+        Distrust = 1,
+        /// A REGISTER, and a re-SUBSCRIBE for what was demoted alongside it,
+        /// went out or could not.
+        Reregister = 2,
+        /// The application was asked for a transport.
+        WantTransport = 3,
+        /// The application was asked for an address.
+        WantAddress = 4,
+    }
+}
+
+codes! {
+    /// Why a recovery ladder gave up, for [`SipralEventKind::Recovery`]'s
+    /// `payload.recovery.reason`. Names for `sipral_ua::RecoveryFailure`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralRecoveryFailure: u32 {
+        /// The ladder did not give up.
+        None = 0,
+        /// Every REGISTER that could be sent was sent and none of them was
+        /// answered.
+        Unreachable = 1,
+        /// A transport was asked for and the application did not bind one.
+        NoTransport = 2,
+        /// An address was asked for and the application did not supply one.
+        Unresolved = 3,
     }
 }
 
@@ -556,6 +619,25 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::Recovery`] carries: the lifecycle machine
+    /// settling, either by proving the path again or by giving the ladder up.
+    #[derive(Clone, Copy)]
+    pub struct SipralRecoveryEvent {
+        /// A [`SipralRecoveryOutcome`].
+        pub state: u32,
+        /// A [`SipralRecoveryRung`]: the last rung tried. Zero unless `state`
+        /// is [`SipralRecoveryOutcome::GaveUp`].
+        pub rung: u32,
+        /// A [`SipralRecoveryFailure`]. Zero unless `state` is
+        /// [`SipralRecoveryOutcome::GaveUp`].
+        pub reason: u32,
+        /// Bindings the ladder never proved. Meaningful only when `state` is
+        /// [`SipralRecoveryOutcome::GaveUp`].
+        pub unverified: u32,
+    }
+}
+
+record! {
     /// The arm of an event that its kind names.
     ///
     /// Reading any other arm reads bytes the library did not write for it.
@@ -572,6 +654,8 @@ record! {
         /// For every media kind: started, changed, stalled, resumed, failed, the
         /// end-of-call statistics, and a recording that stopped by itself.
         pub media: SipralMediaEvent,
+        /// For [`SipralEventKind::Recovery`].
+        pub recovery: SipralRecoveryEvent,
     }
 }
 
@@ -735,7 +819,10 @@ pub(crate) fn translate(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
     if let Some(out) = about_a_call_ending(known, event) {
         return Some(out);
     }
-    about_a_transfer(known, event)
+    if let Some(out) = about_a_transfer(known, event) {
+        return Some(out);
+    }
+    about_lifecycle(known, event)
 }
 
 fn about_registration(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
@@ -966,6 +1053,75 @@ fn about_a_transfer(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipra
         // guarantee lives instead, because that is where a mistake would be
         // permanent.
         _ => None,
+    }
+}
+
+/// The two ways `crates/sipral-ffi/src/lifecycle.rs`'s ladder settles: a
+/// registrar proved the path again, or every rung was climbed and none of
+/// them worked.
+fn about_lifecycle(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::Lifecycle {
+            state: LifecycleState::Running,
+            rung: None,
+            next_in: None,
+        } => Some(recovery_event(
+            known,
+            SipralRecoveryEvent {
+                state: SipralRecoveryOutcome::Running as u32,
+                rung: 0,
+                reason: 0,
+                unverified: 0,
+            },
+        )),
+        UaEvent::RecoveryGaveUp {
+            rung,
+            reason,
+            unverified,
+        } => Some(recovery_event(
+            known,
+            SipralRecoveryEvent {
+                state: SipralRecoveryOutcome::GaveUp as u32,
+                rung: recovery_rung(rung) as u32,
+                reason: recovery_failure(reason) as u32,
+                unverified: u32::try_from(unverified).unwrap_or(u32::MAX),
+            },
+        )),
+        // every other `Lifecycle` variant is a rung mid-ladder — `Suspending`,
+        // or `Recovering`/`ResolutionLost`/`InterfaceLost` with a rung that is
+        // not the last one — and this ABI has no word for a step, only for
+        // where a ladder ends. `SIPRAL_EVENT_KIND_RECOVERY` is that word.
+        _ => None,
+    }
+}
+
+fn recovery_event(known: &Vocabulary<'_>, payload: SipralRecoveryEvent) -> SipralEvent {
+    SipralEvent::of(
+        known.stack,
+        SipralEventKind::Recovery,
+        SipralEventPayload { recovery: payload },
+    )
+}
+
+fn recovery_rung(rung: Rung) -> SipralRecoveryRung {
+    match rung {
+        Rung::Distrust => SipralRecoveryRung::Distrust,
+        Rung::Reregister => SipralRecoveryRung::Reregister,
+        Rung::WantTransport => SipralRecoveryRung::WantTransport,
+        Rung::WantAddress => SipralRecoveryRung::WantAddress,
+        // `Rung` is `#[non_exhaustive]`, and `give_up_recovering` never
+        // reports `Rung::GiveUp` as the rung it gave up on in the first
+        // place.
+        _ => SipralRecoveryRung::None,
+    }
+}
+
+fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
+    match reason {
+        RecoveryFailure::Unreachable => SipralRecoveryFailure::Unreachable,
+        RecoveryFailure::NoTransport => SipralRecoveryFailure::NoTransport,
+        RecoveryFailure::Unresolved => SipralRecoveryFailure::Unresolved,
+        _ => SipralRecoveryFailure::None,
     }
 }
 
@@ -1425,7 +1581,8 @@ mod tests {
         assert_eq!(SipralEventKind::RecordingStopped as u32, 25);
         assert_eq!(SipralEventKind::DigitReceived as u32, 26);
         assert_eq!(SipralEventKind::DtmfSent as u32, 27);
-        assert_eq!(SipralEventKind::ALL.len(), 23, "and there are no others");
+        assert_eq!(SipralEventKind::Recovery as u32, 28);
+        assert_eq!(SipralEventKind::ALL.len(), 24, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -1449,6 +1606,11 @@ mod tests {
             27,
             "27 was held for a DTMF digit sent by SIP INFO being answered (8.3.11)"
         );
+        assert_eq!(
+            SipralEventKind::Recovery as u32,
+            28,
+            "28 was held for the stack recovering from a suspension or a network change (8.4.13)"
+        );
     }
 
     #[test]
@@ -1469,7 +1631,7 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [15, 16, 18, 20, 28, 29_u32] {
+        for held in [15, 16, 18, 20, 29_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
         assert_eq!(name(30), None, "past the last kind");

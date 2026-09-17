@@ -29,7 +29,7 @@ use sipral_core::endpoint::{
     ReceiveError, SendError, Transmit, TransportId,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
-use sipral_core::replay::Driven;
+use sipral_core::replay::{Driven, RecordError, Recorder, Recording};
 use sipral_core::sdp;
 use sipral_core::transaction::{
     AnyTransactionId, DialogId, InviteClient, InviteServer, NonInviteClient, TimerConfigError,
@@ -159,6 +159,29 @@ pub struct UserAgent {
     pub(crate) next_call: u32,
     pub(crate) next_subscription: u32,
     pub(crate) next_announcement: u32,
+    /// The signalling seed this agent was built with (`docs/18-replay.md`).
+    ///
+    /// Kept so that [`UserAgent::start_recording`] can hand a [`Recorder`] the
+    /// seed that matches: a recording made with any other one would replay
+    /// into requests whose branches and tags do not agree with the answers
+    /// this session actually received.
+    replay_seed: [u8; 32],
+    /// The recording in progress, if the application asked for one.
+    ///
+    /// `None` for the whole life of an agent nobody records. Everything that
+    /// enters through [`UserAgent::receive`] and [`UserAgent::handle_timeout`]
+    /// is offered to it first, and nothing else here ever is: what this end
+    /// sent is never handed to it, which is the reason a caller's own
+    /// negotiated key never rides along in its own recording (8.2.4,
+    /// `docs/18-replay.md`).
+    recorder: Option<Recorder>,
+    /// What [`UserAgent::stop_recording`] last produced, held until
+    /// [`UserAgent::clear_stopped_recording`] releases it. Kept apart from
+    /// [`UserAgent::recorder`] rather than folded into one `enum` because a
+    /// caller working out how large a buffer to bring for the finished text
+    /// asks [`UserAgent::stop_recording`] more than once, and the second ask
+    /// must not stop a recording that is no longer running.
+    stopped_recording: Option<Result<Recording, RecordError>>,
 }
 
 impl UserAgent {
@@ -179,6 +202,9 @@ impl UserAgent {
         let sdp_limits = config.sdp_limits;
         Ok(Self {
             endpoint: Endpoint::new(config, seed)?,
+            replay_seed: seed,
+            recorder: None,
+            stopped_recording: None,
             accounts: HashMap::new(),
             registrations: HashMap::new(),
             owners: HashMap::new(),
@@ -221,6 +247,12 @@ impl UserAgent {
         // where the bytes came from is on the input and nowhere else by the
         // time an event names them, and screening an INVITE needs it
         self.guard.arrived(&input);
+        // recorded before anything else touches it: what arrived is the only
+        // thing a recording ever holds of the wire, never what this end sent
+        // (`docs/18-replay.md`)
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.arrived(&input, now);
+        }
         let bound = crate::announce::bound_transport(&input);
         let outcome = self.endpoint.receive(input, now);
         if let Some(transport) = bound {
@@ -232,6 +264,9 @@ impl UserAgent {
 
     /// Time has passed: the endpoint's timers, and this layer's own.
     pub fn handle_timeout(&mut self, now: Instant) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.woke(now);
+        }
         self.endpoint.handle_timeout(now);
         self.fire_due(now);
         self.fire_call_timers(now);
@@ -239,6 +274,72 @@ impl UserAgent {
         self.fire_lifecycle_timers(now);
         self.fire_announce_timers(now);
         self.drain(now);
+    }
+
+    /// Starts a recording of everything this agent is fed from here on
+    /// (`docs/18-replay.md`): every [`UserAgent::receive`] and
+    /// [`UserAgent::handle_timeout`], with the seed this agent was built
+    /// with, since a replay needs that same seed to write the branches and
+    /// tags the recorded answers belong to.
+    ///
+    /// A recording already running is discarded rather than extended: the
+    /// two would disagree about where their own clock starts, and a caller
+    /// that meant to keep the first one would not have asked to start a
+    /// second.
+    ///
+    /// `note` is one line of prose for whoever opens the file later. A note
+    /// that is not one line is accepted here — nothing here has an error to
+    /// give back — and turns into [`RecordError::NotOneLine`] the first time
+    /// [`UserAgent::stop_recording`] is called, the same as any other reason
+    /// a recording could not be produced.
+    pub fn start_recording(&mut self, note: Option<&str>) {
+        let recorder = match note {
+            Some(note) => Recorder::new(self.replay_seed).about(note),
+            None => Recorder::new(self.replay_seed),
+        };
+        self.recorder = Some(recorder);
+        // an answer nobody came back for is abandoned rather than kept: a
+        // caller starting over has already said it does not want it
+        self.stopped_recording = None;
+    }
+
+    /// Stops the recording started by [`UserAgent::start_recording`], and
+    /// holds the answer until [`UserAgent::clear_stopped_recording`] says it
+    /// has been delivered.
+    ///
+    /// `None` when nothing was running and nothing already stopped is
+    /// waiting to be collected. Calling this again before the answer is
+    /// cleared hands back the same one rather than stopping a second time —
+    /// there is nothing left running to stop — which is what lets a caller
+    /// that does not yet know how big a buffer to bring ask twice: once to
+    /// be told, and once to be handed the text, both against one recording
+    /// rather than two.
+    ///
+    /// `Some(Err(_))` when something this session was fed could not go in
+    /// the recording — a message with a body that is not text is the one
+    /// way that happens (`docs/18-replay.md`) — in which case the recording
+    /// is not produced at all rather than handed back with a gap in it.
+    pub fn stop_recording(&mut self) -> Option<Result<&Recording, RecordError>> {
+        if self.stopped_recording.is_none() {
+            self.stopped_recording = Some(self.recorder.take()?.finish());
+        }
+        self.stopped_recording
+            .as_ref()
+            .map(|result| result.as_ref().map_err(|error| *error))
+    }
+
+    /// Discards the answer [`UserAgent::stop_recording`] is holding, once it
+    /// has been collected in full. Safe to call whether or not there is one.
+    pub fn clear_stopped_recording(&mut self) {
+        self.stopped_recording = None;
+    }
+
+    /// Whether a recording is running. `false` again from the moment
+    /// [`UserAgent::stop_recording`] is first called, whether or not its
+    /// answer has been collected yet.
+    #[must_use]
+    pub const fn is_recording(&self) -> bool {
+        self.recorder.is_some()
     }
 
     /// Bytes to put on a transport. Drain to empty.

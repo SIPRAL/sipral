@@ -471,6 +471,10 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         crate::versioned::min_size::STREAM_STATS,
     ),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
+    // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
+    // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
+    // it is not `crate::versioned::min_size::SUSPENDING` beside the rest.
+    ("SipralSuspending", 32),
 ];
 
 /// The one versioned-shaped struct with no pinned length, and why.
@@ -518,6 +522,11 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralCallState::ABI,
         crate::event::SipralCallEndReason::ABI,
         crate::event::SipralDigitSource::ABI,
+        crate::event::SipralRecoveryOutcome::ABI,
+        crate::event::SipralRecoveryRung::ABI,
+        crate::event::SipralRecoveryFailure::ABI,
+        crate::lifecycle::SipralLink::ABI,
+        crate::lifecycle::SipralRecovery::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -538,8 +547,10 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralCallEvent::ABI,
         crate::event::SipralTransferEvent::ABI,
         crate::event::SipralMediaEvent::ABI,
+        crate::event::SipralRecoveryEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
+        crate::lifecycle::SipralSuspending::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -615,6 +626,16 @@ pub const SURFACE: Surface = Surface {
         crate::header::sipral_message_header::ABI,
         crate::header::sipral_message_header_element_count::ABI,
         crate::header::sipral_message_header_element::ABI,
+        crate::lifecycle::sipral_stack_suspending::ABI,
+        crate::lifecycle::sipral_stack_resumed::ABI,
+        crate::lifecycle::sipral_stack_network_changed::ABI,
+        crate::lifecycle::sipral_stack_interface_lost::ABI,
+        crate::lifecycle::sipral_stack_name_resolution_lost::ABI,
+        crate::lifecycle::sipral_account_rebind::ABI,
+        crate::diagnostics::sipral_call_record_json::ABI,
+        crate::diagnostics::sipral_stack_diagnostics_json::ABI,
+        crate::diagnostics::sipral_stack_recording_start::ABI,
+        crate::diagnostics::sipral_stack_recording_stop::ABI,
     ],
 };
 
@@ -785,6 +806,7 @@ mod tests {
             "SipralCallEvent",
             "SipralTransferEvent",
             "SipralMediaEvent",
+            "SipralRecoveryEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

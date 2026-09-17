@@ -5,6 +5,11 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # Security policy
 
+The threat model this policy's scope is drawn from — what a hostile peer, a
+rewriting proxy, a flood or a replay can do against this tree, what already
+refuses each, and what has not been read for this yet — is
+`docs/20-security-model.md`.
+
 ## Reporting a vulnerability
 
 Use GitHub's **private vulnerability reporting** on this repository: the

@@ -1612,3 +1612,174 @@ Java_org_sipral_SipralNative_sipral_1message_1header_1element(JNIEnv *env, jobje
     return (jint)status;
 }
 
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1suspending(JNIEnv *env, jobject self, jlong stack, jlong nowMs, jlongArray report)
+{
+    (void)env;
+    (void)self;
+    sipral_suspending_t report_value;
+    memset(&report_value, 0, sizeof report_value);
+    report_value.size = sizeof report_value;
+    sipral_status_t status = sipral_stack_suspending((sipral_handle_t)stack, (uint64_t)nowMs, &report_value);
+    {
+        jlong slots[4];
+        slots[0] = (jlong)report_value.size;
+        slots[1] = (jlong)report_value.unverified;
+        slots[2] = (jlong)report_value.subscriptions;
+        slots[3] = (jlong)report_value.calls;
+        (*env)->SetLongArrayRegion(env, report, 0, 4, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1resumed(JNIEnv *env, jobject self, jlong stack, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_resumed((sipral_handle_t)stack, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1network_1changed(JNIEnv *env, jobject self, jlong stack, jlong fromLink, jbyteArray fromAddress, jbyteArray fromInterface, jlong fromResolves, jlong toLink, jbyteArray toAddress, jbyteArray toInterface, jlong toResolves, jlong nowMs, jlongArray recovery)
+{
+    (void)env;
+    (void)self;
+    jbyte *fromAddress_data = fromAddress ? (*env)->GetByteArrayElements(env, fromAddress, NULL) : NULL;
+    jsize fromAddress_size = fromAddress ? (*env)->GetArrayLength(env, fromAddress) : 0;
+    jbyte *fromInterface_data = fromInterface ? (*env)->GetByteArrayElements(env, fromInterface, NULL) : NULL;
+    jsize fromInterface_size = fromInterface ? (*env)->GetArrayLength(env, fromInterface) : 0;
+    jbyte *toAddress_data = toAddress ? (*env)->GetByteArrayElements(env, toAddress, NULL) : NULL;
+    jsize toAddress_size = toAddress ? (*env)->GetArrayLength(env, toAddress) : 0;
+    jbyte *toInterface_data = toInterface ? (*env)->GetByteArrayElements(env, toInterface, NULL) : NULL;
+    jsize toInterface_size = toInterface ? (*env)->GetArrayLength(env, toInterface) : 0;
+    uint32_t recovery_value = 0;
+    sipral_status_t status = sipral_stack_network_changed((sipral_handle_t)stack, (uint32_t)fromLink, (const char *)fromAddress_data, (size_t)fromAddress_size, (const char *)fromInterface_data, (size_t)fromInterface_size, (uint32_t)fromResolves, (uint32_t)toLink, (const char *)toAddress_data, (size_t)toAddress_size, (const char *)toInterface_data, (size_t)toInterface_size, (uint32_t)toResolves, (uint64_t)nowMs, &recovery_value);
+    if (fromAddress) {
+        (*env)->ReleaseByteArrayElements(env, fromAddress, fromAddress_data, JNI_ABORT);
+    }
+    if (fromInterface) {
+        (*env)->ReleaseByteArrayElements(env, fromInterface, fromInterface_data, JNI_ABORT);
+    }
+    if (toAddress) {
+        (*env)->ReleaseByteArrayElements(env, toAddress, toAddress_data, JNI_ABORT);
+    }
+    if (toInterface) {
+        (*env)->ReleaseByteArrayElements(env, toInterface, toInterface_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)recovery_value;
+        (*env)->SetLongArrayRegion(env, recovery, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1interface_1lost(JNIEnv *env, jobject self, jlong stack, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_interface_lost((sipral_handle_t)stack, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1name_1resolution_1lost(JNIEnv *env, jobject self, jlong stack, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_name_resolution_lost((sipral_handle_t)stack, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1rebind(JNIEnv *env, jobject self, jlong stack, jlong account, jlong transport, jbyteArray remote, jbyteArray contact, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *remote_data = remote ? (*env)->GetByteArrayElements(env, remote, NULL) : NULL;
+    jsize remote_size = remote ? (*env)->GetArrayLength(env, remote) : 0;
+    jbyte *contact_data = contact ? (*env)->GetByteArrayElements(env, contact, NULL) : NULL;
+    jsize contact_size = contact ? (*env)->GetArrayLength(env, contact) : 0;
+    sipral_status_t status = sipral_account_rebind((sipral_handle_t)stack, (sipral_handle_t)account, (uint32_t)transport, (const char *)remote_data, (size_t)remote_size, (const char *)contact_data, (size_t)contact_size, (uint64_t)nowMs);
+    if (remote) {
+        (*env)->ReleaseByteArrayElements(env, remote, remote_data, JNI_ABORT);
+    }
+    if (contact) {
+        (*env)->ReleaseByteArrayElements(env, contact, contact_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1record_1json(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray buffer, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_call_record_json((sipral_handle_t)stack, (sipral_handle_t)call, (char *)buffer_data, (size_t)buffer_size, &len_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1diagnostics_1json(JNIEnv *env, jobject self, jlong stack, jbyteArray buffer, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_stack_diagnostics_json((sipral_handle_t)stack, (char *)buffer_data, (size_t)buffer_size, &len_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1recording_1start(JNIEnv *env, jobject self, jlong stack, jbyteArray note)
+{
+    (void)env;
+    (void)self;
+    jbyte *note_data = note ? (*env)->GetByteArrayElements(env, note, NULL) : NULL;
+    jsize note_size = note ? (*env)->GetArrayLength(env, note) : 0;
+    sipral_status_t status = sipral_stack_recording_start((sipral_handle_t)stack, (const char *)note_data, (size_t)note_size);
+    if (note) {
+        (*env)->ReleaseByteArrayElements(env, note, note_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1recording_1stop(JNIEnv *env, jobject self, jlong stack, jbyteArray buffer, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_stack_recording_stop((sipral_handle_t)stack, (char *)buffer_data, (size_t)buffer_size, &len_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+

@@ -10,6 +10,65 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Added
+
+- **The lifecycle a phone actually lives is reachable from C.** A stack could
+  be suspended, woken, moved between networks and told its interface or its
+  resolver was gone — in Rust. From C none of it existed, which meant
+  `SIPRAL_REGISTRATION_STATE_UNVERIFIED` and `_RESTORED` were states a C
+  application could read and never cause: it could be told a binding was no
+  longer evidence, but had no way to say the machine had slept.
+  `sipral_stack_suspending`, `sipral_stack_resumed`,
+  `sipral_stack_network_changed`, `sipral_stack_interface_lost`,
+  `sipral_stack_name_resolution_lost` and `sipral_account_rebind` are those
+  words, and `sipral_stack_suspending` hands back what the stack found when it
+  was told — how many bindings stopped being evidence, how many subscriptions
+  and calls were open. Reserved event 28 becomes
+  `SIPRAL_EVENT_KIND_RECOVERY`, raised when the ladder settles: a registrar
+  proved the path again, or every rung was climbed and none worked.
+
+- **A call's own story, and the whole diagnostic document, can be read from
+  C.** `sipral_call_record_json` and `sipral_stack_diagnostics_json` hand back
+  the JSON `docs/14-diagnostics.md` describes, in the buffer convention the
+  rest of this header already uses: call once to learn the length, once to
+  take it. And the signalling can be recorded for replay —
+  `sipral_stack_recording_start` and `sipral_stack_recording_stop` — with the
+  guarantee `docs/18-replay.md` makes held where it matters: a recording is
+  only ever offered what arrived, never what this end sent, so the key this
+  end negotiated is not in its own recording. A test places a real encrypted
+  call from C and reads the finished recording back to show it.
+
+- **`docs/20-security-model.md`**: what a hostile peer, a rewriting proxy, a
+  flood and a replay can each do, what refuses them and where that lives, what
+  the keys are and are not protected by, what this stack deliberately does not
+  do — no sockets, no clock, no thread, no signalling TLS of its own — and,
+  named plainly, what has had no security reading yet.
+
+### Fixed
+
+- **A request that cannot be read is answered 400, and named.** RFC 3261
+  §8.2.x has a UAS that detects a syntax error answer 400 with a phrase
+  identifying the problem. `RawMessage::validate` has always been able to find
+  those faults, and its own documentation said the question is asked "once, by
+  whoever is about to answer" — but nothing on the live path asked it. A
+  framed message with, say, a `CSeq` naming a different method than its start
+  line went straight to the handlers, each of which read the field it needed,
+  failed, and dropped the message without a word; the peer retransmitted into
+  silence. It is asked now, before a transaction is matched to the request,
+  and the answer names the field: `400 Bad CSeq`. An ACK is dropped rather
+  than answered, because nothing answers an ACK, and a request whose own `Via`
+  cannot be read is dropped too, because there is nowhere to send an answer.
+  Responses are unchanged: §18.1.2 already discards one whose `Via` is not
+  ours, and each reader of a response handles the field it reads.
+
+- **A network change that changed nothing no longer announces a recovery.**
+  A stack told about the same network twice decided, correctly, that there was
+  nothing to do — and then raised the event that says a recovery settled,
+  because the no-op and the real thing pushed the same lifecycle state. An
+  empty ladder says so only when the state moved now. A device that reports
+  its network on every wake would otherwise have announced a recovery it never
+  made.
+
 ### Security
 
 - **The SRTP master key and salt are built in a buffer that wipes itself**.

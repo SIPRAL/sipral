@@ -95,9 +95,13 @@ registered?" answers *unverified*, and an application that renders a green dot
 from it is making a decision rather than being misled by one.
 
 The FFI enum carries it as `SIPRAL_REGISTRATION_STATE_UNVERIFIED`, beside
-`SIPRAL_REGISTRATION_STATE_RESTORED`. What is missing is a C entry point that
-can produce either: `suspending`, `resumed` and `network_changed` have no
-counterpart in `sipral.h` yet, and phase 3 closes that.
+`SIPRAL_REGISTRATION_STATE_RESTORED`. `crates/sipral-ffi/src/lifecycle.rs` is
+where both become producible from C: `sipral_stack_suspending`,
+`sipral_stack_resumed`, `sipral_stack_network_changed`,
+`sipral_stack_interface_lost`, `sipral_stack_name_resolution_lost` and
+`sipral_account_rebind` are their counterparts in `sipral.h`, and
+`SIPRAL_EVENT_KIND_RECOVERY` is the event that says a ladder ended — by
+proving the path again or by giving up.
 
 ## suspending — a hard deadline, and what fits inside it
 

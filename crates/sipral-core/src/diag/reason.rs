@@ -63,6 +63,12 @@ pub enum Reason {
     /// A peer's request was refused with a 503 because this endpoint is
     /// holding as many transactions or dialogs as it is configured to.
     RequestRefusedWhenFull,
+    /// A request arrived framed and was refused with a 400 before anything
+    /// acted on it, because a field that carries the message could not be
+    /// read (RFC 3261 §8.2.x: a UAS that detects a syntax error answers 400
+    /// and names the problem). An ACK draws no answer, so it is dropped here
+    /// instead, under the same reason.
+    RequestRefusedAsMalformed,
     /// A peer already inside a dialog was refused with a 503 because that one
     /// dialog is already holding as many non-INVITE server transactions as it
     /// may at once — a ceiling of its own, distinct from
@@ -128,6 +134,7 @@ impl Reason {
             Self::RequestSent => "request.sent",
             Self::RequestRetransmitted => "request.retransmitted",
             Self::RequestRefusedWhenFull => "request.refused.overload",
+            Self::RequestRefusedAsMalformed => "request.refused.malformed",
             Self::RequestRefusedByDialog => "request.refused.dialog",
             Self::ResponseSent => "response.sent",
             Self::ResponseRetransmitted => "response.retransmitted",
@@ -160,7 +167,7 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 24] = [
+    const ALL: [Reason; 25] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
@@ -169,6 +176,7 @@ mod tests {
         Reason::RequestSent,
         Reason::RequestRetransmitted,
         Reason::RequestRefusedWhenFull,
+        Reason::RequestRefusedAsMalformed,
         Reason::RequestRefusedByDialog,
         Reason::ResponseSent,
         Reason::ResponseRetransmitted,

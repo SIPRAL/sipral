@@ -704,6 +704,7 @@ impl UserAgent {
 
     /// Start a ladder.
     fn recover(&mut self, recovery: Recovery, now: Instant) {
+        let before = self.life.state;
         let state = recovery.state();
         self.life = Machine {
             state,
@@ -713,11 +714,19 @@ impl UserAgent {
             told: false,
         };
         if self.life.ladder.is_empty() {
-            self.events.push_back(UaEvent::Lifecycle {
-                state,
-                rung: None,
-                next_in: None,
-            });
+            // A ladder with no rungs is the decision that nothing needs doing.
+            // Saying so is worth an event only when the state moved: an event
+            // that repeats the state the stack is already in reads, from a C
+            // application, exactly like a recovery that has just settled, and
+            // a network change that changed nothing would announce one every
+            // time it was reported.
+            if state != before {
+                self.events.push_back(UaEvent::Lifecycle {
+                    state,
+                    rung: None,
+                    next_in: None,
+                });
+            }
             return;
         }
         self.climb(now);

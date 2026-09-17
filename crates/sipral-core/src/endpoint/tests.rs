@@ -3008,3 +3008,60 @@ fn an_endpoint_refuses_timers_that_would_never_stop_rearming() {
     // and a config nobody touched stays accepted
     assert!(Endpoint::new(EndpointConfig::default(), [22; 32]).is_ok());
 }
+
+// -- what the front door refuses ---------------------------------------------
+
+/// A request that arrived whole and cannot be read is answered 400, naming the
+/// field, before anything matches a transaction to it.
+///
+/// The fault here is RFC 4475 §3.1.2.17's: a `CSeq` whose method is not the
+/// start line's. It is the one worth testing of the several
+/// `RawMessage::validate` catches, because it is the one that could otherwise
+/// be acted on: the transaction table keys a request on its own method and a
+/// response on its `CSeq`'s, so a message where the two disagree is a message
+/// that means one thing on the way in and another on the way back.
+#[test]
+fn a_request_whose_cseq_disagrees_with_its_start_line_is_answered_400() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let malformed = String::from_utf8(incoming("OPTIONS", "malformed-cseq", ""))
+        .expect("ascii")
+        .replace("CSeq: 1 OPTIONS", "CSeq: 1 INVITE")
+        .into_bytes();
+
+    deliver(&mut endpoint, &malformed, t0);
+
+    let answer = sent(&mut endpoint);
+    let text = String::from_utf8_lossy(&answer);
+    assert!(text.starts_with("SIP/2.0 400 Bad CSeq"), "{text}");
+    assert!(
+        events(&mut endpoint).is_empty(),
+        "a message that could not be read reached the application"
+    );
+    // and nothing was made for it: a second copy earns the same stateless
+    // answer rather than being matched to something
+    deliver(&mut endpoint, &malformed, t0);
+    let again = String::from_utf8_lossy(&sent(&mut endpoint)).into_owned();
+    assert!(again.starts_with("SIP/2.0 400 Bad CSeq"), "{again}");
+}
+
+/// The same fault in an ACK is dropped rather than answered: §17.1.1.3 has no
+/// response to an ACK, and inventing one would be a message the far end has
+/// no transaction for.
+#[test]
+fn a_malformed_ack_is_dropped_rather_than_answered() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let malformed = String::from_utf8(incoming("ACK", "malformed-ack", ""))
+        .expect("ascii")
+        .replace("CSeq: 1 ACK", "CSeq: 1 INVITE")
+        .into_bytes();
+
+    deliver(&mut endpoint, &malformed, t0);
+
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "an ACK was answered, and nothing answers an ACK"
+    );
+    assert!(events(&mut endpoint).is_empty());
+}
