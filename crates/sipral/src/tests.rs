@@ -20,6 +20,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use sipral_core::msg::{ParseMode, ParseScratch};
+use sipral_core::replay::Recorder;
 use sipral_core::sdp::{Crypto, Direction, MediaDescription, SessionDescription, parse};
 use sipral_rtp::srtp::SrtpError;
 
@@ -3492,4 +3494,200 @@ fn carries_bye(compound: &[u8]) -> bool {
         at += words.saturating_add(1) * 4;
     }
     false
+}
+
+// -- 8.2.4: a recording carries no key ---------------------------------------
+
+/// The base64 an `a=crypto` line in a SIP message's body carries, however
+/// many session parameters trail it.
+///
+/// Read with `sipral_core::msg::parse`, the same as the stack's own body
+/// lookup, rather than a manual search for the blank line — and then with
+/// [`crypto_line`], the same as every other test here that reads one.
+fn offered_key(datagram: &[u8]) -> String {
+    let mut scratch = ParseScratch::new();
+    let message = sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient)
+        .expect("a well formed SIP message");
+    let description = parse(message.body()).expect("the SDP parses");
+    let crypto = crypto_line(&one_stream(&description)).expect("a crypto line");
+    crypto
+        .key_params
+        .strip_prefix("inline:")
+        .expect("the key method is inline")
+        .split('|')
+        .next()
+        .expect("a key value")
+        .to_owned()
+}
+
+/// 8.2.4's whole point, proved rather than read off the code: a recording of
+/// a live SRTP call, taken from the caller's own side, does not carry the key
+/// the caller's own engine negotiated for it.
+///
+/// The recorder only ever hears two things — what arrived at `receive`, and
+/// the name of what the application did on its own — and the caller's own
+/// offer is neither of those: it is written out, not read in. What does
+/// arrive is the callee's answer, carrying the callee's own key from the
+/// callee's own engine, a different value from a different seed; the second
+/// pair of assertions below is there so that a future change collapsing the
+/// two seeds back together fails a call in progress, not only a unit test of
+/// `draw_key` on its own.
+#[test]
+fn a_recorded_srtp_call_does_not_carry_the_key_it_negotiated() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let mut recorder =
+        Recorder::new([11; 32]).about("an SRTP call, recorded from the caller's side only");
+
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+
+    recorder.cue("place", pair.now);
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+
+    // the same loop `Pair::settle` runs, with the caller's own half of it
+    // beside a recorder: what the caller sends is never handed to it, only
+    // what arrives at the caller is
+    let mut own_key = None;
+    for _ in 0..12 {
+        let dialled = pair.caller.outbound();
+        let answered = pair.callee.outbound();
+        if dialled.is_empty() && answered.is_empty() {
+            break;
+        }
+        for datagram in &dialled {
+            if own_key.is_none() {
+                own_key = Some(offered_key(datagram));
+            }
+            pair.callee.deliver(datagram, caller_sip(), pair.now);
+        }
+        for datagram in &answered {
+            let input = Input::Datagram {
+                transport: UDP,
+                remote: callee_sip(),
+                local: pair.caller.local,
+                data: datagram.as_slice(),
+            };
+            recorder.arrived(&input, pair.now);
+            pair.caller
+                .agent
+                .receive(input, pair.now)
+                .expect("a datagram");
+        }
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, true);
+    }
+
+    let own_key = own_key.expect("the caller's own INVITE carried a crypto line");
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .is_encrypted(),
+        "the call this test records was never actually secured"
+    );
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .is_encrypted()
+    );
+
+    let text = recorder.finish().expect("a recording of it").to_text();
+    assert!(
+        !text.contains(&own_key),
+        "the caller's own negotiated key rode along in its own recording: {text}"
+    );
+}
+
+/// One offer, from a user agent and a media engine built fresh from the two
+/// seeds given, and the base64 its `a=crypto` line carries.
+fn offered_with_seeds(
+    endpoint_seed: [u8; 32],
+    media_seed: [u8; 32],
+    catalog: CodecCatalog,
+    clock: WallClock,
+    now: Instant,
+) -> String {
+    let mut agent = UserAgent::new(EndpointConfig::default(), endpoint_seed).expect("a user agent");
+    let mut engine = MediaEngine::new(catalog, MediaConfig::default(), clock, media_seed);
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: caller_sip(),
+                remote: None,
+            },
+            now,
+        )
+        .expect("binding a transport");
+    let account = agent.add_account(Account::new(
+        uri("sip:alice@example.com"),
+        uri("sip:example.com"),
+        uri(&format!("sip:alice@{}", caller_sip().ip())),
+        UDP,
+        callee_sip(),
+    ));
+    engine
+        .place(
+            &mut agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            now,
+        )
+        .expect("the INVITE goes");
+    let invite = agent
+        .poll_transmit()
+        .expect("the INVITE was written")
+        .payload
+        .to_vec();
+    offered_key(&invite)
+}
+
+/// The other half of 8.2.4: the media seed, not the endpoint seed, is what a
+/// negotiated key follows. Two calls placed from user agents that share one
+/// endpoint seed — which is what a replay recording carries in clear — offer
+/// two different keys as long as their media seeds differ.
+///
+/// `key_source_tests::the_media_key_follows_the_media_seed_and_nothing_else`
+/// in `engine.rs` already proves this fact at `draw_key`'s own level, with
+/// two bare `KeySource`s and no endpoint anywhere; this is the same fact one
+/// layer up, through an actual offer and with the endpoint seed literally
+/// shared between the two, which is the specific case the plan calls out and
+/// that lower-level test does not touch.
+#[test]
+fn two_engines_sharing_an_endpoint_seed_still_negotiate_different_keys() {
+    let now = Instant::now();
+    let clock = WallClock::from_unix(now, 1_700_000_000, 0);
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let shared_endpoint_seed = [77; 32];
+
+    let first = offered_with_seeds(shared_endpoint_seed, [1; 32], catalog.clone(), clock, now);
+    let second = offered_with_seeds(shared_endpoint_seed, [2; 32], catalog, clock, now);
+
+    assert_ne!(
+        first, second,
+        "the same endpoint seed must not make two different media seeds \
+         negotiate the same key"
+    );
 }

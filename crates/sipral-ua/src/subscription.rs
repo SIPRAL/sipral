@@ -197,7 +197,13 @@ impl SubscriptionEnd {
     /// reason code: `rejected`, `noresource` and `invariant` are the three it
     /// tells clients not to come back from. The rest is this end's, and it is
     /// the same split registration makes — a refusal about the resource will
-    /// be made again, an outage will not.
+    /// be made again, an outage will not. `Expired` sits with the refusals
+    /// rather than the outages, and for a third reason that is neither: it is
+    /// not the notifier answering and it is not a failure to reach one, it is
+    /// this end letting the granted lifetime run out with nothing having
+    /// refreshed it in time. Asking again after that is subscribing, not
+    /// retrying, and `subscribe` is the call for it; the back-off this answer
+    /// drives is for a subscription that ended against this end's will.
     #[must_use]
     pub const fn is_worth_retrying(self) -> bool {
         !matches!(
@@ -209,6 +215,7 @@ impl SubscriptionEnd {
                 | Self::BadEvent
                 | Self::Refused
                 | Self::Redirected
+                | Self::Expired
         )
     }
 
@@ -787,7 +794,14 @@ impl UserAgent {
             .map(|(handle, _)| *handle)
             .collect();
         for subscription in lapsed {
-            self.end_subscription(subscription, SubscriptionEnd::Expired, None, None);
+            self.retry_or_end(
+                subscription,
+                SubscriptionEnd::Expired,
+                None,
+                None,
+                None,
+                now,
+            );
         }
 
         let due: Vec<(SubscriptionHandle, Waiting)> = self

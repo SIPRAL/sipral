@@ -441,6 +441,83 @@ comes back. The last is the shape of every report that says the call froze.
 
 ---
 
+## What the C ABI reaches today
+
+This is not a second copy of the priorities above; it is the other axis —
+which of them a binding can act on through `sipral.h` and `crates/sipral-ffi`
+alone, which exist only as Rust today, and which do not exist anywhere yet.
+Updated as 8.4 closes the gap, against the tree rather than against a plan for
+it.
+
+Two requirements are not part of this list because reachability is not the
+question for them. **C1** reduces to one sentence about the platform ("the
+application must present a ringing call before the network session exists"),
+and there is nothing to build for it beyond C2, which is below. **D10** asks
+for fixtures in this repository rather than for a capability any binding
+calls, and `interop/impairment/` already has them: `mobile.sh`, `satellite.sh`
+and `blackout.sh` are the three shapes named above, run by the lab against a
+live stack rather than reached from one.
+
+### Reachable from `sipral.h` alone
+
+| Requirement | What reaches it |
+|---|---|
+| **A4** — codec enumeration and priority | `sipral_stack_config_t::codecs` sets the order at creation, `sipral_stack_codec_order` reads it back, `sipral_codec_count`/`sipral_codec_at` enumerate what this build contains at all, and `SIPRAL_EVENT_KIND_MEDIA_STARTED` reports what a live call actually negotiated. |
+| **A5** — call recording | `sipral_media_record_start`/`_stop`/`_state`, and `SIPRAL_EVENT_KIND_RECORDING_STOPPED` when one stops on its own. |
+| **A6** — stream statistics | `sipral_call_media` mints a handle once media starts; `sipral_media_info` and `sipral_media_statistics` read it live, and `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` delivers the completed record once the call has ended. |
+| **A9** — DTMF over INFO | `sipral_call_send_dtmf`'s `via` argument picks RTP or INFO per send; `SIPRAL_EVENT_KIND_DTMF_SENT` reports the far end's answer, a 415 included, and `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s `source` says which of the two a keypress arrived by. |
+| **A10** — product identity, the settable half | `sipral_stack_config_t::user_agent`. The signalling-trace half is superseded by D1, and D1 is Rust-only — see below. |
+| **B1** — never emit a request that cannot arrive | RFC 3261 §18.1.1 runs on every call this stack signals, with nothing to turn it on, and every byte `sipral_stack_poll_transmit` hands over is already the size the application is about to put on the wire, without a capture. Not yet reachable: the dedicated event for the choice (kind 18, still reserved) and the size-and-limit pair the way B1 asks for it, which today lives only in the D1 diagnostic record. |
+| **B2** — a silently ignored setting is worse than an unsupported one | `SIPRAL_STATUS_NOT_SUPPORTED`, a status distinct from `SIPRAL_STATUS_INVALID_ARGUMENT`, exists for exactly this and nothing else. |
+| **B3** — a failure during suspend or resume is an event, not an abort | True for whatever a C caller can reach today: a background timer through `sipral_stack_poll` and a dead transport through `sipral_stack_transport_failed` both raise an event and never abort. Suspend itself and lost name resolution are D4's failure modes, and D4 has no C entry point. |
+| **B4** — the threading contract is a guarantee, not a convention | Documented and tested in `docs/08-ffi.md`; a call that lands on the wrong thread gets `SIPRAL_STATUS_BUSY`, not a fault. |
+| **B5** — media that has stopped is detected by the engine | `SIPRAL_EVENT_KIND_MEDIA_STALLED` and `_MEDIA_RESUMED`, both carrying `silent_for_ms`. |
+| **B6** — defaults chosen for the equipment actually deployed against | `rport` and symmetric RTP with latching are what every call gets (`docs/06-nat.md`); full ICE is not wired to a call at all yet, so the mechanism that caused the original harm is unreachable through this header by default rather than by configuration. |
+| **B7** — adding a function cannot leave a platform behind | `scripts/check.sh`'s "the bindings compile" step (`docs/08-ffi.md`) builds all three generated bindings against the library this gate just built, and `BindingCheck.kt` creates a real stack and hears a real event on a thread the JVM did not make. |
+| **C5** — cheap when idle | `sipral_stack_poll`'s `has_deadline`/`next_poll_in_ms` answers the same question `UserAgent::idle().is_quiet()` answers in Rust. The itemised counts behind it (`Idle::registrations`, `::subscriptions`, ...) are Rust-only. |
+| **D3** — health counters, sampled rather than grepped | `sipral_stack_counters`, one call, field for field against `sipral::Counters`. |
+| **D8** — honest capability reporting | `sipral_capabilities`, answerable before any stack exists. |
+| **D9** — time is injectable | Every entry point that can act on time takes `now_ms` explicitly; nothing behind this header reads a clock of its own. |
+
+### Reachable only from Rust today
+
+The Rust surface for each of these already exists somewhere below
+`sipral-ffi`; none has a C entry point yet.
+
+| Requirement | Where it lives |
+|---|---|
+| **A1** — subscriptions and busy-lamp-field | `UserAgent::subscribe`/`subscribe_many`/`unsubscribe`, `subscription_state`, `dialog_info` (`crates/sipral-ua/src/subscription.rs`, `dialoginfo.rs`). `SIPRAL_EVENT_KIND` 15 is reserved, and `sipral_capabilities` correctly reports the feature bit off, because a C caller has no way to use it yet. |
+| **A7** — network change and recovery | `UserAgent::network_changed` and the rest of the ladder — see D4. |
+| **A8** — refusing an unwanted INVITE before it is visible | `sipral_ua::screening::Screen` and `UserAgent::screen` (`crates/sipral-ua/src/screening.rs`). |
+| **C2** — accepting a call announced out of band | `UserAgent::announce`, `refresh_binding`, `forget_announcement` (`crates/sipral-ua/src/announce.rs`). `SIPRAL_EVENT_KIND` 20 is reserved. |
+| **C3** — registration that freezes and thaws | `UserAgent::freeze_registration`/`thaw_registration` and `time_to_ready` (`crates/sipral-ua/src/registration.rs`, `announce.rs`). RFC 8599 push parameters exist on the account type but not on `sipral_account_config_t`. |
+| **C4** — audio that survives the platform's own interruptions | Device-state detection (`IMMDevice::GetState`) lives in `sipral-io-wasapi`, but that crate and `sipral-io-coreaudio` are depended on by nothing else in the workspace — not `sipral`, not `sipral-ua` — so this is reachable only by taking a dependency on the platform crate directly, not through the facade. |
+| **D1** — a call's story as a structured object | `Endpoint::call_record`/`endpoint_record`/`diagnostics_json`, fully built and documented (`docs/14-diagnostics.md`). |
+| **D2** — deterministic replay | `crates/sipral-core/src/replay`: recording, reading and driving a session back. |
+| **D4** — a lifecycle model for a machine that suspends | `UserAgent::suspending`/`resumed`/`network_changed`/`interface_lost`/`name_resolution_lost`/`rebind`, all in `docs/16-lifecycle.md`, which says outright: "What is missing is a C entry point ... and phase 3 closes that." |
+| **D5** — the engine explains its negotiations | The codec half: `sipral::CodecCatalog::candidates` names why every candidate that was not chosen was not. The transport and NAT half is not built anywhere — nothing here chooses between transports or NAT strategies per call at all. |
+| **D7** — abuse resistance below the application | `sipral_ua::screening::Rate` and `Refusals`, beside the A8 hook they sit next to. |
+
+### Not built anywhere yet
+
+- **A2** — audio devices on desktop. By design, first: the core deliberately
+  has no device in it, and this is the application's and the operating
+  system's. What exists besides that design boundary is not the feature
+  either — `sipral-io-wasapi` and `sipral-io-coreaudio` exist, but neither is
+  depended on by anything, and neither implements the enumeration with an
+  identity that survives unplug and replug that A2 asks for.
+- **A3** — volume, mute, level metering. The same design boundary as A2. The
+  same two crates each have a `level.rs`, unreferenced by anything else, and
+  nothing there is a gain or mute control.
+- **D6** — per call, not per process. Codec order and transport are properties
+  of `sipral_stack_config_t` in C and of nothing narrower than the stack in
+  `sipral-ua` either — two accounts on two codec policies still need two
+  stacks. The device part of this requirement is the exception and is already
+  answered: `sipral_call_config_t::media_address` and `::srtp` are per call,
+  in C, today.
+
+---
+
 ## What this changes in the roadmap
 
 Phases stay as `docs/10-roadmap.md` defines them. What changes is what each

@@ -147,7 +147,10 @@ slower and worse.
 All ten are permissive and dual-licensed the same way, so one MIT notice
 covers the set. `zeroize` is named directly as well as through `aes`: keys
 have to be wiped where they are held, and the write that survives the
-optimiser needs `unsafe`, which `sipral-rtp` denies.
+optimiser needs `unsafe`, which `sipral-rtp` denies. `sipral` itself names the
+same version directly too, for the SRTP master key and salt `draw_key` hands
+out in `crates/sipral/src/engine.rs`, for the same reason: this crate also
+denies `unsafe`.
 
 #### Build-time only
 

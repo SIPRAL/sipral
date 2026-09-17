@@ -813,16 +813,32 @@ C linker could collide with.
 
 ### What it does not catch
 
-**Nothing compiles the output but the C.** There is no Swift, Kotlin or .NET
-toolchain in `scripts/check.sh`, so a generated file in one of those three that
-will not compile passes the gate. Kotlin is the exception on a machine with a
-JDK and `kotlinc`: there the JNI shim is linked against the shared library and
-the Kotlin binding runs against it on a JVM, and without them the step says
-`skip` and names what is missing. The header is the other exception, and no
-longer only just:
-`bindings/c/smoke.c` includes it, compiles under `-std=c11 -Wall -Wextra
--Werror`, links the shared library and runs, in the gate; `bindings/c/sipral.c`
-compiles it a second time as the Swift package's own translation unit.
+**A missing toolchain is a named skip, not silence.** `scripts/check.sh` has a
+step, `the bindings compile`, that builds every one of the three generated
+bindings: `dotnet build -c Release` on `bindings/dotnet/Sipral`; `kotlinc` over
+every `.kt` file it finds under `bindings/kotlin`; and `xcrun --toolchain
+default swift build` on `bindings/`. Kotlin goes further than a compile: once
+`kotlinc` and a JDK carrying `include/jni.h` are both there, `cc -fsyntax-only
+-Wall -Wextra -Werror` checks `sipral_jni.c` against that JDK's own headers,
+the shim and a small test helper are then linked against the shared library
+built earlier in the gate, and `BindingCheckKt` runs against the two on a JVM
+under `-Xcheck:jni`, so a native crash or a JNI warning fails the step and not
+only a compiler would have. `xcrun --toolchain default` on the Swift line is
+not decoration: a bare `swift build` resolves to whatever toolchain answers to
+`swift` on `PATH` — a version manager such as swiftly, where one is installed,
+rather than the toolchain the Xcode Command Line Tools ship — and a mismatched
+one can fail on the package's declared `tools-version` instead of building it;
+`xcrun --toolchain default` names the Command Line Tools' own toolchain, so
+the gate builds with that one regardless of what else answers to `swift`.
+None of the three is assumed present: a machine with no .NET SDK, no
+`kotlinc`, no JDK carrying `include/jni.h`, or Command Line Tools with no
+`PackageDescription` module for `swift package dump-package` to read first,
+prints `skip` naming exactly what is missing, rather than staying quiet about
+that language. The header remains the one binding compiled unconditionally
+rather than skippably: `bindings/c/smoke.c` includes it, compiles under
+`-std=c11 -Wall -Wextra -Werror`, links the shared library and runs, in the
+gate; `bindings/c/sipral.c` compiles it a second time as the Swift package's
+own translation unit.
 
 **It says nothing about meaning.** A member that keeps its name and its type and
 starts meaning something else travels into all four files intact. So does a
@@ -1054,26 +1070,38 @@ a static constructor throws, so the first use of `Sipral` throws
 `TypeInitializationException`, whose `InnerException` is the `SipralException`
 with both versions in its message, and every later use throws that same
 `TypeInitializationException` again without running the check a second time.
-An application that wants the sentence reads the inner exception.
-Kotlin's `SipralNative.init {}` block is where the same call belongs, and it
-is not there yet: today that block loads the JNI shim and checks nothing.
+An application that wants the sentence reads the inner exception. Kotlin's
+`SipralNative.init {}` block keeps the same promise the JVM's own way: the JVM
+guarantees a singleton `object`'s initialiser runs once, before its first
+member is read, and that block calls `agree(major, minor)` there, which
+throws `SipralException` on a mismatch — wrapped, on the first touch, as the
+cause of an `ExceptionInInitializerError`, and rethrown as
+`NoClassDefFoundError` on every touch after, without the check running again.
 
-Swift has neither a module initializer nor anything else the language
-guarantees to run before a namespace `enum`'s first use, so it has no load
-hook to print one into. `SipralAbi.swift` says so directly, on `Sipral`
-itself, and the application calls the check itself, once, before it creates a
-stack or calls anything else in the module:
+Swift has neither a module initialiser nor a singleton object to hang one on:
+nothing the language guarantees to run before a namespace `enum`'s first use,
+the way a static constructor does for a class or `init {}` does for a Kotlin
+`object`. What Swift does guarantee, and what `SipralAbi.swift` uses instead,
+is narrower and just as usable: a static stored property's initialiser runs
+at most once, finishing before the first read of it returns, on whichever
+thread reaches it first — the same promise `dispatch_once` made in
+Objective-C. `Sipral.abiMismatch` is that property. It calls
+`sipral_abi_check` once, against the version this file was printed from, and
+every call in the `enum` reads it first, through `ensureAbi()`, before it does
+anything else. So the check runs the first time the application calls
+anything at all in the module, on whichever thread makes that call — not at
+import, which Swift gives no hook for — and a mismatch is what that first
+call throws: a `SipralError`, not a separate call the application has to
+remember to make and not a warning that is easy to miss.
 
-```swift
-try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
-```
-
-Skipping it is not safe on any binding. The `size` every versioned struct
-carries settles how long a struct is, not what is in it: a header and a
-library that disagree about the order or the meaning of members can still
-agree about the length, and then every size rule passes while the library
-reads a pointer out of whatever the caller put in its place. No entry point
-can catch that, because whether a pointer is readable for the length beside
-it is the caller's promise in every Safety section, not something the library
-can check. The version check is the one call that finds the disagreement
-before anything is read.
+Skipping it is not safe on any binding, and on Swift it is not something a
+caller can do at all: there is no call into `Sipral` that reaches C without
+going through `ensureAbi()` first. The `size` every versioned struct carries
+settles how long a struct is, not what is in it: a header and a library that
+disagree about the order or the meaning of members can still agree about the
+length, and then every size rule passes while the library reads a pointer out
+of whatever the caller put in its place. No entry point can catch that,
+because whether a pointer is readable for the length beside it is the
+caller's promise in every Safety section, not something the library can
+check. The version check is the one call that finds the disagreement before
+anything is read.

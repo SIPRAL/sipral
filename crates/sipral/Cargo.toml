@@ -45,6 +45,11 @@ sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
 # anything: without it, `--no-default-features` on this crate would still link
 # libopus through `sipral-media` and prove nothing.
 sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+# already a dependency of `sipral-rtp` and `sipral-dtls`, pinned to the same
+# version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
+# needs a write the optimiser is not allowed to remove, and that needs
+# `unsafe`, which this crate denies.
+zeroize = "=1.9.0"
 
 [lints]
 workspace = true

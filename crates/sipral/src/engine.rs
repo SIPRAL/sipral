@@ -59,7 +59,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{Ordering, compiler_fence};
 use std::time::{Duration, Instant};
 
 use sipral_core::auth::KeySource;
@@ -73,6 +72,7 @@ use sipral_ua::{
     AccountId, CallHandle, CallState, OutgoingCall, OutgoingExtras, StatusCode, UaError, UaEvent,
     UserAgent,
 };
+use zeroize::Zeroizing;
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate, CodecCatalog};
@@ -1429,18 +1429,35 @@ fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
 /// the whole of the encryption**, and it costs it silently: SDES then
 /// protects the media against nobody while every message still looks right.
 ///
-/// The block is wiped before it goes out of scope. Thirty of its bytes are
-/// now key material, and a buffer that is merely dropped is a buffer that
-/// stays on the stack for whatever runs next.
+/// The block, and the key and salt sliced from it, live in [`Zeroizing`]
+/// rather than a plain array (8.2.9). A buffer that is merely dropped is a
+/// buffer that stays on the stack for whatever runs next; `Zeroizing` wipes
+/// its bytes in its own `Drop`, which a later edit to this function cannot
+/// silently stop doing the way it could stop a `fill(0)` written by hand.
+///
+/// Both halves are copied out a byte at a time rather than sliced, because
+/// this is the one function in the tree where reading past the end must not
+/// be recoverable: a fallible slice with a zero-filled fallback would hand
+/// out a key of zeros, and the paragraph above is about exactly how quiet
+/// that failure is. The assertion beside it holds the two lengths to the
+/// block, so a later change to either one stops the build rather than
+/// shortening a key.
+const _: () = assert!(
+    MASTER_KEY + MASTER_SALT <= 32,
+    "the key and the salt come out of one thirty-two byte block"
+);
+
 fn draw_key(keys: &mut KeySource) -> KeySalt {
-    let mut block = keys.block();
-    let mut key = [0_u8; MASTER_KEY];
-    let mut salt = [0_u8; MASTER_SALT];
-    key.copy_from_slice(&block[..MASTER_KEY]);
-    salt.copy_from_slice(&block[MASTER_KEY..MASTER_KEY + MASTER_SALT]);
-    block.fill(0);
-    compiler_fence(Ordering::SeqCst);
-    KeySalt::new(key, salt)
+    let block = Zeroizing::new(keys.block());
+    let mut key = Zeroizing::new([0_u8; MASTER_KEY]);
+    let mut salt = Zeroizing::new([0_u8; MASTER_SALT]);
+    for (slot, byte) in key.iter_mut().zip(block.iter()) {
+        *slot = *byte;
+    }
+    for (slot, byte) in salt.iter_mut().zip(block.iter().skip(MASTER_KEY)) {
+        *slot = *byte;
+    }
+    KeySalt::new(*key, *salt)
 }
 
 /// `len` hexadecimal characters of `token`, starting at `at`, as a number.
@@ -1848,6 +1865,47 @@ mod key_source_tests {
             let pair = (drawn.key(), drawn.salt());
             assert!(!seen.contains(&pair), "a key repeated");
             seen.push(pair);
+        }
+    }
+
+    /// The block `draw_key` reads and the key and salt sliced out of it
+    /// (8.2.9) hold the SRTP master key and salt, so all three have to be the
+    /// type that wipes itself on drop rather than a plain array left to be
+    /// merely dropped, or a `Vec` that leaves its last copy in freed memory.
+    /// A wipe is not observable from safe Rust and Miri cannot be pointed at
+    /// this, so what is asserted is the one thing that is visible: which type
+    /// the function declares its buffers as. The needles are assembled at
+    /// runtime, so the test cannot pass by matching its own assertion — the
+    /// same check `sipral-core` runs on `A1` in
+    /// `auth::digest::tests::the_password_is_never_built_in_a_buffer_that_is_not_wiped`.
+    #[test]
+    fn the_media_key_and_salt_are_never_built_in_a_buffer_that_is_not_wiped() {
+        let source = include_str!("engine.rs").replace("\r\n", "\n");
+        let opens = "fn draw_key(keys: &mut KeySource) -> KeySalt {";
+        let from = source.find(opens).expect("draw_key is in this file");
+        let rest = source.get(from..).expect("the rest of the file");
+        let to = rest.find("\n}\n").map_or(rest.len(), |at| at + 1);
+        let body = rest.get(..to).expect("the body of draw_key");
+        assert!(
+            body.len() > opens.len(),
+            "the slice is the function, not the signature"
+        );
+
+        let wiping = format!("{}::{}", "Zeroizing", "new");
+        assert!(
+            body.matches(&wiping).count() >= 3,
+            "the block, the key and the salt all hold key material and must \
+             each be built with {wiping}: {body}"
+        );
+        for grown in [
+            format!("{}::{}", "Vec", "new"),
+            format!("{}::{}", "Vec", "with_capacity"),
+            format!("{}{}", "to_", "vec()"),
+        ] {
+            assert!(
+                !body.contains(&grown),
+                "the key material must not pass through {grown}"
+            );
         }
     }
 }

@@ -141,23 +141,30 @@ public struct SipralHeader: Sendable {
 /// Swift gives a namespace `enum` like this one no load hook: there is
 /// no module initializer and nothing else the runtime guarantees to run
 /// before first use, the way a static constructor does for the .NET
-/// binding. Nothing here calls `abiCheck` for you. The application
-/// calls it itself, once, as the first thing it does with this module —
-/// before creating a stack or calling anything else here:
+/// binding or an `init` block does for the Kotlin one. What Swift does
+/// guarantee is narrower, and it is enough: a static stored property's
+/// initializer runs at most once, and finishes before the first read of
+/// it returns, on whichever thread reaches it first — the same promise
+/// `dispatch_once` made in Objective-C. `abiMismatch` below is one such
+/// property, and every call in this `enum` reads it, through
+/// `ensureAbi`, before it does anything else. So the check runs the
+/// first time this module is asked to do anything at all, on whichever
+/// thread makes that first call — not at import, which Swift gives no
+/// hook for, but before that first call reaches C, which is the promise
+/// this makes instead.
 ///
-/// ```swift
-/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
-/// ```
-///
-/// Skipping it is not safe. The `size` every struct here carries
-/// settles how long a struct is, not what is in it: a header and a
-/// library that disagree about the order or the meaning of members can
-/// still agree about the length, and then every size rule passes while
-/// the library reads a pointer out of whatever was put in its place.
-/// No entry point can catch that, because whether a pointer is
-/// readable is the caller's promise, not something the library can
-/// check. This call is the one that finds the disagreement before
-/// anything is read.
+/// Skipping it is not something a caller can do: there is no call here
+/// that reaches C without going through `ensureAbi` first. The `size`
+/// every struct here carries settles how long a struct is, not what is
+/// in it: a header and a library that disagree about the order or the
+/// meaning of members can still agree about the length, and then every
+/// size rule passes while the library reads a pointer out of whatever
+/// was put in its place. No entry point can catch that on its own,
+/// because whether a pointer is readable is the caller's promise, not
+/// something the library can check. This is what finds the
+/// disagreement before anything is read, and a mismatch is what it
+/// throws — a SipralError, from whichever call the application happens
+/// to make first, not a warning that is easy to miss.
 public enum Sipral {
     /// The handle that names nothing.
     public static let handleNone: SipralHandle = 0
@@ -177,7 +184,12 @@ public enum Sipral {
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
     /// for the bytes.
-    public static func lastErrorMessage() -> String {
+    ///
+    /// Not behind `ensureAbi`. This is what a mismatch's own message
+    /// is read with, while `abiMismatch` is still being computed, and
+    /// going through the check to reach it would be this property
+    /// reading itself before it has a value.
+    static func rawLastErrorMessage() -> String {
         var needed = 0
         _ = sipral_last_error_message(nil, 0, &needed)
         guard needed > 1 else { return "" }
@@ -189,29 +201,65 @@ public enum Sipral {
         return String(cString: buffer)
     }
 
+    /// The calling thread's last error, or an empty string when it
+    /// has none.
+    public static func lastErrorMessage() throws -> String {
+        try ensureAbi()
+        return rawLastErrorMessage()
+    }
+
+    /// Whether the library this binding loaded can serve the ABI this
+    /// file was printed against, checked once. A static stored
+    /// property's initializer in Swift runs at most once and
+    /// finishes before the first read of it returns, on whichever
+    /// thread reaches it first, which is what makes this safe to
+    /// read from every one of them without a lock of its own.
+    static let abiMismatch: SipralError? = {
+        let status = sipral_abi_check(abiVersionMajor, abiVersionMinor)
+        guard status != SIPRAL_STATUS_OK else { return nil }
+        return SipralError(
+            status: SipralStatus(rawValue: status) ?? .panic,
+            message: rawLastErrorMessage()
+        )
+    }()
+
+    /// Throws what `abiMismatch` found, if it found one. Every call
+    /// below reaches this before it reaches C, so a binding loaded
+    /// over the wrong library fails here, in whichever call the
+    /// application happens to make first, rather than in whichever
+    /// one first happens to disagree about a struct's layout.
+    static func ensureAbi() throws {
+        if let mismatch = abiMismatch {
+            throw mismatch
+        }
+    }
+
     /// Turn a status into a thrown error, and nothing into nothing.
     static func check(_ status: sipral_status_t) throws {
         guard status != SIPRAL_STATUS_OK else { return }
         throw SipralError(
             status: SipralStatus(rawValue: status) ?? .panic,
-            message: lastErrorMessage()
+            message: rawLastErrorMessage()
         )
     }
 
     /// Whether this library can serve a binding generated against `major`.`minor`.
     public static func abiCheck(major: UInt32, minor: UInt32) throws {
+        try ensureAbi()
         let status = sipral_abi_check(major, minor)
         try check(status)
     }
 
     /// The name of one SipralStatus, for a log line.
-    public static func statusName(code: Int32) -> String? {
+    public static func statusName(code: Int32) throws -> String? {
+        try ensureAbi()
         guard let text = sipral_status_name(code) else { return nil }
         return String(cString: text)
     }
 
     /// Make one.
     public static func stackCreate(config: sipral_stack_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var stack = SipralHandle()
         let status =
@@ -226,6 +274,7 @@ public enum Sipral {
 
     /// Read sipral_counters_t off it.
     public static func stackCounters(stack: SipralHandle) throws -> sipral_counters_t {
+        try ensureAbi()
         var counters = sipral_counters_t.sized()
         let status = sipral_stack_counters(stack, &counters)
         try check(status)
@@ -234,6 +283,7 @@ public enum Sipral {
 
     /// Hand it bytes to send.
     public static func stackSend(stack: SipralHandle, message: [UInt8]) throws {
+        try ensureAbi()
         let status =
             message.withUnsafeBufferPointer { p1 in
                 sipral_stack_send(stack, p1.baseAddress, p1.count)
@@ -243,6 +293,7 @@ public enum Sipral {
 
     /// Hand it header fields, an array of them with its length beside it.
     public static func stackLabel(stack: SipralHandle, headers: [SipralHeader]) throws {
+        try ensureAbi()
         let status =
             SipralHeader.withUnsafeArray(headers) { p1 in
                 sipral_stack_label(stack, p1.baseAddress, p1.count)
@@ -252,6 +303,7 @@ public enum Sipral {
 
     /// Hand it text, which crosses as UTF-8 and not as a String.
     public static func stackDescribe(stack: SipralHandle, note: String) throws {
+        try ensureAbi()
         let status =
             Array(note.utf8).withUnsafeBufferPointer { raw1 in
                 raw1.withMemoryRebound(to: CChar.self) { p1 in
@@ -263,6 +315,7 @@ public enum Sipral {
 
     /// Fill a buffer the caller brings.
     public static func stackName(stack: SipralHandle, name: inout [CChar]) throws -> Int {
+        try ensureAbi()
         var len = Int()
         let status =
             name.withUnsafeMutableBufferPointer { p1 in
@@ -274,6 +327,7 @@ public enum Sipral {
 
     /// Fill a buffer of numbers the caller brings.
     public static func stackCodecOrder(stack: SipralHandle, outCodecs: inout [UInt32]) throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status =
             outCodecs.withUnsafeMutableBufferPointer { p1 in
@@ -285,6 +339,7 @@ public enum Sipral {
 
     /// Fill a buffer of samples the caller brings.
     public static func callPlayback(stack: SipralHandle, samples: inout [Int16]) throws -> Int {
+        try ensureAbi()
         var written = Int()
         let status =
             samples.withUnsafeMutableBufferPointer { p1 in
@@ -296,6 +351,7 @@ public enum Sipral {
 
     /// Hand it samples, and get one datagram back in the struct.
     public static func callCapture(stack: SipralHandle, samples: [Int16], packet: inout sipral_media_packet_t) throws {
+        try ensureAbi()
         let status =
             samples.withUnsafeBufferPointer { p1 in
                 sipral_call_capture(stack, p1.baseAddress, p1.count, &packet)
@@ -306,6 +362,7 @@ public enum Sipral {
     /// Hand it a datagram that arrived, in a buffer it may rewrite in
     /// place, and hear what became of it.
     public static func callMediaReceive(stack: SipralHandle, data: inout [UInt8]) throws -> UInt32 {
+        try ensureAbi()
         var arrival = UInt32()
         let status =
             data.withUnsafeMutableBufferPointer { p1 in
@@ -317,6 +374,7 @@ public enum Sipral {
 
     /// Take it apart.
     public static func stackDestroy(stack: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_stack_destroy(stack)
         try check(status)
     }

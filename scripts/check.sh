@@ -729,6 +729,83 @@ else
     fail "the default build does not link libopus: the feature is meant to be on"
 fi
 
+# The tree says libopus is not a dependency; it says nothing about what is in
+# the file a customer actually links. Rebuilt and removed first for the same
+# reason the release artefacts above are: `cargo test -p sipral-ffi
+# --no-default-features --features sipral/opus` a few lines up already
+# rebuilt this exact path with the codec back in over the facade's flag, and
+# a check that read it without saying so would be checking that build.
+FFI_DEBUG_DYLIB="target/debug/libsipral_ffi.dylib"
+FFI_DEBUG_ARCHIVE="target/debug/libsipral_ffi.a"
+rm -f "$FFI_DEBUG_DYLIB" "$FFI_DEBUG_ARCHIVE"
+if ! cargo build -p sipral-ffi --no-default-features >/dev/null 2>&1; then
+    fail "cargo build -p sipral-ffi --no-default-features, to inspect the artefact"
+elif [ ! -s "$FFI_DEBUG_DYLIB" ]; then
+    fail "$FFI_DEBUG_DYLIB is not there to inspect"
+else
+    # libopus is vendored and built statically (crates/sipral-media/Cargo.toml
+    # says so, and opusic-sys is what does the building), so it never shows up
+    # here today. Asserted anyway: the day something links a system libopus
+    # dylib instead -- a pkg-config found on the machine that built it, say --
+    # is a day this stops being true silently.
+    dynamic=$(otool -L "$FFI_DEBUG_DYLIB" 2>/dev/null)
+    read_ok=$?
+    if [ "$read_ok" -ne 0 ] || [ -z "$dynamic" ]; then
+        fail "otool -L read nothing out of $(basename "$FFI_DEBUG_DYLIB"), so nothing was checked"
+    elif printf '%s\n' "$dynamic" | grep -qi opus; then
+        fail "the no-default-features build links opus dynamically:"
+        printf '%s\n' "$dynamic" | grep -i opus | sed 's/^/        /'
+    else
+        pass "no dynamic dependency on opus (otool -L, no-default-features)"
+    fi
+
+    # The static half, which is the one that matters, since the Rust `opus`
+    # crate builds libopus into the archive rather than against it: libopus's
+    # own C symbols, not sipral_media's `opus` module, whose Rust-mangled
+    # names also match a plain `grep -i opus` and say nothing about whether
+    # the library itself is in the file. nm-classic without `-g`, because
+    # opusic-sys builds libopus with hidden visibility, and a symbol hidden
+    # from the exported table is still a symbol linked into the binary.
+    symbols=$(xcrun nm-classic -U "$FFI_DEBUG_DYLIB" 2>/dev/null | awk '{print $NF}')
+    if [ -z "$symbols" ]; then
+        fail "nm read no symbol out of $(basename "$FFI_DEBUG_DYLIB"), so nothing was checked"
+    else
+        linked=$(printf '%s\n' "$symbols" | grep '^_opus_' || true)
+        if [ -n "$linked" ]; then
+            fail "the no-default-features build links opus symbols (nm):"
+            printf '%s\n' "$linked" | head -5 | sed 's/^/        /'
+        else
+            pass "no opus symbol in the artefact (nm, no-default-features)"
+        fi
+    fi
+fi
+
+# The mirror of the nm check above, over the same path built with the default
+# features instead -- opus on. Not the release $DYLIB from earlier: its
+# profile sets `strip = true`, which throws away every local symbol and
+# leaves the 66 exported `_sipral_*` entry points and nothing else, in this
+# build or that one, so it would report "no opus symbol" whether or not
+# libopus is in the file and call that a pass. Removed and rebuilt at the
+# same debug path for the same reason the no-default-features half above is.
+rm -f "$FFI_DEBUG_DYLIB" "$FFI_DEBUG_ARCHIVE"
+if ! cargo build -p sipral-ffi >/dev/null 2>&1; then
+    fail "cargo build -p sipral-ffi, to inspect the default-features artefact"
+elif [ ! -s "$FFI_DEBUG_DYLIB" ]; then
+    fail "$FFI_DEBUG_DYLIB is not there for the default-features mirror check"
+else
+    symbols=$(xcrun nm-classic -U "$FFI_DEBUG_DYLIB" 2>/dev/null | awk '{print $NF}')
+    if [ -z "$symbols" ]; then
+        fail "nm read no symbol out of $(basename "$FFI_DEBUG_DYLIB"), so nothing was checked"
+    else
+        linked=$(printf '%s\n' "$symbols" | grep '^_opus_' || true)
+        if [ -n "$linked" ]; then
+            pass "opus symbols are in the default artefact (nm)"
+        else
+            fail "the default build does not link a single opus symbol: an empty default feature set would pass this silently"
+        fi
+    fi
+fi
+
 # the other half of B7: what is committed under bindings/ against what the
 # declarations produce right now. The scans above say a declaration is listed;
 # this says the listed declaration reached the header and all three bindings.
@@ -836,7 +913,17 @@ if command -v kotlinc >/dev/null 2>&1; then
     # which ships in the lib/ of the distribution kotlinc runs from, beside
     # the standard library the JVM run below needs as well. The directory is
     # read off the command rather than guessed, and asserted to hold both.
-    kotlin_lib="$(cd "$(dirname "$(readlink -f "$(command -v kotlinc)")")/.." 2>/dev/null && pwd)/lib"
+    #
+    # Two layouts, because Homebrew's `kotlin` is not the distribution
+    # unpacked: its bin/kotlinc is a one-line wrapper that execs the real
+    # compiler under libexec/, so `readlink -f` lands beside the wrapper and
+    # the jars are a directory further in. The distribution's own layout is
+    # tried first, and the wrapper's after it.
+    kotlin_home="$(cd "$(dirname "$(readlink -f "$(command -v kotlinc)")")/.." 2>/dev/null && pwd)"
+    kotlin_lib="$kotlin_home/lib"
+    if [ ! -s "$kotlin_lib/kotlin-stdlib.jar" ] && [ -s "$kotlin_home/libexec/lib/kotlin-stdlib.jar" ]; then
+        kotlin_lib="$kotlin_home/libexec/lib"
+    fi
     if [ "${#kotlin_sources[@]}" -eq 0 ]; then
         fail "no Kotlin source found under bindings/kotlin, so nothing was compiled"
     elif [ ! -s "$kotlin_lib/kotlin-test.jar" ] || [ ! -s "$kotlin_lib/kotlin-stdlib.jar" ]; then

@@ -607,11 +607,11 @@ fn the_jni_shim_is_what_it_was() {
     golden("synthetic_jni.c", &kotlin::shim(&SYNTHETIC).unwrap());
 }
 
-/// The .NET static constructor and the call Swift's documentation gives are
-/// read from the declarations, not written into the back end. Written in,
-/// they named `AbiCheck`, `AbiVersionMajor` and `AbiVersionMinor` whatever the
-/// surface declared, and `golden/synthetic.cs`, printed from a surface that
-/// declared none of the three, stopped compiling.
+/// The .NET static constructor and the call Swift's `abiMismatch` makes on
+/// its own behalf are read from the declarations, not written into the back
+/// end. Written in, they named `AbiCheck`, `AbiVersionMajor` and
+/// `AbiVersionMinor` whatever the surface declared, and `golden/synthetic.cs`,
+/// printed from a surface that declared none of the three, stopped compiling.
 #[test]
 fn the_load_check_is_read_from_the_declarations() {
     for (language, printed) in [
@@ -650,18 +650,20 @@ fn the_load_check_is_read_from_the_declarations() {
     let printed = swift::binding(&SYNTHETIC).unwrap();
     assert!(
         printed.contains(
-            "/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)\n"
+            "    static let abiMismatch: SipralError? = {\n        let status = \
+             sipral_abi_check(abiVersionMajor, abiVersionMinor)\n"
         ),
         "{printed}"
     );
     for declared in [
         "public static func abiCheck(major: UInt32, minor: UInt32) throws {",
+        "static func ensureAbi() throws {",
         "public static let abiVersionMajor: UInt32 = 0",
         "public static let abiVersionMinor: UInt32 = 8",
     ] {
         assert!(
             printed.contains(declared),
-            "Swift documents a call it does not declare: {declared}"
+            "Swift calls what it does not declare: {declared}"
         );
     }
 }
@@ -1044,12 +1046,12 @@ fn a_type_spelled_with_a_space_is_the_same_type() {
     );
     let printed = swift::binding(&SYNTHETIC).unwrap();
     assert!(
-        printed.contains("public static func statusName(code: Int32) -> String? {"),
+        printed.contains("public static func statusName(code: Int32) throws -> String? {"),
         "Swift read the spelling rather than the type:\n{printed}"
     );
     let printed = swift::binding(&sipral_ffi::abi::SURFACE).unwrap();
     assert!(
-        printed.contains("public static func eventKindName(kind: UInt32) -> String? {"),
+        printed.contains("public static func eventKindName(kind: UInt32) throws -> String? {"),
         "the one declaration inside a macro is still printed as a status"
     );
 }
@@ -2266,11 +2268,11 @@ fn every_binding_hands_over_a_list_with_its_own_count() {
     let printed = swift::binding(surface).unwrap();
     for line in [
         "    public static func callSetHeaders(stack: SipralHandle, call: SipralHandle, \
-         headers: [SipralHeader]) throws {\n        let status =\n            \
+         headers: [SipralHeader]) throws {\n        try ensureAbi()\n        let status =\n            \
          SipralHeader.withUnsafeArray(headers) { p2 in\n                \
          sipral_call_set_headers(stack, call, p2.baseAddress, p2.count)\n",
         "config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws \
-         -> SipralHandle {\n",
+         -> SipralHandle {\n        try ensureAbi()\n",
         "SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in\n                \
          config.headers = p2Headers.baseAddress\n                \
          config.headers_len = p2Headers.count\n                \

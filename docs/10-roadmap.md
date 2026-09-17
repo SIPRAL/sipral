@@ -284,10 +284,12 @@ shape is permanent once published:
   resolve request as an event with its answer;
 - an account without a registrar, for trunks authenticated by address.
   *Built*: `registrar_len` zero, with `registrar_address` as the outbound proxy
-  and `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` as its state;
-- the Kotlin binding does not call `sipral_abi_check` at load; the .NET one
-  does, from a static constructor, and Swift, which has no load hook, documents
-  the call the application makes before anything else.
+  and `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` as its state.
+
+*Built*, all three: the .NET binding calls `sipral_abi_check` from a static
+constructor, Kotlin from the singleton object's `init {}` block, and Swift,
+which has neither, from `ensureAbi()`, which every call reads a static
+property through before it reaches C.
 
 **The layers a developer actually adopts**, above the printed bindings:
 

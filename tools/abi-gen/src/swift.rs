@@ -366,6 +366,7 @@ fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
 
 fn body(surface: &Surface, function: &Function, parts: &[Role<'_>]) -> Result<String, Refused> {
     let mut out = String::new();
+    out.push_str("        try ensureAbi()\n");
     for role in parts {
         match role {
             Role::Config(read) => {
@@ -592,9 +593,10 @@ fn naming(function: &Function, read: &[Read<'_>]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "    public static func {}({arguments}) -> String? {{",
+        "    public static func {}({arguments}) throws -> String? {{",
         called(function)
     );
+    out.push_str("        try ensureAbi()\n");
     let _ = writeln!(
         out,
         "        guard let text = {}({passed}) else {{ return nil }}",
@@ -676,6 +678,83 @@ fn sized(surface: &Surface) -> String {
     out
 }
 
+/// Everything a call reaches before it reaches C: the raw read of the last
+/// error, the ABI check `abiMismatch` runs once and `ensureAbi` throws from,
+/// and `check`, which turns an ordinary status into a thrown error.
+///
+/// Split out of [`binding`] only because clippy counts lines for a function
+/// that prints a whole file in one breath; nothing here reads differently
+/// for being its own function.
+fn plumbing(check: &crate::model::LoadCheck<'_>) -> String {
+    let constant = |value: &Value| {
+        safe(&lower_camel(
+            value.name.strip_prefix("SIPRAL_").unwrap_or(value.name),
+        ))
+    };
+    format!(
+        "    /// The calling thread's last error, or an empty string when it\n\
+         \x20   /// has none. Read the way C reads it: ask for the length, then\n\
+         \x20   /// for the bytes.\n\
+         \x20   ///\n\
+         \x20   /// Not behind `ensureAbi`. This is what a mismatch's own message\n\
+         \x20   /// is read with, while `abiMismatch` is still being computed, and\n\
+         \x20   /// going through the check to reach it would be this property\n\
+         \x20   /// reading itself before it has a value.\n\
+         \x20   static func rawLastErrorMessage() -> String {{\n\
+         \x20       var needed = 0\n\
+         \x20       _ = sipral_last_error_message(nil, 0, &needed)\n\
+         \x20       guard needed > 1 else {{ return \"\" }}\n\
+         \x20       var buffer = [CChar](repeating: 0, count: needed)\n\
+         \x20       let status = buffer.withUnsafeMutableBufferPointer {{\n\
+         \x20           sipral_last_error_message($0.baseAddress, $0.count, nil)\n\
+         \x20       }}\n\
+         \x20       guard status == SIPRAL_STATUS_OK else {{ return \"\" }}\n\
+         \x20       return String(cString: buffer)\n\
+         \x20   }}\n\n\
+         \x20   /// The calling thread's last error, or an empty string when it\n\
+         \x20   /// has none.\n\
+         \x20   public static func lastErrorMessage() throws -> String {{\n\
+         \x20       try ensureAbi()\n\
+         \x20       return rawLastErrorMessage()\n\
+         \x20   }}\n\n\
+         \x20   /// Whether the library this binding loaded can serve the ABI this\n\
+         \x20   /// file was printed against, checked once. A static stored\n\
+         \x20   /// property's initializer in Swift runs at most once and\n\
+         \x20   /// finishes before the first read of it returns, on whichever\n\
+         \x20   /// thread reaches it first, which is what makes this safe to\n\
+         \x20   /// read from every one of them without a lock of its own.\n\
+         \x20   static let abiMismatch: SipralError? = {{\n\
+         \x20       let status = {call}({major}, {minor})\n\
+         \x20       guard status != SIPRAL_STATUS_OK else {{ return nil }}\n\
+         \x20       return SipralError(\n\
+         \x20           status: SipralStatus(rawValue: status) ?? .panic,\n\
+         \x20           message: rawLastErrorMessage()\n\
+         \x20       )\n\
+         \x20   }}()\n\n\
+         \x20   /// Throws what `abiMismatch` found, if it found one. Every call\n\
+         \x20   /// below reaches this before it reaches C, so a binding loaded\n\
+         \x20   /// over the wrong library fails here, in whichever call the\n\
+         \x20   /// application happens to make first, rather than in whichever\n\
+         \x20   /// one first happens to disagree about a struct's layout.\n\
+         \x20   static func ensureAbi() throws {{\n\
+         \x20       if let mismatch = abiMismatch {{\n\
+         \x20           throw mismatch\n\
+         \x20       }}\n\
+         \x20   }}\n\n\
+         \x20   /// Turn a status into a thrown error, and nothing into nothing.\n\
+         \x20   static func check(_ status: sipral_status_t) throws {{\n\
+         \x20       guard status != SIPRAL_STATUS_OK else {{ return }}\n\
+         \x20       throw SipralError(\n\
+         \x20           status: SipralStatus(rawValue: status) ?? .panic,\n\
+         \x20           message: rawLastErrorMessage()\n\
+         \x20       )\n\
+         \x20   }}\n\n",
+        call = check.function.name,
+        major = constant(check.major),
+        minor = constant(check.minor),
+    )
+}
+
 /// Print the Swift binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     audit(surface, &Names)?;
@@ -710,45 +789,41 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     out.push_str(&sized(surface));
     out.push_str(&element_structs(surface)?);
 
-    // the call the application is told to make, spelled the way the method
-    // and the constants below are spelled, from the declarations they are
-    // printed from
+    // the call `abiMismatch` makes on this file's own behalf, spelled the way
+    // the entry point and the constants below are spelled, from the
+    // declarations they are printed from
     let check = crate::model::load_check(surface, "Swift")?;
-    let constant = |value: &Value| {
-        safe(&lower_camel(
-            value.name.strip_prefix("SIPRAL_").unwrap_or(value.name),
-        ))
-    };
-    let _ = write!(
-        out,
+    out.push_str(
         "/// Everything the library does, with the C conventions read off it.\n\
          ///\n\
          /// Swift gives a namespace `enum` like this one no load hook: there is\n\
          /// no module initializer and nothing else the runtime guarantees to run\n\
          /// before first use, the way a static constructor does for the .NET\n\
-         /// binding. Nothing here calls `{method}` for you. The application\n\
-         /// calls it itself, once, as the first thing it does with this module —\n\
-         /// before creating a stack or calling anything else here:\n\
+         /// binding or an `init` block does for the Kotlin one. What Swift does\n\
+         /// guarantee is narrower, and it is enough: a static stored property's\n\
+         /// initializer runs at most once, and finishes before the first read of\n\
+         /// it returns, on whichever thread reaches it first — the same promise\n\
+         /// `dispatch_once` made in Objective-C. `abiMismatch` below is one such\n\
+         /// property, and every call in this `enum` reads it, through\n\
+         /// `ensureAbi`, before it does anything else. So the check runs the\n\
+         /// first time this module is asked to do anything at all, on whichever\n\
+         /// thread makes that first call — not at import, which Swift gives no\n\
+         /// hook for, but before that first call reaches C, which is the promise\n\
+         /// this makes instead.\n\
          ///\n\
-         /// ```swift\n\
-         /// try Sipral.{method}({major_label}: Sipral.{major}, {minor_label}: Sipral.{minor})\n\
-         /// ```\n\
-         ///\n\
-         /// Skipping it is not safe. The `size` every struct here carries\n\
-         /// settles how long a struct is, not what is in it: a header and a\n\
-         /// library that disagree about the order or the meaning of members can\n\
-         /// still agree about the length, and then every size rule passes while\n\
-         /// the library reads a pointer out of whatever was put in its place.\n\
-         /// No entry point can catch that, because whether a pointer is\n\
-         /// readable is the caller's promise, not something the library can\n\
-         /// check. This call is the one that finds the disagreement before\n\
-         /// anything is read.\n\
-         public enum Sipral {{\n",
-        method = called(check.function),
-        major_label = safe(&lower_camel(check.major_parameter.name)),
-        major = constant(check.major),
-        minor_label = safe(&lower_camel(check.minor_parameter.name)),
-        minor = constant(check.minor),
+         /// Skipping it is not something a caller can do: there is no call here\n\
+         /// that reaches C without going through `ensureAbi` first. The `size`\n\
+         /// every struct here carries settles how long a struct is, not what is\n\
+         /// in it: a header and a library that disagree about the order or the\n\
+         /// meaning of members can still agree about the length, and then every\n\
+         /// size rule passes while the library reads a pointer out of whatever\n\
+         /// was put in its place. No entry point can catch that on its own,\n\
+         /// because whether a pointer is readable is the caller's promise, not\n\
+         /// something the library can check. This is what finds the\n\
+         /// disagreement before anything is read, and a mismatch is what it\n\
+         /// throws — a SipralError, from whichever call the application happens\n\
+         /// to make first, not a warning that is easy to miss.\n\
+         public enum Sipral {\n",
     );
 
     for group in surface.constants {
@@ -766,30 +841,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
         }
     }
 
-    out.push_str(
-        "    /// The calling thread's last error, or an empty string when it\n\
-         \x20   /// has none. Read the way C reads it: ask for the length, then\n\
-         \x20   /// for the bytes.\n\
-         \x20   public static func lastErrorMessage() -> String {\n\
-         \x20       var needed = 0\n\
-         \x20       _ = sipral_last_error_message(nil, 0, &needed)\n\
-         \x20       guard needed > 1 else { return \"\" }\n\
-         \x20       var buffer = [CChar](repeating: 0, count: needed)\n\
-         \x20       let status = buffer.withUnsafeMutableBufferPointer {\n\
-         \x20           sipral_last_error_message($0.baseAddress, $0.count, nil)\n\
-         \x20       }\n\
-         \x20       guard status == SIPRAL_STATUS_OK else { return \"\" }\n\
-         \x20       return String(cString: buffer)\n\
-         \x20   }\n\n\
-         \x20   /// Turn a status into a thrown error, and nothing into nothing.\n\
-         \x20   static func check(_ status: sipral_status_t) throws {\n\
-         \x20       guard status != SIPRAL_STATUS_OK else { return }\n\
-         \x20       throw SipralError(\n\
-         \x20           status: SipralStatus(rawValue: status) ?? .panic,\n\
-         \x20           message: lastErrorMessage()\n\
-         \x20       )\n\
-         \x20   }\n\n",
-    );
+    out.push_str(&plumbing(&check));
 
     for (function, read) in functions(surface)? {
         if function.name == "sipral_last_error_message" {
@@ -882,6 +934,15 @@ impl Spelling for Names {
     fn written_by_hand(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("lastErrorMessage", "sipral_last_error_message"),
+            (
+                "rawLastErrorMessage",
+                "the raw error read this back end writes",
+            ),
+            (
+                "abiMismatch",
+                "the ABI check this back end runs once, on first use",
+            ),
+            ("ensureAbi", "the ABI check this back end writes"),
             ("check", "the status check this back end writes"),
         ]
     }

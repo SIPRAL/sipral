@@ -35,8 +35,8 @@ impl std::fmt::Display for Refused {
 
 /// What a binding checks itself against at load, as the surface declares it:
 /// the entry point that says whether this library can serve a binding
-/// generated against a version, the two parameters it takes that version in,
-/// and the two constants that are that version.
+/// generated against a version, and the two constants that are that
+/// version.
 ///
 /// A back end prints the call from these rather than writing it out, because
 /// a call written out names whatever the declarations were called the day it
@@ -47,10 +47,6 @@ impl std::fmt::Display for Refused {
 pub(crate) struct LoadCheck<'a> {
     /// The entry point.
     pub(crate) function: &'a Function,
-    /// Its parameter for the major version.
-    pub(crate) major_parameter: &'a Member,
-    /// Its parameter for the minor version.
-    pub(crate) minor_parameter: &'a Member,
     /// The major version the surface is.
     pub(crate) major: &'a Value,
     /// The minor version the surface is.
@@ -104,8 +100,6 @@ pub(crate) fn load_check<'a>(
     };
     Ok(LoadCheck {
         function,
-        major_parameter,
-        minor_parameter,
         major: constant("SIPRAL_ABI_VERSION_MAJOR")?,
         minor: constant("SIPRAL_ABI_VERSION_MINOR")?,
     })

@@ -7919,6 +7919,75 @@ fn a_subscription_nothing_refreshes_lapses_when_the_notifier_said_it_would() {
 }
 
 #[test]
+fn is_worth_retrying_agrees_with_what_a_subscription_actually_does() {
+    // Both a lapse and a `terminated;reason=timeout` NOTIFY read like a
+    // failure that could go differently on a second try, and both of the
+    // paths that can end a subscription for a reason — a lapse through
+    // `fire_subscription_timers`, a `terminated` NOTIFY through
+    // `on_subscription_over` — go through the one function that asks
+    // `is_worth_retrying`. The enum and what is left behind must agree.
+    assert!(!SubscriptionEnd::Expired.is_worth_retrying());
+    assert!(SubscriptionEnd::Timeout.is_worth_retrying());
+
+    let t0 = Instant::now();
+
+    // the lapse: nothing refreshed it before the granted hour ran out
+    {
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (handle, _) = subscribed(&mut agent, id, t0);
+        agent.handle_timeout(t0 + Duration::from_secs(3_601));
+        let ended = events(&mut agent);
+        assert!(
+            ended.iter().any(|event| matches!(
+                *event,
+                UaEvent::SubscriptionEnded {
+                    reason: SubscriptionEnd::Expired,
+                    retry_in: None,
+                    ..
+                }
+            )),
+            "{ended:?}"
+        );
+        assert_eq!(
+            agent.subscription_state(handle),
+            None,
+            "is_worth_retrying says Expired is not, and nothing is left to retry"
+        );
+    }
+
+    // the recoverable reason: the notifier says so itself
+    {
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let (handle, subscribe) = subscribed(&mut agent, id, t0);
+        deliver(
+            &mut agent,
+            &notification(&subscribe, 2, "notifier", "terminated;reason=timeout", None),
+            t0,
+        );
+        transmits(&mut agent);
+        let ended = events(&mut agent);
+        assert!(
+            ended.iter().any(|event| matches!(
+                *event,
+                UaEvent::SubscriptionEnded {
+                    reason: SubscriptionEnd::Timeout,
+                    retry_in: Some(_),
+                    ..
+                }
+            )),
+            "{ended:?}"
+        );
+        assert_eq!(
+            agent.subscription_state(handle),
+            Some(SubscriptionState::Retrying),
+            "is_worth_retrying says Timeout is, and a retry is scheduled"
+        );
+    }
+}
+
+#[test]
 fn a_notification_nobody_subscribed_to_is_refused() {
     // §4.1.3: "the subscriber should check that it matches at least one of its
     // outstanding subscriptions; if not, it MUST return a 481"

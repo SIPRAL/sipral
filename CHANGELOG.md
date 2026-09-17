@@ -10,10 +10,46 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ## [Unreleased]
 
+### Security
+
+- **The SRTP master key and salt are built in a buffer that wipes itself**.
+  `draw_key` drew one block of `SHA-256(media seed || counter)`
+  into a plain array, copied the key and the salt out of it into two more,
+  and cleared only the block, by hand, with a compiler fence behind it — so
+  the two buffers that actually held the key outlived the function on the
+  stack. All three are `zeroize::Zeroizing` now, wiped in their own `Drop`,
+  which the next edit to that function cannot quietly stop doing. The two
+  halves are copied out a byte at a time rather than sliced, and an assertion
+  beside the function holds both lengths to the block: this is the one place
+  in the tree where reading past the end must not be recoverable, because a
+  key of zeros protects nothing while every message still looks right.
+  `zeroize` was already in the tree at the same pinned version for
+  `sipral-rtp` and `sipral-dtls`; `sipral` now names it directly, and
+  `THIRD-PARTY-NOTICES.md` says why.
+
+- **A recorded call is shown, not assumed, to carry no key**.
+  The separation of the media seed from the endpoint's own was already built;
+  what was missing was a demonstration of it. A test now negotiates a
+  real SRTP call between two stacks, records the caller's inbound half with
+  the replay recorder, and asserts the caller's own negotiated key appears
+  nowhere in the finished recording — and a second test places two calls from
+  two agents that share one endpoint seed and differ only in their media
+  seed, and asserts the keys they offer differ. The first test was watched to
+  fail with the key written in on purpose before it was left passing.
+
 ### Fixed
 
-- **A REFER's transfer seat is freed on every way it can end** (task
-  8.3.11-ter(a)). A REFER that timed out or whose transport failed left the
+- **An expired subscription no longer claims it is worth retrying**.
+  `SubscriptionEnd::is_worth_retrying` answered true for `Expired`
+  while the timer path ended such a subscription for good, and the two never
+  met because that path called `end_subscription` directly rather than going
+  through the one function that asks. The lapse goes through it now, so the
+  enum is the single answer for every reason there is, and `Expired` sits
+  with the refusals: a granted lifetime that ran out is this end's own doing,
+  and what follows it is a fresh SUBSCRIBE rather than a resumed one.
+
+- **A REFER's transfer seat is freed on every way it can end**. A REFER that
+  timed out or whose transport failed left the
   call unable to transfer again for good: the core raises
   `TransactionTerminated` before `RequestFailed` on both paths, so the
   release that ran on the answer no longer found the transaction it keyed
@@ -22,36 +58,36 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   that terminates the subscription frees it too when its body is a 100 or
   unreadable, as RFC 3515 §2.4.4 lets the first NOTIFY be.
 
-- **The 415 branch `on_dtmf_event` could no longer reach is gone** (task
-  8.3.11-ter(b)). `names_a_dtmf_body` already turns back every `Content-Type`
+- **The 415 branch `on_dtmf_event` could no longer reach is gone**.
+  `names_a_dtmf_body` already turns back every `Content-Type`
   but the two this stack reads before a body is parsed, so the `Accept`
   header a 415 used to add named a case that could not happen any more;
   removed along with the constant it built.
 
-- **A queued digit whose own INFO could not be sent is reported** (task
-  8.3.11-ter(c)). `request_in_dialog` refusing a digit behind the one just
+- **A queued digit whose own INFO could not be sent is reported**.
+  `request_in_dialog` refusing a digit behind the one just
   answered used to vanish silently; it is `UaEvent::DtmfSent` with 503 now —
   the status RFC 3261 §8.1.3.1 already stands for a request that never went
   out — and the digits still waiting are discarded the same as for any other
   failure mid-sequence.
 
-- **`Duration=0` and no duration at all read apart again, at the facade**
-  (task 8.3.11-ter(d)). `MediaEvent::DigitReceived::held` is
+- **`Duration=0` and no duration at all read apart again, at the facade**.
+  `MediaEvent::DigitReceived::held` is
   `Option<Duration>`: `None` for the INFO body that never carries one,
   `Some(Duration::ZERO)` for a peer that said `Duration=0` on the other. No
   ABI change — `sipral_media_event_t::held_ms` still reads zero for both, and
   its documentation now says so.
 
-- **A call's SIP INFO digit queue is bounded at sixty-four** (task
-  8.3.11-ter(e)) — the digit in flight and everything waiting behind it. A
+- **A call's SIP INFO digit queue is bounded at sixty-four** — the digit in
+  flight and everything waiting behind it. A
   string that would carry a call past that many is refused whole, before
   anything of it is sent, with the same error an invalid digit already gets.
 
-- **Four follow-ups of DTMF by SIP INFO** (task 8.3.11-bis). An INFO whose
+- **Four follow-ups of DTMF by SIP INFO**. An INFO whose
   `Content-Type` is not `application/dtmf-relay` or `application/dtmf` — RFC
   5168's media control, a vendor Info-Package, one with no body at all —
-  reaches the application unanswered again, the way it did before 8.3.11
-  started claiming every INFO in a call's dialog by method alone.
+  reaches the application unanswered again, the way it did before this stack
+  began claiming every INFO in a call's dialog by method alone.
   `UserAgent::send_dtmf_info` takes a whole string now, validated as a whole
   before anything is sent, and sends it one digit at a time — each INFO only
   after the one ahead of it has a final answer, so a refusal, a timeout or a
@@ -68,7 +104,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
-- **DTMF by SIP INFO, both ways, owned by the user agent** (task 8.3.11).
+- **DTMF by SIP INFO, both ways, owned by the user agent**.
   `UserAgent::send_dtmf_info` builds and sends the INFO in `sipral-ua` now —
   the construction moved out of `sipral-ffi`, which used to build it by hand
   with no transaction ownership and no report of the answer — and reports the
@@ -100,15 +136,60 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **The Swift binding checks the ABI before the first call into it, rather
+  than asking the application to remember**. C# and Kotlin
+  already checked at load; Swift has no load hook, so the generator now
+  prints a `static let` whose initialiser runs once, before the first read of
+  it returns, on whichever thread gets there first — and every generated
+  entry point reads it first. A mismatch is a thrown `SipralError` naming
+  both versions, not a printed warning. The three name lookups
+  (`statusName`, `codecName`, `eventKindName`) became `throws` with the
+  rest, because an entry point that skips the check is a gap rather than a
+  convenience. Written in `tools/abi-gen`, not by hand in the binding.
+
+- **The gate reads the artefact for libopus, not only the dependency graph**.
+  `cargo tree` says what the build was told to link; it does
+  not say what came out. The step that proves a build without the feature
+  carries no Opus now rebuilds `sipral-ffi`'s shared library with
+  `--no-default-features` and inspects it — `otool -L` for a dynamic
+  dependency, and `nm` for the statically linked symbols, which is where they
+  actually are, since the Opus crate vendors and builds libopus with hidden
+  visibility. The mirror half asserts the default build does carry them, so
+  an empty default feature set cannot pass quietly. The inspection is of a
+  debug artefact on purpose: the release profile strips local symbols, which
+  would make the two builds look identical.
+
+- **`docs/13-client-requirements.md` says which requirements a C caller can
+  reach today**. A new section sorts all of them three ways:
+  answerable from `sipral.h` alone, built in Rust with no C entry point yet,
+  and not built anywhere. It is written against the header and the FFI crate
+  rather than against a plan for them, and it is the list 8.4 shortens.
+  Two documents were also brought back to the truth: `docs/08-ffi.md` said no
+  Swift, Kotlin or .NET toolchain ran in the gate, which stopped being true
+  when that step was added, and `docs/04-ua.md` said neither form of DTMF had
+  been run against a real server, which stopped being true when the lab ran
+  both. Both forms pass against Asterisk; RFC 4733 does not yet pass through
+  the lab's proxy to FreeSWITCH, and the document now says so rather than
+  reporting a pass on one server's word.
+
+- **The Kotlin step finds its own standard library on a wrapped
+  installation**. `kotlinc` from a package manager is often a
+  one-line wrapper that execs the real compiler a directory further in, so
+  reading the jars off the command landed beside the wrapper and the step
+  failed on a machine where Kotlin was installed correctly. Both layouts are
+  tried now. With that, and with a Kotlin compiler present, the gate runs
+  with no skipped step for the first time.
+
 - **Event kinds 28 and 29 are held for two events the C ABI does not raise
   yet**: the stack recovering from a suspension or a network change, and the
   application being asked to resolve a destination. `sipral.h` lists them
   with the other reserved numbers, so the branches that add them cannot
   collide. 27 was held the same way, for a DTMF digit sent by SIP INFO being
-  answered, and 8.3.11 turned it into a kind in place.
+  answered, and the work that brought DTMF by SIP INFO turned it into a kind
+  in place.
 
 - **A transfer taken from C places its call the way `sipral_call_place`
-  does** (task 8.4.4). `sipral_call_accept_transfer` used to place an
+  does**. `sipral_call_accept_transfer` used to place an
   offerless INVITE with no SRTP policy and no application headers on it,
   because it had no configuration to read one from; it now takes a
   `sipral_call_config_t`, the same struct and the same versioned reader
@@ -136,8 +217,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   nothing outside this tree calls it yet, so it changed outright rather than
   carrying a parameter nobody could ever set.
 
-- **The lab now drives calls through the facade an application links** (task
-  8.5.1). `sipral-interop` carried its own RTP session, its own codec pair and
+- **The lab now drives calls through the facade an application links**.
+  `sipral-interop` carried its own RTP session, its own codec pair and
   its own DTMF sender — a second media join, written for the lab and used
   nowhere else, which is a phase 1 exit criterion this stack had not met:
   "a phase whose proof runs on a path no customer uses has not exited"
@@ -154,7 +235,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   9003); SRTP against a new SDES endpoint of Asterisk's own
   (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004); and a
   hold whose resume re-offers a narrower codec list than the call held on
-  (the 8.2.1 case), against Asterisk, by a re-offer the harness writes
+  (the case a codec change makes), against Asterisk, by a re-offer the harness
+  writes
   itself — `sipral::MediaEngine` has no public way yet to re-offer a live
   call on a catalogue of its own choosing, which `interop/harness/src/main.rs`
   (`reoffer_onto`) says in full. DTMF by SIP INFO is not among them:
@@ -169,7 +251,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
-- **The SRTP policy is now chosen from C** (task 8.4.6). An application
+- **The SRTP policy is now chosen from C**. An application
   linking `sipral.h` could not ask for SRTP at all, although the facade
   underneath always could: `sipral_stack_config_t::srtp` sets the stack's
   default and `sipral_call_config_t::srtp` overrides it for one call, both a
@@ -182,7 +264,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   built against an older header still works and gets the default. An
   out-of-range value is refused before anything is built.
 
-- **A call event now names who is on it** (task 8.4.7). `sipral_call_event_t`
+- **A call event now names who is on it**. `sipral_call_event_t`
   gained `from_uri`, `from_display`, `to_uri` and `call_id`: the `From` URI,
   the resolved `From` display name, the `To` URI and the `Call-ID` of the
   request that opened the call, read once and the same on every event of that
@@ -193,7 +275,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   build — but `sipral_event_t` carries no pinned length to begin with, so a
   caller built against an older header is unaffected.
 
-- **Early media when this stack runs the audio** (task 8.4.9). An incoming
+- **Early media when this stack runs the audio**. An incoming
   call could be answered with audio (`sipral_call_answer_media`,
   `MediaEngine::answer`) but not rung with it: `sipral_call_ring` only sent a
   183 with whatever description the application wrote itself.
@@ -205,7 +287,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   same `o=` id and version — and what the 200 OK carries then follows RFC
   3262 §5 and RFC 6337 §3.1.1 exactly, from whether the 183 went out reliably.
   `sipral_call_ring_media` also takes `sipral_call_config_t::srtp`, closing
-  the gap 8.4.6 left: an answered call could not override the stack's SRTP
+  the gap the stack-wide setting left: an answered call could not override
+  the stack's SRTP
   policy at all. Ringing with media twice is `SIPRAL_STATUS_WRONG_STATE`;
   ringing with media after a `sipral_call_ring` that sent no description is
   not, and after one that sent the application's own it is, since every
@@ -233,8 +316,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   time, and now raises it only when the codec, the address or the direction
   actually moved.
 
-- **A BYE is exempt from the per-dialog non-INVITE transaction budget (task
-  8.7.4-ter a).** Sixteen non-INVITE server transactions open on a dialog
+- **A BYE is exempt from the per-dialog non-INVITE transaction budget.**
+  Sixteen non-INVITE server transactions open on a dialog
   used to get a BYE the same 503 as a seventeenth INFO would, but RFC 3261
   §15.1.1 has the caller consider the session over the moment it sends one,
   whatever answer comes back — so the refusal only left the far end holding
@@ -244,7 +327,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and, like every other non-INVITE request, is still held to the same
   ceiling of sixteen.
 
-- **Documentation for the per-dialog 503 (task 8.7.4-ter c, d).**
+- **Documentation for the per-dialog 503.**
   `docs/09-rfc-index.md` gains the row for RFC 5057, the source for reading
   that 503 as ending only the transaction it answers rather than the dialog
   underneath it. `docs/03-core-signalling.md` says why the refusal carries
@@ -257,7 +340,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   longer wait would idle an otherwise healthy call for room that may already
   be there.
 
-- **`StackState::farewells` is bounded (task 8.4.21).** An application that
+- **`StackState::farewells` is bounded.** An application that
   never called `sipral_stack_poll_farewell` — a binding built against a
   header from before that entry point existed, among others — kept every
   ended call's RTCP goodbye queued for as long as the stack lived, about a
@@ -267,7 +350,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   drop is counted in `sipral_counters_t::farewells_dropped`, appended at the
   struct's tail with `MIN_SIZE` unchanged.
 
-- **Six follow-ups from the transaction and dialog audit (task 8.7.4).** A
+- **Six follow-ups from reading the transaction and dialog layers back
+  against RFC 3261.** A
   request inside a dialog was wholly exempt from `max_server_transactions`,
   so a peer already inside a live call could open non-INVITE server
   transactions without limit; each dialog now has a ceiling of its own —
@@ -353,7 +437,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 - **A call's RTCP BYE was built and then dropped, and a slow callback could
   hold every thread on a stack open for as long as other threads kept posting
-  behind it (task 8.4.21).** `MediaEngine::poll_farewell` had nothing in
+  behind it.** `MediaEngine::poll_farewell` had nothing in
   `sipral-ffi` or `interop/harness` calling it, so the goodbye RFC 3550 §6.3.7
   owes a call's far end was built at the moment the call ended and then
   discarded with the session it came from; `sipral_stack_poll_farewell` is
@@ -1268,7 +1352,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   with `no_renegotiation`. The SRTP keys, arranged per direction in the shape
   `sipral-rtp` takes them, and any application data come out only after the
   peer's Finished is verified. `setup::dtls_role` maps `a=setup` to the role.
-  Two findings of the foundation's review go with it: a hello's extensions
+  Two findings from reading that foundation back against RFC 6347 go with it:
+  a hello's extensions
   were checked for a duplicate by searching the list once per extension, a
   hundred million comparisons for one 64 KiB block, and are now sorted once;
   and reassembly kept the first of two fragments that disagree, so one forged
@@ -1500,7 +1585,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   everything the generator prints raises the minor, and not only a function
   or a struct member, which is a project rule rather than something about
   codecs. The reason for all of it is licensing and not size —
-  `docs/05-media.md` says which customer needs it out and why, and notes that
+  `docs/05-media.md` sets out the licensing position in full, and notes that
   a build without the feature needs no cmake and no C++ toolchain because
   nothing compiles libopus from source, and `docs/10-roadmap.md` now carries
   the half of that decision the packaging owns, so that the pointer lands on
@@ -1512,8 +1597,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   crate whose feature removes items from its public API has to say so where
   the API is read. And `scripts/check.sh` now builds, tests and lints both
   configurations, tests the mixed one, and asserts that libopus is out of the
-  dependency graph of `sipral` **and** of `sipral-ffi` — the C library a
-  hardware customer ships reaches the codec down an edge of its own, and two
+  dependency graph of `sipral` **and** of `sipral-ffi` — the C library
+  reaches the codec down an edge of its own, and two
   graphs that agree today can be made to disagree by one edit. That assertion
   captures the tree into a variable first and counts a cargo that did not run
   as a failure: written as a negated pipeline, as it first was, a renamed
@@ -1600,8 +1685,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the octets rather than a borrow.
 
 - **The derived constant names in two bindings were nonsense, and are not any
-  more.** `SIPRAL_FEATURE_OPUS` — the one symbol a hardware customer is told
-  to check for — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,
+  more.** `SIPRAL_FEATURE_OPUS` — the one symbol an application reads to know
+  whether this build has Opus — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,
   beside `fEATURESUBSCRIPTIONS` and `MEDIAPACKETBYTES` and seventeen others.
   The camel-case derivation looked for an underscore or a capital to start a
   word at, and a name already in capitals has neither, so it lower-cased the
@@ -1894,8 +1979,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 - A configuration value cannot be accepted and ignored. `SIPRAL_STATUS_NOT_SUPPORTED`
   is the third answer a setter may give, distinct from a value that is wrong
-  and from a struct this build cannot read, and the audit that came with it
-  found the failure it was written for: `timer_t2_ms` and `timer_t4_ms` were
+  and from a struct this build cannot read, and reading every setter against
+  the transport it applies to found the failure it was written for:
+  `timer_t2_ms` and `timer_t4_ms` were
   taken without complaint on TCP, TLS and WebSocket transports, where neither
   is ever armed — a setting disabled by a neighbouring one, which is the shape
   the requirement describes. Both are refused where they are set now, naming
@@ -1944,10 +2030,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the spelling rather than the layout, so a wrong `usize`-to-`size_t` rule
   would be wrong in all five outputs at once and compare clean.
 
-  It also closed a coupling of exactly the shape B7 describes, found inside the
-  workspace this morning: `UaEvent::IncomingCall` was destructured field by
-  field in the FFI, so adding a field to it broke the build — one agent had
-  already had to redesign a feature around it.
+  It also closed a coupling of exactly the shape B7 describes, inside the
+  workspace itself: `UaEvent::IncomingCall` was destructured field by field
+  in the FFI, so adding a field to it broke the build, and a feature in
+  progress had already had to be redesigned around that.
 
 - **SRTP is reachable from a call** (SDES, RFC 4568). It was written in full,
   proved against RFC 3711's own test vectors, and joined to nothing: no offer
@@ -3048,11 +3134,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
   published to NuGet as `Sipral` 0.0.1.
 - `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
-  merged from four independent proposals scored by three reviewers, with
-  register, call, CANCEL-race and fork walkthroughs, a fake-clock test, the C
-  projection, and a record of what was rejected and why. Adds the RFC 6026
-  `Accepted` state to both INVITE machines, which every proposal had missed on
-  the client side.
+  with register, call, CANCEL-race and fork walkthroughs, a fake-clock test,
+  the C projection, and a record of what was rejected and why. Adds the RFC
+  6026 `Accepted` state to both INVITE machines, which every draft of the
+  surface had missed on the client side.
 - RFC 4475 torture corpus under `fixtures/rfc4475/`: the 49 messages decoded
   byte for byte from the archive in Appendix A, laid out by RFC section, with
   a manifest carrying section, title, expected outcome and SHA-256 per file.

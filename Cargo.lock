@@ -448,6 +448,7 @@ dependencies = [
  "sipral-media",
  "sipral-rtp",
  "sipral-ua",
+ "zeroize",
 ]
 
 [[package]]

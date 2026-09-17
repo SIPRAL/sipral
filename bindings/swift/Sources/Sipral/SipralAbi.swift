@@ -736,23 +736,30 @@ public struct SipralHeader: Sendable {
 /// Swift gives a namespace `enum` like this one no load hook: there is
 /// no module initializer and nothing else the runtime guarantees to run
 /// before first use, the way a static constructor does for the .NET
-/// binding. Nothing here calls `abiCheck` for you. The application
-/// calls it itself, once, as the first thing it does with this module —
-/// before creating a stack or calling anything else here:
+/// binding or an `init` block does for the Kotlin one. What Swift does
+/// guarantee is narrower, and it is enough: a static stored property's
+/// initializer runs at most once, and finishes before the first read of
+/// it returns, on whichever thread reaches it first — the same promise
+/// `dispatch_once` made in Objective-C. `abiMismatch` below is one such
+/// property, and every call in this `enum` reads it, through
+/// `ensureAbi`, before it does anything else. So the check runs the
+/// first time this module is asked to do anything at all, on whichever
+/// thread makes that first call — not at import, which Swift gives no
+/// hook for, but before that first call reaches C, which is the promise
+/// this makes instead.
 ///
-/// ```swift
-/// try Sipral.abiCheck(major: Sipral.abiVersionMajor, minor: Sipral.abiVersionMinor)
-/// ```
-///
-/// Skipping it is not safe. The `size` every struct here carries
-/// settles how long a struct is, not what is in it: a header and a
-/// library that disagree about the order or the meaning of members can
-/// still agree about the length, and then every size rule passes while
-/// the library reads a pointer out of whatever was put in its place.
-/// No entry point can catch that, because whether a pointer is
-/// readable is the caller's promise, not something the library can
-/// check. This call is the one that finds the disagreement before
-/// anything is read.
+/// Skipping it is not something a caller can do: there is no call here
+/// that reaches C without going through `ensureAbi` first. The `size`
+/// every struct here carries settles how long a struct is, not what is
+/// in it: a header and a library that disagree about the order or the
+/// meaning of members can still agree about the length, and then every
+/// size rule passes while the library reads a pointer out of whatever
+/// was put in its place. No entry point can catch that on its own,
+/// because whether a pointer is readable is the caller's promise, not
+/// something the library can check. This is what finds the
+/// disagreement before anything is read, and a mismatch is what it
+/// throws — a SipralError, from whichever call the application happens
+/// to make first, not a warning that is easy to miss.
 public enum Sipral {
     /// The value no live handle ever takes.
     public static let handleNone: SipralHandle = 0
@@ -857,7 +864,12 @@ public enum Sipral {
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
     /// for the bytes.
-    public static func lastErrorMessage() -> String {
+    ///
+    /// Not behind `ensureAbi`. This is what a mismatch's own message
+    /// is read with, while `abiMismatch` is still being computed, and
+    /// going through the check to reach it would be this property
+    /// reading itself before it has a value.
+    static func rawLastErrorMessage() -> String {
         var needed = 0
         _ = sipral_last_error_message(nil, 0, &needed)
         guard needed > 1 else { return "" }
@@ -869,12 +881,45 @@ public enum Sipral {
         return String(cString: buffer)
     }
 
+    /// The calling thread's last error, or an empty string when it
+    /// has none.
+    public static func lastErrorMessage() throws -> String {
+        try ensureAbi()
+        return rawLastErrorMessage()
+    }
+
+    /// Whether the library this binding loaded can serve the ABI this
+    /// file was printed against, checked once. A static stored
+    /// property's initializer in Swift runs at most once and
+    /// finishes before the first read of it returns, on whichever
+    /// thread reaches it first, which is what makes this safe to
+    /// read from every one of them without a lock of its own.
+    static let abiMismatch: SipralError? = {
+        let status = sipral_abi_check(abiVersionMajor, abiVersionMinor)
+        guard status != SIPRAL_STATUS_OK else { return nil }
+        return SipralError(
+            status: SipralStatus(rawValue: status) ?? .panic,
+            message: rawLastErrorMessage()
+        )
+    }()
+
+    /// Throws what `abiMismatch` found, if it found one. Every call
+    /// below reaches this before it reaches C, so a binding loaded
+    /// over the wrong library fails here, in whichever call the
+    /// application happens to make first, rather than in whichever
+    /// one first happens to disagree about a struct's layout.
+    static func ensureAbi() throws {
+        if let mismatch = abiMismatch {
+            throw mismatch
+        }
+    }
+
     /// Turn a status into a thrown error, and nothing into nothing.
     static func check(_ status: sipral_status_t) throws {
         guard status != SIPRAL_STATUS_OK else { return }
         throw SipralError(
             status: SipralStatus(rawValue: status) ?? .panic,
-            message: lastErrorMessage()
+            message: rawLastErrorMessage()
         )
     }
 
@@ -887,7 +932,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Reads no memory the caller owns, and is safe to call from any thread.
-    public static func statusName(status: Int32) -> String? {
+    public static func statusName(status: Int32) throws -> String? {
+        try ensureAbi()
         guard let text = sipral_status_name(status) else { return nil }
         return String(cString: text)
     }
@@ -899,6 +945,7 @@ public enum Sipral {
     /// `out_version` must point at a `sipral_abi_version_t` whose `size`
     /// member says how long it is.
     public static func abiVersion() throws -> sipral_abi_version_t {
+        try ensureAbi()
         var version = sipral_abi_version_t.sized()
         let status = sipral_abi_version(&version)
         try check(status)
@@ -920,6 +967,7 @@ public enum Sipral {
     ///
     /// Reads no memory the caller owns, and is safe to call from any thread.
     public static func abiCheck(major: UInt32, minor: UInt32) throws {
+        try ensureAbi()
         let status = sipral_abi_check(major, minor)
         try check(status)
     }
@@ -943,6 +991,7 @@ public enum Sipral {
     /// `name` must be readable for `name_len` bytes, and `out_size` must
     /// point at one `size_t`.
     public static func abiStructSize(name: String) throws -> Int {
+        try ensureAbi()
         var size = Int()
         let status =
             Array(name.utf8).withUnsafeBufferPointer { raw0 in
@@ -968,6 +1017,7 @@ public enum Sipral {
     ///
     /// `out_count` must point at one `size_t`.
     public static func abiVersionedCount() throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status = sipral_abi_versioned_count(&count)
         try check(status)
@@ -986,6 +1036,7 @@ public enum Sipral {
     /// `out_capabilities` must point at a `sipral_capabilities_t` whose
     /// `size` member says how long it is.
     public static func capabilities() throws -> sipral_capabilities_t {
+        try ensureAbi()
         var capabilities = sipral_capabilities_t.sized()
         let status = sipral_capabilities(&capabilities)
         try check(status)
@@ -1007,6 +1058,7 @@ public enum Sipral {
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_stack` at one `sipral_handle_t`.
     public static func stackCreate(config: sipral_stack_config_t) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var stack = SipralHandle()
         let status = sipral_stack_create(&config, &stack)
@@ -1026,6 +1078,7 @@ public enum Sipral {
     /// `out_settings` must point at a `sipral_stack_settings_t` whose `size`
     /// member says how long it is.
     public static func stackSettings(stack: SipralHandle) throws -> sipral_stack_settings_t {
+        try ensureAbi()
         var settings = sipral_stack_settings_t.sized()
         let status = sipral_stack_settings(stack, &settings)
         try check(status)
@@ -1047,6 +1100,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     public static func stackDestroy(stack: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_stack_destroy(stack)
         try check(status)
     }
@@ -1082,6 +1136,7 @@ public enum Sipral {
     /// `result` must be null or point at a `sipral_poll_result_t` whose `size`
     /// member says how long it is.
     public static func stackPoll(stack: SipralHandle, nowMs: UInt64) throws -> sipral_poll_result_t {
+        try ensureAbi()
         var result = sipral_poll_result_t.sized()
         let status = sipral_stack_poll(stack, nowMs, &result)
         try check(status)
@@ -1100,6 +1155,7 @@ public enum Sipral {
     /// `out_counters` must point at a `sipral_counters_t` whose `size` member
     /// says how long it is.
     public static func stackCounters(stack: SipralHandle) throws -> sipral_counters_t {
+        try ensureAbi()
         var counters = sipral_counters_t.sized()
         let status = sipral_stack_counters(stack, &counters)
         try check(status)
@@ -1117,6 +1173,7 @@ public enum Sipral {
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_account` at one `sipral_handle_t`.
     public static func accountAdd(stack: SipralHandle, config: sipral_account_config_t, configHeaders: [SipralHeader]) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var account = SipralHandle()
         let status =
@@ -1140,6 +1197,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func accountRemove(stack: SipralHandle, account: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_account_remove(stack, account)
         try check(status)
     }
@@ -1158,6 +1216,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func accountRegister(stack: SipralHandle, account: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_account_register(stack, account, nowMs)
         try check(status)
     }
@@ -1175,6 +1234,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func accountUnregister(stack: SipralHandle, account: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_account_unregister(stack, account, nowMs)
         try check(status)
     }
@@ -1188,6 +1248,7 @@ public enum Sipral {
     ///
     /// `out_state` must point at one `uint32_t`.
     public static func accountRegistrationState(stack: SipralHandle, account: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
         var state = UInt32()
         let status = sipral_account_registration_state(stack, account, &state)
         try check(status)
@@ -1213,6 +1274,7 @@ public enum Sipral {
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_call` at one `sipral_handle_t`.
     public static func callPlace(stack: SipralHandle, account: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var call = SipralHandle()
         let status =
@@ -1235,6 +1297,7 @@ public enum Sipral {
     ///
     /// `sdp` must be null or readable for `sdp_len` bytes.
     public static func callRing(stack: SipralHandle, call: SipralHandle, sdp: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             sdp.withUnsafeBufferPointer { p2 in
                 sipral_call_ring(stack, call, p2.baseAddress, p2.count, nowMs)
@@ -1287,6 +1350,7 @@ public enum Sipral {
     /// says how long it is, with `media_address` readable for
     /// `media_address_len` bytes.
     public static func callRingMedia(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws {
+        try ensureAbi()
         var config = config
         let status =
             SipralHeader.withUnsafeArray(configHeaders) { p2Headers -> sipral_status_t in
@@ -1307,6 +1371,7 @@ public enum Sipral {
     ///
     /// `sdp` must be readable for `sdp_len` bytes.
     public static func callAnswer(stack: SipralHandle, call: SipralHandle, sdp: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             sdp.withUnsafeBufferPointer { p2 in
                 sipral_call_answer(stack, call, p2.baseAddress, p2.count, nowMs)
@@ -1336,6 +1401,7 @@ public enum Sipral {
     ///
     /// `media_address` must be readable for `media_address_len` bytes.
     public static func callAnswerMedia(stack: SipralHandle, call: SipralHandle, mediaAddress: String, nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             Array(mediaAddress.utf8).withUnsafeBufferPointer { raw2 in
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
@@ -1354,6 +1420,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callReject(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_reject(stack, call, code, nowMs)
         try check(status)
     }
@@ -1368,6 +1435,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callHangup(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_hangup(stack, call, nowMs)
         try check(status)
     }
@@ -1397,6 +1465,7 @@ public enum Sipral {
     /// `headers_len` elements, each with a name and a value readable for the
     /// lengths beside them.
     public static func callSetHeaders(stack: SipralHandle, call: SipralHandle, headers: [SipralHeader]) throws {
+        try ensureAbi()
         let status =
             SipralHeader.withUnsafeArray(headers) { p2 in
                 sipral_call_set_headers(stack, call, p2.baseAddress, p2.count)
@@ -1414,6 +1483,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callHold(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_hold(stack, call, nowMs)
         try check(status)
     }
@@ -1428,6 +1498,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callResume(stack: SipralHandle, call: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_resume(stack, call, nowMs)
         try check(status)
     }
@@ -1449,6 +1520,7 @@ public enum Sipral {
     ///
     /// `sdp` must be null or readable for `sdp_len` bytes.
     public static func callAcceptSession(stack: SipralHandle, call: SipralHandle, sdp: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             sdp.withUnsafeBufferPointer { p2 in
                 sipral_call_accept_session(stack, call, p2.baseAddress, p2.count, nowMs)
@@ -1468,6 +1540,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callRejectSession(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_reject_session(stack, call, code, nowMs)
         try check(status)
     }
@@ -1513,6 +1586,7 @@ public enum Sipral {
     ///
     /// `digits` must be readable for `digits_len` bytes.
     public static func callSendDtmf(stack: SipralHandle, call: SipralHandle, digits: String, via: UInt32, durationMs: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             Array(digits.utf8).withUnsafeBufferPointer { raw2 in
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
@@ -1535,6 +1609,7 @@ public enum Sipral {
     ///
     /// `target` must be readable for `target_len` bytes.
     public static func callTransfer(stack: SipralHandle, call: SipralHandle, target: String, nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             Array(target.utf8).withUnsafeBufferPointer { raw2 in
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
@@ -1562,6 +1637,7 @@ public enum Sipral {
     ///
     /// As sipral_call_place.
     public static func callConsult(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var consultation = SipralHandle()
         let status =
@@ -1584,6 +1660,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callTransferTo(stack: SipralHandle, call: SipralHandle, other: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_transfer_to(stack, call, other, nowMs)
         try check(status)
     }
@@ -1614,6 +1691,7 @@ public enum Sipral {
     /// says how long it is, with every pointer in it readable for the length
     /// beside it, and `out_placed` at one `sipral_handle_t`.
     public static func callAcceptTransfer(stack: SipralHandle, call: SipralHandle, config: sipral_call_config_t, configHeaders: [SipralHeader], nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
         var config = config
         var placed = SipralHandle()
         let status =
@@ -1632,6 +1710,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle values.
     public static func callRejectTransfer(stack: SipralHandle, call: SipralHandle, code: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_call_reject_transfer(stack, call, code, nowMs)
         try check(status)
     }
@@ -1646,6 +1725,7 @@ public enum Sipral {
     ///
     /// `out_state` must point at one `uint32_t`.
     public static func callState(stack: SipralHandle, call: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
         var state = UInt32()
         let status = sipral_call_state(stack, call, &state)
         try check(status)
@@ -1661,6 +1741,7 @@ public enum Sipral {
     /// `out_here` and `out_there` must each be null or point at one
     /// `uint32_t`.
     public static func callHoldState(stack: SipralHandle, call: SipralHandle) throws -> (here: UInt32, there: UInt32) {
+        try ensureAbi()
         var here = UInt32()
         var there = UInt32()
         let status = sipral_call_hold_state(stack, call, &here, &there)
@@ -1678,7 +1759,8 @@ public enum Sipral {
     /// Safety
     ///
     /// Reads no memory the caller owns, and is safe to call from any thread.
-    public static func codecName(codec: UInt32) -> String? {
+    public static func codecName(codec: UInt32) throws -> String? {
+        try ensureAbi()
         guard let text = sipral_codec_name(codec) else { return nil }
         return String(cString: text)
     }
@@ -1692,6 +1774,7 @@ public enum Sipral {
     ///
     /// `out_count` must point at one `size_t`.
     public static func codecCount() throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status = sipral_codec_count(&count)
         try check(status)
@@ -1708,6 +1791,7 @@ public enum Sipral {
     /// `out_info` must point at a `sipral_codec_info_t` whose `size` member
     /// says how long it is.
     public static func codecAt(index: Int) throws -> sipral_codec_info_t {
+        try ensureAbi()
         var info = sipral_codec_info_t.sized()
         let status = sipral_codec_at(index, &info)
         try check(status)
@@ -1727,6 +1811,7 @@ public enum Sipral {
     /// `out_codecs` must be writable for `capacity` `uint32_t` or null with a
     /// capacity of zero, and `out_count` must point at one `size_t` or be null.
     public static func stackCodecOrder(stack: SipralHandle, outCodecs: inout [UInt32]) throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status =
             outCodecs.withUnsafeMutableBufferPointer { p1 in
@@ -1760,6 +1845,7 @@ public enum Sipral {
     ///
     /// `out_media` must point at one `sipral_handle_t`.
     public static func callMedia(stack: SipralHandle, call: SipralHandle) throws -> SipralHandle {
+        try ensureAbi()
         var media = SipralHandle()
         let status = sipral_call_media(stack, call, &media)
         try check(status)
@@ -1778,6 +1864,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     public static func mediaRelease(media: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_media_release(media)
         try check(status)
     }
@@ -1789,6 +1876,7 @@ public enum Sipral {
     /// `out_info` must point at a `sipral_media_info_t` whose `size` member
     /// says how long it is.
     public static func mediaInfo(media: SipralHandle) throws -> sipral_media_info_t {
+        try ensureAbi()
         var info = sipral_media_info_t.sized()
         let status = sipral_media_info(media, &info)
         try check(status)
@@ -1813,6 +1901,7 @@ public enum Sipral {
     /// `out_stats` must point at a `sipral_stream_stats_t` whose `size` member
     /// says how long it is.
     public static func mediaStatistics(media: SipralHandle, nowMs: UInt64) throws -> sipral_stream_stats_t {
+        try ensureAbi()
         var stats = sipral_stream_stats_t.sized()
         let status = sipral_media_statistics(media, nowMs, &stats)
         try check(status)
@@ -1842,6 +1931,7 @@ public enum Sipral {
     /// for `from_len`, and `out_arrival` must point at one `uint32_t` or be
     /// null.
     public static func mediaReceive(media: SipralHandle, data: inout [UInt8], from: String, nowMs: UInt64) throws -> UInt32 {
+        try ensureAbi()
         var arrival = UInt32()
         let status =
             data.withUnsafeMutableBufferPointer { p1 in
@@ -1870,6 +1960,7 @@ public enum Sipral {
     /// point at one `size_t` or be null, and `out_source` at one `uint32_t` or
     /// be null.
     public static func mediaPlayback(media: SipralHandle, samples: inout [Int16]) throws -> (written: Int, source: UInt32) {
+        try ensureAbi()
         var written = Int()
         var source = UInt32()
         let status =
@@ -1898,6 +1989,7 @@ public enum Sipral {
     /// long it is and whose buffers are writable for the capacities beside
     /// them.
     public static func mediaCapture(media: SipralHandle, samples: [Int16], packet: inout sipral_media_packet_t) throws {
+        try ensureAbi()
         let status =
             samples.withUnsafeBufferPointer { p1 in
                 sipral_media_capture(media, p1.baseAddress, p1.count, &packet)
@@ -1925,6 +2017,7 @@ public enum Sipral {
     /// `packet` must point at a `sipral_media_packet_t` as
     /// sipral_media_capture describes.
     public static func mediaPollRtcp(media: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws {
+        try ensureAbi()
         let status = sipral_media_poll_rtcp(media, nowMs, &packet)
         try check(status)
     }
@@ -1957,6 +2050,7 @@ public enum Sipral {
     /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
     /// `sipral_media_packet_t` as sipral_media_capture describes.
     public static func stackPollFarewell(stack: SipralHandle, outPacket: inout sipral_media_packet_t) throws -> SipralHandle {
+        try ensureAbi()
         var call = SipralHandle()
         let status = sipral_stack_poll_farewell(stack, &call, &outPacket)
         try check(status)
@@ -1975,6 +2069,7 @@ public enum Sipral {
     /// `out_dialling` must point at one `uint32_t` or be null, and
     /// `out_waiting` at one `size_t` or be null.
     public static func mediaDialling(media: SipralHandle) throws -> (dialling: UInt32, waiting: Int) {
+        try ensureAbi()
         var dialling = UInt32()
         var waiting = Int()
         let status = sipral_media_dialling(media, &dialling, &waiting)
@@ -1991,6 +2086,7 @@ public enum Sipral {
     ///
     /// Reads no memory the caller owns.
     public static func mediaStopDialling(media: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_media_stop_dialling(media)
         try check(status)
     }
@@ -2013,6 +2109,7 @@ public enum Sipral {
     ///
     /// `path` must be readable for `path_len` bytes.
     public static func mediaRecordStart(media: SipralHandle, path: String) throws {
+        try ensureAbi()
         let status =
             Array(path.utf8).withUnsafeBufferPointer { raw1 in
                 raw1.withMemoryRebound(to: CChar.self) { p1 in
@@ -2032,6 +2129,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle value.
     public static func mediaRecordStop(media: SipralHandle) throws {
+        try ensureAbi()
         let status = sipral_media_record_stop(media)
         try check(status)
     }
@@ -2047,6 +2145,7 @@ public enum Sipral {
     /// `out_recording` must point at one `uint32_t` or be null, and
     /// `out_recorded_ms` at one `uint64_t` or be null.
     public static func mediaRecordState(media: SipralHandle) throws -> (recording: UInt32, recordedMs: UInt64) {
+        try ensureAbi()
         var recording = UInt32()
         var recordedMs = UInt64()
         let status = sipral_media_record_state(media, &recording, &recordedMs)
@@ -2073,6 +2172,7 @@ public enum Sipral {
     /// how long it is and whose buffers are writable for the capacities beside
     /// them.
     public static func stackPollTransmit(stack: SipralHandle, transmit: inout sipral_transmit_t) throws {
+        try ensureAbi()
         let status = sipral_stack_poll_transmit(stack, &transmit)
         try check(status)
     }
@@ -2096,6 +2196,7 @@ public enum Sipral {
     /// `data` must be readable for `len` bytes, `from` for `from_len`, and `to`
     /// for `to_len`.
     public static func stackReceiveDatagram(stack: SipralHandle, transport: UInt32, data: [UInt8], from: String, to: String, nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             data.withUnsafeBufferPointer { p2 in
                 Array(from.utf8).withUnsafeBufferPointer { raw3 in
@@ -2128,6 +2229,7 @@ public enum Sipral {
     ///
     /// `data` must be readable for `len` bytes.
     public static func stackReceiveStream(stack: SipralHandle, transport: UInt32, data: [UInt8], nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             data.withUnsafeBufferPointer { p2 in
                 sipral_stack_receive_stream(stack, transport, p2.baseAddress, p2.count, nowMs)
@@ -2159,6 +2261,7 @@ public enum Sipral {
     /// `local` must be readable for `local_len` bytes and `remote` for
     /// `remote_len`.
     public static func stackTransportBind(stack: SipralHandle, transport: UInt32, local: String, remote: String, nowMs: UInt64) throws {
+        try ensureAbi()
         let status =
             Array(local.utf8).withUnsafeBufferPointer { raw2 in
                 raw2.withMemoryRebound(to: CChar.self) { p2 in
@@ -2190,6 +2293,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     public static func stackTransportFailed(stack: SipralHandle, transport: UInt32, error: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_stack_transport_failed(stack, transport, error, nowMs)
         try check(status)
     }
@@ -2206,6 +2310,7 @@ public enum Sipral {
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
     public static func stackStreamClosed(stack: SipralHandle, transport: UInt32, nowMs: UInt64) throws {
+        try ensureAbi()
         let status = sipral_stack_stream_closed(stack, transport, nowMs)
         try check(status)
     }
@@ -2223,7 +2328,8 @@ public enum Sipral {
     ///
     /// Reads no memory the caller owns, and is safe to call from any
     /// thread.
-    public static func eventKindName(kind: UInt32) -> String? {
+    public static func eventKindName(kind: UInt32) throws -> String? {
+        try ensureAbi()
         guard let text = sipral_event_kind_name(kind) else { return nil }
         return String(cString: text)
     }
@@ -2243,6 +2349,7 @@ public enum Sipral {
     /// `message` must be readable for `message_len` bytes and `name` for
     /// `name_len`, and `out_count` must point at one `size_t`.
     public static func messageHeaderCount(message: [UInt8], name: String) throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status =
             message.withUnsafeBufferPointer { p0 in
@@ -2274,6 +2381,7 @@ public enum Sipral {
     /// As `sipral_message_header_count`, with `out_offset` and `out_len` each
     /// pointing at one `size_t`.
     public static func messageHeader(message: [UInt8], name: String, index: Int) throws -> (offset: Int, len: Int) {
+        try ensureAbi()
         var offset = Int()
         var len = Int()
         let status =
@@ -2306,6 +2414,7 @@ public enum Sipral {
     ///
     /// As `sipral_message_header_count`.
     public static func messageHeaderElementCount(message: [UInt8], name: String) throws -> Int {
+        try ensureAbi()
         var count = Int()
         let status =
             message.withUnsafeBufferPointer { p0 in
@@ -2329,6 +2438,7 @@ public enum Sipral {
     ///
     /// As `sipral_message_header`.
     public static func messageHeaderElement(message: [UInt8], name: String, index: Int) throws -> (offset: Int, len: Int) {
+        try ensureAbi()
         var offset = Int()
         var len = Int()
         let status =
