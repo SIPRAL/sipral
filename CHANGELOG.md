@@ -136,6 +136,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **A zeroed field no longer means "send the digits in the media".**
+  `SIPRAL_DTMF_RTP` was zero, which is what a caller who filled nothing in
+  leaves behind, and the way a digit travels is the one setting here a peer can
+  ignore in silence: a call that meant INFO and sent nothing at all looks, from
+  this end, exactly like one that sent it. The three forms are 1, 2 and 3 now,
+  and zero is refused by name. The ABI minor goes to 10.
+
+- **A compound RTCP report is held to a bound of its own on the way in.**
+  `sipral_media_receive` refused anything over `SIPRAL_MEDIA_PACKET_BYTES`,
+  which is the bound this stack builds against — but what arrives is the
+  peer's arithmetic, and RFC 3550's compound report grows with the number of
+  sources it describes. A datagram RFC 5761 §4 says is control is now held to
+  `SIPRAL_MEDIA_RTCP_BYTES` (8 KB) instead, so a report larger than this end
+  would have built is read and judged for what it is rather than refused as a
+  caller's mistake. Media is unchanged, and so is sending.
+
 - **The Swift binding checks the ABI before the first call into it, rather
   than asking the application to remember**. C# and Kotlin
   already checked at load; Swift has no load hook, so the generator now

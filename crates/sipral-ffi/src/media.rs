@@ -84,6 +84,22 @@ constants! {
     /// lost from a stream whose timestamps have already moved past it.
     pub const SIPRAL_MEDIA_PACKET_BYTES: usize = 1_500;
 
+    /// The bound a datagram of control gets instead, on the way in.
+    ///
+    /// RTCP is compound: one report packet carries a sender or receiver report
+    /// for every source being heard, then the source description, then whatever
+    /// extended reports the session agreed on. A call between two ends stays
+    /// far inside the media bound, but nothing in RFC 3550 says it has to, and
+    /// what arrives is the peer's arithmetic rather than ours. So the media
+    /// bound stops being the reason a report is refused: an arriving datagram
+    /// that RFC 5761 §4 says is control gets this one, and everything else
+    /// still gets [`SIPRAL_MEDIA_PACKET_BYTES`]. It bounds the read, so it is
+    /// still a bound: a caller that says a megabyte is still refused.
+    ///
+    /// Sending is unchanged — what this stack builds is its own arithmetic, and
+    /// it fits in the media bound.
+    pub const SIPRAL_MEDIA_RTCP_BYTES: usize = 8_192;
+
     /// Room enough for any address this ABI writes, the NUL included:
     /// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.
     pub const SIPRAL_ADDRESS_BYTES: usize = 64;
@@ -1159,10 +1175,15 @@ entry! {
         if data.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "data is null"));
         }
-        if len == 0 || len > SIPRAL_MEDIA_PACKET_BYTES {
+        let bound = if len >= 2 && is_control(unsafe { data.add(1).read() }) {
+            SIPRAL_MEDIA_RTCP_BYTES
+        } else {
+            SIPRAL_MEDIA_PACKET_BYTES
+        };
+        if len == 0 || len > bound {
             return Err(fail(
                 SipralStatus::InvalidArgument,
-                format!("data says it is {len} bytes, and a datagram is 1 to {SIPRAL_MEDIA_PACKET_BYTES}"),
+                format!("data says it is {len} bytes, and a datagram is 1 to {bound}"),
             ));
         }
         let peer = unsafe { address(from, from_len, "from") }?;
@@ -1176,6 +1197,18 @@ entry! {
         }
         Ok(())
     }
+}
+
+/// Whether the second byte of a datagram says control, by RFC 5761 §4.
+///
+/// The field is the payload type with the marker bit above it in RTP, and the
+/// packet type in RTCP; 64 to 95 are the numbers RTP never uses and RTCP
+/// always does, which is what lets the two share a socket. Read here only to
+/// pick which bound the datagram is held to — the session tells them apart
+/// again for itself, and disagreeing with it would only mean a report is read
+/// as media a moment later.
+const fn is_control(second: u8) -> bool {
+    matches!(second & 0x7f, 64..=95)
 }
 
 const fn arrival_of(arrival: Arrival) -> SipralArrival {
@@ -2263,6 +2296,58 @@ a=sendrecv\r\n";
         let status = unsafe { sipral_stack_codec_order(stack, ptr::null_mut(), 0, &raw mut count) };
         assert_eq!(status, SipralStatus::BufferTooSmall);
         assert_eq!(count, 1, "the fixture offers one codec");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A compound report is held to the control bound and media to the media
+    /// one, and the two are told apart by RFC 5761 §4 before either is read.
+    ///
+    /// Two kilobytes is past `SIPRAL_MEDIA_PACKET_BYTES` and inside
+    /// `SIPRAL_MEDIA_RTCP_BYTES`. As control it reaches the session, which
+    /// refuses it for what it is rather than for how long it is; as media it
+    /// never gets that far. The difference is the whole of the change: a report
+    /// a peer built larger than this end builds one used to be an argument
+    /// error, which says the caller did something wrong when the caller only
+    /// handed over what arrived.
+    #[test]
+    fn a_long_report_is_read_and_a_long_media_packet_is_not() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call(&mut observed);
+        let media = media_of(stack, call);
+
+        let mut report = vec![0_u8; 2_000];
+        report[0] = 0x80;
+        report[1] = 201; // RFC 3550 §6.4.2: a receiver report
+        assert_eq!(
+            arrive(media, &mut report, PEER_MEDIA, 1_100),
+            SipralArrival::ControlRefused,
+            "the length was not what refused it"
+        );
+
+        let mut oversized = rtp(1, 160);
+        oversized.resize(2_000, 0xFF);
+        let refused = unsafe {
+            sipral_media_receive(
+                media,
+                oversized.as_mut_ptr(),
+                oversized.len(),
+                PEER_MEDIA.as_ptr().cast::<c_char>(),
+                PEER_MEDIA.len(),
+                1_100,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(refused, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains(&SIPRAL_MEDIA_PACKET_BYTES.to_string()),
+            "the refusal names the control bound: {}",
+            last_error_text()
+        );
+
+        assert_eq!(unsafe { sipral_media_release(media) }, SipralStatus::Ok);
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok

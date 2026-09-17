@@ -435,18 +435,24 @@ public enum SipralDtmf : uint
     /// In the media, as an RFC 4733 named telephone event. What to reach for:
     /// it is the only one carried end to end by every gateway on the path, and
     /// the only one whose timing survives transcoding.
+    ///
+    /// It is one rather than zero on purpose. Zero is what a caller who
+    /// filled nothing in leaves behind, and the way a digit travels is the
+    /// one setting here that a peer can ignore in silence: a call that
+    /// meant INFO and sent nothing at all looks, from this end, exactly
+    /// like a call that sent it. So zero names no form and is refused.
     /// </summary>
-    Rtp = 0,
+    Rtp = 1,
     /// <summary>
     /// An INFO per digit carrying `application/dtmf-relay`, which states the
     /// signal and how long it was held.
     /// </summary>
-    InfoRelay = 1,
+    InfoRelay = 2,
     /// <summary>
     /// An INFO per digit carrying `application/dtmf`, whose whole body is the
     /// character. Some switches take only this one.
     /// </summary>
-    InfoPlain = 2,
+    InfoPlain = 3,
 }
 
 /// <summary>
@@ -2738,7 +2744,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 9;
+    public const uint AbiVersionMinor = 10;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -2831,6 +2837,24 @@ public static class Sipral
     /// lost from a stream whose timestamps have already moved past it.
     /// </summary>
     public static readonly nuint MediaPacketBytes = 1500;
+
+    /// <summary>
+    /// The bound a datagram of control gets instead, on the way in.
+    ///
+    /// RTCP is compound: one report packet carries a sender or receiver report
+    /// for every source being heard, then the source description, then whatever
+    /// extended reports the session agreed on. A call between two ends stays
+    /// far inside the media bound, but nothing in RFC 3550 says it has to, and
+    /// what arrives is the peer's arithmetic rather than ours. So the media
+    /// bound stops being the reason a report is refused: an arriving datagram
+    /// that RFC 5761 §4 says is control gets this one, and everything else
+    /// still gets SIPRAL_MEDIA_PACKET_BYTES. It bounds the read, so it is
+    /// still a bound: a caller that says a megabyte is still refused.
+    ///
+    /// Sending is unchanged — what this stack builds is its own arithmetic, and
+    /// it fits in the media bound.
+    /// </summary>
+    public static readonly nuint MediaRtcpBytes = 8192;
 
     /// <summary>
     /// Room enough for any address this ABI writes, the NUL included:

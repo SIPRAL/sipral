@@ -279,13 +279,19 @@ public enum SipralDtmf: UInt32, Sendable {
     /// In the media, as an RFC 4733 named telephone event. What to reach for:
     /// it is the only one carried end to end by every gateway on the path, and
     /// the only one whose timing survives transcoding.
-    case rtp = 0
+    ///
+    /// It is one rather than zero on purpose. Zero is what a caller who
+    /// filled nothing in leaves behind, and the way a digit travels is the
+    /// one setting here that a peer can ignore in silence: a call that
+    /// meant INFO and sent nothing at all looks, from this end, exactly
+    /// like a call that sent it. So zero names no form and is refused.
+    case rtp = 1
     /// An INFO per digit carrying `application/dtmf-relay`, which states the
     /// signal and how long it was held.
-    case infoRelay = 1
+    case infoRelay = 2
     /// An INFO per digit carrying `application/dtmf`, whose whole body is the
     /// character. Some switches take only this one.
-    case infoPlain = 2
+    case infoPlain = 3
 }
 
 /// What an event is about.
@@ -774,7 +780,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 9
+    public static let abiVersionMinor: UInt32 = 10
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -839,6 +845,22 @@ public enum Sipral {
     /// because a frame that was encoded and then had nowhere to go is a frame
     /// lost from a stream whose timestamps have already moved past it.
     public static let mediaPacketBytes: Int = 1500
+
+    /// The bound a datagram of control gets instead, on the way in.
+    ///
+    /// RTCP is compound: one report packet carries a sender or receiver report
+    /// for every source being heard, then the source description, then whatever
+    /// extended reports the session agreed on. A call between two ends stays
+    /// far inside the media bound, but nothing in RFC 3550 says it has to, and
+    /// what arrives is the peer's arithmetic rather than ours. So the media
+    /// bound stops being the reason a report is refused: an arriving datagram
+    /// that RFC 5761 §4 says is control gets this one, and everything else
+    /// still gets SIPRAL_MEDIA_PACKET_BYTES. It bounds the read, so it is
+    /// still a bound: a caller that says a megabyte is still refused.
+    ///
+    /// Sending is unchanged — what this stack builds is its own arithmetic, and
+    /// it fits in the media bound.
+    public static let mediaRtcpBytes: Int = 8192
 
     /// Room enough for any address this ABI writes, the NUL included:
     /// `[2001:db8:0000:0000:0000:0000:0000:0001]:65535` and a byte to spare.

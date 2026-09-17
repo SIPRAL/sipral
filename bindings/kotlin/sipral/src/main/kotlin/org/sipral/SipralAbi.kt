@@ -474,18 +474,24 @@ enum class SipralDtmf(val value: Int) {
      * In the media, as an RFC 4733 named telephone event. What to reach for:
      * it is the only one carried end to end by every gateway on the path, and
      * the only one whose timing survives transcoding.
+     *
+     * It is one rather than zero on purpose. Zero is what a caller who
+     * filled nothing in leaves behind, and the way a digit travels is the
+     * one setting here that a peer can ignore in silence: a call that
+     * meant INFO and sent nothing at all looks, from this end, exactly
+     * like a call that sent it. So zero names no form and is refused.
      */
-    RTP(0),
+    RTP(1),
     /**
      * An INFO per digit carrying `application/dtmf-relay`, which states the
      * signal and how long it was held.
      */
-    INFO_RELAY(1),
+    INFO_RELAY(2),
     /**
      * An INFO per digit carrying `application/dtmf`, whose whole body is the
      * character. Some switches take only this one.
      */
-    INFO_PLAIN(2),
+    INFO_PLAIN(3),
     ;
 
     companion object {
@@ -2072,7 +2078,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 9)
+        agree(0, 10)
     }
 
     /**
@@ -2178,7 +2184,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 9
+    const val ABI_VERSION_MINOR: Long = 10
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -2271,6 +2277,24 @@ object Sipral {
      * lost from a stream whose timestamps have already moved past it.
      */
     const val MEDIA_PACKET_BYTES: Long = 1500
+
+    /**
+     * The bound a datagram of control gets instead, on the way in.
+     *
+     * RTCP is compound: one report packet carries a sender or receiver report
+     * for every source being heard, then the source description, then whatever
+     * extended reports the session agreed on. A call between two ends stays
+     * far inside the media bound, but nothing in RFC 3550 says it has to, and
+     * what arrives is the peer's arithmetic rather than ours. So the media
+     * bound stops being the reason a report is refused: an arriving datagram
+     * that RFC 5761 §4 says is control gets this one, and everything else
+     * still gets SIPRAL_MEDIA_PACKET_BYTES. It bounds the read, so it is
+     * still a bound: a caller that says a megabyte is still refused.
+     *
+     * Sending is unchanged — what this stack builds is its own arithmetic, and
+     * it fits in the media bound.
+     */
+    const val MEDIA_RTCP_BYTES: Long = 8192
 
     /**
      * Room enough for any address this ABI writes, the NUL included:

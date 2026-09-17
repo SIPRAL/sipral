@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)9)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)10)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -151,6 +151,24 @@ typedef uint64_t sipral_handle_t;
  * lost from a stream whose timestamps have already moved past it.
  */
 #define SIPRAL_MEDIA_PACKET_BYTES ((size_t)1500)
+
+/**
+ * The bound a datagram of control gets instead, on the way in.
+ *
+ * RTCP is compound: one report packet carries a sender or receiver report
+ * for every source being heard, then the source description, then whatever
+ * extended reports the session agreed on. A call between two ends stays
+ * far inside the media bound, but nothing in RFC 3550 says it has to, and
+ * what arrives is the peer's arithmetic rather than ours. So the media
+ * bound stops being the reason a report is refused: an arriving datagram
+ * that RFC 5761 §4 says is control gets this one, and everything else
+ * still gets SIPRAL_MEDIA_PACKET_BYTES. It bounds the read, so it is
+ * still a bound: a caller that says a megabyte is still refused.
+ *
+ * Sending is unchanged — what this stack builds is its own arithmetic, and
+ * it fits in the media bound.
+ */
+#define SIPRAL_MEDIA_RTCP_BYTES ((size_t)8192)
 
 /**
  * Room enough for any address this ABI writes, the NUL included:
@@ -626,18 +644,24 @@ enum {
      * In the media, as an RFC 4733 named telephone event. What to reach for:
      * it is the only one carried end to end by every gateway on the path, and
      * the only one whose timing survives transcoding.
+     *
+     * It is one rather than zero on purpose. Zero is what a caller who
+     * filled nothing in leaves behind, and the way a digit travels is the
+     * one setting here that a peer can ignore in silence: a call that
+     * meant INFO and sent nothing at all looks, from this end, exactly
+     * like a call that sent it. So zero names no form and is refused.
      */
-    SIPRAL_DTMF_RTP = 0,
+    SIPRAL_DTMF_RTP = 1,
     /**
      * An INFO per digit carrying `application/dtmf-relay`, which states the
      * signal and how long it was held.
      */
-    SIPRAL_DTMF_INFO_RELAY = 1,
+    SIPRAL_DTMF_INFO_RELAY = 2,
     /**
      * An INFO per digit carrying `application/dtmf`, whose whole body is the
      * character. Some switches take only this one.
      */
-    SIPRAL_DTMF_INFO_PLAIN = 2,
+    SIPRAL_DTMF_INFO_PLAIN = 3,
 };
 
 /**

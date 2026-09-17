@@ -806,13 +806,19 @@ codes! {
         /// In the media, as an RFC 4733 named telephone event. What to reach for:
         /// it is the only one carried end to end by every gateway on the path, and
         /// the only one whose timing survives transcoding.
-        Rtp = 0,
+        ///
+        /// It is one rather than zero on purpose. Zero is what a caller who
+        /// filled nothing in leaves behind, and the way a digit travels is the
+        /// one setting here that a peer can ignore in silence: a call that
+        /// meant INFO and sent nothing at all looks, from this end, exactly
+        /// like a call that sent it. So zero names no form and is refused.
+        Rtp = 1,
         /// An INFO per digit carrying `application/dtmf-relay`, which states the
         /// signal and how long it was held.
-        InfoRelay = 1,
+        InfoRelay = 2,
         /// An INFO per digit carrying `application/dtmf`, whose whole body is the
         /// character. Some switches take only this one.
-        InfoPlain = 2,
+        InfoPlain = 3,
     }
 }
 
@@ -891,14 +897,14 @@ entry! {
 /// The form a number names, or a refusal saying what the three are.
 fn dtmf_form(via: u32) -> Result<SipralDtmf, Fail> {
     match via {
-        0 => Ok(SipralDtmf::Rtp),
-        1 => Ok(SipralDtmf::InfoRelay),
-        2 => Ok(SipralDtmf::InfoPlain),
+        1 => Ok(SipralDtmf::Rtp),
+        2 => Ok(SipralDtmf::InfoRelay),
+        3 => Ok(SipralDtmf::InfoPlain),
         _ => Err(fail(
             SipralStatus::InvalidArgument,
             format!(
-                "{via} is not a way to send a digit; they are 0 for the media, 1 for INFO with \
-                 application/dtmf-relay and 2 for INFO with application/dtmf"
+                "{via} is not a way to send a digit; they are 1 for the media, 2 for INFO with \
+                 application/dtmf-relay and 3 for INFO with application/dtmf"
             ),
         )),
     }
@@ -2758,12 +2764,14 @@ Content-Length: 0\r\n\r\n";
     /// A form this ABI has no number for is refused rather than quietly taken
     /// as the default: an application that meant the media and passed a
     /// mistyped constant would otherwise send in the dialog and never know.
+    /// Zero is the case that matters most, because it is what a caller who
+    /// filled the field in with nothing leaves behind.
     #[test]
     fn a_way_of_sending_a_digit_that_does_not_exist_is_refused() {
-        assert_eq!(dtmf_form(0).ok(), Some(SipralDtmf::Rtp));
-        assert_eq!(dtmf_form(1).ok(), Some(SipralDtmf::InfoRelay));
-        assert_eq!(dtmf_form(2).ok(), Some(SipralDtmf::InfoPlain));
-        for wrong in [3, 4, u32::MAX] {
+        assert_eq!(dtmf_form(1).ok(), Some(SipralDtmf::Rtp));
+        assert_eq!(dtmf_form(2).ok(), Some(SipralDtmf::InfoRelay));
+        assert_eq!(dtmf_form(3).ok(), Some(SipralDtmf::InfoPlain));
+        for wrong in [0, 4, 5, u32::MAX] {
             assert!(dtmf_form(wrong).is_err(), "{wrong} was taken as a form");
         }
     }
@@ -3625,7 +3633,17 @@ Content-Length: 0\r\n\r\n";
                 sipral_call_answer(handle, SIPRAL_HANDLE_NONE, ANSWER.as_ptr(), ANSWER.len(), 0)
             },
             unsafe {
-                sipral_call_send_dtmf(handle, SIPRAL_HANDLE_NONE, digits, digits_len, 0, 0, 0)
+                // a real form, because the way of sending is read before the
+                // handle is looked up, the same as a struct's size is
+                sipral_call_send_dtmf(
+                    handle,
+                    SIPRAL_HANDLE_NONE,
+                    digits,
+                    digits_len,
+                    SipralDtmf::Rtp as u32,
+                    0,
+                    0,
+                )
             },
             unsafe { sipral_call_transfer(handle, SIPRAL_HANDLE_NONE, target, target_len, 0) },
             unsafe { sipral_call_transfer_to(handle, SIPRAL_HANDLE_NONE, SIPRAL_HANDLE_NONE, 0) },
