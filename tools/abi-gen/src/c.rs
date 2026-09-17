@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 use sipral_ffi::abi::{Alias, Code, Enumeration, Function, Record, Shape, Stands, Surface, Value};
 
 use crate::model::{
-    Base, Int, Linked, Read, Refused, Role, Type, Writable, linked, plain_named, read_all,
-    screaming, snake,
+    Base, Int, Linked, Read, Refused, Role, Type, Writable, callback_answer, linked, plain_named,
+    read_all, screaming, snake,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -178,14 +178,18 @@ fn enumerations(out: &mut String, surface: &Surface) -> Result<(), Refused> {
 
 fn callbacks(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     for alias in surface.aliases {
-        let Stands::Callback(arguments) = alias.stands else {
+        let Stands::Callback(arguments, _) = alias.stands else {
             continue;
         };
         block(out, "", &lines(surface, alias.doc));
         let read = read_all(alias.name, arguments)?;
+        let returns = match callback_answer(alias)? {
+            Some(ty) => spell(&ty),
+            None => "void".to_owned(),
+        };
         let _ = writeln!(
             out,
-            "typedef void (*{})({});\n",
+            "typedef {returns} (*{})({});\n",
             named(alias.name),
             parameters(&read)
         );

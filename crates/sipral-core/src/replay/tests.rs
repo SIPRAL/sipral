@@ -305,8 +305,8 @@ fn a_resolved_answer_is_captured_and_a_replay_repeats_it_unasked() {
     // the answer to an `Event::ResolveNeeded` this test never reads, which is
     // the point: nothing about this call goes through `receive` or
     // `handle_timeout`
-    endpoint.resolved(dialog, &[elsewhere]);
-    recorder.resolved(dialog, &[elsewhere], t0);
+    endpoint.resolved(dialog, &[elsewhere], None);
+    recorder.resolved(dialog, &[elsewhere], None, t0);
 
     recorder.cue("bye", t0);
     endpoint.bye(dialog, t0).expect("the BYE goes");
@@ -404,7 +404,7 @@ fn a_recording_round_trips_through_its_own_text() {
 fn the_text_holds_the_seed_the_session_was_drawn_from() {
     let (recording, _) = record();
     let text = recording.to_text();
-    assert!(text.starts_with("sipral-recording 2\nseed "), "{text}");
+    assert!(text.starts_with("sipral-recording 3\nseed "), "{text}");
     assert!(
         text.contains(&"17".repeat(32)),
         "the seed is the twenty-third byte, sixty-four times over: {text}"
@@ -417,18 +417,18 @@ fn a_reader_refuses_a_recording_from_a_later_version_and_says_so() {
     let (recording, _) = record();
     let text = recording
         .to_text()
-        .replacen("sipral-recording 2", "sipral-recording 3", 1);
+        .replacen("sipral-recording 3", "sipral-recording 4", 1);
     let error = Recording::parse(&text).expect_err("a version this build cannot know");
     assert_eq!(
         error,
         ReadError::Version {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         }
     );
     assert_eq!(
         error.to_string(),
-        "recording is version 3 and this reader knows 2"
+        "recording is version 4 and this reader knows 3"
     );
 }
 

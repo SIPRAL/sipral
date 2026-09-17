@@ -201,6 +201,50 @@ impl SipralTransport {
     }
 }
 
+/// Every transport a stack has bound: [`SIPRAL_TRANSPORT_MAIN`], from the
+/// moment the stack is created, and whatever
+/// [`crate::transport::sipral_stack_transport_bind`] has added since.
+///
+/// Grows only, for the stack's whole life. `TransportId` documents itself, one
+/// crate down, as "a transport the caller opened, named by the caller" — the
+/// endpoint never interprets the number — so the numbers beyond
+/// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN) are the
+/// caller's own to choose, the same way `sipral_account_config_t::transport`
+/// and `sipral_call_config_t::transport` are read straight through to here
+/// with no translation. A transport that failed or whose stream closed is
+/// retired one layer down — nothing can be sent on it until it is bound again
+/// — which is a fact about whether it may be written to, not about whether
+/// its number still names something: the whole point of remembering it here
+/// is that `sipral_stack_transport_bind` can bring the very same one back.
+pub(crate) struct Transports(HashMap<u32, TransportProtocol>);
+
+impl Transports {
+    /// A table with only the main transport in it, speaking what the stack
+    /// was created to speak.
+    fn new(main: TransportProtocol) -> Self {
+        let mut entries = HashMap::new();
+        entries.insert(TRANSPORT.0, main);
+        Self(entries)
+    }
+
+    /// What a number names, or `None` for one this stack has never bound.
+    pub(crate) fn resolve(&self, id: u32) -> Option<TransportId> {
+        self.0.contains_key(&id).then_some(TransportId(id))
+    }
+
+    /// What a transport already bound speaks, or `None` for one that is not.
+    pub(crate) fn protocol_of(&self, id: u32) -> Option<TransportProtocol> {
+        self.0.get(&id).copied()
+    }
+
+    /// Record a transport as bound: the first time under a number, this is
+    /// what mints the entry; every time after, the number already named this
+    /// same protocol, so nothing here moves.
+    pub(crate) fn record(&mut self, id: u32, protocol: TransportProtocol) {
+        self.0.entry(id).or_insert(protocol);
+    }
+}
+
 record! {
     /// What a stack is created with.
     ///
@@ -667,8 +711,10 @@ pub(crate) struct StackState {
     /// because by the time a call has ended the layer below has already let
     /// it go and has nothing left to ask.
     identities: HashMap<CallHandle, Arc<CallIdentity>>,
-    /// The transport every account and every call uses. There is one.
-    pub(crate) transport: TransportId,
+    /// Every transport this stack has bound: the table `transport` on
+    /// `sipral_account_config_t` and `sipral_call_config_t` is read against,
+    /// and the one [`crate::transport::sipral_stack_transport_bind`] grows.
+    pub(crate) transports: Transports,
     /// What that transport speaks, kept so the settings can be read back and so
     /// that binding it again cannot change it.
     pub(crate) speaks: SipralTransport,
@@ -910,7 +956,7 @@ fn lock(entry: &Arc<StackEntry>) -> Result<MutexGuard<'_, StackState>, Fail> {
     }
 }
 
-fn transport_of(value: u32) -> Result<SipralTransport, Fail> {
+pub(crate) fn transport_of(value: u32) -> Result<SipralTransport, Fail> {
     match value {
         1 => Ok(SipralTransport::Udp),
         2 => Ok(SipralTransport::Tcp),
@@ -1171,7 +1217,7 @@ pub(crate) unsafe fn create_on(
             calls: Names::new(&tag, Kind::Call),
             identities: HashMap::new(),
             tag,
-            transport: TRANSPORT,
+            transports: Transports::new(speaks.protocol()),
             speaks,
             local,
             held: None,
@@ -1488,6 +1534,11 @@ fn signalling(
     {
         return;
     }
+    // built before `said` moves behind the `Arc`, and for the same reason a
+    // media reason is built in `media` below: a `SocketAddr` has no bytes of
+    // its own to point at, so this is what the event's pointer needs kept
+    // alive once the borrow below has gone
+    let destination = crate::event::transport_wanted_destination(&said);
     // shared rather than owned outright, so that the bytes the translation
     // points into stay where they are however often the delivery moves
     let said = Arc::new(said);
@@ -1499,14 +1550,14 @@ fn signalling(
         identities: &state.identities,
         raised_identity: None,
     };
-    let Some(event) = crate::event::translate(&mut known, &said) else {
+    let Some(event) = crate::event::translate(&mut known, &said, destination.as_deref()) else {
         *unclaimed = unclaimed.saturating_add(1);
         return;
     };
     raised.push(Delivery {
         event,
         _raised: Some(said),
-        _reason: None,
+        _reason: destination,
         _record: None,
         _identity: known.raised_identity,
     });

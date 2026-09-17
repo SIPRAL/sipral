@@ -201,6 +201,8 @@ Rules for the ABI:
   also take the five in front of it, and a number taken by a feature that does
   not exist is exactly the lie the reservation was meant to prevent. The media
   surface took 17 and 19 this way and left 15, 16, 18 and 20 where they were.
+  8.4.10 has since turned 18 into `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, in
+  place, and left 15, 16 and 20 where they still are.
   27, 28 and 29 were held the same way for three events no requirement numbers
   but the C ABI already planned: a DTMF digit sent by SIP INFO being answered,
   the stack recovering from a suspension or a network change, and a
@@ -378,34 +380,50 @@ send nothing. It is a registration state rather than a status because it is a
 fact about the account for as long as the account exists, not about one
 request.
 
-**One transport, and its number is published.** `SIPRAL_TRANSPORT_MAIN` is the
-transport a stack is created with and the only one this build binds; every other
-number is `SIPRAL_STATUS_INVALID_ARGUMENT`. Every call names it anyway. A second
-transport is not an I/O question — an account carries the transport its REGISTER
-goes out on and a call carries the one its INVITE does — so when it arrives it
-is a member of `sipral_account_config_t` (today that struct has no such member),
-and it belongs with the §18.1.1 promotion onto a stream that spends event
-number 18. Naming the transport now makes that growth
-more valid numbers rather than a second set of functions taking an argument the
-first set lacks.
+**A table of transports, and the main one still published (task 8.4.10).**
+`SIPRAL_TRANSPORT_MAIN` is the transport a stack is created with, and every
+call still names it by default — a caller that never binds a second one sees
+exactly the surface this crate always had. `sipral_stack_transport_bind` may
+now bind more: the number beyond the main one is the caller's own to choose,
+the same way `TransportId` one crate down already documents itself as "named
+by the caller" and never interpreted, and `out_transport_id` hands the same
+number back so a caller always has one place to read the id it is about to
+put in `sipral_account_config_t::transport` or `sipral_call_config_t::transport`
+— the two new members that say which transport an account's REGISTER, or a
+call's INVITE, goes out on, with zero meaning `SIPRAL_TRANSPORT_MAIN` in both,
+so a caller that fills neither in gets exactly what it always got. A call's
+own `transport` is read only together with an explicit `destination`: with
+neither given the call already goes where its account does, over the
+account's own transport, and there is nothing to combine a bare `transport`
+with. This is also where the §18.1.1 promotion onto a stream now lands,
+described two paragraphs on: it spends event number 18, previously reserved.
 
-**A transport that failed is retired.** Both the failure and an orderly close
-fail every transaction on the transport and unbind it, which is §17's "inform the
-TU and terminate" arriving where an application can see it. Nothing goes out
-afterwards until `sipral_stack_transport_bind` brings a transport back — which is
-also how a socket re-opened on another address after the network moved says what
-goes in the `Via` from now on, and how a stream names the far end it reached.
+**A transport that failed is retired, not forgotten.** Both the failure and an
+orderly close fail every transaction on the transport and unbind it, which is
+§17's "inform the TU and terminate" arriving where an application can see it.
+Nothing goes out on it afterwards until `sipral_stack_transport_bind` brings it
+back — which is also how a socket re-opened on another address after the
+network moved says what goes in the `Via` from now on, how a stream names the
+far end it reached, and how a further transport enters the table the first
+time. An account whose transport is retired this way is untouched by it: it is
+a fact about the transport, and the account starts sending again the moment
+the same id is bound.
 
-**The stream path is carried, and the promotion onto it is not.** TCP and TLS
-work end to end: bytes go in as fragments, the layer below frames them on
-`Content-Length` (§18.3), and a connection that closes retires its transport. A
-WebSocket frame goes in as a datagram, because RFC 7118 §4.2 puts one message in
-each. What is deferred is §18.1.1 — a request that outgrew a datagram going out
-on a stream instead — which needs a second transport and the event number already
-reserved for it. `sipral_transmit_t::protocol` is the seam: it says what the
-message is going out over rather than what the socket is, and it is the member
-that would start disagreeing with `sipral_stack_settings_t::transport` on the day
-that lands.
+**The stream path is carried, and the promotion onto it is now too (task
+8.4.10).** TCP and TLS work end to end: bytes go in as fragments, the layer
+below frames them on `Content-Length` (§18.3), and a connection that closes
+retires its transport. A WebSocket frame goes in as a datagram, because RFC
+7118 §4.2 puts one message in each. §18.1.1 — a request that outgrew a
+datagram going out on a stream instead — arrives as
+`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, naming the protocol and the destination
+in `sipral_transport_wanted_event_t`; the application answers it with
+`sipral_stack_transport_bind`, and the stack sends the request again by itself
+once that returns `SIPRAL_STATUS_OK` — there is no separate "it went" event.
+`sipral_transmit_t::protocol` is still the seam that made this possible
+without a second `sipral_stack_poll_transmit`: it says what the message went
+out over rather than what the socket is, which is what lets one account's
+REGISTER and another's leave on two different transports through the one
+queue.
 
 **Header fields go in as an array and come out as offsets.** An application
 that labels a call, asserts an identity or reads a carrier's `Diversion` needs
@@ -789,6 +807,29 @@ caller's. So a new parameter called `blob` beside `blob_size` rather than
 pointer instead of a string. `tools/abi-gen/src/model.rs` is where those five
 rules are written down.
 
+**A callback may answer, and the answer is a plain integer or nothing.**
+`SipralEventCallback` only ever reports — the poll hands it an event and moves
+on — but a policy callback, one the library asks a question it must wait for
+the answer to before it goes on, has to return a value. `alias!` takes that
+return type straight off the declaration: `pub type X = fn(a: A, b: B) ->
+u32;` is a callback that answers a `u32`, and leaving the `-> …` off, as every
+callback declared today does, is a callback that answers nothing. Both are
+printed in all four languages — `void` becomes the answer's C type, its C#
+delegate return, and a return on the Kotlin listener's method — from the one
+declaration, the same way everything else here is. An answer that is not a
+plain integer, or a return type this generator has no rule to print in one of
+the four languages, is refused by name: `tools/abi-gen/src/model.rs` reads it
+off the declaration once, rather than leaving each back end to find out on
+its own that it cannot spell what a listener would have to return.
+
+Zero is the answer that fails closed, for every answering callback this ABI
+declares, by the declaration's own choice rather than a rule the generator
+imposes: a policy callback is declared so that zero means refuse, matching
+`SipralToggle::Off` and every other yes/no answer in this ABI. It matters
+because it is also what a listener that throws instead of answering is read
+as — Kotlin's, and no other language here builds a listener of its own to
+throw from. See "Kotlin" below for what that costs.
+
 ### What the gate catches
 
 A function, a struct, a union, an enumeration, a constant or an alias added,
@@ -959,6 +1000,30 @@ default handler never does: it ends the process, as it would for a throw
 anywhere else in the application. The C contract is that the callback does not
 unwind; a throw carried out through the poll instead would leave a Java
 exception pending across every JNI call the shim makes on the way out.
+
+**A callback that answers is handled differently, because forwarding to the
+thread's own handler is the wrong answer for it.** `deliver` does not catch
+for one of these: what a listener throws is left to propagate out of the call
+and across the JNI boundary, rather than sent to a handler that could end the
+process over a question the library only needs a yes or a no from. The
+landing function reads it there instead — the same `ExceptionCheck` it already
+made for a call that only reports, which used to see nothing but a JVM
+failure such as an array it could not make. Whatever is pending, from either
+cause, is cleared, described to `stderr` for whoever is watching, and the
+answer is set to zero: the library gets the refusal every answering callback
+here is declared to mean by zero, never a value read off a call that did not
+finish making one. **An application author reading this is owed one
+sentence, so here it is: a listener that throws is a listener that refused,
+not a listener that crashed anything, and the library goes on as if it had.**
+
+**A listener that answers returns a `Long` rather than nothing** — `Long`
+because every integer crosses this boundary as one, the same rule
+`SipralNative`'s parameters already follow — and the shim reads the call's
+result with `CallStaticLongMethod` in place of `CallStaticVoidMethod`, cast
+down to whatever C type the declaration answers with. Nothing else about the
+listener changes: it is still kept under a key, tied to the handle its call
+made, and let go of when that handle is destroyed, exactly as
+`SipralEventListener` is.
 
 **A listener is handed the head of the event** — the size, the handles, the
 kind and the message — and not the payload union. Which arm the library wrote

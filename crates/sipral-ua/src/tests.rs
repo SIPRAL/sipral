@@ -43,6 +43,12 @@ fn registrar() -> SocketAddr {
     "192.0.2.9:5060".parse().expect("the registrar's address")
 }
 
+/// A second SRV target, or a migrated registrar: an address that is not
+/// [`registrar`].
+fn elsewhere() -> SocketAddr {
+    "198.51.100.7:5060".parse().expect("another address")
+}
+
 fn uri(text: &str) -> Uri {
     Uri::parse_str(text).expect("a URI")
 }
@@ -2059,6 +2065,136 @@ fn a_registrar_that_is_not_answering_is_tried_again_later() {
     assert!(
         sent(&mut agent).starts_with(b"REGISTER "),
         "and it goes by itself"
+    );
+}
+
+// -- a registrar that moves ---------------------------------------------
+
+#[test]
+fn a_registrar_that_does_not_answer_is_retargeted_to_the_next_srv_target() {
+    // the scenario the plan names: a registrar that does not answer, a
+    // retarget to the second SRV target, a REGISTER on the new address
+    // carrying the same Call-ID with the sequence number continued
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.register(id, t0).expect("the first REGISTER goes");
+    let first = sent(&mut agent);
+    assert_eq!(header(&first, HeaderName::CSeq), b"1 REGISTER");
+
+    // timer F: thirty-two seconds and nothing ever came back
+    agent.handle_timeout(t0 + Duration::from_secs(32));
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::RegistrationFailed { .. })),
+        "the registrar's silence is a failure this layer can observe"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Retrying),
+        "backed off, not given up on"
+    );
+
+    agent
+        .retarget(id, elsewhere(), t0 + Duration::from_secs(32))
+        .expect("retargeting a registered account");
+    let retried = agent.poll_transmit().expect("the retarget resent at once");
+    assert_eq!(
+        retried.destination,
+        elsewhere(),
+        "the second SRV target, not the one that never answered"
+    );
+    assert_eq!(header(&retried.payload, HeaderName::CSeq), b"2 REGISTER");
+    assert_eq!(
+        header(&retried.payload, HeaderName::CallId),
+        header(&first, HeaderName::CallId),
+        "one Call-ID for the whole boot cycle, 10.2.4"
+    );
+}
+
+#[test]
+fn a_retarget_mid_refresh_supersedes_it_rather_than_restarting_the_binding() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    registered(&mut agent, id, 3_600, t0);
+
+    // a refresh goes out and is left unanswered, in flight, when the
+    // registrar's address changes under it
+    let t1 = t0 + crate::registration::refresh_after(Duration::from_secs(3_600));
+    agent.handle_timeout(t1);
+    let refresh = sent(&mut agent);
+    assert_eq!(header(&refresh, HeaderName::CSeq), b"2 REGISTER");
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Refreshing)
+    );
+
+    agent
+        .retarget(id, elsewhere(), t1)
+        .expect("retargeting mid-refresh");
+    let superseding = agent
+        .poll_transmit()
+        .expect("the account's next attempt goes at once");
+    assert_eq!(superseding.destination, elsewhere());
+    assert_eq!(
+        header(&superseding.payload, HeaderName::CSeq),
+        b"3 REGISTER",
+        "the sequence number keeps growing rather than restarting"
+    );
+    assert_eq!(
+        header(&superseding.payload, HeaderName::CallId),
+        header(&refresh, HeaderName::CallId),
+        "the same binding, not a new one"
+    );
+
+    // the refresh still out there on the old address is nobody's business
+    // any more: answering it does not confuse the account that moved on.
+    // `send_register`'s "one entry per account" rule already drops the old
+    // attempt's ownership the moment the superseding one is sent, so this
+    // arrives unclaimed rather than being read as this account's refresh
+    // succeeding
+    deliver(&mut agent, &granted(&refresh, 3_600), t1);
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, UaEvent::Registered { account, .. } if *account == id)),
+        "a stale 200 from the address this account moved off of must not \
+         read as this account's registration succeeding: {seen:?}"
+    );
+}
+
+#[test]
+fn retargeting_to_the_address_an_account_is_already_on_does_nothing() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    registered(&mut agent, id, 3_600, t0);
+
+    agent
+        .retarget(id, registrar(), t0)
+        .expect("retargeting to the same address");
+    assert!(
+        agent.poll_transmit().is_none(),
+        "nothing needed sending: the account was already there"
+    );
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Registered)
+    );
+}
+
+#[test]
+fn a_trunk_has_no_registrar_to_retarget() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(trunk());
+    assert_eq!(
+        agent.retarget(id, elsewhere(), t0),
+        Err(UaError::NoRegistrar)
     );
 }
 

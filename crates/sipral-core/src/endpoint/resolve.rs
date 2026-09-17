@@ -22,6 +22,13 @@
 //! caller that has a resolver can answer with [`Endpoint::resolved`]. Ignoring
 //! it is a legitimate choice and the common one; answering it is what a proxy
 //! or a server-side deployment wants.
+//!
+//! A NAPTR or SRV answer, unlike an A lookup, names a transport as well as an
+//! address (§4.1) and may name several addresses to try in order (§4.3), so
+//! [`Endpoint::resolved`] takes both: the protocol travels with the flow it
+//! sets, and the addresses after the one it takes are kept, and tried in
+//! turn on this endpoint's own transport failures and timeouts, rather than
+//! handed back for the caller to retry by itself.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -31,7 +38,7 @@ use super::event::Event;
 use super::table::Flow;
 use super::transport::{Host, TransportProtocol};
 use crate::msg::Uri;
-use crate::transaction::DialogId;
+use crate::transaction::{AnyTransactionId, DialogId, NonInviteClient, TransactionId};
 
 impl Endpoint {
     /// Ask again when a response or request just applied moved the remote
@@ -57,28 +64,111 @@ impl Endpoint {
         }
     }
 
-    /// Point a dialog's requests at an address that was resolved outside.
+    /// Point a dialog's requests at an address that was resolved outside, on
+    /// the transport RFC 3263 §4.1 says the lookup named.
     ///
-    /// The first address that can be used is taken; the rest are the caller's
-    /// to retry with, since which of several SRV targets is reachable is
-    /// something only an attempt can answer. An answer for a dialog that has
-    /// ended is dropped.
+    /// `protocol` is `None` when the caller has none to report — an A lookup
+    /// with nothing upstream of it, as the reference loop does — and then the
+    /// flow keeps speaking whatever it already spoke; `Some` is what a NAPTR
+    /// or SRV answer carries, and may name a protocol the dialog was not
+    /// using.
+    ///
+    /// A protocol is only ever *found*, never opened: this layer does not own
+    /// a socket, so a transport nothing has bound for it is not something it
+    /// can invent. The addresses are walked in the order they were handed in
+    /// and the first one this endpoint already has an open transport of the
+    /// wanted protocol for is taken (RFC 3263 §4.3's "first server"); the ones
+    /// after it are kept rather than discarded, for this endpoint to try in
+    /// turn, on its own, if this one goes on to fail. An address before it
+    /// that named a protocol nothing here speaks is not tried again either —
+    /// it is simply not one "that can be used" today, and answering
+    /// [`Event::ResolveNeeded`] again after opening the transport it asked for
+    /// is how it gets another chance. When not one of the addresses can be
+    /// used this way, or the dialog has already ended, nothing changes: the
+    /// flow stands exactly as it did before this was called.
     ///
     /// There is no `now` here on purpose. Every other call that changes the
     /// endpoint takes the time because something it does is timed; this one
     /// only writes down an address.
-    pub fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]) {
-        let (Some(flow), Some(&destination)) = (self.dialogs.flow(dialog), addresses.first())
+    pub fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    ) {
+        let Some(flow) = self.dialogs.flow(dialog) else {
+            return;
+        };
+        let wanted = protocol.unwrap_or(flow.protocol);
+        let mut rest = addresses.iter().copied();
+        let Some((transport, destination)) = rest
+            .by_ref()
+            .find_map(|address| Some((self.transports.speaking_to(wanted, address)?, address)))
         else {
             return;
         };
         self.dialogs.set_flow(
             dialog,
             Flow {
+                transport,
                 destination,
+                protocol: wanted,
                 ..flow
             },
         );
+        self.dialogs.set_failover(dialog, rest.collect());
+    }
+
+    /// The flow a request just failed on gets the next address
+    /// [`Endpoint::resolved`] kept for it, if there is one this endpoint has a
+    /// transport for.
+    ///
+    /// RFC 3263 §4.3: "if the transport in the first server proved to be
+    /// unusable, then the client SHOULD retry the request... [with] a
+    /// different server". "Unusable" is what a transport failure or a timeout
+    /// says — nothing came back, or nothing could be sent — never a refusal
+    /// the far end signed: a 404 from the address this reached is an answer
+    /// from the right server, and moving to a different one would be asking
+    /// it the wrong question.
+    ///
+    /// Called only where a dialog stands to lose nothing else by staying
+    /// open — an in-dialog request that timed out or hit a dead transport,
+    /// not a re-INVITE, whose own failure already ends the dialog
+    /// (§12.2.1.2, [`super::reinvite`]) before there is anywhere left to
+    /// retry it. `flow` is the one the failed request went out on: a dialog
+    /// that has since moved past it, because another request on the same
+    /// flow already triggered this, is not moved a second time by a late
+    /// report about the first.
+    pub(super) fn failover(&mut self, dialog: DialogId, flow: Flow) {
+        if self.dialogs.flow(dialog) != Some(flow) {
+            return;
+        }
+        while let Some(address) = self.dialogs.take_failover(dialog) {
+            if let Some(transport) = self.transports.speaking_to(flow.protocol, address) {
+                self.dialogs.set_flow(
+                    dialog,
+                    Flow {
+                        transport,
+                        destination: address,
+                        ..flow
+                    },
+                );
+                return;
+            }
+        }
+    }
+
+    /// [`Endpoint::failover`], for a non-INVITE client transaction that was
+    /// sent inside a dialog.
+    ///
+    /// A transaction started outside one — a REGISTER, an OPTIONS this end
+    /// sent out of the blue — is never given to [`Endpoint::remember_dialog`],
+    /// so this is a no-op for it, exactly as it should be: nothing here ever
+    /// gave such a request a resolved answer to fail over from.
+    pub(super) fn failover_in_dialog(&mut self, id: TransactionId<NonInviteClient>, flow: Flow) {
+        if let Some(dialog) = self.dialog_of(AnyTransactionId::NonInviteClient(id)) {
+            self.failover(dialog, flow);
+        }
     }
 
     /// Say what a dialog's next hop is, if it is not where its requests are

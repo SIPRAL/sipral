@@ -509,7 +509,6 @@ enum class SipralDtmf(val value: Int) {
  * Numbers already spent on features this build does not have:
  * - 15: a subscription's state changed (A1)
  * - 16: the set of audio devices changed (A2)
- * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
  * - 29: the application is asked to resolve a destination
  */
@@ -592,6 +591,20 @@ enum class SipralEventKind(val value: Int) {
      * fail.
      */
     MEDIA_STATISTICS(17),
+    /**
+     * A request grew too large for a datagram (RFC 3261 §18.1.1) and this
+     * stack has no stream transport open to the destination it names.
+     * `payload.transport_wanted` says where it was going, over what
+     * protocol, and how it measured against the datagram it did not fit.
+     *
+     * B1. Answered with
+     * sipral_stack_transport_bind:
+     * once the application binds a transport to that destination, the
+     * stack sends the request again by itself and this ABI raises
+     * nothing further about it — there is no "it went" event, the same
+     * way there is none for an ordinary request that fit the first time.
+     */
+    TRANSPORT_WANTED(18),
     /**
      * Nothing has arrived on the media path for longer than the configured
      * threshold, while signalling is perfectly happy.
@@ -2096,6 +2109,20 @@ class SipralAccountConfig(
      * to put them on.
      */
     val headers: List<SipralHeader>? = null,
+    /**
+     * Which transport this account's REGISTER and every request it
+     * places go out on: SIPRAL_TRANSPORT_MAIN
+     * for zero, which is what a caller that leaves this at zero already
+     * gets, or a further number
+     * sipral_stack_transport_bind
+     * has bound. A number this stack has never bound is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
+     *
+     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before this member existed never
+     * sent reads as the zero that already means "the main transport".
+     */
+    val transport: Long = 0,
 )
 
 /**
@@ -2169,6 +2196,20 @@ class SipralCallConfig(
      * SRTP in it is the application's own line to write or not.
      */
     val srtp: Long = 0,
+    /**
+     * Which transport the INVITE goes out on, read only together with
+     * `destination`: SIPRAL_TRANSPORT_MAIN
+     * for zero, or a further number
+     * sipral_stack_transport_bind
+     * has bound. Nonzero with `destination` null is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
+     * override already goes out on its account's own transport, and
+     * there is nothing to combine this with.
+     *
+     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val transport: Long = 0,
 )
 
 /**
@@ -2312,7 +2353,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 11)
+        agree(0, 12)
     }
 
     /**
@@ -2341,14 +2382,14 @@ internal object SipralNative {
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
     external fun sipral_stack_counters(stack: Long, counters: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -2360,9 +2401,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
@@ -2387,7 +2428,7 @@ internal object SipralNative {
     external fun sipral_stack_poll_transmit(stack: Long, transmit: Long): Int
     external fun sipral_stack_receive_datagram(stack: Long, transport: Long, data: ByteArray, from: ByteArray, to: ByteArray, nowMs: Long): Int
     external fun sipral_stack_receive_stream(stack: Long, transport: Long, data: ByteArray, nowMs: Long): Int
-    external fun sipral_stack_transport_bind(stack: Long, transport: Long, local: ByteArray, remote: ByteArray, nowMs: Long): Int
+    external fun sipral_stack_transport_bind(stack: Long, transport: Long, protocol: Long, local: ByteArray, remote: ByteArray, nowMs: Long, transportId: LongArray): Int
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
     external fun sipral_event_kind_name(kind: Long): String?
@@ -2428,7 +2469,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 11
+    const val ABI_VERSION_MINOR: Long = 12
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -2547,12 +2588,15 @@ object Sipral {
     const val ADDRESS_BYTES: Long = 64
 
     /**
-     * The transport a stack is created with, and the only one this build
-     * binds.
+     * The transport a stack is created with.
      *
-     * Named rather than assumed, so that the day a stack has two of them is a
-     * day more numbers become valid and not a day this ABI grows a second way
-     * to hand bytes over.
+     * Never retired: sipral_stack_transport_failed and
+     * sipral_stack_stream_closed can still stop it carrying traffic, and
+     * sipral_stack_transport_bind is still what brings it back, exactly
+     * as when this was the only number a stack had. Zero on
+     * `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
+     * means this one, so a caller that never binds a second transport fills
+     * neither in and gets exactly what it always got.
      */
     const val TRANSPORT_MAIN: Long = 0
 
@@ -2862,7 +2906,7 @@ object Sipral {
         val configInstanceId = config.instanceId?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, accountSlot))
         return accountSlot[0]
     }
 
@@ -2961,7 +3005,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -3005,9 +3049,9 @@ object Sipral {
      * `docs/05-media.md`, "Ringing with media".
      *
      * Every other member of `config` — `target`, `sdp`, `destination`,
-     * `keep_all_forks`, `headers` — names something a call to place would
-     * need, and this call already exists; setting one of them is
-     * `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+     * `transport`, `keep_all_forks`, `headers` — names something a call to
+     * place would need, and this call already exists; setting one of them
+     * is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
      *
      * An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
      * nothing sent: the offer this end would make instead belongs in no
@@ -3031,7 +3075,7 @@ object Sipral {
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, nowMs))
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, nowMs))
     }
 
     /**
@@ -3297,7 +3341,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -3328,9 +3372,9 @@ object Sipral {
      * `sipral_call_place`: `sdp` for a description the application wrote and
      * runs the audio of, `media_address` for one this stack writes and runs
      * (`config.srtp` overriding the stack's own policy for it, the same
-     * way), `headers`, `destination` and `keep_all_forks` for the INVITE
-     * this places. `Replaces` and `Referred-By` among `headers` are
-     * `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
+     * way), `headers`, `destination`, `transport` and `keep_all_forks` for
+     * the INVITE this places. `Replaces` and `Referred-By` among `headers`
+     * are `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
      * there to take: that INVITE takes both from the REFER. Giving neither
      * `sdp` nor `media_address` is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
@@ -3349,7 +3393,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, placedSlot, nowMs))
         return placedSlot[0]
     }
 
@@ -3855,34 +3899,54 @@ object Sipral {
     }
 
     /**
-     * Say that a transport is open and may be written to.
+     * Say that a transport is open and may be written to — the main one
+     * again, or a further one this stack has not had before.
      *
-     * The one way back from sipral_stack_transport_failed, and the way a
-     * stream stack names its far end: a connection that has just been made
-     * knows its peer, and a stack created before the connect did not. It is
-     * also how a socket re-opened on another address after the network moved
-     * tells this stack what to put in its `Via` from now on — every message
-     * after this one carries `local`, and the ones already in flight carry what
-     * they were written with.
+     * The one way back from sipral_stack_transport_failed, the way a
+     * stream stack names its far end, and the way a further transport enters
+     * the table at all. `transport` is SIPRAL_TRANSPORT_MAIN to (re)bind
+     * the main one, or any other number: one this stack already has rebinds
+     * it, and one it does not opens it — the number is the caller's own
+     * choice, the same as `sipral_account_config_t::transport` and
+     * `sipral_call_config_t::transport` read it. `out_transport_id` may be
+     * null; when it is not, it receives that same number, which is where a
+     * caller answering
+     * SipralEventKind.TRANSPORT_WANTED
+     * reads back the id it just gave one of those two configs.
+     *
+     * `protocol` is a crate::stack::SipralTransport.
+     * Rebinding an existing transport takes zero to mean "whatever it
+     * already speaks" and anything else has to agree with that or this is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
+     * according to what a transport was opened speaking, and changing that
+     * underneath the timers would be a transport configured out of RFC 3261
+     * §17 halfway through a call. Opening a new one needs a protocol to
+     * speak, so zero there is the same refusal for the opposite reason:
+     * nothing to fall back on.
      *
      * `local` is the address the far end reaches this one at, as `host:port`.
      * `remote` is the far end of a connection, and is refused on a datagram
      * transport, which has many.
      *
-     * The protocol is not an argument: a stack retransmits or does not
-     * according to what it was created speaking, and a transport that changed
-     * that underneath the timers would be a stack configured out of RFC 3261
-     * §17 halfway through a call.
+     * This is also how a request
+     * SipralEventKind.TRANSPORT_WANTED
+     * named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
+     * protocol and destination the event gave, the stack sends the request
+     * again by itself on the next `sipral_stack_poll` — there is no further
+     * event about that one request.
      *
      * Safety
      *
-     * `local` must be readable for `local_len` bytes and `remote` for
-     * `remote_len`.
+     * `local` must be readable for `local_len` bytes, `remote` for
+     * `remote_len`, and `out_transport_id`, when it is not null, must point
+     * at one `uint32_t`.
      */
-    fun stackTransportBind(stack: Long, transport: Long, local: String, remote: String, nowMs: Long) {
+    fun stackTransportBind(stack: Long, transport: Long, protocol: Long, local: String, remote: String, nowMs: Long): Long {
         val localBytes = local.toByteArray(Charsets.UTF_8)
         val remoteBytes = remote.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_stack_transport_bind(stack, transport, localBytes, remoteBytes, nowMs))
+        val transportIdSlot = LongArray(1)
+        check(SipralNative.sipral_stack_transport_bind(stack, transport, protocol, localBytes, remoteBytes, nowMs, transportIdSlot))
+        return transportIdSlot[0]
     }
 
     /**
@@ -4172,9 +4236,11 @@ object Sipral {
      * stack that let it stand would register a binding that silently
      * receives nothing.
      *
-     * `transport` is SIPRAL_TRANSPORT_MAIN,
-     * the only one a stack of this build binds; every other number is
-     * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+     * `transport` must be one this stack already has —
+     * SIPRAL_TRANSPORT_MAIN or
+     * a further one sipral_stack_transport_bind
+     * has bound — and any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`:
+     * this call points an account at a transport, it does not open one.
      *
      * Safe to call whether or not this stack is waiting for it. When it is,
      * answering climbs the next rung at once rather than waiting out the

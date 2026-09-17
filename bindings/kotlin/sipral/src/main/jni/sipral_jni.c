@@ -517,7 +517,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -557,6 +557,7 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.instance_id = (const char *)configInstanceId_data;
     config_value.instance_id_len = (size_t)configInstanceId_size;
     config_value.expires_seconds = (uint64_t)configExpiresSeconds;
+    config_value.transport = (uint32_t)configTransport;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -648,7 +649,7 @@ Java_org_sipral_SipralNative_sipral_1account_1registration_1state(JNIEnv *env, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray call, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jlongArray call, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -673,6 +674,7 @@ Java_org_sipral_SipralNative_sipral_1call_1place(JNIEnv *env, jobject self, jlon
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     config_value.srtp = (uint32_t)configSrtp;
+    config_value.transport = (uint32_t)configTransport;
     sipral_handle_t call_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -725,7 +727,7 @@ Java_org_sipral_SipralNative_sipral_1call_1ring(JNIEnv *env, jobject self, jlong
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -750,6 +752,7 @@ Java_org_sipral_SipralNative_sipral_1call_1ring_1media(JNIEnv *env, jobject self
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     config_value.srtp = (uint32_t)configSrtp;
+    config_value.transport = (uint32_t)configTransport;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
     sipral_header_t *configHeaders_array = NULL;
@@ -917,7 +920,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray consultation, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jlongArray consultation, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -942,6 +945,7 @@ Java_org_sipral_SipralNative_sipral_1call_1consult(JNIEnv *env, jobject self, jl
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     config_value.srtp = (uint32_t)configSrtp;
+    config_value.transport = (uint32_t)configTransport;
     sipral_handle_t consultation_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -989,7 +993,7 @@ Java_org_sipral_SipralNative_sipral_1call_1transfer_1to(JNIEnv *env, jobject sel
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlongArray placed, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray configTarget, jbyteArray configSdp, jbyteArray configDestination, jlong configKeepAllForks, jbyteArray configMediaAddress, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configSrtp, jlong configTransport, jlongArray placed, jlong nowMs)
 {
     (void)env;
     (void)self;
@@ -1014,6 +1018,7 @@ Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer(JNIEnv *env, jobject
     config_value.media_address = (const char *)configMediaAddress_data;
     config_value.media_address_len = (size_t)configMediaAddress_size;
     config_value.srtp = (uint32_t)configSrtp;
+    config_value.transport = (uint32_t)configTransport;
     sipral_handle_t placed_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -1461,7 +1466,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1receive_1stream(JNIEnv *env, jobject
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1transport_1bind(JNIEnv *env, jobject self, jlong stack, jlong transport, jbyteArray local, jbyteArray remote, jlong nowMs)
+Java_org_sipral_SipralNative_sipral_1stack_1transport_1bind(JNIEnv *env, jobject self, jlong stack, jlong transport, jlong protocol, jbyteArray local, jbyteArray remote, jlong nowMs, jlongArray transportId)
 {
     (void)env;
     (void)self;
@@ -1469,12 +1474,17 @@ Java_org_sipral_SipralNative_sipral_1stack_1transport_1bind(JNIEnv *env, jobject
     jsize local_size = local ? (*env)->GetArrayLength(env, local) : 0;
     jbyte *remote_data = remote ? (*env)->GetByteArrayElements(env, remote, NULL) : NULL;
     jsize remote_size = remote ? (*env)->GetArrayLength(env, remote) : 0;
-    sipral_status_t status = sipral_stack_transport_bind((sipral_handle_t)stack, (uint32_t)transport, (const char *)local_data, (size_t)local_size, (const char *)remote_data, (size_t)remote_size, (uint64_t)nowMs);
+    uint32_t transportId_value = 0;
+    sipral_status_t status = sipral_stack_transport_bind((sipral_handle_t)stack, (uint32_t)transport, (uint32_t)protocol, (const char *)local_data, (size_t)local_size, (const char *)remote_data, (size_t)remote_size, (uint64_t)nowMs, &transportId_value);
     if (local) {
         (*env)->ReleaseByteArrayElements(env, local, local_data, JNI_ABORT);
     }
     if (remote) {
         (*env)->ReleaseByteArrayElements(env, remote, remote_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)transportId_value;
+        (*env)->SetLongArrayRegion(env, transportId, 0, 1, &slot);
     }
     return (jint)status;
 }

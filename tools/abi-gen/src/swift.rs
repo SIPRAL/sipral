@@ -950,8 +950,9 @@ impl Spelling for Names {
     /// Nothing. The callback is the C target's, imported rather than
     /// printed -- which is what [`Spelling::types`] says about it too -- and
     /// a C function pointer reaches Swift as `@convention(c)` with its
-    /// parameter names dropped. So this back end spells none of them, and
-    /// [`crate::c::Names`] reads the one spelling there is.
+    /// parameter names dropped and its result carried through untouched, an
+    /// answering callback's included. So this back end spells none of them,
+    /// and [`crate::c::Names`] reads the one spelling there is.
     fn signature(&self, alias: &Alias, read: &[Read<'_>]) -> Vec<Named> {
         let _ = (alias, read);
         Vec::new()

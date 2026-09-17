@@ -190,17 +190,9 @@ fn frame(line: &str, at: usize, last: Duration) -> Result<Taken, ReadError> {
             }));
         }
         "resolved" => {
-            let dialog = word.next().and_then(dialog_id).ok_or(bad)?;
-            let mut addresses = Vec::new();
-            for token in word {
-                addresses.push(address(token).ok_or(bad)?);
-            }
             return Ok(Taken::Done(Frame {
                 at: when,
-                step: Step::Resolved {
-                    dialog,
-                    addresses: addresses.into(),
-                },
+                step: resolved(&mut word, bad)?,
             }));
         }
         "closed" => Step::Arrived(Arrival::StreamClosed {
@@ -234,6 +226,29 @@ fn frame(line: &str, at: usize, last: Duration) -> Result<Taken, ReadError> {
         return Err(bad);
     }
     Ok(Taken::Done(Frame { at: when, step }))
+}
+
+/// A `resolved` line's own words: the dialog it answers for, the protocol
+/// (`-` for none), then the addresses
+/// [`Recorder::resolved`](super::Recorder::resolved) was handed.
+fn resolved<'a>(
+    word: &mut impl Iterator<Item = &'a str>,
+    bad: ReadError,
+) -> Result<Step, ReadError> {
+    let dialog = word.next().and_then(dialog_id).ok_or(bad)?;
+    let protocol = match word.next().ok_or(bad)? {
+        "-" => None,
+        token => Some(TransportProtocol::from_token(token.as_bytes()).ok_or(bad)?),
+    };
+    let mut addresses = Vec::new();
+    for token in word {
+        addresses.push(address(token).ok_or(bad)?);
+    }
+    Ok(Step::Resolved {
+        dialog,
+        addresses: addresses.into(),
+        protocol,
+    })
 }
 
 /// A frame whose payload lines are all in.

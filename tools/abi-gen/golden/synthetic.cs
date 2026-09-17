@@ -55,6 +55,18 @@ public enum SipralToggle : uint
 public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);
 
 /// <summary>
+/// Asked before the library goes on, and answered with whether to
+/// continue. A listener that throws instead of answering is read as
+/// zero, which every callback here that answers is defined to take
+/// as "no".
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate uint SipralScreenCallback(IntPtr @event, IntPtr userData);
+
+/// <summary>
 /// What a stack has done since it was made.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -252,6 +264,29 @@ public struct SipralEvent
     {
         var value = default(SipralEvent);
         value.Size = (nuint)Marshal.SizeOf<SipralEvent>();
+        return value;
+    }
+}
+
+/// <summary>
+/// What a policy callback is asked before the library goes on.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralScreenEvent
+{
+    public nuint Size;
+    /// <summary>
+    /// Who is calling, as UTF-8, or null.
+    /// </summary>
+    public IntPtr From;
+    public nuint FromLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralScreenEvent Sized()
+    {
+        var value = default(SipralScreenEvent);
+        value.Size = (nuint)Marshal.SizeOf<SipralScreenEvent>();
         return value;
     }
 }

@@ -2436,7 +2436,7 @@ fn a_dialog_whose_next_hop_is_a_name_says_so() {
 
     // answering it moves the dialog's requests
     let elsewhere: SocketAddr = "198.51.100.7:5080".parse().expect("an address");
-    endpoint.resolved(asked.0, &[elsewhere]);
+    endpoint.resolved(asked.0, &[elsewhere], None);
     endpoint.bye(asked.0, t0).expect("the BYE goes");
     let out = transmits(&mut endpoint);
     assert_eq!(out.first().map(|t| t.destination), Some(elsewhere));
@@ -2466,8 +2466,166 @@ fn an_answer_for_a_dialog_that_has_ended_is_dropped() {
     transmits(&mut endpoint);
 
     let elsewhere: SocketAddr = "198.51.100.7:5080".parse().expect("an address");
-    endpoint.resolved(dialog, &[elsewhere]);
+    endpoint.resolved(dialog, &[elsewhere], None);
     assert!(endpoint.dialog(dialog).is_none());
+}
+
+#[test]
+fn a_resolved_answer_that_names_tcp_moves_a_dialog_off_udp() {
+    // RFC 3263 4.1: the transport comes out of the lookup along with the
+    // address, and a SRV target naming TCP has to be able to say so
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding TCP");
+
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().expect("an address");
+    endpoint.resolved(dialog, &[elsewhere], Some(TransportProtocol::Tcp));
+
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("the BYE went somewhere");
+    assert_eq!(sent.transport, TCP, "the flow moved to the TCP transport");
+    assert_eq!(sent.protocol, TransportProtocol::Tcp);
+    assert_eq!(sent.destination, elsewhere);
+}
+
+#[test]
+fn a_resolved_answer_naming_an_unbound_transport_changes_nothing() {
+    // this layer never opens a transport; a protocol nothing here speaks is
+    // not something `resolved` can invent, so the flow stands until the
+    // caller opens what RFC 3263 asked for and answers again
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().expect("an address");
+    endpoint.resolved(dialog, &[elsewhere], Some(TransportProtocol::Tls));
+
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("the BYE still goes, on the old flow");
+    assert_eq!(
+        sent.protocol,
+        TransportProtocol::Udp,
+        "nothing speaks TLS here"
+    );
+    assert_eq!(
+        sent.destination,
+        peer(),
+        "the address nothing could reach it by is not taken either"
+    );
+}
+
+#[test]
+fn a_second_resolved_address_is_kept_and_used_after_the_first_times_out() {
+    // RFC 3263 4.3: a client that fails on one SRV target retries the next
+    // one, and "fails" is a transport failure or a timeout -- never a
+    // refusal the far end signed
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+
+    let first: SocketAddr = "198.51.100.7:5060".parse().expect("an address");
+    let second: SocketAddr = "198.51.100.8:5060".parse().expect("another address");
+    endpoint.resolved(dialog, &[first, second], None);
+
+    let info = OutgoingInDialogRequest::new(Method::Extension("INFO"));
+    endpoint
+        .request_in_dialog(dialog, &info, t0)
+        .expect("the first INFO goes");
+    let out = transmits(&mut endpoint);
+    assert_eq!(
+        out.first().map(|t| t.destination),
+        Some(first),
+        "the first address is the one taken"
+    );
+
+    // 64*T1: timer F, nothing ever came back. Everything up to and
+    // including it retransmits the first INFO to `first` a handful of
+    // times, and those retransmissions -- not the request this test cares
+    // about -- are what a plain `poll_transmit` would hand back first
+    let t1 = t0 + Duration::from_secs(32);
+    endpoint.handle_timeout(t1);
+    let seen = events(&mut endpoint);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::RequestFailed {
+                reason: FailureReason::Timeout,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    transmits(&mut endpoint);
+
+    let info = OutgoingInDialogRequest::new(Method::Extension("INFO"));
+    endpoint
+        .request_in_dialog(dialog, &info, t1)
+        .expect("the second INFO goes");
+    let out = transmits(&mut endpoint);
+    assert_eq!(
+        out.first().map(|t| t.destination),
+        Some(second),
+        "the timeout moved the dialog to the address kept for it"
+    );
+}
+
+#[test]
+fn a_refusal_at_the_sip_layer_does_not_move_a_dialog_to_the_next_address() {
+    // a 404 from the address this reached is an answer from the right
+    // server, and RFC 3263 4.3's failover is not for it
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let (_, _, dialog) = call(&mut endpoint, t0);
+    endpoint.ack_2xx(dialog, None, t0).expect("the ACK goes");
+    transmits(&mut endpoint);
+
+    let first: SocketAddr = "198.51.100.7:5060".parse().expect("an address");
+    let second: SocketAddr = "198.51.100.8:5060".parse().expect("another address");
+    endpoint.resolved(dialog, &[first, second], None);
+
+    let info = OutgoingInDialogRequest::new(Method::Extension("INFO"));
+    endpoint
+        .request_in_dialog(dialog, &info, t0)
+        .expect("the INFO goes");
+    let bytes = transmits(&mut endpoint)
+        .pop()
+        .expect("the INFO went")
+        .payload
+        .to_vec();
+    deliver(
+        &mut endpoint,
+        &respond_to(&bytes, 404, "Not Found", Some("desk")),
+        t0,
+    );
+    events(&mut endpoint);
+
+    endpoint.bye(dialog, t0).expect("the BYE goes");
+    let out = transmits(&mut endpoint);
+    assert_eq!(
+        out.first().map(|t| t.destination),
+        Some(first),
+        "the server that answered is still the right one to ask"
+    );
 }
 
 #[test]

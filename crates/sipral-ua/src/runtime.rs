@@ -312,7 +312,7 @@ impl Runtime {
                 }) => {
                     let addresses = look_up(host, port, protocol);
                     if !addresses.is_empty() {
-                        self.agent.endpoint().resolved(dialog, &addresses);
+                        self.agent.endpoint().resolved(dialog, &addresses, protocol);
                     }
                 }
                 // opened here, and reported anyway: the two sizes on it are

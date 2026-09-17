@@ -929,10 +929,20 @@ impl Endpoint {
     pub fn invite_with_credentials(&mut self, request: &OutgoingRequest, credentials: &Credentials, now: Instant)
         -> Result<TransactionId<InviteClient>, SendError>;
 
-    /// Point a dialog's requests at an address resolved outside. No `now`:
-    /// every other mutating call takes the time because something it does is
-    /// timed, and this one only writes down an address.
-    pub fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]);
+    /// Point a dialog's requests at an address resolved outside, and at the
+    /// protocol the answer names (`None` keeps the flow's own, which is what
+    /// an answer from a plain A record has to say). The first address there
+    /// is a bound transport for is taken and the rest are kept, so a
+    /// transport failure or a timeout moves to the next SRV target without a
+    /// second round trip. No `now`: every other mutating call takes the time
+    /// because something it does is timed, and this one only writes down an
+    /// address.
+    pub fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    );
 
     // -- UAS ------------------------------------------------------------------
     /// 100, or any final response. Rejected with `MustBeReliable` if the

@@ -41,9 +41,9 @@ use sipral_ffi::abi::{
 
 use crate::c;
 use crate::model::{
-    Base, Element, Int, Linked, Read, Refused, Role, Text, Type, Writable, counts_records, element,
-    elements, functions, linked, lower_camel, plain_named, read_all, record_named, roles,
-    screaming, snake, unprintable, upper_camel, without_prefix,
+    Base, Element, Int, Linked, Read, Refused, Role, Text, Type, Writable, callback_answer,
+    counts_records, element, elements, functions, linked, lower_camel, plain_named, read_all,
+    record_named, roles, screaming, snake, unprintable, upper_camel, without_prefix,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -290,7 +290,7 @@ fn callback_named(surface: &Surface, name: &str) -> Option<&'static Alias> {
     surface
         .aliases
         .iter()
-        .find(|alias| alias.name == name && matches!(alias.stands, Stands::Callback(_)))
+        .find(|alias| alias.name == name && matches!(alias.stands, Stands::Callback(_, _)))
 }
 
 /// The pointer a callback's user data travels in.
@@ -495,6 +495,9 @@ struct Landing {
     /// The user pointer, which carries the key the listener is kept under.
     user_data: &'static Member,
     record: &'static Record,
+    /// What the callback answers with, once its return type has been read:
+    /// absent for one that only reports.
+    answer: Option<Type>,
 }
 
 impl Landing {
@@ -509,7 +512,7 @@ impl Landing {
                 alias.name
             ))
         };
-        let Stands::Callback(arguments) = alias.stands else {
+        let Stands::Callback(arguments, _) = alias.stands else {
             return Err(refuse());
         };
         let [event, user_data] = arguments else {
@@ -529,12 +532,20 @@ impl Landing {
         }) else {
             return Err(refuse());
         };
+        let answer = callback_answer(alias)?;
         Ok(Self {
             alias,
             event,
             user_data,
             record,
+            answer,
         })
+    }
+
+    /// The Kotlin type a listener answers in, and the shim reads the call's
+    /// result as: absent for a callback that only reports.
+    fn kotlin_answer(&self) -> Option<&'static str> {
+        self.answer.as_ref().map(plain_kotlin)
     }
 
     /// `SipralEventCallback` is `SipralEventListener`.
@@ -575,7 +586,7 @@ fn landings(surface: &Surface) -> Result<Vec<Landing>, Refused> {
     surface
         .aliases
         .iter()
-        .filter(|alias| matches!(alias.stands, Stands::Callback(_)))
+        .filter(|alias| matches!(alias.stands, Stands::Callback(_, _)))
         .map(|alias| Landing::of(surface, alias))
         .collect()
 }
@@ -724,10 +735,16 @@ fn handed(
     Ok((out, left_out))
 }
 
-/// The JVM descriptor of a keeper's `deliver`: the key, then every member.
-fn deliver_descriptor(members: &[Handed]) -> String {
+/// The JVM descriptor of a keeper's `deliver`: the key, then every member,
+/// then what it answers with -- `V` for nothing, or the descriptor of the
+/// plain integer a callback that answers reads its result as.
+fn deliver_descriptor(members: &[Handed], answer: Option<&Type>) -> String {
     let inside: String = members.iter().map(|one| one.descriptor.as_str()).collect();
-    format!("(J{inside})V")
+    let result = match answer {
+        Some(ty) => plain_descriptor(ty),
+        None => "V",
+    };
+    format!("(J{inside}){result}")
 }
 
 /// The listener each struct going in to an entry point holds, by the object
@@ -1166,19 +1183,39 @@ fn listeners(surface: &Surface) -> Result<String, Refused> {
         about.push(
             " shim attaches that thread to the JVM for the length of the call when it".to_owned(),
         );
-        about.push(
-            " is not attached already. What a listener throws goes to that thread's".to_owned(),
-        );
-        about.push(
-            " uncaught exception handler, and the poll carries on once the handler".to_owned(),
-        );
-        about.push(
-            " returns. Android's default handler does not return: it ends the process.".to_owned(),
-        );
+        if let Some(kotlin_answer) = landing.kotlin_answer() {
+            about.push(format!(
+                " is not attached already. It answers with a {kotlin_answer}, which the shim"
+            ));
+            about.push(
+                " hands the library back. What a listener throws is not delivered anywhere:"
+                    .to_owned(),
+            );
+            about.push(
+                " the shim clears it and answers as if this had returned zero, which is what"
+                    .to_owned(),
+            );
+            about.push(" every answering listener here is defined to take as \"no\".".to_owned());
+        } else {
+            about.push(
+                " is not attached already. What a listener throws goes to that thread's".to_owned(),
+            );
+            about.push(
+                " uncaught exception handler, and the poll carries on once the handler".to_owned(),
+            );
+            about.push(
+                " returns. Android's default handler does not return: it ends the process."
+                    .to_owned(),
+            );
+        }
         doc(&mut out, "", &about);
+        let returns = landing
+            .kotlin_answer()
+            .map(|kotlin_answer| format!(": {kotlin_answer}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "fun interface {listener} {{\n    fun {}({}: {})\n}}\n",
+            "fun interface {listener} {{\n    fun {}({}: {}){returns}\n}}\n",
             landing.method(),
             safe(&lower_camel(landing.event.name)),
             record.name
@@ -1203,6 +1240,44 @@ fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
         .iter()
         .map(|member| member.argument.as_str())
         .collect();
+    // An answering listener's own exception is not caught here: it is left
+    // to propagate out of this call and across the JNI boundary, where the
+    // shim reads the pending exception rather than whatever this returned,
+    // and answers as if this had returned zero. A listener that only
+    // reports is caught here instead, and handed to the thread's own
+    // uncaught exception handler, because nothing downstream of it reads an
+    // answer that would need to fail closed.
+    let deliver = match landing.kotlin_answer() {
+        Some(kotlin_answer) => format!(
+            "    /** Called by the JNI shim, once per event, on the thread that polls. */\n\
+             \x20   @JvmStatic\n\
+             \x20   fun deliver(key: Long, {}): {kotlin_answer} {{\n\
+             \x20       val listener = synchronized(this) {{ listening[key] }} ?: return 0\n\
+             \x20       return listener.{}({}({}))\n\
+             \x20   }}\n",
+            parameters.join(", "),
+            landing.method(),
+            record.name,
+            arguments.join(", ")
+        ),
+        None => format!(
+            "    /** Called by the JNI shim, once per event, on the thread that polls. */\n\
+             \x20   @JvmStatic\n\
+             \x20   fun deliver(key: Long, {}) {{\n\
+             \x20       val listener = synchronized(this) {{ listening[key] }} ?: return\n\
+             \x20       try {{\n\
+             \x20           listener.{}({}({}))\n\
+             \x20       }} catch (failure: Throwable) {{\n\
+             \x20           val thread = Thread.currentThread()\n\
+             \x20           thread.uncaughtExceptionHandler.uncaughtException(thread, failure)\n\
+             \x20       }}\n\
+             \x20   }}\n",
+            parameters.join(", "),
+            landing.method(),
+            record.name,
+            arguments.join(", ")
+        ),
+    };
     let mut out = String::new();
     {
         let _ = writeln!(
@@ -1250,22 +1325,8 @@ fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
              \x20           listening.remove(key)\n\
              \x20       }}\n\
              \x20   }}\n\n\
-             \x20   /** Called by the JNI shim, once per event, on the thread that polls. */\n\
-             \x20   @JvmStatic\n\
-             \x20   fun deliver(key: Long, {}) {{\n\
-             \x20       val listener = synchronized(this) {{ listening[key] }} ?: return\n\
-             \x20       try {{\n\
-             \x20           listener.{}({}({}))\n\
-             \x20       }} catch (failure: Throwable) {{\n\
-             \x20           val thread = Thread.currentThread()\n\
-             \x20           thread.uncaughtExceptionHandler.uncaughtException(thread, failure)\n\
-             \x20       }}\n\
-             \x20   }}\n\
+             {deliver}\
              }}\n",
-            parameters.join(", "),
-            landing.method(),
-            record.name,
-            arguments.join(", ")
         );
     }
     out
@@ -2448,7 +2509,7 @@ fn load_hooks(surface: &Surface, landings: &[Landing]) -> Result<String, Refused
     for landing in landings {
         let fields = read_all(landing.record.name, landing.record.fields)?;
         let (handed_over, _) = handed(surface, landing, &fields)?;
-        let members = deliver_descriptor(&handed_over);
+        let members = deliver_descriptor(&handed_over, landing.answer.as_ref());
         let _ = writeln!(
             out,
             "    {{\n\
@@ -2500,6 +2561,80 @@ fn load_hooks(surface: &Surface, landings: &[Landing]) -> Result<String, Refused
 }
 
 /// The C function one callback lands in.
+/// The doc comment above the C function one callback lands in.
+fn landing_comment(landing: &Landing, answering: bool) -> String {
+    let more = if answering {
+        " Answers with what the listener answered, or with the value that\n\
+         \x20* fails closed when there was none."
+    } else {
+        ""
+    };
+    format!(
+        "/* Where a {callback} lands. The event is handed to\n\
+         \x20* {keeper}.deliver under the key its user pointer carries, on a\n\
+         \x20* thread attached to the JVM for the length of the call when it was not\n\
+         \x20* attached already, and every local reference made here is deleted\n\
+         \x20* before it returns: a poll delivers all its events inside one native\n\
+         \x20* call, and nothing made here would be released until that call ended.{more} */\n",
+        callback = c::named(landing.alias.name),
+        keeper = landing.keeper(),
+    )
+}
+
+/// The call to `deliver`, guarded by whether every array the event needed
+/// was made: void for a callback that only reports, or a call whose result
+/// is read into `answer` for one that answers.
+fn landing_call(landing: &Landing, answer: Option<&str>, passed: &[String]) -> String {
+    match answer {
+        Some(ty) => format!(
+            "    if (built) {{\n        answer = \
+             ({ty})(*env)->CallStaticLongMethod(env, {}, {}, {});\n    }}\n",
+            landing.class(),
+            landing.deliver(),
+            passed.join(", ")
+        ),
+        None => format!(
+            "    if (built) {{\n        (*env)->CallStaticVoidMethod(env, {}, {}, {});\n    }}\n",
+            landing.class(),
+            landing.deliver(),
+            passed.join(", ")
+        ),
+    }
+}
+
+/// What is pending after the call is made, and what this does about it.
+///
+/// A callback that only reports has `deliver` catch what a listener throws
+/// and hand it to the thread's own uncaught exception handler, so what is
+/// pending here, if anything, is the JVM's own -- an array it could not
+/// make -- and a callback has no Java frame beneath it to throw into. A
+/// callback that answers has `deliver` let a listener's own exception
+/// through instead, so the same check also catches that, and `answer` is
+/// reset to zero either way: a policy question with no answer fails closed
+/// rather than carry on with whatever the call happened to return.
+fn landing_exception_check(answering: bool) -> &'static str {
+    if answering {
+        "    /* Pending here either because an array could not be made, or because\n\
+         \x20    * deliver let a listener's own exception through rather than catch it:\n\
+         \x20    * a policy question with no answer fails closed rather than carry on\n\
+         \x20    * with whatever the call above happened to return. */\n\
+         \x20   if ((*env)->ExceptionCheck(env)) {\n\
+         \x20       (*env)->ExceptionDescribe(env);\n\
+         \x20       (*env)->ExceptionClear(env);\n\
+         \x20       answer = 0;\n\
+         \x20   }\n"
+    } else {
+        "    /* deliver hands what a listener throws to the thread's own handler, so\n\
+         \x20    * what is pending here is the JVM's -- an array it could not make --\n\
+         \x20    * and a callback has no Java frame beneath it to throw into */\n\
+         \x20   if ((*env)->ExceptionCheck(env)) {\n\
+         \x20       (*env)->ExceptionDescribe(env);\n\
+         \x20       (*env)->ExceptionClear(env);\n\
+         \x20   }\n"
+    }
+}
+
+/// The C function one callback lands in.
 fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refused> {
     let record = landing.record;
     let fields = read_all(record.name, record.fields)?;
@@ -2507,26 +2642,29 @@ fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refu
     let event = landing.event.name;
     let user_data = landing.user_data.name;
     let pointed = c::spell(&Type::read(landing.event.rust_type)?);
-    let mut out = String::new();
+    // The C return type this callback was declared with: `void` for one that
+    // only reports, or the plain integer one that answers is defined over,
+    // which is also the type `answer` is declared at and every early exit
+    // below returns -- zero, the value that fails closed, until a call
+    // actually answers.
+    let answer = landing.answer.as_ref().map(c::spell);
+    let head = answer.as_deref().unwrap_or("void");
+    let early = match &answer {
+        Some(ty) => format!("return ({ty})answer;"),
+        None => "return;".to_owned(),
+    };
+    let mut out = landing_comment(landing, answer.is_some());
     let _ = writeln!(
         out,
-        "/* Where a {callback} lands. The event is handed to\n\
-         \x20* {keeper}.deliver under the key its user pointer carries, on a\n\
-         \x20* thread attached to the JVM for the length of the call when it was not\n\
-         \x20* attached already, and every local reference made here is deleted\n\
-         \x20* before it returns: a poll delivers all its events inside one native\n\
-         \x20* call, and nothing made here would be released until that call ended. */",
-        callback = c::named(landing.alias.name),
-        keeper = landing.keeper()
-    );
-    let _ = writeln!(
-        out,
-        "static void\n{}({pointed}{event}, void *{user_data})\n{{",
+        "static {head}\n{}({pointed}{event}, void *{user_data})\n{{",
         landing.function()
     );
     out.push_str(
         "    JNIEnv *env = NULL;\n    int attached = 0;\n    int built = 1;\n    jint found;\n",
     );
+    if let Some(ty) = &answer {
+        let _ = writeln!(out, "    {ty} answer = 0;");
+    }
     for member in &members {
         if let Some((name, ty)) = &member.c_local {
             let _ = writeln!(out, "    {ty} {name} = NULL;");
@@ -2534,40 +2672,27 @@ fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refu
     }
     let _ = writeln!(
         out,
-        "\n    if (jni_vm == NULL || {event} == NULL) {{\n        return;\n    }}"
+        "\n    if (jni_vm == NULL || {event} == NULL) {{\n        {early}\n    }}"
     );
-    out.push_str(
+    let _ = write!(
+        out,
         "    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);\n\
-         \x20   if (found == JNI_EDETACHED) {\n\
-         \x20       if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {\n\
-         \x20           return;\n\
-         \x20       }\n\
+         \x20   if (found == JNI_EDETACHED) {{\n\
+         \x20       if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {{\n\
+         \x20           {early}\n\
+         \x20       }}\n\
          \x20       attached = 1;\n\
-         \x20   } else if (found != JNI_OK) {\n\
-         \x20       return;\n\
-         \x20   }\n",
+         \x20   }} else if (found != JNI_OK) {{\n\
+         \x20       {early}\n\
+         \x20   }}\n",
     );
     for member in &members {
         out.push_str(&member.c_make);
     }
     let mut passed = vec![format!("(jlong)(intptr_t){user_data}")];
     passed.extend(members.iter().map(|member| member.c_passed.clone()));
-    let _ = writeln!(
-        out,
-        "    if (built) {{\n        (*env)->CallStaticVoidMethod(env, {}, {}, {});\n    }}",
-        landing.class(),
-        landing.deliver(),
-        passed.join(", ")
-    );
-    out.push_str(
-        "    /* deliver hands what a listener throws to the thread's own handler, so\n\
-         \x20    * what is pending here is the JVM's -- an array it could not make --\n\
-         \x20    * and a callback has no Java frame beneath it to throw into */\n\
-         \x20   if ((*env)->ExceptionCheck(env)) {\n\
-         \x20       (*env)->ExceptionDescribe(env);\n\
-         \x20       (*env)->ExceptionClear(env);\n\
-         \x20   }\n",
-    );
+    out.push_str(&landing_call(landing, answer.as_deref(), &passed));
+    out.push_str(landing_exception_check(answer.is_some()));
     for member in &members {
         if let Some((name, _)) = &member.c_local {
             let _ = writeln!(
@@ -2576,9 +2701,13 @@ fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refu
             );
         }
     }
-    out.push_str(
-        "    if (attached) {\n        (*jni_vm)->DetachCurrentThread(jni_vm);\n    }\n}\n\n",
-    );
+    out.push_str("    if (attached) {\n        (*jni_vm)->DetachCurrentThread(jni_vm);\n    }\n");
+    match &answer {
+        Some(ty) => {
+            let _ = writeln!(out, "    return ({ty})answer;\n}}\n");
+        }
+        None => out.push_str("}\n\n"),
+    }
     Ok(out)
 }
 
@@ -2669,6 +2798,79 @@ fn own_lists(surface: &Surface, top: &str, file: &str) -> Result<Vec<(String, Na
                 "the function every list helper refuses through",
             ),
         ));
+    }
+    Ok(out)
+}
+
+/// Every name one callback's own printing puts somewhere: the record its
+/// event arrives in, the listener and the keeper it is kept in, the locals
+/// `deliver` and the landing function write, and the three names the shim
+/// gives the landing function itself.
+fn own_landing(
+    surface: &Surface,
+    top: &str,
+    file: &str,
+    landing: &Landing,
+) -> Result<Vec<(String, Named)>, Refused> {
+    let record = landing.record;
+    let alias = landing.alias.name;
+    let mut out = vec![(
+        top.to_owned(),
+        Named::new("", record.name.to_owned(), record.name),
+    )];
+    for emitted in [landing.listener(), landing.keeper()] {
+        out.push((top.to_owned(), Named::new("", emitted, alias)));
+    }
+    out.push((
+        landing.listener(),
+        Named::new("the listener", landing.method(), alias),
+    ));
+    let class = format!("{}, the class", record.name);
+    let deliver = format!("{}.deliver", landing.keeper());
+    let landed = format!("{alias}, the shim");
+    for (name, what) in DELIVER_LOCALS {
+        out.push((
+            deliver.clone(),
+            Named::new("the wrapper", (*name).to_owned(), *what),
+        ));
+    }
+    for (name, what) in LANDING_LOCALS {
+        out.push((
+            landed.clone(),
+            Named::new("the shim", (*name).to_owned(), *what),
+        ));
+    }
+    if landing.answer.is_some() {
+        out.push((
+            landed.clone(),
+            Named::new(
+                "the shim",
+                "answer".to_owned(),
+                "what the shim answers with, or answers as if there had been none",
+            ),
+        ));
+    }
+    let fields = read_all(record.name, record.fields)?;
+    let (members, _) = handed(surface, landing, &fields)?;
+    for member in &members {
+        let from = format!("{}::{}", record.name, member.from);
+        out.push((
+            class.clone(),
+            Named::new("the class", member.kotlin.clone(), from.clone()),
+        ));
+        out.push((
+            deliver.clone(),
+            Named::new("the wrapper", member.kotlin.clone(), from.clone()),
+        ));
+        if let Some((local, _)) = &member.c_local {
+            out.push((
+                landed.clone(),
+                Named::new("the shim", (*local).to_owned(), from),
+            ));
+        }
+    }
+    for emitted in [landing.function(), landing.class(), landing.deliver()] {
+        out.push((file.to_owned(), Named::new("the shim", emitted, alias)));
     }
     Ok(out)
 }
@@ -2867,56 +3069,7 @@ impl Spelling for Names {
         out.extend(own_lists(surface, top, file)?);
         let landings = landings(surface)?;
         for landing in &landings {
-            let record = landing.record;
-            let alias = landing.alias.name;
-            out.push((
-                top.to_owned(),
-                Named::new("", record.name.to_owned(), record.name),
-            ));
-            for emitted in [landing.listener(), landing.keeper()] {
-                out.push((top.to_owned(), Named::new("", emitted, alias)));
-            }
-            out.push((
-                landing.listener(),
-                Named::new("the listener", landing.method(), alias),
-            ));
-            let class = format!("{}, the class", record.name);
-            let deliver = format!("{}.deliver", landing.keeper());
-            let landed = format!("{alias}, the shim");
-            for (name, what) in DELIVER_LOCALS {
-                out.push((
-                    deliver.clone(),
-                    Named::new("the wrapper", (*name).to_owned(), *what),
-                ));
-            }
-            for (name, what) in LANDING_LOCALS {
-                out.push((
-                    landed.clone(),
-                    Named::new("the shim", (*name).to_owned(), *what),
-                ));
-            }
-            let fields = read_all(record.name, record.fields)?;
-            let (members, _) = handed(surface, landing, &fields)?;
-            for member in &members {
-                let from = format!("{}::{}", record.name, member.from);
-                out.push((
-                    class.clone(),
-                    Named::new("the class", member.kotlin.clone(), from.clone()),
-                ));
-                out.push((
-                    deliver.clone(),
-                    Named::new("the wrapper", member.kotlin.clone(), from.clone()),
-                ));
-                if let Some((local, _)) = &member.c_local {
-                    out.push((
-                        landed.clone(),
-                        Named::new("the shim", (*local).to_owned(), from),
-                    ));
-                }
-            }
-            for emitted in [landing.function(), landing.class(), landing.deliver()] {
-                out.push((file.to_owned(), Named::new("the shim", emitted, alias)));
-            }
+            out.extend(own_landing(surface, top, file, landing)?);
         }
         if !landings.is_empty() {
             for (name, what) in SHIM_FILE {

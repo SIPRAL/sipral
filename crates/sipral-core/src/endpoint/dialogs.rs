@@ -16,6 +16,7 @@
 //! know which shape a particular dialog is in.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use super::table::Flow;
 use crate::dialog::{Dialog, DialogKey, DialogSet};
@@ -40,6 +41,12 @@ struct Entry {
     /// Where in-dialog requests leave from. The route set says which hop
     /// first, but not which socket, and the socket is the caller's.
     flow: Flow,
+    /// Addresses [`super::Endpoint::resolved`] was handed beside the one
+    /// `flow` now names, in the order they came in, for
+    /// [`super::Endpoint::failover`] to try in turn if `flow` goes on to
+    /// fail. Empty whenever the dialog has never been resolved, has used up
+    /// what it was given, or the caller's last answer named only one address.
+    failover: Vec<SocketAddr>,
     /// Where the ACK to the 2xx that confirmed this dialog left from, for a
     /// dialog of an INVITE we sent. Not always `flow`: §18.1.1 moves an ACK
     /// too large for a datagram onto a stream, and every retransmission of
@@ -138,6 +145,7 @@ impl Dialogs {
             key: key.clone(),
             home: Home::Branch(set),
             flow,
+            failover: Vec::new(),
             acked_on: None,
             non_invite_transactions: 0,
             answered_invite: None,
@@ -158,6 +166,7 @@ impl Dialogs {
             key: key.clone(),
             home: Home::Answered(Box::new(dialog)),
             flow,
+            failover: Vec::new(),
             acked_on: None,
             non_invite_transactions: 0,
             answered_invite: None,
@@ -202,6 +211,30 @@ impl Dialogs {
         if let Some(entry) = self.entries.get_mut(id.raw) {
             entry.flow = flow;
         }
+    }
+
+    /// Replace what is kept for [`super::Endpoint::failover`] to try next, in
+    /// the order it should try them.
+    ///
+    /// Called only from [`super::Endpoint::resolved`], beside [`Self::set_flow`]
+    /// rather than folded into it: the two are set from different fields of
+    /// the same answer, and a dialog that has ended takes neither.
+    pub(crate) fn set_failover(&mut self, id: DialogId, addresses: Vec<SocketAddr>) {
+        if let Some(entry) = self.entries.get_mut(id.raw) {
+            entry.failover = addresses;
+        }
+    }
+
+    /// The next address kept for this dialog, taking it off the list.
+    ///
+    /// `None` once every address a resolver offered has been tried, which
+    /// leaves the dialog on the flow it was last given — RFC 3263 names no
+    /// further server to fail over to, and neither does this.
+    pub(crate) fn take_failover(&mut self, id: DialogId) -> Option<SocketAddr> {
+        let entry = self.entries.get_mut(id.raw)?;
+        entry.failover.first().copied().inspect(|_| {
+            entry.failover.remove(0);
+        })
     }
 
     /// How many non-INVITE server transactions this dialog holds right now.

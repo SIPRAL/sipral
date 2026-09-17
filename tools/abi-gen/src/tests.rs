@@ -359,6 +359,30 @@ const COUNTERS: Record = Record {
     size: 24,
 };
 
+/// What a callback that answers is handed, the one shape a callback lands in
+/// this back end whether or not it answers: a pointer to this and the user
+/// pointer after it.
+///
+/// Carries a piece of text rather than only numbers, on purpose: a versioned
+/// record with nothing but numbers in it is also the shape a struct the
+/// library hands back whole is built from, and printing this one as both
+/// would give Kotlin two classes of the same name.
+const SCREEN_EVENT: Record = Record {
+    name: "SipralScreenEvent",
+    doc: &[" What a policy callback is asked before the library goes on."],
+    shape: Shape::Struct,
+    fields: &[
+        member("size", "usize"),
+        Member {
+            name: "from",
+            rust_type: "*const c_char",
+            doc: &[" Who is calling, as UTF-8, or null."],
+        },
+        member("from_len", "usize"),
+    ],
+    size: 24,
+};
+
 const FUNCTIONS: &[Function] = &[
     ABI_CHECK,
     Function {
@@ -513,10 +537,29 @@ const SYNTHETIC: Surface = Surface {
         Alias {
             name: "SipralEventCallback",
             doc: &[" What the library calls when something happens."],
-            stands: Stands::Callback(&[
-                member("event", "*const SipralEvent"),
-                member("user_data", "*mut c_void"),
-            ]),
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                None,
+            ),
+        },
+        Alias {
+            name: "SipralScreenCallback",
+            doc: &[
+                " Asked before the library goes on, and answered with whether to",
+                " continue. A listener that throws instead of answering is read as",
+                " zero, which every callback here that answers is defined to take",
+                " as \"no\".",
+            ],
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralScreenEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                Some("u32"),
+            ),
         },
     ],
     enumerations: &[STATUS, TOGGLE],
@@ -529,6 +572,7 @@ const SYNTHETIC: Surface = Surface {
         MEDIA_EVENT,
         PAYLOAD,
         EVENT,
+        SCREEN_EVENT,
     ],
     constants: &[
         &[Value {
@@ -1093,7 +1137,7 @@ fn named_kind(surface: &Surface, name: &str) -> String {
     }
     match surface.aliases.iter().find(|a| a.name == name) {
         Some(Alias {
-            stands: Stands::Callback(_),
+            stands: Stands::Callback(_, _),
             ..
         }) => "the callback".to_owned(),
         Some(_) => "an alias for an integer".to_owned(),
@@ -1162,7 +1206,7 @@ fn shapes(surface: &Surface) -> BTreeSet<String> {
                 let ty = Type::read(target).expect("an alias this generator can read");
                 out.insert(format!("an alias for {}", kind_of(surface, &ty)));
             }
-            Stands::Callback(arguments) => {
+            Stands::Callback(arguments, answer) => {
                 out.insert("a callback".to_owned());
                 for parameter in read_all(alias.name, arguments).expect("a callback") {
                     out.insert(format!(
@@ -1170,6 +1214,14 @@ fn shapes(surface: &Surface) -> BTreeSet<String> {
                         kind_of(surface, &parameter.ty)
                     ));
                 }
+                out.insert(match answer {
+                    Some(spelling) => {
+                        let ty = Type::read(spelling)
+                            .expect("a callback answer this generator can read");
+                        format!("a callback that answers {}", kind_of(surface, &ty))
+                    }
+                    None => "a callback that answers nothing".to_owned(),
+                });
             }
         }
         doc_kinds(surface, alias.doc, &mut out);
@@ -1278,10 +1330,13 @@ const CALLBACK_KEYWORD: Surface = Surface {
     aliases: &[Alias {
         name: "SipralEventCallback",
         doc: &[" What the library calls when something happens."],
-        stands: Stands::Callback(&[
-            member("event", "*const c_void"),
-            member("class", "*mut c_void"),
-        ]),
+        stands: Stands::Callback(
+            &[
+                member("event", "*const c_void"),
+                member("class", "*mut c_void"),
+            ],
+            None,
+        ),
     }],
     // C# prints this one, so it declares what C# checks the ABI with at load
     constants: &[VERSION],
@@ -1330,10 +1385,13 @@ const CALLBACK_COLLIDING: Surface = Surface {
     aliases: &[Alias {
         name: "SipralEventCallback",
         doc: &[" What the library calls when something happens."],
-        stands: Stands::Callback(&[
-            member("user_data", "*mut c_void"),
-            member("UserData", "*mut c_void"),
-        ]),
+        stands: Stands::Callback(
+            &[
+                member("user_data", "*mut c_void"),
+                member("UserData", "*mut c_void"),
+            ],
+            None,
+        ),
     }],
     ..NOTHING
 };
@@ -1350,6 +1408,113 @@ fn two_callback_parameters_that_derive_one_name_are_refused() {
     assert!(
         why.contains("SipralEventCallback"),
         "the message does not say where: {why}"
+    );
+}
+
+/// The record a callback that answers still lands in the way every other
+/// callback here does: a pointer to a versioned struct and a `*mut c_void`.
+const ODD_EVENT: Record = Record {
+    name: "SipralOddEvent",
+    doc: &[],
+    shape: Shape::Struct,
+    fields: &[member("size", "usize")],
+    size: 8,
+};
+
+/// A callback that answers with something none of the four languages has a
+/// rule for reading back off a listener's return: a pointer.
+const CALLBACK_ANSWERS_WRONG: Surface = Surface {
+    records: &[ODD_EVENT],
+    aliases: &[Alias {
+        name: "SipralOddCallback",
+        doc: &[],
+        stands: Stands::Callback(
+            &[
+                member("event", "*const SipralOddEvent"),
+                member("user_data", "*mut c_void"),
+            ],
+            Some("*const c_char"),
+        ),
+    }],
+    constants: &[VERSION],
+    functions: &[ABI_CHECK],
+    ..NOTHING
+};
+
+#[test]
+fn a_callback_that_answers_what_this_generator_cannot_print_is_refused_by_name() {
+    // C, C# and Kotlin all print the answer as a return type, so all three
+    // read it off the declaration and all three refuse this one
+    for (language, printed) in [
+        ("C", c::header(&CALLBACK_ANSWERS_WRONG)),
+        ("C#", csharp::binding(&CALLBACK_ANSWERS_WRONG)),
+        ("Kotlin", kotlin::binding(&CALLBACK_ANSWERS_WRONG)),
+    ] {
+        match printed {
+            Ok(text) => {
+                panic!("{language} printed a callback answering with what it cannot:\n{text}")
+            }
+            Err(why) => assert!(
+                why.to_string().contains("SipralOddCallback")
+                    && why.to_string().contains("not a plain integer"),
+                "{language}: {why}"
+            ),
+        }
+    }
+    // Swift imports the C typedef rather than printing one of its own, so it
+    // has nothing to claim about the answer and nothing to refuse
+    assert!(swift::binding(&CALLBACK_ANSWERS_WRONG).is_ok());
+}
+
+/// A callback that answers nothing -- every one this ABI declares today --
+/// prints exactly the four shapes it always has: `void` in C, `void` in the
+/// C# delegate, no return type on the Kotlin listener, and a landing
+/// function that calls `CallStaticVoidMethod` and returns nothing. Adding
+/// the answering shape to the model must not move any of these.
+#[test]
+fn a_callback_that_answers_nothing_still_prints_as_it_always_did() {
+    let header = c::header(&SYNTHETIC).unwrap();
+    assert!(
+        header.contains(
+            "typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void \
+             *user_data);"
+        ),
+        "{header}"
+    );
+
+    let csharp = csharp::binding(&SYNTHETIC).unwrap();
+    assert!(
+        csharp
+            .contains("public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);"),
+        "{csharp}"
+    );
+
+    let kotlin = kotlin::binding(&SYNTHETIC).unwrap();
+    assert!(
+        kotlin.contains(
+            "fun interface SipralEventListener {\n    fun onEvent(event: SipralEvent)\n}"
+        ),
+        "{kotlin}"
+    );
+    assert!(
+        kotlin.contains(
+            "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: \
+             ByteArray?) {\n        val listener = synchronized(this) { listening[key] } ?: \
+             return\n        try {\n            listener.onEvent(SipralEvent(size, stack, \
+             kind, message))\n        } catch (failure: Throwable) {"
+        ),
+        "{kotlin}"
+    );
+
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    assert!(shim.contains("static void\njni_event_callback("), "{shim}");
+    assert!(
+        shim.contains("(*env)->CallStaticVoidMethod(env, jni_event_callback_class,"),
+        "{shim}"
+    );
+    assert!(
+        !shim.contains("CallStaticLongMethod(env, jni_event_callback_class"),
+        "the callback that only reports read a result off its call:\n{shim}"
     );
 }
 
@@ -1659,10 +1824,13 @@ const UNRELEASED: Surface = Surface {
         Alias {
             name: "SipralEventCallback",
             doc: &[],
-            stands: Stands::Callback(&[
-                member("event", "*const SipralEvent"),
-                member("user_data", "*mut c_void"),
-            ]),
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                None,
+            ),
         },
     ],
     records: &[
@@ -1728,10 +1896,13 @@ const ORPHANED: Surface = Surface {
     aliases: &[Alias {
         name: "SipralEventCallback",
         doc: &[],
-        stands: Stands::Callback(&[
-            member("event", "*const SipralEvent"),
-            member("user_data", "*mut c_void"),
-        ]),
+        stands: Stands::Callback(
+            &[
+                member("event", "*const SipralEvent"),
+                member("user_data", "*mut c_void"),
+            ],
+            None,
+        ),
     }],
     records: &[
         Record {
@@ -1936,18 +2107,24 @@ const EVENT_WITH_CALLBACK: Surface = Surface {
         Alias {
             name: "SipralEventCallback",
             doc: &[],
-            stands: Stands::Callback(&[
-                member("event", "*const SipralEvent"),
-                member("user_data", "*mut c_void"),
-            ]),
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                None,
+            ),
         },
         Alias {
             name: "SipralNestedCallback",
             doc: &[],
-            stands: Stands::Callback(&[
-                member("event", "*const SipralNestedEvent"),
-                member("user_data", "*mut c_void"),
-            ]),
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralNestedEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                None,
+            ),
         },
     ],
     records: &[
@@ -2841,7 +3018,7 @@ fn every_spelling(surface: &Surface) -> Vec<&'static str> {
     let mut out = Vec::new();
     for alias in surface.aliases {
         out.push(alias.name);
-        if let Stands::Callback(arguments) = alias.stands {
+        if let Stands::Callback(arguments, _) = alias.stands {
             out.extend(arguments.iter().map(|parameter| parameter.name));
         }
     }

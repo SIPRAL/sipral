@@ -114,6 +114,18 @@ record! {
         pub headers: *const SipralHeader,
         /// How many elements `headers` has.
         pub headers_len: usize,
+        /// Which transport this account's REGISTER and every request it
+        /// places go out on: [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
+        /// for zero, which is what a caller that leaves this at zero already
+        /// gets, or a further number
+        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+        /// has bound. A number this stack has never bound is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
+        ///
+        /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+        /// unmoved, and what a caller built before this member existed never
+        /// sent reads as the zero that already means "the main transport".
+        pub transport: u32,
     }
 }
 
@@ -233,9 +245,10 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         .transpose()?;
     let contact = uri(contact, "contact")?;
     let remote = address(remote, "registrar_address")?;
+    let transport = crate::transport::named(state, config.transport)?;
     let mut account = match registrar {
-        Some(registrar) => Account::new(aor, registrar, contact, state.transport, remote),
-        None => Account::unregistered(aor, contact, state.transport, remote),
+        Some(registrar) => Account::new(aor, registrar, contact, transport, remote),
+        None => Account::unregistered(aor, contact, transport, remote),
     };
     if let Some(display) = display {
         account = account.display_name(display);
@@ -452,6 +465,7 @@ pub(crate) mod tests {
             expires_seconds: 0,
             headers: ptr::null(),
             headers_len: 0,
+            transport: 0,
         }
     }
 

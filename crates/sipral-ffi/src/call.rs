@@ -112,6 +112,18 @@ record! {
         /// call placed with `sdp` is a session the application wrote, and
         /// SRTP in it is the application's own line to write or not.
         pub srtp: u32,
+        /// Which transport the INVITE goes out on, read only together with
+        /// `destination`: [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN)
+        /// for zero, or a further number
+        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+        /// has bound. Nonzero with `destination` null is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
+        /// override already goes out on its account's own transport, and
+        /// there is nothing to combine this with.
+        ///
+        /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub transport: u32,
     }
 }
 
@@ -245,6 +257,9 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
     if !config.destination.is_null() || config.destination_len != 0 {
         return Err(refused("destination"));
     }
+    if config.transport != 0 {
+        return Err(refused("transport"));
+    }
     if config.keep_all_forks != 0 {
         return Err(refused("keep_all_forks"));
     }
@@ -265,6 +280,12 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
 /// [`sipral_call_place`] and [`sipral_call_accept_transfer`] read exactly the
 /// same way, neither needing the target to make sense of.
 ///
+/// `config.transport` is read only together with `config.destination`: a call
+/// with no destination override already goes where its account does, over
+/// the account's own transport (`sipral_ua`'s own fallback for one, once
+/// neither is given here), so a `transport` with nothing to pair it with is
+/// refused rather than read for nothing.
+///
 /// # Safety
 ///
 /// `config.destination` must be readable for `config.destination_len` bytes.
@@ -272,19 +293,26 @@ unsafe fn destination_and_forks(
     state: &StackState,
     config: &SipralCallConfig,
 ) -> Result<(Option<(TransportId, SocketAddr)>, ForkPolicy), Fail> {
-    let destination =
-        match unsafe { text(config.destination, config.destination_len, "destination") }? {
-            Some(elsewhere) => {
-                let Ok(address) = elsewhere.parse::<SocketAddr>() else {
-                    return Err(fail(
-                        SipralStatus::InvalidArgument,
-                        format!("destination is {elsewhere:?}, which is not an address and a port"),
-                    ));
-                };
-                Some((state.transport, address))
-            }
-            None => None,
+    let destination = if let Some(elsewhere) =
+        unsafe { text(config.destination, config.destination_len, "destination") }?
+    {
+        let Ok(address) = elsewhere.parse::<SocketAddr>() else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!("destination is {elsewhere:?}, which is not an address and a port"),
+            ));
         };
+        let transport = crate::transport::named(state, config.transport)?;
+        Some((transport, address))
+    } else if config.transport == 0 {
+        None
+    } else {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "transport is read together with destination; a call with no destination override \
+             already goes out on its account's own transport",
+        ));
+    };
     let forks = if config.keep_all_forks == 0 {
         ForkPolicy::KeepFirst
     } else {
@@ -474,9 +502,9 @@ entry! {
     /// `docs/05-media.md`, "Ringing with media".
     ///
     /// Every other member of `config` — `target`, `sdp`, `destination`,
-    /// `keep_all_forks`, `headers` — names something a call to place would
-    /// need, and this call already exists; setting one of them is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+    /// `transport`, `keep_all_forks`, `headers` — names something a call to
+    /// place would need, and this call already exists; setting one of them
+    /// is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
     ///
     /// An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
     /// nothing sent: the offer this end would make instead belongs in no
@@ -1096,9 +1124,9 @@ entry! {
     /// `sipral_call_place`: `sdp` for a description the application wrote and
     /// runs the audio of, `media_address` for one this stack writes and runs
     /// (`config.srtp` overriding the stack's own policy for it, the same
-    /// way), `headers`, `destination` and `keep_all_forks` for the INVITE
-    /// this places. `Replaces` and `Referred-By` among `headers` are
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
+    /// way), `headers`, `destination`, `transport` and `keep_all_forks` for
+    /// the INVITE this places. `Replaces` and `Referred-By` among `headers`
+    /// are `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
     /// there to take: that INVITE takes both from the REFER. Giving neither
     /// `sdp` nor `media_address` is
     /// `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
@@ -1308,7 +1336,7 @@ pub(crate) mod tests {
     use crate::stack::tests::{Observed, config, create, poll, record, stack, stack_on};
     use crate::stack::{sipral_stack_destroy, with_stack};
     use crate::status::SipralStatus;
-    use sipral_core::endpoint::Input;
+    use sipral_core::endpoint::{Input, TransportId};
     use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, parse};
     use std::ffi::c_char;
     use std::net::SocketAddr;
@@ -1424,6 +1452,7 @@ a=recvonly\r\n";
             expires_seconds: 0,
             headers: ptr::null(),
             headers_len: 0,
+            transport: 0,
         }
     }
 
@@ -1443,6 +1472,7 @@ a=recvonly\r\n";
             headers: ptr::null(),
             headers_len: 0,
             srtp: 0,
+            transport: 0,
         }
     }
 
@@ -1497,6 +1527,7 @@ a=recvonly\r\n";
             headers: ptr::null(),
             headers_len: 0,
             srtp: 0,
+            transport: 0,
         }
     }
 
@@ -1732,7 +1763,7 @@ a=recvonly\r\n";
     pub(crate) fn deliver(stack: SipralHandle, message: &[u8], now_ms: u64) {
         with_stack(stack, |state| {
             let now = state.instant(now_ms)?;
-            let transport = state.transport;
+            let transport = TransportId(0);
             state
                 .agent
                 .receive(

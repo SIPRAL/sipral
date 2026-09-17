@@ -85,6 +85,16 @@ public extension sipral_event_t {
     }
 }
 
+public extension sipral_screen_event_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field: a name and a value.
 ///
 /// Built here and handed to C in a list. `withUnsafeArray` copies every

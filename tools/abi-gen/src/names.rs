@@ -275,7 +275,7 @@ pub(crate) fn audit(surface: &Surface, how: &dyn Spelling) -> Result<(), Refused
     // names two of the four languages really emit -- and until this walk
     // existed they were the only names in the surface that nothing read back.
     for alias in surface.aliases {
-        let Stands::Callback(arguments) = alias.stands else {
+        let Stands::Callback(arguments, _) = alias.stands else {
             continue;
         };
         let read = read_all(alias.name, arguments)?;

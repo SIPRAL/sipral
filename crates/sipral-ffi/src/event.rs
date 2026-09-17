@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sipral::{DigitSource, MediaEvent};
+use sipral_core::endpoint::Event;
 use sipral_ua::{
     CallEndReason, CallHandle, CallIdentity, CallState, LifecycleState, RecoveryFailure,
     RegistrationFailure, RegistrationState, Rung, UaEvent, UserAgent,
@@ -225,7 +226,18 @@ event_kinds! {
         /// numbers travel in the event rather than behind a lookup that would now
         /// fail.
         17 = MediaStatistics, c"media statistics";
-        reserved 18 = "a request was promoted to a stream transport (B1)";
+        /// A request grew too large for a datagram (RFC 3261 §18.1.1) and this
+        /// stack has no stream transport open to the destination it names.
+        /// `payload.transport_wanted` says where it was going, over what
+        /// protocol, and how it measured against the datagram it did not fit.
+        ///
+        /// B1. Answered with
+        /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind):
+        /// once the application binds a transport to that destination, the
+        /// stack sends the request again by itself and this ABI raises
+        /// nothing further about it — there is no "it went" event, the same
+        /// way there is none for an ordinary request that fit the first time.
+        18 = TransportWanted, c"transport wanted";
         /// Nothing has arrived on the media path for longer than the configured
         /// threshold, while signalling is perfectly happy.
         ///
@@ -638,6 +650,34 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::TransportWanted`] carries: a request RFC
+    /// 3261 §18.1.1 would not let out over a datagram, and nowhere open to
+    /// send it instead.
+    #[derive(Clone, Copy)]
+    pub struct SipralTransportWantedEvent {
+        /// What to open, as a
+        /// [`SipralTransport`](crate::stack::SipralTransport). Zero for a
+        /// protocol this build has no number for, which
+        /// `sipral_stack_transport_bind` then cannot be asked to open
+        /// either — nothing this build originates ever measures against a
+        /// protocol like that, so this is the layer below having grown one
+        /// rather than a caller mistake.
+        pub protocol: u32,
+        /// Where to, as `host:port`. Not NUL-terminated.
+        pub destination: *const c_char,
+        /// How many bytes of it.
+        pub destination_len: usize,
+        /// How large the request came out, in bytes as they would have gone
+        /// on the wire.
+        pub request_bytes: usize,
+        /// The largest it could have been and still fitted a datagram: the
+        /// path MTU less the §18.1.1 headroom where the MTU is known, 1300
+        /// where it is not.
+        pub limit_bytes: u32,
+    }
+}
+
+record! {
     /// The arm of an event that its kind names.
     ///
     /// Reading any other arm reads bytes the library did not write for it.
@@ -656,6 +696,8 @@ record! {
         pub media: SipralMediaEvent,
         /// For [`SipralEventKind::Recovery`].
         pub recovery: SipralRecoveryEvent,
+        /// For [`SipralEventKind::TransportWanted`].
+        pub transport_wanted: SipralTransportWantedEvent,
     }
 }
 
@@ -804,9 +846,17 @@ pub(crate) struct Vocabulary<'a> {
 /// act on, and the poll result counts them instead so that the gap is a number
 /// rather than a silence.
 ///
-/// The pointers in what comes back borrow from `event`, so it has to outlive
-/// the callback it is handed to.
-pub(crate) fn translate(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+/// The pointers in what comes back borrow from `event`, and `transport`
+/// carries one more this ABI has to point at that `event` holds no bytes
+/// for: [`SipralEventKind::TransportWanted`]'s destination, formatted by
+/// [`transport_wanted_destination`] before this is called, since a
+/// `SocketAddr` has none of its own. Both have to outlive the callback this
+/// is handed to.
+pub(crate) fn translate(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+    transport: Option<&str>,
+) -> Option<SipralEvent> {
     if let Some(out) = about_registration(known, event) {
         return Some(out);
     }
@@ -822,7 +872,64 @@ pub(crate) fn translate(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
     if let Some(out) = about_a_transfer(known, event) {
         return Some(out);
     }
+    if let Some(out) = about_a_transport(known, event, transport) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
+}
+
+/// A request RFC 3261 §18.1.1 would not let out over a datagram, with
+/// nowhere open to send it instead. `destination` is the text
+/// [`transport_wanted_destination`] built for the event this is about; `None`
+/// here from a caller that has none is the same as the event carrying no
+/// destination at all, which never actually happens for this kind but is not
+/// this function's to assume.
+fn about_a_transport(
+    known: &Vocabulary<'_>,
+    event: &UaEvent,
+    destination: Option<&str>,
+) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::Unclaimed(Event::TransportWanted {
+            protocol,
+            request_bytes,
+            limit_bytes,
+            ..
+        }) => {
+            let mut payload = SipralTransportWantedEvent {
+                protocol: crate::stack::SipralTransport::named(protocol),
+                destination: std::ptr::null(),
+                destination_len: 0,
+                request_bytes,
+                limit_bytes,
+            };
+            if let Some(text) = destination {
+                payload.destination = text.as_ptr().cast::<c_char>();
+                payload.destination_len = text.len();
+            }
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::TransportWanted,
+                SipralEventPayload {
+                    transport_wanted: payload,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The destination of a [`SipralEventKind::TransportWanted`], formatted once
+/// so the event this ABI raises for it has bytes to point at: a `SocketAddr`
+/// carries none of its own. `None` for every other kind of event, which is
+/// also what a caller who does not care to check the kind first gets.
+pub(crate) fn transport_wanted_destination(event: &UaEvent) -> Option<String> {
+    match *event {
+        UaEvent::Unclaimed(Event::TransportWanted { destination, .. }) => {
+            Some(destination.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn about_registration(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
@@ -1573,6 +1680,7 @@ mod tests {
         assert_eq!(SipralEventKind::CallReplaced as u32, 13);
         assert_eq!(SipralEventKind::CallEnded as u32, 14);
         assert_eq!(SipralEventKind::MediaStatistics as u32, 17);
+        assert_eq!(SipralEventKind::TransportWanted as u32, 18);
         assert_eq!(SipralEventKind::MediaStalled as u32, 19);
         assert_eq!(SipralEventKind::MediaStarted as u32, 21);
         assert_eq!(SipralEventKind::MediaChanged as u32, 22);
@@ -1582,7 +1690,7 @@ mod tests {
         assert_eq!(SipralEventKind::DigitReceived as u32, 26);
         assert_eq!(SipralEventKind::DtmfSent as u32, 27);
         assert_eq!(SipralEventKind::Recovery as u32, 28);
-        assert_eq!(SipralEventKind::ALL.len(), 24, "and there are no others");
+        assert_eq!(SipralEventKind::ALL.len(), 25, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -1611,6 +1719,11 @@ mod tests {
             28,
             "28 was held for the stack recovering from a suspension or a network change (8.4.13)"
         );
+        assert_eq!(
+            SipralEventKind::TransportWanted as u32,
+            18,
+            "18 was held for a request promoted to a stream transport (B1)"
+        );
     }
 
     #[test]
@@ -1631,7 +1744,7 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [15, 16, 18, 20, 29_u32] {
+        for held in [15, 16, 20, 29_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
         assert_eq!(name(30), None, "past the last kind");

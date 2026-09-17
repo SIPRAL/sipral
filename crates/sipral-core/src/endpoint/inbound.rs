@@ -311,6 +311,7 @@ impl Endpoint {
                     transaction: id,
                     reason: FailureReason::Timeout,
                 });
+                self.failover_in_dialog(id, flow);
             }
             Some(Notify::TransportFailed) => {
                 self.note_failure_for(response, FailureReason::TransportFailed);
@@ -318,6 +319,7 @@ impl Endpoint {
                     transaction: id,
                     reason: FailureReason::TransportFailed,
                 });
+                self.failover_in_dialog(id, flow);
             }
             Some(Notify::Ack) | None => (),
         }
@@ -1212,6 +1214,9 @@ impl Endpoint {
                     let notify = effects.notify;
                     let over = notify == Some(Notify::TimedOut);
                     let call = over.then(|| self.call_of(id)).flatten();
+                    // read before applying: retiring a non-INVITE client
+                    // transaction forgets which dialog it was inside
+                    let dialog = over.then(|| self.dialog_of(id)).flatten();
                     self.apply_again(effects, flow, id);
                     if over {
                         self.note_failure(call.as_ref(), FailureReason::Timeout);
@@ -1219,6 +1224,9 @@ impl Endpoint {
                             transaction: inner,
                             reason: FailureReason::Timeout,
                         });
+                        if let Some(dialog) = dialog {
+                            self.failover(dialog, flow);
+                        }
                     }
                 }
             }
@@ -1423,6 +1431,14 @@ impl Endpoint {
             | AnyTransactionId::InviteServer(_)
             | AnyTransactionId::NonInviteServer(_) => None,
         };
+        // read before applying, same as `renegotiated`: retiring a non-INVITE
+        // client transaction forgets which dialog it was inside
+        let dialog = match id {
+            AnyTransactionId::NonInviteClient(_) => self.dialog_of(id),
+            AnyTransactionId::InviteClient(_)
+            | AnyTransactionId::InviteServer(_)
+            | AnyTransactionId::NonInviteServer(_) => None,
+        };
         self.apply(effects, flow, id);
         if notify == Some(Notify::TransportFailed) {
             match id {
@@ -1440,6 +1456,9 @@ impl Endpoint {
                         transaction: inner,
                         reason: FailureReason::TransportFailed,
                     });
+                    if let Some(dialog) = dialog {
+                        self.failover(dialog, flow);
+                    }
                 }
                 AnyTransactionId::InviteServer(_) | AnyTransactionId::NonInviteServer(_) => (),
             }

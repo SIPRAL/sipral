@@ -12,6 +12,48 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A stack can hold more than one transport, and an account or a call can say
+  which.** `StackState` kept exactly one, and the header said so: the constant
+  for it was documented as "for now always". `sipral_stack_transport_bind`
+  takes a protocol and hands back the id it bound, `sipral_account_config_t`
+  and `sipral_call_config_t` gained a `transport` where zero still means the
+  main one, and two accounts can now live on two transports in one stack —
+  which is the test that proves it, each account's REGISTER leaving on its own.
+  With it, reserved event 18 becomes `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`: a
+  request too large for a datagram (RFC 3261 §18.1.1) is not sent and the
+  event names where it was going and over what protocol, the application binds
+  one, and the same request leaves on it. A call's `transport` is read only
+  together with its own `destination`, because a call that names neither is
+  already the account's to route, and a value that is silently read for
+  nothing is worse than one that is refused.
+
+- **A resolved answer can name the protocol, and the addresses after the first
+  are kept.** `Endpoint::resolved` took addresses and nothing else, so an
+  answer that came from an SRV record naming TCP could not say so and the
+  dialog kept sending the way it already was. It takes the protocol now, takes
+  the first address there is a bound transport for, and keeps the rest: a
+  transport failure or a timeout on the current one moves to the next without
+  a second round trip. A refusal at the SIP layer does not — a 404 from the
+  right server is not a reason to try a different server.
+
+- **`UserAgent::retarget`**: an account's registrar address can move — a
+  second SRV target, a failover, an operator's migration — without losing the
+  binding, the credentials or the handle, and without restarting the Call-ID
+  or the sequence number. An attempt already in flight is superseded rather
+  than left to time out, so the new address is tried now instead of after the
+  back-off; the superseded transaction's late answer is reported as unclaimed
+  rather than misread as this attempt's.
+
+- **The binding generator can print a callback that answers.** A callback was
+  modelled as arguments and no result, which was true while the only one was
+  the event callback and is not true in general: a policy callback is the
+  library asking the application a question it must answer before going on.
+  The declaration can name what a callback answers with now, and all four
+  languages print it — including the JNI shim, where the listener's answer is
+  read back across the boundary, and where a listener that threw has its
+  exception cleared and the declared fail-closed value returned in its place.
+  Every existing declaration prints byte for byte as it did.
+
 - **The lifecycle a phone actually lives is reachable from C.** A stack could
   be suspended, woken, moved between networks and told its interface or its
   resolver was gone — in Rust. From C none of it existed, which meant

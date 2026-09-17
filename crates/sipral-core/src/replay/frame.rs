@@ -206,17 +206,21 @@ pub enum Step {
     /// A dialog's next hop was answered from outside
     /// ([`Endpoint::resolved`](crate::endpoint::Endpoint::resolved)).
     ///
-    /// Unlike [`Step::Cue`] this is data, not a name: the addresses a
-    /// resolver returned are everything `resolved` needs, so a replay can
-    /// make the same call again itself rather than asking the caller to.
+    /// Unlike [`Step::Cue`] this is data, not a name: the addresses and the
+    /// protocol a resolver returned are everything `resolved` needs, so a
+    /// replay can make the same call again itself rather than asking the
+    /// caller to.
     Resolved {
         /// Which dialog the answer was for.
         dialog: DialogId,
         /// The addresses that were resolved, in the order they were handed
-        /// to `resolved`. Only the first is ever used, but the rest are part
-        /// of what happened and are kept for the same reason a retransmitted
-        /// datagram is kept rather than folded into the one before it.
+        /// to `resolved`. The first one this endpoint has a transport for is
+        /// taken; the rest are kept for a later failure to fall back to, so
+        /// none of them is folded away the way a retransmitted datagram is.
         addresses: Box<[SocketAddr]>,
+        /// The transport the lookup named, when it named one (RFC 3263
+        /// §4.1). `None` replays as whatever the dialog's flow already spoke.
+        protocol: Option<TransportProtocol>,
     },
     /// The application did something of its own here, under a name it chose.
     ///

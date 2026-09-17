@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)11)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)12)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -177,12 +177,15 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_ADDRESS_BYTES ((size_t)64)
 
 /**
- * The transport a stack is created with, and the only one this build
- * binds.
+ * The transport a stack is created with.
  *
- * Named rather than assumed, so that the day a stack has two of them is a
- * day more numbers become valid and not a day this ABI grows a second way
- * to hand bytes over.
+ * Never retired: sipral_stack_transport_failed and
+ * sipral_stack_stream_closed can still stop it carrying traffic, and
+ * sipral_stack_transport_bind is still what brings it back, exactly
+ * as when this was the only number a stack had. Zero on
+ * `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
+ * means this one, so a caller that never binds a second transport fills
+ * neither in and gets exactly what it always got.
  */
 #define SIPRAL_TRANSPORT_MAIN ((uint32_t)0)
 
@@ -218,6 +221,7 @@ typedef struct sipral_call_event sipral_call_event_t;
 typedef struct sipral_transfer_event sipral_transfer_event_t;
 typedef struct sipral_media_event sipral_media_event_t;
 typedef struct sipral_recovery_event sipral_recovery_event_t;
+typedef struct sipral_transport_wanted_event sipral_transport_wanted_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -676,7 +680,6 @@ enum {
  * Numbers already spent on features this build does not have:
  * - 15: a subscription's state changed (A1)
  * - 16: the set of audio devices changed (A2)
- * - 18: a request was promoted to a stream transport (B1)
  * - 20: a call was announced and never arrived (C2)
  * - 29: the application is asked to resolve a destination
  */
@@ -760,6 +763,20 @@ enum {
      * fail.
      */
     SIPRAL_EVENT_KIND_MEDIA_STATISTICS = 17,
+    /**
+     * A request grew too large for a datagram (RFC 3261 §18.1.1) and this
+     * stack has no stream transport open to the destination it names.
+     * `payload.transport_wanted` says where it was going, over what
+     * protocol, and how it measured against the datagram it did not fit.
+     *
+     * B1. Answered with
+     * sipral_stack_transport_bind:
+     * once the application binds a transport to that destination, the
+     * stack sends the request again by itself and this ABI raises
+     * nothing further about it — there is no "it went" event, the same
+     * way there is none for an ordinary request that fit the first time.
+     */
+    SIPRAL_EVENT_KIND_TRANSPORT_WANTED = 18,
     /**
      * Nothing has arrived on the media path for longer than the configured
      * threshold, while signalling is perfectly happy.
@@ -1837,6 +1854,20 @@ struct sipral_account_config {
      * How many elements `headers` has.
      */
     size_t headers_len;
+    /**
+     * Which transport this account's REGISTER and every request it
+     * places go out on: SIPRAL_TRANSPORT_MAIN
+     * for zero, which is what a caller that leaves this at zero already
+     * gets, or a further number
+     * sipral_stack_transport_bind
+     * has bound. A number this stack has never bound is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
+     *
+     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before this member existed never
+     * sent reads as the zero that already means "the main transport".
+     */
+    uint32_t transport;
 };
 
 /**
@@ -1930,6 +1961,20 @@ struct sipral_call_config {
      * SRTP in it is the application's own line to write or not.
      */
     uint32_t srtp;
+    /**
+     * Which transport the INVITE goes out on, read only together with
+     * `destination`: SIPRAL_TRANSPORT_MAIN
+     * for zero, or a further number
+     * sipral_stack_transport_bind
+     * has bound. Nonzero with `destination` null is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
+     * override already goes out on its account's own transport, and
+     * there is nothing to combine this with.
+     *
+     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    uint32_t transport;
 };
 
 /**
@@ -2230,7 +2275,10 @@ struct sipral_transmit {
      */
     size_t size;
     /**
-     * Which transport to write to. SIPRAL_TRANSPORT_MAIN, for now always.
+     * Which transport to write to: SIPRAL_TRANSPORT_MAIN for a stack
+     * that never bound another, or the number
+     * sipral_stack_transport_bind gave whichever account or call
+     * this message belongs to.
      */
     uint32_t transport;
     /**
@@ -2539,6 +2587,43 @@ struct sipral_recovery_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_TRANSPORT_WANTED carries: a request RFC
+ * 3261 §18.1.1 would not let out over a datagram, and nowhere open to
+ * send it instead.
+ */
+struct sipral_transport_wanted_event {
+    /**
+     * What to open, as a
+     * sipral_transport_t. Zero for a
+     * protocol this build has no number for, which
+     * `sipral_stack_transport_bind` then cannot be asked to open
+     * either — nothing this build originates ever measures against a
+     * protocol like that, so this is the layer below having grown one
+     * rather than a caller mistake.
+     */
+    uint32_t protocol;
+    /**
+     * Where to, as `host:port`. Not NUL-terminated.
+     */
+    const char *destination;
+    /**
+     * How many bytes of it.
+     */
+    size_t destination_len;
+    /**
+     * How large the request came out, in bytes as they would have gone
+     * on the wire.
+     */
+    size_t request_bytes;
+    /**
+     * The largest it could have been and still fitted a datagram: the
+     * path MTU less the §18.1.1 headroom where the MTU is known, 1300
+     * where it is not.
+     */
+    uint32_t limit_bytes;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -2567,6 +2652,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_RECOVERY.
      */
     sipral_recovery_event_t recovery;
+    /**
+     * For SIPRAL_EVENT_KIND_TRANSPORT_WANTED.
+     */
+    sipral_transport_wanted_event_t transport_wanted;
 };
 
 /**
@@ -3003,9 +3092,9 @@ sipral_status_t sipral_call_ring(sipral_handle_t stack, sipral_handle_t call, co
  * `docs/05-media.md`, "Ringing with media".
  *
  * Every other member of `config` — `target`, `sdp`, `destination`,
- * `keep_all_forks`, `headers` — names something a call to place would
- * need, and this call already exists; setting one of them is
- * `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
+ * `transport`, `keep_all_forks`, `headers` — names something a call to
+ * place would need, and this call already exists; setting one of them
+ * is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it.
  *
  * An INVITE that carried no offer is `SIPRAL_STATUS_WRONG_STATE`, with
  * nothing sent: the offer this end would make instead belongs in no
@@ -3284,9 +3373,9 @@ sipral_status_t sipral_call_transfer_to(sipral_handle_t stack, sipral_handle_t c
  * `sipral_call_place`: `sdp` for a description the application wrote and
  * runs the audio of, `media_address` for one this stack writes and runs
  * (`config.srtp` overriding the stack's own policy for it, the same
- * way), `headers`, `destination` and `keep_all_forks` for the INVITE
- * this places. `Replaces` and `Referred-By` among `headers` are
- * `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
+ * way), `headers`, `destination`, `transport` and `keep_all_forks` for
+ * the INVITE this places. `Replaces` and `Referred-By` among `headers`
+ * are `SIPRAL_STATUS_INVALID_ARGUMENT`, nothing sent and the transfer still
  * there to take: that INVITE takes both from the REFER. Giving neither
  * `sdp` nor `media_address` is
  * `SIPRAL_STATUS_INVALID_ARGUMENT`, for the same reason it is on
@@ -3722,31 +3811,49 @@ sipral_status_t sipral_stack_receive_datagram(sipral_handle_t stack, uint32_t tr
 sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t transport, const uint8_t *data, size_t len, uint64_t now_ms);
 
 /**
- * Say that a transport is open and may be written to.
+ * Say that a transport is open and may be written to — the main one
+ * again, or a further one this stack has not had before.
  *
- * The one way back from sipral_stack_transport_failed, and the way a
- * stream stack names its far end: a connection that has just been made
- * knows its peer, and a stack created before the connect did not. It is
- * also how a socket re-opened on another address after the network moved
- * tells this stack what to put in its `Via` from now on — every message
- * after this one carries `local`, and the ones already in flight carry what
- * they were written with.
+ * The one way back from sipral_stack_transport_failed, the way a
+ * stream stack names its far end, and the way a further transport enters
+ * the table at all. `transport` is SIPRAL_TRANSPORT_MAIN to (re)bind
+ * the main one, or any other number: one this stack already has rebinds
+ * it, and one it does not opens it — the number is the caller's own
+ * choice, the same as `sipral_account_config_t::transport` and
+ * `sipral_call_config_t::transport` read it. `out_transport_id` may be
+ * null; when it is not, it receives that same number, which is where a
+ * caller answering
+ * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
+ * reads back the id it just gave one of those two configs.
+ *
+ * `protocol` is a crate::stack::SipralTransport.
+ * Rebinding an existing transport takes zero to mean "whatever it
+ * already speaks" and anything else has to agree with that or this is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
+ * according to what a transport was opened speaking, and changing that
+ * underneath the timers would be a transport configured out of RFC 3261
+ * §17 halfway through a call. Opening a new one needs a protocol to
+ * speak, so zero there is the same refusal for the opposite reason:
+ * nothing to fall back on.
  *
  * `local` is the address the far end reaches this one at, as `host:port`.
  * `remote` is the far end of a connection, and is refused on a datagram
  * transport, which has many.
  *
- * The protocol is not an argument: a stack retransmits or does not
- * according to what it was created speaking, and a transport that changed
- * that underneath the timers would be a stack configured out of RFC 3261
- * §17 halfway through a call.
+ * This is also how a request
+ * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
+ * named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
+ * protocol and destination the event gave, the stack sends the request
+ * again by itself on the next `sipral_stack_poll` — there is no further
+ * event about that one request.
  *
  * Safety
  *
- * `local` must be readable for `local_len` bytes and `remote` for
- * `remote_len`.
+ * `local` must be readable for `local_len` bytes, `remote` for
+ * `remote_len`, and `out_transport_id`, when it is not null, must point
+ * at one `uint32_t`.
  */
-sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t transport, const char *local, size_t local_len, const char *remote, size_t remote_len, uint64_t now_ms);
+sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t transport, uint32_t protocol, const char *local, size_t local_len, const char *remote, size_t remote_len, uint64_t now_ms, uint32_t *out_transport_id);
 
 /**
  * Say that a transport failed, and that whatever was written to it did not
@@ -3990,9 +4097,11 @@ sipral_status_t sipral_stack_name_resolution_lost(sipral_handle_t stack, uint64_
  * stack that let it stand would register a binding that silently
  * receives nothing.
  *
- * `transport` is SIPRAL_TRANSPORT_MAIN,
- * the only one a stack of this build binds; every other number is
- * `SIPRAL_STATUS_INVALID_ARGUMENT`.
+ * `transport` must be one this stack already has —
+ * SIPRAL_TRANSPORT_MAIN or
+ * a further one sipral_stack_transport_bind
+ * has bound — and any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`:
+ * this call points an account at a transport, it does not open one.
  *
  * Safe to call whether or not this stack is waiting for it. When it is,
  * answering climbs the next rung at once rather than waiting out the

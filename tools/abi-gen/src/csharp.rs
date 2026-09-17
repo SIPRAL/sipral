@@ -20,8 +20,9 @@ use sipral_ffi::abi::{
 };
 
 use crate::model::{
-    Base, Element, Int, Linked, Read, Refused, Role, Type, Writable, element, elements, functions,
-    linked, listed_in, lower_camel, plain_named, read_all, roles, unprintable, upper_camel,
+    Base, Element, Int, Linked, Read, Refused, Role, Type, Writable, callback_answer, element,
+    elements, functions, linked, listed_in, lower_camel, plain_named, read_all, roles, unprintable,
+    upper_camel,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -806,7 +807,7 @@ fn declarations(surface: &Surface) -> Result<String, Refused> {
     }
 
     for alias in surface.aliases {
-        let Stands::Callback(arguments) = alias.stands else {
+        let Stands::Callback(arguments, _) = alias.stands else {
             continue;
         };
         let mut about = lines(surface, alias.doc);
@@ -823,9 +824,13 @@ fn declarations(surface: &Surface) -> Result<String, Refused> {
             .iter()
             .map(|parameter| format!("IntPtr {}", held(parameter)))
             .collect();
+        let returns = match callback_answer(alias)? {
+            Some(ty) => scalar(&ty),
+            None => "void".to_owned(),
+        };
         let _ = writeln!(
             out,
-            "public delegate void {}({});\n",
+            "public delegate {returns} {}({});\n",
             alias.name,
             declared.join(", ")
         );
@@ -1038,7 +1043,7 @@ impl Spelling for Names {
             out.push((enumeration.name.to_owned(), enumeration.name.to_owned()));
         }
         for alias in surface.aliases {
-            if matches!(alias.stands, Stands::Callback(_)) {
+            if matches!(alias.stands, Stands::Callback(_, _)) {
                 out.push((alias.name.to_owned(), alias.name.to_owned()));
             }
         }

@@ -108,24 +108,22 @@ codes! {
     }
 }
 
-/// The one transport this build binds, or why the number given is not it.
+/// A transport this stack has bound, or why the number given is not one.
 ///
-/// [`crate::transport`] has the same check; it is not `pub(crate)` there, and
-/// the alternative — a stack with more than one transport — is not this
-/// build's shape either, so this is the same three lines written a second
-/// time rather than a dependency between the two modules for one comparison.
+/// [`crate::transport::named`] is the same check on the same table; it is
+/// `pub(crate)` there and this stays its own three lines rather than a
+/// dependency between the two sibling modules for one comparison.
 fn transport_named(state: &StackState, transport: u32) -> Result<TransportId, Fail> {
-    if transport == state.transport.0 {
-        return Ok(state.transport);
-    }
-    Err(fail(
-        SipralStatus::InvalidArgument,
-        format!(
-            "transport {transport} is not one this stack has; it was created with {}, which is \
-             SIPRAL_TRANSPORT_MAIN and the only one a stack of this build binds",
-            state.transport.0
-        ),
-    ))
+    state.transports.resolve(transport).ok_or_else(|| {
+        fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "transport {transport} is not one this stack has; sipral_stack_transport_bind \
+                 is what adds one, and 0 is SIPRAL_TRANSPORT_MAIN, which every stack has from \
+                 its creation"
+            ),
+        )
+    })
 }
 
 /// What a number names, or why it names none.
@@ -447,9 +445,11 @@ entry! {
     /// stack that let it stand would register a binding that silently
     /// receives nothing.
     ///
-    /// `transport` is [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN),
-    /// the only one a stack of this build binds; every other number is
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
+    /// `transport` must be one this stack already has —
+    /// [`SIPRAL_TRANSPORT_MAIN`](crate::transport::SIPRAL_TRANSPORT_MAIN) or
+    /// a further one [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
+    /// has bound — and any other number is `SIPRAL_STATUS_INVALID_ARGUMENT`:
+    /// this call points an account at a transport, it does not open one.
     ///
     /// Safe to call whether or not this stack is waiting for it. When it is,
     /// answering climbs the next rung at once rather than waiting out the
@@ -543,6 +543,7 @@ mod tests {
             expires_seconds: 0,
             headers: ptr::null(),
             headers_len: 0,
+            transport: 0,
         }
     }
 

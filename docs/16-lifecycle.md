@@ -278,6 +278,14 @@ transport climbs immediately, because there is nothing in flight to wait for. A
 `UserAgent::rebind` climbs immediately, because the answer is the thing the
 wait was for.
 
+`rebind` is this end's own address changing — the answer to `WantTransport` or
+`WantAddress` — and carries a new `Contact` because of it, and it is this
+ladder's own recovery. `UserAgent::retarget` (`docs/04-ua.md`) looks similar
+but answers a different question: the registrar itself moved under an account
+this ladder has no complaint about. It never climbs a rung and is not one of
+these two answers, even where both could in principle be triggered by the same
+DNS record changing underneath a name.
+
 ## The guarantee, and what it does not cover
 
 **No failure of a network operation terminates the process.** Not on a

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     AuthRetryError, Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest,
-    ReceiveError, SendError, Transmit, TransportId,
+    ReceiveError, SendError, Transmit, TransportId, TransportProtocol,
 };
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, StatusCode, Uri};
 use sipral_core::replay::{Driven, RecordError, Recorder, Recording};
@@ -398,8 +398,13 @@ impl Driven for UserAgent {
         Self::handle_timeout(self, now);
     }
 
-    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]) {
-        self.endpoint.resolved(dialog, addresses);
+    fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    ) {
+        self.endpoint.resolved(dialog, addresses, protocol);
     }
 }
 
@@ -477,6 +482,75 @@ impl UserAgent {
     pub fn unregister(&mut self, account: AccountId, now: Instant) -> Result<(), UaError> {
         self.send_register(account, true, now)?;
         self.drain(now);
+        Ok(())
+    }
+
+    /// Point an account at a different registrar address: a second SRV
+    /// target this application resolved on its own, a failover a proxy
+    /// pushed in-band, an operator's migration.
+    ///
+    /// Only the address moves. The transport is not asked for again — a
+    /// registrar migration names a new place, not a new way of reaching it —
+    /// and nothing about the binding this account already holds or is
+    /// getting restarts: the `Call-ID` stands, the sequence number keeps
+    /// growing from wherever it was, and the credentials are the ones this
+    /// account always had. What changes is only where the *next* REGISTER
+    /// this account sends is addressed, and nothing else — contrast
+    /// [`UserAgent::rebind`], which is this end's own
+    /// address moving and has a `Contact` to update because of it.
+    ///
+    /// A REGISTER already in flight is not cancelled — there is no way to
+    /// unsend one — but it is superseded the same way a second call to
+    /// [`UserAgent::register`] already supersedes one still running: this
+    /// account's next attempt goes to the new address, and whatever the old
+    /// one still in the network does with the old one no longer reaches this
+    /// account (`send_register`'s "one entry per account" rule). That
+    /// supersession happens *now*, inside this call, rather than waiting for
+    /// the attempt already running to time out or the next scheduled refresh
+    /// to fall due, whenever this account has a REGISTER in flight or one
+    /// scheduled — a refresh, a challenge answered and about to be retried,
+    /// or a back-off after a failure. Waiting there would mean believing an
+    /// address this call was just told is wrong for up to the RFC 5626 §4.5
+    /// back-off ceiling of thirty minutes. An account that was never told to
+    /// register (`RegistrationState::Idle`) sends nothing: retargeting picks
+    /// where its next `register` goes, it does not call `register` for it.
+    ///
+    /// Retargeting to the address an account is already on changes nothing
+    /// and sends nothing: this call answers `Ok(())` at once, the same
+    /// binding standing exactly as it did before it was asked.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchAccount`], [`UaError::NoRegistrar`] for a trunk that
+    /// never registers, or [`UaError::Send`] as [`UserAgent::register`]'s,
+    /// when the superseding REGISTER cannot be built or sent.
+    pub fn retarget(
+        &mut self,
+        account: AccountId,
+        remote: SocketAddr,
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
+        if config.registrar.is_none() {
+            return Err(UaError::NoRegistrar);
+        }
+        if config.remote == remote {
+            return Ok(());
+        }
+        let config = self
+            .accounts
+            .get_mut(&account)
+            .ok_or(UaError::NoSuchAccount)?;
+        config.remote = remote;
+
+        let reg = self
+            .registrations
+            .get(&account)
+            .ok_or(UaError::NoSuchAccount)?;
+        if reg.transaction.is_some() || reg.due.is_some() {
+            let unregistering = reg.unregistering;
+            self.send_register(account, unregistering, now)?;
+            self.drain(now);
+        }
         Ok(())
     }
 }

@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use sipral_ffi::abi::{Function, Member, Record, Shape, Surface, Value};
+use sipral_ffi::abi::{Alias, Function, Member, Record, Shape, Stands, Surface, Value};
 // the rule for turning `SipralStackConfig` into `sipral_stack_config` is the
 // library's, because the library answers questions about the C names too
 pub(crate) use sipral_ffi::abi::snake;
@@ -221,6 +221,36 @@ impl Type {
             (Some(_), Base::Char | Base::Int(Int { bits: 8 | 16, .. }))
         )
     }
+}
+
+/// What a callback answers with, once its return type has been read: a
+/// plain integer, or nothing, which every callback declared today answers
+/// with.
+///
+/// A pointer, a float, a character or a named type is refused by name here,
+/// once, rather than separately by whichever back end happens to print the
+/// callback's signature first: none of the four languages has a rule yet for
+/// reading one back off a listener's return, and a half-printed binding is
+/// worse than a refusal that says what about the declaration cannot be
+/// printed.
+pub(crate) fn callback_answer(alias: &Alias) -> Result<Option<Type>, Refused> {
+    let Stands::Callback(_, answer) = alias.stands else {
+        return Ok(None);
+    };
+    let Some(spelling) = answer else {
+        return Ok(None);
+    };
+    let ty = Type::read(spelling)
+        .map_err(|why| Refused::about(&format!("{} answers with {why}", alias.name)))?;
+    if ty.pointer.is_some() || !matches!(ty.base, Base::Int(_)) {
+        return Err(Refused::about(&format!(
+            "{} answers with {spelling}, which is not a plain integer, and this generator \
+             prints a callback's answer as one of those or as nothing; give {spelling} a shape \
+             in tools/abi-gen/src/model.rs",
+            alias.name
+        )));
+    }
+    Ok(Some(ty))
 }
 
 /// A parameter, or a member, with its type read.

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use super::frame::{Frame, Step};
 use super::recording::Recording;
-use crate::endpoint::{Endpoint, Input, ReceiveError};
+use crate::endpoint::{Endpoint, Input, ReceiveError, TransportProtocol};
 use crate::transaction::DialogId;
 
 /// Something a recording can be fed into.
@@ -35,7 +35,12 @@ pub trait Driven {
 
     /// A dialog's next hop was answered from outside
     /// ([`Endpoint::resolved`](crate::endpoint::Endpoint::resolved)).
-    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]);
+    fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    );
 }
 
 impl Driven for Endpoint {
@@ -47,8 +52,13 @@ impl Driven for Endpoint {
         Self::handle_timeout(self, now);
     }
 
-    fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr]) {
-        Self::resolved(self, dialog, addresses);
+    fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+    ) {
+        Self::resolved(self, dialog, addresses, protocol);
     }
 }
 
@@ -122,7 +132,8 @@ impl<'a> Replay<'a> {
             Step::Resolved {
                 dialog,
                 ref addresses,
-            } => target.resolved(dialog, addresses),
+                protocol,
+            } => target.resolved(dialog, addresses, protocol),
             Step::Cue(ref label) => return Ok(Some(Played::Cue(label))),
         }
         Ok(Some(Played::Fed))

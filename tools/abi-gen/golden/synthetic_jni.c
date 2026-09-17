@@ -26,6 +26,8 @@
 static JavaVM *jni_vm;
 static jclass jni_event_callback_class;
 static jmethodID jni_event_callback_deliver;
+static jclass jni_screen_callback_class;
+static jmethodID jni_screen_callback_deliver;
 
 /* Whether the struct a callback was handed reaches as far as one of its
  * members: the library fills in no more of it than its size member says. */
@@ -56,6 +58,21 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
             return JNI_ERR;
         }
     }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralScreenListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_screen_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_screen_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_screen_callback_deliver = (*env)->GetStaticMethodID(env, jni_screen_callback_class, "deliver", "(JJ[B)J");
+        if (jni_screen_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
     jni_vm = vm;
     return JNI_VERSION_1_6;
 }
@@ -73,6 +90,10 @@ JNI_OnUnload(JavaVM *vm, void *reserved)
     if (jni_event_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_event_callback_class);
         jni_event_callback_class = NULL;
+    }
+    if (jni_screen_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_screen_callback_class);
+        jni_screen_callback_class = NULL;
     }
 }
 
@@ -127,6 +148,64 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
     }
+}
+
+/* Where a sipral_screen_callback_t lands. The event is handed to
+ * SipralScreenListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. Answers with what the listener answered, or with the value that
+ * fails closed when there was none. */
+static uint32_t
+jni_screen_callback(const sipral_screen_event_t *event, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    uint32_t answer = 0;
+    jbyteArray from = NULL;
+
+    if (jni_vm == NULL || event == NULL) {
+        return (uint32_t)answer;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return (uint32_t)answer;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return (uint32_t)answer;
+    }
+    if (built && JNI_REACHES(event, sipral_screen_event_t, from_len) && event->from != NULL) {
+        from = (*env)->NewByteArray(env, (jsize)event->from_len);
+        if (from == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, from, 0, (jsize)event->from_len, (const jbyte *)event->from);
+        }
+    }
+    if (built) {
+        answer = (uint32_t)(*env)->CallStaticLongMethod(env, jni_screen_callback_class, jni_screen_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, from);
+    }
+    /* Pending here either because an array could not be made, or because
+     * deliver let a listener's own exception through rather than catch it:
+     * a policy question with no answer fails closed rather than carry on
+     * with whatever the call above happened to return. */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        answer = 0;
+    }
+    if (from != NULL) {
+        (*env)->DeleteLocalRef(env, from);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
+    return (uint32_t)answer;
 }
 
 /* Throw a new exception of the class named. What is wrong with a list the

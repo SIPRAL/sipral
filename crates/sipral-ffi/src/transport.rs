@@ -49,20 +49,46 @@
 //! a message the stack has committed to, and a poll that happens in between
 //! leaves the queue where it was.
 //!
-//! # One transport, named
+//! # A table of transports, and the main one named
 //!
-//! A stack is bound to exactly one transport, at creation, and its number is
-//! [`SIPRAL_TRANSPORT_MAIN`]. Every call here names it anyway, and every other
-//! number is `SIPRAL_STATUS_INVALID_ARGUMENT`.
+//! A stack is bound to one transport at creation, [`SIPRAL_TRANSPORT_MAIN`],
+//! and every call here still names it by default — a caller that never binds
+//! a second one sees exactly the surface this crate always had. What changed
+//! (task 8.4.10) is that [`sipral_stack_transport_bind`] may now bind more:
+//! `transport` on `sipral_account_config_t` and `sipral_call_config_t` says
+//! which one an account's REGISTER, or a call's INVITE, goes out on, and zero
+//! keeps meaning [`SIPRAL_TRANSPORT_MAIN`] there too, so a caller that fills
+//! neither in gets exactly what it always got.
 //!
-//! That is a decision rather than an omission. A second transport is not an I/O
-//! question: an account carries the transport its REGISTER goes out on and a
-//! call carries the one its INVITE does, so a stack with two of them has to be
-//! told which account uses which — a member of `sipral_account_config_t`, and
-//! one that belongs with the §18.1.1 promotion onto a stream that spends event
-//! number 18. Until then the honest surface is one transport whose number is
-//! written down, because widening it later means more numbers becoming valid
-//! and not a second set of functions taking an argument the first set lacks.
+//! A stack's transports are a table rather than a single id from the moment
+//! it is created, and the table only grows: [`SIPRAL_TRANSPORT_MAIN`] is in it
+//! first, and [`sipral_stack_transport_bind`] adds an entry the first time a
+//! number is bound and confirms it every time after. Numbers beyond the main
+//! one are the caller's own to choose — the layer below already documents a
+//! transport as "named by the caller" and never interprets what the number
+//! means — so `out_transport_id` on a bind hands back exactly the number that
+//! was asked for, which is a caller's one place to read the id it is about to
+//! put in an account or a call config, and reads the same after a rebind as
+//! before it.
+//!
+//! An account whose transport is later unbound is not retired with it: a
+//! failed or closed transport stops carrying traffic, the same as it always
+//! has, and starts again the moment [`sipral_stack_transport_bind`] brings it
+//! back — nothing about the account changes underneath it. A call with its
+//! own `transport` left at zero is the account's to route exactly as it
+//! always was: `destination` unset means the INVITE goes where the account
+//! registers, over the account's own transport, and `transport` is read only
+//! together with an explicit `destination`, since there is nothing else to
+//! combine it with.
+//!
+//! This is also where §18.1.1's promotion lands: a request too large for a
+//! datagram now arrives as [`crate::event::SipralEventKind::TransportWanted`]
+//! (event 18, previously reserved), naming where it was going and over what
+//! protocol. The application answers it with
+//! [`sipral_stack_transport_bind`] the same way it answers a network change
+//! that took a transport with it, and the stack sends the request again by
+//! itself once the bind succeeds — there is no separate "it went" event, the
+//! same as for a request that fit the first time.
 //!
 //! # A datagram, a stream, and a WebSocket
 //!
@@ -102,12 +128,15 @@ use crate::status::SipralStatus;
 use crate::versioned::{Versioned, read_versioned, write_versioned};
 
 constants! {
-    /// The transport a stack is created with, and the only one this build
-    /// binds.
+    /// The transport a stack is created with.
     ///
-    /// Named rather than assumed, so that the day a stack has two of them is a
-    /// day more numbers become valid and not a day this ABI grows a second way
-    /// to hand bytes over.
+    /// Never retired: [`sipral_stack_transport_failed`] and
+    /// [`sipral_stack_stream_closed`] can still stop it carrying traffic, and
+    /// [`sipral_stack_transport_bind`] is still what brings it back, exactly
+    /// as when this was the only number a stack had. Zero on
+    /// `sipral_account_config_t::transport` and `sipral_call_config_t::transport`
+    /// means this one, so a caller that never binds a second transport fills
+    /// neither in and gets exactly what it always got.
     pub const SIPRAL_TRANSPORT_MAIN: u32 = 0;
 
     /// The largest message that crosses in either direction.
@@ -160,7 +189,10 @@ record! {
     pub struct SipralTransmit {
         /// `sizeof` this struct, as the caller's header declares it.
         pub size: usize,
-        /// Which transport to write to. [`SIPRAL_TRANSPORT_MAIN`], for now always.
+        /// Which transport to write to: [`SIPRAL_TRANSPORT_MAIN`] for a stack
+        /// that never bound another, or the number
+        /// [`sipral_stack_transport_bind`] gave whichever account or call
+        /// this message belongs to.
         pub transport: u32,
         /// What that transport speaks, as a `SipralTransport`.
         ///
@@ -469,65 +501,115 @@ entry! {
 }
 
 entry! {
-    /// Say that a transport is open and may be written to.
+    /// Say that a transport is open and may be written to — the main one
+    /// again, or a further one this stack has not had before.
     ///
-    /// The one way back from [`sipral_stack_transport_failed`], and the way a
-    /// stream stack names its far end: a connection that has just been made
-    /// knows its peer, and a stack created before the connect did not. It is
-    /// also how a socket re-opened on another address after the network moved
-    /// tells this stack what to put in its `Via` from now on — every message
-    /// after this one carries `local`, and the ones already in flight carry what
-    /// they were written with.
+    /// The one way back from [`sipral_stack_transport_failed`], the way a
+    /// stream stack names its far end, and the way a further transport enters
+    /// the table at all. `transport` is [`SIPRAL_TRANSPORT_MAIN`] to (re)bind
+    /// the main one, or any other number: one this stack already has rebinds
+    /// it, and one it does not opens it — the number is the caller's own
+    /// choice, the same as `sipral_account_config_t::transport` and
+    /// `sipral_call_config_t::transport` read it. `out_transport_id` may be
+    /// null; when it is not, it receives that same number, which is where a
+    /// caller answering
+    /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
+    /// reads back the id it just gave one of those two configs.
+    ///
+    /// `protocol` is a [`crate::stack::SipralTransport`].
+    /// Rebinding an existing transport takes zero to mean "whatever it
+    /// already speaks" and anything else has to agree with that or this is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` — a stack retransmits or does not
+    /// according to what a transport was opened speaking, and changing that
+    /// underneath the timers would be a transport configured out of RFC 3261
+    /// §17 halfway through a call. Opening a new one needs a protocol to
+    /// speak, so zero there is the same refusal for the opposite reason:
+    /// nothing to fall back on.
     ///
     /// `local` is the address the far end reaches this one at, as `host:port`.
     /// `remote` is the far end of a connection, and is refused on a datagram
     /// transport, which has many.
     ///
-    /// The protocol is not an argument: a stack retransmits or does not
-    /// according to what it was created speaking, and a transport that changed
-    /// that underneath the timers would be a stack configured out of RFC 3261
-    /// §17 halfway through a call.
+    /// This is also how a request
+    /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
+    /// named gets to leave: once this returns `SIPRAL_STATUS_OK` for the
+    /// protocol and destination the event gave, the stack sends the request
+    /// again by itself on the next `sipral_stack_poll` — there is no further
+    /// event about that one request.
     ///
     /// # Safety
     ///
-    /// `local` must be readable for `local_len` bytes and `remote` for
-    /// `remote_len`.
+    /// `local` must be readable for `local_len` bytes, `remote` for
+    /// `remote_len`, and `out_transport_id`, when it is not null, must point
+    /// at one `uint32_t`.
     fn sipral_stack_transport_bind(
         stack: SipralHandle,
         transport: u32,
+        protocol: u32,
         local: *const c_char,
         local_len: usize,
         remote: *const c_char,
         remote_len: usize,
         now_ms: u64,
+        out_transport_id: *mut u32,
     ) {
         let advertised = unsafe { address(local, local_len, "local") }?;
         let connected = unsafe { optional_address(remote, remote_len, "remote") }?;
         with_stack_at(stack, now_ms, |state, now| {
-            let transport = named(state, transport)?;
-            let protocol = state.speaks.protocol();
-            if connected.is_some() && !protocol.is_stream() {
+            let known = state.transports.protocol_of(transport);
+            let resolved = match (known, protocol) {
+                (Some(speaks), 0) => speaks,
+                (Some(speaks), asked) => {
+                    let asked = crate::stack::transport_of(asked)?.protocol();
+                    if asked != speaks {
+                        return Err(fail(
+                            SipralStatus::InvalidArgument,
+                            format!(
+                                "transport {transport} already speaks {speaks}, and this call \
+                                 named {asked}; a transport does not change protocol underneath \
+                                 the timers it was opened with"
+                            ),
+                        ));
+                    }
+                    asked
+                }
+                (None, 0) => {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        format!(
+                            "transport {transport} is not one this stack has yet, and opening \
+                             one needs a protocol to speak"
+                        ),
+                    ));
+                }
+                (None, asked) => crate::stack::transport_of(asked)?.protocol(),
+            };
+            if connected.is_some() && !resolved.is_stream() {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
-                    format!(
-                        "remote names one far end and this stack speaks {}, which has many",
-                        protocol.as_str()
-                    ),
+                    format!("remote names one far end and {resolved} has many"),
                 ));
             }
+            let id = TransportId(transport);
             state
                 .agent
                 .receive(
                     Input::TransportBound {
-                        transport,
-                        protocol,
+                        transport: id,
+                        protocol: resolved,
                         local: advertised,
                         remote: connected,
                     },
                     now,
                 )
                 .map_err(|error| received_badly(&error))?;
-            state.local = advertised;
+            state.transports.record(transport, resolved);
+            if transport == SIPRAL_TRANSPORT_MAIN {
+                state.local = advertised;
+            }
+            if !out_transport_id.is_null() {
+                unsafe { out_transport_id.write(transport) };
+            }
             Ok(())
         })
     }
@@ -608,18 +690,21 @@ unsafe fn optional_address(
 }
 
 /// The transport a number names, or why it names none.
-fn named(state: &StackState, transport: u32) -> Result<TransportId, Fail> {
-    if transport == state.transport.0 {
-        return Ok(state.transport);
-    }
-    Err(fail(
-        SipralStatus::InvalidArgument,
-        format!(
-            "transport {transport} is not one this stack has; it was created with {}, which is \
-             SIPRAL_TRANSPORT_MAIN and the only one a stack of this build binds",
-            state.transport.0
-        ),
-    ))
+///
+/// [`crate::lifecycle`] has the same check, as `transport_named`; it is not
+/// `pub(crate)` here for that, and the reason not to share it is written
+/// there.
+pub(crate) fn named(state: &StackState, transport: u32) -> Result<TransportId, Fail> {
+    state.transports.resolve(transport).ok_or_else(|| {
+        fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "transport {transport} is not one this stack has; sipral_stack_transport_bind \
+                 is what adds one, and 0 is SIPRAL_TRANSPORT_MAIN, which every stack has from \
+                 its creation"
+            ),
+        )
+    })
 }
 
 /// Bytes a caller handed in, as a slice, or why they are not one.
@@ -688,6 +773,7 @@ pub(crate) mod tests {
     use crate::error::last_error_text;
     use crate::event::{SipralEventKind, SipralRegistrationState};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
+    use crate::header::SipralHeader;
     use crate::media::SIPRAL_ADDRESS_BYTES;
     use crate::stack::tests::{BIND, Observed, config, create, poll, record, stack};
     use crate::stack::{SipralTransport, sipral_stack_destroy};
@@ -856,11 +942,38 @@ pub(crate) mod tests {
             expires_seconds: 0,
             headers: ptr::null(),
             headers_len: 0,
+            transport: 0,
         }
     }
 
     fn line(stack: SipralHandle) -> SipralHandle {
         let config = account_config();
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status = unsafe { sipral_account_add(stack, ptr::from_ref(&config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        account
+    }
+
+    /// An account like [`line`]'s, but its own `aor`, pointed at `transport`
+    /// and answering at `registrar` instead of the shared [`REGISTRAR`], so
+    /// that two of these on one stack never share an identity or a wire.
+    fn line_on(
+        stack: SipralHandle,
+        transport: u32,
+        aor: &'static str,
+        registrar: &'static str,
+    ) -> SipralHandle {
+        let text = |value: &'static str| (value.as_ptr().cast::<c_char>(), value.len());
+        let (aor, aor_len) = text(aor);
+        let (registrar_address, registrar_address_len) = text(registrar);
+        let config = SipralAccountConfig {
+            aor,
+            aor_len,
+            registrar_address,
+            registrar_address_len,
+            transport,
+            ..account_config()
+        };
         let mut account = SIPRAL_HANDLE_NONE;
         let status = unsafe { sipral_account_add(stack, ptr::from_ref(&config), &raw mut account) };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -1493,11 +1606,13 @@ pub(crate) mod tests {
                 sipral_stack_transport_bind(
                     handle,
                     SIPRAL_TRANSPORT_MAIN,
+                    0,
                     moved.as_ptr().cast::<c_char>(),
                     moved.len(),
                     ptr::null(),
                     0,
                     1_200,
+                    ptr::null_mut(),
                 )
             },
             SipralStatus::Ok,
@@ -1541,11 +1656,13 @@ pub(crate) mod tests {
             sipral_stack_transport_bind(
                 handle,
                 SIPRAL_TRANSPORT_MAIN,
+                0,
                 BIND.as_ptr().cast::<c_char>(),
                 BIND.len(),
                 REGISTRAR.as_ptr().cast::<c_char>(),
                 REGISTRAR.len(),
                 1_000,
+                ptr::null_mut(),
             )
         };
         assert_eq!(status, SipralStatus::InvalidArgument);
@@ -1564,11 +1681,13 @@ pub(crate) mod tests {
                     sipral_stack_transport_bind(
                         handle,
                         SIPRAL_TRANSPORT_MAIN,
+                        0,
                         local,
                         local_len,
                         ptr::null(),
                         0,
                         1_000,
+                        ptr::null_mut(),
                     )
                 },
                 SipralStatus::InvalidArgument
@@ -1741,11 +1860,13 @@ pub(crate) mod tests {
             sipral_stack_transport_bind(
                 handle,
                 SIPRAL_TRANSPORT_MAIN,
+                0,
                 BIND.as_ptr().cast::<c_char>(),
                 BIND.len(),
                 REGISTRAR.as_ptr().cast::<c_char>(),
                 REGISTRAR.len(),
                 1_100,
+                ptr::null_mut(),
             )
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
@@ -1812,14 +1933,287 @@ pub(crate) mod tests {
                 sipral_stack_transport_bind(
                     gone,
                     SIPRAL_TRANSPORT_MAIN,
+                    0,
                     BIND.as_ptr().cast::<c_char>(),
                     BIND.len(),
                     ptr::null(),
                     0,
                     0,
+                    ptr::null_mut(),
                 )
             },
             SipralStatus::InvalidHandle
         );
+    }
+
+    // -- 8.4.10: a table of transports ---------------------------------------
+
+    fn header_of(name: &'static str, value: &str) -> SipralHeader {
+        let (name_ptr, name_len) = (name.as_ptr().cast::<c_char>(), name.len());
+        SipralHeader {
+            name: name_ptr,
+            name_len,
+            value: value.as_ptr().cast::<c_char>(),
+            value_len: value.len(),
+        }
+    }
+
+    /// A transport this stack has never bound is refused, and opening one
+    /// needs a protocol — the two ways `sipral_stack_transport_bind` can fail
+    /// before it ever touches the layer below.
+    #[test]
+    fn a_new_transport_needs_a_protocol_and_an_existing_one_keeps_the_one_it_has() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                9,
+                0,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                ptr::null(),
+                0,
+                1_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("protocol"),
+            "{}",
+            last_error_text()
+        );
+
+        // main already speaks UDP; asking it to speak TLS instead is refused
+        // rather than quietly changing the transport underneath its timers
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                SIPRAL_TRANSPORT_MAIN,
+                SipralTransport::Tls as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                ptr::null(),
+                0,
+                1_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("UDP") && last_error_text().contains("TLS"),
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The acceptance test the task names: two accounts, two transports, one
+    /// stack, and each account's own traffic leaves on the transport it was
+    /// given — not on the other account's, and not on the stack's main one,
+    /// which neither of them uses at all.
+    #[test]
+    fn two_accounts_on_two_transports_each_leave_on_their_own() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let first = "203.0.113.9:5061";
+        let second = "203.0.113.10:5061";
+
+        for (id, remote) in [(1_u32, first), (2_u32, second)] {
+            let mut bound = u32::MAX;
+            let status = unsafe {
+                sipral_stack_transport_bind(
+                    handle,
+                    id,
+                    SipralTransport::Tls as u32,
+                    BIND.as_ptr().cast::<c_char>(),
+                    BIND.len(),
+                    remote.as_ptr().cast::<c_char>(),
+                    remote.len(),
+                    1_000,
+                    &raw mut bound,
+                )
+            };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            assert_eq!(
+                bound, id,
+                "the id handed back is the one that was asked for"
+            );
+        }
+
+        let alice = line_on(handle, 1, "sip:alice@example.com", first);
+        let bob = line_on(handle, 2, "sip:bob@example.com", second);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, alice, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { sipral_account_register(handle, bob, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_100);
+
+        let mut on_one = 0;
+        let mut on_two = 0;
+        loop {
+            let mut buffers = Buffers::new();
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                break;
+            }
+            let (bytes, _, _) = buffers.taken(&transmit);
+            assert!(bytes.starts_with(b"REGISTER "), "{:?}", start_of(&bytes));
+            match transmit.transport {
+                1 => on_one += 1,
+                2 => on_two += 1,
+                other => panic!("a message left on transport {other}, which neither account is on"),
+            }
+        }
+        assert_eq!(
+            on_one, 1,
+            "alice's REGISTER did not leave on her own transport"
+        );
+        assert_eq!(
+            on_two, 1,
+            "bob's REGISTER did not leave on his own transport"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// What a [`SipralEventKind::TransportWanted`] carried, copied out while
+    /// the callback was still running: the pointers in an event are the
+    /// library's and are valid for exactly that long.
+    #[derive(Default)]
+    struct Wanted {
+        seen: Vec<(u32, String, usize, u32)>,
+    }
+
+    unsafe extern "C" fn keep_wanted(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let wanted = unsafe { &mut *user_data.cast::<Wanted>() };
+        let event = unsafe { &*event };
+        if event.kind != SipralEventKind::TransportWanted {
+            return;
+        }
+        let payload = unsafe { event.payload.transport_wanted };
+        let destination = if payload.destination.is_null() {
+            String::new()
+        } else {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    payload.destination.cast::<u8>(),
+                    payload.destination_len,
+                )
+            };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        wanted.seen.push((
+            payload.protocol,
+            destination,
+            payload.request_bytes,
+            payload.limit_bytes,
+        ));
+    }
+
+    /// B1, driven from C alone and end to end: a REGISTER too large for the
+    /// datagram it would have gone out on raises
+    /// `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming where it was going and
+    /// over what protocol, nothing is put on the wire for it, the
+    /// application binds exactly that, and the very same call succeeds and
+    /// leaves on the transport it just bound.
+    #[test]
+    fn a_request_too_large_for_a_datagram_is_promoted_once_a_stream_is_bound() {
+        let mut observed = Observed::default();
+        let mut wanted = Wanted::default();
+        let mut settings = config(keep_wanted, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut wanted).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        let padding = "x".repeat(1_400);
+        let fields = [header_of("X-Padding", &padding)];
+        let account_settings = SipralAccountConfig {
+            headers: fields.as_ptr(),
+            headers_len: fields.len(),
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_account_add(handle, ptr::from_ref(&account_settings), &raw mut account)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::NotSent,
+            "a REGISTER this large does not fit a datagram and nothing was open to move it to: \
+             {}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        assert!(
+            drain(handle).is_empty(),
+            "nothing this large was ever put on the wire"
+        );
+
+        let (protocol, destination, request_bytes, limit_bytes) = wanted
+            .seen
+            .first()
+            .cloned()
+            .expect("SIPRAL_EVENT_KIND_TRANSPORT_WANTED was never raised");
+        assert_eq!(protocol, SipralTransport::Tcp as u32);
+        assert_eq!(destination, REGISTRAR);
+        assert!(
+            request_bytes > usize::try_from(limit_bytes).unwrap_or(0),
+            "{request_bytes} against a limit of {limit_bytes}"
+        );
+
+        let mut bound = u32::MAX;
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                7,
+                protocol,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                destination.as_ptr().cast::<c_char>(),
+                destination.len(),
+                1_100,
+                &raw mut bound,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(bound, 7);
+
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_200) },
+            SipralStatus::Ok,
+            "the same call succeeds now that the stream it asked for exists: {}",
+            last_error_text()
+        );
+        let mut buffers = Buffers::new();
+        let mut transmit = buffers.transmit();
+        let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_ne!(transmit.len, 0, "the stack had nothing to send");
+        assert_eq!(transmit.transport, 7, "it left on the transport just bound");
+        let (out, to, _) = buffers.taken(&transmit);
+        assert!(out.starts_with(b"REGISTER "), "{:?}", start_of(&out));
+        assert_eq!(to, REGISTRAR);
+        assert!(
+            String::from_utf8_lossy(&out).contains("X-Padding"),
+            "the same oversized request went out, not a smaller one"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::error::RecordError;
 use super::frame::{Arrival, Frame, Step, failure_token};
 use super::text::{one_line, write_payload};
-use crate::endpoint::Input;
+use crate::endpoint::{Input, TransportProtocol};
 use crate::transaction::DialogId;
 
 /// A session, written down.
@@ -41,7 +41,14 @@ impl Recording {
     /// no way to know what a `resolved` line means, and reading past it as if
     /// it were one of the frames it does understand would replay a dialog to
     /// an address nobody recorded.
-    pub const VERSION: u32 = 2;
+    ///
+    /// Raised again to `3` when `resolved` learned the protocol RFC 3263
+    /// §4.1 resolves alongside the address (`Endpoint::resolved`'s new third
+    /// argument): a `resolved` line now carries one more token than a version
+    /// 2 reader expects between the dialog and the addresses, and reading it
+    /// as an address would either misparse or, worse, parse as one that was
+    /// never resolved.
+    pub const VERSION: u32 = 3;
 
     /// The signalling seed the recorded stack was built with.
     ///
@@ -110,7 +117,8 @@ impl Recording {
                 Step::Resolved {
                     dialog,
                     ref addresses,
-                } => write_resolved(&mut out, dialog, addresses),
+                    protocol,
+                } => write_resolved(&mut out, dialog, addresses, protocol),
                 Step::Cue(ref label) => {
                     let _ = writeln!(out, "cue {label}");
                 }
@@ -121,14 +129,26 @@ impl Recording {
     }
 }
 
-/// One `resolved` line: the dialog it answers for, then the addresses, in the
-/// order they were handed to [`Recorder::resolved`].
-fn write_resolved(out: &mut String, dialog: DialogId, addresses: &[SocketAddr]) {
+/// One `resolved` line: the dialog it answers for, the protocol or `-` for
+/// none, then the addresses, in the order they were handed to
+/// [`Recorder::resolved`].
+fn write_resolved(
+    out: &mut String,
+    dialog: DialogId,
+    addresses: &[SocketAddr],
+    protocol: Option<TransportProtocol>,
+) {
     let _ = write!(
         out,
         "resolved {}.{}",
         dialog.raw.slot, dialog.raw.generation
     );
+    match protocol {
+        Some(protocol) => {
+            let _ = write!(out, " {protocol}");
+        }
+        None => out.push_str(" -"),
+    }
     for address in addresses {
         let _ = write!(out, " {address}");
     }
@@ -250,11 +270,18 @@ impl Recorder {
     /// takes no `now` of its own — there is nothing in it that is timed — so
     /// `now` here only places the frame in the recording's own timeline,
     /// the same as it does for [`Recorder::cue`].
-    pub fn resolved(&mut self, dialog: DialogId, addresses: &[SocketAddr], now: Instant) {
+    pub fn resolved(
+        &mut self,
+        dialog: DialogId,
+        addresses: &[SocketAddr],
+        protocol: Option<TransportProtocol>,
+        now: Instant,
+    ) {
         self.push(
             Step::Resolved {
                 dialog,
                 addresses: Box::from(addresses),
+                protocol,
             },
             now,
         );

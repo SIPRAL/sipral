@@ -875,7 +875,11 @@ fn a_target_refresh_that_moves_the_far_end_asks_the_caller_to_resolve() {
     );
 
     // and once the caller has answered, it moves
-    endpoint.resolved(dialog, &["198.51.100.7:5060".parse().expect("an address")]);
+    endpoint.resolved(
+        dialog,
+        &["198.51.100.7:5060".parse().expect("an address")],
+        None,
+    );
     endpoint
         .reinvite(
             dialog,

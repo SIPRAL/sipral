@@ -180,8 +180,13 @@ pub struct Value {
 pub enum Stands {
     /// Another name for a plain integer.
     For(&'static str),
-    /// A function the caller supplies and the library calls.
-    Callback(&'static [Member]),
+    /// A function the caller supplies and the library calls, with its
+    /// arguments and what it answers with: a plain integer, as the Rust
+    /// declaration spells it, or nothing for a callback that only reports.
+    /// Nothing is what every callback declared today answers with, and it is
+    /// what a listener that throws instead of answering is read as, for one
+    /// that does.
+    Callback(&'static [Member], Option<&'static str>),
 }
 
 /// One published type alias.
@@ -393,11 +398,35 @@ macro_rules! constants {
     };
 }
 
-/// Declare a published type alias, or the shape of the event callback.
+/// Declare a published type alias, or the shape of a callback: one that only
+/// reports, or one that answers.
 ///
-/// The callback arm comes first because a function type is also a type, and
-/// the arms are tried in order.
+/// The callback arms come first because a function type is also a type, and
+/// the arms are tried in order. The answering arm comes before the
+/// fire-and-forget one for the same reason: a return type is more tokens
+/// than none, and a pattern that would match a shorter input is tried second.
 macro_rules! alias {
+    (
+        $(#[doc = $doc:literal])*
+        pub type $name:ident = fn($($argument:ident: $type:ty),* $(,)?) -> $answer:ty;
+    ) => {
+        $(#[doc = $doc])*
+        pub type $name = Option<unsafe extern "C" fn($($argument: $type),*) -> $answer>;
+
+        #[allow(non_upper_case_globals)]
+        pub(crate) const $name: $crate::abi::Alias = $crate::abi::Alias {
+            name: stringify!($name),
+            doc: &[$($doc),*],
+            stands: $crate::abi::Stands::Callback(
+                &[$($crate::abi::Member {
+                    name: stringify!($argument),
+                    rust_type: stringify!($type),
+                    doc: &[],
+                }),*],
+                Some(stringify!($answer)),
+            ),
+        };
+    };
     (
         $(#[doc = $doc:literal])*
         pub type $name:ident = fn($($argument:ident: $type:ty),* $(,)?);
@@ -409,11 +438,14 @@ macro_rules! alias {
         pub(crate) const $name: $crate::abi::Alias = $crate::abi::Alias {
             name: stringify!($name),
             doc: &[$($doc),*],
-            stands: $crate::abi::Stands::Callback(&[$($crate::abi::Member {
-                name: stringify!($argument),
-                rust_type: stringify!($type),
-                doc: &[],
-            }),*]),
+            stands: $crate::abi::Stands::Callback(
+                &[$($crate::abi::Member {
+                    name: stringify!($argument),
+                    rust_type: stringify!($type),
+                    doc: &[],
+                }),*],
+                None,
+            ),
         };
     };
     (
@@ -484,7 +516,7 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
 /// caller reads no further than the `size` says. Nothing ever declares one to
 /// us, so there is no declared size to refuse and no oldest published length
 /// that matters. The exception is named here rather than left to be noticed,
-/// because a fourteenth struct that quietly went unpinned would look exactly
+/// because a fifteenth struct that quietly went unpinned would look exactly
 /// like this one.
 pub const FILLED_BY_US: &[&str] = &["SipralEvent"];
 
@@ -548,6 +580,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralTransferEvent::ABI,
         crate::event::SipralMediaEvent::ABI,
         crate::event::SipralRecoveryEvent::ABI,
+        crate::event::SipralTransportWantedEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -807,6 +840,7 @@ mod tests {
             "SipralTransferEvent",
             "SipralMediaEvent",
             "SipralRecoveryEvent",
+            "SipralTransportWantedEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];
@@ -839,7 +873,7 @@ mod tests {
         let callbacks: Vec<&str> = SURFACE
             .aliases
             .iter()
-            .filter(|alias| matches!(alias.stands, Stands::Callback(_)))
+            .filter(|alias| matches!(alias.stands, Stands::Callback(_, _)))
             .map(|alias| alias.name)
             .collect();
         assert_eq!(callbacks, ["SipralEventCallback"]);

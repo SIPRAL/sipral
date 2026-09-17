@@ -242,6 +242,89 @@ internal object SipralEventListeners {
 }
 
 /**
+ * What a policy callback is asked before the library goes on.
+ */
+class SipralScreenEvent(
+    val size: Long,
+    /**
+     * Who is calling, as UTF-8, or null.
+     */
+    val from: String?,
+)
+
+/**
+ * Asked before the library goes on, and answered with whether to
+ * continue. A listener that throws instead of answering is read as
+ * zero, which every callback here that answers is defined to take
+ * as "no".
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. It answers with a Long, which the shim
+ * hands the library back. What a listener throws is not delivered anywhere:
+ * the shim clears it and answers as if this had returned zero, which is what
+ * every answering listener here is defined to take as "no".
+ */
+fun interface SipralScreenListener {
+    fun onEvent(event: SipralScreenEvent): Long
+}
+
+/**
+ * Every SipralScreenListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralScreenListeners {
+    private val listening = HashMap<Long, SipralScreenListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralScreenListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /** Tie a kept listener to the handle the call made, or let it go when the call failed. */
+    fun made(key: Long, status: Int, handle: Long) {
+        if (key == 0L) {
+            return
+        }
+        synchronized(this) {
+            if (status == SipralStatus.OK.value) {
+                handles[handle] = key
+            } else {
+                listening.remove(key)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was made with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, from: ByteArray?): Long {
+        val listener = synchronized(this) { listening[key] } ?: return 0
+        return listener.onEvent(SipralScreenEvent(size, from?.let { String(it, Charsets.UTF_8) }))
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.

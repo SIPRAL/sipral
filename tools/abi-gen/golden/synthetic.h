@@ -66,6 +66,7 @@ typedef struct sipral_registration_event sipral_registration_event_t;
 typedef struct sipral_media_event sipral_media_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
+typedef struct sipral_screen_event sipral_screen_event_t;
 
 /**
  * What a call across the boundary answered.
@@ -106,6 +107,14 @@ enum {
  * What the library calls when something happens.
  */
 typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_data);
+
+/**
+ * Asked before the library goes on, and answered with whether to
+ * continue. A listener that throws instead of answering is read as
+ * zero, which every callback here that answers is defined to take
+ * as "no".
+ */
+typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_event_t *event, void *user_data);
 
 /**
  * What a stack has done since it was made.
@@ -253,6 +262,18 @@ struct sipral_event {
      * The arm the kind names.
      */
     sipral_event_payload_t payload;
+};
+
+/**
+ * What a policy callback is asked before the library goes on.
+ */
+struct sipral_screen_event {
+    size_t size;
+    /**
+     * Who is calling, as UTF-8, or null.
+     */
+    const char *from;
+    size_t from_len;
 };
 
 /**
