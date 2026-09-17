@@ -382,6 +382,17 @@ public enum Sipral {
         return arrival
     }
 
+    /// Install a policy on it, replace the one installed, or remove it.
+    ///
+    /// The callback and the pointer after it are one listener, the same
+    /// pair a struct going in already means by them, and a null callback
+    /// removes whatever was installed.
+    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t, userData: UnsafeMutableRawPointer) throws {
+        try ensureAbi()
+        let status = sipral_stack_screen(stack, callback, userData)
+        try check(status)
+    }
+
     /// Take it apart.
     public static func stackDestroy(stack: SipralHandle) throws {
         try ensureAbi()

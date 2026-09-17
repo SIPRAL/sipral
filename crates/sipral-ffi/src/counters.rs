@@ -92,6 +92,19 @@ record! {
         /// reason `events_dropped` was: a build from before this member
         /// existed still reads every counter that did.
         pub farewells_dropped: u64,
+        /// INVITEs a `sipral_stack_screen` policy refused (A8, D7).
+        pub screened_refused_by_policy: u64,
+        /// INVITEs refused because their source was offering them faster
+        /// than `sipral_stack_invite_limit` allows.
+        pub screened_refused_by_rate: u64,
+        /// INVITEs refused because every seat this stack keeps for a source
+        /// it is watching belonged to one still spending, and this source
+        /// could not be limited either — a flood from many addresses at
+        /// once rather than one calling too fast.
+        pub screened_refused_by_crowding: u64,
+        /// INVITEs refused 403 for naming a call they had no standing to
+        /// replace (RFC 3891 §3).
+        pub screened_refused_by_replaces: u64,
     }
 }
 
@@ -106,7 +119,12 @@ unsafe impl Versioned for SipralCounters {
     }
 }
 
-fn counters_of(counters: Counters, events_dropped: u64, farewells_dropped: u64) -> SipralCounters {
+fn counters_of(
+    counters: Counters,
+    events_dropped: u64,
+    farewells_dropped: u64,
+    refusals: sipral_ua::Refusals,
+) -> SipralCounters {
     SipralCounters {
         size: size_of::<SipralCounters>(),
         registrations_attempted: counters.registrations_attempted.get(),
@@ -129,6 +147,10 @@ fn counters_of(counters: Counters, events_dropped: u64, farewells_dropped: u64) 
         active_calls: counters.active_calls.get(),
         events_dropped,
         farewells_dropped,
+        screened_refused_by_policy: refusals.by_policy,
+        screened_refused_by_rate: refusals.by_rate,
+        screened_refused_by_crowding: refusals.by_crowding,
+        screened_refused_by_replaces: refusals.by_replaces,
     }
 }
 
@@ -153,6 +175,7 @@ entry! {
                 state.engine.counters(),
                 state.events_dropped,
                 state.farewells_dropped,
+                state.agent.refusals(),
             ))
         })?;
         unsafe { write_versioned(out_counters, counters) }
@@ -191,6 +214,10 @@ mod tests {
             active_calls: u64::MAX,
             events_dropped: u64::MAX,
             farewells_dropped: u64::MAX,
+            screened_refused_by_policy: u64::MAX,
+            screened_refused_by_rate: u64::MAX,
+            screened_refused_by_crowding: u64::MAX,
+            screened_refused_by_replaces: u64::MAX,
         }
     }
 
@@ -214,6 +241,10 @@ mod tests {
         assert_eq!(read.active_calls, 0);
         assert_eq!(read.events_dropped, 0);
         assert_eq!(read.farewells_dropped, 0);
+        assert_eq!(read.screened_refused_by_policy, 0);
+        assert_eq!(read.screened_refused_by_rate, 0);
+        assert_eq!(read.screened_refused_by_crowding, 0);
+        assert_eq!(read.screened_refused_by_replaces, 0);
     }
 
     /// The wiring this file owns: whatever a poll counted as dropped for want

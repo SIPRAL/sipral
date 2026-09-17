@@ -263,7 +263,14 @@ shape is permanent once published:
   rebind — the two registration states the header publishes cannot be
   produced by any C call today), A8 screening before any effect, C2 and C3
   announce and freeze, D1 the diagnostic record, D2 recording, D5 why each
-  codec lost — each gets its entry points;
+  codec lost — each gets its entry points. *Built*: A7 and D4
+  (`sipral_stack_suspending`, `_resumed`, `_network_changed`,
+  `_interface_lost`, `_name_resolution_lost`, `sipral_account_rebind`, and
+  `SIPRAL_EVENT_KIND_RECOVERY` reporting every rung), A8 and D7
+  (`sipral_stack_screen`, `sipral_stack_invite_limit` and the four
+  `screened_*` counters), D1 (`sipral_call_record_json`,
+  `sipral_stack_diagnostics_json`) and D2 (`sipral_stack_recording_start`,
+  `_stop`). Left: A1, C2, C3 and D5;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
   reports it; it becomes a member of the stack and call configuration.
   *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on

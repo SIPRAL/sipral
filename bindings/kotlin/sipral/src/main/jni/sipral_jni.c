@@ -26,6 +26,8 @@
 static JavaVM *jni_vm;
 static jclass jni_event_callback_class;
 static jmethodID jni_event_callback_deliver;
+static jclass jni_screen_callback_class;
+static jmethodID jni_screen_callback_deliver;
 
 /* Whether the struct a callback was handed reaches as far as one of its
  * members: the library fills in no more of it than its size member says. */
@@ -56,6 +58,21 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
             return JNI_ERR;
         }
     }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralScreenListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_screen_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_screen_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_screen_callback_deliver = (*env)->GetStaticMethodID(env, jni_screen_callback_class, "deliver", "(JJJ[B[B)J");
+        if (jni_screen_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
     jni_vm = vm;
     return JNI_VERSION_1_6;
 }
@@ -73,6 +90,10 @@ JNI_OnUnload(JavaVM *vm, void *reserved)
     if (jni_event_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_event_callback_class);
         jni_event_callback_class = NULL;
+    }
+    if (jni_screen_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_screen_callback_class);
+        jni_screen_callback_class = NULL;
     }
 }
 
@@ -127,6 +148,76 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
     }
+}
+
+/* Where a sipral_screen_callback_t lands. The event is handed to
+ * SipralScreenListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. Answers with what the listener answered, or with the value that
+ * fails closed when there was none. */
+static uint32_t
+jni_screen_callback(const sipral_screen_request_t *request, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    uint32_t answer = 0;
+    jbyteArray source = NULL;
+    jbyteArray message = NULL;
+
+    if (jni_vm == NULL || request == NULL) {
+        return (uint32_t)answer;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return (uint32_t)answer;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return (uint32_t)answer;
+    }
+    if (built && JNI_REACHES(request, sipral_screen_request_t, source_len) && request->source != NULL) {
+        source = (*env)->NewByteArray(env, (jsize)request->source_len);
+        if (source == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, source, 0, (jsize)request->source_len, (const jbyte *)request->source);
+        }
+    }
+    if (built && JNI_REACHES(request, sipral_screen_request_t, message_len) && request->message != NULL) {
+        message = (*env)->NewByteArray(env, (jsize)request->message_len);
+        if (message == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, message, 0, (jsize)request->message_len, (const jbyte *)request->message);
+        }
+    }
+    if (built) {
+        answer = (uint32_t)(*env)->CallStaticLongMethod(env, jni_screen_callback_class, jni_screen_callback_deliver, (jlong)(intptr_t)user_data, (jlong)request->size, JNI_REACHES(request, sipral_screen_request_t, stack) ? (jlong)request->stack : 0, source, message);
+    }
+    /* Pending here either because an array could not be made, or because
+     * deliver let a listener's own exception through rather than catch it:
+     * a policy question with no answer fails closed rather than carry on
+     * with whatever the call above happened to return. */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        answer = 0;
+    }
+    if (source != NULL) {
+        (*env)->DeleteLocalRef(env, source);
+    }
+    if (message != NULL) {
+        (*env)->DeleteLocalRef(env, message);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
+    return (uint32_t)answer;
 }
 
 /* Throw a new exception of the class named. What is wrong with a list the
@@ -489,7 +580,7 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
     counters_value.size = sizeof counters_value;
     sipral_status_t status = sipral_stack_counters((sipral_handle_t)stack, &counters_value);
     {
-        jlong slots[21];
+        jlong slots[25];
         slots[0] = (jlong)counters_value.size;
         slots[1] = (jlong)counters_value.registrations_attempted;
         slots[2] = (jlong)counters_value.registrations_succeeded;
@@ -511,8 +602,30 @@ Java_org_sipral_SipralNative_sipral_1stack_1counters(JNIEnv *env, jobject self, 
         slots[18] = (jlong)counters_value.active_calls;
         slots[19] = (jlong)counters_value.events_dropped;
         slots[20] = (jlong)counters_value.farewells_dropped;
-        (*env)->SetLongArrayRegion(env, counters, 0, 21, slots);
+        slots[21] = (jlong)counters_value.screened_refused_by_policy;
+        slots[22] = (jlong)counters_value.screened_refused_by_rate;
+        slots[23] = (jlong)counters_value.screened_refused_by_crowding;
+        slots[24] = (jlong)counters_value.screened_refused_by_replaces;
+        (*env)->SetLongArrayRegion(env, counters, 0, 25, slots);
     }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1screen(JNIEnv *env, jobject self, jlong stack, jlong callback)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_screen((sipral_handle_t)stack, callback != 0 ? jni_screen_callback : NULL, (void *)(intptr_t)callback);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1invite_1limit(JNIEnv *env, jobject self, jlong stack, jlong everyMs, jlong burst)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_invite_limit((sipral_handle_t)stack, (uint64_t)everyMs, (uint32_t)burst);
     return (jint)status;
 }
 

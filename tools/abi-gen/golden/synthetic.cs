@@ -452,6 +452,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_media_receive(ulong stack, byte[] data, nuint len, out uint arrival);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_screen(ulong stack, SipralScreenCallback callback, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_destroy(ulong stack);
 
 }
@@ -649,6 +652,18 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_call_media_receive(stack, data, (nuint)data.Length, out var arrival));
         return arrival;
+    }
+
+    /// <summary>
+    /// Install a policy on it, replace the one installed, or remove it.
+    ///
+    /// The callback and the pointer after it are one listener, the same
+    /// pair a struct going in already means by them, and a null callback
+    /// removes whatever was installed.
+    /// </summary>
+    public static void StackScreen(ulong stack, SipralScreenCallback callback, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_stack_screen(stack, callback, userData));
     }
 
     /// <summary>

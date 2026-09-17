@@ -801,6 +801,16 @@ public extension sipral_suspending_t {
     }
 }
 
+public extension sipral_screen_request_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -905,7 +915,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 12
+    public static let abiVersionMinor: UInt32 = 13
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -1010,6 +1020,17 @@ public enum Sipral {
     /// message and the start of another, and 1500 bytes or so on a datagram
     /// socket, where anything larger was fragmented on the way.
     public static let messageBytes: Int = 65535
+
+    /// The answer that lets an INVITE through, and the reason it is a status
+    /// code rather than a flag.
+    ///
+    /// A policy answers with what it wants said: 200 to let the call arrive,
+    /// or the status to refuse it with. Making acceptance 200 rather than
+    /// zero is the whole safety property of this mechanism — zero is what a
+    /// binding hands back when the application's listener threw, and what a
+    /// caller who filled nothing in leaves behind, and neither of those may
+    /// mean "let the stranger in".
+    public static let screenAccept: UInt32 = 200
 
     /// The calling thread's last error, or an empty string when it
     /// has none. Read the way C reads it: ask for the length, then
@@ -1310,6 +1331,93 @@ public enum Sipral {
         let status = sipral_stack_counters(stack, &counters)
         try check(status)
         return counters
+    }
+
+    /// Install, replace, or remove the screening policy for one stack.
+    ///
+    /// Every INVITE that survives sipral_stack_invite_limit reaches this
+    /// callback before anything else does: before ringing, before
+    /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists for
+    /// anybody to answer or reject. What the callback refuses is answered
+    /// with the SIP status it named — when that status refuses, and with 500
+    /// when it does not — and forgotten — no event, no handle,
+    /// nothing for the application to clean up — and what it takes, by
+    /// answering `SIPRAL_SCREEN_ACCEPT`, arrives exactly as it would with no
+    /// policy installed at all.
+    ///
+    /// `callback` given as `NULL` removes the policy: every INVITE reaches
+    /// the application again, the way it did before this was ever called.
+    /// Calling this a second time with a callback replaces the first outright,
+    /// on this stack alone — a different stack's policy, if it has one, is
+    /// untouched.
+    ///
+    /// The rule that the callback must not call back into this stack, and
+    /// must not unwind, is on sipral_screen_callback_t and is the reason
+    /// this module's own documentation exists; read it there before wiring
+    /// one up.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called on whichever thread is inside an
+    /// entry point that is feeding this stack bytes, for as long as the
+    /// policy stays installed. `user_data` is handed back to it untouched on
+    /// every call and read by nothing here.
+    ///
+    /// **Whatever `user_data` points at has to outlive the last call, and the
+    /// last call is not `sipral_stack_destroy` returning.** A destroy takes
+    /// this thread's share of the stack away; a receive already running on
+    /// another thread holds one of its own until it is done, and the policy
+    /// it is in the middle of asking is still asked. So the moment to free
+    /// what the pointer names is once no thread is inside this stack any
+    /// more, which is the application's own knowledge and not something this
+    /// ABI can answer. Replacing the policy, or removing it with `NULL`, has
+    /// the same shape: it takes the stack's lock, so it cannot run while a
+    /// policy is being asked, and once it returns the callback that was
+    /// there is not asked again.
+    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t, userData: UnsafeMutableRawPointer) throws {
+        try ensureAbi()
+        let status = sipral_stack_screen(stack, callback, userData)
+        try check(status)
+    }
+
+    /// How fast one source address may offer this stack an INVITE (A8).
+    ///
+    /// `burst` calls from one address are let through at once; one more is
+    /// earned every `every_ms` after that. What either number means is
+    /// exactly what Rate already means by it — `sipral_stack_create`'s
+    /// default is ten at once and one every two thousand milliseconds,
+    /// loose on purpose, because in most deployments every legitimate call
+    /// arrives from the one address a phone registered with.
+    ///
+    /// A `burst` of zero, or an `every_ms` of zero, is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
+    /// no call ever, the first or the one after a week of quiet, and the
+    /// second earns a token in no time, which is a limit that never limits —
+    /// Rate::unlimited is how the Rust API says that on purpose, and
+    /// there is deliberately no way to ask for it from C, since a deployment
+    /// that wants no floor at all can simply never call this.
+    ///
+    /// The floor is asked before sipral_stack_screen's own policy is: a
+    /// source that has exhausted it never reaches the callback at all, and is
+    /// counted in `sipral_counters_t::screened_refused_by_rate` or
+    /// `screened_refused_by_crowding`, never in `screened_refused_by_policy`.
+    ///
+    /// **It counts by source address, so it counts nothing it cannot name.**
+    /// An INVITE that arrived on a byte stream the application bound without
+    /// saying where the far end is has no address on it, and this floor lets
+    /// every one of those through to the policy — which is where a caller who
+    /// cannot identify a stream's far end has to decide, the same way
+    /// sipral_screen_request_t.source being null is what it has to decide
+    /// on. Naming the far end in `sipral_stack_transport_bind`'s `remote` is
+    /// what puts a stream under this floor at all.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func stackInviteLimit(stack: SipralHandle, everyMs: UInt64, burst: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_stack_invite_limit(stack, everyMs, burst)
+        try check(status)
     }
 
     /// Configure an account, and write its handle to `out_account`.

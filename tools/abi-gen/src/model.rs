@@ -310,18 +310,56 @@ pub(crate) enum Role<'a> {
     Shared(&'a Read<'a>),
     /// One value written back.
     Out(&'a Read<'a>),
+    /// A listener the caller installs on something the library already holds:
+    /// the callback, and the pointer handed back to it untouched on every
+    /// call, which is where a binding that keeps its own listener puts the
+    /// key it finds that listener by.
+    Listener {
+        /// The function pointer.
+        callback: &'a Read<'a>,
+        /// The `*mut c_void` after it.
+        user_data: &'a Read<'a>,
+        /// What the callback is, for the back end that has to print a
+        /// listener of its own for it.
+        alias: &'static Alias,
+    },
+}
+
+/// The callback a name refers to, if the surface declares one under it.
+pub(crate) fn callback_named(surface: &Surface, name: &str) -> Option<&'static Alias> {
+    surface
+        .aliases
+        .iter()
+        .find(|alias| alias.name == name && matches!(alias.stands, Stands::Callback(_, _)))
+}
+
+/// The pointer a callback's user data travels in.
+pub(crate) fn user_pointer() -> Type {
+    Type {
+        pointer: Some(Writable::Yes),
+        base: Base::Opaque,
+    }
+}
+
+/// Whether a parameter, or a member, is a callback the surface declares.
+fn is_callback(surface: &Surface, read: &Read<'_>) -> Option<&'static Alias> {
+    match (&read.ty.pointer, &read.ty.base) {
+        (None, Base::Named(name)) => callback_named(surface, name),
+        _ => None,
+    }
 }
 
 /// Read a parameter list as the conventions in `docs/08-ffi.md` describe it.
 ///
-/// Five conventions, and all five are the ABI's own rather than this
+/// Six conventions, and all six are the ABI's own rather than this
 /// generator's: a pointer followed by a length is one buffer going in; a
 /// `const` pointer to a record followed by the `_len` named for it is an array
 /// of records going in; a pointer followed by `capacity` is one buffer being
-/// filled; a writable pointer named `out_` is one value coming back; and a
+/// filled; a writable pointer named `out_` is one value coming back; a
 /// pointer to a versioned struct is a struct going in, coming back, or both,
 /// depending on which way the pointer goes and on whether the struct holds
-/// buffers of the caller's.
+/// buffers of the caller's; and a callback followed by a `*mut c_void` is one
+/// listener, the same pair a struct going in already means by it.
 pub(crate) fn roles<'a>(surface: &Surface, parameters: &'a [Read<'a>]) -> Vec<Role<'a>> {
     let mut out = Vec::new();
     let mut index = 0;
@@ -354,6 +392,19 @@ pub(crate) fn roles<'a>(surface: &Surface, parameters: &'a [Read<'a>]) -> Vec<Ro
                 index += 2;
                 continue;
             }
+        }
+        if let Some(alias) = is_callback(surface, parameter)
+            && let Some(next) = parameters
+                .get(index + 1)
+                .filter(|after| after.ty == user_pointer())
+        {
+            out.push(Role::Listener {
+                callback: parameter,
+                user_data: next,
+                alias,
+            });
+            index += 2;
+            continue;
         }
         out.push(role_of(surface, parameter));
         index += 1;
@@ -403,6 +454,11 @@ pub(crate) fn counts_records(surface: &Surface, data: &Read<'_>, next: &Read<'_>
 /// Refuse, naming the declaration, an entry point a binding that builds its
 /// own values would hand C something other than what the declaration says.
 ///
+/// A callback parameter with no `*mut c_void` after it is the first of them.
+/// Kotlin's listener never leaves the JVM and is found again by a key that
+/// travels in exactly that pointer, so a callback taken without one is a
+/// listener that could be installed and never reached.
+///
 /// A pointer to a record with a length after it that [`counts_records`] did
 /// not read as an array going in is one of two things, and neither is one
 /// struct. With the `_len` named for it behind a pointer the library may write
@@ -426,6 +482,21 @@ pub(crate) fn unprintable(
              tools/abi-gen/src/model.rs"
         )))
     };
+    for (index, parameter) in parameters.iter().enumerate() {
+        if is_callback(surface, parameter).is_none() {
+            continue;
+        }
+        if parameters
+            .get(index + 1)
+            .is_none_or(|after| after.ty != user_pointer())
+        {
+            return refuse(format!(
+                "{}::{} is a callback with no `*mut c_void` after it to carry the listener a \
+                 binding of its own keeps",
+                function.name, parameter.member.name
+            ));
+        }
+    }
     for pair in parameters.windows(2) {
         let [data, next] = pair else {
             continue;

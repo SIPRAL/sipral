@@ -799,13 +799,17 @@ naming each shape the golden files do not reach.
 shapes off the parameter lists: a pointer followed by a length is one buffer
 going in, a `const` pointer to a record followed by the `_len` named for it is
 an array of records going in, a pointer followed by `capacity` is a buffer the
-library fills, a writable pointer named `out_…` is one value coming back, and a
+library fills, a writable pointer named `out_…` is one value coming back, a
 pointer to a versioned struct is a struct going in, coming back, or both,
 according to which way it points and whether the struct holds buffers of the
-caller's. So a new parameter called `blob` beside `blob_size` rather than
-`blob_len` is not a naming preference: it is a binding that hands over a raw
-pointer instead of a string. `tools/abi-gen/src/model.rs` is where those five
-rules are written down.
+caller's, and a callback followed by a `*mut c_void` is one listener — the
+same pair a struct going in has always meant by those two members, read the
+same way when they are parameters of their own. So a new parameter called
+`blob` beside `blob_size` rather than `blob_len` is not a naming preference:
+it is a binding that hands over a raw pointer instead of a string, and a
+callback taken without the pointer after it is refused by name rather than
+printed as a listener nothing could reach again.
+`tools/abi-gen/src/model.rs` is where those six rules are written down.
 
 **A callback may answer, and the answer is a plain integer or nothing.**
 `SipralEventCallback` only ever reports — the poll hands it an event and moves
@@ -993,6 +997,31 @@ destroy. A `stackCreate` that makes no stack lets its listener go as well, and
 that includes one that throws rather than answers — a native library that did
 not load, or one that serves another ABI — because the listener is kept as the
 last thing before the call and settled in a `finally` around it.
+
+**A listener installed on a handle the caller already had** — `stackScreen`,
+which takes the policy rather than receiving it inside a config struct — goes
+the same way with one difference: there is no handle being made for it to be
+tied to, so it is handed to the handle it was installed on, and what that
+handle held before is let go of in the same step. Installing a second policy
+therefore releases the first, and installing none — Kotlin's `null`, C's
+`NULL` — releases what was there and installs nothing. A call that failed, or
+threw rather than answered, leaves the handle exactly what it had and lets go
+of the listener that never arrived. `stackDestroy` releases whatever is left,
+the same way it releases the one a config struct carried. On the C side the
+key is all that crosses, in the callback's own user pointer, as it does for
+every other listener here: a Kotlin caller never sees a function pointer and
+has no way to hand one over.
+
+Such a wrapper holds the keeper's own monitor for the whole of the call, which
+is the one place in this binding where a lock spans a native call. It has to:
+registering the listener, installing it and recording which one is now
+installed are three steps, and two threads installing at once would otherwise
+each record their own key after the other's call had already replaced it —
+leaving the library asking about a listener this side had just let go of, and
+every INVITE after that refused by a policy nobody wrote. Holding the monitor
+makes the two orders one. Nothing waits behind it for long, because every
+entry point takes the library's own lock without waiting: a call made while a
+policy is running answers `SIPRAL_STATUS_BUSY` rather than blocking.
 
 What a listener throws goes to the uncaught exception handler of the thread it
 was called on, and the poll carries on once that handler returns. Android's

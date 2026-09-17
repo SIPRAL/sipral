@@ -566,6 +566,15 @@ Java_org_sipral_SipralNative_sipral_1call_1media_1receive(JNIEnv *env, jobject s
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1screen(JNIEnv *env, jobject self, jlong stack, jlong callback)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_screen((sipral_handle_t)stack, callback != 0 ? jni_screen_callback : NULL, (void *)(intptr_t)callback);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1stack_1destroy(JNIEnv *env, jobject self, jlong stack)
 {
     (void)env;

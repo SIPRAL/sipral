@@ -220,7 +220,7 @@ internal object SipralEventListeners {
         }
     }
 
-    /** Let go of the listener a destroyed handle was made with. */
+    /** Let go of the listener a destroyed handle was left with. */
     fun gone(handle: Long) {
         synchronized(this) {
             val key = handles.remove(handle) ?: return
@@ -294,21 +294,26 @@ internal object SipralScreenListeners {
         }
     }
 
-    /** Tie a kept listener to the handle the call made, or let it go when the call failed. */
-    fun made(key: Long, status: Int, handle: Long) {
-        if (key == 0L) {
-            return
-        }
+    /**
+     * Hand a kept listener to a handle the caller already had, letting go of
+     * whatever that handle held before it. A key of zero is the call that
+     * removed the listener outright, and a call that failed leaves the handle
+     * with what it had.
+     */
+    fun installed(key: Long, status: Int, handle: Long) {
         synchronized(this) {
-            if (status == SipralStatus.OK.value) {
-                handles[handle] = key
-            } else {
+            if (status != SipralStatus.OK.value) {
                 listening.remove(key)
+                return
+            }
+            val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)
+            if (before != null) {
+                listening.remove(before)
             }
         }
     }
 
-    /** Let go of the listener a destroyed handle was made with. */
+    /** Let go of the listener a destroyed handle was left with. */
     fun gone(handle: Long) {
         synchronized(this) {
             val key = handles.remove(handle) ?: return
@@ -372,6 +377,7 @@ internal object SipralNative {
     external fun sipral_call_playback(stack: Long, samples: ShortArray, written: LongArray): Int
     external fun sipral_call_capture(stack: Long, samples: ShortArray, packet: Long): Int
     external fun sipral_call_media_receive(stack: Long, data: ByteArray, arrival: LongArray): Int
+    external fun sipral_stack_screen(stack: Long, callback: Long): Int
     external fun sipral_stack_destroy(stack: Long): Int
 }
 
@@ -537,11 +543,34 @@ object Sipral {
     }
 
     /**
+     * Install a policy on it, replace the one installed, or remove it.
+     *
+     * The callback and the pointer after it are one listener, the same
+     * pair a struct going in already means by them, and a null callback
+     * removes whatever was installed.
+     */
+    fun stackScreen(stack: Long, listener: SipralScreenListener?) {
+        // held across the call so that what SipralScreenListeners records and what
+        // the library installed cannot disagree
+        synchronized(SipralScreenListeners) {
+            val callback = SipralScreenListeners.register(listener)
+            var status = -1
+            try {
+                status = SipralNative.sipral_stack_screen(stack, callback)
+            } finally {
+                SipralScreenListeners.installed(callback, status, stack)
+            }
+            check(status)
+        }
+    }
+
+    /**
      * Take it apart.
      */
     fun stackDestroy(stack: Long) {
         val status = SipralNative.sipral_stack_destroy(stack)
         SipralEventListeners.gone(stack)
+        SipralScreenListeners.gone(stack)
         check(status)
     }
 

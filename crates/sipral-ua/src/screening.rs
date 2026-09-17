@@ -676,6 +676,17 @@ impl UserAgent {
         self.guard.policy = Some(Box::new(policy));
     }
 
+    /// Take the screening policy off, if one is set.
+    ///
+    /// What arrives afterwards reaches the application exactly as it would
+    /// if [`UserAgent::screen`] had never been called. The rate limit set by
+    /// [`UserAgent::limit_invites`] answers a different question and is left
+    /// exactly where it was — removing the policy is not a reason to stop
+    /// counting how fast one source is calling.
+    pub fn unscreen(&mut self) {
+        self.guard.policy = None;
+    }
+
     /// How fast one source address may offer calls.
     ///
     /// The default is loose, because in most deployments every legitimate call

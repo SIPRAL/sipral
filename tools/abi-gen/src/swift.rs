@@ -315,6 +315,19 @@ fn signature(
             Role::Given(read) | Role::Out(read) => {
                 results.push((written(read), scalar(&read.ty)));
             }
+            // a C function pointer is a type Swift spells, and the pointer
+            // after it is the caller's own: both are handed through as they
+            // come, which is what every other language does with a listener
+            // installed on a handle the caller already has
+            Role::Listener {
+                callback,
+                user_data,
+                ..
+            } => {
+                for read in [callback, user_data] {
+                    arguments.push(format!("{}: {}", held(read), scalar(&read.ty)));
+                }
+            }
         }
     }
     let returns = match results.len() {
@@ -358,6 +371,14 @@ fn call_arguments(parts: &[Role<'_>], wraps: &[Vec<Wrap>]) -> Vec<String> {
             }
             Role::Given(read) | Role::Out(read) => {
                 arguments.push(format!("&{}", written(read)));
+            }
+            Role::Listener {
+                callback,
+                user_data,
+                ..
+            } => {
+                arguments.push(held(callback));
+                arguments.push(held(user_data));
             }
         }
     }
@@ -1055,6 +1076,15 @@ impl Spelling for Names {
                 }
                 Role::Given(read) | Role::Out(read) => {
                     out.push(Named::new(here, written(read), read.member.name));
+                }
+                Role::Listener {
+                    callback,
+                    user_data,
+                    ..
+                } => {
+                    for read in [callback, user_data] {
+                        out.push(Named::new(here, held(read), read.member.name));
+                    }
                 }
             }
         }

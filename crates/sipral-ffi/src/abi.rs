@@ -509,16 +509,16 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
     ("SipralSuspending", 32),
 ];
 
-/// The one versioned-shaped struct with no pinned length, and why.
+/// The versioned-shaped structs with no pinned length, and why.
 ///
-/// `sipral_event_t` starts with a `size` like the rest, but the library is
-/// what fills it in: it is handed to a callback as a `const` pointer and the
-/// caller reads no further than the `size` says. Nothing ever declares one to
-/// us, so there is no declared size to refuse and no oldest published length
-/// that matters. The exception is named here rather than left to be noticed,
-/// because a fifteenth struct that quietly went unpinned would look exactly
-/// like this one.
-pub const FILLED_BY_US: &[&str] = &["SipralEvent"];
+/// `sipral_event_t` and `sipral_screen_request_t` start with a `size` like the
+/// rest, but the library is what fills them in: each is handed to a callback
+/// as a `const` pointer and the caller reads no further than the `size` says.
+/// Nothing ever declares one to us, so there is no declared size to refuse and
+/// no oldest published length that matters. The exceptions are named here
+/// rather than left to be noticed, because a struct that quietly went unpinned
+/// would look exactly like these two.
+pub const FILLED_BY_US: &[&str] = &["SipralEvent", "SipralScreenRequest"];
 
 /// Everything this ABI publishes, and the only list a person maintains.
 ///
@@ -534,6 +534,7 @@ pub const SURFACE: Surface = Surface {
     aliases: &[
         crate::handle::SipralHandle,
         crate::event::SipralEventCallback,
+        crate::screening::SipralScreenCallback,
     ],
     enumerations: &[
         crate::status::SipralStatus::ABI,
@@ -584,6 +585,7 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
+        crate::screening::SipralScreenRequest::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -591,6 +593,7 @@ pub const SURFACE: Surface = Surface {
         crate::capabilities::ABI_CONSTANTS,
         crate::media::ABI_CONSTANTS,
         crate::transport::ABI_CONSTANTS,
+        crate::screening::ABI_CONSTANTS,
     ],
     functions: &[
         crate::error::sipral_last_error_message::ABI,
@@ -605,6 +608,8 @@ pub const SURFACE: Surface = Surface {
         crate::stack::sipral_stack_destroy::ABI,
         crate::stack::sipral_stack_poll::ABI,
         crate::counters::sipral_stack_counters::ABI,
+        crate::screening::sipral_stack_screen::ABI,
+        crate::screening::sipral_stack_invite_limit::ABI,
         crate::account::sipral_account_add::ABI,
         crate::account::sipral_account_remove::ABI,
         crate::account::sipral_account_register::ABI,
@@ -869,13 +874,13 @@ mod tests {
     }
 
     #[test]
-    fn the_callback_is_the_one_alias_that_is_not_an_integer() {
+    fn the_callbacks_are_the_aliases_that_are_not_integers() {
         let callbacks: Vec<&str> = SURFACE
             .aliases
             .iter()
             .filter(|alias| matches!(alias.stands, Stands::Callback(_, _)))
             .map(|alias| alias.name)
             .collect();
-        assert_eq!(callbacks, ["SipralEventCallback"]);
+        assert_eq!(callbacks, ["SipralEventCallback", "SipralScreenCallback"]);
     }
 }

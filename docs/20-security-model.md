@@ -125,12 +125,18 @@ watched sources is a fixed 64 entries (`const WATCHED: usize = 64`,
 stranger is refused rather than admitted untracked. Second, an application
 policy hook (`trait Screen`, `screening.rs:380`) is asked about every INVITE
 that survives the rate limit, before a `CallHandle` exists and before the
-application's own `IncomingCall` event fires. Every refusal from either rung
-is **480 Temporarily Unavailable** — never 404 (would prove the number exists),
-never 503 (would take the whole line off a proxy's air), never 6xx (would
-speak for the whole person rather than one device) — and it is answered rather
-than dropped, because an INVITE nobody answers is retransmitted for 32 seconds
-and holds a server transaction open for all of it. Nothing about a refusal is
+application's own `IncomingCall` event fires. Every refusal this stack decides
+by itself is **480 Temporarily Unavailable** — never 404 (would prove the
+number exists), never 503 (would take the whole line off a proxy's air), never
+6xx (would speak for the whole person rather than one device) — and it is
+answered rather than dropped, because an INVITE nobody answers is retransmitted
+for 32 seconds and holds a server transaction open for all of it. A policy
+answers with the status it chose, here and through `sipral_stack_screen`, since
+an application may know a truer reason than this stack can; the paragraph above
+is the advice that comes with that freedom, and `docs/04-ua.md` gives it in
+full. The one default that is not 480 is `Screen::on_replaces`, which refuses
+403: an INVITE claiming a call it has no standing to take is not one this end
+is unavailable for. Nothing about a refusal is
 otherwise observable: no event fires (an event queue anyone on the internet
 can fill is the same attack one layer up), only four cumulative counters
 (`UserAgent::refusals()`).

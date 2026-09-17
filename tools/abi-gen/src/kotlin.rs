@@ -42,8 +42,9 @@ use sipral_ffi::abi::{
 use crate::c;
 use crate::model::{
     Base, Element, Int, Linked, Read, Refused, Role, Text, Type, Writable, callback_answer,
-    counts_records, element, elements, functions, linked, lower_camel, plain_named, read_all,
-    record_named, roles, screaming, snake, unprintable, upper_camel, without_prefix,
+    callback_named, counts_records, element, elements, functions, linked, lower_camel, plain_named,
+    read_all, record_named, roles, screaming, snake, unprintable, upper_camel, user_pointer,
+    without_prefix,
 };
 use crate::names::{Layout, Named, Spelling, audit};
 
@@ -285,22 +286,6 @@ enum Part<'a> {
     Arm(&'a Read<'a>),
 }
 
-/// The callback a name refers to, if the surface has one.
-fn callback_named(surface: &Surface, name: &str) -> Option<&'static Alias> {
-    surface
-        .aliases
-        .iter()
-        .find(|alias| alias.name == name && matches!(alias.stands, Stands::Callback(_, _)))
-}
-
-/// The pointer a callback's user data travels in.
-fn user_pointer() -> Type {
-    Type {
-        pointer: Some(Writable::Yes),
-        base: Base::Opaque,
-    }
-}
-
 /// Read the members of a record, from `first` on, as a Kotlin class holds
 /// them.
 ///
@@ -467,8 +452,9 @@ fn built(surface: &Surface) -> Result<Vec<&'static Record>, Refused> {
     Ok(out)
 }
 
-/// The Kotlin name of the field a listener takes: `event_callback` is
-/// `eventListener`.
+/// The Kotlin name a listener is taken under, whether it is a field of a
+/// struct going in or a parameter of its own: `event_callback` is
+/// `eventListener`, and a bare `callback` is `listener`.
 fn listener_field(callback: &Read<'_>) -> String {
     let name = callback.member.name;
     let listening = match name.strip_suffix("callback") {
@@ -766,6 +752,55 @@ fn kept_by(surface: &Surface, roles: &[Role<'_>]) -> Result<Vec<String>, Refused
     Ok(out)
 }
 
+/// The listener each entry point installs on a handle it was given, by the
+/// object it is kept in and the entry point that destroys that handle.
+fn installed_by<'a>(
+    surface: &Surface,
+    function: &Function,
+    roles: &'a [Role<'a>],
+) -> Result<Vec<(String, &'static Function)>, Refused> {
+    let mut out = Vec::new();
+    for role in roles {
+        let Role::Listener { alias, .. } = role else {
+            continue;
+        };
+        let handle = handle_taken(function, roles)?;
+        out.push((
+            Landing::of(surface, alias)?.keeper(),
+            destroyer_of(surface, function, handle)?,
+        ));
+    }
+    Ok(out)
+}
+
+/// The entry point that destroys the thing a listener was installed on: the
+/// one ending in `_destroy` that takes that handle alone, under the same
+/// name.
+///
+/// A listener installed on a handle outlives the call that installed it, so
+/// something has to let it go; an installer whose handle nothing destroys is
+/// refused rather than printed with a listener the JVM would hold for the
+/// life of the process.
+fn destroyer_of(
+    surface: &Surface,
+    installer: &Function,
+    handle: &Read<'_>,
+) -> Result<&'static Function, Refused> {
+    let found = surface.functions.iter().find(|function| {
+        function.name.ends_with("_destroy")
+            && matches!(function.parameters, [only] if only.name == handle.member.name
+                && Type::read(only.rust_type).is_ok_and(|ty| ty == handle.ty))
+    });
+    found.ok_or_else(|| {
+        Refused::about(&format!(
+            "{} installs a listener on `{}`, and the surface has no entry point ending in \
+             `_destroy` that takes that one handle, which is where the listener would be let \
+             go of",
+            installer.name, handle.member.name
+        ))
+    })
+}
+
 /// The entry point that takes apart what `maker` made, and the one value
 /// `maker` writes back.
 ///
@@ -816,15 +851,26 @@ fn destroyer(surface: &Surface, maker: &Function) -> Result<&'static Function, R
 }
 
 /// The objects whose listeners an entry point lets go of: every one a struct
-/// going in to another entry point held, when this is that one's destroyer.
+/// going in to another entry point held, when this is that one's destroyer,
+/// and every one another entry point installed on the handle this destroys.
 fn released_by(surface: &Surface, function: &Function) -> Result<Vec<String>, Refused> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     for (maker, read) in functions(surface)? {
-        let keepers = kept_by(surface, &roles(surface, &read))?;
+        let parts_of_call = roles(surface, &read);
+        for (keeper, destroys) in installed_by(surface, maker, &parts_of_call)? {
+            if destroys.name == function.name && !out.contains(&keeper) {
+                out.push(keeper);
+            }
+        }
+        let keepers = kept_by(surface, &parts_of_call)?;
         if keepers.is_empty() || destroyer(surface, maker)?.name != function.name {
             continue;
         }
-        out.extend(keepers);
+        for keeper in keepers {
+            if !out.contains(&keeper) {
+                out.push(keeper);
+            }
+        }
     }
     Ok(out)
 }
@@ -897,6 +943,16 @@ fn crossing(surface: &Surface, role: &Role<'_>) -> Result<Crossing, Refused> {
             read,
             written(read),
             returned(read.member.name),
+        ),
+        // the listener stays in the JVM and the key it is kept under is the
+        // whole of what crosses: the shim makes the function pointer and the
+        // user pointer out of it, the same two the struct case sets
+        Role::Listener { callback, .. } => (
+            "Long".to_owned(),
+            "jlong".to_owned(),
+            callback,
+            held(callback),
+            c_held(callback),
         ),
     };
     Ok(Crossing {
@@ -1221,14 +1277,89 @@ fn listeners(surface: &Surface) -> Result<String, Refused> {
             record.name
         );
 
-        out.push_str(&keeper_object(&landing, &members));
+        out.push_str(&keeper_object(surface, &landing, &members)?);
     }
     Ok(out)
 }
 
+/// Whether any entry point hands this callback over inside a struct it takes,
+/// which is the listener tied to the handle that call makes.
+fn kept_anywhere(surface: &Surface, landing: &Landing) -> Result<bool, Refused> {
+    for (_, read) in functions(surface)? {
+        if kept_by(surface, &roles(surface, &read))?.contains(&landing.keeper()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any entry point installs this callback on a handle it was given.
+fn installed_anywhere(surface: &Surface, landing: &Landing) -> Result<bool, Refused> {
+    for (function, read) in functions(surface)? {
+        let parts_of_call = roles(surface, &read);
+        if installed_by(surface, function, &parts_of_call)?
+            .iter()
+            .any(|(keeper, _)| *keeper == landing.keeper())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Tying a listener to the handle the call that was handed it made, which is
+/// what a struct going in means by carrying one.
+fn made_method() -> &'static str {
+    "\x20   /** Tie a kept listener to the handle the call made, or let it go when the call failed. */\n\
+         \x20   fun made(key: Long, status: Int, handle: Long) {\n\
+         \x20       if (key == 0L) {\n\
+         \x20           return\n\
+         \x20       }\n\
+         \x20       synchronized(this) {\n\
+         \x20           if (status == SipralStatus.OK.value) {\n\
+         \x20               handles[handle] = key\n\
+         \x20           } else {\n\
+         \x20               listening.remove(key)\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n\n"
+}
+
+/// Handing a listener to a handle the caller already had, which is what a
+/// call that installs one means by taking one.
+fn installed_method() -> &'static str {
+    "\x20   /**\n\
+         \x20    * Hand a kept listener to a handle the caller already had, letting go of\n\
+         \x20    * whatever that handle held before it. A key of zero is the call that\n\
+         \x20    * removed the listener outright, and a call that failed leaves the handle\n\
+         \x20    * with what it had.\n\
+         \x20    */\n\
+         \x20   fun installed(key: Long, status: Int, handle: Long) {\n\
+         \x20       synchronized(this) {\n\
+         \x20           if (status != SipralStatus.OK.value) {\n\
+         \x20               listening.remove(key)\n\
+         \x20               return\n\
+         \x20           }\n\
+         \x20           val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)\n\
+         \x20           if (before != null) {\n\
+         \x20               listening.remove(before)\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n\n"
+}
+
 /// The object a callback's listeners are kept in, and the `deliver` the JNI
 /// shim hands each event to.
-fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
+///
+/// A callback is handed over one of two ways — inside a struct a call takes,
+/// or installed on a handle the caller already had — and the keeper is
+/// printed with the way its own callback is handed over, so that nothing here
+/// is a method nobody calls.
+fn keeper_object(
+    surface: &Surface,
+    landing: &Landing,
+    members: &[Handed],
+) -> Result<String, Refused> {
     let listener = landing.listener();
     let keeper = landing.keeper();
     let record = landing.record;
@@ -1278,6 +1409,16 @@ fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
             arguments.join(", ")
         ),
     };
+    let made = if kept_anywhere(surface, landing)? {
+        made_method()
+    } else {
+        ""
+    };
+    let installed = if installed_anywhere(surface, landing)? {
+        installed_method()
+    } else {
+        ""
+    };
     let mut out = String::new();
     {
         let _ = writeln!(
@@ -1305,20 +1446,9 @@ fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
              \x20           return last\n\
              \x20       }}\n\
              \x20   }}\n\n\
-             \x20   /** Tie a kept listener to the handle the call made, or let it go when the call failed. */\n\
-             \x20   fun made(key: Long, status: Int, handle: Long) {{\n\
-             \x20       if (key == 0L) {{\n\
-             \x20           return\n\
-             \x20       }}\n\
-             \x20       synchronized(this) {{\n\
-             \x20           if (status == SipralStatus.OK.value) {{\n\
-             \x20               handles[handle] = key\n\
-             \x20           }} else {{\n\
-             \x20               listening.remove(key)\n\
-             \x20           }}\n\
-             \x20       }}\n\
-             \x20   }}\n\n\
-             \x20   /** Let go of the listener a destroyed handle was made with. */\n\
+             {made}\
+             {installed}\
+             \x20   /** Let go of the listener a destroyed handle was left with. */\n\
              \x20   fun gone(handle: Long) {{\n\
              \x20       synchronized(this) {{\n\
              \x20           val key = handles.remove(handle) ?: return\n\
@@ -1329,7 +1459,7 @@ fn keeper_object(landing: &Landing, members: &[Handed]) -> String {
              }}\n",
         );
     }
-    out
+    Ok(out)
 }
 
 /// A call that answers with a static string rather than a status.
@@ -1376,8 +1506,17 @@ struct Handover {
     /// Every identifier the wrapper puts in its own scope, reported so the
     /// uniqueness pass reads what was written rather than deriving it again.
     names: Vec<Named>,
+    /// The objects whose monitor the wrapper holds for the whole of the call,
+    /// which is how a listener it installs cannot be recorded in an order the
+    /// library did not install them in.
+    guards: Vec<String>,
 }
 
+// one arm per parameter convention, each a handful of lines: a dispatcher
+// split up by arm reads worse than the dispatcher does, and what is long
+// enough to lift out -- an installed listener, the settling afterwards -- is
+// lifted out already
+#[allow(clippy::too_many_lines)]
 fn hand_over(
     surface: &Surface,
     function: &Function,
@@ -1389,12 +1528,13 @@ fn hand_over(
         passed,
         prologue,
         keeping,
-        settled,
-        epilogue,
         results,
         names,
+        guards,
+        ..
     } = &mut out;
     let mut kept = Vec::new();
+    let mut installed = Vec::new();
     for role in parts_of_call {
         match role {
             Role::Plain(read) => {
@@ -1465,20 +1605,93 @@ fn hand_over(
                 passed.push(slot.clone());
                 results.push((format!("{slot}[0]"), "Long".to_owned()));
             }
+            Role::Listener {
+                callback, alias, ..
+            } => {
+                let taken = installed_argument(surface, callback, alias)?;
+                names.extend(taken.names);
+                arguments.push(taken.argument);
+                keeping.push_str(&taken.keeping);
+                passed.push(taken.key.clone());
+                guards.push(taken.keeper.clone());
+                installed.push((taken.keeper, taken.key));
+            }
         }
     }
 
-    let (tied, released) = listeners_after(surface, function, parts_of_call, &kept)?;
-    settled.push_str(&tied);
-    epilogue.push_str(&released);
-    if !settled.is_empty() || !epilogue.is_empty() {
-        names.push(Named::new(
+    settle(
+        surface,
+        function,
+        parts_of_call,
+        &kept,
+        &installed,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// What the wrapper does once the call is over: the lines that settle every
+/// listener it handed over, and the status it has to hold on to to write
+/// them.
+fn settle(
+    surface: &Surface,
+    function: &Function,
+    parts_of_call: &[Role<'_>],
+    kept: &[(String, String)],
+    installed: &[(String, String)],
+    out: &mut Handover,
+) -> Result<(), Refused> {
+    let (tied, released) = listeners_after(surface, function, parts_of_call, kept, installed)?;
+    out.settled.push_str(&tied);
+    out.epilogue.push_str(&released);
+    if !out.settled.is_empty() || !out.epilogue.is_empty() {
+        out.names.push(Named::new(
             "the wrapper",
             "status".to_owned(),
             "the status the wrapper holds on to",
         ));
     }
-    Ok(out)
+    Ok(())
+}
+
+/// What a listener taken as a parameter adds to the wrapper around a call.
+struct InstalledListener {
+    /// The listener the wrapper takes in its place.
+    argument: String,
+    /// The line that keeps it, written last before the call.
+    keeping: String,
+    /// The local its key is in, which is what crosses.
+    key: String,
+    /// The object it is kept in.
+    keeper: String,
+    names: Vec<Named>,
+}
+
+/// A listener one call installs: taken as a listener, handed over as the key
+/// it is kept under, and settled against the handle it was installed on once
+/// the call is over.
+fn installed_argument(
+    surface: &Surface,
+    callback: &Read<'_>,
+    alias: &'static Alias,
+) -> Result<InstalledListener, Refused> {
+    let landing = Landing::of(surface, alias)?;
+    let listener = listener_field(callback);
+    let key = held(callback);
+    let names = [&listener, &key]
+        .into_iter()
+        .map(|name| Named::new("the wrapper", name.clone(), callback.member.name))
+        .collect();
+    Ok(InstalledListener {
+        argument: format!("{listener}: {}?", landing.listener()),
+        keeping: format!(
+            "        val {key} = {}.register({listener})\n",
+            landing.keeper()
+        ),
+        key,
+        keeper: landing.keeper(),
+        names,
+    })
 }
 
 /// What a struct going in adds to the wrapper around a call.
@@ -1592,17 +1805,32 @@ fn built_argument(surface: &Surface, read: &Read<'_>) -> Result<BuiltArgument, R
 }
 
 /// What a wrapper does with listeners once the call is over: ties each one it
-/// handed over to the handle the call made, or lets it go when there is none,
-/// and then lets go of every one the handle it destroys was made with. The
-/// first is written in a `finally`, the second after it.
+/// handed over to the handle the call made, hands each one it installed to
+/// the handle it was given — which lets go of whatever that handle held
+/// before — or lets it go when the call failed, and then lets go of every one
+/// the handle it destroys was left with. The first two are written in a
+/// `finally`, the last after it.
 fn listeners_after(
     surface: &Surface,
     function: &Function,
     parts_of_call: &[Role<'_>],
     kept: &[(String, String)],
+    installed: &[(String, String)],
 ) -> Result<(String, String), Refused> {
     let mut tied = String::new();
     let mut out = String::new();
+    if !installed.is_empty() {
+        // an installed listener replaces whatever the handle held, so the
+        // handle is the one the call was given rather than one it made
+        let handle = handle_taken(function, parts_of_call)?;
+        for (keeper, local) in installed {
+            let _ = writeln!(
+                tied,
+                "            {keeper}.installed({local}, status, {})",
+                held(handle)
+            );
+        }
+    }
     if !kept.is_empty() {
         // the handle a listener is tied to is the one value this call writes
         // back, and destroyer() refuses a call that writes back more, or has
@@ -1626,17 +1854,26 @@ fn listeners_after(
     }
     let released = released_by(surface, function)?;
     if !released.is_empty() {
-        let Some(Role::Plain(handle)) = parts_of_call.first() else {
-            return Err(Refused::about(&format!(
-                "{} lets go of a listener and takes no handle to find it by",
-                function.name
-            )));
-        };
+        let handle = handle_taken(function, parts_of_call)?;
         for keeper in released {
             let _ = writeln!(out, "        {keeper}.gone({})", held(handle));
         }
     }
     Ok((tied, out))
+}
+
+/// The handle an entry point works on, which every one of them takes first.
+fn handle_taken<'a>(
+    function: &Function,
+    parts_of_call: &'a [Role<'a>],
+) -> Result<&'a Read<'a>, Refused> {
+    match parts_of_call.first() {
+        Some(Role::Plain(handle)) => Ok(handle),
+        _ => Err(Refused::about(&format!(
+            "{} works on a listener and takes no handle to find it by",
+            function.name
+        ))),
+    }
 }
 
 fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<String, Refused> {
@@ -1655,6 +1892,7 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
         epilogue,
         results,
         names: _,
+        guards,
     } = hand_over(surface, function, &roles(surface, read))?;
     let returns = match results.len() {
         0 => String::new(),
@@ -1678,46 +1916,80 @@ fn wrapper(surface: &Surface, function: &Function, read: &[Read<'_>]) -> Result<
             )));
         }
     };
-    let _ = writeln!(out, "    fun {name}({}){returns} {{", arguments.join(", "));
-    out.push_str(&prologue);
+    let mut body = String::new();
+    body.push_str(&prologue);
     let call = format!("SipralNative.{}({})", function.name, passed.join(", "));
     if !settled.is_empty() {
-        out.push_str(&keeping);
+        body.push_str(&keeping);
         // -1 is no status the library answers with, so a call that threw
         // reaches the finally as a call that failed
         let _ = writeln!(
-            out,
+            body,
             "        var status = -1\n        try {{\n            status = {call}\n        }} finally {{"
         );
-        out.push_str(&settled);
-        out.push_str("        }\n");
-        out.push_str(&epilogue);
-        out.push_str("        check(status)\n");
+        body.push_str(&settled);
+        body.push_str("        }\n");
+        body.push_str(&epilogue);
+        body.push_str("        check(status)\n");
     } else if epilogue.is_empty() {
-        let _ = writeln!(out, "        check({call})");
+        let _ = writeln!(body, "        check({call})");
     } else {
-        let _ = writeln!(out, "        val status = {call}");
-        out.push_str(&epilogue);
-        out.push_str("        check(status)\n");
+        let _ = writeln!(body, "        val status = {call}");
+        body.push_str(&epilogue);
+        body.push_str("        check(status)\n");
     }
     match results.len() {
         0 => {}
         1 => {
             if let Some((expression, _)) = results.first() {
-                let _ = writeln!(out, "        return {expression}");
+                let _ = writeln!(body, "        return {expression}");
             }
         }
         _ => {
             let _ = writeln!(
-                out,
+                body,
                 "        return Pair({}, {})",
                 results.first().map(|(e, _)| e.clone()).unwrap_or_default(),
                 results.get(1).map(|(e, _)| e.clone()).unwrap_or_default()
             );
         }
     }
+    let _ = writeln!(out, "    fun {name}({}){returns} {{", arguments.join(", "));
+    out.push_str(&held_while(&guards, &body));
     out.push_str("    }\n\n");
     Ok(out)
+}
+
+/// A wrapper's body inside the monitors it holds while it runs.
+///
+/// A call that installs a listener keeps one: the object that listener is
+/// kept in. What the object records and what the library installed have to
+/// agree, and they can only disagree if two threads install at once — each
+/// would settle its own key after the other's call had already replaced it,
+/// leaving the library asking about a listener this side had let go of.
+/// Holding the monitor across the call makes the two orders one. Nothing
+/// waits behind it for long: every entry point takes the library's own lock
+/// without waiting, so a call made under this monitor answers `BUSY` rather
+/// than blocking.
+fn held_while(guards: &[String], body: &str) -> String {
+    let Some((first, rest)) = guards.split_first() else {
+        return body.to_owned();
+    };
+    let inside = held_while(rest, body);
+    let mut out = format!(
+        "        // held across the call so that what {first} records and what\n\
+         \x20       // the library installed cannot disagree\n\
+         \x20       synchronized({first}) {{\n"
+    );
+    for line in inside.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            let _ = writeln!(out, "    {line}");
+        }
+    }
+    out.push_str("        }\n");
+    out
 }
 
 /// The enumerations, each with a way back from the number on the wire.
@@ -2164,6 +2436,18 @@ fn around(surface: &Surface, parts_of_call: &[Role<'_>]) -> Result<Around, Refus
             }
             Role::Out(read) => out.out(read),
             Role::Given(read) => out.given(surface, read)?,
+            Role::Listener {
+                callback, alias, ..
+            } => {
+                // the key is the user pointer, and a key of zero is the call
+                // that installs nothing, which reaches the library as the
+                // null every such entry point reads as "no listener"
+                let landing = Landing::of(surface, alias)?;
+                let key = c_held(callback);
+                out.passed
+                    .push(format!("{key} != 0 ? {} : NULL", landing.function()));
+                out.passed.push(format!("(void *)(intptr_t){key}"));
+            }
         }
     }
     Ok(out)

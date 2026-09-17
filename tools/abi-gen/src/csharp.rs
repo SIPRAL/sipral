@@ -240,6 +240,17 @@ fn declared<'a>(role: &Role<'a>) -> Vec<Declared<'a>> {
             read,
             written(read),
         )],
+        // the delegate and the pointer handed back to it, each as it comes:
+        // a caller that installs one keeps it alive itself, which the
+        // callback's own summary says in the sentence above its declaration
+        Role::Listener {
+            callback,
+            user_data,
+            ..
+        } => vec![
+            one(scalar(&callback.ty), callback, held(callback)),
+            one(scalar(&user_data.ty), user_data, held(user_data)),
+        ],
     }
 }
 
@@ -537,6 +548,9 @@ const LIST_CLASS_TAIL: &str = "        }\n\n\
      \x20   }\n\
      }\n\n";
 
+// one arm per parameter convention, the same shape the Kotlin back end's own
+// hand_over has, and split up by arm it reads worse than it does whole
+#[allow(clippy::too_many_lines)]
 fn hand_over(surface: &Surface, parts: &[Role<'_>]) -> Result<Handover, Refused> {
     let mut out = Handover::default();
     let Handover {
@@ -623,6 +637,17 @@ fn hand_over(surface: &Surface, parts: &[Role<'_>]) -> Result<Handover, Refused>
                 wrote(&held, read.member);
                 passed.push(format!("out var {held}"));
                 results.push((held, scalar(&read.ty)));
+            }
+            Role::Listener {
+                callback,
+                user_data,
+                ..
+            } => {
+                for read in [callback, user_data] {
+                    wrote(&held(read), read.member);
+                    arguments.push(format!("{} {}", scalar(&read.ty), held(read)));
+                    passed.push(held(read));
+                }
             }
         }
     }

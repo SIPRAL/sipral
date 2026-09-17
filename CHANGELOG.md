@@ -12,6 +12,43 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **An INVITE can be refused before it has had any effect, from C.**
+  `sipral_stack_screen` installs a policy that is asked about every INVITE
+  before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL`, and before a call
+  handle exists for anyone to answer or reject; what it refuses is answered
+  with the status it named and forgotten, and what it takes arrives exactly as
+  it would with no policy at all. The answer is a SIP status code rather than a
+  flag, and acceptance is `SIPRAL_SCREEN_ACCEPT` — 200 — so that zero, which is
+  what a binding hands back when the application's listener threw and what a
+  caller who filled nothing in leaves behind, refuses rather than admits.
+  `sipral_stack_invite_limit` sets the token bucket underneath it, asked before
+  the policy is, and four `screened_*` counters say how many INVITEs each floor
+  refused. A refusal is a failure status and nothing else: a 1xx would leave
+  the caller ringing at a call this end had already forgotten, with a server
+  transaction and an early dialog nothing could ever reach, so a policy that
+  names one has not made a decision this ABI can carry out and is answered the
+  way an answer that never arrived is. The policy runs with the stack's own lock held, which is the
+  opposite of the event callback and is why it must not call back into the
+  stack it was given — a call that tries is answered `SIPRAL_STATUS_BUSY`
+  rather than allowed to deadlock.
+
+- **The generator can print a callback taken as a parameter of its own.** A
+  callback followed by a `*mut c_void` was one listener when it was a member of
+  a struct going in; it is one listener as a pair of parameters now too, which
+  is the sixth and last of the conventions `tools/abi-gen/src/model.rs` reads
+  off a declaration. C, Swift and C# hand the pair through as it comes; Kotlin,
+  whose listener never leaves the JVM, takes a listener and hands over the key
+  it is kept under, and the shim makes the function pointer and the user
+  pointer out of that key. A listener installed this way is handed to the
+  handle it was installed on, so installing a second policy releases the first,
+  installing none releases what was there, a call that failed or threw leaves
+  the handle what it had, and destroying the handle releases whatever is left.
+  The wrapper holds the keeper's monitor across the call, so that two threads
+  installing at once cannot record their keys in an order the library did not
+  install them in.
+  A callback declared without the pointer after it is refused by name rather
+  than printed as a listener nothing could ever reach again.
+
 - **A stack can hold more than one transport, and an account or a call can say
   which.** `StackState` kept exactly one, and the header said so: the constant
   for it was documented as "for now always". `sipral_stack_transport_bind`

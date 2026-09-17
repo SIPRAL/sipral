@@ -1016,6 +1016,50 @@ public enum SipralRecovery : uint
 public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);
 
 /// <summary>
+/// The screening policy: consulted once for every INVITE, before it has
+/// any effect. Installed with crate::screening::sipral_stack_screen.
+///
+/// **It runs with the stack's own lock held**, which is the opposite of
+/// SipralEventCallback and is the
+/// whole reason this type's module documentation exists — read it there.
+/// In consequence: **this callback must not call back into the stack it
+/// was given**, on this thread or on any other. Doing so does not
+/// deadlock — every entry point that takes a stack takes its lock
+/// without waiting and answers `SIPRAL_STATUS_BUSY` rather than block —
+/// but it is refused outright rather than relied on, and a policy that
+/// tries it gets an error code back instead of the call it wanted made.
+/// A *different* stack is unaffected. It must not unwind, for the same
+/// reason nothing in this ABI may: a panic that reached C across this
+/// boundary would take the host process with it.
+///
+/// `request` and everything it points at belong to the library and are
+/// valid for the duration of this one call and no longer.
+///
+/// **The answer is a SIP status code, and the numbers are chosen so that
+/// no answer at all is a refusal.** `SIPRAL_SCREEN_ACCEPT` — 200 — lets
+/// the INVITE through, exactly as it would arrive with no policy
+/// installed. Anything else is a refusal, answered with that status when
+/// that status refuses — 400 to 699 — and with 500 when it does not.
+///
+/// Three ranges do not refuse, and each fails the same way. Zero is what
+/// a binding hands back when the application's own listener threw and
+/// the exception was caught at the boundary, and it is no status at all.
+/// A 1xx is a provisional answer: it would leave the caller ringing at a
+/// call this end has already forgotten, holding a server transaction
+/// nothing here will ever answer. A 2xx that is not the one acceptance
+/// is spelled with accepts nothing, and a 3xx redirects nowhere without
+/// a `Contact` this ABI has no way to give it. So a policy whose answer
+/// went missing does not let a stranger in on the strength of it, and a
+/// policy that meant to refuse and named a number that cannot refuse is
+/// a bug to fix rather than a reason to wave one through.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate uint SipralScreenCallback(IntPtr request, IntPtr userData);
+
+/// <summary>
 /// The version of the ABI this library provides.
 ///
 /// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -1208,6 +1252,27 @@ public struct SipralCounters
     /// existed still reads every counter that did.
     /// </summary>
     public ulong FarewellsDropped;
+    /// <summary>
+    /// INVITEs a `sipral_stack_screen` policy refused (A8, D7).
+    /// </summary>
+    public ulong ScreenedRefusedByPolicy;
+    /// <summary>
+    /// INVITEs refused because their source was offering them faster
+    /// than `sipral_stack_invite_limit` allows.
+    /// </summary>
+    public ulong ScreenedRefusedByRate;
+    /// <summary>
+    /// INVITEs refused because every seat this stack keeps for a source
+    /// it is watching belonged to one still spending, and this source
+    /// could not be limited either — a flood from many addresses at
+    /// once rather than one calling too fast.
+    /// </summary>
+    public ulong ScreenedRefusedByCrowding;
+    /// <summary>
+    /// INVITEs refused 403 for naming a call they had no standing to
+    /// replace (RFC 3891 §3).
+    /// </summary>
+    public ulong ScreenedRefusedByReplaces;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2716,6 +2781,60 @@ public struct SipralSuspending
 }
 
 /// <summary>
+/// What SipralScreenCallback reads about one INVITE, before it has
+/// had any effect at all.
+///
+/// Filled by the library and handed to the callback as a `const`
+/// pointer, the same shape crate::event::SipralEvent is: read `size`
+/// before anything past it, and read nothing once the callback has
+/// returned, since `message` — and `source`, when it is not null —
+/// borrow from a request that is still in the middle of being processed
+/// and are not this ABI's to keep alive a moment longer. The answer does
+/// not travel in here: the callback returns it.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralScreenRequest
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The stack the INVITE arrived on.
+    /// </summary>
+    public ulong Stack;
+    /// <summary>
+    /// The far end of the bytes it arrived in, as `host:port` — the same
+    /// text form every address in this ABI takes. Null and zero for a
+    /// byte stream the application bound without naming its far end.
+    /// </summary>
+    public IntPtr Source;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint SourceLen;
+    /// <summary>
+    /// The INVITE, whole and unparsed. `sipral_message_header` and its
+    /// three companions read any header out of these bytes the way they
+    /// read any other message this ABI hands over.
+    /// </summary>
+    public IntPtr Message;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MessageLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralScreenRequest Sized()
+    {
+        var value = default(SipralScreenRequest);
+        value.Size = (nuint)Marshal.SizeOf<SipralScreenRequest>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -2871,6 +2990,12 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_counters(ulong stack, ref SipralCounters outCounters);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_screen(ulong stack, SipralScreenCallback callback, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_invite_limit(ulong stack, ulong everyMs, uint burst);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_add(ulong stack, in SipralAccountConfig config, out ulong account);
@@ -3109,7 +3234,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 12;
+    public const uint AbiVersionMinor = 13;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -3250,6 +3375,19 @@ public static class Sipral
     /// socket, where anything larger was fragmented on the way.
     /// </summary>
     public static readonly nuint MessageBytes = 65535;
+
+    /// <summary>
+    /// The answer that lets an INVITE through, and the reason it is a status
+    /// code rather than a flag.
+    ///
+    /// A policy answers with what it wants said: 200 to let the call arrive,
+    /// or the status to refuse it with. Making acceptance 200 rather than
+    /// zero is the whole safety property of this mechanism — zero is what a
+    /// binding hands back when the application's listener threw, and what a
+    /// caller who filled nothing in leaves behind, and neither of those may
+    /// mean "let the stranger in".
+    /// </summary>
+    public const uint ScreenAccept = 200;
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -3527,6 +3665,95 @@ public static class Sipral
         var counters = SipralCounters.Sized();
         Check(NativeMethods.sipral_stack_counters(stack, ref counters));
         return counters;
+    }
+
+    /// <summary>
+    /// Install, replace, or remove the screening policy for one stack.
+    ///
+    /// Every INVITE that survives sipral_stack_invite_limit reaches this
+    /// callback before anything else does: before ringing, before
+    /// `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists for
+    /// anybody to answer or reject. What the callback refuses is answered
+    /// with the SIP status it named — when that status refuses, and with 500
+    /// when it does not — and forgotten — no event, no handle,
+    /// nothing for the application to clean up — and what it takes, by
+    /// answering `SIPRAL_SCREEN_ACCEPT`, arrives exactly as it would with no
+    /// policy installed at all.
+    ///
+    /// `callback` given as `NULL` removes the policy: every INVITE reaches
+    /// the application again, the way it did before this was ever called.
+    /// Calling this a second time with a callback replaces the first outright,
+    /// on this stack alone — a different stack's policy, if it has one, is
+    /// untouched.
+    ///
+    /// The rule that the callback must not call back into this stack, and
+    /// must not unwind, is on SipralScreenCallback and is the reason
+    /// this module's own documentation exists; read it there before wiring
+    /// one up.
+    ///
+    /// Safety
+    ///
+    /// `callback`, when not null, is called on whichever thread is inside an
+    /// entry point that is feeding this stack bytes, for as long as the
+    /// policy stays installed. `user_data` is handed back to it untouched on
+    /// every call and read by nothing here.
+    ///
+    /// **Whatever `user_data` points at has to outlive the last call, and the
+    /// last call is not `sipral_stack_destroy` returning.** A destroy takes
+    /// this thread's share of the stack away; a receive already running on
+    /// another thread holds one of its own until it is done, and the policy
+    /// it is in the middle of asking is still asked. So the moment to free
+    /// what the pointer names is once no thread is inside this stack any
+    /// more, which is the application's own knowledge and not something this
+    /// ABI can answer. Replacing the policy, or removing it with `NULL`, has
+    /// the same shape: it takes the stack's lock, so it cannot run while a
+    /// policy is being asked, and once it returns the callback that was
+    /// there is not asked again.
+    /// </summary>
+    public static void StackScreen(ulong stack, SipralScreenCallback callback, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_stack_screen(stack, callback, userData));
+    }
+
+    /// <summary>
+    /// How fast one source address may offer this stack an INVITE (A8).
+    ///
+    /// `burst` calls from one address are let through at once; one more is
+    /// earned every `every_ms` after that. What either number means is
+    /// exactly what Rate already means by it — `sipral_stack_create`'s
+    /// default is ten at once and one every two thousand milliseconds,
+    /// loose on purpose, because in most deployments every legitimate call
+    /// arrives from the one address a phone registered with.
+    ///
+    /// A `burst` of zero, or an `every_ms` of zero, is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` and changes nothing: the first admits
+    /// no call ever, the first or the one after a week of quiet, and the
+    /// second earns a token in no time, which is a limit that never limits —
+    /// Rate::unlimited is how the Rust API says that on purpose, and
+    /// there is deliberately no way to ask for it from C, since a deployment
+    /// that wants no floor at all can simply never call this.
+    ///
+    /// The floor is asked before sipral_stack_screen's own policy is: a
+    /// source that has exhausted it never reaches the callback at all, and is
+    /// counted in `sipral_counters_t::screened_refused_by_rate` or
+    /// `screened_refused_by_crowding`, never in `screened_refused_by_policy`.
+    ///
+    /// **It counts by source address, so it counts nothing it cannot name.**
+    /// An INVITE that arrived on a byte stream the application bound without
+    /// saying where the far end is has no address on it, and this floor lets
+    /// every one of those through to the policy — which is where a caller who
+    /// cannot identify a stream's far end has to decide, the same way
+    /// SipralScreenRequest.Source being null is what it has to decide
+    /// on. Naming the far end in `sipral_stack_transport_bind`'s `remote` is
+    /// what puts a stream under this floor at all.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void StackInviteLimit(ulong stack, ulong everyMs, uint burst)
+    {
+        Check(NativeMethods.sipral_stack_invite_limit(stack, everyMs, burst));
     }
 
     /// <summary>

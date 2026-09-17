@@ -72,6 +72,7 @@ pub mod lifecycle;
 pub mod media;
 mod names;
 pub mod record;
+pub mod screening;
 pub mod stack;
 pub mod status;
 mod text;

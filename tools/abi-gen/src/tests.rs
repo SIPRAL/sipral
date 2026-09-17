@@ -510,6 +510,22 @@ const FUNCTIONS: &[Function] = &[
         returns: "SipralStatus",
     },
     Function {
+        name: "sipral_stack_screen",
+        doc: &[
+            " Install a policy on it, replace the one installed, or remove it.",
+            "",
+            " The callback and the pointer after it are one listener, the same",
+            " pair a struct going in already means by them, and a null callback",
+            " removes whatever was installed.",
+        ],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("callback", "SipralScreenCallback"),
+            member("user_data", "*mut c_void"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
         name: "sipral_stack_destroy",
         doc: &[" Take it apart."],
         parameters: &[member("stack", "SipralHandle")],
@@ -1156,6 +1172,7 @@ fn role_kind(role: &Role<'_>) -> &'static str {
         Role::Given(_) => "a struct coming back",
         Role::Shared(_) => "a struct going both ways",
         Role::Out(_) => "one value written back",
+        Role::Listener { .. } => "a listener installed on a handle",
     }
 }
 
@@ -1687,6 +1704,192 @@ fn the_callback_lands_in_a_kotlin_listener() {
     assert!(
         checked < deleted,
         "a JNI call is made with a Java exception possibly pending:\n{landing}"
+    );
+}
+
+/// A callback taken as a parameter of its own, with nothing after it to
+/// carry the key a binding finds its own listener by.
+const LISTENER_WITHOUT_ITS_POINTER: Surface = Surface {
+    records: &[ODD_EVENT],
+    aliases: &[Alias {
+        name: "SipralOddCallback",
+        doc: &[],
+        stands: Stands::Callback(
+            &[
+                member("event", "*const SipralOddEvent"),
+                member("user_data", "*mut c_void"),
+            ],
+            None,
+        ),
+    }],
+    constants: &[VERSION],
+    functions: &[
+        ABI_CHECK,
+        Function {
+            name: "sipral_stack_watch",
+            doc: &[" Install one, with nowhere to put the key."],
+            parameters: &[
+                member("stack", "SipralHandle"),
+                member("callback", "SipralOddCallback"),
+            ],
+            returns: "SipralStatus",
+        },
+        Function {
+            name: "sipral_stack_destroy",
+            doc: &[" Take it apart."],
+            parameters: &[member("stack", "SipralHandle")],
+            returns: "SipralStatus",
+        },
+    ],
+    ..NOTHING
+};
+
+#[test]
+fn a_callback_taken_without_its_user_pointer_is_refused_by_name() {
+    // every back end that builds a listener of its own reads the pair off
+    // the declaration, so every one of them refuses this: a listener
+    // installed under a key with nowhere to travel is one the landing
+    // function could never find again
+    for (language, printed) in [
+        ("C#", csharp::binding(&LISTENER_WITHOUT_ITS_POINTER)),
+        ("Kotlin", kotlin::binding(&LISTENER_WITHOUT_ITS_POINTER)),
+        ("Swift", swift::binding(&LISTENER_WITHOUT_ITS_POINTER)),
+    ] {
+        match printed {
+            Ok(text) => panic!("{language} printed a listener nothing could reach:\n{text}"),
+            Err(why) => {
+                let why = why.to_string();
+                assert!(
+                    why.contains("sipral_stack_watch") && why.contains("callback"),
+                    "the {language} message does not say which declaration: {why}"
+                );
+            }
+        }
+    }
+}
+
+/// The same callback, taken with its pointer, on a handle no entry point
+/// takes apart.
+const LISTENER_NOTHING_LETS_GO_OF: Surface = Surface {
+    records: &[ODD_EVENT],
+    aliases: &[Alias {
+        name: "SipralOddCallback",
+        doc: &[],
+        stands: Stands::Callback(
+            &[
+                member("event", "*const SipralOddEvent"),
+                member("user_data", "*mut c_void"),
+            ],
+            None,
+        ),
+    }],
+    constants: &[VERSION],
+    functions: &[
+        ABI_CHECK,
+        Function {
+            name: "sipral_stack_watch",
+            doc: &[" Install one, for ever."],
+            parameters: &[
+                member("stack", "SipralHandle"),
+                member("callback", "SipralOddCallback"),
+                member("user_data", "*mut c_void"),
+            ],
+            returns: "SipralStatus",
+        },
+    ],
+    ..NOTHING
+};
+
+#[test]
+fn a_listener_installed_on_a_handle_nothing_destroys_is_refused() {
+    // Kotlin is the one back end that keeps the listener itself, so it is
+    // the one that has to know where to let it go of it again
+    match kotlin::binding(&LISTENER_NOTHING_LETS_GO_OF) {
+        Ok(text) => panic!("the JVM would hold this listener for ever:\n{text}"),
+        Err(why) => {
+            let why = why.to_string();
+            assert!(
+                why.contains("sipral_stack_watch") && why.contains("_destroy"),
+                "the message does not say what is missing: {why}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_listener_installed_on_a_handle_is_kept_by_kotlin_and_let_go_of_with_the_handle() {
+    let printed = kotlin::binding(&SYNTHETIC).unwrap();
+    // the Kotlin caller hands over a listener, never a function pointer:
+    // the key it is kept under is the only thing that crosses
+    for line in [
+        "    fun stackScreen(stack: Long, listener: SipralScreenListener?) {\n",
+        "            val callback = SipralScreenListeners.register(listener)\n",
+        "                status = SipralNative.sipral_stack_screen(stack, callback)\n",
+        "    external fun sipral_stack_screen(stack: Long, callback: Long): Int\n",
+    ] {
+        assert!(printed.contains(line), "no `{line}` in:\n{printed}");
+    }
+    // and the whole of it under the keeper's own monitor, so that two
+    // threads installing at once cannot record their keys in an order the
+    // library did not install them in
+    assert!(
+        printed.contains("        synchronized(SipralScreenListeners) {\n"),
+        "the install is not held against a second thread:\n{printed}"
+    );
+    // settled in a finally against the handle it was installed on, so that a
+    // call that threw rather than answered leaves that handle what it had
+    let wrapper = printed
+        .split("    fun stackScreen(stack: Long, listener: SipralScreenListener?) {\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .unwrap_or_else(|| panic!("no stackScreen in:\n{printed}"));
+    assert!(
+        wrapper.contains(
+            "            } finally {\n                SipralScreenListeners.installed(callback, \
+             status, stack)\n            }"
+        ),
+        "{wrapper}"
+    );
+    // replacing or removing a policy is what lets the one before it go, and
+    // destroying the handle lets go of whatever it was left with
+    assert!(
+        printed.contains(
+            "            val before = if (key == 0L) handles.remove(handle) else \
+             handles.put(handle, key)\n"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("        SipralScreenListeners.gone(stack)\n"),
+        "{printed}"
+    );
+    // and neither keeper carries the other's way of being handed over
+    let screening = printed
+        .split("internal object SipralScreenListeners {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("no SipralScreenListeners in:\n{printed}"));
+    assert!(
+        !screening.contains("fun made("),
+        "a method nobody calls:\n{screening}"
+    );
+    let events = printed
+        .split("internal object SipralEventListeners {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("no SipralEventListeners in:\n{printed}"));
+    assert!(
+        !events.contains("fun installed("),
+        "a method nobody calls:\n{events}"
+    );
+
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    assert!(
+        shim.contains(
+            "sipral_stack_screen((sipral_handle_t)stack, callback != 0 ? jni_screen_callback : \
+             NULL, (void *)(intptr_t)callback);"
+        ),
+        "{shim}"
     );
 }
 

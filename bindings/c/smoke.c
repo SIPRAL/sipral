@@ -29,14 +29,15 @@
  * library from two builds disagree at load rather than in the first call.
  * Lengths only: two members of the same width exchanged is a struct of the
  * same length and passes. The list is compared against the library's own
- * count of them, so a fifteenth versioned struct fails here rather than
+ * count of them, so a struct this list does not name fails here rather than
  * going unasked about. */
 #define VERSIONED(X)                                                          \
     X(sipral_abi_version) X(sipral_capabilities) X(sipral_counters)           \
     X(sipral_stack_config) X(sipral_poll_result) X(sipral_stack_settings)     \
     X(sipral_account_config) X(sipral_call_config) X(sipral_codec_info)       \
     X(sipral_media_info) X(sipral_stream_stats) X(sipral_media_packet)        \
-    X(sipral_transmit) X(sipral_event) X(sipral_suspending)
+    X(sipral_transmit) X(sipral_event) X(sipral_suspending)                  \
+    X(sipral_screen_request)
 
 static int failures;
 
@@ -894,10 +895,9 @@ static void sizes_agree(void)
     VERSIONED(ASK)
 #undef ASK
 
-    /* And the list itself. Fourteen names typed here answer for fourteen
-     * structs and say nothing about a fifteenth, so the library is asked how
-     * many it has. A struct added to the ABI and not to VERSIONED fails
-     * here. */
+    /* And the list itself. The names typed here answer for the structs they
+     * name and say nothing about one more, so the library is asked how many
+     * it has. A struct added to the ABI and not to VERSIONED fails here. */
 #define COUNT(type) +1
     {
         size_t carried = 0;

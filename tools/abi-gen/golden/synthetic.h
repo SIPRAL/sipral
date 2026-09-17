@@ -343,6 +343,15 @@ sipral_status_t sipral_call_capture(sipral_handle_t stack, const int16_t *sample
 sipral_status_t sipral_call_media_receive(sipral_handle_t stack, uint8_t *data, size_t len, uint32_t *out_arrival);
 
 /**
+ * Install a policy on it, replace the one installed, or remove it.
+ *
+ * The callback and the pointer after it are one listener, the same
+ * pair a struct going in already means by them, and a null callback
+ * removes whatever was installed.
+ */
+sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callback_t callback, void *user_data);
+
+/**
  * Take it apart.
  */
 sipral_status_t sipral_stack_destroy(sipral_handle_t stack);
