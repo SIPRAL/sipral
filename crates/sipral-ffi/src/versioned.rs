@@ -76,6 +76,8 @@ pub(crate) mod min_size {
     pub const CALL_CONFIG: usize = 80;
     /// `sipral_capabilities_t`
     pub const CAPABILITIES: usize = 24;
+    /// `sipral_codec_candidate_t`
+    pub const CODEC_CANDIDATE: usize = 24;
     /// `sipral_codec_info_t`
     pub const CODEC_INFO: usize = 32;
     /// `sipral_counters_t`

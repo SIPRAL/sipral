@@ -480,6 +480,7 @@ live stack rather than reached from one.
 | **A8** — refusing an unwanted INVITE before it is visible | `sipral_stack_screen` installs a policy that is asked about every INVITE before it has any effect: before ringing, before `SIPRAL_EVENT_KIND_INCOMING_CALL`, before a call handle exists. It answers with a SIP status, and `SIPRAL_SCREEN_ACCEPT` — 200 — is the one answer that lets a call through, so a listener that failed to answer refuses rather than admits. |
 | **C2** — accepting a call announced out of band | `sipral_account_announce` takes whoever the push said is calling and writes back either the announcement, when nothing has arrived yet, or the call, when the INVITE beat the notification. `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` names the announcement the INVITE answers and is queued immediately before the incoming-call event for it, so the screen is named before the call is; `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` says one never came, and `sipral_announcement_forget` takes the screen down early. |
 | **C3** — registration that freezes and thaws | The RFC 8599 half reaches C: `sipral_account_config_t` carries `push_provider`, `push_prid`, `push_param` and `push_wakes_itself`, which go on the REGISTER's `Contact` and on no other request; `sipral_account_refresh_binding` is §5.5's periodic wake-up; and `sipral_account_push_echo` reads §8.2's `Feature-Caps` answer, which is how an application learns the network really will send the notifications it is about to suspend itself on. `freeze_registration`/`thaw_registration` and `time_to_ready` are still Rust's. |
+| **D6** — per call, not per process | `sipral_call_config_t::codecs` overrides `sipral_stack_config_t::codecs` for one call, the same way `::srtp` overrides the stack's policy, so two accounts on two codec policies no longer need two stacks. The call gets a catalogue of its own — nothing shared is mutated and everything the call said nothing about is the stack's — and `::media_address`, `::srtp` and `::transport` were already per call. Device selection per call is A2's and is not built. |
 | **D1** — a call's story as a structured object | `sipral_call_record_json` and `sipral_stack_diagnostics_json` hand the record over as JSON text rather than as a struct, which is the form that leaves a process anyway (`docs/14-diagnostics.md`). |
 | **D2** — deterministic replay | `sipral_stack_recording_start`/`_stop` record a session from C, with the seed the stack was made with. Driving a recording back is Rust's (`crates/sipral-core/src/replay`), and stays there: it is a test harness, not something a softphone does. |
 | **D3** — health counters, sampled rather than grepped | `sipral_stack_counters`, one call, field for field against `sipral::Counters`. The four `screened_*` counters say how many INVITEs were refused and by which of the three floors. |
@@ -496,7 +497,7 @@ The Rust surface for each of these already exists somewhere below
 | Requirement | Where it lives |
 |---|---|
 | **C4** — audio that survives the platform's own interruptions | Device-state detection (`IMMDevice::GetState`) lives in `sipral-io-wasapi`, but that crate and `sipral-io-coreaudio` are depended on by nothing else in the workspace — not `sipral`, not `sipral-ua` — so this is reachable only by taking a dependency on the platform crate directly, not through the facade. |
-| **D5** — the engine explains its negotiations | The codec half: `sipral::CodecCatalog::candidates` names why every candidate that was not chosen was not. The transport and NAT half is not built anywhere — nothing here chooses between transports or NAT strategies per call at all. |
+| **D5** — the engine explains its negotiations | The codec half is reachable from `sipral.h`: `sipral_media_codec_candidate_count` and `..._at` walk the call's own order and name, for each entry, whether it won, was never named by the far end, or was outranked and by what. The transport and NAT half is not built anywhere — nothing here chooses between transports or NAT strategies per call at all. |
 
 ### Not built anywhere yet
 
@@ -509,12 +510,9 @@ The Rust surface for each of these already exists somewhere below
 - **A3** — volume, mute, level metering. The same design boundary as A2. The
   same two crates each have a `level.rs`, unreferenced by anything else, and
   nothing there is a gain or mute control.
-- **D6** — per call, not per process. Codec order and transport are properties
-  of `sipral_stack_config_t` in C and of nothing narrower than the stack in
-  `sipral-ua` either — two accounts on two codec policies still need two
-  stacks. The device part of this requirement is the exception and is already
-  answered: `sipral_call_config_t::media_address` and `::srtp` are per call,
-  in C, today.
+- **A2**'s half of **D6** — which device a call uses. The other two halves,
+  codec order and transport, are per call in C today; no device crosses this
+  boundary at all, which is A2's to answer and A2 is not built.
 
 ---
 

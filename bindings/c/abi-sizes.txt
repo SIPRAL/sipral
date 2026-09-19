@@ -10,8 +10,9 @@
 # itself and no caller ever declares one.
 sipral_abi_version_t 24 24
 sipral_account_config_t 144 224
-sipral_call_config_t 80 104
+sipral_call_config_t 80 120
 sipral_capabilities_t 24 24
+sipral_codec_candidate_t 24 24
 sipral_codec_info_t 32 32
 sipral_counters_t 152 200
 sipral_event_t - 200

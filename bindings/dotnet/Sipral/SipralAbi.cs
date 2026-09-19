@@ -257,6 +257,41 @@ public enum SipralCodec : uint
 }
 
 /// <summary>
+/// What became of one codec this call's catalogue could have used. Names
+/// for SipralCodecCandidate.Outcome.
+///
+/// D5's codec half: a negotiation that ends in G.711 when the site
+/// configured Opus is a support call, and the answer to it is a list
+/// saying which of the two things happened — the far end never named
+/// Opus, or it named it and something ahead of it in this end's order
+/// won.
+/// </summary>
+public enum SipralCodecOutcome : uint
+{
+    /// <summary>
+    /// Not an outcome: either the candidate is from a build this ABI has
+    /// no number for, or the struct was never filled in.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// This is what the call agreed on. Exactly one candidate carries it,
+    /// and it names the same codec as `sipral_media_info_t::codec`.
+    /// </summary>
+    Chosen = 1,
+    /// <summary>
+    /// The far end's description did not name it, so it was never in the
+    /// running. The commonest answer, and the one that says the question
+    /// is about the far end's configuration rather than this one's.
+    /// </summary>
+    NotNamed = 2,
+    /// <summary>
+    /// The far end named it and this end had something better: the codec
+    /// in `outranked_by` came first in this call's order.
+    /// </summary>
+    Outranked = 3,
+}
+
+/// <summary>
 /// Which way audio may flow, as seen from here. Names for every `direction`.
 /// </summary>
 public enum SipralDirection : uint
@@ -2295,6 +2330,34 @@ public struct SipralCallConfig
     /// unmoved.
     /// </summary>
     public uint Transport;
+    /// <summary>
+    /// What this call offers and in what order, overriding
+    /// `sipral_stack_config_t::codecs` for it: codec names separated by
+    /// commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
+    /// NUL-terminated. Null for the stack's own order.
+    ///
+    /// Everything else the stack's catalogue carries — frame length,
+    /// named events, multiplexing, and SRTP where `srtp` here does not
+    /// override it — is kept, because a call that names its codecs has
+    /// said nothing about any of those. A name this build has no encoder
+    /// for, a name given twice, and a stray comma are each
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
+    /// call.
+    ///
+    /// Read only for a call this stack describes the media of —
+    /// `media_address` set — for the reason `srtp` gives: a call placed
+    /// with `sdp` is a session the application wrote, and the order in it
+    /// is already the application's own. The names are still checked, so
+    /// that a caller who has one wrong learns it here either way.
+    ///
+    /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public IntPtr Codecs;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint CodecsLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2348,6 +2411,50 @@ public struct SipralCodecInfo
     {
         var value = default(SipralCodecInfo);
         value.Size = (nuint)Marshal.SizeOf<SipralCodecInfo>();
+        return value;
+    }
+}
+
+/// <summary>
+/// One codec this call could have used, and what became of it.
+///
+/// Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
+///
+/// The list is what the negotiation itself decided, kept from the moment
+/// it decided it. It is not worked out again when it is asked for, because
+/// a second run against a description that has since been renegotiated
+/// would disagree with the first in exactly the case somebody is
+/// debugging.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralCodecCandidate
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// A SipralCodec: the candidate itself.
+    /// </summary>
+    public uint Codec;
+    /// <summary>
+    /// A SipralCodecOutcome: what became of it.
+    /// </summary>
+    public uint Outcome;
+    /// <summary>
+    /// A SipralCodec: what beat it, when `outcome` is
+    /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
+    /// otherwise, because nothing beat a codec that was never named and
+    /// nothing beat the one that won.
+    /// </summary>
+    public uint OutrankedBy;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralCodecCandidate Sized()
+    {
+        var value = default(SipralCodecCandidate);
+        value.Size = (nuint)Marshal.SizeOf<SipralCodecCandidate>();
         return value;
     }
 }
@@ -3785,6 +3892,12 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_media_info(ulong media, ref SipralMediaInfo outInfo);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_codec_candidate_count(ulong media, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_codec_candidate_at(ulong media, nuint index, ref SipralCodecCandidate outCandidate);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_statistics(ulong media, ulong nowMs, ref SipralStreamStats outStats);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -3925,7 +4038,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 15;
+    public const uint AbiVersionMinor = 16;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -4868,6 +4981,10 @@ public static class Sipral
     /// this has set it, `sipral_call_answer_media` keeps it: it is answering
     /// a call that already has a catalogue, not choosing one.
     ///
+    /// `config.codecs` overrides the stack's codec order for this call in the
+    /// same way and for the same window: the answer written here is written
+    /// from it, and `sipral_call_answer_media` keeps what it settled.
+    ///
     /// `sipral_call_answer_media` after this reuses the session and the
     /// description written here rather than negotiating a second one. What
     /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
@@ -5418,6 +5535,44 @@ public static class Sipral
         var info = SipralMediaInfo.Sized();
         Check(NativeMethods.sipral_media_info(media, ref info));
         return info;
+    }
+
+    /// <summary>
+    /// How many codecs were in the running on this call.
+    ///
+    /// This call's own catalogue, which is the stack's order unless
+    /// `sipral_call_config_t::codecs` named another. Zero is an answer, not a
+    /// failure: a call negotiated from a description with no media line in it
+    /// had nothing in the running at all.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    /// </summary>
+    public static nuint MediaCodecCandidateCount(ulong media)
+    {
+        Check(NativeMethods.sipral_media_codec_candidate_count(media, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// One of them, by index, from zero to what
+    /// `sipral_media_codec_candidate_count` said, in this call's own order.
+    ///
+    /// D5 in one place: what this end offered, what the far end named, and
+    /// which of the two ran out first. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+    ///
+    /// Safety
+    ///
+    /// `out_candidate` must point at a `sipral_codec_candidate_t` whose `size`
+    /// member says how long it is.
+    /// </summary>
+    public static SipralCodecCandidate MediaCodecCandidateAt(ulong media, nuint index)
+    {
+        var candidate = SipralCodecCandidate.Sized();
+        Check(NativeMethods.sipral_media_codec_candidate_at(media, index, ref candidate));
+        return candidate;
     }
 
     /// <summary>

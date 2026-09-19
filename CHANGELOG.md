@@ -12,6 +12,34 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The codec order is a property of the call, not of the process.**
+  `sipral_call_config_t::codecs` overrides `sipral_stack_config_t::codecs` for
+  one call, the same comma-separated list of names, refused the same way for a
+  stray comma, a name given twice, or a name this build has no encoder for.
+  Two accounts on two codec policies no longer need two stacks. The override
+  is derived from the stack's catalogue rather than from a fresh one, so the
+  frame length, named events, multiplexing and SRTP policy the call said
+  nothing about are the ones the stack was configured with, and nothing shared
+  is mutated: a second call off the same stack still offers what the stack was
+  configured with. It composes with `::srtp`, and it is read on every entry
+  point that takes the struct and describes a session — `sipral_call_place`,
+  `sipral_call_ring_media` and `sipral_call_accept_transfer` — while
+  `sipral_call_consult`, which has no catalogue to apply it to, still refuses
+  a name this build has no encoder for rather than accepting what its siblings
+  would refuse.
+
+- **Why each codec lost, through C.** `sipral_media_codec_candidate_count` and
+  `sipral_media_codec_candidate_at` walk a call's own codec order and say what
+  became of every entry: it won, the far end never named it, or the far end
+  named it and something this end preferred won — with
+  `sipral_codec_candidate_t::outranked_by` naming what. Exactly one candidate
+  is the one that won, and it names the same codec as
+  `sipral_media_info_t::codec`, which is what makes the list an explanation of
+  that number rather than a second opinion about it. The list is what the
+  negotiation recorded when it recorded it, never recomputed: a second run
+  against a description that has since been renegotiated would disagree with
+  the first in exactly the case somebody is debugging.
+
 - **A call announced by a push notification reaches C (RFC 8599).** On a phone
   the ringing screen exists before the call does: the operating system delivers
   a notification, the process gets one run loop to raise a screen, and the

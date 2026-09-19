@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sipral::CallMedia;
+use sipral::{CallMedia, CodecCatalog, SrtpPolicy};
 use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{HeaderName, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
@@ -124,6 +124,30 @@ record! {
         /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
         /// unmoved.
         pub transport: u32,
+        /// What this call offers and in what order, overriding
+        /// `sipral_stack_config_t::codecs` for it: codec names separated by
+        /// commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
+        /// NUL-terminated. Null for the stack's own order.
+        ///
+        /// Everything else the stack's catalogue carries — frame length,
+        /// named events, multiplexing, and SRTP where `srtp` here does not
+        /// override it — is kept, because a call that names its codecs has
+        /// said nothing about any of those. A name this build has no encoder
+        /// for, a name given twice, and a stray comma are each
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
+        /// call.
+        ///
+        /// Read only for a call this stack describes the media of —
+        /// `media_address` set — for the reason `srtp` gives: a call placed
+        /// with `sdp` is a session the application wrote, and the order in it
+        /// is already the application's own. The names are still checked, so
+        /// that a caller who has one wrong learns it here either way.
+        ///
+        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub codecs: *const c_char,
+        /// How many bytes of it.
+        pub codecs_len: usize,
     }
 }
 
@@ -224,8 +248,9 @@ unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>,
     Ok(Some(address))
 }
 
-/// The one member of `sipral_call_config_t` that names anything for
-/// [`sipral_call_ring_media`]: where this end will receive media.
+/// The member of `sipral_call_config_t` [`sipral_call_ring_media`] needs:
+/// where this end will receive media. `srtp` and `codecs` also apply to a call
+/// this stack is about to describe, and are read by the entry point itself.
 ///
 /// Every other member names something a call to place would need — who to
 /// call, where to send the INVITE, which forks to keep, what headers to
@@ -244,7 +269,7 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
             SipralStatus::InvalidArgument,
             format!(
                 "{member} is not read here: sipral_call_ring_media names a call that already \
-                 exists, and only media_address and srtp apply to one"
+                 exists, and only media_address, srtp and codecs apply to one"
             ),
         )
     }
@@ -273,6 +298,58 @@ unsafe fn ring_media_address(config: &SipralCallConfig) -> Result<SocketAddr, Fa
             "media_address",
         )
     }
+}
+
+/// The codec order `config` names, as a checked list of names, or `None` for
+/// the stack's own order.
+///
+/// Read before the stack is locked, like `srtp`, so that a name this build has
+/// no encoder for is refused while the caller still knows which string it
+/// passed and before anything has been built. The catalogue it becomes cannot
+/// be derived here, because it is derived from the stack's.
+///
+/// # Safety
+///
+/// `config.codecs` must be readable for `config.codecs_len` bytes.
+unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fail> {
+    let Some(list) = (unsafe { text(config.codecs, config.codecs_len, "codecs") })? else {
+        return Ok(None);
+    };
+    let named = crate::media::names_in(list)?;
+    // which names this build has an encoder for is a fact about the build and
+    // not about any stack, so it is settled here: before the stack is reached,
+    // and whether or not the entry point reading this has a catalogue to apply
+    // the order to at all
+    CodecCatalog::with_order(&named).map_err(|error| media_failed(&error))?;
+    Ok(Some(named))
+}
+
+/// The catalogue and settings one call runs its media with, or `None` for the
+/// stack's own catalogue untouched — which is what `srtp` and `codecs` both
+/// left unset has to mean.
+///
+/// The two overrides compose here rather than each in its own branch, because
+/// a call is allowed to name both and a second branch that rebuilt the
+/// catalogue from names would be a branch that dropped the policy the first
+/// one applied.
+fn call_media(
+    state: &StackState,
+    srtp: Option<SrtpPolicy>,
+    codecs: Option<&[&str]>,
+) -> Result<Option<CallMedia>, Fail> {
+    if srtp.is_none() && codecs.is_none() {
+        return Ok(None);
+    }
+    let mut catalog = state.engine.catalog().clone();
+    if let Some(names) = codecs {
+        catalog = catalog
+            .with_codecs(names)
+            .map_err(|error| media_failed(&error))?;
+    }
+    if let Some(policy) = srtp {
+        catalog = catalog.with_srtp(policy);
+    }
+    Ok(Some(CallMedia::new(catalog, state.media_config())))
 }
 
 /// Where `config` sends the INVITE, other than the account's own address, and
@@ -403,29 +480,27 @@ entry! {
         // checked here, before the account is even looked up, so a bad value
         // never reaches the point of building anything
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let placed = match srtp {
+                    let placed = match call_media(state, srtp, codecs.as_deref())? {
                         // the stack's own catalogue, untouched: this is what
-                        // `srtp` being unspecified on the call has to mean
+                        // `srtp` and `codecs` both unspecified on the call
+                        // have to mean
                         None => {
                             state.engine.place(&mut state.agent, id, outgoing, local, now)
                         }
-                        Some(policy) => {
-                            let catalog = state.engine.catalog().clone().with_srtp(policy);
-                            let media = CallMedia::new(catalog, state.media_config());
-                            state.engine.place_with(
-                                &mut state.agent,
-                                id,
-                                outgoing,
-                                local,
-                                media,
-                                now,
-                            )
-                        }
+                        Some(media) => state.engine.place_with(
+                            &mut state.agent,
+                            id,
+                            outgoing,
+                            local,
+                            media,
+                            now,
+                        ),
                     }
                     .map_err(|error| media_failed(&error))?;
                     state.manage(placed);
@@ -495,6 +570,10 @@ entry! {
     /// this has set it, `sipral_call_answer_media` keeps it: it is answering
     /// a call that already has a catalogue, not choosing one.
     ///
+    /// `config.codecs` overrides the stack's codec order for this call in the
+    /// same way and for the same window: the answer written here is written
+    /// from it, and `sipral_call_answer_media` keeps what it settled.
+    ///
     /// `sipral_call_answer_media` after this reuses the session and the
     /// description written here rather than negotiating a second one. What
     /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
@@ -531,19 +610,16 @@ entry! {
         let config = unsafe { read_versioned(config) }?;
         let local = unsafe { ring_media_address(&config) }?;
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            match srtp {
+            match call_media(state, srtp, codecs.as_deref())? {
                 // the stack's own catalogue, untouched: this is what `srtp`
-                // being unspecified on the call has to mean
+                // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
-                Some(policy) => {
-                    let catalog = state.engine.catalog().clone().with_srtp(policy);
-                    let media = CallMedia::new(catalog, state.media_config());
-                    state
-                        .engine
-                        .ring_with(&mut state.agent, id, local, media, now)
-                }
+                Some(media) => state
+                    .engine
+                    .ring_with(&mut state.agent, id, local, media, now),
             }
             .map_err(|error| media_failed(&error))?;
             state.manage(id);
@@ -1062,9 +1138,11 @@ entry! {
                  leg; place it with sdp and run its audio in the application",
             ));
         }
-        // no catalogue here to apply it to, but the same refusal as
-        // `sipral_call_place` for a value this ABI names nothing for
+        // no catalogue here to apply either of them to, but the same refusals
+        // as `sipral_call_place` for a value this ABI names nothing for and
+        // for a codec this build has no encoder for
         crate::media::srtp_policy(config.srtp, "srtp")?;
+        unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let outgoing = unsafe { outgoing_from(state, &config, false) }?;
@@ -1159,6 +1237,7 @@ entry! {
         }
         let media = unsafe { managed_media(&config) }?;
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
@@ -1181,24 +1260,21 @@ entry! {
                 headers: &headers,
             };
             let placed = if let Some(local) = media {
-                let placed = match srtp {
+                let placed = match call_media(state, srtp, codecs.as_deref())? {
                     // the stack's own catalogue, untouched: this is what
-                    // `srtp` being unspecified on the call has to mean
+                    // `srtp` and `codecs` both unspecified on the call have
+                    // to mean
                     None => state
                         .engine
                         .accept_transfer(&mut state.agent, id, local, extra, now),
-                    Some(policy) => {
-                        let catalog = state.engine.catalog().clone().with_srtp(policy);
-                        let media = CallMedia::new(catalog, state.media_config());
-                        state.engine.accept_transfer_with(
-                            &mut state.agent,
-                            id,
-                            local,
-                            extra,
-                            media,
-                            now,
-                        )
-                    }
+                    Some(media) => state.engine.accept_transfer_with(
+                        &mut state.agent,
+                        id,
+                        local,
+                        extra,
+                        media,
+                        now,
+                    ),
                 }
                 .map_err(|error| media_failed(&error))?;
                 state.manage(placed);
@@ -1480,6 +1556,8 @@ a=recvonly\r\n";
             headers_len: 0,
             srtp: 0,
             transport: 0,
+            codecs: ptr::null(),
+            codecs_len: 0,
         }
     }
 
@@ -1535,6 +1613,8 @@ a=recvonly\r\n";
             headers_len: 0,
             srtp: 0,
             transport: 0,
+            codecs: ptr::null(),
+            codecs_len: 0,
         }
     }
 
@@ -4142,6 +4222,195 @@ Content-Length: 0\r\n\r\n";
             body.contains("RTP/SAVP") && body.contains("a=crypto:"),
             "zero on the call did not fall back to the stack's REQUIRED: {body}"
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// D6: the order is a property of the call, not of the process. The
+    /// stack offers one codec and this call offers another, from the same
+    /// stack and without a second one.
+    #[test]
+    fn a_calls_own_codecs_override_the_stacks() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        let (codecs, codecs_len) = as_text("G722");
+        call_config.codecs = codecs;
+        call_config.codecs_len = codecs_len;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("a=rtpmap:9 G722/8000"),
+            "the call's own order did not reach the offer: {body}"
+        );
+        assert!(
+            !body.contains("PCMU"),
+            "the stack's order is still in the offer: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// And the stack's order is left where it was: the next call off the same
+    /// stack offers what the stack was configured with, which is the race
+    /// D6 is about — a per-call order that mutated a shared catalogue would
+    /// leave this second offer naming G.722.
+    #[test]
+    fn a_calls_own_codecs_leave_the_stacks_order_alone() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut first = managed_config();
+        let (codecs, codecs_len) = as_text("G722");
+        first.codecs = codecs;
+        first.codecs_len = codecs_len;
+        assert_eq!(place(handle, account, &first, 1_000).0, SipralStatus::Ok);
+        let _ = sent(handle);
+
+        let (status, _) = place(handle, account, &managed_config(), 2_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("a=rtpmap:0 PCMU/8000") && !body.contains("G722"),
+            "the earlier call's order outlived it: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The two overrides compose. A call that names both gets both, which a
+    /// second branch rebuilding the catalogue from the names would have lost.
+    #[test]
+    fn a_call_that_names_codecs_and_srtp_gets_both() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.srtp = SipralSrtp::NotOffered as u32;
+        });
+        let mut call_config = managed_config();
+        let (codecs, codecs_len) = as_text("G722");
+        call_config.codecs = codecs;
+        call_config.codecs_len = codecs_len;
+        call_config.srtp = SipralSrtp::Required as u32;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(
+            body.contains("a=rtpmap:9 G722/8000"),
+            "the codec order was lost: {body}"
+        );
+        assert!(
+            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
+            "the srtp policy was lost: {body}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// Everything else the stack's catalogue carries and the call said
+    /// nothing about is kept, which is the whole reason the derivation starts
+    /// from the stack's catalogue rather than from a fresh one.
+    #[test]
+    fn a_call_that_names_codecs_keeps_the_stacks_frame_length() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            config.frame_ms = 40;
+        });
+        let mut call_config = managed_config();
+        let (codecs, codecs_len) = as_text("G722");
+        call_config.codecs = codecs;
+        call_config.codecs_len = codecs_len;
+        let (status, call) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = sent(handle);
+        assert_eq!(
+            with_stack(handle, |state| Ok(state
+                .engine
+                .call_catalog(state.calls.get(call).expect("a live call"))
+                .expect("a catalogue")
+                .frame_length()))
+            .expect("the stack is live"),
+            40,
+            "the call's order came back with the built-in frame length"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The names are checked where the caller still knows which string it
+    /// passed, and before anything is built.
+    #[test]
+    fn a_codec_this_build_has_no_encoder_for_is_invalid_argument_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        let (codecs, codecs_len) = as_text("SILK");
+        call_config.codecs = codecs;
+        call_config.codecs_len = codecs_len;
+        let (status, call) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::NotSupported, "{}", last_error_text());
+        assert_eq!(call, SIPRAL_HANDLE_NONE);
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert!(last_error_text().contains("SILK"), "{}", last_error_text());
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// And a list that is wrong as a list, rather than in one of its names,
+    /// is refused the same way `sipral_stack_config_t::codecs` refuses it.
+    #[test]
+    fn a_stray_comma_in_a_calls_codecs_is_invalid_argument() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        let (codecs, codecs_len) = as_text("PCMU,,G722");
+        call_config.codecs = codecs;
+        call_config.codecs_len = codecs_len;
+        let (status, call) = place(handle, account, &call_config, 1_000);
+        assert_eq!(
+            status,
+            SipralStatus::InvalidArgument,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(call, SIPRAL_HANDLE_NONE);
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// `sipral_call_consult` takes the same struct, and a codec this build
+    /// has no encoder for is refused there too rather than accepted by one
+    /// entry point and refused by its sibling.
+    #[test]
+    fn an_unknown_codec_on_a_consultation_is_refused_and_places_nothing() {
+        let mut observed = Observed::default();
+        let (handle, first) = connected(&mut observed);
+        let _ = sent(handle);
+        let mut config = call_config();
+        let (codecs, codecs_len) = as_text("SILK");
+        config.codecs = codecs;
+        config.codecs_len = codecs_len;
+        let mut second = SIPRAL_HANDLE_NONE;
+        let status = unsafe {
+            sipral_call_consult(
+                handle,
+                first,
+                ptr::from_ref(&config),
+                &raw mut second,
+                2_000,
+            )
+        };
+        assert_eq!(status, SipralStatus::NotSupported, "{}", last_error_text());
+        assert_eq!(second, SIPRAL_HANDLE_NONE);
+        assert!(sent(handle).is_empty(), "nothing was built");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A call configuration at the length the header had before this member
+    /// existed still places a call, and takes the stack's order.
+    #[test]
+    fn a_call_config_at_its_old_min_size_takes_the_stacks_codecs() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        call_config.size = crate::versioned::min_size::CALL_CONFIG;
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let body = String::from_utf8_lossy(&one(handle)).into_owned();
+        assert!(body.contains("a=rtpmap:0 PCMU/8000"), "{body}");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

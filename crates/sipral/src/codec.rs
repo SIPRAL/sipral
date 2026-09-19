@@ -348,6 +348,28 @@ impl CodecCatalog {
     /// for or for one named twice — a duplicate would put the same payload
     /// type on the `m=` line twice, which no peer has to make sense of.
     pub fn with_order(codecs: &[&str]) -> Result<Self, MediaError> {
+        Self::new().with_codecs(codecs)
+    }
+
+    /// This catalogue, offering these codecs in this order and nothing else.
+    ///
+    /// Everything else it was built with — frame length, named events,
+    /// multiplexing, SRTP — is kept. That is what makes this the way one call
+    /// says what it offers without also inheriting the defaults for the four
+    /// settings it said nothing about, which is what starting again from
+    /// [`CodecCatalog::with_order`] would hand it.
+    ///
+    /// # Errors
+    /// [`MediaError::NoCodecs`] for an empty order, and
+    /// [`MediaError::UnsupportedCodec`] for a name this build has no encoder
+    /// for or for one named twice — a duplicate would put the same payload
+    /// type on the `m=` line twice, which no peer has to make sense of.
+    /// [`MediaError::BadFrameLength`] when the frame length already set is one
+    /// the new order has no frame size for: Opus arriving in a catalogue cut
+    /// at thirty milliseconds is that case, and the answer is the same
+    /// refusal [`CodecCatalog::with_frame_length`] would have given had the
+    /// two been named the other way round.
+    pub fn with_codecs(self, codecs: &[&str]) -> Result<Self, MediaError> {
         if codecs.is_empty() {
             return Err(MediaError::NoCodecs);
         }
@@ -362,10 +384,8 @@ impl CodecCatalog {
             }
             order.push(codec);
         }
-        Ok(Self {
-            order,
-            ..Self::new()
-        })
+        let frame_ms = self.frame_ms;
+        Self { order, ..self }.with_frame_length(frame_ms)
     }
 
     /// Cut frames at `millis` milliseconds instead of twenty.
@@ -560,6 +580,7 @@ impl Default for CodecCatalog {
 pub(crate) mod tests {
     use super::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
     use crate::error::MediaError;
+    use crate::keying::SrtpPolicy;
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtpMap};
 
     /// A codec this build has that the far end in these tests never names,
@@ -648,6 +669,54 @@ pub(crate) mod tests {
             .map(NegotiatedCodec::payload)
             .collect();
         assert_eq!(offered, [8, 96]);
+    }
+
+    /// D6: one call names its own order without also losing the four settings
+    /// it said nothing about. Starting again from `with_order` would hand it
+    /// the defaults for all four, which is the bug this method exists to stop.
+    #[test]
+    fn naming_codecs_on_a_catalogue_keeps_everything_else_it_was_built_with() {
+        let site = CodecCatalog::with_order(&["PCMU", "G722"])
+            .unwrap()
+            .with_frame_length(40)
+            .unwrap()
+            .with_dtmf(false)
+            .with_rtcp_mux(true)
+            .with_srtp(SrtpPolicy::Required);
+
+        let call = site.clone().with_codecs(&["G722"]).unwrap();
+
+        assert_eq!(call.codecs(), [Codec::G722]);
+        assert_eq!(call.frame_length(), site.frame_length());
+        assert_eq!(call.srtp(), site.srtp());
+        assert_eq!(call.capabilities().dtmf, site.capabilities().dtmf);
+        assert_eq!(call.capabilities().rtcp_mux, site.capabilities().rtcp_mux);
+    }
+
+    /// And the one setting that is not independent of the order stays
+    /// checked: a frame length the new order has no size for is refused here
+    /// rather than discovered in the offer.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn naming_codecs_rechecks_the_frame_length_against_the_new_order() {
+        // thirty milliseconds is a whole number of samples for all three
+        // written codecs and no frame Opus encodes
+        let narrowband = CodecCatalog::with_order(&["PCMU"])
+            .unwrap()
+            .with_frame_length(30)
+            .unwrap();
+        assert_eq!(
+            narrowband.clone().with_codecs(&["opus"]).unwrap_err(),
+            MediaError::BadFrameLength { millis: 30 }
+        );
+        // and the same order at a length Opus does encode is taken
+        assert!(
+            narrowband
+                .with_frame_length(20)
+                .unwrap()
+                .with_codecs(&["opus"])
+                .is_ok()
+        );
     }
 
     /// B2: a setting that is accepted and ignored is worse than one that is

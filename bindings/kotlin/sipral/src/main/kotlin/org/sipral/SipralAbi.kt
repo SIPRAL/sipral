@@ -277,6 +277,45 @@ enum class SipralCodec(val value: Int) {
 }
 
 /**
+ * What became of one codec this call's catalogue could have used. Names
+ * for SipralCodecCandidate.outcome.
+ *
+ * D5's codec half: a negotiation that ends in G.711 when the site
+ * configured Opus is a support call, and the answer to it is a list
+ * saying which of the two things happened — the far end never named
+ * Opus, or it named it and something ahead of it in this end's order
+ * won.
+ */
+enum class SipralCodecOutcome(val value: Int) {
+    /**
+     * Not an outcome: either the candidate is from a build this ABI has
+     * no number for, or the struct was never filled in.
+     */
+    UNKNOWN(0),
+    /**
+     * This is what the call agreed on. Exactly one candidate carries it,
+     * and it names the same codec as `sipral_media_info_t::codec`.
+     */
+    CHOSEN(1),
+    /**
+     * The far end's description did not name it, so it was never in the
+     * running. The commonest answer, and the one that says the question
+     * is about the far end's configuration rather than this one's.
+     */
+    NOT_NAMED(2),
+    /**
+     * The far end named it and this end had something better: the codec
+     * in `outranked_by` came first in this call's order.
+     */
+    OUTRANKED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralCodecOutcome? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * Which way audio may flow, as seen from here. Names for every `direction`.
  */
 enum class SipralDirection(val value: Int) {
@@ -1887,6 +1926,50 @@ data class SipralCodecInfo(
 }
 
 /**
+ * One codec this call could have used, and what became of it.
+ *
+ * Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
+ *
+ * The list is what the negotiation itself decided, kept from the moment
+ * it decided it. It is not worked out again when it is asked for, because
+ * a second run against a description that has since been renegotiated
+ * would disagree with the first in exactly the case somebody is
+ * debugging.
+ */
+data class SipralCodecCandidate(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * A SipralCodec: the candidate itself.
+     */
+    val codec: Long,
+    /**
+     * A SipralCodecOutcome: what became of it.
+     */
+    val outcome: Long,
+    /**
+     * A SipralCodec: what beat it, when `outcome` is
+     * `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
+     * otherwise, because nothing beat a codec that was never named and
+     * nothing beat the one that won.
+     */
+    val outrankedBy: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 4
+
+        fun of(slots: LongArray): SipralCodecCandidate = SipralCodecCandidate(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+        )
+    }
+}
+
+/**
  * What one call's media settled on, and what it is doing now.
  *
  * A4's reporting half and as much of D5 as this stack knows: the codec that
@@ -2722,6 +2805,30 @@ class SipralCallConfig(
      * unmoved.
      */
     val transport: Long = 0,
+    /**
+     * What this call offers and in what order, overriding
+     * `sipral_stack_config_t::codecs` for it: codec names separated by
+     * commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
+     * NUL-terminated. Null for the stack's own order.
+     *
+     * Everything else the stack's catalogue carries — frame length,
+     * named events, multiplexing, and SRTP where `srtp` here does not
+     * override it — is kept, because a call that names its codecs has
+     * said nothing about any of those. A name this build has no encoder
+     * for, a name given twice, and a stray comma are each
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
+     * call.
+     *
+     * Read only for a call this stack describes the media of —
+     * `media_address` set — for the reason `srtp` gives: a call placed
+     * with `sdp` is a session the application wrote, and the order in it
+     * is already the application's own. The names are still checked, so
+     * that a caller who has one wrong learns it here either way.
+     *
+     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val codecs: String? = null,
 )
 
 /**
@@ -3070,7 +3177,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 15)
+        agree(0, 16)
     }
 
     /**
@@ -3117,9 +3224,9 @@ internal object SipralNative {
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -3131,9 +3238,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
@@ -3144,6 +3251,8 @@ internal object SipralNative {
     external fun sipral_call_media(stack: Long, call: Long, media: LongArray): Int
     external fun sipral_media_release(media: Long): Int
     external fun sipral_media_info(media: Long, info: LongArray): Int
+    external fun sipral_media_codec_candidate_count(media: Long, count: LongArray): Int
+    external fun sipral_media_codec_candidate_at(media: Long, index: Long, candidate: LongArray): Int
     external fun sipral_media_statistics(media: Long, nowMs: Long, stats: LongArray): Int
     external fun sipral_media_receive(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
     external fun sipral_media_playback(media: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
@@ -3199,7 +3308,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 15
+    const val ABI_VERSION_MINOR: Long = 16
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -4110,8 +4219,9 @@ object Sipral {
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -4148,6 +4258,10 @@ object Sipral {
      * this has set it, `sipral_call_answer_media` keeps it: it is answering
      * a call that already has a catalogue, not choosing one.
      *
+     * `config.codecs` overrides the stack's codec order for this call in the
+     * same way and for the same window: the answer written here is written
+     * from it, and `sipral_call_answer_media` keeps what it settled.
+     *
      * `sipral_call_answer_media` after this reuses the session and the
      * description written here rather than negotiating a second one. What
      * the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
@@ -4181,7 +4295,8 @@ object Sipral {
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, nowMs))
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, nowMs))
     }
 
     /**
@@ -4446,8 +4561,9 @@ object Sipral {
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -4498,8 +4614,9 @@ object Sipral {
         val configDestination = config.destination?.toByteArray(Charsets.UTF_8)
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
+        val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, placedSlot, nowMs))
         return placedSlot[0]
     }
 
@@ -4676,6 +4793,43 @@ object Sipral {
         val infoSlots = LongArray(SipralMediaInfo.SLOTS)
         check(SipralNative.sipral_media_info(media, infoSlots))
         return SipralMediaInfo.of(infoSlots)
+    }
+
+    /**
+     * How many codecs were in the running on this call.
+     *
+     * This call's own catalogue, which is the stack's order unless
+     * `sipral_call_config_t::codecs` named another. Zero is an answer, not a
+     * failure: a call negotiated from a description with no media line in it
+     * had nothing in the running at all.
+     *
+     * Safety
+     *
+     * `out_count` must point at one `size_t`.
+     */
+    fun mediaCodecCandidateCount(media: Long): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_media_codec_candidate_count(media, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * One of them, by index, from zero to what
+     * `sipral_media_codec_candidate_count` said, in this call's own order.
+     *
+     * D5 in one place: what this end offered, what the far end named, and
+     * which of the two ran out first. An index past the end is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+     *
+     * Safety
+     *
+     * `out_candidate` must point at a `sipral_codec_candidate_t` whose `size`
+     * member says how long it is.
+     */
+    fun mediaCodecCandidateAt(media: Long, index: Long): SipralCodecCandidate {
+        val candidateSlots = LongArray(SipralCodecCandidate.SLOTS)
+        check(SipralNative.sipral_media_codec_candidate_at(media, index, candidateSlots))
+        return SipralCodecCandidate.of(candidateSlots)
     }
 
     /**

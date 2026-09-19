@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)15)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)16)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -226,6 +226,7 @@ typedef struct sipral_header sipral_header_t;
 typedef struct sipral_account_config sipral_account_config_t;
 typedef struct sipral_call_config sipral_call_config_t;
 typedef struct sipral_codec_info sipral_codec_info_t;
+typedef struct sipral_codec_candidate sipral_codec_candidate_t;
 typedef struct sipral_media_info sipral_media_info_t;
 typedef struct sipral_stream_stats sipral_stream_stats_t;
 typedef struct sipral_media_packet sipral_media_packet_t;
@@ -489,6 +490,41 @@ enum {
      * `sipral_codec_at` enumerates, never the presence of this name.
      */
     SIPRAL_CODEC_OPUS = 4,
+};
+
+/**
+ * What became of one codec this call's catalogue could have used. Names
+ * for sipral_codec_candidate_t::outcome.
+ *
+ * D5's codec half: a negotiation that ends in G.711 when the site
+ * configured Opus is a support call, and the answer to it is a list
+ * saying which of the two things happened — the far end never named
+ * Opus, or it named it and something ahead of it in this end's order
+ * won.
+ */
+typedef uint32_t sipral_codec_outcome_t;
+enum {
+    /**
+     * Not an outcome: either the candidate is from a build this ABI has
+     * no number for, or the struct was never filled in.
+     */
+    SIPRAL_CODEC_OUTCOME_UNKNOWN = 0,
+    /**
+     * This is what the call agreed on. Exactly one candidate carries it,
+     * and it names the same codec as `sipral_media_info_t::codec`.
+     */
+    SIPRAL_CODEC_OUTCOME_CHOSEN = 1,
+    /**
+     * The far end's description did not name it, so it was never in the
+     * running. The commonest answer, and the one that says the question
+     * is about the far end's configuration rather than this one's.
+     */
+    SIPRAL_CODEC_OUTCOME_NOT_NAMED = 2,
+    /**
+     * The far end named it and this end had something better: the codec
+     * in `outranked_by` came first in this call's order.
+     */
+    SIPRAL_CODEC_OUTCOME_OUTRANKED = 3,
 };
 
 /**
@@ -2442,6 +2478,34 @@ struct sipral_call_config {
      * unmoved.
      */
     uint32_t transport;
+    /**
+     * What this call offers and in what order, overriding
+     * `sipral_stack_config_t::codecs` for it: codec names separated by
+     * commas, as `sipral_codec_info_t::name` spells them, UTF-8 and not
+     * NUL-terminated. Null for the stack's own order.
+     *
+     * Everything else the stack's catalogue carries — frame length,
+     * named events, multiplexing, and SRTP where `srtp` here does not
+     * override it — is kept, because a call that names its codecs has
+     * said nothing about any of those. A name this build has no encoder
+     * for, a name given twice, and a stray comma are each
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` naming what was wrong, and no
+     * call.
+     *
+     * Read only for a call this stack describes the media of —
+     * `media_address` set — for the reason `srtp` gives: a call placed
+     * with `sdp` is a session the application wrote, and the order in it
+     * is already the application's own. The names are still checked, so
+     * that a caller who has one wrong learns it here either way.
+     *
+     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    const char *codecs;
+    /**
+     * How many bytes of it.
+     */
+    size_t codecs_len;
 };
 
 /**
@@ -2477,6 +2541,39 @@ struct sipral_codec_info {
      * always travels as a dynamic type.
      */
     uint32_t has_static_payload_type;
+};
+
+/**
+ * One codec this call could have used, and what became of it.
+ *
+ * Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
+ *
+ * The list is what the negotiation itself decided, kept from the moment
+ * it decided it. It is not worked out again when it is asked for, because
+ * a second run against a description that has since been renegotiated
+ * would disagree with the first in exactly the case somebody is
+ * debugging.
+ */
+struct sipral_codec_candidate {
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    size_t size;
+    /**
+     * A sipral_codec_t: the candidate itself.
+     */
+    uint32_t codec;
+    /**
+     * A sipral_codec_outcome_t: what became of it.
+     */
+    uint32_t outcome;
+    /**
+     * A sipral_codec_t: what beat it, when `outcome` is
+     * `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
+     * otherwise, because nothing beat a codec that was never named and
+     * nothing beat the one that won.
+     */
+    uint32_t outranked_by;
 };
 
 /**
@@ -4127,6 +4224,10 @@ sipral_status_t sipral_call_ring(sipral_handle_t stack, sipral_handle_t call, co
  * this has set it, `sipral_call_answer_media` keeps it: it is answering
  * a call that already has a catalogue, not choosing one.
  *
+ * `config.codecs` overrides the stack's codec order for this call in the
+ * same way and for the same window: the answer written here is written
+ * from it, and `sipral_call_answer_media` keeps what it settled.
+ *
  * `sipral_call_answer_media` after this reuses the session and the
  * description written here rather than negotiating a second one. What
  * the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
@@ -4572,6 +4673,35 @@ sipral_status_t sipral_media_release(sipral_handle_t media);
  * says how long it is.
  */
 sipral_status_t sipral_media_info(sipral_handle_t media, sipral_media_info_t *out_info);
+
+/**
+ * How many codecs were in the running on this call.
+ *
+ * This call's own catalogue, which is the stack's order unless
+ * `sipral_call_config_t::codecs` named another. Zero is an answer, not a
+ * failure: a call negotiated from a description with no media line in it
+ * had nothing in the running at all.
+ *
+ * Safety
+ *
+ * `out_count` must point at one `size_t`.
+ */
+sipral_status_t sipral_media_codec_candidate_count(sipral_handle_t media, size_t *out_count);
+
+/**
+ * One of them, by index, from zero to what
+ * `sipral_media_codec_candidate_count` said, in this call's own order.
+ *
+ * D5 in one place: what this end offered, what the far end named, and
+ * which of the two ran out first. An index past the end is
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+ *
+ * Safety
+ *
+ * `out_candidate` must point at a `sipral_codec_candidate_t` whose `size`
+ * member says how long it is.
+ */
+sipral_status_t sipral_media_codec_candidate_at(sipral_handle_t media, size_t index, sipral_codec_candidate_t *out_candidate);
 
 /**
  * What one call's media has cost, and what it is costing now.

@@ -579,6 +579,38 @@ existed still works, unlike `media_seed`, and what it never sent reads as the
 zero that means "unspecified" — exactly what leaving it alone on a current
 header does too.
 
+**The codec order is a property of the call, not of the process** (D6).
+`sipral_stack_config_t::codecs` is the stack's order and
+`sipral_call_config_t::codecs` overrides it for one call — the same
+comma-separated list of names, refused the same way for a stray comma, a name
+given twice, or a name this build has no encoder for. Two accounts on two
+codec policies no longer need two stacks, and the override is derived from the
+stack's catalogue rather than from a fresh one, so everything the call said
+nothing about — frame length, named events, multiplexing, and SRTP where the
+call's own `srtp` does not override it — is what the stack was configured
+with. Nothing shared is mutated: the call gets a catalogue of its own, which
+is what keeps a second call off the same stack offering what the stack was
+configured with. `codecs` is read for no call but one this stack describes the
+media of, for the same reason `srtp` is, and the names are still checked
+wherever the struct is read, so a caller with one wrong learns it from the
+entry point it called rather than from a call that behaved as though it had
+not been set.
+
+**Why each codec lost** (D5) is the reporting half.
+`sipral_media_codec_candidate_count` and `sipral_media_codec_candidate_at`
+walk this call's own order and say what became of each entry: it won
+(`SIPRAL_CODEC_OUTCOME_CHOSEN`, exactly one, naming the same codec as
+`sipral_media_info_t::codec`), the far end never named it
+(`..._NOT_NAMED`), or the far end named it and something this end preferred
+won (`..._OUTRANKED`, with `outranked_by` naming what). The list is what the
+negotiation itself recorded, kept from the moment it recorded it, not worked
+out again when it is asked for: a second run against a description that has
+since been renegotiated would disagree with the first in exactly the case
+somebody is debugging. Both take a media handle, like `sipral_media_info`, so
+neither reaches a stack and neither can wait on one. A count of zero is an
+answer — a call negotiated from a description with no media line in it had
+nothing in the running at all.
+
 **`sipral_call_ring_media` rings an incoming call with this stack running the
 audio** (task 8.4.9): the answer to the offer the INVITE carried is written
 from this stack's codec order against `config.media_address`, and the session
@@ -590,7 +622,10 @@ one reliably (RFC 3262 §3, decided from the INVITE's own `Require` or
 overrides the stack's own SRTP policy for the call, applied through the
 facade the same way `sipral_call_place` applies it — the one way an incoming
 call can choose its own SRTP policy at all, since `sipral_call_answer_media`
-takes no configuration of its own and so could not before this. Every other
+takes no configuration of its own and so could not before this. `config.codecs`
+overrides the stack's codec order for the same call over the same window, and
+what `sipral_call_ring_media` settles is what `sipral_call_answer_media`
+keeps. Every other
 member of `config` names something a call to place needs — `target`, `sdp`,
 `destination`, `keep_all_forks`, `headers` — and this call already exists, so
 each is `SIPRAL_STATUS_INVALID_ARGUMENT` by name if set, the same struct read

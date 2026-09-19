@@ -35,10 +35,10 @@
     X(sipral_abi_version) X(sipral_capabilities) X(sipral_counters)           \
     X(sipral_stack_config) X(sipral_poll_result) X(sipral_stack_settings)     \
     X(sipral_account_config) X(sipral_call_config) X(sipral_codec_info)       \
-    X(sipral_media_info) X(sipral_stream_stats) X(sipral_media_packet)        \
-    X(sipral_transmit) X(sipral_event) X(sipral_suspending)                  \
-    X(sipral_screen_request) X(sipral_subscribe_config)                       \
-    X(sipral_watched_dialog) X(sipral_push_echo)
+    X(sipral_codec_candidate) X(sipral_media_info) X(sipral_stream_stats)     \
+    X(sipral_media_packet) X(sipral_transmit) X(sipral_event)                 \
+    X(sipral_suspending) X(sipral_screen_request)                             \
+    X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)
 
 static int failures;
 
@@ -797,6 +797,19 @@ static sipral_status_t media_info_at(struct fixture *fixture, size_t declared)
     return status;
 }
 
+static sipral_status_t codec_candidate_at(struct fixture *fixture, size_t declared)
+{
+    sipral_codec_candidate_t candidate = { 0 };
+    candidate.size = declared;
+    sipral_handle_t media = media_handle_of(fixture);
+    if (media == SIPRAL_HANDLE_NONE) {
+        return SIPRAL_STATUS_WRONG_STATE;
+    }
+    sipral_status_t status = sipral_media_codec_candidate_at(media, 0, &candidate);
+    sipral_media_release(media);
+    return status;
+}
+
 static sipral_status_t stream_stats_at(struct fixture *fixture, size_t declared)
 {
     sipral_stream_stats_t stats = { 0 };
@@ -853,6 +866,7 @@ static const struct {
     { "sipral_account_config_t", account_config_at },
     { "sipral_call_config_t", call_config_at },
     { "sipral_codec_info_t", codec_info_at },
+    { "sipral_codec_candidate_t", codec_candidate_at },
     { "sipral_media_info_t", media_info_at },
     { "sipral_stream_stats_t", stream_stats_at },
     { "sipral_media_packet_t", media_packet_at },
@@ -1206,6 +1220,182 @@ static void headers_cross_a_call(void)
     sipral_stack_destroy(caller);
 }
 
+/* -- one call's own codec order ----------------------------------------------
+ *
+ * D6: the order is a property of the call, not of the process. Two calls off
+ * one stack, offering different formats, with no second stack anywhere.
+ */
+static int invite_out_of(sipral_handle_t stack, char *into, size_t capacity)
+{
+    for (int drained = 0; drained < 8; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            return 0;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (strncmp((const char *)message_buffer, "INVITE ", strlen("INVITE ")) != 0) {
+            continue;
+        }
+        if (transmit.len >= capacity) {
+            return 0;
+        }
+        memcpy(into, message_buffer, transmit.len + 1);
+        return 1;
+    }
+    return 0;
+}
+
+static void a_call_names_its_own_codecs(void)
+{
+    static const char stack_order[] = "PCMU";
+    static const char call_order[] = "G722";
+    static const char absent[] = "SILK";
+    static const char target[] = "sip:bob@example.com";
+    static const char media[] = "192.0.2.10:40000";
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the stack a call's own order is tried on", 0);
+        return;
+    }
+
+    sipral_stack_config_t config =
+        fixture_stack_config(sizeof config, entropy, media_seed);
+    config.codecs = stack_order;
+    config.codecs_len = strlen(stack_order);
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the stack a call's own order is tried on would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the account a call's own order is tried on was refused",
+           sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+
+    sipral_call_config_t call_config = { 0 };
+    call_config.size = sizeof call_config;
+    call_config.target = target;
+    call_config.target_len = strlen(target);
+    call_config.media_address = media;
+    call_config.media_address_len = strlen(media);
+    call_config.codecs = call_order;
+    call_config.codecs_len = strlen(call_order);
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    expect("a call naming its own order would not go out",
+           sipral_call_place(stack, account, &call_config, &call, 0) == SIPRAL_STATUS_OK);
+
+    char invite[SIPRAL_MESSAGE_BYTES];
+    expect("the INVITE a call's own order wrote never came out",
+           invite_out_of(stack, invite, sizeof invite));
+    expect("the call's own order did not reach its offer", strstr(invite, "G722") != NULL);
+    expect("the stack's order is in the offer of a call that overrode it",
+           strstr(invite, "PCMU") == NULL);
+
+    /* and the stack's own order is where it was: a per-call order that
+     * mutated the catalogue everything else shares would show up here */
+    sipral_call_config_t plain = call_config;
+    plain.codecs = NULL;
+    plain.codecs_len = 0;
+    sipral_handle_t second = SIPRAL_HANDLE_NONE;
+    expect("a second call on the same stack would not go out",
+           sipral_call_place(stack, account, &plain, &second, 0) == SIPRAL_STATUS_OK);
+    expect("the INVITE of the second call never came out",
+           invite_out_of(stack, invite, sizeof invite));
+    expect("the earlier call's order outlived the call",
+           strstr(invite, "PCMU") != NULL && strstr(invite, "G722") == NULL);
+
+    /* a name this build has no encoder for is refused where the caller still
+     * knows which string it passed, and nothing is placed */
+    sipral_call_config_t unknown = call_config;
+    unknown.codecs = absent;
+    unknown.codecs_len = strlen(absent);
+    sipral_handle_t nowhere = SIPRAL_HANDLE_NONE;
+    expect("a codec this build has no encoder for was accepted on a call",
+           sipral_call_place(stack, account, &unknown, &nowhere, 0) ==
+               SIPRAL_STATUS_NOT_SUPPORTED);
+    expect("the call that was refused handed back a handle anyway",
+           nowhere == SIPRAL_HANDLE_NONE);
+
+    sipral_stack_destroy(stack);
+}
+
+/* -- why each codec lost -----------------------------------------------------
+ *
+ * D5 through the ABI: a call that settled on one format, and the list saying
+ * what became of every other format this end could have offered. The
+ * integrator's question is "we configured Opus and the call is on G.711" and
+ * this is where it is answered, without a packet capture.
+ */
+static void every_codec_says_what_became_of_it(void)
+{
+    struct fixture fixture;
+    if (!fixture_up(&fixture)) {
+        return;
+    }
+    sipral_handle_t media = media_handle_of(&fixture);
+    expect("the fixture call has no media to explain", media != SIPRAL_HANDLE_NONE);
+    if (media == SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(fixture.stack);
+        return;
+    }
+
+    size_t candidates = 0;
+    expect("the call would not say how many codecs were in the running",
+           sipral_media_codec_candidate_count(media, &candidates) == SIPRAL_STATUS_OK);
+    expect("a call that negotiated a codec had none in the running", candidates > 0);
+
+    sipral_media_info_t info = { 0 };
+    info.size = sizeof info;
+    expect("the call would not say what it settled on",
+           sipral_media_info(media, &info) == SIPRAL_STATUS_OK);
+
+    unsigned chosen = 0;
+    for (size_t which = 0; which < candidates; which++) {
+        sipral_codec_candidate_t candidate = { 0 };
+        candidate.size = sizeof candidate;
+        expect("a candidate inside the count was refused",
+               sipral_media_codec_candidate_at(media, which, &candidate) == SIPRAL_STATUS_OK);
+        if (candidate.outcome == SIPRAL_CODEC_OUTCOME_CHOSEN) {
+            chosen++;
+            expect("the codec the call chose is not the codec it is using",
+                   candidate.codec == info.codec);
+            expect("something is said to have beaten the codec that won",
+                   candidate.outranked_by == SIPRAL_CODEC_UNKNOWN);
+        } else {
+            expect("a codec that did not win is not said to have lost either way",
+                   candidate.outcome == SIPRAL_CODEC_OUTCOME_NOT_NAMED ||
+                       candidate.outcome == SIPRAL_CODEC_OUTCOME_OUTRANKED);
+        }
+        /* the far end named one format, so nothing here can have been
+         * outranked -- and a candidate that was would have to name what beat
+         * it */
+        if (candidate.outcome == SIPRAL_CODEC_OUTCOME_OUTRANKED) {
+            expect("a codec was outranked by nothing",
+                   candidate.outranked_by != SIPRAL_CODEC_UNKNOWN);
+        }
+    }
+    expect("the list does not name exactly one codec as the one that won", chosen == 1);
+
+    sipral_codec_candidate_t past = { 0 };
+    past.size = sizeof past;
+    expect("a candidate index past the end was answered",
+           sipral_media_codec_candidate_at(media, candidates, &past) ==
+               SIPRAL_STATUS_INVALID_ARGUMENT);
+
+    sipral_media_release(media);
+    sipral_stack_destroy(fixture.stack);
+}
+
 static void sizes_agree(void)
 {
 #define ASK(type)                                                             \
@@ -1292,6 +1482,8 @@ int main(void)
     sizes_agree();
     oldest_lengths_still_work();
     headers_cross_a_call();
+    a_call_names_its_own_codecs();
+    every_codec_says_what_became_of_it();
 
     config.size = sizeof config;
     config.event_callback = on_event;

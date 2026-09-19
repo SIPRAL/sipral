@@ -215,11 +215,14 @@ trusts.
 
 - **A2, A3** — device enumeration with an identity that survives replug, gain,
   mute and a peak level cheap enough for a meter. *Built.* Selection per call
-  is the part that is not, and it is D6's rather than the device layer's.
+  is the part that is not, and it is D6's rather than the device layer's; the
+  codec and transport halves of D6 are across the ABI, the device half is not.
 - **A5** — call recording: the mixed conversation to one file, started and
   stopped mid-call. *Built.*
 - **A4** — codec enumeration and priority, and what a live call settled on.
-  *Built.* **D5**, the engine explaining why the other candidates lost, is not.
+  *Built*, and with it **D5**'s codec half: the engine says what became of
+  every candidate that lost, through `sipral_media_codec_candidate_count` and
+  `..._at`. D5's transport and NAT half is not built anywhere.
 - **A7, D4** — the network-change entry point and the lifecycle model behind
   it, with tests that suspend and resume under adverse conditions. *Built*, and
   it brought `RegistrationState::Unverified` with it: a monotonic clock cannot
@@ -249,7 +252,9 @@ trusts.
   bindings in the gate is still to be added, and the ABI does not freeze
   before it is.
 - **D6** — device, codec and transport as properties of a call rather than of
-  the process. *Built* in Rust; the transport half is not yet across the ABI.
+  the process. *Built* in Rust, and the codec and transport halves are across
+  the ABI: `sipral_call_config_t` carries `codecs` and `transport` beside
+  `media_address` and `srtp`. The device half waits on A2 crossing at all.
 
 **What is built in Rust and cannot be reached through `sipral.h`** — the list
 phase 3 closes before the ABI freezes, because each of these is a shape and a
@@ -276,8 +281,9 @@ shape is permanent once published:
   RFC 8599 half of C3 (`sipral_account_announce`,
   `sipral_account_refresh_binding`, `sipral_announcement_forget`,
   `sipral_account_push_echo`, the four push members on
-  `sipral_account_config_t`, and event kinds 20 and 31). Left: the freeze and
-  thaw half of C3, and D5;
+  `sipral_account_config_t`, and event kinds 20 and 31), and D5's codec half
+  (`sipral_media_codec_candidate_count`, `..._at` and
+  `sipral_codec_candidate_t`). Left: the freeze and thaw half of C3;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
   reports it; it becomes a member of the stack and call configuration.
   *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on
@@ -285,14 +291,18 @@ shape is permanent once published:
   unspecified;
 - no event says who is calling; `From`, `To` and `Call-ID` join the call event,
   from the core's own parse, so no binding writes a SIP parser to show a
-  caller;
+  caller. *Built*: `sipral_call_event_t` carries the display name, the address
+  of record and the `Call-ID` of the call it is about;
 - application header fields on requests and responses, and a way to read any
   field back out. *Built*: `sipral_header_t` in `headers`/`headers_len` on the
   call and account configurations, `sipral_call_set_headers` for what a call
   sends at the application's request, and `sipral_message_header` with its
   three siblings over the core's parser;
 - a transfer accepted through the ABI places an INVITE with no offer; the
-  entry point takes a call configuration like `sipral_call_place`;
+  entry point takes a call configuration like `sipral_call_place`. *Built*:
+  `sipral_call_accept_transfer` takes a `sipral_call_config_t`, reads
+  `destination`, `keep_all_forks`, `headers`, `srtp` and `codecs` from it, and
+  refuses `target`, which the REFER already named;
 - one transport per stack, and a registrar that cannot be re-pointed: a
   transport per account and per call, `sipral_account_retarget`, and the
   resolve request as an event with its answer;

@@ -61,8 +61,9 @@ use std::slice;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Arrival, Codec, CodecCatalog, Direction, MediaError, MediaSession, Playback, RtcpPlan,
-    SessionShare, SessionUnavailable, SrtpPolicy, StreamStatistics,
+    Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, MediaError,
+    MediaSession, Playback, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
+    StreamStatistics,
 };
 use sipral_core::sdp::SdpError;
 
@@ -174,6 +175,33 @@ codes! {
         /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
         /// `sipral_codec_at` enumerates, never the presence of this name.
         Opus = 4,
+    }
+}
+
+codes! {
+    /// What became of one codec this call's catalogue could have used. Names
+    /// for [`SipralCodecCandidate::outcome`].
+    ///
+    /// D5's codec half: a negotiation that ends in G.711 when the site
+    /// configured Opus is a support call, and the answer to it is a list
+    /// saying which of the two things happened — the far end never named
+    /// Opus, or it named it and something ahead of it in this end's order
+    /// won.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralCodecOutcome: u32 {
+        /// Not an outcome: either the candidate is from a build this ABI has
+        /// no number for, or the struct was never filled in.
+        Unknown = 0,
+        /// This is what the call agreed on. Exactly one candidate carries it,
+        /// and it names the same codec as `sipral_media_info_t::codec`.
+        Chosen = 1,
+        /// The far end's description did not name it, so it was never in the
+        /// running. The commonest answer, and the one that says the question
+        /// is about the far end's configuration rather than this one's.
+        NotNamed = 2,
+        /// The far end named it and this end had something better: the codec
+        /// in `outranked_by` came first in this call's order.
+        Outranked = 3,
     }
 }
 
@@ -313,6 +341,44 @@ record! {
 unsafe impl Versioned for SipralCodecInfo {
     const NAME: &'static str = "sipral_codec_info";
     const MIN_SIZE: usize = crate::versioned::min_size::CODEC_INFO;
+
+    fn set_declared_size(&mut self, bytes: usize) {
+        self.size = bytes;
+    }
+}
+
+record! {
+    /// One codec this call could have used, and what became of it.
+    ///
+    /// Set `size` to `sizeof(sipral_codec_candidate_t)` before the call.
+    ///
+    /// The list is what the negotiation itself decided, kept from the moment
+    /// it decided it. It is not worked out again when it is asked for, because
+    /// a second run against a description that has since been renegotiated
+    /// would disagree with the first in exactly the case somebody is
+    /// debugging.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SipralCodecCandidate {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// A [`SipralCodec`]: the candidate itself.
+        pub codec: u32,
+        /// A [`SipralCodecOutcome`]: what became of it.
+        pub outcome: u32,
+        /// A [`SipralCodec`]: what beat it, when `outcome` is
+        /// `SIPRAL_CODEC_OUTCOME_OUTRANKED`. `SIPRAL_CODEC_UNKNOWN`
+        /// otherwise, because nothing beat a codec that was never named and
+        /// nothing beat the one that won.
+        pub outranked_by: u32,
+    }
+}
+
+// Safety: integers, no invariant between them, and zero is a valid value of
+// each — a zeroed one reads as the codec that is not a codec, with the outcome
+// that is not an outcome.
+unsafe impl Versioned for SipralCodecCandidate {
+    const NAME: &'static str = "sipral_codec_candidate";
+    const MIN_SIZE: usize = crate::versioned::min_size::CODEC_CANDIDATE;
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -737,6 +803,18 @@ pub(crate) fn catalog_of(
 
 /// The codec order a caller wrote, as a catalogue.
 fn ordered(list: &str) -> Result<CodecCatalog, Fail> {
+    CodecCatalog::with_order(&names_in(list)?).map_err(|error| media_failed(&error))
+}
+
+/// The codec names a caller wrote, as a list, checked for the two faults that
+/// are the list's own rather than any one name's.
+///
+/// Separate from [`ordered`] because a call names its order on a structure
+/// that is read before the stack is locked, and the catalogue it becomes can
+/// only be derived from the stack's own once it is. The names are checked at
+/// the first of those two moments, where the caller still knows which string
+/// it passed.
+pub(crate) fn names_in(list: &str) -> Result<Vec<&str>, Fail> {
     let named: Vec<&str> = list.split(',').map(str::trim).collect();
     if let Some(empty) = named.iter().position(|name| name.is_empty()) {
         return Err(fail(
@@ -759,7 +837,7 @@ fn ordered(list: &str) -> Result<CodecCatalog, Fail> {
             ));
         }
     }
-    CodecCatalog::with_order(&named).map_err(|error| media_failed(&error))
+    Ok(named)
 }
 
 // -- reaching one call's media -----------------------------------------------
@@ -1070,6 +1148,83 @@ entry! {
         unsafe { crate::versioned::declared_size(out_info.cast_const()) }?;
         let info = with_media(media, |session, _| Ok(media_info(session)))?;
         unsafe { write_versioned(out_info, info) }
+    }
+}
+
+entry! {
+    /// How many codecs were in the running on this call.
+    ///
+    /// This call's own catalogue, which is the stack's order unless
+    /// `sipral_call_config_t::codecs` named another. Zero is an answer, not a
+    /// failure: a call negotiated from a description with no media line in it
+    /// had nothing in the running at all.
+    ///
+    /// # Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    fn sipral_media_codec_candidate_count(media: SipralHandle, out_count: *mut usize) {
+        if out_count.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_count is null"));
+        }
+        let count = with_media(media, |session, _| Ok(session.codec_candidates().len()))?;
+        unsafe { out_count.write(count) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// One of them, by index, from zero to what
+    /// `sipral_media_codec_candidate_count` said, in this call's own order.
+    ///
+    /// D5 in one place: what this end offered, what the far end named, and
+    /// which of the two ran out first. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+    ///
+    /// # Safety
+    ///
+    /// `out_candidate` must point at a `sipral_codec_candidate_t` whose `size`
+    /// member says how long it is.
+    fn sipral_media_codec_candidate_at(
+        media: SipralHandle,
+        index: usize,
+        out_candidate: *mut SipralCodecCandidate,
+    ) {
+        // checked before the handle is even looked up, so a caller that got
+        // its size wrong is told that rather than something about the call
+        unsafe { crate::versioned::declared_size(out_candidate.cast_const()) }?;
+        let candidate = with_media(media, |session, _| {
+            let candidates = session.codec_candidates();
+            let Some(candidate) = candidates.get(index) else {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!(
+                        "there is no candidate {index}; this call had {} in the running",
+                        candidates.len()
+                    ),
+                ));
+            };
+            Ok(candidate_of(candidate))
+        })?;
+        unsafe { write_versioned(out_candidate, candidate) }
+    }
+}
+
+/// What the negotiation recorded about one codec, as the numbers this ABI has
+/// for it.
+fn candidate_of(candidate: &CodecCandidate) -> SipralCodecCandidate {
+    let (outcome, outranked_by) = match &candidate.outcome {
+        CodecOutcome::Chosen => (SipralCodecOutcome::Chosen, SipralCodec::Unknown),
+        CodecOutcome::NotNamed => (SipralCodecOutcome::NotNamed, SipralCodec::Unknown),
+        CodecOutcome::Outranked(winner) => (SipralCodecOutcome::Outranked, named_codec(*winner)),
+        // the layer below has grown an outcome this ABI has no number for,
+        // and saying so beats picking one that is wrong
+        _ => (SipralCodecOutcome::Unknown, SipralCodec::Unknown),
+    };
+    SipralCodecCandidate {
+        size: size_of::<SipralCodecCandidate>(),
+        codec: named_codec(candidate.codec) as u32,
+        outcome: outcome as u32,
+        outranked_by: outranked_by as u32,
     }
 }
 
@@ -1581,13 +1736,15 @@ pub(crate) mod tests {
     use super::toggled;
     use super::{
         Codec, SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralArrival, SipralCodec,
-        SipralCodecInfo, SipralDirection, SipralMediaFault, SipralMediaInfo, SipralMediaPacket,
-        SipralPlayback, SipralRtcp, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of,
-        media_failed, named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
-        sipral_codec_name, sipral_media_capture, sipral_media_dialling, sipral_media_info,
-        sipral_media_playback, sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
-        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
-        sipral_stack_poll_farewell, srtp_policy,
+        SipralCodecCandidate, SipralCodecInfo, SipralCodecOutcome, SipralDirection,
+        SipralMediaFault, SipralMediaInfo, SipralMediaPacket, SipralPlayback, SipralRtcp,
+        SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, media_failed, named_codec,
+        ordered, sipral_call_media, sipral_codec_at, sipral_codec_count, sipral_codec_name,
+        sipral_media_capture, sipral_media_codec_candidate_at, sipral_media_codec_candidate_count,
+        sipral_media_dialling, sipral_media_info, sipral_media_playback, sipral_media_poll_rtcp,
+        sipral_media_receive, sipral_media_release, sipral_media_statistics,
+        sipral_media_stop_dialling, sipral_stack_codec_order, sipral_stack_poll_farewell,
+        srtp_policy,
     };
     use crate::call::tests::{
         ANSWER, PEER_MEDIA, accepted, account_on, connected, deliver, hangup, managed_config,
@@ -2227,6 +2384,145 @@ a=sendrecv\r\n";
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
+        );
+    }
+
+    /// A far end that names two of the three formats this end offered, so
+    /// that one negotiation produces all three outcomes at once.
+    const TWO_FORMATS: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 8 9\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:9 G722/8000\r\n\
+a=sendrecv\r\n";
+
+    fn candidate_count(media: SipralHandle) -> usize {
+        let mut count = usize::MAX;
+        let status = unsafe { sipral_media_codec_candidate_count(media, &raw mut count) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        count
+    }
+
+    fn candidate_zeroed() -> SipralCodecCandidate {
+        SipralCodecCandidate {
+            size: size_of::<SipralCodecCandidate>(),
+            codec: u32::MAX,
+            outcome: u32::MAX,
+            outranked_by: u32::MAX,
+        }
+    }
+
+    fn candidate_at(media: SipralHandle, index: usize) -> SipralCodecCandidate {
+        let mut candidate = candidate_zeroed();
+        let status = unsafe { sipral_media_codec_candidate_at(media, index, &raw mut candidate) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        candidate
+    }
+
+    /// D5, the codec half: the list names every codec this call could have
+    /// used and what became of each. The far end named two of the three, so
+    /// all three answers are in one negotiation — the one that won, the one
+    /// it beat, and the one that was never in the running at all.
+    #[test]
+    fn every_codec_this_call_could_have_used_says_what_became_of_it() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_offering(&mut observed, "PCMU,PCMA,G722", TWO_FORMATS);
+        let media = media_of(stack, call);
+
+        assert_eq!(candidate_count(media), 3, "one entry per codec offered");
+
+        let never = candidate_at(media, 0);
+        assert_eq!(never.codec, SipralCodec::Pcmu as u32);
+        assert_eq!(never.outcome, SipralCodecOutcome::NotNamed as u32);
+        assert_eq!(
+            never.outranked_by,
+            SipralCodec::Unknown as u32,
+            "nothing beat a codec that was never named"
+        );
+
+        let won = candidate_at(media, 1);
+        assert_eq!(won.codec, SipralCodec::Pcma as u32);
+        assert_eq!(won.outcome, SipralCodecOutcome::Chosen as u32);
+        assert_eq!(won.outranked_by, SipralCodec::Unknown as u32);
+
+        let beaten = candidate_at(media, 2);
+        assert_eq!(beaten.codec, SipralCodec::G722 as u32);
+        assert_eq!(beaten.outcome, SipralCodecOutcome::Outranked as u32);
+        assert_eq!(
+            beaten.outranked_by,
+            SipralCodec::Pcma as u32,
+            "the answer does not say what beat it"
+        );
+
+        // and the one that won is the one the call is actually using, which
+        // is what makes this list an explanation of that number rather than a
+        // second opinion about it
+        assert_eq!(won.codec, media_info(media).codec);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The list is this call's own catalogue, so a call that named its own
+    /// order has exactly that order in it and nothing the stack offers
+    /// besides.
+    #[test]
+    fn the_candidates_are_the_calls_own_order_not_the_stacks() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_offering(&mut observed, "PCMA", TWO_FORMATS);
+        let media = media_of(stack, call);
+        assert_eq!(candidate_count(media), 1);
+        let only = candidate_at(media, 0);
+        assert_eq!(only.codec, SipralCodec::Pcma as u32);
+        assert_eq!(only.outcome, SipralCodecOutcome::Chosen as u32);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// An index past the end names how many there are, the way every other
+    /// indexed reader in this ABI does.
+    #[test]
+    fn a_candidate_index_past_the_end_says_how_many_there_are() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_offering(&mut observed, "PCMU,PCMA", ANSWER);
+        let media = media_of(stack, call);
+        let mut candidate = candidate_zeroed();
+        assert_eq!(
+            unsafe { sipral_media_codec_candidate_at(media, 2, &raw mut candidate) },
+            SipralStatus::InvalidArgument
+        );
+        let said = last_error_text();
+        assert!(said.contains('2') && said.contains("had 2"), "{said}");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// And the size is checked before the handle is looked up, the same way
+    /// `sipral_media_info` checks it, so a caller that got its header wrong
+    /// is told that rather than something about the call.
+    #[test]
+    fn a_candidate_struct_shorter_than_its_min_size_is_unsupported_version() {
+        let mut candidate = candidate_zeroed();
+        candidate.size = crate::versioned::min_size::CODEC_CANDIDATE - 1;
+        assert_eq!(
+            unsafe { sipral_media_codec_candidate_at(SIPRAL_HANDLE_NONE, 0, &raw mut candidate) },
+            SipralStatus::UnsupportedVersion
+        );
+    }
+
+    #[test]
+    fn a_null_candidate_count_is_invalid_argument() {
+        assert_eq!(
+            unsafe { sipral_media_codec_candidate_count(SIPRAL_HANDLE_NONE, ptr::null_mut()) },
+            SipralStatus::InvalidArgument
         );
     }
 

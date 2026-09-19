@@ -177,6 +177,30 @@ public enum SipralCodec: UInt32, Sendable {
     case opus = 4
 }
 
+/// What became of one codec this call's catalogue could have used. Names
+/// for sipral_codec_candidate_t.outcome.
+///
+/// D5's codec half: a negotiation that ends in G.711 when the site
+/// configured Opus is a support call, and the answer to it is a list
+/// saying which of the two things happened — the far end never named
+/// Opus, or it named it and something ahead of it in this end's order
+/// won.
+public enum SipralCodecOutcome: UInt32, Sendable {
+    /// Not an outcome: either the candidate is from a build this ABI has
+    /// no number for, or the struct was never filled in.
+    case unknown = 0
+    /// This is what the call agreed on. Exactly one candidate carries it,
+    /// and it names the same codec as `sipral_media_info_t::codec`.
+    case chosen = 1
+    /// The far end's description did not name it, so it was never in the
+    /// running. The commonest answer, and the one that says the question
+    /// is about the far end's configuration rather than this one's.
+    case notNamed = 2
+    /// The far end named it and this end had something better: the codec
+    /// in `outranked_by` came first in this call's order.
+    case outranked = 3
+}
+
 /// Which way audio may flow, as seen from here. Names for every `direction`.
 public enum SipralDirection: UInt32, Sendable {
     /// Not negotiated.
@@ -950,6 +974,16 @@ public extension sipral_codec_info_t {
     }
 }
 
+public extension sipral_codec_candidate_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 public extension sipral_media_info_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
@@ -1154,7 +1188,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 15
+    public static let abiVersionMinor: UInt32 = 16
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2084,6 +2118,10 @@ public enum Sipral {
     /// this has set it, `sipral_call_answer_media` keeps it: it is answering
     /// a call that already has a catalogue, not choosing one.
     ///
+    /// `config.codecs` overrides the stack's codec order for this call in the
+    /// same way and for the same window: the answer written here is written
+    /// from it, and `sipral_call_answer_media` keeps what it settled.
+    ///
     /// `sipral_call_answer_media` after this reuses the session and the
     /// description written here rather than negotiating a second one. What
     /// the 200 OK it sends carries then follows RFC 3262 §5 and RFC 6337
@@ -2643,6 +2681,43 @@ public enum Sipral {
         let status = sipral_media_info(media, &info)
         try check(status)
         return info
+    }
+
+    /// How many codecs were in the running on this call.
+    ///
+    /// This call's own catalogue, which is the stack's order unless
+    /// `sipral_call_config_t::codecs` named another. Zero is an answer, not a
+    /// failure: a call negotiated from a description with no media line in it
+    /// had nothing in the running at all.
+    ///
+    /// Safety
+    ///
+    /// `out_count` must point at one `size_t`.
+    public static func mediaCodecCandidateCount(media: SipralHandle) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status = sipral_media_codec_candidate_count(media, &count)
+        try check(status)
+        return count
+    }
+
+    /// One of them, by index, from zero to what
+    /// `sipral_media_codec_candidate_count` said, in this call's own order.
+    ///
+    /// D5 in one place: what this end offered, what the far end named, and
+    /// which of the two ran out first. An index past the end is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` naming how many there are.
+    ///
+    /// Safety
+    ///
+    /// `out_candidate` must point at a `sipral_codec_candidate_t` whose `size`
+    /// member says how long it is.
+    public static func mediaCodecCandidateAt(media: SipralHandle, index: Int) throws -> sipral_codec_candidate_t {
+        try ensureAbi()
+        var candidate = sipral_codec_candidate_t.sized()
+        let status = sipral_media_codec_candidate_at(media, index, &candidate)
+        try check(status)
+        return candidate
     }
 
     /// What one call's media has cost, and what it is costing now.
