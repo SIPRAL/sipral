@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use sipral_core::auth::Credentials;
 use sipral_core::msg::{HeaderName, Uri};
-use sipral_ua::{Account, HeadersFor};
+use sipral_ua::{Account, HeadersFor, Push};
 
 use crate::abi::record;
 use crate::call::ua_failed;
@@ -126,6 +126,45 @@ record! {
         /// unmoved, and what a caller built before this member existed never
         /// sent reads as the zero that already means "the main transport".
         pub transport: u32,
+        /// The push notification service to be woken through, as its
+        /// registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
+        /// for an account that is not woken by push, which is every account on
+        /// a machine that does not suspend.
+        ///
+        /// These four go on the `Contact` of this account's REGISTER and on no
+        /// other request, ever: §4.1 says so because a `pn-prid` in the
+        /// `Contact` of an INVITE hands the far end a token that wakes this
+        /// device whenever it likes. The de-registration that gives the binding
+        /// up leaves the identifier out, which §4.1.2 also requires.
+        pub push_provider: *const c_char,
+        /// How many bytes of it.
+        pub push_provider_len: usize,
+        /// The resource identifier the service issued for this installation —
+        /// the device token. Required when `push_provider` is given, and
+        /// refused without one.
+        ///
+        /// Whatever it holds is percent-escaped where the SIP grammar needs it
+        /// (§8.7), because an APNs token carries `=` and a Web Push identifier
+        /// is a whole URL.
+        pub push_prid: *const c_char,
+        /// How many bytes of it.
+        pub push_prid_len: usize,
+        /// The extra value a service needs beside the identifier: the
+        /// application bundle for Apple, the sender for Firebase. §4.1.1 makes
+        /// it mandatory "if required for the specific PNS", so it is optional
+        /// here and the service decides.
+        pub push_param: *const c_char,
+        /// How many bytes of it.
+        pub push_param_len: usize,
+        /// Nonzero to say this device can send a binding refresh without being
+        /// woken by a push, which §4.1.4 makes it declare with a
+        /// `+sip.pnsreg` media feature tag.
+        ///
+        /// It is the application's fact and not this library's to guess: a
+        /// process the operating system has suspended has no timer that runs,
+        /// and one that claims otherwise gets a registrar that stops sending
+        /// the wake-ups the device is relying on.
+        pub push_wakes_itself: u32,
     }
 }
 
@@ -179,6 +218,51 @@ fn address(supplied: &str, name: &'static str) -> Result<SocketAddr, Fail> {
             format!("{name} is {supplied:?}, which is not an address and a port"),
         )
     })
+}
+
+/// The push service an account asks to be woken through, or nothing when it
+/// asked for none.
+///
+/// # Safety
+///
+/// Every push pointer in `config` must be readable for the length beside it.
+unsafe fn push_from(config: &SipralAccountConfig) -> Result<Option<Push>, Fail> {
+    let provider = unsafe {
+        text(
+            config.push_provider,
+            config.push_provider_len,
+            "push_provider",
+        )
+    }?;
+    let prid = unsafe { text(config.push_prid, config.push_prid_len, "push_prid") }?;
+    let param = unsafe { text(config.push_param, config.push_param_len, "push_param") }?;
+    let (Some(provider), Some(prid)) = (provider, prid) else {
+        // a provider with no identifier is a `Contact` naming a service and no
+        // device, which a registrar takes and nothing ever wakes
+        if provider.is_some() || prid.is_some() || param.is_some() {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "push_provider and push_prid go together: a service with no device to wake, or a \
+                 device with no service to wake it through, is a binding nothing ever rings",
+            ));
+        }
+        if config.push_wakes_itself != 0 {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "push_wakes_itself says how an account already asking for push refreshes its \
+                 binding, and this one asks for none",
+            ));
+        }
+        return Ok(None);
+    };
+    let mut push = Push::new(provider, prid);
+    if let Some(param) = param {
+        push = push.param(param);
+    }
+    if config.push_wakes_itself != 0 {
+        push = push.wakes_itself();
+    }
+    Ok(Some(push))
 }
 
 /// Turn what crossed the boundary into an account, or say what was wrong.
@@ -269,6 +353,9 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }
     if let Some(instance) = instance {
         account = account.instance_id(instance);
+    }
+    if let Some(push) = unsafe { push_from(config) }? {
+        account = account.push(push);
     }
     if config.expires_seconds != 0 {
         account = account.expires(expiry(config.expires_seconds)?);
@@ -439,7 +526,7 @@ pub(crate) mod tests {
         (value.as_ptr().cast::<c_char>(), value.len())
     }
 
-    fn account_config() -> SipralAccountConfig {
+    pub(crate) fn account_config() -> SipralAccountConfig {
         let (aor, aor_len) = text(AOR);
         let (registrar, registrar_len) = text(REGISTRAR);
         let (contact, contact_len) = text(CONTACT);
@@ -466,6 +553,13 @@ pub(crate) mod tests {
             headers: ptr::null(),
             headers_len: 0,
             transport: 0,
+            push_provider: ptr::null(),
+            push_provider_len: 0,
+            push_prid: ptr::null(),
+            push_prid_len: 0,
+            push_param: ptr::null(),
+            push_param_len: 0,
+            push_wakes_itself: 0,
         }
     }
 

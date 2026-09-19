@@ -302,7 +302,6 @@ public enum SipralDtmf: UInt32, Sendable {
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 20: a call was announced and never arrived (C2)
 /// - 29: the application is asked to resolve a destination
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
@@ -381,6 +380,16 @@ public enum SipralEventKind: UInt32, Sendable {
     /// whether to hang up over silence is a decision with a person on the other
     /// end of it.
     case mediaStalled = 19
+    /// A call a push announced never arrived.
+    ///
+    /// C2, and not an error. A wake-up chain has a notification service,
+    /// a proxy, a bucket timer and a radio in it, and when a call does not
+    /// come through it this is the only place that says which end gave up:
+    /// the push was delivered, this device woke, refreshed its binding,
+    /// and no INVITE followed. `payload.announce` says which announcement
+    /// and how long it was waited for; the screen the application raised
+    /// can come down.
+    case announcedCallMissing = 20
     /// Audio is running: the negotiation settled and an RTP session is open.
     ///
     /// A4's reporting half and the first half of D5: `payload.media.codec` is
@@ -448,6 +457,22 @@ public enum SipralEventKind: UInt32, Sendable {
     /// known beats one showing what a malformed document happened to
     /// contain.
     case notified = 30
+    /// The INVITE for a call a push had already announced has arrived
+    /// (RFC 8599).
+    ///
+    /// C2's other half. Queued immediately before the
+    /// SipralEventKind.incomingCall naming the same call, and never
+    /// without one, so that an application reading its events in order
+    /// knows which screen the call belongs to before it is told there is a
+    /// call at all. That is the whole point: on a phone the ringing screen
+    /// exists first, and a stack that reports the INVITE without saying
+    /// which announcement it answers has made the application guess.
+    ///
+    /// `call` is the call, and `payload.announce.announcement` what
+    /// announced it. That announcement is spent: it is not waited for any
+    /// more, and `sipral_announcement_forget` on it answers
+    /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+    case callAnnounced = 31
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1015,6 +1040,16 @@ public extension sipral_watched_dialog_t {
     }
 }
 
+public extension sipral_push_echo_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field an application hands over: a name and a value, UTF-8,
 /// neither NUL-terminated.
 ///
@@ -1119,7 +1154,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 14
+    public static let abiVersionMinor: UInt32 = 15
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -1779,6 +1814,114 @@ public enum Sipral {
             }
         try check(status)
         return needed
+    }
+
+    /// A call is expected on this account, announced by a push (C2).
+    ///
+    /// `caller` is whoever the notification said is calling, as a SIP URI.
+    /// The binding is refreshed at once on whatever path exists — §4.1.3
+    /// makes that a MUST for a woken agent, and a transport the application
+    /// has not opened yet is the ordinary shape of a wake-up, so the REGISTER
+    /// is owed and goes the moment one is bound.
+    ///
+    /// Exactly one of the two values written back names something, and which
+    /// one is a race the caller cannot control:
+    ///
+    /// - `out_announcement` when nothing has arrived yet. The INVITE that
+    ///   matches will be reported as `SIPRAL_EVENT_KIND_CALL_ANNOUNCED`
+    ///   naming this announcement, immediately before the
+    ///   `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call; and
+    ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` when none does.
+    /// - `out_call` when the INVITE beat the push. The screen just raised
+    ///   belongs to that call handle, and no announcement was recorded for it
+    ///   to answer. A `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` still arrives for it
+    ///   when the incoming-call event has not been delivered yet, because the
+    ///   two are queued together and in that order; once it has, this return
+    ///   value is the only word about the match there will be.
+    ///
+    /// An account with no registrar has no binding to refresh, and for one of
+    /// those only the matching happens.
+    ///
+    /// Safety
+    ///
+    /// `caller` must be readable for `caller_len` bytes, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    public static func accountAnnounce(stack: SipralHandle, account: SipralHandle, caller: String, nowMs: UInt64) throws -> (announcement: SipralHandle, call: SipralHandle) {
+        try ensureAbi()
+        var announcement = SipralHandle()
+        var call = SipralHandle()
+        let status =
+            Array(caller.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    sipral_account_announce(stack, account, p2.baseAddress, p2.count, &announcement, &call, nowMs)
+                }
+            }
+        try check(status)
+        return (announcement: announcement, call: call)
+    }
+
+    /// Refresh the binding now, without announcing anything (C3).
+    ///
+    /// For the periodic wake-up a proxy sends to keep a suspended device's
+    /// binding alive (RFC 8599 §5.5). A push is evidence that the path to the
+    /// proxy is working, so a back-off earned by an earlier outage is not
+    /// what to wait for now and is dropped.
+    ///
+    /// Nothing is sent when a REGISTER is already in flight, which is already
+    /// the fastest path, or when the registration has failed in a way trying
+    /// again cannot fix — repeating a password that was refused is how an
+    /// account gets locked out, and a push does not change that. Both of those
+    /// are `SIPRAL_STATUS_OK`: the refresh was asked for and the answer is
+    /// that nothing needed sending.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers,
+    /// which has no binding to refresh: it is the account that is wrong for
+    /// this call, not the build that is missing the feature. A send that could
+    /// not happen because no transport is bound yet is reported too, and is
+    /// not fatal: the refresh is remembered and goes out the moment one is.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func accountRefreshBinding(stack: SipralHandle, account: SipralHandle, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status = sipral_account_refresh_binding(stack, account, nowMs)
+        try check(status)
+    }
+
+    /// Stop expecting an announced call.
+    ///
+    /// The user dismissed the screen, or the application decided the wake-up
+    /// was stale. `SIPRAL_STATUS_WRONG_STATE` when it had already been
+    /// fulfilled or had already expired, which is not a mistake: the event
+    /// that said so and this call can cross.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    public static func announcementForget(stack: SipralHandle, announcement: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_announcement_forget(stack, announcement)
+        try check(status)
+    }
+
+    /// What the registrar said about push, in the 2xx to the REGISTER that
+    /// asked for it.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` when this account did not ask for push,
+    /// or when no binding it could have been said about is standing — none
+    /// granted yet, one given up, or one that has lapsed.
+    ///
+    /// Safety
+    ///
+    /// `out_echo` must point at a `sipral_push_echo_t` whose `size` member
+    /// says how long it is.
+    public static func accountPushEcho(stack: SipralHandle, account: SipralHandle) throws -> sipral_push_echo_t {
+        try ensureAbi()
+        var echo = sipral_push_echo_t.sized()
+        let status = sipral_account_push_echo(stack, account, &echo)
+        try check(status)
+        return echo
     }
 
     /// Configure an account, and write its handle to `out_account`.

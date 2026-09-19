@@ -112,7 +112,9 @@ use std::time::{Duration, Instant};
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
 use sipral_core::transaction::TimerConfig;
-use sipral_ua::{AccountId, CallHandle, CallIdentity, SubscriptionHandle, UaEvent, UserAgent};
+use sipral_ua::{
+    AccountId, AnnouncementId, CallHandle, CallIdentity, SubscriptionHandle, UaEvent, UserAgent,
+};
 
 use crate::abi::{codes, record};
 use crate::error::{Fail, entry, fail};
@@ -711,6 +713,8 @@ pub(crate) struct StackState {
     /// SUBSCRIBE be answered by two notifiers, and the sibling is named here
     /// when its event is translated rather than when a call asked for it.
     pub(crate) subscriptions: Names<SubscriptionHandle>,
+    /// Every call a push announced and no INVITE has answered yet.
+    pub(crate) announcements: Names<AnnouncementId>,
     /// Who is on every call this stack still knows: the `From` and `To` of
     /// the request that opened it, fixed since. Read once, at that moment,
     /// because by the time a call has ended the layer below has already let
@@ -1221,6 +1225,7 @@ pub(crate) unsafe fn create_on(
             accounts: Names::new(&tag, Kind::Account),
             calls: Names::new(&tag, Kind::Call),
             subscriptions: Names::new(&tag, Kind::Subscription),
+            announcements: Names::new(&tag, Kind::Announcement),
             identities: HashMap::new(),
             tag,
             transports: Transports::new(speaks.protocol()),
@@ -1554,6 +1559,7 @@ fn signalling(
         accounts: &mut state.accounts,
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
+        announcements: &mut state.announcements,
         identities: &state.identities,
         raised_identity: None,
     };
@@ -1593,6 +1599,7 @@ fn media(
         accounts: &mut state.accounts,
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
+        announcements: &mut state.announcements,
         identities: &state.identities,
         raised_identity: None,
     };

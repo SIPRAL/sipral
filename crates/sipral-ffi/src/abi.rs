@@ -510,6 +510,7 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
         "SipralWatchedDialog",
         crate::versioned::min_size::WATCHED_DIALOG,
     ),
+    ("SipralPushEcho", crate::versioned::min_size::PUSH_ECHO),
     ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
     // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
     // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
@@ -597,12 +598,14 @@ pub const SURFACE: Surface = Surface {
         crate::event::SipralRecoveryEvent::ABI,
         crate::event::SipralTransportWantedEvent::ABI,
         crate::event::SipralSubscriptionEvent::ABI,
+        crate::event::SipralAnnounceEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
         crate::screening::SipralScreenRequest::ABI,
         crate::subscription::SipralSubscribeConfig::ABI,
         crate::subscription::SipralWatchedDialog::ABI,
+        crate::announce::SipralPushEcho::ABI,
     ],
     constants: &[
         crate::handle::ABI_CONSTANTS,
@@ -634,6 +637,10 @@ pub const SURFACE: Surface = Surface {
         crate::subscription::sipral_subscription_dialog_count::ABI,
         crate::subscription::sipral_subscription_dialog_at::ABI,
         crate::subscription::sipral_subscription_dialog_text::ABI,
+        crate::announce::sipral_account_announce::ABI,
+        crate::announce::sipral_account_refresh_binding::ABI,
+        crate::announce::sipral_announcement_forget::ABI,
+        crate::announce::sipral_account_push_echo::ABI,
         crate::account::sipral_account_add::ABI,
         crate::account::sipral_account_remove::ABI,
         crate::account::sipral_account_register::ABI,
@@ -871,6 +878,7 @@ mod tests {
             "SipralRecoveryEvent",
             "SipralTransportWantedEvent",
             "SipralSubscriptionEvent",
+            "SipralAnnounceEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

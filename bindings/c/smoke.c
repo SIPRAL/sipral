@@ -38,7 +38,7 @@
     X(sipral_media_info) X(sipral_stream_stats) X(sipral_media_packet)        \
     X(sipral_transmit) X(sipral_event) X(sipral_suspending)                  \
     X(sipral_screen_request) X(sipral_subscribe_config)                       \
-    X(sipral_watched_dialog)
+    X(sipral_watched_dialog) X(sipral_push_echo)
 
 static int failures;
 
@@ -145,6 +145,8 @@ static const char fixture_target[] = "sip:dave@example.com";
 static const char fixture_media[] = "192.0.2.30:40000";
 static const char fixture_peer[] = "203.0.113.5:5060";
 static const char fixture_watched[] = "sip:dave@example.com";
+static const char fixture_push_provider[] = "apns";
+static const char fixture_push_prid[] = "smoke-device-token";
 
 /* One dialog on the watched extension, ringing, so that the table a busy
  * lamp field reads has a row in it. */
@@ -189,6 +191,7 @@ static void on_event_ignored(const sipral_event_t *event, void *user_data)
 /* Below, beside the two structs a busy lamp field reads, because it is what
  * fills their table in. */
 static int fixture_subscribe(struct fixture *fixture);
+static int fixture_register(struct fixture *fixture);
 
 /* The one thing the fixture's own stack reports that it keeps: the call that
  * came in. */
@@ -240,6 +243,14 @@ static sipral_account_config_t fixture_account_config(size_t declared)
     config.contact_len = strlen(fixture_contact);
     config.registrar_address = fixture_registrar_address;
     config.registrar_address_len = strlen(fixture_registrar_address);
+    /* woken through a notification service, because one of the structs below
+     * is what the registrar answered about that. Every one of these goes on
+     * the REGISTER's Contact and on no other request, so the call this
+     * fixture also places is unaffected. */
+    config.push_provider = fixture_push_provider;
+    config.push_provider_len = strlen(fixture_push_provider);
+    config.push_prid = fixture_push_prid;
+    config.push_prid_len = strlen(fixture_push_prid);
     return config;
 }
 
@@ -359,6 +370,8 @@ static int fixture_up(struct fixture *fixture)
                                          0) == SIPRAL_STATUS_OK);
     expect("the stack the oldest lengths are tried on would not poll after the ACK",
            sipral_stack_poll(fixture->stack, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the registrar never answered the fixture's account about push",
+           fixture_register(fixture));
     expect("the subscription the oldest lengths are tried on was never told about a dialog",
            fixture_subscribe(fixture));
     return 1;
@@ -510,6 +523,92 @@ static int drain_for_subscribe(struct fixture *fixture, char *into, size_t room)
         return 1;
     }
     return 0;
+}
+
+/* The registrar's answer about push, so that the struct it is read out of can
+ * be handed over at its oldest published length. */
+static int fixture_register(struct fixture *fixture)
+{
+    if (sipral_account_register(fixture->stack, fixture->account, 0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    char reg[2048] = { 0 };
+    for (int drained = 0; drained < 8 && reg[0] == '\0'; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(fixture->stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (strncmp((const char *)message_buffer, "REGISTER ", strlen("REGISTER ")) != 0 ||
+            transmit.len >= sizeof reg) {
+            continue;
+        }
+        memcpy(reg, message_buffer, transmit.len);
+        reg[transmit.len] = '\0';
+    }
+    if (reg[0] == '\0') {
+        return 0;
+    }
+    char via[256];
+    char from[256];
+    char to[256];
+    char call_id[256];
+    char cseq[64];
+    char contact[512];
+    if (!header_of(reg, "Via", via, sizeof via) || !header_of(reg, "From", from, sizeof from) ||
+        !header_of(reg, "To", to, sizeof to) ||
+        !header_of(reg, "Call-ID", call_id, sizeof call_id) ||
+        !header_of(reg, "CSeq", cseq, sizeof cseq) ||
+        !header_of(reg, "Contact", contact, sizeof contact)) {
+        return 0;
+    }
+    char answer[2048];
+    int length = snprintf(answer, sizeof answer,
+                          "SIP/2.0 200 OK\r\n"
+                          "Via: %s\r\n"
+                          "From: %s\r\n"
+                          "To: %s;tag=smoke-registrar\r\n"
+                          "Call-ID: %s\r\n"
+                          "CSeq: %s\r\n"
+                          "Contact: %s\r\n"
+                          "Feature-Caps: *;+sip.pns=\"apns\";+sip.pnsreg=\"121\"\r\n"
+                          "Expires: 3600\r\n"
+                          "Content-Length: 0\r\n\r\n",
+                          via, from, to, call_id, cseq, contact);
+    if (length <= 0 || (size_t)length >= sizeof answer) {
+        return 0;
+    }
+    if (sipral_stack_receive_datagram(fixture->stack, SIPRAL_TRANSPORT_MAIN,
+                                      (const uint8_t *)answer, (size_t)length, fixture_peer,
+                                      strlen(fixture_peer), fixture_bind, strlen(fixture_bind),
+                                      0) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    if (sipral_stack_poll(fixture->stack, 0, &poll) != SIPRAL_STATUS_OK) {
+        return 0;
+    }
+    sipral_push_echo_t echo = { 0 };
+    echo.size = sizeof echo;
+    return sipral_account_push_echo(fixture->stack, fixture->account, &echo) ==
+               SIPRAL_STATUS_OK &&
+           echo.accepted != 0;
+}
+
+static sipral_status_t push_echo_at(struct fixture *fixture, size_t declared)
+{
+    sipral_push_echo_t echo = { 0 };
+    echo.size = declared;
+    return sipral_account_push_echo(fixture->stack, fixture->account, &echo);
 }
 
 static sipral_subscribe_config_t fixture_subscribe_config(size_t declared)
@@ -761,6 +860,7 @@ static const struct {
     { "sipral_suspending_t", suspending_at },
     { "sipral_subscribe_config_t", subscribe_config_at },
     { "sipral_watched_dialog_t", watched_dialog_at },
+    { "sipral_push_echo_t", push_echo_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

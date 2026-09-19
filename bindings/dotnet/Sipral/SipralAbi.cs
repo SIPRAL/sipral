@@ -463,7 +463,6 @@ public enum SipralDtmf : uint
 /// refuse it, which is what makes adding one safe.
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 20: a call was announced and never arrived (C2)
 /// - 29: the application is asked to resolve a destination
 /// </summary>
 public enum SipralEventKind : uint
@@ -581,6 +580,18 @@ public enum SipralEventKind : uint
     /// </summary>
     MediaStalled = 19,
     /// <summary>
+    /// A call a push announced never arrived.
+    ///
+    /// C2, and not an error. A wake-up chain has a notification service,
+    /// a proxy, a bucket timer and a radio in it, and when a call does not
+    /// come through it this is the only place that says which end gave up:
+    /// the push was delivered, this device woke, refreshed its binding,
+    /// and no INVITE followed. `payload.announce` says which announcement
+    /// and how long it was waited for; the screen the application raised
+    /// can come down.
+    /// </summary>
+    AnnouncedCallMissing = 20,
+    /// <summary>
     /// Audio is running: the negotiation settled and an RTP session is open.
     ///
     /// A4's reporting half and the first half of D5: `payload.media.codec` is
@@ -665,6 +676,24 @@ public enum SipralEventKind : uint
     /// contain.
     /// </summary>
     Notified = 30,
+    /// <summary>
+    /// The INVITE for a call a push had already announced has arrived
+    /// (RFC 8599).
+    ///
+    /// C2's other half. Queued immediately before the
+    /// SipralEventKind.IncomingCall naming the same call, and never
+    /// without one, so that an application reading its events in order
+    /// knows which screen the call belongs to before it is told there is a
+    /// call at all. That is the whole point: on a phone the ringing screen
+    /// exists first, and a stack that reports the INVITE without saying
+    /// which announcement it answers has made the application guess.
+    ///
+    /// `call` is the call, and `payload.announce.announcement` what
+    /// announced it. That announcement is spent: it is not waited for any
+    /// more, and `sipral_announcement_forget` on it answers
+    /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+    /// </summary>
+    CallAnnounced = 31,
 }
 
 /// <summary>
@@ -2095,6 +2124,59 @@ public struct SipralAccountConfig
     /// sent reads as the zero that already means "the main transport".
     /// </summary>
     public uint Transport;
+    /// <summary>
+    /// The push notification service to be woken through, as its
+    /// registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
+    /// for an account that is not woken by push, which is every account on
+    /// a machine that does not suspend.
+    ///
+    /// These four go on the `Contact` of this account's REGISTER and on no
+    /// other request, ever: §4.1 says so because a `pn-prid` in the
+    /// `Contact` of an INVITE hands the far end a token that wakes this
+    /// device whenever it likes. The de-registration that gives the binding
+    /// up leaves the identifier out, which §4.1.2 also requires.
+    /// </summary>
+    public IntPtr PushProvider;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PushProviderLen;
+    /// <summary>
+    /// The resource identifier the service issued for this installation —
+    /// the device token. Required when `push_provider` is given, and
+    /// refused without one.
+    ///
+    /// Whatever it holds is percent-escaped where the SIP grammar needs it
+    /// (§8.7), because an APNs token carries `=` and a Web Push identifier
+    /// is a whole URL.
+    /// </summary>
+    public IntPtr PushPrid;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PushPridLen;
+    /// <summary>
+    /// The extra value a service needs beside the identifier: the
+    /// application bundle for Apple, the sender for Firebase. §4.1.1 makes
+    /// it mandatory "if required for the specific PNS", so it is optional
+    /// here and the service decides.
+    /// </summary>
+    public IntPtr PushParam;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PushParamLen;
+    /// <summary>
+    /// Nonzero to say this device can send a binding refresh without being
+    /// woken by a push, which §4.1.4 makes it declare with a
+    /// `+sip.pnsreg` media feature tag.
+    ///
+    /// It is the application's fact and not this library's to guess: a
+    /// process the operating system has suspended has no timer that runs,
+    /// and one that claims otherwise gets a registrar that stops sending
+    /// the wake-ups the device is relying on.
+    /// </summary>
+    public uint PushWakesItself;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3003,6 +3085,26 @@ public struct SipralSubscriptionEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.CallAnnounced and a
+/// SipralEventKind.AnnouncedCallMissing carry.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralAnnounceEvent
+{
+    /// <summary>
+    /// Which announcement. Minted by `sipral_account_announce`, and it
+    /// names nothing once either of these two events has been raised
+    /// about it.
+    /// </summary>
+    public ulong Announcement;
+    /// <summary>
+    /// How long the call was waited for, in milliseconds. Meaningful only
+    /// on SipralEventKind.AnnouncedCallMissing.
+    /// </summary>
+    public ulong WaitedMs;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -3049,6 +3151,12 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralSubscriptionEvent Subscription;
+    /// <summary>
+    /// For SipralEventKind.CallAnnounced and
+    /// SipralEventKind.AnnouncedCallMissing.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralAnnounceEvent Announce;
 }
 
 /// <summary>
@@ -3344,6 +3452,47 @@ public struct SipralWatchedDialog
 }
 
 /// <summary>
+/// What the registrar said about push, in the 2xx to a REGISTER that
+/// asked for it (RFC 8599 §8.2).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralPushEcho
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// Whether the network said it will ask for notifications of the type
+    /// this account asked for. Zero means it did not say so, which §4.1.1
+    /// makes "MUST NOT assume they are coming" rather than "they are not":
+    /// an application that suspends itself on the strength of a push it
+    /// was never promised stops ringing.
+    /// </summary>
+    public uint Accepted;
+    /// <summary>
+    /// Whether `refresh_lead_ms` was sent at all.
+    /// </summary>
+    public uint HasRefreshLead;
+    /// <summary>
+    /// How long before the binding lapses the network insists on seeing a
+    /// refresh, from a `sip.pnsreg` indicator (§4.1.4), in milliseconds.
+    /// Zero when the network sent none, which `has_refresh_lead` is how to
+    /// tell from a lead of zero.
+    /// </summary>
+    public ulong RefreshLeadMs;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralPushEcho Sized()
+    {
+        var value = default(SipralPushEcho);
+        value.Size = (nuint)Marshal.SizeOf<SipralPushEcho>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -3526,6 +3675,18 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_subscription_dialog_text(ulong stack, ulong subscription, nuint index, uint which, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_announce(ulong stack, ulong account, sbyte[] caller, nuint callerLen, out ulong announcement, out ulong call, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_refresh_binding(ulong stack, ulong account, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_announcement_forget(ulong stack, ulong announcement);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_push_echo(ulong stack, ulong account, ref SipralPushEcho outEcho);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_add(ulong stack, in SipralAccountConfig config, out ulong account);
@@ -3764,7 +3925,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 14;
+    public const uint AbiVersionMinor = 15;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -4439,6 +4600,114 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_subscription_dialog_text(stack, subscription, index, which, buffer, (nuint)buffer.Length, out var needed));
         return needed;
+    }
+
+    /// <summary>
+    /// A call is expected on this account, announced by a push (C2).
+    ///
+    /// `caller` is whoever the notification said is calling, as a SIP URI.
+    /// The binding is refreshed at once on whatever path exists — §4.1.3
+    /// makes that a MUST for a woken agent, and a transport the application
+    /// has not opened yet is the ordinary shape of a wake-up, so the REGISTER
+    /// is owed and goes the moment one is bound.
+    ///
+    /// Exactly one of the two values written back names something, and which
+    /// one is a race the caller cannot control:
+    ///
+    /// - `out_announcement` when nothing has arrived yet. The INVITE that
+    ///   matches will be reported as `SIPRAL_EVENT_KIND_CALL_ANNOUNCED`
+    ///   naming this announcement, immediately before the
+    ///   `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call; and
+    ///   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` when none does.
+    /// - `out_call` when the INVITE beat the push. The screen just raised
+    ///   belongs to that call handle, and no announcement was recorded for it
+    ///   to answer. A `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` still arrives for it
+    ///   when the incoming-call event has not been delivered yet, because the
+    ///   two are queued together and in that order; once it has, this return
+    ///   value is the only word about the match there will be.
+    ///
+    /// An account with no registrar has no binding to refresh, and for one of
+    /// those only the matching happens.
+    ///
+    /// Safety
+    ///
+    /// `caller` must be readable for `caller_len` bytes, and each of
+    /// `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static (ulong Announcement, ulong Call) AccountAnnounce(ulong stack, ulong account, string caller, ulong nowMs)
+    {
+        var callerBytes = Encoding.UTF8.GetBytes(caller);
+        var callerSigned = new sbyte[callerBytes.Length];
+        Buffer.BlockCopy(callerBytes, 0, callerSigned, 0, callerBytes.Length);
+        Check(NativeMethods.sipral_account_announce(stack, account, callerSigned, (nuint)callerSigned.Length, out var announcement, out var call, nowMs));
+        return (announcement, call);
+    }
+
+    /// <summary>
+    /// Refresh the binding now, without announcing anything (C3).
+    ///
+    /// For the periodic wake-up a proxy sends to keep a suspended device's
+    /// binding alive (RFC 8599 §5.5). A push is evidence that the path to the
+    /// proxy is working, so a back-off earned by an earlier outage is not
+    /// what to wait for now and is dropped.
+    ///
+    /// Nothing is sent when a REGISTER is already in flight, which is already
+    /// the fastest path, or when the registration has failed in a way trying
+    /// again cannot fix — repeating a password that was refused is how an
+    /// account gets locked out, and a push does not change that. Both of those
+    /// are `SIPRAL_STATUS_OK`: the refresh was asked for and the answer is
+    /// that nothing needed sending.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers,
+    /// which has no binding to refresh: it is the account that is wrong for
+    /// this call, not the build that is missing the feature. A send that could
+    /// not happen because no transport is bound yet is reported too, and is
+    /// not fatal: the refresh is remembered and goes out the moment one is.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void AccountRefreshBinding(ulong stack, ulong account, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_account_refresh_binding(stack, account, nowMs));
+    }
+
+    /// <summary>
+    /// Stop expecting an announced call.
+    ///
+    /// The user dismissed the screen, or the application decided the wake-up
+    /// was stale. `SIPRAL_STATUS_WRONG_STATE` when it had already been
+    /// fulfilled or had already expired, which is not a mistake: the event
+    /// that said so and this call can cross.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle value.
+    /// </summary>
+    public static void AnnouncementForget(ulong stack, ulong announcement)
+    {
+        Check(NativeMethods.sipral_announcement_forget(stack, announcement));
+    }
+
+    /// <summary>
+    /// What the registrar said about push, in the 2xx to the REGISTER that
+    /// asked for it.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` when this account did not ask for push,
+    /// or when no binding it could have been said about is standing — none
+    /// granted yet, one given up, or one that has lapsed.
+    ///
+    /// Safety
+    ///
+    /// `out_echo` must point at a `sipral_push_echo_t` whose `size` member
+    /// says how long it is.
+    /// </summary>
+    public static SipralPushEcho AccountPushEcho(ulong stack, ulong account)
+    {
+        var echo = SipralPushEcho.Sized();
+        Check(NativeMethods.sipral_account_push_echo(stack, account, ref echo));
+        return echo;
     }
 
     /// <summary>

@@ -60,6 +60,7 @@
 
 pub mod abi;
 pub mod account;
+pub mod announce;
 pub mod call;
 pub mod capabilities;
 pub mod counters;

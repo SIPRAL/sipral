@@ -255,7 +255,16 @@ event_kinds! {
         /// whether to hang up over silence is a decision with a person on the other
         /// end of it.
         19 = MediaStalled, c"media stalled";
-        reserved 20 = "a call was announced and never arrived (C2)";
+        /// A call a push announced never arrived.
+        ///
+        /// C2, and not an error. A wake-up chain has a notification service,
+        /// a proxy, a bucket timer and a radio in it, and when a call does not
+        /// come through it this is the only place that says which end gave up:
+        /// the push was delivered, this device woke, refreshed its binding,
+        /// and no INVITE followed. `payload.announce` says which announcement
+        /// and how long it was waited for; the screen the application raised
+        /// can come down.
+        20 = AnnouncedCallMissing, c"announced call missing";
         /// Audio is running: the negotiation settled and an RTP session is open.
         ///
         /// A4's reporting half and the first half of D5: `payload.media.codec` is
@@ -329,6 +338,22 @@ event_kinds! {
         /// known beats one showing what a malformed document happened to
         /// contain.
         30 = Notified, c"notified";
+        /// The INVITE for a call a push had already announced has arrived
+        /// (RFC 8599).
+        ///
+        /// C2's other half. Queued immediately before the
+        /// [`SipralEventKind::IncomingCall`] naming the same call, and never
+        /// without one, so that an application reading its events in order
+        /// knows which screen the call belongs to before it is told there is a
+        /// call at all. That is the whole point: on a phone the ringing screen
+        /// exists first, and a stack that reports the INVITE without saying
+        /// which announcement it answers has made the application guess.
+        ///
+        /// `call` is the call, and `payload.announce.announcement` what
+        /// announced it. That announcement is spent: it is not waited for any
+        /// more, and `sipral_announcement_forget` on it answers
+        /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+        31 = CallAnnounced, c"call announced";
     }
 }
 
@@ -674,6 +699,21 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::CallAnnounced`] and a
+    /// [`SipralEventKind::AnnouncedCallMissing`] carry.
+    #[derive(Clone, Copy)]
+    pub struct SipralAnnounceEvent {
+        /// Which announcement. Minted by `sipral_account_announce`, and it
+        /// names nothing once either of these two events has been raised
+        /// about it.
+        pub announcement: SipralHandle,
+        /// How long the call was waited for, in milliseconds. Meaningful only
+        /// on [`SipralEventKind::AnnouncedCallMissing`].
+        pub waited_ms: u64,
+    }
+}
+
+record! {
     /// What a [`SipralEventKind::SubscriptionChanged`] and a
     /// [`SipralEventKind::Notified`] carry.
     ///
@@ -771,6 +811,9 @@ record! {
         /// For [`SipralEventKind::SubscriptionChanged`] and
         /// [`SipralEventKind::Notified`].
         pub subscription: SipralSubscriptionEvent,
+        /// For [`SipralEventKind::CallAnnounced`] and
+        /// [`SipralEventKind::AnnouncedCallMissing`].
+        pub announce: SipralAnnounceEvent,
     }
 }
 
@@ -904,6 +947,7 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) accounts: &'a mut Names<sipral_ua::AccountId>,
     pub(crate) calls: &'a mut Names<CallHandle>,
     pub(crate) subscriptions: &'a mut Names<sipral_ua::SubscriptionHandle>,
+    pub(crate) announcements: &'a mut Names<sipral_ua::AnnouncementId>,
     /// Who is on every call this stack still knows, fixed when each was
     /// created.
     pub(crate) identities: &'a HashMap<CallHandle, Arc<CallIdentity>>,
@@ -952,7 +996,57 @@ pub(crate) fn translate(
     if let Some(out) = about_a_subscription(known, event) {
         return Some(out);
     }
+    if let Some(out) = about_an_announcement(known, event) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
+}
+
+/// A call a push announced: the INVITE that answered it, or the silence that
+/// did not.
+fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::CallAnnounced {
+            call,
+            ref announcement,
+        } => {
+            let named = known
+                .announcements
+                .name_of(announcement.id())
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            let payload = SipralAnnounceEvent {
+                announcement: named,
+                waited_ms: 0,
+            };
+            let call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::CallAnnounced,
+                SipralEventPayload { announce: payload },
+            );
+            out.call = call;
+            Some(out)
+        }
+        UaEvent::AnnouncedCallMissing {
+            ref announcement,
+            waited,
+        } => {
+            let named = known
+                .announcements
+                .name_of(announcement.id())
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            let payload = SipralAnnounceEvent {
+                announcement: named,
+                waited_ms: millis(waited),
+            };
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::AnnouncedCallMissing,
+                SipralEventPayload { announce: payload },
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// An event with nothing in it but the subscription it is about.
@@ -1907,6 +2001,7 @@ mod tests {
         assert_eq!(SipralEventKind::MediaStatistics as u32, 17);
         assert_eq!(SipralEventKind::TransportWanted as u32, 18);
         assert_eq!(SipralEventKind::MediaStalled as u32, 19);
+        assert_eq!(SipralEventKind::AnnouncedCallMissing as u32, 20);
         assert_eq!(SipralEventKind::MediaStarted as u32, 21);
         assert_eq!(SipralEventKind::MediaChanged as u32, 22);
         assert_eq!(SipralEventKind::MediaResumed as u32, 23);
@@ -1916,7 +2011,8 @@ mod tests {
         assert_eq!(SipralEventKind::DtmfSent as u32, 27);
         assert_eq!(SipralEventKind::Recovery as u32, 28);
         assert_eq!(SipralEventKind::Notified as u32, 30);
-        assert_eq!(SipralEventKind::ALL.len(), 27, "and there are no others");
+        assert_eq!(SipralEventKind::CallAnnounced as u32, 31);
+        assert_eq!(SipralEventKind::ALL.len(), 29, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -1970,10 +2066,10 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [16, 20, 29_u32] {
+        for held in [16, 29_u32] {
             assert_eq!(name(held), None, "{held} is reserved, not live");
         }
-        assert_eq!(name(31), None, "past the last kind");
+        assert_eq!(name(32), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

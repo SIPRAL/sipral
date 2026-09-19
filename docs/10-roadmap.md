@@ -272,8 +272,12 @@ shape is permanent once published:
   `sipral_stack_diagnostics_json`), D2 (`sipral_stack_recording_start`,
   `_stop`) and A1 (`sipral_account_subscribe`, `sipral_subscription_end`,
   `sipral_subscription_lamp` and the three dialog readers, with event kinds 15
-  and 30 behind them and `SIPRAL_FEATURE_SUBSCRIPTIONS` set). Left: C2, C3
-  and D5;
+  and 30 behind them and `SIPRAL_FEATURE_SUBSCRIPTIONS` set), and C2 with the
+  RFC 8599 half of C3 (`sipral_account_announce`,
+  `sipral_account_refresh_binding`, `sipral_announcement_forget`,
+  `sipral_account_push_echo`, the four push members on
+  `sipral_account_config_t`, and event kinds 20 and 31). Left: the freeze and
+  thaw half of C3, and D5;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
   reports it; it becomes a member of the stack and call configuration.
   *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on

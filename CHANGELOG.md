@@ -12,6 +12,32 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A call announced by a push notification reaches C (RFC 8599).** On a phone
+  the ringing screen exists before the call does: the operating system delivers
+  a notification, the process gets one run loop to raise a screen, and the
+  INVITE arrives some time afterwards, or never.
+  `sipral_account_announce` is what an application calls the moment it is
+  woken. It refreshes the binding at once, which §4.1.3 makes a MUST for a
+  woken agent, and writes back either the announcement — when nothing has
+  arrived yet — or the call, when the INVITE beat the notification, which is a
+  race the application cannot control. `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` says
+  which announcement an INVITE answers and is queued immediately before the
+  incoming-call event for it, so the screen is named before the call is;
+  `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` says one never came, which is a
+  diagnosis rather than an error — a wake-up chain has a notification service,
+  a proxy, a bucket timer and a radio in it, and this is the only place that
+  says which end gave up.
+
+  `sipral_account_config_t` carries the four push members it takes to ask for
+  any of that: `push_provider`, `push_prid`, `push_param` and
+  `push_wakes_itself`, appended at the tail with the pinned minimum unmoved.
+  They go on the REGISTER's `Contact` and on no other request, because §4.1
+  says a `pn-prid` in the `Contact` of an INVITE hands the far end a token that
+  wakes the device whenever it likes. `sipral_account_push_echo` reads §8.2's
+  `Feature-Caps` answer back: a phone that suspends itself believing the
+  network will wake it, when the network never said so, is a phone that stops
+  ringing.
+
 - **Subscriptions and the busy lamp field reach C.** Everything RFC 6665 needs
   was already written and tested — the transaction, the dialog, timer N, the
   refresh at a fraction of what the notifier granted, the fork that turns one

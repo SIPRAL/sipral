@@ -544,6 +544,13 @@ mod tests {
             headers: ptr::null(),
             headers_len: 0,
             transport: 0,
+            push_provider: ptr::null(),
+            push_provider_len: 0,
+            push_prid: ptr::null(),
+            push_prid_len: 0,
+            push_param: ptr::null(),
+            push_param_len: 0,
+            push_wakes_itself: 0,
         }
     }
 

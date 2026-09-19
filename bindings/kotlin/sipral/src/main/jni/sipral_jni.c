@@ -769,7 +769,69 @@ Java_org_sipral_SipralNative_sipral_1subscription_1dialog_1text(JNIEnv *env, job
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1announce(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray caller, jlongArray announcement, jlongArray call, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *caller_data = caller ? (*env)->GetByteArrayElements(env, caller, NULL) : NULL;
+    jsize caller_size = caller ? (*env)->GetArrayLength(env, caller) : 0;
+    sipral_handle_t announcement_value = 0;
+    sipral_handle_t call_value = 0;
+    sipral_status_t status = sipral_account_announce((sipral_handle_t)stack, (sipral_handle_t)account, (const char *)caller_data, (size_t)caller_size, &announcement_value, &call_value, (uint64_t)nowMs);
+    if (caller) {
+        (*env)->ReleaseByteArrayElements(env, caller, caller_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)announcement_value;
+        (*env)->SetLongArrayRegion(env, announcement, 0, 1, &slot);
+    }
+    {
+        jlong slot = (jlong)call_value;
+        (*env)->SetLongArrayRegion(env, call, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1refresh_1binding(JNIEnv *env, jobject self, jlong stack, jlong account, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_account_refresh_binding((sipral_handle_t)stack, (sipral_handle_t)account, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1announcement_1forget(JNIEnv *env, jobject self, jlong stack, jlong announcement)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_announcement_forget((sipral_handle_t)stack, (sipral_handle_t)announcement);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject self, jlong stack, jlong account, jlongArray echo)
+{
+    (void)env;
+    (void)self;
+    sipral_push_echo_t echo_value;
+    memset(&echo_value, 0, sizeof echo_value);
+    echo_value.size = sizeof echo_value;
+    sipral_status_t status = sipral_account_push_echo((sipral_handle_t)stack, (sipral_handle_t)account, &echo_value);
+    {
+        jlong slots[4];
+        slots[0] = (jlong)echo_value.size;
+        slots[1] = (jlong)echo_value.accepted;
+        slots[2] = (jlong)echo_value.has_refresh_lead;
+        slots[3] = (jlong)echo_value.refresh_lead_ms;
+        (*env)->SetLongArrayRegion(env, echo, 0, 4, slots);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -810,6 +872,19 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.instance_id_len = (size_t)configInstanceId_size;
     config_value.expires_seconds = (uint64_t)configExpiresSeconds;
     config_value.transport = (uint32_t)configTransport;
+    jbyte *configPushProvider_data = configPushProvider ? (*env)->GetByteArrayElements(env, configPushProvider, NULL) : NULL;
+    jsize configPushProvider_size = configPushProvider ? (*env)->GetArrayLength(env, configPushProvider) : 0;
+    config_value.push_provider = (const char *)configPushProvider_data;
+    config_value.push_provider_len = (size_t)configPushProvider_size;
+    jbyte *configPushPrid_data = configPushPrid ? (*env)->GetByteArrayElements(env, configPushPrid, NULL) : NULL;
+    jsize configPushPrid_size = configPushPrid ? (*env)->GetArrayLength(env, configPushPrid) : 0;
+    config_value.push_prid = (const char *)configPushPrid_data;
+    config_value.push_prid_len = (size_t)configPushPrid_size;
+    jbyte *configPushParam_data = configPushParam ? (*env)->GetByteArrayElements(env, configPushParam, NULL) : NULL;
+    jsize configPushParam_size = configPushParam ? (*env)->GetArrayLength(env, configPushParam) : 0;
+    config_value.push_param = (const char *)configPushParam_data;
+    config_value.push_param_len = (size_t)configPushParam_size;
+    config_value.push_wakes_itself = (uint32_t)configPushWakesItself;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -850,6 +925,15 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
         (*env)->ReleaseByteArrayElements(env, configInstanceId, configInstanceId_data, JNI_ABORT);
     }
     jni_header_release(env, configHeadersBytes, configHeaders_pinned, configHeaders_array);
+    if (configPushProvider) {
+        (*env)->ReleaseByteArrayElements(env, configPushProvider, configPushProvider_data, JNI_ABORT);
+    }
+    if (configPushPrid) {
+        (*env)->ReleaseByteArrayElements(env, configPushPrid, configPushPrid_data, JNI_ABORT);
+    }
+    if (configPushParam) {
+        (*env)->ReleaseByteArrayElements(env, configPushParam, configPushParam_data, JNI_ABORT);
+    }
     if (ready) {
         {
             jlong slot = (jlong)account_value;

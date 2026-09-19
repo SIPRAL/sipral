@@ -508,7 +508,6 @@ enum class SipralDtmf(val value: Int) {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
- * - 20: a call was announced and never arrived (C2)
  * - 29: the application is asked to resolve a destination
  */
 enum class SipralEventKind(val value: Int) {
@@ -625,6 +624,18 @@ enum class SipralEventKind(val value: Int) {
      */
     MEDIA_STALLED(19),
     /**
+     * A call a push announced never arrived.
+     *
+     * C2, and not an error. A wake-up chain has a notification service,
+     * a proxy, a bucket timer and a radio in it, and when a call does not
+     * come through it this is the only place that says which end gave up:
+     * the push was delivered, this device woke, refreshed its binding,
+     * and no INVITE followed. `payload.announce` says which announcement
+     * and how long it was waited for; the screen the application raised
+     * can come down.
+     */
+    ANNOUNCED_CALL_MISSING(20),
+    /**
      * Audio is running: the negotiation settled and an RTP session is open.
      *
      * A4's reporting half and the first half of D5: `payload.media.codec` is
@@ -709,6 +720,24 @@ enum class SipralEventKind(val value: Int) {
      * contain.
      */
     NOTIFIED(30),
+    /**
+     * The INVITE for a call a push had already announced has arrived
+     * (RFC 8599).
+     *
+     * C2's other half. Queued immediately before the
+     * SipralEventKind.INCOMING_CALL naming the same call, and never
+     * without one, so that an application reading its events in order
+     * knows which screen the call belongs to before it is told there is a
+     * call at all. That is the whole point: on a phone the ringing screen
+     * exists first, and a stack that reports the INVITE without saying
+     * which announcement it answers has made the application guess.
+     *
+     * `call` is the call, and `payload.announce.announcement` what
+     * announced it. That announcement is spent: it is not waited for any
+     * more, and `sipral_announcement_forget` on it answers
+     * `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
+     */
+    CALL_ANNOUNCED(31),
     ;
 
     companion object {
@@ -2203,6 +2232,47 @@ data class SipralWatchedDialog(
 }
 
 /**
+ * What the registrar said about push, in the 2xx to a REGISTER that
+ * asked for it (RFC 8599 §8.2).
+ */
+data class SipralPushEcho(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * Whether the network said it will ask for notifications of the type
+     * this account asked for. Zero means it did not say so, which §4.1.1
+     * makes "MUST NOT assume they are coming" rather than "they are not":
+     * an application that suspends itself on the strength of a push it
+     * was never promised stops ringing.
+     */
+    val accepted: Long,
+    /**
+     * Whether `refresh_lead_ms` was sent at all.
+     */
+    val hasRefreshLead: Long,
+    /**
+     * How long before the binding lapses the network insists on seeing a
+     * refresh, from a `sip.pnsreg` indicator (§4.1.4), in milliseconds.
+     * Zero when the network sent none, which `has_refresh_lead` is how to
+     * tell from a lead of zero.
+     */
+    val refreshLeadMs: Long,
+) {
+    internal companion object {
+        const val SLOTS: Int = 4
+
+        fun of(slots: LongArray): SipralPushEcho = SipralPushEcho(
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[3],
+        )
+    }
+}
+
+/**
  * One header field an application hands over: a name and a value, UTF-8,
  * neither NUL-terminated.
  *
@@ -2524,6 +2594,47 @@ class SipralAccountConfig(
      * sent reads as the zero that already means "the main transport".
      */
     val transport: Long = 0,
+    /**
+     * The push notification service to be woken through, as its
+     * registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
+     * for an account that is not woken by push, which is every account on
+     * a machine that does not suspend.
+     *
+     * These four go on the `Contact` of this account's REGISTER and on no
+     * other request, ever: §4.1 says so because a `pn-prid` in the
+     * `Contact` of an INVITE hands the far end a token that wakes this
+     * device whenever it likes. The de-registration that gives the binding
+     * up leaves the identifier out, which §4.1.2 also requires.
+     */
+    val pushProvider: String? = null,
+    /**
+     * The resource identifier the service issued for this installation —
+     * the device token. Required when `push_provider` is given, and
+     * refused without one.
+     *
+     * Whatever it holds is percent-escaped where the SIP grammar needs it
+     * (§8.7), because an APNs token carries `=` and a Web Push identifier
+     * is a whole URL.
+     */
+    val pushPrid: String? = null,
+    /**
+     * The extra value a service needs beside the identifier: the
+     * application bundle for Apple, the sender for Firebase. §4.1.1 makes
+     * it mandatory "if required for the specific PNS", so it is optional
+     * here and the service decides.
+     */
+    val pushParam: String? = null,
+    /**
+     * Nonzero to say this device can send a binding refresh without being
+     * woken by a push, which §4.1.4 makes it declare with a
+     * `+sip.pnsreg` media feature tag.
+     *
+     * It is the application's fact and not this library's to guess: a
+     * process the operating system has suspended has no timer that runs,
+     * and one that claims otherwise gets a registrar that stops sending
+     * the wake-ups the device is relying on.
+     */
+    val pushWakesItself: Long = 0,
 )
 
 /**
@@ -2959,7 +3070,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 14)
+        agree(0, 15)
     }
 
     /**
@@ -2997,7 +3108,11 @@ internal object SipralNative {
     external fun sipral_subscription_dialog_count(stack: Long, subscription: Long, count: LongArray): Int
     external fun sipral_subscription_dialog_at(stack: Long, subscription: Long, index: Long, dialog: LongArray): Int
     external fun sipral_subscription_dialog_text(stack: Long, subscription: Long, index: Long, which: Long, buffer: ByteArray, needed: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, account: LongArray): Int
+    external fun sipral_account_announce(stack: Long, account: Long, caller: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
+    external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
+    external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
+    external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -3084,7 +3199,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 14
+    const val ABI_VERSION_MINOR: Long = 15
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -3768,6 +3883,110 @@ object Sipral {
     }
 
     /**
+     * A call is expected on this account, announced by a push (C2).
+     *
+     * `caller` is whoever the notification said is calling, as a SIP URI.
+     * The binding is refreshed at once on whatever path exists — §4.1.3
+     * makes that a MUST for a woken agent, and a transport the application
+     * has not opened yet is the ordinary shape of a wake-up, so the REGISTER
+     * is owed and goes the moment one is bound.
+     *
+     * Exactly one of the two values written back names something, and which
+     * one is a race the caller cannot control:
+     *
+     * - `out_announcement` when nothing has arrived yet. The INVITE that
+     *   matches will be reported as `SIPRAL_EVENT_KIND_CALL_ANNOUNCED`
+     *   naming this announcement, immediately before the
+     *   `SIPRAL_EVENT_KIND_INCOMING_CALL` for the same call; and
+     *   `SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING` when none does.
+     * - `out_call` when the INVITE beat the push. The screen just raised
+     *   belongs to that call handle, and no announcement was recorded for it
+     *   to answer. A `SIPRAL_EVENT_KIND_CALL_ANNOUNCED` still arrives for it
+     *   when the incoming-call event has not been delivered yet, because the
+     *   two are queued together and in that order; once it has, this return
+     *   value is the only word about the match there will be.
+     *
+     * An account with no registrar has no binding to refresh, and for one of
+     * those only the matching happens.
+     *
+     * Safety
+     *
+     * `caller` must be readable for `caller_len` bytes, and each of
+     * `out_announcement` and `out_call` must point at one `sipral_handle_t`.
+     */
+    fun accountAnnounce(stack: Long, account: Long, caller: String, nowMs: Long): Pair<Long, Long> {
+        val callerBytes = caller.toByteArray(Charsets.UTF_8)
+        val announcementSlot = LongArray(1)
+        val callSlot = LongArray(1)
+        check(SipralNative.sipral_account_announce(stack, account, callerBytes, announcementSlot, callSlot, nowMs))
+        return Pair(announcementSlot[0], callSlot[0])
+    }
+
+    /**
+     * Refresh the binding now, without announcing anything (C3).
+     *
+     * For the periodic wake-up a proxy sends to keep a suspended device's
+     * binding alive (RFC 8599 §5.5). A push is evidence that the path to the
+     * proxy is working, so a back-off earned by an earlier outage is not
+     * what to wait for now and is dropped.
+     *
+     * Nothing is sent when a REGISTER is already in flight, which is already
+     * the fastest path, or when the registration has failed in a way trying
+     * again cannot fix — repeating a password that was refused is how an
+     * account gets locked out, and a push does not change that. Both of those
+     * are `SIPRAL_STATUS_OK`: the refresh was asked for and the answer is
+     * that nothing needed sending.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for an account that never registers,
+     * which has no binding to refresh: it is the account that is wrong for
+     * this call, not the build that is missing the feature. A send that could
+     * not happen because no transport is bound yet is reported too, and is
+     * not fatal: the refresh is remembered and goes out the moment one is.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun accountRefreshBinding(stack: Long, account: Long, nowMs: Long) {
+        check(SipralNative.sipral_account_refresh_binding(stack, account, nowMs))
+    }
+
+    /**
+     * Stop expecting an announced call.
+     *
+     * The user dismissed the screen, or the application decided the wake-up
+     * was stale. `SIPRAL_STATUS_WRONG_STATE` when it had already been
+     * fulfilled or had already expired, which is not a mistake: the event
+     * that said so and this call can cross.
+     *
+     * Safety
+     *
+     * Safe to call with any handle value.
+     */
+    fun announcementForget(stack: Long, announcement: Long) {
+        check(SipralNative.sipral_announcement_forget(stack, announcement))
+    }
+
+    /**
+     * What the registrar said about push, in the 2xx to the REGISTER that
+     * asked for it.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` when this account did not ask for push,
+     * or when no binding it could have been said about is standing — none
+     * granted yet, one given up, or one that has lapsed.
+     *
+     * Safety
+     *
+     * `out_echo` must point at a `sipral_push_echo_t` whose `size` member
+     * says how long it is.
+     */
+    fun accountPushEcho(stack: Long, account: Long): SipralPushEcho {
+        val echoSlots = LongArray(SipralPushEcho.SLOTS)
+        check(SipralNative.sipral_account_push_echo(stack, account, echoSlots))
+        return SipralPushEcho.of(echoSlots)
+    }
+
+    /**
      * Configure an account, and write its handle to `out_account`.
      *
      * Nothing is sent. The account exists until sipral_account_remove or
@@ -3789,8 +4008,11 @@ object Sipral {
         val configAuthPassword = config.authPassword?.toByteArray(Charsets.UTF_8)
         val configInstanceId = config.instanceId?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
+        val configPushProvider = config.pushProvider?.toByteArray(Charsets.UTF_8)
+        val configPushPrid = config.pushPrid?.toByteArray(Charsets.UTF_8)
+        val configPushParam = config.pushParam?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, accountSlot))
         return accountSlot[0]
     }
 
