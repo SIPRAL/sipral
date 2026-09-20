@@ -12,6 +12,39 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A destination the application is asked to resolve, and the answer that
+  moves it.** Nothing below this boundary owns a resolver, for the same reason
+  nothing below it owns a socket, so a dialog whose route set and remote target
+  name a next hop that is not where its requests are going now says so:
+  `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` — number 29, held for exactly this since
+  before it was written — carries the host as the URI spells it, the port the
+  URI gave or zero, the transport it named or zero, and a handle for the dialog
+  itself. `sipral_stack_resolved` is the answer, and it takes a **list** in RFC
+  3263 §4.3 priority order rather than one address: the first one this stack
+  can already reach is taken and the rest are kept for it to try in turn when
+  that one fails, which is what makes failover possible at all.
+
+  A protocol is found, never opened. An address on one nothing has bound is
+  passed over, and answering again after `sipral_stack_transport_bind` is how
+  it gets another chance — so an answer that moves nothing is
+  `SIPRAL_STATUS_OK`, not a failure, and so is one for a dialog that has ended.
+  Nothing times out: ignoring the request leaves the dialog on the flow its
+  first message travelled, which RFC 3261 §8.1.2 allows as an alternate address
+  and which is the only thing that survives a NAT, so there is no second event
+  saying the first went unanswered.
+
+  `sipral_account_retarget` is the same question one layer up, and was the
+  other half of the ABI that had been specified and never built: it points an
+  account's next REGISTER at another address for a registrar named by a record
+  with more than one target, keeping the binding's `Call-ID`, its sequence and
+  its credentials, so the registrar reads it as the same device continuing
+  rather than a second one arriving.
+
+  The dialog handle is the seventh kind of handle and the only one the library
+  mints rather than the application asking for: it is named rather than
+  inserted, so a dialog asking again on every target refresh keeps the handle
+  it was first given, and it is forgotten with the call it belonged to.
+
 - **A registration that survives the process, through C.**
   `sipral_account_freeze` writes an account's binding into a buffer the caller
   sizes by asking — a null buffer and a capacity of zero get

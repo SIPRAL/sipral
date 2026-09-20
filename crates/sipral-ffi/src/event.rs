@@ -320,10 +320,23 @@ event_kinds! {
         /// and `docs/16-lifecycle.md` are the ladder this reports on.
         28 = Recovery, c"recovery";
 
-        // Held for the event the C ABI does not raise yet, already planned
-        // behind an entry point of its own, so that the branch adding it
-        // cannot arrive holding the same number.
-        reserved 29 = "the application is asked to resolve a destination";
+        /// A dialog's next hop is a name, and this library does not look
+        /// names up.
+        ///
+        /// RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
+        /// route set and the remote target say where this dialog's requests
+        /// should go, and what they say is not where they are going. Nothing
+        /// here owns a resolver — nothing here owns a socket either — so the
+        /// answer is the application's, through
+        /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved),
+        /// with `payload.resolve.dialog` as the handle it takes.
+        ///
+        /// **Ignoring it is legitimate and is the common case.** The dialog
+        /// keeps the flow its first message travelled on, which §8.1.2 allows
+        /// as an alternate address and which is the only thing that survives
+        /// a NAT. Nothing times out, nothing retries, and no second event
+        /// says the first went unanswered.
+        29 = ResolveNeeded, c"resolve needed";
 
         /// A notification arrived on a subscription, and has been answered.
         ///
@@ -788,6 +801,36 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::ResolveNeeded`] carries: the name a dialog's
+    /// next hop is written as, and the handle an answer takes.
+    #[derive(Clone, Copy)]
+    pub struct SipralResolveEvent {
+        /// The dialog this is about, and what
+        /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved)
+        /// is answered with. Minted by the library, valid while the dialog
+        /// is, and answering for one that has ended changes nothing rather
+        /// than failing.
+        pub dialog: SipralHandle,
+        /// The host to resolve, as the URI spells it — a name, or a literal
+        /// address, which is still reported because the flow the dialog is on
+        /// may legitimately differ from it. An IPv6 literal carries its
+        /// brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+        pub host: *const c_char,
+        /// How many bytes of it.
+        pub host_len: usize,
+        /// The port the URI gave, or zero for none. Zero is not 5060: RFC
+        /// 3263 §4.2 leaves the choice to whoever does the lookup, because
+        /// an SRV answer carries a port of its own.
+        pub port: u32,
+        /// The transport the URI or the scheme named, as a
+        /// [`SipralTransport`](crate::stack::SipralTransport), or zero for
+        /// neither — which leaves §4.1's NAPTR step to the caller, and is
+        /// also what a protocol this build has no number for reads as.
+        pub protocol: u32,
+    }
+}
+
+record! {
     /// The arm of an event that its kind names.
     ///
     /// Reading any other arm reads bytes the library did not write for it.
@@ -814,6 +857,8 @@ record! {
         /// For [`SipralEventKind::CallAnnounced`] and
         /// [`SipralEventKind::AnnouncedCallMissing`].
         pub announce: SipralAnnounceEvent,
+        /// For [`SipralEventKind::ResolveNeeded`].
+        pub resolve: SipralResolveEvent,
     }
 }
 
@@ -948,6 +993,7 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) calls: &'a mut Names<CallHandle>,
     pub(crate) subscriptions: &'a mut Names<sipral_ua::SubscriptionHandle>,
     pub(crate) announcements: &'a mut Names<sipral_ua::AnnouncementId>,
+    pub(crate) dialogs: &'a mut Names<sipral_core::transaction::DialogId>,
     /// Who is on every call this stack still knows, fixed when each was
     /// created.
     pub(crate) identities: &'a HashMap<CallHandle, Arc<CallIdentity>>,
@@ -965,11 +1011,12 @@ pub(crate) struct Vocabulary<'a> {
 /// rather than a silence.
 ///
 /// The pointers in what comes back borrow from `event`, and `transport`
-/// carries one more this ABI has to point at that `event` holds no bytes
-/// for: [`SipralEventKind::TransportWanted`]'s destination, formatted by
-/// [`transport_wanted_destination`] before this is called, since a
-/// `SocketAddr` has none of its own. Both have to outlive the callback this
-/// is handed to.
+/// carries one more this ABI has to point at that `event` holds no bytes for:
+/// [`SipralEventKind::TransportWanted`]'s destination or
+/// [`SipralEventKind::ResolveNeeded`]'s host, formatted by
+/// [`text_to_point_at`] before this is called, since neither has bytes of its
+/// own in the shape C reads. Both have to outlive the callback this is handed
+/// to.
 pub(crate) fn translate(
     known: &mut Vocabulary<'_>,
     event: &UaEvent,
@@ -997,6 +1044,9 @@ pub(crate) fn translate(
         return Some(out);
     }
     if let Some(out) = about_an_announcement(known, event) {
+        return Some(out);
+    }
+    if let Some(out) = about_a_resolve(known, event, transport) {
         return Some(out);
     }
     about_lifecycle(known, event)
@@ -1198,7 +1248,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
 
 /// A request RFC 3261 §18.1.1 would not let out over a datagram, with
 /// nowhere open to send it instead. `destination` is the text
-/// [`transport_wanted_destination`] built for the event this is about; `None`
+/// [`text_to_point_at`] built for the event this is about; `None`
 /// here from a caller that has none is the same as the event carrying no
 /// destination at all, which never actually happens for this kind but is not
 /// this function's to assume.
@@ -1237,15 +1287,69 @@ fn about_a_transport(
     }
 }
 
-/// The destination of a [`SipralEventKind::TransportWanted`], formatted once
-/// so the event this ABI raises for it has bytes to point at: a `SocketAddr`
-/// carries none of its own. `None` for every other kind of event, which is
-/// also what a caller who does not care to check the kind first gets.
-pub(crate) fn transport_wanted_destination(event: &UaEvent) -> Option<String> {
+/// A dialog whose next hop is a name this library will not look up. `host` is
+/// the text [`text_to_point_at`] built for this event, for the same reason
+/// `about_a_transport` needs one: a [`Host`](sipral_core::endpoint::Host) that
+/// is a literal address has no bytes of its own to point at, and one that is a
+/// name has bytes that belong to the event rather than to the shape C reads.
+/// Formatting both the same way is one rule instead of two.
+fn about_a_resolve(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+    host: Option<&str>,
+) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::Unclaimed(Event::ResolveNeeded {
+            dialog,
+            port,
+            protocol,
+            ..
+        }) => {
+            // named rather than inserted, so that a dialog asking again --
+            // which it does on every target refresh -- is the same handle it
+            // was the first time and not another row
+            let named = known
+                .dialogs
+                .name_of(dialog)
+                .unwrap_or(crate::handle::SIPRAL_HANDLE_NONE);
+            let mut payload = SipralResolveEvent {
+                dialog: named,
+                host: std::ptr::null(),
+                host_len: 0,
+                port: u32::from(port.unwrap_or(0)),
+                protocol: protocol.map_or(0, crate::stack::SipralTransport::named),
+            };
+            if let Some(text) = host {
+                payload.host = text.as_ptr().cast::<c_char>();
+                payload.host_len = text.len();
+            }
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::ResolveNeeded,
+                SipralEventPayload { resolve: payload },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The one piece of text an event has no bytes of its own for, formatted once
+/// so the shape this ABI raises has something to point at that outlives the
+/// callback.
+///
+/// Two kinds need it and neither can borrow: a
+/// [`SipralEventKind::TransportWanted`]'s destination is a `SocketAddr`, which
+/// carries no text at all, and a [`SipralEventKind::ResolveNeeded`]'s host is
+/// a `Host`, whose name half borrows from the event and whose address half is
+/// again a value with no text. One rule for both beats two. `None` for every
+/// other kind of event, which is also what a caller who does not care to check
+/// the kind first gets.
+pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
     match *event {
         UaEvent::Unclaimed(Event::TransportWanted { destination, .. }) => {
             Some(destination.to_string())
         }
+        UaEvent::Unclaimed(Event::ResolveNeeded { ref host, .. }) => Some(host.to_string()),
         _ => None,
     }
 }
@@ -2010,15 +2114,16 @@ mod tests {
         assert_eq!(SipralEventKind::DigitReceived as u32, 26);
         assert_eq!(SipralEventKind::DtmfSent as u32, 27);
         assert_eq!(SipralEventKind::Recovery as u32, 28);
+        assert_eq!(SipralEventKind::ResolveNeeded as u32, 29);
         assert_eq!(SipralEventKind::Notified as u32, 30);
         assert_eq!(SipralEventKind::CallAnnounced as u32, 31);
-        assert_eq!(SipralEventKind::ALL.len(), 29, "and there are no others");
+        assert_eq!(SipralEventKind::ALL.len(), 30, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
     /// spoken for before either was written, and each took them where they
     /// were rather than appending. A feature that had chosen the next free
-    /// number instead would have renamed one of the two still reserved.
+    /// number instead would have renamed the one still reserved.
     #[test]
     fn the_numbers_that_were_reserved_for_this_are_the_ones_it_took() {
         assert_eq!(
@@ -2046,6 +2151,11 @@ mod tests {
             18,
             "18 was held for a request promoted to a stream transport (B1)"
         );
+        assert_eq!(
+            SipralEventKind::ResolveNeeded as u32,
+            29,
+            "29 was held for the application being asked to resolve a destination (8.4.11)"
+        );
     }
 
     #[test]
@@ -2066,9 +2176,9 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        for held in [16, 29_u32] {
-            assert_eq!(name(held), None, "{held} is reserved, not live");
-        }
+        // one number is still held, and the loop this used to be is gone
+        // with the second: 16, for audio devices
+        assert_eq!(name(16), None, "16 is reserved, not live");
         assert_eq!(name(32), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);

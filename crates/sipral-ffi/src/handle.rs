@@ -142,6 +142,10 @@ pub(crate) enum Kind {
     Subscription,
     /// `sipral_account_announce`'s.
     Announcement,
+    /// The dialog a `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` names, which
+    /// `sipral_stack_resolved` answers for. Minted by the library rather than
+    /// asked for, and the only kind that is.
+    Dialog,
 }
 
 impl Kind {
@@ -153,12 +157,13 @@ impl Kind {
             Self::Media => 3,
             Self::Subscription => 4,
             Self::Announcement => 5,
+            Self::Dialog => 6,
         }
     }
 
     /// The kind these four bits name, or none for a pattern no table mints —
     /// which is most of them: four bits hold sixteen values and this library
-    /// has six kinds.
+    /// has seven kinds.
     const fn from_bits(bits: u8) -> Option<Self> {
         match bits {
             0 => Some(Self::Stack),
@@ -167,6 +172,7 @@ impl Kind {
             3 => Some(Self::Media),
             4 => Some(Self::Subscription),
             5 => Some(Self::Announcement),
+            6 => Some(Self::Dialog),
             _ => None,
         }
     }
@@ -181,6 +187,7 @@ impl Kind {
             Self::Media => "a call's media",
             Self::Subscription => "a subscription",
             Self::Announcement => "an announced call",
+            Self::Dialog => "a dialog waiting to be resolved",
         }
     }
 }

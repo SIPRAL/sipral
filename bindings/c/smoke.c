@@ -1220,6 +1220,201 @@ static void headers_cross_a_call(void)
     sipral_stack_destroy(caller);
 }
 
+/* -- a next hop nothing here will look up ------------------------------------
+ *
+ * RFC 3263 4 through the ABI: the far end answered with a Contact naming a
+ * host, so the dialog's requests should go somewhere only a resolver can
+ * name. Nothing below this boundary owns one, so the question comes out as an
+ * event and the answer goes back in as a list.
+ */
+static sipral_handle_t asked_dialog;
+static char asked_host[256];
+static uint32_t asked_port;
+static uint32_t asked_protocol;
+
+static void on_resolve_event(const sipral_event_t *event, void *user_data)
+{
+    (void)user_data;
+    if (event->kind != SIPRAL_EVENT_KIND_RESOLVE_NEEDED) {
+        return;
+    }
+    asked_dialog = event->payload.resolve.dialog;
+    asked_port = event->payload.resolve.port;
+    asked_protocol = event->payload.resolve.protocol;
+    size_t len = event->payload.resolve.host_len;
+    if (len >= sizeof asked_host) {
+        len = sizeof asked_host - 1;
+    }
+    if (event->payload.resolve.host != NULL) {
+        memcpy(asked_host, event->payload.resolve.host, len);
+    }
+    asked_host[len] = '\0';
+}
+
+/* Drain everything the stack wants written and report where the first message
+ * beginning with `start` was going. */
+static int going_to(sipral_handle_t stack, const char *start, char *into, size_t room)
+{
+    int found = 0;
+    for (;;) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            return found;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (found || strncmp((const char *)message_buffer, start, strlen(start)) != 0) {
+            continue;
+        }
+        if (strlen(destination_buffer) >= room) {
+            return 0;
+        }
+        memcpy(into, destination_buffer, strlen(destination_buffer) + 1);
+        found = 1;
+    }
+}
+
+static void a_next_hop_is_asked_about_and_answered(void)
+{
+    static const char elsewhere[] = "198.51.100.7:5080";
+    static const char target[] = "sip:bob@example.com";
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the stack a next hop is asked about on", 0);
+        return;
+    }
+    asked_dialog = SIPRAL_HANDLE_NONE;
+    asked_host[0] = '\0';
+
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    config.event_callback = on_resolve_event;
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the stack a next hop is asked about on would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the account a next hop is asked about on was refused",
+           sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+
+    sipral_call_config_t call_config = { 0 };
+    call_config.size = sizeof call_config;
+    call_config.target = target;
+    call_config.target_len = strlen(target);
+    call_config.sdp = (const uint8_t *)fixture_offer;
+    call_config.sdp_len = strlen(fixture_offer);
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    expect("the call whose next hop is a name would not go out",
+           sipral_call_place(stack, account, &call_config, &call, 0) == SIPRAL_STATUS_OK);
+
+    char invite[2048] = { 0 };
+    for (int drained = 0; drained < 8 && invite[0] == '\0'; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (strncmp((const char *)message_buffer, "INVITE ", strlen("INVITE ")) != 0 ||
+            transmit.len >= sizeof invite) {
+            continue;
+        }
+        memcpy(invite, message_buffer, transmit.len + 1);
+    }
+    if (invite[0] == '\0') {
+        expect("the INVITE never came out", 0);
+        sipral_stack_destroy(stack);
+        return;
+    }
+
+    char via[256];
+    char from[256];
+    char to[256];
+    char call_id[256];
+    char cseq[64];
+    if (!header_of(invite, "Via", via, sizeof via) ||
+        !header_of(invite, "From", from, sizeof from) ||
+        !header_of(invite, "To", to, sizeof to) ||
+        !header_of(invite, "Call-ID", call_id, sizeof call_id) ||
+        !header_of(invite, "CSeq", cseq, sizeof cseq)) {
+        expect("the INVITE the far end is answering cannot be read", 0);
+        sipral_stack_destroy(stack);
+        return;
+    }
+    /* the Contact names a host, which is the whole point: the dialog's next
+     * hop is now something only a resolver turns into an address */
+    char answer[2048];
+    int length = snprintf(answer, sizeof answer,
+                          "SIP/2.0 200 OK\r\n"
+                          "Via: %s\r\n"
+                          "From: %s\r\n"
+                          "To: %s;tag=smoke-farend\r\n"
+                          "Call-ID: %s\r\n"
+                          "CSeq: %s\r\n"
+                          "Contact: <sip:bob@bob.example.com>\r\n"
+                          "Content-Length: 0\r\n\r\n",
+                          via, from, to, call_id, cseq);
+    if (length <= 0 || (size_t)length >= sizeof answer) {
+        expect("the answer the far end sends does not fit its buffer", 0);
+        sipral_stack_destroy(stack);
+        return;
+    }
+    expect("the answer was not taken",
+           sipral_stack_receive_datagram(stack, SIPRAL_TRANSPORT_MAIN, (const uint8_t *)answer,
+                                         (size_t)length, fixture_peer, strlen(fixture_peer),
+                                         fixture_bind, strlen(fixture_bind),
+                                         0) == SIPRAL_STATUS_OK);
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    expect("the stack would not poll", sipral_stack_poll(stack, 0, &poll) == SIPRAL_STATUS_OK);
+
+    expect("nothing asked about the next hop", asked_dialog != SIPRAL_HANDLE_NONE);
+    expect("the host asked about is not the one the Contact named",
+           strcmp(asked_host, "bob.example.com") == 0);
+    expect("a port was invented for a URI that gave none", asked_port == 0);
+    expect("a transport was invented for a URI that named none", asked_protocol == 0);
+    if (asked_dialog == SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(stack);
+        return;
+    }
+
+    /* a name where an address belongs is refused, because resolving one is
+     * exactly what this call is the answer to */
+    expect("a name was accepted as an answer",
+           sipral_stack_resolved(stack, asked_dialog, "bob.example.com:5060",
+                                 strlen("bob.example.com:5060"),
+                                 0) == SIPRAL_STATUS_INVALID_ARGUMENT);
+
+    expect("the answer was refused",
+           sipral_stack_resolved(stack, asked_dialog, elsewhere, strlen(elsewhere), 0) ==
+               SIPRAL_STATUS_OK);
+    expect("the call would not hang up",
+           sipral_call_hangup(stack, call, 1) == SIPRAL_STATUS_OK);
+    char went[SIPRAL_ADDRESS_BYTES] = { 0 };
+    expect("the BYE never came out", going_to(stack, "BYE ", went, sizeof went));
+    expect("the answer did not move where the dialog's requests go",
+           strcmp(went, elsewhere) == 0);
+
+    sipral_stack_destroy(stack);
+}
+
 /* -- a registration that survives the process --------------------------------
  *
  * C3 through the ABI: a binding written down on the way into suspend, read
@@ -1563,6 +1758,7 @@ int main(void)
     a_call_names_its_own_codecs();
     every_codec_says_what_became_of_it();
     a_registration_freezes_and_thaws();
+    a_next_hop_is_asked_about_and_answered();
 
     config.size = sizeof config;
     config.event_callback = on_event;

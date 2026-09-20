@@ -1488,7 +1488,7 @@ m=audio 41000 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=recvonly\r\n";
 
-    fn as_text(value: &str) -> (*const c_char, usize) {
+    pub(crate) fn as_text(value: &str) -> (*const c_char, usize) {
         (value.as_ptr().cast::<c_char>(), value.len())
     }
 
@@ -1716,7 +1716,7 @@ a=recvonly\r\n";
         message.body().to_vec()
     }
 
-    fn start_line(bytes: &[u8]) -> String {
+    pub(crate) fn start_line(bytes: &[u8]) -> String {
         String::from_utf8_lossy(
             bytes
                 .split(|byte| *byte == b'\r')

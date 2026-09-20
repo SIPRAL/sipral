@@ -326,7 +326,6 @@ public enum SipralDtmf: UInt32, Sendable {
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 29: the application is asked to resolve a destination
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -468,6 +467,23 @@ public enum SipralEventKind: UInt32, Sendable {
     /// got there actually knows. `crates/sipral-ffi/src/lifecycle.rs`
     /// and `docs/16-lifecycle.md` are the ladder this reports on.
     case recovery = 28
+    /// A dialog's next hop is a name, and this library does not look
+    /// names up.
+    ///
+    /// RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
+    /// route set and the remote target say where this dialog's requests
+    /// should go, and what they say is not where they are going. Nothing
+    /// here owns a resolver — nothing here owns a socket either — so the
+    /// answer is the application's, through
+    /// sipral_stack_resolved,
+    /// with `payload.resolve.dialog` as the handle it takes.
+    ///
+    /// **Ignoring it is legitimate and is the common case.** The dialog
+    /// keeps the flow its first message travelled on, which §8.1.2 allows
+    /// as an alternate address and which is the only thing that survives
+    /// a NAT. Nothing times out, nothing retries, and no second event
+    /// says the first went unanswered.
+    case resolveNeeded = 29
     /// A notification arrived on a subscription, and has been answered.
     ///
     /// A1's other half. The NOTIFY is in `message`, whole and unparsed,
@@ -1188,7 +1204,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 17
+    public static let abiVersionMinor: UInt32 = 18
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3613,6 +3629,87 @@ public enum Sipral {
         let status = sipral_account_time_to_ready(stack, account, &hasValue, &ms)
         try check(status)
         return (hasValue: hasValue, ms: ms)
+    }
+
+    /// Say where a dialog's next hop actually is.
+    ///
+    /// The answer to
+    /// SIPRAL_EVENT_KIND_RESOLVE_NEEDED,
+    /// with `dialog` the handle that event carried. `addresses` is
+    /// comma-separated `host:port`, **in RFC 3263 §4.3 priority order**: the
+    /// first one this stack already has an open transport of the wanted
+    /// protocol for is taken, and the ones after it are kept for this stack
+    /// to try in turn if that one goes on to fail. A list is therefore not a
+    /// convenience — it is what makes failover possible at all, and one
+    /// address is a list of one that cannot fail over.
+    ///
+    /// `protocol` is a SipralTransport when
+    /// the lookup named one, which a NAPTR or SRV answer does, and zero when
+    /// it did not — an A lookup with nothing above it — in which case the flow
+    /// keeps speaking whatever it already spoke. It is looked for, never
+    /// opened: nothing here owns a socket, so a protocol nothing has bound is
+    /// not something this can invent. An address on one is passed over, and
+    /// answering again after
+    /// sipral_stack_transport_bind
+    /// is how it gets another chance.
+    ///
+    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
+    /// cases, and neither is an error: the dialog has ended, and none of the
+    /// addresses is one this stack can reach on the protocol asked for. The
+    /// flow stands exactly as it did.
+    ///
+    /// There is no `now_ms` here on purpose. Every other call that changes
+    /// what this stack will send takes the time because something it does is
+    /// timed; this one only writes an address down.
+    ///
+    /// Safety
+    ///
+    /// `addresses` must be readable for `addresses_len` bytes.
+    public static func stackResolved(stack: SipralHandle, dialog: SipralHandle, addresses: String, `protocol`: UInt32) throws {
+        try ensureAbi()
+        let status =
+            Array(addresses.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    sipral_stack_resolved(stack, dialog, p2.baseAddress, p2.count, `protocol`)
+                }
+            }
+        try check(status)
+    }
+
+    /// Point an account's registration at another address.
+    ///
+    /// For a registrar named by a record with more than one target, and for
+    /// the one after it when the first stops answering. The binding's
+    /// `Call-ID`, its sequence number and its credentials are all kept, so
+    /// the next REGISTER reads to the registrar as the same device
+    /// continuing, not as a second one arriving — which is the whole of the
+    /// saving and the reason this is not "remove the account and add it
+    /// again".
+    ///
+    /// A REGISTER already in flight or already booked for this account is
+    /// superseded at once rather than waited out. Retargeting to the address
+    /// an account is already using is `SIPRAL_STATUS_OK` and sends nothing.
+    ///
+    /// `registrar_address` is `host:port`, not a name: resolving one is the
+    /// application's, here as everywhere else in this module.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar — a
+    /// trunk authenticated by address has nothing to retarget, and
+    /// `sipral_account_config_t::registrar_address` is where its outbound
+    /// proxy is set.
+    ///
+    /// Safety
+    ///
+    /// `registrar_address` must be readable for `registrar_address_len`
+    /// bytes.
+    public static func accountRetarget(stack: SipralHandle, account: SipralHandle, registrarAddress: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(registrarAddress.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    sipral_account_retarget(stack, account, p2.baseAddress, p2.count, nowMs)
+                }
+            }
+        try check(status)
     }
 
     /// Copy one call's diagnostic record into `buffer`, as the JSON

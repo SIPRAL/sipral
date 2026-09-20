@@ -856,6 +856,23 @@ pub(crate) mod tests {
         buffers.taken(&transmit)
     }
 
+    /// The same, keeping where each one was going: what a test that is about
+    /// an address rather than a message needs.
+    pub(crate) fn drain_addressed(stack: SipralHandle) -> Vec<(Vec<u8>, String)> {
+        let mut buffers = Buffers::new();
+        let mut all = Vec::new();
+        loop {
+            let mut transmit = buffers.transmit();
+            let status = unsafe { sipral_stack_poll_transmit(stack, &raw mut transmit) };
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            if transmit.len == 0 {
+                return all;
+            }
+            let (message, destination, _) = buffers.taken(&transmit);
+            all.push((message, destination));
+        }
+    }
+
     /// Everything the stack wants written, in order, through the C ABI.
     pub(crate) fn drain(stack: SipralHandle) -> Vec<Vec<u8>> {
         let mut buffers = Buffers::new();

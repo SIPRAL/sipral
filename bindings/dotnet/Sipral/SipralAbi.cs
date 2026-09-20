@@ -498,7 +498,6 @@ public enum SipralDtmf : uint
 /// refuse it, which is what makes adding one safe.
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 29: the application is asked to resolve a destination
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -696,6 +695,25 @@ public enum SipralEventKind : uint
     /// and `docs/16-lifecycle.md` are the ladder this reports on.
     /// </summary>
     Recovery = 28,
+    /// <summary>
+    /// A dialog's next hop is a name, and this library does not look
+    /// names up.
+    ///
+    /// RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
+    /// route set and the remote target say where this dialog's requests
+    /// should go, and what they say is not where they are going. Nothing
+    /// here owns a resolver — nothing here owns a socket either — so the
+    /// answer is the application's, through
+    /// sipral_stack_resolved,
+    /// with `payload.resolve.dialog` as the handle it takes.
+    ///
+    /// **Ignoring it is legitimate and is the common case.** The dialog
+    /// keeps the flow its first message travelled on, which §8.1.2 allows
+    /// as an alternate address and which is the only thing that survives
+    /// a NAT. Nothing times out, nothing retries, and no second event
+    /// says the first went unanswered.
+    /// </summary>
+    ResolveNeeded = 29,
     /// <summary>
     /// A notification arrived on a subscription, and has been answered.
     ///
@@ -3212,6 +3230,47 @@ public struct SipralAnnounceEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.ResolveNeeded carries: the name a dialog's
+/// next hop is written as, and the handle an answer takes.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralResolveEvent
+{
+    /// <summary>
+    /// The dialog this is about, and what
+    /// sipral_stack_resolved
+    /// is answered with. Minted by the library, valid while the dialog
+    /// is, and answering for one that has ended changes nothing rather
+    /// than failing.
+    /// </summary>
+    public ulong Dialog;
+    /// <summary>
+    /// The host to resolve, as the URI spells it — a name, or a literal
+    /// address, which is still reported because the flow the dialog is on
+    /// may legitimately differ from it. An IPv6 literal carries its
+    /// brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+    /// </summary>
+    public IntPtr Host;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint HostLen;
+    /// <summary>
+    /// The port the URI gave, or zero for none. Zero is not 5060: RFC
+    /// 3263 §4.2 leaves the choice to whoever does the lookup, because
+    /// an SRV answer carries a port of its own.
+    /// </summary>
+    public uint Port;
+    /// <summary>
+    /// The transport the URI or the scheme named, as a
+    /// SipralTransport, or zero for
+    /// neither — which leaves §4.1's NAPTR step to the caller, and is
+    /// also what a protocol this build has no number for reads as.
+    /// </summary>
+    public uint Protocol;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -3264,6 +3323,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralAnnounceEvent Announce;
+    /// <summary>
+    /// For SipralEventKind.ResolveNeeded.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralResolveEvent Resolve;
 }
 
 /// <summary>
@@ -3994,6 +4058,12 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_time_to_ready(ulong stack, ulong account, out uint hasValue, out ulong ms);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_resolved(ulong stack, ulong dialog, sbyte[] addresses, nuint addressesLen, uint protocol);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_retarget(ulong stack, ulong account, sbyte[] registrarAddress, nuint registrarAddressLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_record_json(ulong stack, ulong call, sbyte[] buffer, nuint capacity, out nuint len);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -4050,7 +4120,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 17;
+    public const uint AbiVersionMinor = 18;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -6438,6 +6508,85 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_account_time_to_ready(stack, account, out var hasValue, out var ms));
         return (hasValue, ms);
+    }
+
+    /// <summary>
+    /// Say where a dialog's next hop actually is.
+    ///
+    /// The answer to
+    /// SIPRAL_EVENT_KIND_RESOLVE_NEEDED,
+    /// with `dialog` the handle that event carried. `addresses` is
+    /// comma-separated `host:port`, **in RFC 3263 §4.3 priority order**: the
+    /// first one this stack already has an open transport of the wanted
+    /// protocol for is taken, and the ones after it are kept for this stack
+    /// to try in turn if that one goes on to fail. A list is therefore not a
+    /// convenience — it is what makes failover possible at all, and one
+    /// address is a list of one that cannot fail over.
+    ///
+    /// `protocol` is a SipralTransport when
+    /// the lookup named one, which a NAPTR or SRV answer does, and zero when
+    /// it did not — an A lookup with nothing above it — in which case the flow
+    /// keeps speaking whatever it already spoke. It is looked for, never
+    /// opened: nothing here owns a socket, so a protocol nothing has bound is
+    /// not something this can invent. An address on one is passed over, and
+    /// answering again after
+    /// sipral_stack_transport_bind
+    /// is how it gets another chance.
+    ///
+    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
+    /// cases, and neither is an error: the dialog has ended, and none of the
+    /// addresses is one this stack can reach on the protocol asked for. The
+    /// flow stands exactly as it did.
+    ///
+    /// There is no `now_ms` here on purpose. Every other call that changes
+    /// what this stack will send takes the time because something it does is
+    /// timed; this one only writes an address down.
+    ///
+    /// Safety
+    ///
+    /// `addresses` must be readable for `addresses_len` bytes.
+    /// </summary>
+    public static void StackResolved(ulong stack, ulong dialog, string addresses, uint protocol)
+    {
+        var addressesBytes = Encoding.UTF8.GetBytes(addresses);
+        var addressesSigned = new sbyte[addressesBytes.Length];
+        Buffer.BlockCopy(addressesBytes, 0, addressesSigned, 0, addressesBytes.Length);
+        Check(NativeMethods.sipral_stack_resolved(stack, dialog, addressesSigned, (nuint)addressesSigned.Length, protocol));
+    }
+
+    /// <summary>
+    /// Point an account's registration at another address.
+    ///
+    /// For a registrar named by a record with more than one target, and for
+    /// the one after it when the first stops answering. The binding's
+    /// `Call-ID`, its sequence number and its credentials are all kept, so
+    /// the next REGISTER reads to the registrar as the same device
+    /// continuing, not as a second one arriving — which is the whole of the
+    /// saving and the reason this is not "remove the account and add it
+    /// again".
+    ///
+    /// A REGISTER already in flight or already booked for this account is
+    /// superseded at once rather than waited out. Retargeting to the address
+    /// an account is already using is `SIPRAL_STATUS_OK` and sends nothing.
+    ///
+    /// `registrar_address` is `host:port`, not a name: resolving one is the
+    /// application's, here as everywhere else in this module.
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar — a
+    /// trunk authenticated by address has nothing to retarget, and
+    /// `sipral_account_config_t::registrar_address` is where its outbound
+    /// proxy is set.
+    ///
+    /// Safety
+    ///
+    /// `registrar_address` must be readable for `registrar_address_len`
+    /// bytes.
+    /// </summary>
+    public static void AccountRetarget(ulong stack, ulong account, string registrarAddress, ulong nowMs)
+    {
+        var registrarAddressBytes = Encoding.UTF8.GetBytes(registrarAddress);
+        var registrarAddressSigned = new sbyte[registrarAddressBytes.Length];
+        Buffer.BlockCopy(registrarAddressBytes, 0, registrarAddressSigned, 0, registrarAddressBytes.Length);
+        Check(NativeMethods.sipral_account_retarget(stack, account, registrarAddressSigned, (nuint)registrarAddressSigned.Length, nowMs));
     }
 
     /// <summary>

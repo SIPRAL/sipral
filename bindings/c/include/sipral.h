@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)17)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)18)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -239,6 +239,7 @@ typedef struct sipral_recovery_event sipral_recovery_event_t;
 typedef struct sipral_transport_wanted_event sipral_transport_wanted_event_t;
 typedef struct sipral_subscription_event sipral_subscription_event_t;
 typedef struct sipral_announce_event sipral_announce_event_t;
+typedef struct sipral_resolve_event sipral_resolve_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -735,7 +736,6 @@ enum {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
- * - 29: the application is asked to resolve a destination
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -933,6 +933,25 @@ enum {
      * and `docs/16-lifecycle.md` are the ladder this reports on.
      */
     SIPRAL_EVENT_KIND_RECOVERY = 28,
+    /**
+     * A dialog's next hop is a name, and this library does not look
+     * names up.
+     *
+     * RFC 3263 §4's TARGET, before any NAPTR, SRV or A lookup: the
+     * route set and the remote target say where this dialog's requests
+     * should go, and what they say is not where they are going. Nothing
+     * here owns a resolver — nothing here owns a socket either — so the
+     * answer is the application's, through
+     * sipral_stack_resolved,
+     * with `payload.resolve.dialog` as the handle it takes.
+     *
+     * **Ignoring it is legitimate and is the common case.** The dialog
+     * keeps the flow its first message travelled on, which §8.1.2 allows
+     * as an alternate address and which is the only thing that survives
+     * a NAT. Nothing times out, nothing retries, and no second event
+     * says the first went unanswered.
+     */
+    SIPRAL_EVENT_KIND_RESOLVE_NEEDED = 29,
     /**
      * A notification arrived on a subscription, and has been answered.
      *
@@ -3269,6 +3288,45 @@ struct sipral_announce_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_RESOLVE_NEEDED carries: the name a dialog's
+ * next hop is written as, and the handle an answer takes.
+ */
+struct sipral_resolve_event {
+    /**
+     * The dialog this is about, and what
+     * sipral_stack_resolved
+     * is answered with. Minted by the library, valid while the dialog
+     * is, and answering for one that has ended changes nothing rather
+     * than failing.
+     */
+    sipral_handle_t dialog;
+    /**
+     * The host to resolve, as the URI spells it — a name, or a literal
+     * address, which is still reported because the flow the dialog is on
+     * may legitimately differ from it. An IPv6 literal carries its
+     * brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+     */
+    const char *host;
+    /**
+     * How many bytes of it.
+     */
+    size_t host_len;
+    /**
+     * The port the URI gave, or zero for none. Zero is not 5060: RFC
+     * 3263 §4.2 leaves the choice to whoever does the lookup, because
+     * an SRV answer carries a port of its own.
+     */
+    uint32_t port;
+    /**
+     * The transport the URI or the scheme named, as a
+     * sipral_transport_t, or zero for
+     * neither — which leaves §4.1's NAPTR step to the caller, and is
+     * also what a protocol this build has no number for reads as.
+     */
+    uint32_t protocol;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -3311,6 +3369,10 @@ union sipral_event_payload {
      * SIPRAL_EVENT_KIND_ANNOUNCED_CALL_MISSING.
      */
     sipral_announce_event_t announce;
+    /**
+     * For SIPRAL_EVENT_KIND_RESOLVE_NEEDED.
+     */
+    sipral_resolve_event_t resolve;
 };
 
 /**
@@ -5396,6 +5458,73 @@ sipral_status_t sipral_account_thaw(sipral_handle_t stack, sipral_handle_t accou
  * `uint64_t`.
  */
 sipral_status_t sipral_account_time_to_ready(sipral_handle_t stack, sipral_handle_t account, uint32_t *out_has_value, uint64_t *out_ms);
+
+/**
+ * Say where a dialog's next hop actually is.
+ *
+ * The answer to
+ * SIPRAL_EVENT_KIND_RESOLVE_NEEDED,
+ * with `dialog` the handle that event carried. `addresses` is
+ * comma-separated `host:port`, **in RFC 3263 §4.3 priority order**: the
+ * first one this stack already has an open transport of the wanted
+ * protocol for is taken, and the ones after it are kept for this stack
+ * to try in turn if that one goes on to fail. A list is therefore not a
+ * convenience — it is what makes failover possible at all, and one
+ * address is a list of one that cannot fail over.
+ *
+ * `protocol` is a sipral_transport_t when
+ * the lookup named one, which a NAPTR or SRV answer does, and zero when
+ * it did not — an A lookup with nothing above it — in which case the flow
+ * keeps speaking whatever it already spoke. It is looked for, never
+ * opened: nothing here owns a socket, so a protocol nothing has bound is
+ * not something this can invent. An address on one is passed over, and
+ * answering again after
+ * sipral_stack_transport_bind
+ * is how it gets another chance.
+ *
+ * `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
+ * cases, and neither is an error: the dialog has ended, and none of the
+ * addresses is one this stack can reach on the protocol asked for. The
+ * flow stands exactly as it did.
+ *
+ * There is no `now_ms` here on purpose. Every other call that changes
+ * what this stack will send takes the time because something it does is
+ * timed; this one only writes an address down.
+ *
+ * Safety
+ *
+ * `addresses` must be readable for `addresses_len` bytes.
+ */
+sipral_status_t sipral_stack_resolved(sipral_handle_t stack, sipral_handle_t dialog, const char *addresses, size_t addresses_len, uint32_t protocol);
+
+/**
+ * Point an account's registration at another address.
+ *
+ * For a registrar named by a record with more than one target, and for
+ * the one after it when the first stops answering. The binding's
+ * `Call-ID`, its sequence number and its credentials are all kept, so
+ * the next REGISTER reads to the registrar as the same device
+ * continuing, not as a second one arriving — which is the whole of the
+ * saving and the reason this is not "remove the account and add it
+ * again".
+ *
+ * A REGISTER already in flight or already booked for this account is
+ * superseded at once rather than waited out. Retargeting to the address
+ * an account is already using is `SIPRAL_STATUS_OK` and sends nothing.
+ *
+ * `registrar_address` is `host:port`, not a name: resolving one is the
+ * application's, here as everywhere else in this module.
+ * `SIPRAL_STATUS_NOT_SUPPORTED` for an account with no registrar — a
+ * trunk authenticated by address has nothing to retarget, and
+ * `sipral_account_config_t::registrar_address` is where its outbound
+ * proxy is set.
+ *
+ * Safety
+ *
+ * `registrar_address` must be readable for `registrar_address_len`
+ * bytes.
+ */
+sipral_status_t sipral_account_retarget(sipral_handle_t stack, sipral_handle_t account, const char *registrar_address, size_t registrar_address_len, uint64_t now_ms);
 
 /**
  * Copy one call's diagnostic record into `buffer`, as the JSON

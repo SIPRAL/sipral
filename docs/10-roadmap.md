@@ -307,7 +307,11 @@ shape is permanent once published:
   refuses `target`, which the REFER already named;
 - one transport per stack, and a registrar that cannot be re-pointed: a
   transport per account and per call, `sipral_account_retarget`, and the
-  resolve request as an event with its answer;
+  resolve request as an event with its answer. *Built*: `transport` on the
+  account and call configurations, `sipral_account_retarget`, and
+  `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` — number 29, which was held for it —
+  answered by `sipral_stack_resolved` with a list of addresses in RFC 3263
+  §4.3 order;
 - an account without a registrar, for trunks authenticated by address.
   *Built*: `registrar_len` zero, with `registrar_address` as the outbound proxy
   and `SIPRAL_REGISTRATION_STATE_NOT_REGISTERING` as its state.

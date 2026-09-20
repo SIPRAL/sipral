@@ -206,9 +206,10 @@ Rules for the ABI:
   27, 28 and 29 were held the same way for three events no requirement numbers
   but the C ABI already planned: a DTMF digit sent by SIP INFO being answered,
   the stack recovering from a suspension or a network change, and a
-  destination the application is asked to resolve. 8.3.11 turned the first of
-  those into `SIPRAL_EVENT_KIND_DTMF_SENT`, in place at 27, and left 28 and 29
-  where they were for the two that follow it.
+  destination the application is asked to resolve. All three have since been
+  taken where they stood — `SIPRAL_EVENT_KIND_DTMF_SENT` at 27,
+  `..._RECOVERY` at 28 and `..._RESOLVE_NEEDED` at 29 — and 16, for audio
+  devices, is the one number still held.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -218,7 +219,8 @@ Rules for the ABI:
 ## Handles
 
 A handle is sixty-four bits naming one thing the library owns: a stack, an
-account, a call, a call's media. A caller reads nothing out of it. The layout
+account, a call, a call's media, a subscription, an announced call, or a
+dialog waiting to be resolved. A caller reads nothing out of it. The layout
 is written down for the person reading a log line or a crash dump, and for
 whoever adds a table.
 
@@ -245,17 +247,22 @@ whoever adds a table.
   now)` reached whichever of the three sat in that slot, most often the account
   or the call, and answered `SIPRAL_STATUS_OK` for a hang-up that named no call
   at all. The four bits of kind are what a handle now carries to say which
-  table it came from — a stack, an account, a call, or a call's media — and
+  table it came from — a stack, an account, a call, a call's media, a
+  subscription, an announced call, or a dialog — and
   every lookup refuses a handle of another kind with
   `SIPRAL_STATUS_INVALID_HANDLE` before it looks at a slot, naming the kind it
   actually got. Every handle of every kind, tag included, is put together by one
   function in `crates/sipral-ffi/src/handle.rs` that takes both, so a table
-  added later cannot mint without either.
+  added later cannot mint without either. Six of the seven kinds are handed out
+  by a call the application made; the seventh, a dialog waiting to be resolved,
+  is minted by the library when it raises the event that carries it, and is
+  named rather than inserted so a dialog asking again keeps the handle it was
+  first given.
 - **The widths.** Twenty-four bits of slot is sixteen million live objects on
   one stack. Eight bits of tag is 256 stacks alive in one process, and that is
   the limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and
-  writes no handle. Four bits of kind is sixteen values for the four this
-  library mints; a fifth kind is still eleven away. What is left for the
+  writes no handle. Four bits of kind is sixteen values for the seven this
+  library mints; an eighth kind is still nine away. What is left for the
   generation is twenty-eight bits rather than the thirty-two a handle with no
   kind could give it: ten calls a second through one slot ran for about
   thirteen and a half years on thirty-two bits and runs about three hundred and

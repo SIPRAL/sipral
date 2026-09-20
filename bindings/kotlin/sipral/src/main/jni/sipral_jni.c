@@ -2182,6 +2182,34 @@ Java_org_sipral_SipralNative_sipral_1account_1time_1to_1ready(JNIEnv *env, jobje
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1resolved(JNIEnv *env, jobject self, jlong stack, jlong dialog, jbyteArray addresses, jlong protocol)
+{
+    (void)env;
+    (void)self;
+    jbyte *addresses_data = addresses ? (*env)->GetByteArrayElements(env, addresses, NULL) : NULL;
+    jsize addresses_size = addresses ? (*env)->GetArrayLength(env, addresses) : 0;
+    sipral_status_t status = sipral_stack_resolved((sipral_handle_t)stack, (sipral_handle_t)dialog, (const char *)addresses_data, (size_t)addresses_size, (uint32_t)protocol);
+    if (addresses) {
+        (*env)->ReleaseByteArrayElements(env, addresses, addresses_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1retarget(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray registrarAddress, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *registrarAddress_data = registrarAddress ? (*env)->GetByteArrayElements(env, registrarAddress, NULL) : NULL;
+    jsize registrarAddress_size = registrarAddress ? (*env)->GetArrayLength(env, registrarAddress) : 0;
+    sipral_status_t status = sipral_account_retarget((sipral_handle_t)stack, (sipral_handle_t)account, (const char *)registrarAddress_data, (size_t)registrarAddress_size, (uint64_t)nowMs);
+    if (registrarAddress) {
+        (*env)->ReleaseByteArrayElements(env, registrarAddress, registrarAddress_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1record_1json(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray buffer, jlongArray len)
 {
     (void)env;

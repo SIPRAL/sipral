@@ -111,7 +111,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
-use sipral_core::transaction::TimerConfig;
+use sipral_core::transaction::{DialogId, TimerConfig};
 use sipral_ua::{
     AccountId, AnnouncementId, CallHandle, CallIdentity, SubscriptionHandle, UaEvent, UserAgent,
 };
@@ -715,6 +715,14 @@ pub(crate) struct StackState {
     pub(crate) subscriptions: Names<SubscriptionHandle>,
     /// Every call a push announced and no INVITE has answered yet.
     pub(crate) announcements: Names<AnnouncementId>,
+    /// Every dialog this stack has asked the application to resolve a next
+    /// hop for. Named rather than inserted when the event is translated, so
+    /// that a dialog asking again on every target refresh keeps the handle it
+    /// was first given, and forgotten with the call it belonged to. A dialog
+    /// that is not a call's — a subscription's — stays named until the stack
+    /// is destroyed, which is one row and is what the alternative, a lookup
+    /// `sipral-ua` does not publish, would cost a public method to avoid.
+    pub(crate) dialogs: Names<DialogId>,
     /// Who is on every call this stack still knows: the `From` and `To` of
     /// the request that opened it, fixed since. Read once, at that moment,
     /// because by the time a call has ended the layer below has already let
@@ -1226,6 +1234,7 @@ pub(crate) unsafe fn create_on(
             calls: Names::new(&tag, Kind::Call),
             subscriptions: Names::new(&tag, Kind::Subscription),
             announcements: Names::new(&tag, Kind::Announcement),
+            dialogs: Names::new(&tag, Kind::Dialog),
             identities: HashMap::new(),
             tag,
             transports: Transports::new(speaks.protocol()),
@@ -1520,6 +1529,9 @@ fn drain(
         state.farewells.push_back((handle, destination, payload));
     }
     for call in ended {
+        if let Some(dialog) = state.agent.call_dialog(call) {
+            state.dialogs.forget(dialog);
+        }
         state.calls.forget(call);
         state.unmanage(call);
         // the delivery already queued for this call's own ending keeps its
@@ -1549,7 +1561,7 @@ fn signalling(
     // media reason is built in `media` below: a `SocketAddr` has no bytes of
     // its own to point at, so this is what the event's pointer needs kept
     // alive once the borrow below has gone
-    let destination = crate::event::transport_wanted_destination(&said);
+    let destination = crate::event::text_to_point_at(&said);
     // shared rather than owned outright, so that the bytes the translation
     // points into stay where they are however often the delivery moves
     let said = Arc::new(said);
@@ -1560,6 +1572,7 @@ fn signalling(
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
         announcements: &mut state.announcements,
+        dialogs: &mut state.dialogs,
         identities: &state.identities,
         raised_identity: None,
     };
@@ -1600,6 +1613,7 @@ fn media(
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
         announcements: &mut state.announcements,
+        dialogs: &mut state.dialogs,
         identities: &state.identities,
         raised_identity: None,
     };
@@ -1698,6 +1712,8 @@ pub(crate) mod tests {
         pub(crate) calls: Vec<Seen>,
         /// What every subscription event carried, in the order they arrived.
         pub(crate) subscriptions: Vec<Watched>,
+        /// What every resolve request carried, in the order they arrived.
+        pub(crate) resolves: Vec<Asked>,
         /// Filled by the callbacks that call back into the library.
         reentrant_status: Option<SipralStatus>,
         destroy_status: Option<SipralStatus>,
@@ -1840,6 +1856,38 @@ pub(crate) mod tests {
         pub(crate) message_len: usize,
     }
 
+    /// What one `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` said, copied out while its
+    /// pointers are still the library's to read.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Asked {
+        pub(crate) dialog: SipralHandle,
+        pub(crate) host: String,
+        pub(crate) port: u32,
+        pub(crate) protocol: u32,
+    }
+
+    /// The resolve arm of one event's payload.
+    ///
+    /// # Safety
+    ///
+    /// `event` must be the kind that fills that arm in.
+    unsafe fn asked(event: &SipralEvent) -> Asked {
+        let payload = unsafe { event.payload.resolve };
+        let host = if payload.host.is_null() {
+            String::new()
+        } else {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(payload.host.cast::<u8>(), payload.host_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        Asked {
+            dialog: payload.dialog,
+            host,
+            port: payload.port,
+            protocol: payload.protocol,
+        }
+    }
+
     /// The subscription arm of one event's payload.
     ///
     /// # Safety
@@ -1881,6 +1929,10 @@ pub(crate) mod tests {
         ) {
             let watched = unsafe { watched(event) };
             observed.subscriptions.push(watched);
+        }
+        if event.kind == SipralEventKind::ResolveNeeded {
+            let asked = unsafe { asked(event) };
+            observed.resolves.push(asked);
         }
     }
 
