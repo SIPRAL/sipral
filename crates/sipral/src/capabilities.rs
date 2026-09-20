@@ -57,13 +57,13 @@ pub enum SrtpKeying {
     Sdes,
     /// RFC 5764's handshake on the media path.
     ///
-    /// Named here and deliberately absent from [`Capabilities::srtp_keying`]:
-    /// `sipral-core` reads an `a=fingerprint` and carries it through, and
-    /// there is no DTLS anywhere in this tree — no handshake, no certificate,
-    /// nothing that could produce a key. A plan keyed this way is refused
-    /// with [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) rather
-    /// than opened in the clear, which is the behaviour this absence is
-    /// derived from.
+    /// Listed only where the `dtls` feature put a handshake behind it. In a
+    /// build without it, `sipral-core` still reads an `a=fingerprint` and
+    /// carries it through, and nothing can produce a key from it: a plan
+    /// keyed this way is then refused with
+    /// [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) rather than
+    /// opened in the clear, which is the behaviour that absence is derived
+    /// from.
     Dtls,
 }
 
@@ -89,8 +89,15 @@ const fn contains_opus(codecs: &[Codec]) -> bool {
 ///
 /// Not "the ones SRTP defines" and not "the ones something in this workspace
 /// has a type for": the ones a call placed or answered through
-/// [`MediaEngine`](crate::MediaEngine) reaches, which today is SDES and only
-/// SDES.
+/// [`MediaEngine`](crate::MediaEngine) reaches. SDES always, and DTLS-SRTP
+/// wherever the `dtls` feature put a handshake behind it.
+#[cfg(feature = "dtls")]
+const KEYING: [SrtpKeying; 2] = [SrtpKeying::Sdes, SrtpKeying::Dtls];
+
+/// Without the feature there is no handshake, no certificate and nothing that
+/// could produce a key on the media path, so the list is one long and a plan
+/// keyed by a handshake is refused where it arrives.
+#[cfg(not(feature = "dtls"))]
 const KEYING: [SrtpKeying; 1] = [SrtpKeying::Sdes];
 
 /// What this build can do, in one answer.
@@ -183,8 +190,11 @@ mod tests {
     use sipral_core::sdp::{Direction, KeySalt, Keying, NegotiatedCodec, RtcpPlan, RtpMap};
 
     use crate::codec::{Codec, CodecCatalog};
+    #[cfg(not(feature = "dtls"))]
     use crate::error::MediaError;
-    use crate::keying::{SrtpPolicy, security};
+    #[cfg(feature = "dtls")]
+    use crate::keying::Opening;
+    use crate::keying::{SrtpPolicy, opening};
 
     #[test]
     fn the_codec_list_is_the_catalogues_own_default_order() {
@@ -243,15 +253,14 @@ mod tests {
         );
     }
 
-    /// The claim is that SDES is reachable and DTLS-SRTP is not, and both
-    /// halves are checked against the behaviour rather than restated: an
+    /// Every claim is checked against the behaviour rather than restated: an
     /// offer written under a policy that asks for SDES has to name the secure
     /// profile and carry a key, and a plan keyed by a handshake has to be
-    /// refused.
+    /// opened waiting where the build has one and refused where it does not.
     #[test]
     fn the_keying_this_build_lists_is_the_keying_a_call_can_reach() {
         let capabilities = Capabilities::of_this_build();
-        assert_eq!(capabilities.srtp_keying, [SrtpKeying::Sdes]);
+        assert!(capabilities.srtp_keying.contains(&SrtpKeying::Sdes));
         assert_eq!(
             capabilities.srtp,
             !capabilities.srtp_keying.is_empty(),
@@ -260,7 +269,7 @@ mod tests {
 
         let offer = CodecCatalog::new()
             .with_srtp(SrtpPolicy::Offered)
-            .offering(Some(KeySalt::new([3; 16], [4; 14])))
+            .offering(Some(KeySalt::new([3; 16], [4; 14])), None)
             .offer("audio", 40_000, Direction::SendRecv);
         assert_eq!(offer.proto, "RTP/SAVP");
         assert!(
@@ -271,9 +280,10 @@ mod tests {
             "SDES is listed as reachable and the offer carries no key"
         );
 
-        assert!(
-            !capabilities.srtp_keying.contains(&SrtpKeying::Dtls),
-            "there is no DTLS in this tree"
+        assert_eq!(
+            capabilities.srtp_keying.contains(&SrtpKeying::Dtls),
+            cfg!(feature = "dtls"),
+            "the list and the build disagree about DTLS-SRTP"
         );
         let handshaken = sipral_core::sdp::MediaPlan {
             local: "192.0.2.1:40000".parse().expect("an address"),
@@ -288,12 +298,22 @@ mod tests {
             dtmf: None,
             rtcp: RtcpPlan::Off,
             keying: Some(Keying::Dtls {
-                fingerprint: "sha-256 AA:BB".to_owned(),
+                fingerprints: vec!["sha-256 AA:BB".to_owned()],
                 setup: None,
             }),
         };
+        // the list and the code that reads a plan have to agree: a build that
+        // does not list DTLS-SRTP must refuse a plan keyed that way rather
+        // than open it in the clear, and a build that lists it must open the
+        // stream waiting for the handshake rather than refuse it
+        #[cfg(feature = "dtls")]
+        assert!(
+            matches!(opening(&handshaken), Ok(Opening::Awaiting(_))),
+            "DTLS-SRTP is listed as reachable and a plan keyed that way is not opened"
+        );
+        #[cfg(not(feature = "dtls"))]
         assert_eq!(
-            security(&handshaken).err(),
+            opening(&handshaken).err(),
             Some(MediaError::NoDtlsSrtp),
             "DTLS-SRTP is left off the list, so it has to be refused where it arrives"
         );

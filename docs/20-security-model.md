@@ -328,15 +328,25 @@ this end directly rather than through the line's own proxy.
   on someone else's behalf and never terminates one signalling leg to
   originate another, so the class of attack that targets those roles has
   nothing here to land on (`docs/01-architecture.md`, `docs/09-rfc-index.md`).
-- **DTLS-SRTP is written and not reachable from a call.** The handshake in
-  `crates/sipral-dtls` — both roles, the record layer, fingerprint checking in
-  constant time — exists and is unit-tested, but nothing joins it to
-  `sipral-rtp` or the facade yet, so an offer that requires it is refused
-  rather than answered in the clear (`MediaError::NoDtlsSrtp`,
-  `docs/05-media.md`). Its own documentation already commits it to an
-  adversarial cryptography review "before it ships under the commercial
-  licence" (`docs/05-media.md`) — that review has not happened, because
-  nothing yet depends on the answer.
+- **DTLS-SRTP is reachable from a call, and has not had its review.** The
+  handshake in `crates/sipral-dtls` — both roles, the record layer,
+  fingerprint checking in constant time — is joined to the facade behind the
+  `dtls` feature, which is on by default (`docs/05-media.md`). Its own
+  documentation commits it to an adversarial cryptography review "before it
+  ships under the commercial licence", and **that review has not happened**.
+  Until it does, the honest statement about a DTLS-SRTP call on this stack is
+  that its protocol is written from the RFCs and tested against itself, not
+  that its cryptography has been attacked by anyone but its author.
+
+  One limit is known and is a property of the design rather than of the code.
+  A DTLS connection ends on any fatal alert, and an alert arriving before the
+  keys exist cannot be authenticated, because there is nothing yet to
+  authenticate it with. `MediaSession` therefore latches on the address the
+  first *handshake* record arrives from and refuses records from any other,
+  which narrows the window to the same race symmetric RTP already runs: an
+  attacker has to beat the far end's first flight rather than pick its
+  moment. Closing it needs the candidate exchange of ICE, which this stack
+  negotiates and does not assume (`docs/06-nat.md`).
 
 ## The unsafe surface
 

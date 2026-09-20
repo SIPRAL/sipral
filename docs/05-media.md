@@ -381,14 +381,15 @@ is spent. Leaving protect and unprotect to the caller would have been less
 code here and one more thing for every integrator to get wrong in the same
 way.
 
-SDES key exchange through `a=crypto` in SDP for the common case. DTLS-SRTP is
-deliberately not here yet: it needs a DTLS implementation, `rustls` has none,
-and the alternatives are single-maintainer crates. The cost of the delay is
-that peers who require DTLS-SRTP and refuse SDES — a browser talking WebRTC
-directly, and some carrier session border controllers — cannot be reached.
+SDES key exchange through `a=crypto` in SDP for the common case, and
+DTLS-SRTP for the peers that require it and refuse SDES — a browser talking
+WebRTC directly, and some carrier session border controllers. Both are
+reachable from a call; which one a call uses is `SrtpPolicy`, and the two
+never appear in the same description, because a description carrying both has
+agreed to neither.
 
-The way in was decided on 10 September 2026: **written in-tree**, as the last
-item of phase 2. The DTLS 1.2 state machine comes from RFC 6347 — both roles
+The way in was decided on 10 September 2026: **written in-tree**, because
+`rustls` carries no DTLS and the alternatives are single-maintainer crates. The DTLS 1.2 state machine comes from RFC 6347 — both roles
 per `a=setup` (RFC 4145), the record layer with its epoch and anti-replay
 window, fragmentation and retransmission of the handshake flights, the
 `use_srtp` extension and the key export of RFC 5705, the peer's self-signed
@@ -405,8 +406,9 @@ commercial licence. An application that already runs DTLS of its own can
 still export its keys per RFC 5705 and hand them to the engine through the
 seam SDES uses, which costs one function and keeps the gateway case cheap.
 
-**The handshake exists, and no call reaches it yet.** `crates/sipral-dtls`
-holds DTLS 1.2 for either end of a DTLS-SRTP call. Underneath, each piece
+**What the handshake is made of.** `crates/sipral-dtls` holds DTLS 1.2 for
+either end of a DTLS-SRTP call, and a call reaches it through the facade's
+`dtls` feature. Underneath, each piece
 tested on its own: the TLS 1.2 PRF with SHA-256, the master secret and RFC
 7627's extended master secret, the Finished `verify_data` and the record key
 block; the RFC 5705 exporter and the key layout of RFC 5764 §4.2 for
@@ -594,13 +596,40 @@ because a failed attempt leaves the datagram untouched — §3.3's order is
 replay window, then tag, then decrypt — and a change that decrypted first
 would break this without any test noticing.
 
-**What it deliberately does not do.** DTLS-SRTP. `sipral-core` reads an
-`a=fingerprint` and carries it through, and the handshake in `sipral-dtls` is
-not joined to a call, so an offer arriving on `UDP/TLS/RTP/SAVP` has its stream refused rather
-than answered, and a plan that comes back keyed that way is refused with
-`MediaError::NoDtlsSrtp` rather than opened in the clear on a secure profile.
-`Capabilities::srtp_keying` names SDES and not DTLS-SRTP, so an application
-can grey the control out instead of finding out from a support ticket.
+**DTLS-SRTP, and the window it opens.** The handshake in `sipral-dtls` is
+joined to a call behind the `dtls` feature, which is on by default. A
+catalogue set to `SrtpPolicy::DtlsOffered` or `DtlsRequired` writes
+`UDP/TLS/RTP/SAVP` with `a=fingerprint` and `a=setup`, the handshake runs on
+the media path, and the keys it exports open the same `Security` an
+`a=crypto` line would have. Which of the two transforms it opens is the
+handshake's to choose (RFC 5764 §4.1.2), not the signalling's, which is why
+`MediaEvent::Secured` carries it.
+
+What is new about it is the window. SDES keys a stream before its session is
+opened; DTLS-SRTP agrees in the signalling that a stream is protected and
+produces the keys a round trip later. So `RtpSession` has a third state
+between "in the clear" and "keyed": `awaiting`, in which nothing goes out and
+nothing arriving is believed. Every builder answers `BuildError::NotKeyed` and
+every arrival is dropped as `Discard::NotKeyed`, and the refusal is decided
+before the packet is written rather than after, so a refused frame never sits
+in the caller's buffer in the clear. `MediaSession::is_encrypted` reads that
+state rather than the plan: for the length of a handshake it says no, because
+for the length of a handshake nothing has been encrypted.
+
+Three refusals go with it, each for a failure that would otherwise be silent.
+Two `a=setup` values RFC 4145 §4.1 has no row for are refused where they are
+read, because two ends that both believe they are the server wait for each
+other until the handshake gives up. A call that agreed DTLS-SRTP and did not
+agree `a=rtcp-mux` is refused with `MediaError::DtlsNeedsRtcpMux`: RFC 5764
+§4.2 would put a second association on the RTCP port and this stack runs one.
+And a DTLS server has no flight to retransmit, so its connection would never
+time out at all — the facade gives every handshake the budget the client's own
+schedule spends, and reports `MediaError::DtlsHandshake` when it runs out.
+
+Without the `dtls` feature there is no handshake and no certificate: a plan
+that comes back keyed that way is refused with `MediaError::NoDtlsSrtp` rather
+than opened in the clear on a secure profile, and `Capabilities::srtp_keying`
+says so before a call is placed rather than after one has failed.
 
 Nor does it half-honour a crypto line. One master key to a line, because one
 context opens one key; and RFC 4568 §6.3's defaults, so `UNENCRYPTED_SRTP`,

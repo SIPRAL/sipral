@@ -28,8 +28,20 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # this one can be off over a facade that did link libopus. `SIPRAL_CODEC_OPUS`
 # is 4 in every build and always will be, because a number that has left this
 # header is spent for good.
-default = ["opus"]
+#
+# The facade's DTLS-SRTP feature, carried up the same way and on by default.
+# Unlike `opus`, this crate does branch on it: the arms that read a handshake
+# out of a `MediaEvent` and put a record on the wire name types that exist
+# only where the facade compiled them. What does not branch on it is the
+# header — `SIPRAL_SRTP_DTLS`, `SIPRAL_SRTP_DTLS_REQUIRED`,
+# `SIPRAL_EVENT_KIND_MEDIA_SECURED` and `sipral_media_poll_transmit` are in
+# every build of it, because a name that has left this header is spent for
+# good. A build without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to
+# the policies and "nothing due" to the poll, and `SIPRAL_FEATURE_DTLS_SRTP`
+# says so before an application asks.
+default = ["opus", "dtls"]
 opus = ["sipral/opus"]
+dtls = ["sipral/dtls"]
 
 [dependencies]
 # the facade, which is what carries media across this boundary. The two below

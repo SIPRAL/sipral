@@ -149,6 +149,25 @@ public enum SipralSrtp: UInt32, Sendable {
     /// SrtpPolicy::Required: offer it, and let no stream on this call
     /// carry audio unencrypted.
     case required = 3
+    /// SrtpPolicy::DtlsOffered: offer DTLS-SRTP (RFC 5764) on
+    /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
+    ///
+    /// What `Offered` is for SDES, with the difference that matters: the
+    /// key never travels in the body, so this is the one policy here that
+    /// is sound over a SIP transport somebody else can read. The cost is
+    /// a round trip of silence at the start of every call while the
+    /// handshake runs, and an application that names it **must** drain
+    /// sipral_media_poll_transmit — a handshake whose records never
+    /// leave is a call that is up, silent, and reports no error.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_DTLS_SRTP`.
+    case dtls = 4
+    /// SrtpPolicy::DtlsRequired: offer DTLS-SRTP, and let no stream on
+    /// this call carry audio any other way — an answer carrying
+    /// `a=crypto` included, since that key travelled in a body this
+    /// policy exists to avoid trusting.
+    case dtlsRequired = 5
 }
 
 /// One codec this ABI has a number for. Names for every member that says
@@ -275,6 +294,30 @@ public enum SipralArrival: UInt32, Sendable {
     /// Control traffic that was not believed: from the wrong address, or not a
     /// well-formed compound packet.
     case controlRefused = 5
+    /// A record of the DTLS-SRTP handshake that keys this call, which has
+    /// been taken. Whatever it owes the far end in reply is waiting in
+    /// sipral_media_poll_transmit, and this is the signal to drain it.
+    case handshake = 6
+    /// Something arrived on a call that agreed to be encrypted and has no
+    /// keys yet, so there was nothing to verify it with. The ordinary way
+    /// this happens is a peer that starts sending the moment its own half
+    /// of the handshake finishes, which is before ours does.
+    case notKeyed = 7
+}
+
+/// The SRTP transform a call is running. Names for
+/// `sipral_media_event_t::suite`.
+public enum SipralSrtpSuite: UInt32, Sendable {
+    /// No transform: the event is not about one, or the call is not
+    /// encrypted.
+    case unknown = 0
+    /// `AES_CM_128_HMAC_SHA1_80`, the one every implementation has.
+    case aesCm80 = 1
+    /// `AES_CM_128_HMAC_SHA1_32`, the same cipher with a shorter tag.
+    case aesCm32 = 2
+    /// `F8_128_HMAC_SHA1_80`, which is what 3GPP asks for. Reachable by
+    /// SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
+    case aesF8 = 3
 }
 
 /// Where the frame sipral_media_playback just produced came from.
@@ -513,6 +556,25 @@ public enum SipralEventKind: UInt32, Sendable {
     /// more, and `sipral_announcement_forget` on it answers
     /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
     case callAnnounced = 31
+    /// The handshake that keys a call finished, and audio can move
+    /// (RFC 5764).
+    ///
+    /// Only DTLS-SRTP produces it, and it is the moment the call becomes
+    /// what it agreed to be: between `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+    /// and this one the stream exists, has an address and a codec, and
+    /// carries nothing in either direction. An application that draws a
+    /// padlock draws it here.
+    ///
+    /// `call` is the call and `payload.media.suite` is the transform the
+    /// handshake chose — the signalling does not, which is why there is
+    /// an event for it at all. A call keyed by SDES never produces one,
+    /// because such a call is keyed before its session is opened.
+    ///
+    /// A handshake that does not finish produces
+    /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead, and the call is left up:
+    /// whether to hang it up is a decision with a person on the other end
+    /// of it.
+    case mediaSecured = 32
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1204,7 +1266,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 18
+    public static let abiVersionMinor: UInt32 = 19
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -1261,6 +1323,21 @@ public enum Sipral {
     /// number either way, since a value that has left this header is spent
     /// for good.
     public static let featureOpus: UInt32 = 64
+
+    /// DTLS-SRTP (RFC 5764): the keys for a call's media come from a
+    /// handshake on the media path rather than from the body of a message.
+    ///
+    /// Behind a compile-time feature for the reason Opus is: a build that
+    /// will only ever place SDES calls over a protected SIP transport has no
+    /// use for an elliptic curve, and a desk phone counts its flash. Both
+    /// `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers
+    /// in a build without it — a value that has left this header is spent —
+    /// and naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED` rather than
+    /// quietly placing an unencrypted call.
+    ///
+    /// An application that sets one of those policies must also drain
+    /// `sipral_media_poll_transmit`; see there.
+    public static let featureDtlsSrtp: UInt32 = 128
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -2872,6 +2949,35 @@ public enum Sipral {
     public static func mediaPollRtcp(media: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws {
         try ensureAbi()
         let status = sipral_media_poll_rtcp(media, nowMs, &packet)
+        try check(status)
+    }
+
+    /// A datagram this call owes the far end that is neither audio nor a
+    /// report: today, a record of the DTLS-SRTP handshake that keys it.
+    ///
+    /// A `len` of zero means nothing is due. On a call that is not keyed by a
+    /// handshake — every call in a build without `SIPRAL_FEATURE_DTLS_SRTP`,
+    /// and every SDES or plain call in a build with it — that is the answer
+    /// for ever, and calling this costs one comparison.
+    ///
+    /// **Drain it to empty**, in a loop, after every `sipral_media_receive`
+    /// that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every deadline
+    /// `sipral_stack_poll` names. A handshake whose records never leave is a
+    /// ClientHello that never goes out: the call rings, answers, carries no
+    /// audio in either direction, and reports nothing wrong for the two
+    /// minutes it takes to give up. That is the one failure this entry point
+    /// exists to prevent, and there is no way to notice it from the outside.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point.
+    ///
+    /// Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// sipral_media_capture describes.
+    public static func mediaPollTransmit(media: SipralHandle, nowMs: UInt64, packet: inout sipral_media_packet_t) throws {
+        try ensureAbi()
+        let status = sipral_media_poll_transmit(media, nowMs, &packet)
         try check(status)
     }
 

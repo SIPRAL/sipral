@@ -91,13 +91,21 @@ against a peer that supports it is negotiated or detected, never assumed.** ICE
 against a PBX that learns the caller's real address from the media it receives
 buys nothing and costs the call.
 
-**Off has to be a decision, not an accident.** At this commit `sipral-nat` is
-linked by nothing — not by `sipral-ua`, not by the facade, not by the C ABI — so
-ICE is absent because no code path reaches it. That is the right behaviour
-arrived at the wrong way, and it is worth writing down, because a default that
-holds only because nobody wired the alternative is a default that changes the
-first time somebody does. When the facade grows an ICE seam, the switch is
-explicit and this table is what it defaults to.
+**Off has to be a decision, not an accident.** The facade links `sipral-nat`
+for one thing only: the first-octet rule of RFC 7983, which is what tells a
+DTLS record from the RTP beside it on the same socket. Nothing reaches
+`ice::`, in either role, so ICE is still absent because no code path gets to
+it — but the dependency edge now exists, which is the half of the work that
+was missing. When the facade grows the seam itself, the switch is explicit and
+this table is what it defaults to.
+
+Until it does, one thing rests on that absence. A DTLS-SRTP handshake is
+authenticated by a fingerprint the signalling carried, and the fatal alert
+that can end it arrives before there is any key to authenticate *it* with. The
+media session therefore latches on the address the first handshake record came
+from and refuses every other — the same latch symmetric RTP keeps, applied one
+protocol earlier. It narrows the race and does not close it; closing it is
+what the candidate exchange is for (`docs/20-security-model.md`).
 
 ## STUN
 

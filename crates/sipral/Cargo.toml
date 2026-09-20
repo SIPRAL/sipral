@@ -28,8 +28,20 @@ publish = true
 # and in `docs/05-media.md`. With it off, `Codec::ALL` is G.722 and the two
 # G.711 laws, and a peer that offers nothing else is a call with no audio in
 # the ordinary way, not a special kind of failure.
-default = ["opus"]
+#
+# `dtls` is the other one, and it is off the same pattern for a different
+# reason. libopus is a licensing question; this is a size one. DTLS-SRTP
+# brings `sipral-dtls` and the four RustCrypto crates under it — an elliptic
+# curve, AES-GCM, SHA-256 and HMAC — into a build that may never place a call
+# that uses them, because an SDES stream over a TLS-protected SIP transport is
+# what most carriers ask for and all a deployment behind one carrier will ever
+# see. With it off there is no handshake, no certificate and no fingerprint in
+# any offer this stack writes, `Capabilities::srtp_keying` says so before a
+# call is placed, and a peer that offers `UDP/TLS/RTP/SAVP` has its stream
+# refused rather than answered with keys that cannot arrive.
+default = ["opus", "dtls"]
 opus = ["sipral-media/opus"]
+dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a
@@ -45,6 +57,12 @@ sipral-rtp = { path = "../sipral-rtp", version = "0.0.1" }
 # anything: without it, `--no-default-features` on this crate would still link
 # libopus through `sipral-media` and prove nothing.
 sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+# DTLS-SRTP, behind the `dtls` feature. Two crates rather than one: the
+# handshake that produces the keys, and the one octet of RFC 7983 that tells a
+# DTLS record from the RTP beside it on the same socket. The second is written
+# where ICE will need it too, so it is read from there rather than copied.
+sipral-dtls = { path = "../sipral-dtls", version = "0.0.1", optional = true }
+sipral-nat = { path = "../sipral-nat", version = "0.0.1", optional = true }
 # already a dependency of `sipral-rtp` and `sipral-dtls`, pinned to the same
 # version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
 # needs a write the optimiser is not allowed to remove, and that needs

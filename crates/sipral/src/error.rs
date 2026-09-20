@@ -67,9 +67,77 @@ pub enum MediaError {
     /// there is no DTLS in this build.
     ///
     /// Refused rather than opened in the clear on a secure profile. The whole
-    /// of what this build does about keys is SDES, and
+    /// of what a build without the `dtls` feature does about keys is SDES, and
     /// [`Capabilities`](crate::Capabilities) says so before a call is placed.
     NoDtlsSrtp,
+    /// This stack could not make the key and certificate it would have
+    /// presented (RFC 8122).
+    ///
+    /// The one way to reach it is a media seed that is not entropy, which is
+    /// the caller's to supply and the one thing about SRTP that fails
+    /// silently everywhere else: see
+    /// [`MediaEngine::new`](crate::MediaEngine::new).
+    #[cfg(feature = "dtls")]
+    DtlsIdentity,
+    /// The two `a=setup` values cannot both be honoured, so neither end knows
+    /// which of them sends the ClientHello (RFC 4145 §4.1, RFC 5763 §5).
+    ///
+    /// Refused here rather than left to the handshake, because the failure it
+    /// would otherwise cause is the quiet one: two ends that both believe
+    /// they are the server wait for each other until the handshake gives up,
+    /// which is two minutes of a call with no audio and no error.
+    #[cfg(feature = "dtls")]
+    DtlsRole,
+    /// The peer's `a=fingerprint` cannot be read, or names a hash function
+    /// this build has no implementation of (RFC 8122 §5).
+    ///
+    /// A fingerprint that cannot be read cannot authenticate anything, and a
+    /// handshake run without one is a handshake with whoever answers.
+    #[cfg(feature = "dtls")]
+    DtlsFingerprint,
+    /// The handshake did not produce keys: the peer's certificate is not the
+    /// one its signalling named (RFC 8122 §5.1), it offered nothing this end
+    /// can key with, it sent an alert, or it never answered at all.
+    ///
+    /// The call itself is untouched — whether to hang it up is a decision
+    /// with a person on the other end of it — but no audio will flow, because
+    /// a stream that agreed to be secured is never opened in the clear
+    /// instead.
+    #[cfg(feature = "dtls")]
+    DtlsHandshake,
+    /// The far end closed the DTLS connection before it was keyed, or while
+    /// it was running (RFC 6347 §4.2.8).
+    #[cfg(feature = "dtls")]
+    DtlsClosed,
+    /// The handshake agreed an SRTP protection profile this build has no
+    /// transform for (RFC 5764 §4.1.2).
+    ///
+    /// Not reachable against a peer, since only profiles this end offered can
+    /// be agreed; it is the arm a profile added to the handshake and not to
+    /// the stream would land in, loudly, rather than opening a stream under
+    /// the wrong transform.
+    #[cfg(feature = "dtls")]
+    DtlsProfile,
+    /// The call agreed DTLS-SRTP and did not agree to multiplex its control
+    /// traffic, so RFC 5764 §4.2 would need a second handshake on the RTCP
+    /// port and this stack runs one.
+    ///
+    /// Refused rather than opened with an SRTCP half nothing will ever key.
+    /// An offer written under a DTLS policy always asks for `a=rtcp-mux`, so
+    /// the peer is one that took the attribute out of its answer.
+    #[cfg(feature = "dtls")]
+    DtlsNeedsRtcpMux,
+    /// A re-negotiation named a different certificate for the far end
+    /// (RFC 5763 §6.6).
+    ///
+    /// §6.6 asks for a new DTLS association there, and this stack does not
+    /// start one: it refuses the plan instead, so the session keeps running
+    /// on keys both ends still agree on and the call is told. Carrying on
+    /// silently would be worse than either — the far end would have moved to
+    /// a certificate this end never checked, and the media would keep
+    /// flowing as though it had.
+    #[cfg(feature = "dtls")]
+    DtlsFingerprintChanged,
     /// The call asked for SRTP and would have carried audio without it: a
     /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
     /// plain re-offer inside one.
@@ -271,6 +339,32 @@ impl fmt::Display for MediaError {
             Self::NoSuchCall => f.write_str("no such call"),
             Self::NoDtlsSrtp => {
                 f.write_str("the keys were to come from a DTLS handshake, which this build has no")
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsIdentity => f.write_str("no key and certificate could be made for DTLS-SRTP"),
+            #[cfg(feature = "dtls")]
+            Self::DtlsRole => {
+                f.write_str("the two a=setup values do not say which end starts the handshake")
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsFingerprint => f.write_str("the peer's a=fingerprint could not be read"),
+            #[cfg(feature = "dtls")]
+            Self::DtlsHandshake => f.write_str("the DTLS handshake produced no keys"),
+            #[cfg(feature = "dtls")]
+            Self::DtlsClosed => {
+                f.write_str("the far end closed the DTLS connection before it was keyed")
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsProfile => {
+                f.write_str("the handshake agreed an SRTP profile this build cannot open")
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsNeedsRtcpMux => {
+                f.write_str("DTLS-SRTP here needs RTP and RTCP on one port, and the answer did not")
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsFingerprintChanged => {
+                f.write_str("the far end named a different certificate part-way through the call")
             }
             Self::SrtpRequired => {
                 f.write_str("this call requires SRTP and the far end described none")

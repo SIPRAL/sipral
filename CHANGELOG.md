@@ -12,6 +12,61 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **DTLS-SRTP keys a call.** Twelve thousand lines of handshake had been
+  written, tested and depended on by nothing; this is the joint. A catalogue
+  set to `SrtpPolicy::DtlsOffered` or `DtlsRequired` writes
+  `UDP/TLS/RTP/SAVP` with `a=fingerprint` and `a=setup`, the handshake of RFC
+  5764 runs on the call's own media socket, and the keys it exports open the
+  same SRTP contexts an `a=crypto` line would have. Which transform it opens
+  is the handshake's to choose rather than the signalling's, so the new
+  `MediaEvent::Secured` carries it. In C: `SIPRAL_SRTP_DTLS` and
+  `SIPRAL_SRTP_DTLS_REQUIRED`, `SIPRAL_FEATURE_DTLS_SRTP`,
+  `SIPRAL_EVENT_KIND_MEDIA_SECURED`, and a fifth media call,
+  `sipral_media_poll_transmit`, which **must** be drained or the handshake
+  never leaves.
+
+  What is new under it is a third state for a stream. SDES keys a stream
+  before its session opens; DTLS-SRTP agrees in the signalling that a stream
+  is protected and produces the keys a round trip later, so `RtpSession` now
+  has `awaiting` between "in the clear" and "keyed". Nothing goes out and
+  nothing arriving is believed while it holds — `BuildError::NotKeyed` and
+  `Discard::NotKeyed` — and the refusal is decided before the packet is
+  written rather than after, so a refused frame never sits in the caller's
+  buffer in the clear. `MediaSession::is_encrypted` reads that state rather
+  than the plan, so for the length of a handshake it says no, because for the
+  length of a handshake nothing has been encrypted.
+
+  Four failures that would otherwise have been silent are refused by name. Two
+  `a=setup` values RFC 4145 §4.1 has no row for, because two ends that both
+  believe they are the server wait for each other until the handshake gives
+  up. A call that agreed DTLS-SRTP and not `a=rtcp-mux`, because RFC 5764 §4.2
+  would put a second association on the RTCP port. A DTLS server, which has no
+  flight to retransmit and would therefore never time out at all — every
+  handshake now gets the budget the client's own schedule spends. And a fatal
+  alert from an address the call has not heard a handshake record from: an
+  alert arriving before the keys exist cannot be authenticated, so without
+  that latch one forged datagram would have ended any encrypted call this
+  stack placed.
+
+  A re-negotiation that names a different certificate is refused by name
+  (`MediaError::DtlsFingerprintChanged`) rather than ignored. RFC 5763 §6.6
+  asks for a new DTLS association there and this does not start one; refusing
+  keeps the session on keys both ends still agree on and tells the
+  application, where carrying on would have left the media flowing as though a
+  certificate nobody checked had been checked.
+
+- **The demux of RFC 7983 §7 tells DTLS from the media beside it.**
+  `sipral_nat::Demux` classified two protocols on the first two bits and put a
+  DTLS record in `Other` with the rest of the noise. It now reads the first
+  octet as the RFC's own table does — 0 to 3 STUN, 20 to 63 DTLS, 128 to 191
+  RTP or RTCP — which also tightens STUN from sixty-four values to the four it
+  actually uses.
+
+- **Every `a=fingerprint` of a description is carried, not the first.** RFC
+  8122 §5 lets a description name one per hash function so that a peer which
+  knows only one of them can still check it, and `Keying::Dtls` had room for
+  one: a call could die over which hash the other end happened to write first.
+
 - **A destination the application is asked to resolve, and the answer that
   moves it.** Nothing below this boundary owns a resolver, for the same reason
   nothing below it owns a socket, so a dialog whose route set and remote target

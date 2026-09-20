@@ -2379,7 +2379,7 @@ pub(crate) mod tests {
 
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        config.srtp = 4;
+        config.srtp = 6;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(handle, SIPRAL_HANDLE_NONE, "nothing was built");

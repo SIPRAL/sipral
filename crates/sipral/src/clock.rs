@@ -56,6 +56,18 @@ impl WallClock {
         self.ntp
             .saturating_add(ntp_ticks(now.saturating_duration_since(self.origin)))
     }
+
+    /// The wall clock at `now` as whole seconds since 1 January 1970, for the
+    /// one thing in this tree that needs a date rather than a timestamp: the
+    /// validity period RFC 5280 §4.1.2.5 makes a certificate carry.
+    ///
+    /// The same clock the reports read, and the same rule about time before
+    /// the origin. Seconds and not the fraction, because a period measured in
+    /// months has no use for one.
+    #[must_use]
+    pub fn unix_at(&self, now: Instant) -> u64 {
+        (self.at(now) >> 32).saturating_sub(NTP_EPOCH_OFFSET)
+    }
 }
 
 /// A duration as a 64-bit NTP timestamp difference: seconds in the upper half,
@@ -87,6 +99,22 @@ mod tests {
         let clock = WallClock::from_unix(origin, 0, 0);
         assert_eq!(clock.at(origin) >> 32, NTP_EPOCH_OFFSET);
         assert_eq!(clock.at(origin) & 0xFFFF_FFFF, 0);
+    }
+
+    #[test]
+    fn the_two_epochs_come_back_to_the_same_second() {
+        // the certificate half reads seconds since 1970 and the reports read
+        // ticks since 1900; a difference between them would date a
+        // certificate seventy years out
+        let origin = Instant::now();
+        for seconds in [0_u64, 1, 1_790_000_000] {
+            let clock = WallClock::from_unix(origin, seconds, 500_000_000);
+            assert_eq!(clock.unix_at(origin), seconds);
+            assert_eq!(
+                clock.unix_at(origin + Duration::from_secs(90)),
+                seconds + 90
+            );
+        }
     }
 
     #[test]

@@ -288,9 +288,12 @@ suite as a value rather than a token, the master key and salt decoded out of
 the key parameter, and the lifetime and key identifier that travel beside them.
 
 `a=fingerprint` for DTLS-SRTP is read into the plan and written into an offer,
-both exactly as the value stands. There is no DTLS anywhere in this tree — no
-handshake, no certificate, nothing that could produce a key — so the line is
-carried for whoever does one rather than acted on here.
+exactly as the value stands, and **every** line is kept rather than the first:
+RFC 8122 §5 lets a description carry one per hash function so that a peer
+which knows only one of them can still check it, and taking the first would
+fail a call over which hash the other end happened to write first. Nothing
+here acts on them — no handshake, no certificate, no key lives in this crate —
+but the facade does, behind its `dtls` feature (`docs/05-media.md`).
 
 Carried but not typed here: the `a=candidate` lines ICE needs. They survive a
 parse and a round trip like every other attribute, and reading one still means

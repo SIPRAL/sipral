@@ -469,6 +469,10 @@ pub enum BuildError {
     ExtensionLength(usize),
     /// The packet was built and then refused by SRTP.
     Secured(crate::srtp::SrtpError),
+    /// The stream agreed to be secured and its keys have not arrived, so
+    /// there is nothing to protect the packet with. Sending it anyway would
+    /// put in the clear exactly the audio the negotiation asked to encrypt.
+    NotKeyed,
 }
 
 impl fmt::Display for BuildError {
@@ -480,6 +484,7 @@ impl fmt::Display for BuildError {
             Self::TooManyCsrc(n) => write!(f, "{n} contributing sources, {MAX_CSRC} is the most"),
             Self::ExtensionLength(n) => write!(f, "extension of {n} octets is not whole words"),
             Self::Secured(error) => write!(f, "the packet could not be protected: {error}"),
+            Self::NotKeyed => f.write_str("the stream has no keys yet"),
         }
     }
 }

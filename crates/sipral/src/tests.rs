@@ -32,7 +32,7 @@ use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
 use crate::keying::SrtpPolicy;
 use crate::record::tests::Buffer;
-use crate::session::{Arrival, MediaConfig, MediaSession, Playback, StreamIdentity};
+use crate::session::{Arrival, MediaConfig, MediaSession, Playback, Start, StreamIdentity};
 use crate::{
     Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, MediaEngine, OutgoingCall,
     OutgoingExtras, TransportId, TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
@@ -390,6 +390,71 @@ impl Pair {
 
     fn advance(&mut self) {
         self.now += TICK;
+    }
+
+    /// Run the DTLS-SRTP handshake between the two ends, over the media path
+    /// and over nothing else, and say how many records crossed.
+    ///
+    /// The shape a real driver has to have: drain `poll_transmit` to empty,
+    /// deliver, drive the clock to whatever `poll_timeout` asked for, drain
+    /// again. A driver that skips any of those three is a driver whose calls
+    /// come up silent, which is what this reproduces if it is got wrong.
+    #[cfg(feature = "dtls")]
+    fn shake_hands(&mut self, call: CallHandle, remote: CallHandle) -> usize {
+        let mut crossed = 0;
+        for _ in 0..64 {
+            let mut moved = false;
+            let mut pending = Vec::new();
+            while let Some((_, _, record)) = self.caller.engine.poll_transmit() {
+                pending.push((record, true));
+            }
+            while let Some((_, _, record)) = self.callee.engine.poll_transmit() {
+                pending.push((record, false));
+            }
+            for (mut record, from_caller) in pending {
+                crossed += 1;
+                moved = true;
+                let (mut session, from) = if from_caller {
+                    (
+                        self.callee.engine.session(remote).expect("media"),
+                        caller_media(),
+                    )
+                } else {
+                    (
+                        self.caller.engine.session(call).expect("media"),
+                        callee_media(),
+                    )
+                };
+                session.receive(&mut record, from, self.now);
+            }
+            let keyed = self
+                .caller
+                .engine
+                .session(call)
+                .expect("media")
+                .is_encrypted()
+                && self
+                    .callee
+                    .engine
+                    .session(remote)
+                    .expect("media")
+                    .is_encrypted();
+            // the events the handshake raised are the session's until the
+            // engine is drained, and an application learns of them there
+            self.caller.drain(self.now, false);
+            self.callee.drain(self.now, false);
+            if keyed {
+                break;
+            }
+            if !moved {
+                // nothing crossed, so only the retransmission timer can move
+                // either end
+                self.now += Duration::from_millis(1100);
+                self.caller.engine.handle_timeout(self.now);
+                self.callee.engine.handle_timeout(self.now);
+            }
+        }
+        crossed
     }
 
     /// Every control packet either side has due, delivered to the other.
@@ -1051,6 +1116,328 @@ fn spoken(catalog: CodecCatalog) -> Spoken {
         datagram,
         played,
     }
+}
+
+// -- DTLS-SRTP ----------------------------------------------------------------
+
+/// One frame of the same tone every other test here uses.
+#[cfg(feature = "dtls")]
+fn one_frame() -> Vec<i16> {
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0;
+    tone(&mut samples, 8_000, &mut phase);
+    samples
+}
+
+/// A call placed under a DTLS policy, taken to the point where the two ends
+/// have described each other and the handshake has not run yet.
+#[cfg(feature = "dtls")]
+fn dtls_call() -> (Pair, CallHandle, CallHandle) {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    (pair, call, remote)
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn the_offer_a_dtls_call_writes_names_a_fingerprint_and_asks_to_multiplex() {
+    let (pair, _, _) = dtls_call();
+    let offer = one_stream(
+        &pair
+            .callee
+            .offer_received()
+            .expect("the callee saw an offer"),
+    );
+    assert_eq!(offer.proto, "UDP/TLS/RTP/SAVP");
+    let fingerprint = offer
+        .attribute("fingerprint")
+        .and_then(|line| line.value.as_deref())
+        .expect("the offer carries a fingerprint");
+    assert!(fingerprint.starts_with("sha-256 "), "{fingerprint}");
+    // RFC 5763 §5: "The endpoint that is the offerer MUST use the setup
+    // attribute value of setup:actpass"
+    assert_eq!(
+        offer
+            .attribute("setup")
+            .and_then(|line| line.value.as_deref()),
+        Some("actpass")
+    );
+    // RFC 5764 §4.2 would put a second handshake on a separate RTCP port, and
+    // this stack runs one, so the offer asks for the attribute whatever the
+    // catalogue says about it
+    assert!(offer.has_rtcp_mux(), "the offer did not ask to multiplex");
+    assert!(
+        crypto_line(&offer).is_none(),
+        "a description keyed by a handshake also put a key in the body"
+    );
+
+    let answer = one_stream(
+        &pair
+            .caller
+            .answer_received()
+            .expect("the caller saw an answer"),
+    );
+    assert_eq!(answer.proto, "UDP/TLS/RTP/SAVP");
+    // §4.1's table: the answer to actpass is active, and RFC 5763 §5
+    // recommends it so the answerer's ClientHello leaves with the answer
+    assert_eq!(
+        answer
+            .attribute("setup")
+            .and_then(|line| line.value.as_deref()),
+        Some("active")
+    );
+    let theirs = answer
+        .attribute("fingerprint")
+        .and_then(|line| line.value.as_deref())
+        .expect("the answer carries one too");
+    assert_ne!(
+        theirs, fingerprint,
+        "both ends offered the same certificate, so neither authenticates anything"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_call_that_agreed_dtls_srtp_sends_nothing_until_the_handshake_has_keyed_it() {
+    let (mut pair, call, remote) = dtls_call();
+    let tone = one_frame();
+
+    // the session exists, has a codec and an address, and reports itself as
+    // not encrypted: the padlock is drawn from the keys, not from the SDP
+    {
+        let session = pair.caller.engine.session(call).expect("media");
+        assert!(!session.is_encrypted());
+        assert!(session.is_awaiting_keys());
+    }
+
+    // and it carries nothing. Not one octet, in fifty frames — a second of a
+    // call, which is longer than the handshake it is waiting for
+    for frame in 0..50 {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        let sent = session.capture(&tone).expect("the frame encodes").is_some();
+        drop(session);
+        assert!(
+            !sent,
+            "frame {frame} went out in the clear on a stream that agreed to be encrypted"
+        );
+    }
+    // nor any report, which would have carried this end's canonical name
+    assert!(
+        pair.caller.engine.poll_rtcp(pair.now).is_none(),
+        "a report went out unprotected"
+    );
+
+    // the handshake, and then it does
+    let crossed = pair.shake_hands(call, remote);
+    assert!(crossed >= 4, "only {crossed} records crossed");
+    {
+        let session = pair.caller.engine.session(call).expect("media");
+        assert!(session.is_encrypted());
+        assert!(!session.is_awaiting_keys());
+    }
+    let mut session = pair.caller.engine.session(call).expect("media");
+    let went = session.capture(&tone).expect("the frame encodes").is_some();
+    drop(session);
+    assert!(went, "the call stayed silent after it was keyed");
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn two_stacks_complete_a_dtls_handshake_on_the_media_path_and_the_tone_crosses_afterwards() {
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+
+    // both ends say the same thing about the same call
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+            && pair
+                .callee
+                .engine
+                .session(remote)
+                .expect("media")
+                .is_encrypted(),
+        "one end thinks the call is encrypted and the other does not"
+    );
+
+    // each end was told, once, with the transform the handshake chose
+    let secured: Vec<_> = pair
+        .caller
+        .heard
+        .iter()
+        .filter_map(|event| match event {
+            Event::Media {
+                event: MediaEvent::Secured { suite, peer },
+                ..
+            } => Some((*suite, *peer)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        secured.len(),
+        1,
+        "the caller was told {} times",
+        secured.len()
+    );
+    // RFC 5764 §4.1.2, and sipral-dtls offers the eighty-bit tag first
+    assert_eq!(secured[0].0, sipral_rtp::srtp::Suite::AesCm80);
+    assert_eq!(secured[0].1, Some(callee_media()));
+
+    // and the audio crosses, which is the far end having decrypted it
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} through the handshaken call",
+        loudness(&played)
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_dtls_call_carries_none_of_the_plaintext_on_the_wire() {
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+    let tone = one_frame();
+    let (datagram, _) = pair.speak(call, remote, &tone);
+
+    // the same shape the SDES test proves, reached the other way: the RFC
+    // 3711 §3.1 header is readable and nothing past it is
+    assert!(datagram.len() > 12);
+    let payload = &datagram[12..];
+    let plain: Vec<u8> = tone
+        .iter()
+        .map(|sample| sipral_media::g711::Law::Mu.encode(*sample))
+        .collect();
+    assert!(
+        !payload
+            .windows(plain.len().min(payload.len()))
+            .any(|window| window == &plain[..window.len()]),
+        "the encoded tone is on the wire in the clear"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_forged_alert_from_a_stranger_does_not_end_a_call_that_is_being_keyed() {
+    // the attack this latch exists for. A DTLS connection ends on any fatal
+    // alert; an alert arriving before the keys exist cannot be authenticated,
+    // because there is nothing yet to authenticate it with. Without the latch
+    // one fifteen-octet datagram from anywhere on the path would end every
+    // encrypted call this stack places, and the call would look like a call
+    // with a network fault.
+    //
+    // RFC 6347 §4.1: content type 21 is an alert, and this one says
+    // handshake_failure (40) at the fatal level (2).
+    let forged = || vec![21_u8, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 40];
+    let stranger: SocketAddr = "203.0.113.9:40000".parse().expect("an address");
+
+    let (mut pair, call, remote) = dtls_call();
+    // before any record has arrived there is no latch, and an alert is
+    // refused because it is not the kind of record a latch closes on
+    let refused = {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        session.receive(&mut forged(), stranger, pair.now)
+    };
+    assert_eq!(refused, Arrival::Dropped(crate::Discard::ForeignAddress));
+
+    // the handshake runs anyway, which is the point
+    pair.shake_hands(call, remote);
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+            && pair
+                .callee
+                .engine
+                .session(remote)
+                .expect("media")
+                .is_encrypted(),
+        "the forged alert killed the call"
+    );
+
+    // and once the latch has closed it refuses the same datagram for the
+    // other reason
+    let refused = {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        session.receive(&mut forged(), stranger, pair.now)
+    };
+    assert_eq!(refused, Arrival::Dropped(crate::Discard::ForeignAddress));
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_re_negotiation_that_names_a_different_certificate_is_refused_by_name() {
+    // RFC 5763 §6.6 asks for a new DTLS association there. This stack does
+    // not start one, so the honest answer is a refusal the application can
+    // read — not a session that carries on under keys the far end has
+    // already moved away from
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+
+    let mut moved = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .plan()
+        .clone();
+    let Some(sipral_core::sdp::Keying::Dtls { fingerprints, .. }) = moved.keying.as_mut() else {
+        panic!("the call was not keyed by a handshake");
+    };
+    fingerprints[0] = "sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:\
+AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+        .to_owned();
+
+    let candidates = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .codec_candidates()
+        .to_vec();
+    let mut session = pair.caller.engine.session(call).expect("media");
+    let adopted = session.adopt(&moved, candidates, pair.now);
+    let still_encrypted = session.is_encrypted();
+    drop(session);
+
+    assert_eq!(adopted.err(), Some(MediaError::DtlsFingerprintChanged));
+    assert!(
+        still_encrypted,
+        "the session threw away keys both ends still agree on"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_call_waiting_for_its_keys_asks_to_be_woken_for_the_handshake_and_not_for_a_report() {
+    // the deadline a report would have named never moves while the stream is
+    // unkeyed, because no report is ever built; a driver told to wake for one
+    // would be told to wake immediately, for ever
+    let (mut pair, call, _) = dtls_call();
+    let now = pair.now;
+    let session = pair.caller.engine.session(call).expect("media");
+    let deadline = session.poll_timeout().expect("a deadline");
+    assert!(
+        deadline > now,
+        "the session asked to be woken at a moment already passed"
+    );
+    assert!(!session.rtcp_deadline_passed(now));
 }
 
 /// The one that would pass with the encryption never attached is the one that
@@ -2020,15 +2407,19 @@ fn the_first_rtcp_report_is_scheduled_from_this_calls_own_seed() {
             &plan,
             20,
             &MediaConfig::default(),
-            StreamIdentity {
-                ssrc: 1,
-                sequence: 1,
-                timestamp: 0,
-                seed,
-            },
-            WallClock::from_unix(now, 1_700_000_000, 0),
             Vec::new(),
-            now,
+            Start {
+                identity: StreamIdentity {
+                    ssrc: 1,
+                    sequence: 1,
+                    timestamp: 0,
+                    seed,
+                },
+                clock: WallClock::from_unix(now, 1_700_000_000, 0),
+                #[cfg(feature = "dtls")]
+                handshake: None,
+                now,
+            },
         )
         .expect("the session opens")
         .poll_timeout()
@@ -2318,15 +2709,19 @@ fn session(local: &SessionDescription, remote: &SessionDescription, now: Instant
         &plan,
         20,
         &MediaConfig::default(),
-        StreamIdentity {
-            ssrc: 0x5149_5241,
-            sequence: 1,
-            timestamp: 0,
-            seed: 7,
-        },
-        WallClock::from_unix(now, 1_700_000_000, 0),
         Vec::new(),
-        now,
+        Start {
+            identity: StreamIdentity {
+                ssrc: 0x5149_5241,
+                sequence: 1,
+                timestamp: 0,
+                seed: 7,
+            },
+            clock: WallClock::from_unix(now, 1_700_000_000, 0),
+            #[cfg(feature = "dtls")]
+            handshake: None,
+            now,
+        },
     )
     .expect("the session opens")
 }
@@ -2496,15 +2891,19 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
         &plan,
         20,
         &MediaConfig::default(),
-        StreamIdentity {
-            ssrc: 1,
-            sequence: 1,
-            timestamp: 0,
-            seed: 7,
-        },
-        WallClock::from_unix(now, 1_700_000_000, 0),
         Vec::new(),
-        now,
+        Start {
+            identity: StreamIdentity {
+                ssrc: 1,
+                sequence: 1,
+                timestamp: 0,
+                seed: 7,
+            },
+            clock: WallClock::from_unix(now, 1_700_000_000, 0),
+            #[cfg(feature = "dtls")]
+            handshake: None,
+            now,
+        },
     );
     assert_eq!(
         opened.err(),

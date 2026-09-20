@@ -130,6 +130,8 @@ mod capabilities;
 mod clock;
 mod codec;
 mod counters;
+#[cfg(feature = "dtls")]
+mod dtls;
 mod dtmf;
 mod echo;
 mod engine;
@@ -148,6 +150,8 @@ pub use capabilities::{Capabilities, SrtpKeying};
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};
 pub use counters::{CallDispositionCounts, Counter, Counters, Gauge, RegistrationFailureCounts};
+#[cfg(feature = "dtls")]
+pub use dtls::Identity;
 pub use dtmf::{DEFAULT_DIGIT, DIGIT_GAP, Digit, LONGEST_DIGIT, SHORTEST_DIGIT};
 pub use echo::MAX_RENDER_DELAY;
 pub use engine::{CallMedia, MediaEngine};
@@ -175,6 +179,7 @@ pub use sipral_core::sdp::{
 pub use sipral_media::processor::{NoProcessor, Processor};
 /// What the de-jitter buffer counted, which is most of what a stream statistic
 /// is.
+pub use sipral_rtp::srtp::Suite as SrtpSuite;
 pub use sipral_rtp::{Discard, Quality};
 /// Which end placed a call, renamed on the way through: `sipral-ua` and
 /// `sipral-core::sdp` both have a `Direction` and they are about different

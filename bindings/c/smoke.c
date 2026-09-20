@@ -1421,6 +1421,142 @@ static void a_next_hop_is_asked_about_and_answered(void)
  * back by a process that was not there when it was written, and coming up
  * restored rather than registered -- because nobody has confirmed it since.
  */
+/* DTLS-SRTP, from the one side of the boundary that can prove it is really
+ * there: a C program.
+ *
+ * What the ABI promises is that naming the policy writes a description keyed
+ * by a handshake and that the handshake's first record is waiting to be sent.
+ * Both are checked against the octets, because the failure they guard against
+ * is exactly the one that looks like success -- a call that rings, answers,
+ * and carries nothing in either direction for the two minutes it takes DTLS
+ * to give up.
+ *
+ * In a build without the feature the policy is refused instead, and that is
+ * checked too: a number that has left the header is spent, so it is in this
+ * header either way and must answer for itself in both builds. */
+static void a_call_keyed_by_a_handshake_says_so_in_its_offer(void)
+{
+    static const char target[] = "sip:bob@example.com";
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the DTLS-SRTP stack", 0);
+        return;
+    }
+
+    sipral_capabilities_t capabilities = { 0 };
+    capabilities.size = sizeof capabilities;
+    expect("capabilities would not be read for the DTLS-SRTP check",
+           sipral_capabilities(&capabilities) == SIPRAL_STATUS_OK);
+    int has_dtls = (capabilities.features & SIPRAL_FEATURE_DTLS_SRTP) != 0;
+
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the DTLS-SRTP stack would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the DTLS-SRTP account was refused",
+           sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+
+    sipral_call_config_t call_config = { 0 };
+    call_config.size = sizeof call_config;
+    call_config.target = target;
+    call_config.target_len = strlen(target);
+    call_config.media_address = fixture_media;
+    call_config.media_address_len = strlen(fixture_media);
+    call_config.srtp = SIPRAL_SRTP_DTLS;
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    sipral_status_t placed = sipral_call_place(stack, account, &call_config, &call, 0);
+
+    if (!has_dtls) {
+        /* the whole of what a build without it owes an application: say so,
+         * rather than place the unencrypted call the policy was chosen to
+         * prevent */
+        expect("a build with no handshake took a DTLS-SRTP policy anyway",
+               placed == SIPRAL_STATUS_NOT_SUPPORTED);
+        sipral_stack_destroy(stack);
+        return;
+    }
+    expect("the DTLS-SRTP call would not go out", placed == SIPRAL_STATUS_OK);
+
+    char invite[4096] = { 0 };
+    for (int drained = 0; drained < 8 && invite[0] == '\0'; drained++) {
+        sipral_transmit_t transmit = { 0 };
+        transmit.size = sizeof transmit;
+        transmit.data = message_buffer;
+        transmit.capacity = sizeof message_buffer - 1;
+        transmit.destination = destination_buffer;
+        transmit.destination_capacity = sizeof destination_buffer;
+        transmit.source = source_buffer;
+        transmit.source_capacity = sizeof source_buffer;
+        if (sipral_stack_poll_transmit(stack, &transmit) != SIPRAL_STATUS_OK ||
+            transmit.len == 0) {
+            break;
+        }
+        message_buffer[transmit.len] = '\0';
+        if (strncmp((const char *)message_buffer, "INVITE ", strlen("INVITE ")) != 0 ||
+            transmit.len >= sizeof invite) {
+            continue;
+        }
+        memcpy(invite, message_buffer, transmit.len + 1);
+    }
+    expect("no INVITE came out of the DTLS-SRTP call", invite[0] != '\0');
+
+    /* RFC 5764 section 4.1 names the transport; RFC 8122 the fingerprint;
+     * RFC 5763 section 5 makes an offerer write actpass */
+    expect("the offer did not name the DTLS transport",
+           strstr(invite, "UDP/TLS/RTP/SAVP") != NULL);
+    expect("the offer carries no fingerprint",
+           strstr(invite, "a=fingerprint:sha-256 ") != NULL);
+    expect("the offer did not leave the role to the answer",
+           strstr(invite, "a=setup:actpass") != NULL);
+    /* RFC 5764 section 4.2 would put a second handshake on a separate RTCP
+     * port, and this stack runs one */
+    expect("the offer did not ask to multiplex its control traffic",
+           strstr(invite, "a=rtcp-mux") != NULL);
+    /* and the key is not in the body, which is the whole point of it */
+    expect("a description keyed by a handshake also put a key in the body",
+           strstr(invite, "a=crypto:") == NULL);
+
+    sipral_stack_destroy(stack);
+}
+
+/* The entry point without which none of the above ever leaves: a call that
+ * has no media yet still has to answer, and answer "nothing due" rather than
+ * fail, or an application cannot write one loop for every call it has. */
+static void nothing_is_due_on_a_call_with_no_media(void)
+{
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the poll_transmit check", 0);
+        return;
+    }
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the stack poll_transmit is checked on would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_media_packet_t packet = { 0 };
+    packet.size = sizeof packet;
+    packet.data = message_buffer;
+    packet.capacity = sizeof message_buffer;
+    packet.destination = destination_buffer;
+    packet.destination_capacity = sizeof destination_buffer;
+    /* a handle of no media at all: the answer is a refusal with a name, not a
+     * crash and not silence */
+    expect("polling a media handle that is not one answered something else",
+           sipral_media_poll_transmit(SIPRAL_HANDLE_NONE, 0, &packet) ==
+               SIPRAL_STATUS_INVALID_HANDLE);
+    sipral_stack_destroy(stack);
+}
+
 static void a_registration_freezes_and_thaws(void)
 {
     struct fixture fixture;
@@ -1757,6 +1893,8 @@ int main(void)
     headers_cross_a_call();
     a_call_names_its_own_codecs();
     every_codec_says_what_became_of_it();
+    a_call_keyed_by_a_handshake_says_so_in_its_offer();
+    nothing_is_due_on_a_call_with_no_media();
     a_registration_freezes_and_thaws();
     a_next_hop_is_asked_about_and_answered();
 

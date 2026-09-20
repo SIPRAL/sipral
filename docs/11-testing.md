@@ -150,7 +150,11 @@ agent calls, since STUN and media share a port by design. `turn` takes the strea
 and ChannelData both ways they arrive, delimited and self-delimiting.
 
 Two for DTLS, whose peer's bytes are read before anything in them is
-authenticated. `dtls_record` takes a run of datagrams, two octets of length in
+authenticated. Neither covers the seam a call goes through now that the
+handshake is joined to one: `sipral_nat::classify` sorting a hostile datagram
+on the media port and `MediaSession::receive` routing it. A target for that —
+a session opened awaiting its keys, and a run of datagrams from alternating
+addresses — is the one that should exist and does not. `dtls_record` takes a run of datagrams, two octets of length in
 front of each, through the record reader, the handshake fragment reader and
 one reassembler kept across the run, through AES-GCM open behind one replay
 window, and into a server and a client `Connection` built from fixed keys —

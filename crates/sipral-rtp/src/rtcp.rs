@@ -1125,6 +1125,11 @@ pub enum RtcpBuildError {
     ReasonTooLong(usize),
     /// The SDES packet being built has no CNAME item in any chunk.
     MissingCname,
+    /// The stream agreed to be secured and its keys have not arrived, so
+    /// there is nothing to protect the report with. A report goes out in the
+    /// clear no more readily than audio does: RFC 3550 §6.5.1 puts the
+    /// canonical name in every one of them.
+    NotKeyed,
 }
 
 impl fmt::Display for RtcpBuildError {
@@ -1142,6 +1147,7 @@ impl fmt::Display for RtcpBuildError {
             }
             Self::MissingCname => write!(f, "no SDES CNAME item in any chunk"),
             Self::Secured(error) => write!(f, "the packet could not be protected: {error}"),
+            Self::NotKeyed => f.write_str("the stream has no keys yet"),
         }
     }
 }

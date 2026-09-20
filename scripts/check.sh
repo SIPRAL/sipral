@@ -688,6 +688,45 @@ cargo clippy -p sipral-ffi --no-default-features --features sipral/opus --all-ta
     && pass "cargo clippy -p sipral-ffi over sipral/opus" \
     || fail "cargo clippy -p sipral-ffi --no-default-features --features sipral/opus"
 
+# Two features now, and `--no-default-features` turns off both at once -- so
+# the two interesting halves, "DTLS on and Opus off" and "Opus on and DTLS
+# off", are configurations nothing above ever compiles. They are also the two
+# a real customer builds: the desk phone that cannot ship libopus still wants
+# encrypted calls, and the carrier deployment behind a TLS SIP transport wants
+# the codec and has no use for an elliptic curve.
+for combination in dtls opus; do
+    cargo test -p sipral --no-default-features --features "$combination" >/dev/null 2>&1 \
+        && pass "cargo test -p sipral with $combination alone" \
+        || fail "cargo test -p sipral --no-default-features --features $combination"
+    cargo clippy -p sipral --no-default-features --features "$combination" --all-targets \
+        -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral with $combination alone" \
+        || fail "cargo clippy -p sipral --no-default-features --features $combination"
+done
+cargo test -p sipral-ffi --no-default-features --features dtls >/dev/null 2>&1 \
+    && pass "cargo test -p sipral-ffi with dtls alone" \
+    || fail "cargo test -p sipral-ffi --no-default-features --features dtls"
+cargo clippy -p sipral-ffi --no-default-features --features dtls --all-targets \
+    -- -D warnings >/dev/null 2>&1 \
+    && pass "cargo clippy -p sipral-ffi with dtls alone" \
+    || fail "cargo clippy -p sipral-ffi --no-default-features --features dtls"
+
+# And what the DTLS feature exists for, on the same principle as the libopus
+# check below: with it off, none of the four RustCrypto crates the handshake
+# stands on is in the graph at all. A build that compiles without the feature
+# and still carries p256 is a build whose flash the feature saved nothing of.
+for crate in sipral sipral-ffi; do
+    if graph=$(cargo tree -p "$crate" --no-default-features -e normal 2>&1); then
+        if printf '%s' "$graph" | grep -qiE '(^| )(p256|sipral-dtls|sipral-nat)( |$| v)'; then
+            fail "a DTLS dependency is in the graph of $crate, the build meant to be without it"
+        else
+            pass "nothing links a DTLS primitive ($crate)"
+        fi
+    else
+        fail "cargo tree -p $crate --no-default-features"
+    fi
+done
+
 # And the thing the feature exists for, which every check above passes
 # without: with it off, libopus is not in the dependency graph at all. A
 # build that compiles and tests and still links it is a build the customer

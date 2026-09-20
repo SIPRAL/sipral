@@ -62,7 +62,7 @@ you pick, or replace, or leave out entirely.
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
 | `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
-| `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the client and server handshake with retransmission, the stateless cookie exchange, alerts and the SRTP key export, over the record layer, handshake framing and messages, key derivation, and self-signed certificates checked by fingerprint. Written and tested; no call reaches it yet |
+| `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the client and server handshake with retransmission, the stateless cookie exchange, alerts and the SRTP key export, over the record layer, handshake framing and messages, key derivation, and self-signed certificates checked by fingerprint. Reached from a call behind the `dtls` feature |
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 follows in phase 2, written the same way, for the carrier that insists |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
@@ -76,9 +76,9 @@ Implemented from the RFCs, not from anyone's source tree. The full list, and
 which crate owns each one, is in [`docs/09-rfc-index.md`](docs/09-rfc-index.md).
 Core set: RFC 3261, 3262, 3263, 3264, 3311, 3515, 3581, 4028, 6026, 6665, 8760
 for signalling; 3550, 3551, 4733, 6716 and 7587 for media; 3711 with 4568 for
-SRTP and its SDES keying; 8445, 8489 and 8656 for NAT. DTLS-SRTP (5764) is
-phase 2: the SDP plumbing is there and so is the handshake, and the two are
-not joined yet.
+SRTP and its SDES keying; 5763, 5764, 6347 and 8122 for DTLS-SRTP; 8445, 8489
+and 8656 for NAT. DTLS-SRTP is behind the `dtls` feature, on by default, and
+has not had its adversarial cryptography review yet.
 
 ## Not trusting the input
 

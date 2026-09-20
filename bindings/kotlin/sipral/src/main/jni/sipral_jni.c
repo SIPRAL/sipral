@@ -1733,6 +1733,15 @@ Java_org_sipral_SipralNative_sipral_1media_1poll_1rtcp(JNIEnv *env, jobject self
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1media_1poll_1transmit(JNIEnv *env, jobject self, jlong media, jlong nowMs, jlong packet)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_media_poll_transmit((sipral_handle_t)media, (uint64_t)nowMs, (sipral_media_packet_t *)(intptr_t)packet);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1stack_1poll_1farewell(JNIEnv *env, jobject self, jlong stack, jlongArray call, jlong outPacket)
 {
     (void)env;

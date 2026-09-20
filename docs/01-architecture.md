@@ -154,8 +154,15 @@ DTLS 1.2, for the SRTP keys of a DTLS-SRTP handshake (RFC 5764): the client
 and server handshake, sans-I/O like the core, over the record layer, the
 handshake framing and messages, the key derivation and the exporter, and the
 self-signed certificate a peer checks against `a=fingerprint`. Like
-`sipral-rtp` it names no Sipral crate. It is not in the picture above because
-nothing depends on it yet: the handshake is written, and no call reaches it.
+`sipral-rtp` it names no Sipral crate.
+
+The facade depends on it, and on `sipral-nat` beside it, behind the `dtls`
+feature: the handshake runs on the call's own media socket, and telling its
+records from the RTP there is the first-octet rule of RFC 7983, which lives in
+`sipral-nat` because ICE will need it in the same place. Both edges are
+optional and both disappear with the feature, which is what lets a build that
+will only ever place SDES calls leave four cryptographic crates out of its
+binary.
 
 Detail in [05-media.md](05-media.md).
 
@@ -209,11 +216,13 @@ halves — placing a call, answering one, and draining the events — rather tha
 wrapping the user agent, whose sixty-odd methods would each be a place to get
 registration or transfer subtly wrong on the way through.
 
-What is still not joined is `sipral-nat`: a call behind a NAT that symmetric
-RTP does not solve is the application's to arrange, and the ICE candidates that
-would go in the offer have no route through this crate yet. The C ABI is
-already pointed here — `sipral-ffi` names `sipral` in its manifest — so what
-the boundary does not carry is what this crate does not.
+What is still not joined is the rest of `sipral-nat`. One octet of it is —
+the RFC 7983 rule that tells a DTLS record from the RTP beside it — and
+nothing above `ice::` is: a call behind a NAT that symmetric RTP does not
+solve is the application's to arrange, and the candidates that would go in the
+offer have no route through this crate yet. The C ABI is already pointed here
+— `sipral-ffi` names `sipral` in its manifest — so what the boundary does not
+carry is what this crate does not.
 
 ## What is not in the tree
 

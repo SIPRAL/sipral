@@ -445,7 +445,9 @@ name = "sipral"
 version = "0.0.1"
 dependencies = [
  "sipral-core",
+ "sipral-dtls",
  "sipral-media",
+ "sipral-nat",
  "sipral-rtp",
  "sipral-ua",
  "zeroize",

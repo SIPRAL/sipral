@@ -209,7 +209,9 @@ Rules for the ABI:
   destination the application is asked to resolve. All three have since been
   taken where they stood — `SIPRAL_EVENT_KIND_DTMF_SENT` at 27,
   `..._RECOVERY` at 28 and `..._RESOLVE_NEEDED` at 29 — and 16, for audio
-  devices, is the one number still held.
+  devices, is the one number still held. `..._MEDIA_SECURED` took 32, which
+  was nobody's and is the ordinary way a number is spent: at the end of the
+  run, because no reservation named it. The next free number is 33.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -575,10 +577,32 @@ already reports the outcome a session actually reached; `srtp` is only ever
 the request. `SIPRAL_FEATURE_SRTP` in `sipral_capabilities_t::features`
 answers whether this path exists in the build at all, from the same
 `sipral::Capabilities::srtp` this crate has always read it from — true in
-every build today, because SDES keying is compiled in unconditionally and not
-behind a Cargo feature. Choosing between SDES and DTLS-SRTP keying is a
-separate, later addition; `srtp` says nothing about it and does not need to
-change shape to grow one.
+every build, because SDES keying is compiled in unconditionally and not behind
+a Cargo feature.
+
+The choice between SDES and DTLS-SRTP grew into the same member, as that
+paragraph said it could: `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED`
+are two more values of `srtp` rather than a second member, and
+`SIPRAL_FEATURE_DTLS_SRTP` says whether this build has a handshake behind
+them. Both numbers are in every header — a value that has left it is spent for
+good — and a build without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED`
+rather than placing the unencrypted call the policy was chosen to prevent.
+
+**A DTLS-SRTP call has one obligation no other call has**, and an application
+that does not meet it gets a call that rings, answers and carries nothing:
+`sipral_media_poll_transmit` must be drained to empty, after every
+`sipral_media_receive` that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every
+deadline `sipral_stack_poll` names. It is the fifth media call, beside
+receive, capture, playback and `poll_rtcp`, and it exists because the key
+exchange runs on the media socket rather than in the signalling: a record that
+never leaves is a ClientHello that never goes out, and DTLS takes two minutes
+to notice. Between the answer and `SIPRAL_EVENT_KIND_MEDIA_SECURED` the call
+is up and silent by design — `sipral_media_capture` answers a `len` of zero
+and every arrival is `SIPRAL_ARRIVAL_NOT_KEYED` — because a stream that agreed
+to be encrypted and sent one packet in the clear has leaked exactly what it
+was asked to protect. `SIPRAL_EVENT_KIND_MEDIA_SECURED` carries
+`payload.media.suite`, the transform the handshake chose, which the signalling
+never named.
 
 `srtp` is appended at the tail of both structs, and the pinned `MIN_SIZE` of
 each is unmoved: a caller built against a header from before this member

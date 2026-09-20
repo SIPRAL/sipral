@@ -127,6 +127,11 @@ pub enum Discard {
     /// deliberately — falling back to the clear is worse than dropping the
     /// audio.
     Insecure(SrtpError),
+    /// The stream agreed to be secured and its keys have not arrived, so
+    /// there is nothing to verify the packet with (see
+    /// [`RtpSession::awaiting`]). A peer that starts sending before its own
+    /// handshake finishes is the ordinary way this happens.
+    NotKeyed,
 }
 
 /// What an incoming compound RTCP packet said.
@@ -148,6 +153,11 @@ pub enum RtcpReceived<'a> {
     Malformed(RtcpError),
     /// SRTCP refused it, so nothing in it was read.
     Insecure(SrtpError),
+    /// The stream agreed to be secured and its keys have not arrived, so
+    /// nothing in it could be verified and nothing in it was read — not even
+    /// the size, which §6.3.3 would otherwise fold into this session's own
+    /// report interval.
+    NotKeyed,
 }
 
 /// One RTP stream in each direction, plus the RTCP that goes with it.
@@ -170,7 +180,45 @@ pub struct RtpSession {
     /// rather than left to the caller so that the order of §3.3 — protect
     /// after building, verify before believing — is not something a caller
     /// can get wrong.
-    security: Option<Security>,
+    security: Protection,
+}
+
+/// Whether this stream is secured, and whether it can be yet.
+///
+/// Two of these are the whole of SDES: a stream is either keyed from the
+/// moment it opens or it was never meant to be. The third is what DTLS-SRTP
+/// needs, and it is the reason this is an enumeration rather than an
+/// `Option`: RFC 5764 puts the key exchange on the media path, so a stream
+/// agreed on `UDP/TLS/RTP/SAVP` exists — with an address, a codec and a
+/// sequence number — for as long as a handshake takes before any key is
+/// available to it.
+///
+/// What must not happen in that window is a packet in the clear. A stream
+/// that agreed to be secured and sent one unprotected packet has leaked the
+/// audio it was asked to protect, and it has done it while looking like a
+/// working call. So the window is a state of its own rather than an absence,
+/// and every path out of this type goes through it.
+// One of these lives inside one `RtpSession` and nothing moves it, so the
+// difference between the variants costs nothing: the enumeration is exactly
+// as wide as the `Option<Security>` it replaced, which is what a session has
+// always carried. Boxing the keys to even them up would put an indirection on
+// the path every packet takes, to save nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+enum Protection {
+    /// The stream was never meant to be secured.
+    Clear,
+    /// The description agreed that this stream is secured, and the keys have
+    /// not arrived.
+    ///
+    /// The policy held here is not the one that will be installed — RFC 5764
+    /// §4.1.2 has the profile chosen inside the handshake rather than in the
+    /// signalling — but the most expensive one that could be, so that a
+    /// caller sizing a buffer against [`RtpSession::rtp_overhead`] before the
+    /// keys arrive sizes it for whichever profile the handshake settles on.
+    Awaited(Policy),
+    /// Keys.
+    Open(Security),
 }
 
 #[derive(Debug)]
@@ -293,7 +341,7 @@ impl RtpSession {
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
             round_trip: None,
-            security: None,
+            security: Protection::Clear,
         }
     }
 
@@ -309,19 +357,100 @@ impl RtpSession {
     #[must_use]
     pub fn protected(config: &StreamConfig, unit_interval: f64, security: Security) -> Self {
         Self {
-            security: Some(security),
+            security: Protection::Open(security),
             ..Self::new(config, unit_interval)
         }
+    }
+
+    /// The same stream, secured by keys that have not arrived yet.
+    ///
+    /// DTLS-SRTP (RFC 5764) agrees in the signalling that a stream is
+    /// protected and then runs the handshake that keys it on the media path,
+    /// so there is a window — a round trip at best, two minutes of
+    /// retransmissions at worst — in which the stream exists and has no key.
+    ///
+    /// A stream opened this way sends nothing and believes nothing until
+    /// [`RtpSession::keyed`] hands it the keys: [`BuildError::NotKeyed`]
+    /// comes back from every builder and [`Discard::NotKeyed`] from
+    /// everything that arrives. That is the point of the constructor. The
+    /// alternative — opening in the clear and turning protection on when the
+    /// handshake finishes — is a call that sends the first seconds of its
+    /// audio unencrypted and reports itself as secure.
+    ///
+    /// `most` is the most expensive policy the handshake could settle on.
+    /// RFC 5764 §4.1.2 has the profile chosen inside the handshake rather
+    /// than in the signalling, so the overhead a caller sizes a buffer
+    /// against before the keys arrive has to be an upper bound on whichever
+    /// one it settles on — see [`RtpSession::rtp_overhead`].
+    #[must_use]
+    pub fn awaiting(config: &StreamConfig, unit_interval: f64, most: Policy) -> Self {
+        Self {
+            security: Protection::Awaited(most),
+            ..Self::new(config, unit_interval)
+        }
+    }
+
+    /// Hand a stream that was opened awaiting its keys the keys it was
+    /// waiting for, and say whether it took them.
+    ///
+    /// `false` for a stream that is not waiting, and that is the whole of the
+    /// safety here: this is not a path by which a plain stream becomes
+    /// secured, nor one by which a running secured stream is re-keyed behind
+    /// the caller's back. A stream in the clear stays in the clear —
+    /// encryption appearing mid-call is not something the far end agreed to —
+    /// and a stream already open re-keys through [`RtpSession::rekey_local`]
+    /// and [`RtpSession::rekey_remote`], which keep the packet index RFC 3711
+    /// §9.1 requires them to keep.
+    ///
+    /// The index does not restart here either: nothing was ever sent under
+    /// the old state, because there was no old state to send under.
+    ///
+    /// The receiving context starts at a rollover counter of zero, which RFC
+    /// 3711 §3.3.1 would otherwise want supplied out of band for a stream
+    /// already in flight. It is right here because of what the far end is
+    /// doing while this waits: it cannot protect anything before its own half
+    /// of the same handshake finishes, and a handshake finishes in a round
+    /// trip or gives up in two minutes — either way long before the 65 536
+    /// packets a rollover takes, which at twenty milliseconds apiece is
+    /// twenty-two.
+    pub fn keyed(&mut self, security: Security) -> bool {
+        if !matches!(self.security, Protection::Awaited(_)) {
+            return false;
+        }
+        self.security = Protection::Open(security);
+        true
+    }
+
+    /// Whether this stream agreed to be secured and has no keys yet.
+    #[must_use]
+    pub const fn awaiting_keys(&self) -> bool {
+        matches!(self.security, Protection::Awaited(_))
+    }
+
+    /// Whether what this stream sends is protected and what it believes was.
+    ///
+    /// The state and not the negotiation: a stream that agreed to be secured
+    /// and is still waiting for its keys answers `false`, because nothing has
+    /// been encrypted yet and a padlock drawn from this would be lying for
+    /// the length of a handshake.
+    #[must_use]
+    pub const fn is_protected(&self) -> bool {
+        matches!(self.security, Protection::Open(_))
     }
 
     /// Octets every packet sent on this stream is longer than the packet the
     /// builders produce, which is what a caller has to add to its buffer.
     /// Zero when the stream is not secured.
+    ///
+    /// A stream still waiting for its keys answers with the most its
+    /// handshake could cost rather than with nothing, so that a buffer sized
+    /// once at the start of a call is still big enough after the keys land.
     #[must_use]
     pub const fn rtp_overhead(&self) -> usize {
         match &self.security {
-            Some(security) => security.rtp_overhead(),
-            None => 0,
+            Protection::Open(security) => security.rtp_overhead(),
+            Protection::Awaited(most) => most.rtp_overhead(),
+            Protection::Clear => 0,
         }
     }
 
@@ -330,8 +459,9 @@ impl RtpSession {
     #[must_use]
     pub const fn rtcp_overhead(&self) -> usize {
         match &self.security {
-            Some(security) => security.rtcp_overhead(),
-            None => 0,
+            Protection::Open(security) => security.rtcp_overhead(),
+            Protection::Awaited(most) => most.rtcp_overhead(),
+            Protection::Clear => 0,
         }
     }
 
@@ -349,19 +479,21 @@ impl RtpSession {
 
     fn protect_rtp(&mut self, out: &mut [u8], built: usize) -> Result<usize, BuildError> {
         match &mut self.security {
-            Some(security) => security
+            Protection::Open(security) => security
                 .protect_rtp(out, built)
                 .map_err(BuildError::Secured),
-            None => Ok(built),
+            Protection::Awaited(_) => Err(BuildError::NotKeyed),
+            Protection::Clear => Ok(built),
         }
     }
 
     fn protect_rtcp(&mut self, out: &mut [u8], built: usize) -> Result<usize, RtcpBuildError> {
         match &mut self.security {
-            Some(security) => security
+            Protection::Open(security) => security
                 .protect_rtcp(out, built)
                 .map_err(RtcpBuildError::Secured),
-            None => Ok(built),
+            Protection::Awaited(_) => Err(RtcpBuildError::NotKeyed),
+            Protection::Clear => Ok(built),
         }
     }
 
@@ -397,11 +529,16 @@ impl RtpSession {
         // §3.3: verify, then decrypt, then believe. Nothing below this line
         // sees a packet whose tag did not check out
         let plain = match &mut self.security {
-            Some(security) => match security.unprotect_rtp(datagram) {
+            Protection::Open(security) => match security.unprotect_rtp(datagram) {
                 Ok(len) => datagram.get(..len).unwrap_or_default(),
                 Err(error) => return Received::Dropped(Discard::Insecure(error)),
             },
-            None => &*datagram,
+            // there is no key to verify it with, and a packet believed
+            // without one is the same fallback in the other direction: a peer
+            // that sends audio before the handshake finishes gets it dropped,
+            // not played
+            Protection::Awaited(_) => return Received::Dropped(Discard::NotKeyed),
+            Protection::Clear => &*datagram,
         };
         let packet = match RtpPacket::parse(plain) {
             Ok(packet) => packet,
@@ -493,16 +630,23 @@ impl RtpSession {
     /// still means the same amount of time (§5.1).
     ///
     /// # Errors
-    /// [`BuildError::Short`] when `out` cannot hold the packet, and
+    /// [`BuildError::Short`] when `out` cannot hold the packet,
     /// [`BuildError::PayloadType`] for a payload type this stream was
-    /// configured with that does not fit the field. Either way nothing has been
-    /// written and no sequence number has been spent.
+    /// configured with that does not fit the field, and
+    /// [`BuildError::NotKeyed`] on a stream still waiting for a handshake's
+    /// keys. In every case nothing has been written and no sequence number
+    /// has been spent — which is why the last of them is decided here rather
+    /// than left to the protection step, where the packet would already be
+    /// sitting in the caller's buffer in the clear.
     pub fn send(
         &mut self,
         payload: &[u8],
         samples: u32,
         out: &mut [u8],
     ) -> Result<usize, BuildError> {
+        if self.awaiting_keys() {
+            return Err(BuildError::NotKeyed);
+        }
         let header = RtpHeader {
             marker: self.outbound.silence_suppression && self.outbound.spurt_start,
             payload_type: self.outbound.payload_type,
@@ -584,6 +728,9 @@ impl RtpSession {
         payload_type: u8,
         out: &mut [u8],
     ) -> Result<usize, BuildError> {
+        if self.awaiting_keys() {
+            return Err(BuildError::NotKeyed);
+        }
         let mut payload = [0_u8; EVENT_LEN];
         if event.report.write(&mut payload).is_err() {
             // the buffer is exactly as wide as the payload, so the volume is
@@ -795,9 +942,11 @@ impl RtpSession {
     /// A stream that was never given keys is left alone. A negotiation cannot
     /// arrive here having turned encryption on — that is a different session,
     /// opened rather than re-keyed — so there is nothing to do and no error to
-    /// report.
+    /// report. A stream still waiting for a handshake's keys is left alone
+    /// too: its first keys arrive through [`RtpSession::keyed`], and a
+    /// re-negotiation that reaches it before they do has nothing to move.
     pub fn rekey_local(&mut self, policy: Policy, master: Master, what: Rekeyed) {
-        if let Some(security) = self.security.as_mut() {
+        if let Protection::Open(security) = &mut self.security {
             security.rekey_local(policy, master, what);
         }
     }
@@ -809,7 +958,7 @@ impl RtpSession {
     /// the far end's answer arrives before the far end's first packet under
     /// the key it names. As [`Security::rekey_remote`].
     pub fn rekey_remote(&mut self, policy: Policy, master: Master, what: Rekeyed) {
-        if let Some(security) = self.security.as_mut() {
+        if let Protection::Open(security) = &mut self.security {
             security.rekey_remote(policy, master, what);
         }
     }
@@ -844,6 +993,9 @@ impl RtpSession {
         ntp: u64,
         unit_interval: f64,
     ) -> Result<(usize, Duration), RtcpBuildError> {
+        if self.awaiting_keys() {
+            return Err(RtcpBuildError::NotKeyed);
+        }
         let sequence = self.inbound.sequence;
         let block = self
             .inbound
@@ -927,6 +1079,9 @@ impl RtpSession {
         reason: &[u8],
         unit_interval: f64,
     ) -> Result<usize, RtcpBuildError> {
+        if self.awaiting_keys() {
+            return Err(RtcpBuildError::NotKeyed);
+        }
         let cname_item = [SdesItem {
             kind: CNAME,
             text: self.cname.as_bytes(),
@@ -986,18 +1141,22 @@ impl RtpSession {
         now: Duration,
         ntp: u64,
     ) -> RtcpReceived<'a> {
-        if self.security.is_some() && !self.rtcp_origin_possible(from) {
+        if !matches!(self.security, Protection::Clear) && !self.rtcp_origin_possible(from) {
             return RtcpReceived::ForeignAddress;
         }
         // what §6.3.3 folds into the report interval is the size on the wire,
         // which is the protected one
         let wire = datagram.len();
         let plain = match &mut self.security {
-            Some(security) => match security.unprotect_rtcp(datagram) {
+            Protection::Open(security) => match security.unprotect_rtcp(datagram) {
                 Ok(len) => len,
                 Err(error) => return RtcpReceived::Insecure(error),
             },
-            None => wire,
+            // as on the RTP side: nothing arriving before the keys is
+            // believed, and a report folded in from an unverified packet
+            // would move this session's own report interval
+            Protection::Awaited(_) => return RtcpReceived::NotKeyed,
+            Protection::Clear => wire,
         };
         let datagram = datagram.get(..plain).unwrap_or_default();
         let compound = match CompoundPacket::parse(datagram) {
@@ -1199,7 +1358,7 @@ mod tests {
     use crate::playout::{Activity, BufferConfig, Frame, Pull};
     use crate::rtcp::{
         CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder,
-        ReceiverReportBuilder, ReportBlock, RtcpPacket, SdesItem, SenderOrReceiver,
+        ReceiverReportBuilder, ReportBlock, RtcpBuildError, RtcpPacket, SdesItem, SenderOrReceiver,
         SourceDescriptionBuilder,
     };
     use crate::rtcp_timer::Due;
@@ -2827,6 +2986,190 @@ mod tests {
             peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO),
             Received::Dropped(Discard::Insecure(SrtpError::NotAuthentic))
         );
+    }
+
+    /// A stream opened the way DTLS-SRTP opens one: the description agreed it
+    /// is secured, and the handshake that keys it has not finished.
+    fn awaiting_session() -> RtpSession {
+        let mut waiting = config();
+        waiting.remote = addr(PEER);
+        RtpSession::awaiting(&waiting, 0.5, Policy::new(Suite::AesCm80))
+    }
+
+    #[test]
+    fn a_stream_waiting_for_its_keys_sends_no_audio() {
+        let mut session = awaiting_session();
+        let mut wire = vec![0_u8; 64];
+        assert_eq!(
+            session.send(b"eight ok", 160, &mut wire),
+            Err(BuildError::NotKeyed)
+        );
+        assert!(session.awaiting_keys());
+        assert!(
+            wire.iter().all(|&octet| octet == 0),
+            "a refused packet still wrote itself into the caller's buffer"
+        );
+    }
+
+    #[test]
+    fn a_stream_waiting_for_its_keys_sends_no_reports_and_no_goodbye() {
+        // a report carries this end's canonical name (RFC 3550 §6.5.1) and a
+        // goodbye says who is leaving: neither goes out in the clear on a
+        // stream that asked to be encrypted
+        let mut session = awaiting_session();
+        let mut out = [0_u8; 256];
+        assert_eq!(
+            session.build_report(&mut out, Duration::ZERO, 0, 0.5),
+            Err(RtcpBuildError::NotKeyed)
+        );
+        assert_eq!(
+            session.send_bye(&mut out, Duration::ZERO, b"", 0.5),
+            Err(RtcpBuildError::NotKeyed)
+        );
+    }
+
+    #[test]
+    fn a_stream_waiting_for_its_keys_believes_nothing_that_arrives() {
+        let mut session = awaiting_session();
+        assert_eq!(
+            session.receive(&mut datagram(7, 100, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::NotKeyed)
+        );
+        let mut report = [0_u8; 256];
+        let n = round_trip_report(&mut report, 0x0a0b_0c0d);
+        assert_eq!(
+            session.rtcp_receive(
+                report.get_mut(..n).expect("the report"),
+                addr(PEER_RTCP),
+                Duration::ZERO,
+                0
+            ),
+            RtcpReceived::NotKeyed
+        );
+    }
+
+    #[test]
+    fn a_stream_waiting_for_its_keys_sizes_a_buffer_for_the_profile_it_will_get() {
+        // the profile is chosen inside the handshake, so the overhead a
+        // caller sizes against before it finishes is the most it could be —
+        // and it does not grow when the keys land
+        let mut session = awaiting_session();
+        assert_eq!(session.rtp_overhead(), 10);
+        assert_eq!(session.rtcp_overhead(), 14);
+        let policy = Policy::new(Suite::AesCm80);
+        assert!(session.keyed(Security::new(
+            policy,
+            Master::new([0x11; 16], [0x22; 14]),
+            policy,
+            Master::new([0x33; 16], [0x44; 14]),
+        )));
+        assert_eq!(session.rtp_overhead(), 10);
+        assert_eq!(session.rtcp_overhead(), 14);
+    }
+
+    #[test]
+    fn keys_arriving_open_a_stream_that_was_waiting_for_them() {
+        let policy = Policy::new(Suite::AesCm80);
+        let ours = || Master::new([0x11; 16], [0x22; 14]);
+        let theirs = || Master::new([0x33; 16], [0x44; 14]);
+
+        let mut caller = awaiting_session();
+        assert!(caller.keyed(Security::new(policy, ours(), policy, theirs())));
+        assert!(!caller.awaiting_keys());
+
+        let mut peer_config = config();
+        peer_config.ssrc = 0x0a0b_0c0d;
+        peer_config.remote = addr(SIGNALLED);
+        peer_config.cname = "peer@198.51.100.7".to_string();
+        let mut peer = RtpSession::protected(
+            &peer_config,
+            0.5,
+            Security::new(policy, theirs(), policy, ours()),
+        );
+
+        let mut wire = vec![0_u8; 64];
+        for packet in 0..2 {
+            let len = caller.send(b"eight ok", 160, &mut wire).expect("room");
+            let mut received = wire.get(..len).unwrap_or_default().to_vec();
+            let expected = if packet == 0 {
+                Received::Dropped(Discard::Probation)
+            } else {
+                Received::Queued
+            };
+            assert_eq!(
+                peer.receive(&mut received, addr(SIGNALLED), Duration::ZERO),
+                expected,
+                "packet {packet}"
+            );
+        }
+        let Pull::Packet(frame) = peer.pull(Activity::Speech) else {
+            panic!("nothing came out of the buffer");
+        };
+        assert_eq!(frame.payload, b"eight ok");
+    }
+
+    #[test]
+    fn the_first_packet_after_the_keys_is_the_first_packet_of_the_stream() {
+        // nothing was spent while the stream waited, so the sequence number
+        // and the timestamp are still the ones it was configured with: there
+        // is no gap for the far end to read as loss
+        let mut session = awaiting_session();
+        let mut wire = vec![0_u8; 64];
+        for _ in 0..3 {
+            assert!(session.send(b"eight ok", 160, &mut wire).is_err());
+        }
+        let policy = Policy::new(Suite::AesCm80);
+        assert!(session.keyed(Security::new(
+            policy,
+            Master::new([0x11; 16], [0x22; 14]),
+            policy,
+            Master::new([0x33; 16], [0x44; 14]),
+        )));
+
+        let mut plain = RtpSession::new(&config(), 0.5);
+        let mut reference = vec![0_u8; 64];
+        let plain_len = plain.send(b"eight ok", 160, &mut reference).expect("room");
+        let len = session.send(b"eight ok", 160, &mut wire).expect("room");
+        assert_eq!(len, plain_len + 10, "the tag, and nothing else, differs");
+        // the header is the part that must match: sequence number and
+        // timestamp, in the clear in both
+        assert_eq!(wire.get(2..12), reference.get(2..12));
+    }
+
+    #[test]
+    fn a_stream_that_never_agreed_to_be_secured_refuses_keys() {
+        // the one thing this path must not become: a way for encryption to
+        // appear on a call the far end negotiated in the clear
+        let mut session = session();
+        let policy = Policy::new(Suite::AesCm80);
+        assert!(!session.keyed(Security::new(
+            policy,
+            Master::new([0x11; 16], [0x22; 14]),
+            policy,
+            Master::new([0x33; 16], [0x44; 14]),
+        )));
+        assert_eq!(session.rtp_overhead(), 0, "it took them anyway");
+        let mut wire = vec![0_u8; 64];
+        assert!(
+            session.send(b"eight ok", 160, &mut wire).is_ok(),
+            "a plain stream stopped sending"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_already_has_keys_refuses_more() {
+        // re-keying is RtpSession::rekey_local and rekey_remote, which keep
+        // the packet index RFC 3711 §9.1 requires them to keep; this path
+        // would restart it
+        let (mut caller, _) = secured_pair();
+        let policy = Policy::new(Suite::AesCm32);
+        assert!(!caller.keyed(Security::new(
+            policy,
+            Master::new([0x55; 16], [0x66; 14]),
+            policy,
+            Master::new([0x77; 16], [0x88; 14]),
+        )));
+        assert_eq!(caller.rtp_overhead(), 10, "the shorter tag was installed");
     }
 
     #[test]

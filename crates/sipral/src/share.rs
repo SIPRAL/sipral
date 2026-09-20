@@ -202,7 +202,7 @@ mod tests {
 
     use super::{SessionShare, SessionUnavailable, hold, lock};
     use crate::clock::WallClock;
-    use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+    use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 
     /// A session nobody negotiated: enough to put behind a lock, not enough
     /// to carry a real call.
@@ -232,10 +232,14 @@ mod tests {
             &plan,
             20,
             &MediaConfig::default(),
-            identity,
-            WallClock::from_unix(now, 1_700_000_000, 0),
             Vec::new(),
-            now,
+            Start {
+                identity,
+                clock: WallClock::from_unix(now, 1_700_000_000, 0),
+                #[cfg(feature = "dtls")]
+                handshake: None,
+                now,
+            },
         )
         .expect("PCMU is always in this build's catalogue")
     }

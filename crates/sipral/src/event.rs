@@ -21,7 +21,12 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "dtls")]
+use std::net::SocketAddr;
+
 use sipral_core::sdp::Direction;
+#[cfg(feature = "dtls")]
+use sipral_rtp::srtp::Suite;
 use sipral_ua::{CallHandle, UaEvent};
 
 use crate::codec::Codec;
@@ -127,6 +132,29 @@ pub enum MediaEvent {
         /// Which of the two ways this stack accepts a digit reported this
         /// one.
         source: DigitSource,
+    },
+    /// The handshake that keys this call finished, and audio can move.
+    ///
+    /// Only DTLS-SRTP produces this, and it is the moment the call becomes
+    /// what it agreed to be: between
+    /// [`MediaEvent::Started`](MediaEvent::Started) and this one, the stream
+    /// exists, has an address and a codec, and carries nothing in either
+    /// direction. An application that draws a padlock draws it here, and
+    /// [`MediaSession::is_encrypted`](crate::MediaSession::is_encrypted)
+    /// answers the same question at any other moment.
+    ///
+    /// A call keyed by SDES never emits it, because such a call is keyed
+    /// before its session is opened at all.
+    #[cfg(feature = "dtls")]
+    Secured {
+        /// The transform the handshake agreed on, which RFC 5764 §4.1.2 has
+        /// it choose rather than the signalling.
+        suite: Suite,
+        /// Where the far end's handshake records came from, which is the
+        /// address its media will be believed from too. `None` only for a
+        /// handshake in which this end sent every record and the far end
+        /// answered from nowhere, which no completed handshake can be.
+        peer: Option<SocketAddr>,
     },
     /// Media could not be started or could not be kept: an answer naming a
     /// codec this build has no decoder for, a description that could not be

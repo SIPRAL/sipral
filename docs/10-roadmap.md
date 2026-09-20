@@ -175,9 +175,12 @@ and each is cheaper before the ABI carries it than after:
   the primitives it needs (P-256, AES-GCM, SHA-256, HMAC) come from the same
   permissively licensed crate family that already supplies AES, because a
   constant-time elliptic curve is the one place a home-grown implementation is
-  a risk rather than a virtue. Reviewed adversarially before it ships under
-  the commercial licence. It is the last item of the phase, and nothing else
-  waits on it.
+  a risk rather than a virtue. **Built**, and joined to a call behind the
+  `dtls` feature, which is on by default: `SrtpPolicy::DtlsOffered` and
+  `DtlsRequired`, `MediaEvent::Secured`, and a stream that agreed to be
+  encrypted and sends nothing until the handshake has keyed it. Still to do:
+  the adversarial cryptography review, before it ships under the commercial
+  licence, and the lab run against a real DTLS-SRTP peer.
 
 **Exit:**
 

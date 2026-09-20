@@ -146,12 +146,24 @@ pub enum Keying {
     },
     /// DTLS-SRTP (RFC 5764). The keys come out of a handshake on the media
     /// path, which is not signalling and not this crate's; what the
-    /// description carries is the fingerprint that authenticates the peer's
-    /// certificate and the role it will take, and both are passed through
-    /// exactly as written.
+    /// description carries is the fingerprints that authenticate the peer's
+    /// certificate and the role it will take, and all of them are passed
+    /// through exactly as written.
     Dtls {
-        /// The value of the peer's `a=fingerprint`.
-        fingerprint: String,
+        /// Every `a=fingerprint` the peer wrote, in the order it wrote them.
+        ///
+        /// A list and not one value, because RFC 8122 §5 lets a description
+        /// carry one line per hash function — "a certificate fingerprint
+        /// \[...\] MUST be calculated using the same one-way hash function
+        /// as is used in the certificate's signature algorithm" is the rule
+        /// for which one matches, and an endpoint may offer several so that
+        /// a peer which knows only one of the hashes can still check it.
+        /// Keeping only the first would kill a call over a hash the other
+        /// end happened to write first.
+        ///
+        /// Never empty: a description with no fingerprint is not keyed this
+        /// way at all.
+        fingerprints: Vec<String>,
         /// The value of its `a=setup`, when it wrote one.
         setup: Option<String>,
     },
@@ -738,9 +750,10 @@ fn keying(
         return Err(SdpError::CryptoNotOffered { stream });
     }
 
-    if let Some(fingerprint) = attribute_value(theirs, their_stream, "fingerprint") {
+    let fingerprints = attribute_values(theirs, their_stream, "fingerprint");
+    if !fingerprints.is_empty() {
         return Ok(Some(Keying::Dtls {
-            fingerprint: fingerprint.to_owned(),
+            fingerprints,
             setup: attribute_value(theirs, their_stream, "setup").map(str::to_owned),
         }));
     }
@@ -774,6 +787,31 @@ fn agreed_crypto<'a>(
         let ours = mine.iter().find(|ours| ours.tag == peer.tag)?;
         (ours.suite == peer.suite).then_some((ours, peer))
     })
+}
+
+/// Every value a stream carries for `name`, falling back to the session level
+/// as [`attribute_value`] does — and falling back wholesale, because §5.13's
+/// rule is that a media-level attribute "overrides" the session-level one
+/// rather than adding to it, so one `a=fingerprint` on the stream replaces
+/// every one written above it.
+fn attribute_values(
+    session: &SessionDescription,
+    stream: &MediaDescription,
+    name: &str,
+) -> Vec<String> {
+    let from = |attributes: &[Attribute]| -> Vec<String> {
+        attributes
+            .iter()
+            .filter(|attribute| attribute.name == name)
+            .filter_map(|attribute| attribute.value.clone())
+            .collect()
+    };
+    let own = from(&stream.attributes);
+    if own.is_empty() {
+        from(&session.attributes)
+    } else {
+        own
+    }
 }
 
 /// An attribute of a stream, falling back to the session-level one that
@@ -1397,7 +1435,86 @@ a=setup:active\r\n"
         assert_eq!(
             plan.keying,
             Some(Keying::Dtls {
-                fingerprint: PRINT.to_owned(),
+                fingerprints: vec![PRINT.to_owned()],
+                setup: Some("active".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn every_fingerprint_a_peer_wrote_is_carried_through_in_its_own_order() {
+        // RFC 8122 §5 lets a description carry one line per hash function so
+        // that a peer which knows only one of them can still check it; taking
+        // the first and dropping the rest would fail a call over which hash
+        // the other end happened to write first
+        const SHA1: &str = "sha-1 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78";
+        const SHA256: &str = "sha-256 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:\
+12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0";
+        let local = sdp("v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n\
+a=setup:actpass\r\n");
+        let remote = sdp(&format!(
+            "v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+m=audio 49170 UDP/TLS/RTP/SAVP 0\r\n\
+a=fingerprint:{SHA1}\r\n\
+a=fingerprint:{SHA256}\r\n\
+a=setup:active\r\n"
+        ));
+        let plan = local
+            .media_plan(&remote, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert_eq!(
+            plan.keying,
+            Some(Keying::Dtls {
+                fingerprints: vec![SHA1.to_owned(), SHA256.to_owned()],
+                setup: Some("active".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_on_the_stream_replaces_every_one_above_it() {
+        // §5.13: a media-level attribute "overrides" the session-level one.
+        // Overrides, not adds to — a stream that named one hash has not
+        // silently kept the session's other one as well
+        const SESSION: &str = "sha-1 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD";
+        const STREAM: &str = "sha-256 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:\
+12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0";
+        let local = sdp("v=0\r\n\
+o=- 1 1 IN IP4 192.0.2.1\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.1\r\n\
+t=0 0\r\n\
+m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n\
+a=setup:actpass\r\n");
+        let remote = sdp(&format!(
+            "v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+a=fingerprint:{SESSION}\r\n\
+m=audio 49170 UDP/TLS/RTP/SAVP 0\r\n\
+a=fingerprint:{STREAM}\r\n\
+a=setup:active\r\n"
+        ));
+        let plan = local
+            .media_plan(&remote, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert_eq!(
+            plan.keying,
+            Some(Keying::Dtls {
+                fingerprints: vec![STREAM.to_owned()],
                 setup: Some("active".to_owned()),
             })
         );

@@ -146,6 +146,25 @@ codes! {
         /// [`SrtpPolicy::Required`]: offer it, and let no stream on this call
         /// carry audio unencrypted.
         Required = 3,
+        /// [`SrtpPolicy::DtlsOffered`]: offer DTLS-SRTP (RFC 5764) on
+        /// `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
+        ///
+        /// What `Offered` is for SDES, with the difference that matters: the
+        /// key never travels in the body, so this is the one policy here that
+        /// is sound over a SIP transport somebody else can read. The cost is
+        /// a round trip of silence at the start of every call while the
+        /// handshake runs, and an application that names it **must** drain
+        /// [`sipral_media_poll_transmit`] — a handshake whose records never
+        /// leave is a call that is up, silent, and reports no error.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+        /// `SIPRAL_FEATURE_DTLS_SRTP`.
+        Dtls = 4,
+        /// [`SrtpPolicy::DtlsRequired`]: offer DTLS-SRTP, and let no stream on
+        /// this call carry audio any other way — an answer carrying
+        /// `a=crypto` included, since that key travelled in a body this
+        /// policy exists to avoid trusting.
+        DtlsRequired = 5,
     }
 }
 
@@ -290,6 +309,33 @@ codes! {
         /// Control traffic that was not believed: from the wrong address, or not a
         /// well-formed compound packet.
         ControlRefused = 5,
+        /// A record of the DTLS-SRTP handshake that keys this call, which has
+        /// been taken. Whatever it owes the far end in reply is waiting in
+        /// [`sipral_media_poll_transmit`], and this is the signal to drain it.
+        Handshake = 6,
+        /// Something arrived on a call that agreed to be encrypted and has no
+        /// keys yet, so there was nothing to verify it with. The ordinary way
+        /// this happens is a peer that starts sending the moment its own half
+        /// of the handshake finishes, which is before ours does.
+        NotKeyed = 7,
+    }
+}
+
+codes! {
+    /// The SRTP transform a call is running. Names for
+    /// `sipral_media_event_t::suite`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralSrtpSuite: u32 {
+        /// No transform: the event is not about one, or the call is not
+        /// encrypted.
+        Unknown = 0,
+        /// `AES_CM_128_HMAC_SHA1_80`, the one every implementation has.
+        AesCm80 = 1,
+        /// `AES_CM_128_HMAC_SHA1_32`, the same cipher with a shorter tag.
+        AesCm32 = 2,
+        /// `F8_128_HMAC_SHA1_80`, which is what 3GPP asks for. Reachable by
+        /// SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
+        AesF8 = 3,
     }
 }
 
@@ -763,11 +809,27 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
         1 => Ok(Some(SrtpPolicy::NotOffered)),
         2 => Ok(Some(SrtpPolicy::Offered)),
         3 => Ok(Some(SrtpPolicy::Required)),
+        // the numbers are in the header of every build, because a value that
+        // has left it is spent; what a build without the feature has is no
+        // handshake to honour them with, and saying so is better than placing
+        // the unencrypted call the policy was chosen to prevent
+        #[cfg(feature = "dtls")]
+        4 => Ok(Some(SrtpPolicy::DtlsOffered)),
+        #[cfg(feature = "dtls")]
+        5 => Ok(Some(SrtpPolicy::DtlsRequired)),
+        #[cfg(not(feature = "dtls"))]
+        4 | 5 => Err(fail(
+            SipralStatus::NotSupported,
+            format!(
+                "{name} names DTLS-SRTP and this build has none: SIPRAL_FEATURE_DTLS_SRTP is \
+                 clear in sipral_capabilities"
+            ),
+        )),
         other => Err(fail(
             SipralStatus::InvalidArgument,
             format!(
                 "{name} is {other}, and srtp is 0 to leave it unspecified, 1 for not offered, 2 \
-                 for offered or 3 for required"
+                 for offered, 3 for required, 4 for DTLS-SRTP or 5 for DTLS-SRTP required"
             ),
         )),
     }
@@ -1373,6 +1435,9 @@ const fn arrival_of(arrival: Arrival) -> SipralArrival {
         Arrival::Control => SipralArrival::Control,
         Arrival::Goodbye => SipralArrival::Goodbye,
         Arrival::ControlRefused => SipralArrival::ControlRefused,
+        #[cfg(feature = "dtls")]
+        Arrival::Handshake => SipralArrival::Handshake,
+        Arrival::NotKeyed => SipralArrival::NotKeyed,
         _ => SipralArrival::Unknown,
     }
 }
@@ -1510,6 +1575,53 @@ entry! {
             match session.poll_rtcp(now) {
                 Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
                 None => Ok(()),
+            }
+        })?;
+        unsafe { write_versioned(packet, out) }
+    }
+}
+
+entry! {
+    /// A datagram this call owes the far end that is neither audio nor a
+    /// report: today, a record of the DTLS-SRTP handshake that keys it.
+    ///
+    /// A `len` of zero means nothing is due. On a call that is not keyed by a
+    /// handshake — every call in a build without `SIPRAL_FEATURE_DTLS_SRTP`,
+    /// and every SDES or plain call in a build with it — that is the answer
+    /// for ever, and calling this costs one comparison.
+    ///
+    /// **Drain it to empty**, in a loop, after every `sipral_media_receive`
+    /// that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every deadline
+    /// `sipral_stack_poll` names. A handshake whose records never leave is a
+    /// ClientHello that never goes out: the call rings, answers, carries no
+    /// audio in either direction, and reports nothing wrong for the two
+    /// minutes it takes to give up. That is the one failure this entry point
+    /// exists to prevent, and there is no way to notice it from the outside.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point.
+    ///
+    /// # Safety
+    ///
+    /// `packet` must point at a `sipral_media_packet_t` as
+    /// [`sipral_media_capture`] describes.
+    fn sipral_media_poll_transmit(media: SipralHandle, now_ms: u64, packet: *mut SipralMediaPacket) {
+        let mut out = unsafe { read_versioned(packet) }?;
+        prepare(&mut out)?;
+        with_media(media, |session, entry| {
+            // the clock is read and checked like every other entry point's,
+            // so that a caller which drives this one alone still cannot walk
+            // a stack's time backwards
+            let _ = entry.instant(now_ms)?;
+            #[cfg(feature = "dtls")]
+            match session.poll_transmit() {
+                Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
+                None => Ok(()),
+            }
+            #[cfg(not(feature = "dtls"))]
+            {
+                let _ = session;
+                Ok(())
             }
         })?;
         unsafe { write_versioned(packet, out) }
@@ -2235,7 +2347,7 @@ a=sendrecv\r\n";
 
     #[test]
     fn srtp_policy_refuses_anything_else() {
-        let refused = srtp_policy(4, "srtp").expect_err("4 names no policy");
+        let refused = srtp_policy(6, "srtp").expect_err("6 names no policy");
         assert_eq!(refused.status, SipralStatus::InvalidArgument);
     }
 

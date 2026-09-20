@@ -26,6 +26,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "dtls")]
+use sipral::SrtpSuite;
 use sipral::{DigitSource, MediaEvent};
 use sipral_core::endpoint::Event;
 use sipral_ua::{
@@ -367,6 +369,25 @@ event_kinds! {
         /// more, and `sipral_announcement_forget` on it answers
         /// `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
         31 = CallAnnounced, c"call announced";
+        /// The handshake that keys a call finished, and audio can move
+        /// (RFC 5764).
+        ///
+        /// Only DTLS-SRTP produces it, and it is the moment the call becomes
+        /// what it agreed to be: between `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+        /// and this one the stream exists, has an address and a codec, and
+        /// carries nothing in either direction. An application that draws a
+        /// padlock draws it here.
+        ///
+        /// `call` is the call and `payload.media.suite` is the transform the
+        /// handshake chose — the signalling does not, which is why there is
+        /// an event for it at all. A call keyed by SDES never produces one,
+        /// because such a call is keyed before its session is opened.
+        ///
+        /// A handshake that does not finish produces
+        /// `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead, and the call is left up:
+        /// whether to hang it up is a decision with a person on the other end
+        /// of it.
+        32 = MediaSecured, c"media secured";
     }
 }
 
@@ -686,6 +707,10 @@ record! {
         /// own `Duration=0` — a peer that held the key for no time at all.
         /// The Rust facade keeps the two apart; this ABI does not.
         pub held_ms: u64,
+        /// A [`SipralSrtpSuite`](crate::media::SipralSrtpSuite): the transform
+        /// this call's media is protected with, for
+        /// [`SipralEventKind::MediaSecured`] and zero on every other kind.
+        pub suite: u32,
         /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
         /// digit reported this one, for [`SipralEventKind::DigitReceived`].
         pub source: u32,
@@ -941,6 +966,7 @@ impl SipralMediaEvent {
             digit: 0,
             event_code: 0,
             held_ms: 0,
+            suite: 0,
             source: SipralDigitSource::Rtp as u32,
         }
     }
@@ -1663,6 +1689,17 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
 /// `reason` and `statistics` are the caller's, because both are built for the
 /// duration of one delivery and neither can be borrowed from the event itself:
 /// a `MediaError` is a Rust value with no C shape, and the statistics have to
+/// The transform a call is running, on this side of the boundary.
+#[cfg(feature = "dtls")]
+const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
+    use crate::media::SipralSrtpSuite;
+    match suite {
+        SrtpSuite::AesCm80 => SipralSrtpSuite::AesCm80,
+        SrtpSuite::AesCm32 => SipralSrtpSuite::AesCm32,
+        SrtpSuite::AesF8 => SipralSrtpSuite::AesF8,
+    }
+}
+
 /// be converted before they have one.
 pub(crate) fn media(
     known: &mut Vocabulary<'_>,
@@ -1698,6 +1735,15 @@ pub(crate) fn media(
         MediaEvent::Failed(ref error) => {
             payload.fault = fault_of(error) as u32;
             SipralEventKind::MediaFailed
+        }
+        #[cfg(feature = "dtls")]
+        MediaEvent::Secured { suite, .. } => {
+            // the address the handshake came from is deliberately not carried
+            // here: it is the address `sipral_media_poll_transmit` already
+            // hands every record back with, so an application that drove the
+            // handshake at all has it
+            payload.suite = suite_of(suite) as u32;
+            SipralEventKind::MediaSecured
         }
         MediaEvent::DigitReceived {
             digit,
@@ -2117,7 +2163,8 @@ mod tests {
         assert_eq!(SipralEventKind::ResolveNeeded as u32, 29);
         assert_eq!(SipralEventKind::Notified as u32, 30);
         assert_eq!(SipralEventKind::CallAnnounced as u32, 31);
-        assert_eq!(SipralEventKind::ALL.len(), 30, "and there are no others");
+        assert_eq!(SipralEventKind::MediaSecured as u32, 32);
+        assert_eq!(SipralEventKind::ALL.len(), 31, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2179,7 +2226,7 @@ mod tests {
         // one number is still held, and the loop this used to be is gone
         // with the second: 16, for audio devices
         assert_eq!(name(16), None, "16 is reserved, not live");
-        assert_eq!(name(32), None, "past the last kind");
+        assert_eq!(name(33), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

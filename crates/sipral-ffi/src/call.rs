@@ -4419,7 +4419,7 @@ Content-Length: 0\r\n\r\n";
         let mut observed = Observed::default();
         let (handle, account) = media_line(&mut observed, |_| {});
         let mut call_config = managed_config();
-        call_config.srtp = 4;
+        call_config.srtp = 6;
         let (status, call) = place(handle, account, &call_config, 1_000);
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert_eq!(call, SIPRAL_HANDLE_NONE);
@@ -4437,7 +4437,7 @@ Content-Length: 0\r\n\r\n";
         let (handle, first) = connected(&mut observed);
         let _ = sent(handle);
         let mut config = call_config();
-        config.srtp = 4;
+        config.srtp = 6;
         let mut second = SIPRAL_HANDLE_NONE;
         let status = unsafe {
             sipral_call_consult(

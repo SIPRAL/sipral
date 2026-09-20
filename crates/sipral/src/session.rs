@@ -47,7 +47,7 @@ use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
-    Activity, BufferConfig, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
+    Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
     PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
     is_rtcp,
 };
@@ -58,7 +58,7 @@ use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
-use crate::keying;
+use crate::keying::{self, Opening};
 use crate::pipeline::Coder;
 use crate::record::{Recorder, RecordingSink};
 use crate::stats::StreamStatistics;
@@ -129,6 +129,19 @@ pub enum Arrival {
     /// Control traffic that was not believed: from the wrong address, or not
     /// a well-formed compound packet.
     ControlRefused,
+    /// A record of the DTLS-SRTP handshake that keys this call (RFC 5764).
+    ///
+    /// The handshake has been driven with it, and whatever it owes the far
+    /// end in reply is waiting in [`MediaSession::poll_transmit`] — which is
+    /// what this arrival is the signal to drain.
+    #[cfg(feature = "dtls")]
+    Handshake,
+    /// Something arrived on a stream that agreed to be secured and has no
+    /// keys yet, so there was nothing to verify it with.
+    ///
+    /// The ordinary way this happens is a peer that starts sending the moment
+    /// its own half of the handshake finishes, which is before ours does.
+    NotKeyed,
 }
 
 /// Where the frame that was just played came from.
@@ -226,6 +239,28 @@ pub(crate) struct StreamIdentity {
     pub(crate) seed: u64,
 }
 
+/// What the engine brings to opening a session, as against what the
+/// negotiation decided.
+///
+/// Four things a description cannot hold: the numbers this stream starts
+/// counting from, the wall clock its reports will carry, the handshake that
+/// will key it, and the instant it is being opened at. Grouped rather than
+/// listed because they travel together and always have — every one of them
+/// comes from the engine and none of them is a property of the call.
+// `Copy` where there is nothing to move: without the `dtls` feature the whole
+// of it is three numbers and an instant, and clippy is right that passing it
+// by value then consumes nothing. With the feature it owns a handshake, and
+// the move is the point.
+#[cfg_attr(not(feature = "dtls"), derive(Clone, Copy))]
+pub(crate) struct Start {
+    pub(crate) identity: StreamIdentity,
+    pub(crate) clock: WallClock,
+    /// The DTLS-SRTP handshake that will key this stream, already started.
+    #[cfg(feature = "dtls")]
+    pub(crate) handshake: Option<crate::dtls::Handshake>,
+    pub(crate) now: Instant,
+}
+
 /// One call's media.
 #[derive(Debug)]
 pub struct MediaSession {
@@ -274,6 +309,48 @@ pub struct MediaSession {
     /// A2, D6: which device this call's audio is on, carried rather than
     /// interpreted. See [`MediaConfig::device`].
     device: Option<String>,
+    /// The DTLS-SRTP handshake that will key this stream, while it is still
+    /// running. `None` on every other call, and on this one once the keys are
+    /// in or the handshake has given up.
+    #[cfg(feature = "dtls")]
+    dtls: Option<Dtls>,
+    /// One handshake record, held rather than allocated, so that
+    /// [`MediaSession::poll_transmit`] hands back a borrow like every other
+    /// thing this session puts on the wire.
+    #[cfg(feature = "dtls")]
+    dtls_out: Vec<u8>,
+}
+
+/// The content type of a DTLS handshake record (RFC 6347 §4.1), which is the
+/// one kind this session will take from an address it has not heard from
+/// before. Everything else on that connection — the alerts above all — is
+/// believed only from the address a handshake record came from first.
+#[cfg(feature = "dtls")]
+const HANDSHAKE_RECORD: u8 = 22;
+
+/// A running handshake and the address its records are believed from.
+#[cfg(feature = "dtls")]
+#[derive(Debug)]
+struct Dtls {
+    handshake: crate::dtls::Handshake,
+    /// Where the far end's records come from, once one has arrived.
+    ///
+    /// The same latch RTP keeps, kept separately because no RTP arrives while
+    /// the handshake runs, so the stream's own latch has not closed yet.
+    ///
+    /// It matters more here than it does there. A DTLS connection ends on any
+    /// fatal alert, and an alert arriving before the keys exist cannot be
+    /// authenticated — there is nothing to authenticate it with — so without
+    /// a latch one forged datagram from anywhere on the path would end any
+    /// call on this stack that had agreed to be encrypted. The latch closes
+    /// on the first *handshake* record to arrive, never on an alert, which
+    /// narrows that to the same race the RTP latch already has: an attacker
+    /// must beat the far end's first flight rather than pick its moment.
+    ///
+    /// Narrows, and does not close. Closing it needs the candidate exchange
+    /// of ICE, which this stack negotiates and does not assume; see
+    /// `docs/06-nat.md`.
+    peer: Option<SocketAddr>,
 }
 
 impl MediaSession {
@@ -301,11 +378,16 @@ impl MediaSession {
         plan: &MediaPlan,
         frame_ms: u32,
         config: &MediaConfig,
-        identity: StreamIdentity,
-        clock: WallClock,
         candidates: Vec<CodecCandidate>,
-        now: Instant,
+        start: Start,
     ) -> Result<Self, MediaError> {
+        let Start {
+            identity,
+            clock,
+            #[cfg(feature = "dtls")]
+            handshake,
+            now,
+        } = start;
         let agreed = Codec::of_plan(plan)?;
         if config.render_delay > MAX_RENDER_DELAY {
             return Err(MediaError::RenderDelayTooLong {
@@ -341,9 +423,13 @@ impl MediaSession {
         // the protected session builds goes out encrypted and everything
         // arriving is verified before any of it is believed, so this is the
         // last point at which the two shapes of stream differ
-        let rtp = match keying::security(plan)? {
-            Some(security) => RtpSession::protected(&stream, draws.unit(), security),
-            None => RtpSession::new(&stream, draws.unit()),
+        let rtp = match keying::opening(plan)? {
+            Opening::Keyed(security) => RtpSession::protected(&stream, draws.unit(), security),
+            // the keys are a handshake away and nothing may go out or be
+            // believed until they land: see `RtpSession::awaiting`
+            #[cfg(feature = "dtls")]
+            Opening::Awaiting(most) => RtpSession::awaiting(&stream, draws.unit(), most),
+            Opening::Clear => RtpSession::new(&stream, draws.unit()),
         };
         Ok(Self {
             rtp,
@@ -375,6 +461,13 @@ impl MediaSession {
             events: VecDeque::new(),
             codec_candidates: candidates,
             device: config.device.clone(),
+            #[cfg(feature = "dtls")]
+            dtls: handshake.map(|handshake| Dtls {
+                handshake,
+                peer: None,
+            }),
+            #[cfg(feature = "dtls")]
+            dtls_out: Vec::new(),
         })
     }
 
@@ -411,14 +504,32 @@ impl MediaSession {
 
     /// Whether this call's audio is encrypted.
     ///
-    /// True only for a stream whose keys were actually negotiated and are
-    /// actually in use, which is what a padlock on a screen has to mean. A
-    /// call that asked for SDES and got a plain answer never reaches here —
-    /// the stream is refused or the session is not opened — so there is no
-    /// state in which this says yes and the packets say otherwise.
+    /// True only for a stream whose keys are actually in use, which is what a
+    /// padlock on a screen has to mean. A call that asked for SDES and got a
+    /// plain answer never reaches here — the stream is refused or the session
+    /// is not opened — so there is no state in which this says yes and the
+    /// packets say otherwise.
+    ///
+    /// Read off the stream rather than off the plan, and that is the whole of
+    /// the difference DTLS-SRTP makes to it: a plan can say a call is keyed
+    /// by a handshake from the moment the answer is parsed, and the handshake
+    /// finishes a round trip later. For that round trip this says no, because
+    /// for that round trip nothing has been encrypted.
     #[must_use]
     pub const fn is_encrypted(&self) -> bool {
-        matches!(self.plan.keying, Some(Keying::Sdes { .. }))
+        self.rtp.is_protected()
+    }
+
+    /// Whether this call agreed to be encrypted and is still waiting for the
+    /// handshake that keys it.
+    ///
+    /// Neither [`MediaSession::is_encrypted`] nor a plain call: no audio
+    /// moves in either direction while this is true, and it becomes false
+    /// either because [`MediaEvent::Secured`] was emitted or because
+    /// [`MediaEvent::Failed`] was.
+    #[must_use]
+    pub const fn is_awaiting_keys(&self) -> bool {
+        self.rtp.awaiting_keys()
     }
 
     /// The rate the samples handed to and taken from this session are at,
@@ -510,6 +621,10 @@ impl MediaSession {
     /// application that put both on one socket does not have to sort them
     /// itself.
     pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Instant) -> Arrival {
+        #[cfg(feature = "dtls")]
+        if sipral_nat::classify(datagram) == sipral_nat::Demux::Dtls {
+            return self.receive_handshake(datagram, from, now);
+        }
         if is_rtcp(datagram) {
             return self.receive_control(datagram, from, now);
         }
@@ -519,8 +634,96 @@ impl MediaSession {
                 self.note_arrival(now);
                 Arrival::Queued
             }
+            Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
             Received::Dropped(why) => Arrival::Dropped(why),
         }
+    }
+
+    /// Take a record of the handshake that keys this call.
+    ///
+    /// `last_inbound` is deliberately not touched. The watchdog behind
+    /// [`MediaEvent::Stalled`] measures audio, and a peer retransmitting its
+    /// flights into a call that will never key is exactly the case it must
+    /// not be talked out of reporting. What reports a handshake that does not
+    /// finish is the handshake's own budget.
+    #[cfg(feature = "dtls")]
+    fn receive_handshake(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) -> Arrival {
+        let Some(dtls) = self.dtls.as_mut() else {
+            // the keys are in, or the handshake gave up: a record arriving
+            // now is a retransmission the far end has not stopped sending, or
+            // it is nobody's
+            return Arrival::Dropped(Discard::ForeignAddress);
+        };
+        match dtls.peer {
+            Some(latched) if latched != from => {
+                return Arrival::Dropped(Discard::ForeignAddress);
+            }
+            Some(_) => {}
+            // RFC 6347 §4.1: a record's first octet is its content type, and
+            // 22 is a handshake. Latching on one of those and not on an alert
+            // is what keeps an unauthenticated alert — the one thing a peer
+            // can send before there are keys that ends the connection — from
+            // arriving from anywhere at all
+            None if datagram.first() == Some(&HANDSHAKE_RECORD) => dtls.peer = Some(from),
+            None => return Arrival::Dropped(Discard::ForeignAddress),
+        }
+        dtls.handshake.on_datagram(datagram, now);
+        self.settle_handshake();
+        Arrival::Handshake
+    }
+
+    /// Install what the handshake produced, or report why there will be none.
+    ///
+    /// Called after anything that could have moved it. Doing it in one place
+    /// is what makes "the keys are installed exactly once" a property of the
+    /// session rather than of every caller.
+    #[cfg(feature = "dtls")]
+    fn settle_handshake(&mut self) {
+        let Some(dtls) = self.dtls.as_mut() else {
+            return;
+        };
+        let peer = dtls.peer;
+        match dtls.handshake.take_outcome() {
+            Some(Ok((suite, security))) => {
+                // `keyed` is false for a stream that was not waiting, which
+                // is a session that has already been keyed once: the event
+                // goes out with the keys or not at all
+                let installed = self.rtp.keyed(security);
+                if installed {
+                    self.events.push_back(MediaEvent::Secured { suite, peer });
+                }
+            }
+            Some(Err(error)) => self.events.push_back(MediaEvent::Failed(error)),
+            None => {}
+        }
+        // the handshake is kept either way rather than dropped. A far end
+        // that lost our last flight retransmits its own, and a connection
+        // that is still here answers it; one that had been thrown away would
+        // leave the peer retransmitting into a call that is already carrying
+        // audio.
+    }
+
+    /// A datagram this session owes the far end that is neither audio nor a
+    /// report: today, a record of the DTLS-SRTP handshake.
+    ///
+    /// Drain it to empty after every [`MediaSession::receive`] and at every
+    /// deadline [`MediaSession::poll_timeout`] named. A handshake that is not
+    /// drained is a handshake whose ClientHello never leaves, and a call that
+    /// is up with no audio and no error.
+    #[cfg(feature = "dtls")]
+    #[must_use]
+    pub fn poll_transmit(&mut self) -> Option<Datagram<'_>> {
+        let record = self.dtls.as_mut()?.handshake.take_outbound()?;
+        self.dtls_out = record;
+        Some(Datagram {
+            // the stream's own address, which is the signalled one until a
+            // packet has been seen from somewhere else and the latched one
+            // afterwards: a handshake follows symmetric RTP and follows a
+            // re-negotiation that moved the stream, with no second copy of
+            // the answer to keep in step
+            destination: self.rtp.destination(),
+            payload: &self.dtls_out,
+        })
     }
 
     /// Take a datagram off the control socket, for a call whose RTCP has a
@@ -536,6 +739,7 @@ impl MediaSession {
         match self.rtp.rtcp_receive(datagram, from, elapsed, ntp) {
             RtcpReceived::Report => Arrival::Control,
             RtcpReceived::Goodbye { .. } => Arrival::Goodbye,
+            RtcpReceived::NotKeyed => Arrival::NotKeyed,
             RtcpReceived::ForeignAddress
             | RtcpReceived::Malformed(_)
             | RtcpReceived::Insecure(_) => Arrival::ControlRefused,
@@ -731,13 +935,20 @@ impl MediaSession {
         }
         let written = self.coder.encode(samples, &mut self.payload)?;
         let payload = self.payload.get(..written).unwrap_or_default();
-        let length = self
-            .rtp
-            .send(payload, self.frame_ticks, &mut self.rtp_out)
-            .map_err(|_| MediaError::PacketTooLong {
-                need: written,
-                got: self.rtp_out.len(),
-            })?;
+        let length = match self.rtp.send(payload, self.frame_ticks, &mut self.rtp_out) {
+            Ok(length) => length,
+            // a stream that agreed to be secured and is still waiting for its
+            // keys drops the frame rather than queueing it. A frame held for
+            // the length of a handshake is a frame that arrives too late to
+            // play, and the clock has moved on by then anyway (§5.1)
+            Err(BuildError::NotKeyed) => return Ok(None),
+            Err(_) => {
+                return Err(MediaError::PacketTooLong {
+                    need: written,
+                    got: self.rtp_out.len(),
+                });
+            }
+        };
         self.packets_sent = self.packets_sent.saturating_add(1);
         self.octets_sent = self
             .octets_sent
@@ -765,13 +976,26 @@ impl MediaSession {
         let Due::Event { outgoing, repeat } = due else {
             return Ok(None);
         };
-        let length = self
+        let length = match self
             .rtp
             .send_event(outgoing, payload_type, &mut self.rtp_out)
-            .map_err(|_| MediaError::PacketTooLong {
-                need: EVENT_LEN,
-                got: self.rtp_out.len(),
-            })?;
+        {
+            Ok(length) => length,
+            // as on the audio path, and with one more consequence: the digit
+            // this packet belonged to is abandoned rather than half sent.
+            // RFC 4733 §2.5.1.4 builds a digit out of a run of updates, and a
+            // run with a hole in it is a digit the far end reads as two
+            Err(BuildError::NotKeyed) => {
+                self.dialling.clear();
+                return Ok(None);
+            }
+            Err(_) => {
+                return Err(MediaError::PacketTooLong {
+                    need: EVENT_LEN,
+                    got: self.rtp_out.len(),
+                });
+            }
+        };
         // an update carries the duration so far and moves the audio clock with
         // it; the two repeats of the closing packet report a duration already
         // reported and move nothing, so the frame of real time they take is
@@ -793,6 +1017,14 @@ impl MediaSession {
     /// and answers `None` for ever on a call that negotiated no RTCP.
     #[must_use]
     pub fn poll_rtcp(&mut self, now: Instant) -> Option<Datagram<'_>> {
+        // refused before the schedule is asked, not after. `rtcp_due` both
+        // answers and reconsiders, and a report that was scheduled and then
+        // refused by the protection step would leave the deadline where it
+        // was — so every later poll would see it passed, and a caller driven
+        // by `poll_timeout` would spin for the whole handshake
+        if self.rtp.awaiting_keys() {
+            return None;
+        }
         let destination = self.control_destination()?;
         let elapsed = self.elapsed(now);
         if !matches!(self.rtp.rtcp_due(elapsed, self.draws.unit()), RtcpDue::Send) {
@@ -808,6 +1040,23 @@ impl MediaSession {
             destination,
             payload: self.rtcp_out.get(..length).unwrap_or_default(),
         })
+    }
+
+    /// Say goodbye to the far end's DTLS stack, before the socket closes.
+    ///
+    /// RFC 6347 §4.2.8's `close_notify`. A peer that gets one stops
+    /// retransmitting its flights into a call that has already hung up, which
+    /// on a handshake that never finished is the difference between ending
+    /// and trailing off for two minutes — the same difference the RTCP BYE
+    /// makes to the media, and the reason both are sent here.
+    ///
+    /// The records it produces come out of [`MediaSession::poll_transmit`]
+    /// like any others. Nothing waits for an answer; there will not be one.
+    #[cfg(feature = "dtls")]
+    pub fn close_handshake(&mut self) {
+        if let Some(dtls) = self.dtls.as_mut() {
+            dtls.handshake.close();
+        }
     }
 
     /// The RTCP BYE that says this end has left (RFC 3550 §6.6).
@@ -848,21 +1097,36 @@ impl MediaSession {
     pub fn poll_timeout(&self) -> Option<Instant> {
         let rtcp = self
             .control_destination()
+            .filter(|_| !self.rtp.awaiting_keys())
             .map(|_| self.origin + self.rtp.next_rtcp_deadline());
         let stall = self
             .stall_after
             .filter(|_| self.is_receiving() && !self.stalled)
             .map(|after| self.last_inbound + after);
-        match (rtcp, stall) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (left, right) => left.or(right),
-        }
+        #[cfg(feature = "dtls")]
+        let handshake = self
+            .dtls
+            .as_ref()
+            .and_then(|dtls| dtls.handshake.poll_timeout());
+        #[cfg(not(feature = "dtls"))]
+        let handshake = None;
+        [rtcp, stall, handshake].into_iter().flatten().min()
     }
 
     /// Time has passed. The only thing this decides is whether the stream has
     /// stopped; a report that is due is taken with
     /// [`MediaSession::poll_rtcp`], because it needs somewhere to be written.
     pub fn handle_timeout(&mut self, now: Instant) {
+        // first and unconditionally. Everything below this line is the stall
+        // watchdog, which an application is free to turn off and which a
+        // `sendonly` call does not run at all — and a handshake driven only
+        // when the watchdog happens to be armed is a handshake that never
+        // retransmits and never gives up
+        #[cfg(feature = "dtls")]
+        if let Some(dtls) = self.dtls.as_mut() {
+            dtls.handshake.on_timeout(now);
+            self.settle_handshake();
+        }
         let Some(after) = self.stall_after else {
             return;
         };
@@ -890,7 +1154,9 @@ impl MediaSession {
     /// one session out of several that has something to send asks this first.
     #[must_use]
     pub fn rtcp_deadline_passed(&self, now: Instant) -> bool {
-        self.control_destination().is_some() && self.elapsed(now) >= self.rtp.next_rtcp_deadline()
+        !self.rtp.awaiting_keys()
+            && self.control_destination().is_some()
+            && self.elapsed(now) >= self.rtp.next_rtcp_deadline()
     }
 
     /// This session's own timeline, which is what `sipral-rtp` counts in.
@@ -1192,10 +1458,33 @@ impl MediaSession {
     /// expressible as a context for a stream that is running; the session
     /// keeps the keys it has, and the engine's `keying_holds` is where a
     /// stream that lost a required policy is refused.
+    ///
+    /// # Errors
+    /// [`MediaError::DtlsFingerprintChanged`] for a re-negotiation that names
+    /// a different certificate. RFC 5763 §6.6 asks for a **new** DTLS
+    /// association there, which this does not start; what it does instead is
+    /// refuse the plan by name, so the session keeps running on keys both
+    /// ends still agree on and the application is told. Carrying on silently
+    /// would be worse than either: the far end would have moved to a
+    /// certificate this end never checked, and the media would keep flowing
+    /// as though it had.
     fn rekeyed(
         was: &MediaPlan,
         plan: &MediaPlan,
     ) -> Result<(Option<Rekey>, Option<Rekey>), MediaError> {
+        #[cfg(feature = "dtls")]
+        if let (
+            Some(Keying::Dtls {
+                fingerprints: had, ..
+            }),
+            Some(Keying::Dtls {
+                fingerprints: now, ..
+            }),
+        ) = (&was.keying, &plan.keying)
+            && had != now
+        {
+            return Err(MediaError::DtlsFingerprintChanged);
+        }
         let (
             Some(Keying::Sdes {
                 local: was_local,

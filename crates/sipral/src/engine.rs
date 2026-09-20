@@ -63,11 +63,15 @@ use std::time::{Duration, Instant};
 
 use sipral_core::auth::KeySource;
 use sipral_core::msg::OwnedMessage;
+#[cfg(feature = "dtls")]
+use sipral_core::sdp::RtcpPlan;
 use sipral_core::sdp::{
     AcceptedStream, Attribute, Connection, Direction, KeySalt, Keying, MASTER_KEY, MASTER_SALT,
     MediaDescription, MediaPlan, NegotiatedCodec, Origin, SessionDescription, StreamAnswer, parse,
     static_rtpmap,
 };
+#[cfg(feature = "dtls")]
+use sipral_dtls::setup::{Party, Setup};
 use sipral_ua::{
     AccountId, CallHandle, CallState, OutgoingCall, OutgoingExtras, StatusCode, UaError, UaEvent,
     UserAgent,
@@ -75,13 +79,17 @@ use sipral_ua::{
 use zeroize::Zeroizing;
 
 use crate::clock::WallClock;
-use crate::codec::{Codec, CodecCandidate, CodecCatalog};
+use crate::codec::{Codec, CodecCandidate, CodecCatalog, Keyed};
 use crate::counters::Counters;
+#[cfg(feature = "dtls")]
+use crate::dtls::Identity;
 use crate::dtmf::Digit;
 use crate::error::MediaError;
 use crate::event::{DigitSource, Event, MediaEvent};
-use crate::keying::{self, SrtpPolicy};
-use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+#[cfg(feature = "dtls")]
+use crate::keying::SrtpPolicy;
+use crate::keying::{self};
+use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 use crate::share::{self, Held, SessionGuard, SessionShare};
 
 /// The media type this stack negotiates. There is no video, deliberately, and
@@ -120,6 +128,13 @@ struct Managed {
     /// D6: how this call's session is opened — this engine's default unless
     /// overridden the same way.
     config: MediaConfig,
+    /// What this end wrote for DTLS-SRTP in the description it last sent:
+    /// which side of the exchange it was on, and the `a=setup` it wrote.
+    ///
+    /// Kept because [`dtls_role`](sipral_dtls::setup::dtls_role) reads the
+    /// offer's value and the answer's together, and only one of the two ever
+    /// arrives from the far end. `None` on every call not keyed this way.
+    dtls: Option<(Side, String)>,
     /// Whether [`MediaEngine::ring_with`] has already described and opened
     /// this call's session, before it was answered.
     ///
@@ -187,13 +202,23 @@ pub struct MediaEngine {
     /// D3's health counters, fed from the same drain that hands events to
     /// the application — see `crate::counters`.
     counters: Counters,
-    /// Where every SRTP master key comes from, and nothing else does.
+    /// Where every SRTP master key comes from, and every DTLS secret with
+    /// them, and nothing else does.
     ///
     /// Its own stream, separate from the endpoint's, because the endpoint's
     /// seed is written in clear into every replay recording. A recording must
     /// be able to reproduce a session byte for byte without carrying the
-    /// means to decrypt any of the media that went with it.
+    /// means to decrypt any of the media that went with it — nor, since the
+    /// certificate key is drawn from the same stream, the means to be
+    /// mistaken for the stack that made it.
     keys: KeySource,
+    /// The key and certificate this stack presents for DTLS-SRTP, made on the
+    /// first call that needs one and re-made when it is close to running out.
+    ///
+    /// `None` until then, because a stack that never places an encrypted call
+    /// should not spend a P-256 key pair on starting up.
+    #[cfg(feature = "dtls")]
+    identity: Option<Identity>,
 }
 
 impl MediaEngine {
@@ -226,7 +251,130 @@ impl MediaEngine {
             farewells: VecDeque::new(),
             counters: Counters::default(),
             keys: KeySource::new(media_seed),
+            #[cfg(feature = "dtls")]
+            identity: None,
         }
+    }
+
+    /// The key and certificate this stack presents, making one if there is
+    /// none or if the one there is has nearly run out.
+    ///
+    /// # Errors
+    /// [`MediaError::DtlsIdentity`], which a sound media seed does not
+    /// produce.
+    #[cfg(feature = "dtls")]
+    fn identity(&mut self, now: Instant) -> Result<&Identity, MediaError> {
+        let unix = self.clock.unix_at(now);
+        if self.identity.as_ref().is_none_or(|had| had.is_stale(unix)) {
+            // a fresh one rather than a refused call: `MediaEngine` is made
+            // once and a desk phone runs for months, so a certificate that
+            // outlives its own period is the ordinary case rather than a
+            // fault
+            self.identity = Some(Identity::new(&mut self.keys, unix)?);
+        }
+        self.identity.as_ref().ok_or(MediaError::DtlsIdentity)
+    }
+
+    /// The `a=fingerprint` this end writes into the description it is about
+    /// to send and the `a=setup` beside it, or `None` for a call that is not
+    /// keyed by a handshake.
+    ///
+    /// Owned strings rather than a borrow, because the call remembers what it
+    /// wrote: [`dtls_role`](sipral_dtls::setup::dtls_role) needs both halves
+    /// of the exchange, and only one of them ever arrives from the far end.
+    ///
+    /// # Errors
+    /// As [`MediaEngine::identity`], and [`MediaError::DtlsRole`] for an
+    /// offer whose `a=setup` cannot be read.
+    #[cfg(feature = "dtls")]
+    fn dtls_lines(
+        &mut self,
+        catalog: &CodecCatalog,
+        side: Side,
+        offered: Option<&SessionDescription>,
+        now: Instant,
+    ) -> Result<Option<(String, String)>, MediaError> {
+        if !catalog.srtp().wants_dtls() {
+            return Ok(None);
+        }
+        let theirs = offered.and_then(peer_setup);
+        let setup = crate::dtls::setup_to_write(side.party(), theirs.as_deref())?;
+        let fingerprint = self.identity(now)?.fingerprint().to_owned();
+        Ok(Some((fingerprint, setup.name().to_owned())))
+    }
+
+    /// Without the feature there is no handshake to describe, and every
+    /// description this engine writes is keyed by SDES or not at all.
+    #[cfg(not(feature = "dtls"))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn dtls_lines(
+        &mut self,
+        _catalog: &CodecCatalog,
+        _side: Side,
+        _offered: Option<&SessionDescription>,
+        _now: Instant,
+    ) -> Result<Option<(String, String)>, MediaError> {
+        Ok(None)
+    }
+
+    /// The handshake a settled plan calls for, ready to be driven.
+    ///
+    /// `Ok(None)` for a call not keyed this way, and for one whose peer
+    /// answered `holdconn`.
+    ///
+    /// # Errors
+    /// As [`crate::dtls::Handshake::start`], and [`MediaError::DtlsRole`]
+    /// when this call has no record of what it wrote — which cannot happen
+    /// for a plan that came back keyed by a handshake, since the same
+    /// description carried both.
+    #[cfg(feature = "dtls")]
+    fn handshake_for(
+        &mut self,
+        call: CallHandle,
+        plan: &MediaPlan,
+        now: Instant,
+    ) -> Result<Option<crate::dtls::Handshake>, MediaError> {
+        let Some(keying @ Keying::Dtls { .. }) = plan.keying.as_ref() else {
+            return Ok(None);
+        };
+        let Some((side, ours)) = self
+            .calls
+            .get(&call)
+            .and_then(|managed| managed.dtls.clone())
+        else {
+            return Err(MediaError::DtlsRole);
+        };
+        let ours = Setup::parse(&ours).map_err(|_| MediaError::DtlsRole)?;
+        // minted first, so that the split borrow below sees a certificate
+        // that is already there
+        self.identity(now)?;
+        let Self { identity, keys, .. } = self;
+        let identity = identity.as_ref().ok_or(MediaError::DtlsIdentity)?;
+        crate::dtls::Handshake::start(identity, keying, side.party(), ours, keys, now)
+    }
+
+    /// A record of the DTLS-SRTP handshake that one call owes the far end,
+    /// the call it belongs to, and where it goes.
+    ///
+    /// One at a time, like every other poll here. **A caller loops until it
+    /// answers `None`, after every datagram delivered and at every deadline
+    /// [`MediaEngine::poll_timeout`] named.** A handshake that is never
+    /// drained is a ClientHello that never leaves, and a call that is up with
+    /// no audio, no encryption and no error.
+    ///
+    /// The octets are copied out rather than lent, for the reason
+    /// [`MediaEngine::poll_rtcp`] gives: a handshake is a few datagrams once
+    /// per call.
+    #[cfg(feature = "dtls")]
+    #[must_use]
+    pub fn poll_transmit(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+        for (call, held) in &self.sessions {
+            let mut slot = share::lock(held);
+            if let Some(datagram) = slot.session.poll_transmit() {
+                return Some((*call, datagram.destination, datagram.payload.to_vec()));
+            }
+        }
+        None
     }
 
     /// What this engine offers by default, in the order it offers it — A4's
@@ -376,7 +524,9 @@ impl MediaEngine {
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
-        let offer = write_offer(&catalog, local, session_id, 1, keys);
+        let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
+        let offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
         self.calls.insert(
@@ -390,6 +540,7 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config,
+                dtls,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
             },
@@ -445,7 +596,9 @@ impl MediaEngine {
         let CallMedia { catalog, config } = media;
         let (identity, session_id) = draw(agent);
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
-        let offer = write_offer(&catalog, local, session_id, 1, keys);
+        let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
+        let offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
         self.calls.insert(
             new,
@@ -458,6 +611,7 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config,
+                dtls,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
             },
@@ -554,8 +708,16 @@ impl MediaEngine {
             return Err(MediaError::SrtpRequired);
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
-        let description =
-            write_answer(&catalog, &offer, local, session_id, version, keys.as_ref())?;
+        let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), now)?;
+        let description = write_answer(
+            &catalog,
+            &offer,
+            local,
+            session_id,
+            version,
+            keys.as_ref(),
+            keyed(dtls.as_ref()),
+        )?;
         let bytes = description.to_bytes();
         agent.ring(call, Some(Arc::from(bytes)), now)?;
         if let Some(managed) = self.calls.get_mut(&call) {
@@ -564,6 +726,7 @@ impl MediaEngine {
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
             managed.rung_with_media = true;
         }
         // no event tells this engine when a 183 has gone out the way
@@ -644,11 +807,33 @@ impl MediaEngine {
             return Err(MediaError::SrtpRequired);
         }
         let keys = will_key(&catalog, offered.as_ref()).then(|| draw_key(&mut self.keys));
+        // an INVITE with no offer leaves this end offering, so which side it
+        // is on is decided by what arrived rather than by which method was
+        // called
+        let side = if offered.is_some() {
+            Side::Answering
+        } else {
+            Side::Offering
+        };
+        let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), now)?;
         let description = match offered {
-            Some(offer) => {
-                write_answer(&catalog, &offer, local, session_id, version, keys.as_ref())?
-            }
-            None => write_offer(&catalog, local, session_id, version, keys),
+            Some(offer) => write_answer(
+                &catalog,
+                &offer,
+                local,
+                session_id,
+                version,
+                keys.as_ref(),
+                keyed(dtls.as_ref()),
+            )?,
+            None => write_offer(
+                &catalog,
+                local,
+                session_id,
+                version,
+                keys,
+                keyed(dtls.as_ref()),
+            ),
         };
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
@@ -658,6 +843,7 @@ impl MediaEngine {
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            managed.dtls = dtls.map(|(_, setup)| (side, setup));
         }
         Ok(())
     }
@@ -882,6 +1068,9 @@ impl MediaEngine {
                 version: 1,
                 catalog: self.catalog.clone(),
                 config: self.config.clone(),
+                // nothing has been written for this call yet: what it will
+                // say about DTLS-SRTP is decided when it is rung or answered
+                dtls: None,
                 rung_with_media: false,
             },
         );
@@ -977,6 +1166,14 @@ impl MediaEngine {
             return;
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
+        let dtls = match self.dtls_lines(&catalog, Side::Answering, Some(&offer), now) {
+            Ok(lines) => lines,
+            Err(error) => {
+                self.events.push_back((call, MediaEvent::Failed(error)));
+                let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+                return;
+            }
+        };
         match write_answer(
             &catalog,
             &offer,
@@ -984,6 +1181,7 @@ impl MediaEngine {
             session_id,
             version,
             keys.as_ref(),
+            keyed(dtls.as_ref()),
         ) {
             Ok(answer) => {
                 let bytes = answer.to_bytes();
@@ -991,6 +1189,7 @@ impl MediaEngine {
                     && let Some(managed) = self.calls.get_mut(&call)
                 {
                     managed.version = version;
+                    managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
                     // the descriptions themselves arrive back as
                     // UaEvent::SessionChanged, which is what settles the plan
                 }
@@ -1031,6 +1230,18 @@ impl MediaEngine {
         if let Some(datagram) = session.goodbye(now) {
             self.farewells
                 .push_back((call, datagram.destination, datagram.payload.to_vec()));
+        }
+        // and the same courtesy to the far end's DTLS stack. It comes after
+        // the BYE because a stream that never keyed has no BYE to send —
+        // `send_bye` refuses to write one in the clear — and this is then the
+        // only thing that tells the peer to stop retransmitting.
+        #[cfg(feature = "dtls")]
+        {
+            session.close_handshake();
+            while let Some(datagram) = session.poll_transmit() {
+                self.farewells
+                    .push_back((call, datagram.destination, datagram.payload.to_vec()));
+            }
         }
         self.events
             .push_back((call, MediaEvent::Ended(session.statistics(now))));
@@ -1142,15 +1353,29 @@ impl MediaEngine {
                 slot.session
                     .reformat(plan, frame_length, &config, candidates, now)
             }
-            None => MediaSession::open(
-                plan,
-                frame_length,
-                &config,
-                identity,
-                self.clock,
-                candidates,
-                now,
-            )
+            None => {
+                #[cfg(feature = "dtls")]
+                let handshake = match self.handshake_for(call, plan, now) {
+                    Ok(handshake) => handshake,
+                    Err(error) => {
+                        self.fail(call, error);
+                        return;
+                    }
+                };
+                MediaSession::open(
+                    plan,
+                    frame_length,
+                    &config,
+                    candidates,
+                    Start {
+                        identity,
+                        clock: self.clock,
+                        #[cfg(feature = "dtls")]
+                        handshake,
+                        now,
+                    },
+                )
+            }
             .map(|session| {
                 self.sessions.insert(call, share::hold(session));
             }),
@@ -1181,6 +1406,57 @@ impl MediaEngine {
     }
 }
 
+/// The borrowed form the description writers take, from the owned pair the
+/// engine keeps.
+#[cfg(feature = "dtls")]
+fn keyed(lines: Option<&(String, String)>) -> Option<Keyed<'_>> {
+    lines.map(|(fingerprint, setup)| Keyed { fingerprint, setup })
+}
+
+/// Without the feature nothing is ever keyed by a handshake, and the writers
+/// still name the type.
+#[cfg(not(feature = "dtls"))]
+#[allow(clippy::needless_pass_by_value)]
+const fn keyed(_lines: Option<&(String, String)>) -> Option<Keyed<'static>> {
+    None
+}
+
+/// Which side of an offer/answer exchange this end is writing.
+///
+/// Known here and nowhere below, and it has to be: RFC 4145 §4.1 reads the
+/// pair of `a=setup` values as a table, and which row a value is on depends
+/// on whether it was written in the offer or in the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// This end is writing the offer.
+    Offering,
+    /// This end is writing the answer to one that arrived.
+    Answering,
+}
+
+#[cfg(feature = "dtls")]
+impl Side {
+    const fn party(self) -> Party {
+        match self {
+            Self::Offering => Party::Offerer,
+            Self::Answering => Party::Answerer,
+        }
+    }
+}
+
+/// The `a=setup` an offer carried, at media level or, as RFC 4566 §5.13 lets
+/// a media-level attribute override, at session level.
+#[cfg(feature = "dtls")]
+fn peer_setup(offer: &SessionDescription) -> Option<String> {
+    offer
+        .media
+        .first()
+        .and_then(|stream| stream.attribute("setup"))
+        .or_else(|| offer.attribute("setup"))?
+        .value
+        .clone()
+}
+
 // -- writing descriptions -----------------------------------------------------
 //
 // Free functions rather than methods, because D6 made the catalogue a
@@ -1197,12 +1473,13 @@ fn write_offer(
     session_id: u64,
     version: u64,
     keys: Option<KeySalt>,
+    dtls: Option<Keyed<'_>>,
 ) -> SessionDescription {
     let mut description = SessionDescription::new(
         Origin::new(session_id, version, address.ip()),
         Connection::new(address.ip()),
     );
-    description.media.push(catalog.offering(keys).offer(
+    description.media.push(catalog.offering(keys, dtls).offer(
         AUDIO,
         address.port(),
         Direction::SendRecv,
@@ -1218,7 +1495,7 @@ fn write_offer(
 /// is answered with one of ours, which carries a key, so it passes either
 /// way.
 fn keying_allows(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
-    catalog.srtp() != SrtpPolicy::Required || offered.is_none_or(any_secure_stream)
+    !catalog.srtp().requires() || offered.is_none_or(any_secure_stream)
 }
 
 /// Whether the description this end is about to write will carry a key: it
@@ -1249,7 +1526,31 @@ fn keying_holds(
     remote: &SessionDescription,
 ) -> Result<(), MediaError> {
     match &plan.keying {
-        None if catalog.srtp() == SrtpPolicy::Required => Err(MediaError::SrtpRequired),
+        None if catalog.srtp().requires() => Err(MediaError::SrtpRequired),
+        // a policy that named a way to key is not answered with the other
+        // way. `DtlsRequired` exists because the key must not travel in the
+        // body of a message, and an answer carrying `a=crypto` has put it
+        // there; `Required` is the mirror of it, and a peer that answered a
+        // `RTP/SAVP` offer with a fingerprint has answered something this
+        // call did not ask for.
+        #[cfg(feature = "dtls")]
+        Some(Keying::Sdes { .. }) if catalog.srtp() == SrtpPolicy::DtlsRequired => {
+            Err(MediaError::SrtpRequired)
+        }
+        #[cfg(feature = "dtls")]
+        Some(Keying::Dtls { .. }) if catalog.srtp() == SrtpPolicy::Required => {
+            Err(MediaError::SrtpRequired)
+        }
+        // RFC 5764 §4.2: with RTP and RTCP on separate ports there are two
+        // DTLS-SRTP associations, one per port. This stack runs one, on the
+        // media port, so a call that did not agree to multiplex its control
+        // traffic is refused rather than opened with an SRTCP half nothing
+        // will ever key. The offer asks for `a=rtcp-mux` whenever the policy
+        // is a DTLS one, so this is a peer that took the attribute out.
+        #[cfg(feature = "dtls")]
+        Some(Keying::Dtls { .. }) if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) => {
+            Err(MediaError::DtlsNeedsRtcpMux)
+        }
         Some(Keying::Sdes { remote: theirs, .. })
             if !remote
                 .media
@@ -1276,6 +1577,7 @@ fn write_answer(
     session_id: u64,
     version: u64,
     keys: Option<&KeySalt>,
+    dtls: Option<Keyed<'_>>,
 ) -> Result<SessionDescription, MediaError> {
     let mut taken = false;
     let streams: Vec<StreamAnswer> = offer
@@ -1285,7 +1587,7 @@ fn write_answer(
             if taken {
                 return StreamAnswer::Reject;
             }
-            let answer = take_stream(catalog, offered, address, keys);
+            let answer = take_stream(catalog, offered, address, keys, dtls);
             taken = matches!(answer, StreamAnswer::Accept(_));
             answer
         })
@@ -1305,6 +1607,7 @@ fn take_stream(
     offered: &MediaDescription,
     address: SocketAddr,
     keys: Option<&KeySalt>,
+    #[cfg_attr(not(feature = "dtls"), allow(unused_variables))] dtls: Option<Keyed<'_>>,
 ) -> StreamAnswer {
     if offered.media != AUDIO || offered.is_rejected() {
         return StreamAnswer::Reject;
@@ -1313,11 +1616,19 @@ fn take_stream(
     if !any_codec {
         return StreamAnswer::Reject;
     }
+    // an offer keyed by a handshake is answered by naming this end's own
+    // certificate and the role it will take, and never by a crypto line: the
+    // two are different key management protocols and a description carrying
+    // both has agreed to neither
+    #[cfg(feature = "dtls")]
+    let handshake = dtls.filter(|_| keying::is_secure(&offered.proto));
+    #[cfg(not(feature = "dtls"))]
+    let handshake: Option<Keyed<'_>> = None;
     // RFC 4568 §7.1.2: a stream on the secure profile is answered by
     // accepting exactly one of its crypto lines, or it is refused. There is
     // no third answer, and a stream taken without a key would be one both
     // ends believe is encrypted
-    let crypto = if keying::is_secure(&offered.proto) {
+    let crypto = if keying::is_secure(&offered.proto) && handshake.is_none() {
         match (keying::acceptable(offered), keys) {
             (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
             _ => return StreamAnswer::Reject,
@@ -1330,12 +1641,19 @@ fn take_stream(
         .with_direction(Direction::SendRecv);
     // RFC 5761 §5.1.1: multiplexing happens only where both ends asked for
     // it, so the answer says so only if the offer did and this catalogue
-    // wants it
-    if catalog.capabilities().rtcp_mux && offered.has_rtcp_mux() {
+    // wants it — or if this answer is keyed by a handshake, since RFC 5764
+    // §4.2 would otherwise need a second one on the RTCP port
+    if (catalog.capabilities().rtcp_mux || handshake.is_some()) && offered.has_rtcp_mux() {
         accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
     }
     if let Some(line) = crypto {
         accepted = accepted.with_attribute(line.attribute());
+    }
+    #[cfg(feature = "dtls")]
+    if let Some(keyed) = handshake {
+        accepted = accepted
+            .with_attribute(Attribute::with_value("fingerprint", keyed.fingerprint))
+            .with_attribute(Attribute::with_value("setup", keyed.setup));
     }
     StreamAnswer::Accept(accepted)
 }
@@ -1532,6 +1850,90 @@ mod keying_guards {
         }
     }
 
+    /// RFC 5764 §4.2: with RTP and RTCP on separate ports there are two
+    /// DTLS-SRTP associations, one per port, and this stack runs one. An
+    /// offer under a DTLS policy always asks for `a=rtcp-mux`, so a plan that
+    /// comes back without it is a peer that took the attribute out — and
+    /// opening the stream anyway would leave its SRTCP half keyed by nothing,
+    /// which reads from the outside as a call whose reports simply never
+    /// arrive.
+    #[cfg(feature = "dtls")]
+    #[test]
+    fn a_dtls_call_whose_peer_took_the_multiplexing_out_is_refused_by_name() {
+        let catalog = CodecCatalog::new().with_srtp(SrtpPolicy::DtlsOffered);
+        let theirs = described(
+            "m=audio 40002 UDP/TLS/RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+             a=fingerprint:sha-256 AA:BB\r\na=setup:active\r\n",
+        );
+        let keyed = || {
+            Some(Keying::Dtls {
+                fingerprints: vec!["sha-256 AA:BB".to_owned()],
+                setup: Some("active".to_owned()),
+            })
+        };
+
+        let mut muxed = plan(keyed());
+        muxed.rtcp = RtcpPlan::Muxed;
+        assert!(keying_holds(&catalog, &muxed, &theirs).is_ok());
+
+        let mut split = plan(keyed());
+        split.rtcp = RtcpPlan::SeparatePort {
+            local: "192.0.2.1:40001".parse().expect("an address"),
+            remote: "192.0.2.2:40003".parse().expect("an address"),
+        };
+        assert_eq!(
+            keying_holds(&catalog, &split, &theirs),
+            Err(MediaError::DtlsNeedsRtcpMux)
+        );
+
+        // and a call with no RTCP at all is not a call with RTCP somewhere
+        // else: one association covers everything there is
+        assert!(keying_holds(&catalog, &plan(keyed()), &theirs).is_ok());
+    }
+
+    /// The other half of the same rule: a policy that named one way to key is
+    /// not answered with the other. Both refusals exist because the key
+    /// travelling in a body is exactly what `DtlsRequired` was chosen to
+    /// avoid, and a fingerprint is exactly what `Required` did not ask for.
+    #[cfg(feature = "dtls")]
+    #[test]
+    fn a_policy_that_named_one_way_to_key_refuses_the_other() {
+        let sdes = Some(Keying::Sdes {
+            local: sipral_core::sdp::CryptoPolicy::new(
+                1,
+                sipral_core::sdp::CryptoSuite::AesCm80,
+                KeySalt::new([1; 16], [2; 14]),
+            ),
+            remote: sipral_core::sdp::CryptoPolicy::new(
+                1,
+                sipral_core::sdp::CryptoSuite::AesCm80,
+                KeySalt::new([3; 16], [4; 14]),
+            ),
+        });
+        let handshake = Some(Keying::Dtls {
+            fingerprints: vec!["sha-256 AA:BB".to_owned()],
+            setup: Some("active".to_owned()),
+        });
+        let anything = described("m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n");
+
+        assert_eq!(
+            keying_holds(
+                &CodecCatalog::new().with_srtp(SrtpPolicy::DtlsRequired),
+                &plan(sdes),
+                &anything
+            ),
+            Err(MediaError::SrtpRequired)
+        );
+        assert_eq!(
+            keying_holds(
+                &CodecCatalog::new().with_srtp(SrtpPolicy::Required),
+                &plan(handshake),
+                &anything
+            ),
+            Err(MediaError::SrtpRequired)
+        );
+    }
+
     #[test]
     fn a_call_that_requires_keys_answers_only_a_description_that_can_carry_them() {
         let required = CodecCatalog::new().with_srtp(SrtpPolicy::Required);
@@ -1623,7 +2025,7 @@ mod counter_wiring {
     use crate::clock::WallClock;
     use crate::codec::CodecCatalog;
     use crate::event::{Event, MediaEvent};
-    use crate::session::{MediaConfig, MediaSession, StreamIdentity};
+    use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
     use crate::share::SessionUnavailable;
 
     const TRANSPORT: TransportId = TransportId(3);
@@ -1704,10 +2106,14 @@ mod counter_wiring {
             &plan,
             20,
             &config,
-            identity,
-            WallClock::from_unix(now, 1_700_000_000, 0),
             Vec::new(),
-            now,
+            Start {
+                identity,
+                clock: WallClock::from_unix(now, 1_700_000_000, 0),
+                #[cfg(feature = "dtls")]
+                handshake: None,
+                now,
+            },
         )
         .expect("PCMU is always in this build's catalogue");
         engine.sessions.insert(call, crate::share::hold(session));

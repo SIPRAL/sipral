@@ -165,7 +165,7 @@ impl Policy {
         }
     }
 
-    const fn rtp_overhead(&self) -> usize {
+    pub(crate) const fn rtp_overhead(&self) -> usize {
         let tag = if self.authenticate_rtp {
             self.suite.tag()
         } else {
@@ -174,7 +174,7 @@ impl Policy {
         tag + self.mki_len()
     }
 
-    const fn rtcp_overhead(&self) -> usize {
+    pub(crate) const fn rtcp_overhead(&self) -> usize {
         RTCP_INDEX + self.suite.rtcp_tag() + self.mki_len()
     }
 

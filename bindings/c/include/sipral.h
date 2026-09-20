@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)18)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)19)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -141,6 +141,23 @@ typedef uint64_t sipral_handle_t;
  * for good.
  */
 #define SIPRAL_FEATURE_OPUS ((uint32_t)64)
+
+/**
+ * DTLS-SRTP (RFC 5764): the keys for a call's media come from a
+ * handshake on the media path rather than from the body of a message.
+ *
+ * Behind a compile-time feature for the reason Opus is: a build that
+ * will only ever place SDES calls over a protected SIP transport has no
+ * use for an elliptic curve, and a desk phone counts its flash. Both
+ * `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers
+ * in a build without it — a value that has left this header is spent —
+ * and naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED` rather than
+ * quietly placing an unencrypted call.
+ *
+ * An application that sets one of those policies must also drain
+ * `sipral_media_poll_transmit`; see there.
+ */
+#define SIPRAL_FEATURE_DTLS_SRTP ((uint32_t)128)
 
 /**
  * The buffer a caller has to bring for one outgoing packet.
@@ -452,6 +469,29 @@ enum {
      * carry audio unencrypted.
      */
     SIPRAL_SRTP_REQUIRED = 3,
+    /**
+     * SrtpPolicy::DtlsOffered: offer DTLS-SRTP (RFC 5764) on
+     * `UDP/TLS/RTP/SAVP`, and answer a plain offer plainly.
+     *
+     * What `Offered` is for SDES, with the difference that matters: the
+     * key never travels in the body, so this is the one policy here that
+     * is sound over a SIP transport somebody else can read. The cost is
+     * a round trip of silence at the start of every call while the
+     * handshake runs, and an application that names it **must** drain
+     * sipral_media_poll_transmit — a handshake whose records never
+     * leave is a call that is up, silent, and reports no error.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_DTLS_SRTP`.
+     */
+    SIPRAL_SRTP_DTLS = 4,
+    /**
+     * SrtpPolicy::DtlsRequired: offer DTLS-SRTP, and let no stream on
+     * this call carry audio any other way — an answer carrying
+     * `a=crypto` included, since that key travelled in a body this
+     * policy exists to avoid trusting.
+     */
+    SIPRAL_SRTP_DTLS_REQUIRED = 5,
 };
 
 /**
@@ -662,6 +702,45 @@ enum {
      * well-formed compound packet.
      */
     SIPRAL_ARRIVAL_CONTROL_REFUSED = 5,
+    /**
+     * A record of the DTLS-SRTP handshake that keys this call, which has
+     * been taken. Whatever it owes the far end in reply is waiting in
+     * sipral_media_poll_transmit, and this is the signal to drain it.
+     */
+    SIPRAL_ARRIVAL_HANDSHAKE = 6,
+    /**
+     * Something arrived on a call that agreed to be encrypted and has no
+     * keys yet, so there was nothing to verify it with. The ordinary way
+     * this happens is a peer that starts sending the moment its own half
+     * of the handshake finishes, which is before ours does.
+     */
+    SIPRAL_ARRIVAL_NOT_KEYED = 7,
+};
+
+/**
+ * The SRTP transform a call is running. Names for
+ * `sipral_media_event_t::suite`.
+ */
+typedef uint32_t sipral_srtp_suite_t;
+enum {
+    /**
+     * No transform: the event is not about one, or the call is not
+     * encrypted.
+     */
+    SIPRAL_SRTP_SUITE_UNKNOWN = 0,
+    /**
+     * `AES_CM_128_HMAC_SHA1_80`, the one every implementation has.
+     */
+    SIPRAL_SRTP_SUITE_AES_CM80 = 1,
+    /**
+     * `AES_CM_128_HMAC_SHA1_32`, the same cipher with a shorter tag.
+     */
+    SIPRAL_SRTP_SUITE_AES_CM32 = 2,
+    /**
+     * `F8_128_HMAC_SHA1_80`, which is what 3GPP asks for. Reachable by
+     * SDES only; RFC 5764 §4.1.2 defines no DTLS-SRTP profile for it.
+     */
+    SIPRAL_SRTP_SUITE_AES_F8 = 3,
 };
 
 /**
@@ -985,6 +1064,27 @@ enum {
      * `SIPRAL_STATUS_WRONG_STATE` rather than taking a screen down twice.
      */
     SIPRAL_EVENT_KIND_CALL_ANNOUNCED = 31,
+    /**
+     * The handshake that keys a call finished, and audio can move
+     * (RFC 5764).
+     *
+     * Only DTLS-SRTP produces it, and it is the moment the call becomes
+     * what it agreed to be: between `SIPRAL_EVENT_KIND_MEDIA_STARTED`
+     * and this one the stream exists, has an address and a codec, and
+     * carries nothing in either direction. An application that draws a
+     * padlock draws it here.
+     *
+     * `call` is the call and `payload.media.suite` is the transform the
+     * handshake chose — the signalling does not, which is why there is
+     * an event for it at all. A call keyed by SDES never produces one,
+     * because such a call is keyed before its session is opened.
+     *
+     * A handshake that does not finish produces
+     * `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead, and the call is left up:
+     * whether to hang it up is a decision with a person on the other end
+     * of it.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_SECURED = 32,
 };
 
 /**
@@ -3137,6 +3237,12 @@ struct sipral_media_event {
      */
     uint64_t held_ms;
     /**
+     * A sipral_srtp_suite_t: the transform
+     * this call's media is protected with, for
+     * SIPRAL_EVENT_KIND_MEDIA_SECURED and zero on every other kind.
+     */
+    uint32_t suite;
+    /**
      * A sipral_digit_source_t: which of the two ways this stack accepts a
      * digit reported this one, for SIPRAL_EVENT_KIND_DIGIT_RECEIVED.
      */
@@ -4873,6 +4979,33 @@ sipral_status_t sipral_media_capture(sipral_handle_t media, const int16_t *sampl
  * sipral_media_capture describes.
  */
 sipral_status_t sipral_media_poll_rtcp(sipral_handle_t media, uint64_t now_ms, sipral_media_packet_t *packet);
+
+/**
+ * A datagram this call owes the far end that is neither audio nor a
+ * report: today, a record of the DTLS-SRTP handshake that keys it.
+ *
+ * A `len` of zero means nothing is due. On a call that is not keyed by a
+ * handshake — every call in a build without `SIPRAL_FEATURE_DTLS_SRTP`,
+ * and every SDES or plain call in a build with it — that is the answer
+ * for ever, and calling this costs one comparison.
+ *
+ * **Drain it to empty**, in a loop, after every `sipral_media_receive`
+ * that answered `SIPRAL_ARRIVAL_HANDSHAKE` and at every deadline
+ * `sipral_stack_poll` names. A handshake whose records never leave is a
+ * ClientHello that never goes out: the call rings, answers, carries no
+ * audio in either direction, and reports nothing wrong for the two
+ * minutes it takes to give up. That is the one failure this entry point
+ * exists to prevent, and there is no way to notice it from the outside.
+ *
+ * `now_ms` is read as the stack reads it and moves nothing, as with every
+ * media entry point.
+ *
+ * Safety
+ *
+ * `packet` must point at a `sipral_media_packet_t` as
+ * sipral_media_capture describes.
+ */
+sipral_status_t sipral_media_poll_transmit(sipral_handle_t media, uint64_t now_ms, sipral_media_packet_t *packet);
 
 /**
  * The RTCP goodbye of a call whose media has ended (task 8.4.21).

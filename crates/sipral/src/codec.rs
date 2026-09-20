@@ -295,6 +295,27 @@ impl core::fmt::Display for Codec {
     }
 }
 
+/// The two lines a DTLS-SRTP description carries, as the engine worked them
+/// out: the fingerprint of this stack's certificate (RFC 8122) and the
+/// `a=setup` that says which end starts the handshake (RFC 4145).
+///
+/// Borrowed rather than owned because they are written once into a
+/// description and the engine holds both for longer than that.
+#[cfg(feature = "dtls")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Keyed<'a> {
+    /// The value of `a=fingerprint`.
+    pub(crate) fingerprint: &'a str,
+    /// The value of `a=setup`.
+    pub(crate) setup: &'a str,
+}
+
+/// With the `dtls` feature off nothing ever constructs one, and the signature
+/// that takes it still has to name a type.
+#[cfg(not(feature = "dtls"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Keyed<'a>(core::marker::PhantomData<&'a ()>);
+
 /// What to offer, in what order, and how a frame is cut.
 ///
 /// A stack keeps one as its site policy — what a carrier or a PBX deployment
@@ -493,14 +514,36 @@ impl CodecCatalog {
             .with_rtcp_mux(self.rtcp_mux)
     }
 
-    /// The same, with the `a=crypto` line an offer under this policy carries.
+    /// The same, with the keying a description under this policy carries.
     ///
     /// `keys` is the master key and salt this end will use for what it sends,
-    /// drawn once for the description being written. `None`, or a policy that
-    /// does not offer, leaves the offer on `RTP/AVP` with nothing in the body
-    /// that has to be kept secret.
-    pub(crate) fn offering(&self, keys: Option<KeySalt>) -> MediaCapabilities {
+    /// drawn once for the description being written, and `dtls` is the
+    /// fingerprint of this stack's certificate with the `a=setup` that goes
+    /// beside it. A policy that does not offer, or a description with neither
+    /// to write, leaves the offer on `RTP/AVP` with nothing in the body that
+    /// has to be kept secret.
+    ///
+    /// A DTLS description also asks for `a=rtcp-mux` whatever the catalogue
+    /// says, because RFC 5764 §4.2 puts a second handshake on a separate RTCP
+    /// port and this stack runs one; asking here is what keeps that from
+    /// becoming a refusal later.
+    pub(crate) fn offering(
+        &self,
+        keys: Option<KeySalt>,
+        dtls: Option<Keyed<'_>>,
+    ) -> MediaCapabilities {
         let capabilities = self.capabilities();
+        #[cfg(feature = "dtls")]
+        if let Some(keyed) = dtls.filter(|_| self.srtp.offers()) {
+            return capabilities
+                .with_rtcp_mux(true)
+                .with_srtp(SrtpSupport::Dtls {
+                    fingerprint: keyed.fingerprint.to_owned(),
+                    setup: keyed.setup.to_owned(),
+                });
+        }
+        #[cfg(not(feature = "dtls"))]
+        let _ = dtls;
         match keys.filter(|_| self.srtp.offers()) {
             Some(keys) => capabilities.with_srtp(SrtpSupport::Sdes(vec![keying::offer_line(keys)])),
             None => capabilities,

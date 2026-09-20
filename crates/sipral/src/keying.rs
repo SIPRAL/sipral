@@ -12,11 +12,16 @@
 //! and one function that turns [`MediaPlan::keying`] into the [`Security`] a
 //! session is opened with.
 //!
-//! # SDES, and nothing else
+//! # Two ways to a key, and one of them is not finished when the call is
 //!
-//! [`Keying::Dtls`] is parsed by the layers below and carried through, and
-//! there is no DTLS anywhere in this tree — no handshake, no certificate,
-//! nothing that could produce a key on the media path. A plan that arrives
+//! SDES puts the key in the body, so a plan keyed that way opens a stream
+//! that is protected from its first packet. DTLS-SRTP puts it in a handshake
+//! on the media path, so a plan keyed *that* way opens a stream that has
+//! agreed to be protected and cannot be yet — which is why [`opening`] has
+//! three answers where a pair of keys would have been two.
+//!
+//! Without the `dtls` feature there is no handshake, no certificate and
+//! nothing that could produce a key on the media path; a plan that arrives
 //! keyed that way is refused rather than opened unprotected, and
 //! [`Capabilities`](crate::Capabilities) says so before a call is placed
 //! rather than after one has failed.
@@ -103,13 +108,75 @@ pub enum SrtpPolicy {
     /// a peer that refuses that stream leaves the call with no audio either
     /// way. This stack does not follow a refusal with a plain re-offer.
     Required,
+    /// Offer DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764), and answer a plain
+    /// offer plainly.
+    ///
+    /// What [`SrtpPolicy::Offered`] is for SDES, with the difference that
+    /// matters: the key never travels in the body, so this is the one policy
+    /// here that is sound over a SIP transport somebody else can read. RFC
+    /// 4568 §7 says the same thing the other way round about SDES.
+    ///
+    /// The cost is a round trip of silence at the start of every call while
+    /// the handshake runs, and a PBX that does not do DTLS-SRTP refuses the
+    /// stream outright rather than falling back.
+    #[cfg(feature = "dtls")]
+    DtlsOffered,
+    /// Offer DTLS-SRTP, and let no stream on this call carry audio any other
+    /// way.
+    ///
+    /// [`SrtpPolicy::Required`]'s refusals, and one more: a peer that answers
+    /// with `a=crypto` has answered with keys that travelled in the body of a
+    /// message this policy exists to avoid trusting, so that answer is
+    /// refused too.
+    #[cfg(feature = "dtls")]
+    DtlsRequired,
 }
 
 impl SrtpPolicy {
-    /// Whether an offer written under this policy carries `a=crypto`.
+    /// Whether an offer written under this policy carries keying at all —
+    /// `a=crypto` for SDES, `a=fingerprint` and `a=setup` for DTLS-SRTP.
     #[must_use]
     pub(crate) const fn offers(self) -> bool {
-        matches!(self, Self::Offered | Self::Required)
+        match self {
+            Self::NotOffered => false,
+            #[cfg(feature = "dtls")]
+            Self::DtlsOffered | Self::DtlsRequired => true,
+            Self::Offered | Self::Required => true,
+        }
+    }
+
+    /// Whether a call under this policy would rather have no audio than
+    /// unencrypted audio.
+    ///
+    /// A predicate and not an equality test, because the one thing a fourth
+    /// and fifth variant must not do is walk past a guard that was written
+    /// as `== Required`.
+    #[must_use]
+    pub(crate) const fn requires(self) -> bool {
+        match self {
+            Self::NotOffered | Self::Offered => false,
+            #[cfg(feature = "dtls")]
+            Self::DtlsOffered => false,
+            #[cfg(feature = "dtls")]
+            Self::DtlsRequired => true,
+            Self::Required => true,
+        }
+    }
+
+    /// Whether this policy asks for the keys to come from a handshake on the
+    /// media path rather than from the body of a message.
+    ///
+    /// Never true in a build without the `dtls` feature, which has no variant
+    /// that could make it so — the method stays so that the one caller does
+    /// not have to be written twice.
+    #[must_use]
+    #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
+    pub(crate) const fn wants_dtls(self) -> bool {
+        match self {
+            Self::NotOffered | Self::Offered | Self::Required => false,
+            #[cfg(feature = "dtls")]
+            Self::DtlsOffered | Self::DtlsRequired => true,
+        }
     }
 }
 
@@ -163,25 +230,48 @@ pub(crate) fn peer_line_holds(stream: &MediaDescription, tag: u32) -> bool {
         .any(|line| understood(&line) && line.policy().is_some_and(|policy| usable(&policy)))
 }
 
-/// The keys a plan settled on, as the pair of contexts a session opens with.
+/// How a session is opened, once the negotiation has settled.
 ///
-/// `Ok(None)` is a stream that was never meant to be secured, which is most
-/// of them.
+/// Three and not two, because DTLS-SRTP agrees in the signalling that a
+/// stream is protected and produces the keys a round trip later: a stream in
+/// [`Opening::Awaiting`] is neither in the clear nor able to carry anything.
+// moved once, from the negotiation into the session being opened, and never
+// stored: the keys were already this wide as the `Option<Security>` this
+// replaced, and boxing them here would allocate on every secured call to even
+// up a value that has nowhere to sit.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub(crate) enum Opening {
+    /// Never meant to be secured, which is most of them.
+    Clear,
+    /// Secured, and keyed: SDES, whose keys were in the body.
+    Keyed(Security),
+    /// Secured, and waiting for the handshake that keys it. The policy is the
+    /// most expensive the handshake could settle on; see
+    /// [`RtpSession::awaiting`](sipral_rtp::RtpSession::awaiting).
+    #[cfg(feature = "dtls")]
+    Awaiting(Policy),
+}
+
+/// How a plan opens a session.
 ///
 /// # Errors
 /// [`MediaError::NoDtlsSrtp`] when the keys were to come from a DTLS
-/// handshake, and [`MediaError::UnusableKeying`] for a crypto line this build
-/// will not be held to.
-pub(crate) fn security(plan: &MediaPlan) -> Result<Option<Security>, MediaError> {
+/// handshake and this build has none, and [`MediaError::UnusableKeying`] for
+/// a crypto line this build will not be held to.
+pub(crate) fn opening(plan: &MediaPlan) -> Result<Opening, MediaError> {
     match &plan.keying {
-        None => Ok(None),
+        None => Ok(Opening::Clear),
+        #[cfg(feature = "dtls")]
+        Some(Keying::Dtls { .. }) => Ok(Opening::Awaiting(crate::dtls::MOST)),
+        #[cfg(not(feature = "dtls"))]
         Some(Keying::Dtls { .. }) => Err(MediaError::NoDtlsSrtp),
         Some(Keying::Sdes { local, remote }) => {
             // ours protects what goes out and theirs opens what arrives:
             // §7.1.1 has each end key its own transmission and nothing else
             let (sending, sending_key) = context(local)?;
             let (receiving, receiving_key) = context(remote)?;
-            Ok(Some(Security::new(
+            Ok(Opening::Keyed(Security::new(
                 sending,
                 sending_key,
                 receiving,
@@ -291,10 +381,14 @@ const fn transform(suite: CryptoSuite) -> Suite {
 
 #[cfg(test)]
 mod tests {
-    use super::{SrtpPolicy, acceptable, is_secure, offer_line, peer_line_holds, security, usable};
+    use super::{
+        Opening, SrtpPolicy, acceptable, is_secure, offer_line, opening, peer_line_holds, usable,
+    };
     use sipral_core::sdp::{Crypto, CryptoSuite, KeySalt, Keying, MediaPlan, parse};
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtcpPlan, RtpMap};
 
+    #[cfg(not(feature = "dtls"))]
+    #[cfg(not(feature = "dtls"))]
     use crate::error::MediaError;
 
     /// Thirty octets of nothing in particular; what matters in these tests is
@@ -459,19 +553,32 @@ mod tests {
         assert!(!peer_line_holds(&bad, 4));
     }
 
-    /// The one thing this module exists to be honest about.
+    /// The one thing this module exists to be honest about, in both builds.
     #[test]
-    fn a_plan_keyed_by_a_handshake_this_build_has_no_code_for_is_refused() {
+    fn a_plan_keyed_by_a_handshake_opens_waiting_or_not_at_all() {
         let keyed = plan(Some(Keying::Dtls {
-            fingerprint: "sha-256 00:11:22".to_owned(),
+            fingerprints: vec!["sha-256 00:11:22".to_owned()],
             setup: Some("active".to_owned()),
         }));
-        assert_eq!(security(&keyed).err(), Some(MediaError::NoDtlsSrtp));
+        #[cfg(feature = "dtls")]
+        assert!(
+            matches!(opening(&keyed), Ok(Opening::Awaiting(_))),
+            "a stream that agreed to be keyed by a handshake opened some other way"
+        );
+        #[cfg(not(feature = "dtls"))]
+        assert_eq!(
+            opening(&keyed).err(),
+            Some(MediaError::NoDtlsSrtp),
+            "a build with no handshake opened a stream keyed by one"
+        );
     }
 
     #[test]
     fn a_plain_stream_opens_with_no_keys_and_that_is_not_a_failure() {
-        assert!(security(&plan(None)).expect("a plain plan").is_none());
+        assert!(matches!(
+            opening(&plan(None)).expect("a plain plan"),
+            Opening::Clear
+        ));
     }
 
     /// The two contexts have to be built the right way round: what we send is
@@ -482,12 +589,14 @@ mod tests {
     fn each_direction_takes_the_key_of_the_end_that_wrote_it() {
         let ours = sipral_core::sdp::CryptoPolicy::new(1, CryptoSuite::AesCm32, keys(1));
         let theirs = sipral_core::sdp::CryptoPolicy::new(1, CryptoSuite::AesCm32, keys(9));
-        let built = security(&plan(Some(Keying::Sdes {
+        let built = opening(&plan(Some(Keying::Sdes {
             local: ours,
             remote: theirs,
         })))
-        .expect("both lines are usable")
-        .expect("a secured plan opens a pair of contexts");
+        .expect("both lines are usable");
+        let Opening::Keyed(built) = built else {
+            panic!("a secured plan opened something other than a pair of contexts");
+        };
         // the sending half is the one an overhead is quoted from, and the
         // short suite is four octets of tag rather than ten
         assert_eq!(built.rtp_overhead(), 4);

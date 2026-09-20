@@ -28,7 +28,7 @@
 //! before it is built here takes its place, and this paragraph is the shape of
 //! the answer for it.
 
-use sipral::Capabilities;
+use sipral::{Capabilities, SrtpKeying};
 use sipral_ua::TransportProtocol;
 
 use crate::abi::{constants, record};
@@ -79,6 +79,20 @@ constants! {
     /// number either way, since a value that has left this header is spent
     /// for good.
     pub const SIPRAL_FEATURE_OPUS: u32 = 1 << 6;
+    /// DTLS-SRTP (RFC 5764): the keys for a call's media come from a
+    /// handshake on the media path rather than from the body of a message.
+    ///
+    /// Behind a compile-time feature for the reason Opus is: a build that
+    /// will only ever place SDES calls over a protected SIP transport has no
+    /// use for an elliptic curve, and a desk phone counts its flash. Both
+    /// `SIPRAL_SRTP_DTLS` and `SIPRAL_SRTP_DTLS_REQUIRED` keep their numbers
+    /// in a build without it — a value that has left this header is spent —
+    /// and naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED` rather than
+    /// quietly placing an unencrypted call.
+    ///
+    /// An application that sets one of those policies must also drain
+    /// `sipral_media_poll_transmit`; see there.
+    pub const SIPRAL_FEATURE_DTLS_SRTP: u32 = 1 << 7;
 }
 
 record! {
@@ -170,6 +184,13 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     // bit is the facade's answer like every other one here
     if capabilities.subscriptions {
         features |= SIPRAL_FEATURE_SUBSCRIPTIONS;
+    }
+    // read off the facade's own list of what a call can actually complete,
+    // not off this crate's feature flag, for the reason the Opus bit gives:
+    // the two crates are compiled separately and a bit derived from the wrong
+    // one would promise what the build below cannot do
+    if capabilities.srtp_keying.contains(&SrtpKeying::Dtls) {
+        features |= SIPRAL_FEATURE_DTLS_SRTP;
     }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),
