@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)16)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)17)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5290,6 +5290,112 @@ sipral_status_t sipral_stack_name_resolution_lost(sipral_handle_t stack, uint64_
  * `contact_len` bytes.
  */
 sipral_status_t sipral_account_rebind(sipral_handle_t stack, sipral_handle_t account, uint32_t transport, const char *remote, size_t remote_len, const char *contact, size_t contact_len, uint64_t now_ms);
+
+/**
+ * Say the process has just started, so that time to ready is measured
+ * from somewhere.
+ *
+ * The zero of sipral_account_time_to_ready, and a declaration rather
+ * than something this library could observe: a stack is created long
+ * before the launch it belongs to is over, and only the application
+ * knows which moment its users are waiting from. Every account's
+ * measurement is cleared and taken again, so calling this twice restarts
+ * the clock rather than confusing two launches.
+ *
+ * Safety
+ *
+ * Safe to call with any handle value.
+ */
+sipral_status_t sipral_stack_cold_start(sipral_handle_t stack, uint64_t now_ms);
+
+/**
+ * Write an account's registration down, so a later start can carry it on
+ * instead of paying for a whole handshake.
+ *
+ * `out_len` receives how many bytes it takes whether or not there was
+ * room, so a caller passing a null `buffer` and a `capacity` of zero is
+ * asking how much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`
+ * with the answer — that is the question, not a failure. Nothing is
+ * written to a buffer too short.
+ *
+ * **The bytes are opaque, and reading them is not part of this ABI.**
+ * They carry a version, and a build reads only the layouts it was made
+ * for; an application that parses them is an application that stops
+ * working when the layout grows a field. Storing them is the
+ * application's, and so is protecting them: a snapshot is not a secret,
+ * but it names an address of record, which is a record of who uses this
+ * device.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` when there is nothing worth keeping — an
+ * account that has never registered, one that never will, one whose
+ * registration failed, or one whose binding has been given up. A cold
+ * start after that is an ordinary cold start, which is what would have
+ * happened anyway.
+ *
+ * The clock is read and not moved: this writes nothing and sends
+ * nothing, so a snapshot taken on the way into suspend cannot be what
+ * stops a later `now_ms` from being accepted.
+ *
+ * Safety
+ *
+ * `buffer` must be writable for `capacity` bytes or be null with a
+ * `capacity` of zero, and `out_len` must point at one `size_t` or be
+ * null.
+ */
+sipral_status_t sipral_account_freeze(sipral_handle_t stack, sipral_handle_t account, uint8_t *buffer, size_t capacity, size_t *out_len, uint64_t now_ms);
+
+/**
+ * Read one back, on an account that has been added and has not
+ * registered.
+ *
+ * `asleep_ms` is how long the snapshot sat unused, and it is the
+ * caller's to supply because nothing here reads a wall clock and a
+ * monotonic instant does not survive the process that minted it. The
+ * application is the only one that knows whether this is a wake from
+ * suspend or a cold launch a week later. What is left of the binding's
+ * life is what was left when it was written down, less that.
+ *
+ * The account comes up in
+ * SIPRAL_REGISTRATION_STATE_RESTORED
+ * rather than registered: a binding nobody has confirmed since the
+ * machine slept is a belief, not evidence, and the refresh this books is
+ * what turns one into the other.
+ *
+ * Refused, with the account left exactly as it was:
+ * `SIPRAL_STATUS_UNSUPPORTED_VERSION` for bytes a newer build wrote,
+ * `SIPRAL_STATUS_NOT_SUPPORTED` for an account that does not register at
+ * all, and `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+ * snapshot, are damaged, or are another account's — an address of record
+ * that is not this account's is the one mix-up that would otherwise send
+ * a REGISTER for somebody else.
+ *
+ * Safety
+ *
+ * `snapshot` must be readable for `snapshot_len` bytes.
+ */
+sipral_status_t sipral_account_thaw(sipral_handle_t stack, sipral_handle_t account, const uint8_t *snapshot, size_t snapshot_len, uint64_t asleep_ms, uint64_t now_ms);
+
+/**
+ * How long this account took to become reachable, measured from
+ * sipral_stack_cold_start.
+ *
+ * The number a queue needs: how long it rings each agent before giving
+ * up and trying the next one has to be longer than this, or a phone that
+ * was asleep is skipped every time and its owner is told the queue was
+ * quiet.
+ *
+ * `out_has_value` is zero, and `out_ms` zero with it, until there is an
+ * answer — before the account has registered, for an account that never
+ * registers, and always when no cold start was ever declared, because
+ * nothing marks the moment those became reachable. Zero milliseconds
+ * with `out_has_value` set is a real answer and a different one.
+ *
+ * Safety
+ *
+ * `out_has_value` must point at one `uint32_t` and `out_ms` at one
+ * `uint64_t`.
+ */
+sipral_status_t sipral_account_time_to_ready(sipral_handle_t stack, sipral_handle_t account, uint32_t *out_has_value, uint64_t *out_ms);
 
 /**
  * Copy one call's diagnostic record into `buffer`, as the JSON

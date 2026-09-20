@@ -327,6 +327,11 @@ sipral_status_t sipral_stack_name(sipral_handle_t stack, char *name, size_t capa
 sipral_status_t sipral_stack_codec_order(sipral_handle_t stack, uint32_t *out_codecs, size_t capacity, size_t *out_count);
 
 /**
+ * Fill a buffer of opaque bytes the caller brings.
+ */
+sipral_status_t sipral_stack_freeze(sipral_handle_t stack, uint8_t *buffer, size_t capacity, size_t *out_len);
+
+/**
  * Fill a buffer of samples the caller brings.
  */
 sipral_status_t sipral_call_playback(sipral_handle_t stack, int16_t *samples, size_t capacity, size_t *out_written);

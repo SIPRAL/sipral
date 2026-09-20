@@ -17,6 +17,7 @@
 //! caller still knows which string it passed.
 
 use std::ffi::c_char;
+use std::ptr;
 use std::slice;
 use std::str;
 
@@ -122,6 +123,56 @@ pub(crate) unsafe fn required_text<'a>(
 /// a value some receiver on the path will read differently.
 const fn is_field_ending(byte: u8) -> bool {
     byte < 0x20 || byte == 0x7f
+}
+
+/// Bytes going the other way: copied into a buffer the caller owns, with the
+/// length written whether or not the buffer was long enough.
+///
+/// `out_len` receives what it takes before the capacity is looked at, so a
+/// caller that passes a null buffer and a capacity of zero learns how much
+/// room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL` — which is the
+/// question being asked, not a failure.
+///
+/// Not [`crate::diagnostics::copy_out`], which is for text: that one appends a
+/// NUL and counts it in the length. These bytes are opaque and can contain a
+/// NUL, so a terminator would be both a byte too many and a place for a
+/// reader to stop early.
+///
+/// # Safety
+///
+/// `buffer` must be writable for `capacity` bytes or be null with a capacity
+/// of zero, and `out_len` must point at one `size_t` or be null.
+pub(crate) unsafe fn copy_bytes_out(
+    taken: &[u8],
+    buffer: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> Result<(), Fail> {
+    if buffer.is_null() && capacity != 0 {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "buffer is null and capacity is not zero",
+        ));
+    }
+    if !out_len.is_null() {
+        unsafe { out_len.write(taken.len()) };
+    }
+    if capacity < taken.len() {
+        return Err(fail(
+            SipralStatus::BufferTooSmall,
+            format!(
+                "{} bytes are needed to hold this and {capacity} were given",
+                taken.len()
+            ),
+        ));
+    }
+    if taken.is_empty() {
+        return Ok(());
+    }
+    // the capacity reaches a length that is not zero, so the buffer is not
+    // null
+    unsafe { ptr::copy_nonoverlapping(taken.as_ptr(), buffer, taken.len()) };
+    Ok(())
 }
 
 #[cfg(test)]

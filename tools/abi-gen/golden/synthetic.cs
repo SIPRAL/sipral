@@ -443,6 +443,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_codec_order(ulong stack, uint[] outCodecs, nuint capacity, out nuint count);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_freeze(ulong stack, byte[] buffer, nuint capacity, out nuint len);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_playback(ulong stack, short[] samples, nuint capacity, out nuint written);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -625,6 +628,15 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_stack_codec_order(stack, outCodecs, (nuint)outCodecs.Length, out var count));
         return count;
+    }
+
+    /// <summary>
+    /// Fill a buffer of opaque bytes the caller brings.
+    /// </summary>
+    public static nuint StackFreeze(ulong stack, byte[] buffer)
+    {
+        Check(NativeMethods.sipral_stack_freeze(stack, buffer, (nuint)buffer.Length, out var len));
+        return len;
     }
 
     /// <summary>

@@ -347,6 +347,18 @@ public enum Sipral {
         return count
     }
 
+    /// Fill a buffer of opaque bytes the caller brings.
+    public static func stackFreeze(stack: SipralHandle, buffer: inout [UInt8]) throws -> Int {
+        try ensureAbi()
+        var len = Int()
+        let status =
+            buffer.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_freeze(stack, p1.baseAddress, p1.count, &len)
+            }
+        try check(status)
+        return len
+    }
+
     /// Fill a buffer of samples the caller brings.
     public static func callPlayback(stack: SipralHandle, samples: inout [Int16]) throws -> Int {
         try ensureAbi()

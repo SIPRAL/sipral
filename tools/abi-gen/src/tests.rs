@@ -474,6 +474,17 @@ const FUNCTIONS: &[Function] = &[
         returns: "SipralStatus",
     },
     Function {
+        name: "sipral_stack_freeze",
+        doc: &[" Fill a buffer of opaque bytes the caller brings."],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("buffer", "*mut u8"),
+            member("capacity", "usize"),
+            member("out_len", "*mut usize"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
         name: "sipral_call_playback",
         doc: &[" Fill a buffer of samples the caller brings."],
         parameters: &[

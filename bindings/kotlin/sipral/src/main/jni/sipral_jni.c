@@ -2121,6 +2121,67 @@ Java_org_sipral_SipralNative_sipral_1account_1rebind(JNIEnv *env, jobject self, 
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1cold_1start(JNIEnv *env, jobject self, jlong stack, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_cold_start((sipral_handle_t)stack, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1freeze(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray buffer, jlongArray len, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_account_freeze((sipral_handle_t)stack, (sipral_handle_t)account, (uint8_t *)buffer_data, (size_t)buffer_size, &len_value, (uint64_t)nowMs);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1thaw(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray snapshot, jlong asleepMs, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *snapshot_data = snapshot ? (*env)->GetByteArrayElements(env, snapshot, NULL) : NULL;
+    jsize snapshot_size = snapshot ? (*env)->GetArrayLength(env, snapshot) : 0;
+    sipral_status_t status = sipral_account_thaw((sipral_handle_t)stack, (sipral_handle_t)account, (const uint8_t *)snapshot_data, (size_t)snapshot_size, (uint64_t)asleepMs, (uint64_t)nowMs);
+    if (snapshot) {
+        (*env)->ReleaseByteArrayElements(env, snapshot, snapshot_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1time_1to_1ready(JNIEnv *env, jobject self, jlong stack, jlong account, jlongArray hasValue, jlongArray ms)
+{
+    (void)env;
+    (void)self;
+    uint32_t hasValue_value = 0;
+    uint64_t ms_value = 0;
+    sipral_status_t status = sipral_account_time_to_ready((sipral_handle_t)stack, (sipral_handle_t)account, &hasValue_value, &ms_value);
+    {
+        jlong slot = (jlong)hasValue_value;
+        (*env)->SetLongArrayRegion(env, hasValue, 0, 1, &slot);
+    }
+    {
+        jlong slot = (jlong)ms_value;
+        (*env)->SetLongArrayRegion(env, ms, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1record_1json(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray buffer, jlongArray len)
 {
     (void)env;

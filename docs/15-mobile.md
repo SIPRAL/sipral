@@ -211,6 +211,33 @@ confirmed it" is the smallest honest thing to put in its place.
 `binding_expires_in` reports what is believed to be left, and is believed no
 more strongly than that.
 
+### Through `sipral.h`
+
+`sipral_account_freeze(stack, account, buffer, capacity, out_len, now_ms)` and
+`sipral_account_thaw(stack, account, snapshot, snapshot_len, asleep_ms, now_ms)`
+are the same two calls from C. Freeze writes `out_len` whether or not there was
+room, so a null buffer with a capacity of zero asks how much to bring and gets
+`SIPRAL_STATUS_BUFFER_TOO_SMALL` with the answer — a question, not a failure —
+and nothing is written to a buffer too short. An account with nothing worth
+keeping is `SIPRAL_STATUS_WRONG_STATE` rather than zero bytes, which a caller
+could not tell from the question. The clock is read and not moved: a snapshot
+taken on the way into suspend writes nothing and sends nothing, so it cannot be
+what makes a later `now_ms` unacceptable.
+
+**The bytes are opaque across this boundary, and the table above is not part of
+the C ABI.** It is published here because this document is the specification of
+the format for whoever maintains it, not so that an application can parse one:
+the version rule only stays enforceable while the library is the only reader.
+
+The three ways thaw refuses map onto three statuses, which is what lets a
+caller tell them apart without reading the sentence:
+`SIPRAL_STATUS_UNSUPPORTED_VERSION` for bytes a newer build wrote — the same
+answer a struct that is too short gets, and for the same reason —
+`SIPRAL_STATUS_NOT_SUPPORTED` for an account that does not register at all, and
+`SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a snapshot, are damaged,
+or are another account's. The account is left exactly as it was in every one of
+them.
+
 ### Time-to-ready from cold
 
 `cold_start(now)` says when the process was launched or woken;
@@ -224,6 +251,13 @@ that makes this stack testable: the launch happened before any of this existed,
 and reading a clock to find out when is the one thing the protocol crates may
 not do. A refresh an hour later does not overwrite the number — an hourly
 refresh is not a cold start.
+
+From C the two are `sipral_stack_cold_start(stack, now_ms)` and
+`sipral_account_time_to_ready(stack, account, out_has_value, out_ms)`. They
+ship together because either alone is useless: without a declared cold start
+there is nothing to measure from, so the reader could only ever answer
+"nothing". `out_has_value` is how a caller tells "no answer yet" from an answer
+of zero milliseconds, which is a real and different thing.
 
 It is a product number rather than a curiosity. How long a queue rings each
 agent before skipping to the next has to be longer than this, or a phone that

@@ -514,6 +514,25 @@ Java_org_sipral_SipralNative_sipral_1stack_1codec_1order(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1freeze(JNIEnv *env, jobject self, jlong stack, jbyteArray buffer, jlongArray len)
+{
+    (void)env;
+    (void)self;
+    jbyte *buffer_data = buffer ? (*env)->GetByteArrayElements(env, buffer, NULL) : NULL;
+    jsize buffer_size = buffer ? (*env)->GetArrayLength(env, buffer) : 0;
+    size_t len_value = 0;
+    sipral_status_t status = sipral_stack_freeze((sipral_handle_t)stack, (uint8_t *)buffer_data, (size_t)buffer_size, &len_value);
+    if (buffer) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buffer_data, 0);
+    }
+    {
+        jlong slot = (jlong)len_value;
+        (*env)->SetLongArrayRegion(env, len, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1playback(JNIEnv *env, jobject self, jlong stack, jshortArray samples, jlongArray written)
 {
     (void)env;

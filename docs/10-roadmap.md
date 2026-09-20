@@ -281,9 +281,11 @@ shape is permanent once published:
   RFC 8599 half of C3 (`sipral_account_announce`,
   `sipral_account_refresh_binding`, `sipral_announcement_forget`,
   `sipral_account_push_echo`, the four push members on
-  `sipral_account_config_t`, and event kinds 20 and 31), and D5's codec half
+  `sipral_account_config_t`, and event kinds 20 and 31), D5's codec half
   (`sipral_media_codec_candidate_count`, `..._at` and
-  `sipral_codec_candidate_t`). Left: the freeze and thaw half of C3;
+  `sipral_codec_candidate_t`) and the freeze and thaw half of C3
+  (`sipral_account_freeze`, `sipral_account_thaw`, `sipral_stack_cold_start`
+  and `sipral_account_time_to_ready`). **Every one of them is across**;
 - SRTP cannot be offered or required from C while `sipral_capabilities`
   reports it; it becomes a member of the stack and call configuration.
   *Built*: `srtp` on `sipral_stack_config_t` as the stack's default and on

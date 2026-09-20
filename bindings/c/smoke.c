@@ -1220,6 +1220,84 @@ static void headers_cross_a_call(void)
     sipral_stack_destroy(caller);
 }
 
+/* -- a registration that survives the process --------------------------------
+ *
+ * C3 through the ABI: a binding written down on the way into suspend, read
+ * back by a process that was not there when it was written, and coming up
+ * restored rather than registered -- because nobody has confirmed it since.
+ */
+static void a_registration_freezes_and_thaws(void)
+{
+    struct fixture fixture;
+    if (!fixture_up(&fixture)) {
+        return;
+    }
+
+    size_t needed = 0;
+    expect("freezing into no room did not say how much is needed",
+           sipral_account_freeze(fixture.stack, fixture.account, NULL, 0, &needed, 0) ==
+               SIPRAL_STATUS_BUFFER_TOO_SMALL);
+    expect("a standing binding froze to nothing", needed > 0);
+    if (needed == 0 || needed > 4096) {
+        sipral_stack_destroy(fixture.stack);
+        return;
+    }
+    uint8_t snapshot[4096];
+    size_t written = 0;
+    expect("the registration would not be written down",
+           sipral_account_freeze(fixture.stack, fixture.account, snapshot, sizeof snapshot,
+                                 &written, 0) == SIPRAL_STATUS_OK);
+    expect("the second answer disagreed with the first", written == needed);
+    sipral_stack_destroy(fixture.stack);
+
+    /* a process that was not there when it was written */
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the stack a snapshot is thawed on", 0);
+        return;
+    }
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    sipral_handle_t woken = SIPRAL_HANDLE_NONE;
+    expect("the stack a snapshot is thawed on would not start",
+           sipral_stack_create(&config, &woken) == SIPRAL_STATUS_OK);
+    if (woken == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the account a snapshot is thawed into was refused",
+           sipral_account_add(woken, &account_config, &account) == SIPRAL_STATUS_OK);
+
+    expect("the snapshot was refused by the account it was written for",
+           sipral_account_thaw(woken, account, snapshot, written, 60000, 0) ==
+               SIPRAL_STATUS_OK);
+    uint32_t state = 0;
+    expect("the thawed account would not say what state it is in",
+           sipral_account_registration_state(woken, account, &state) == SIPRAL_STATUS_OK);
+    expect("a binding nobody has confirmed came back as evidence",
+           state == SIPRAL_REGISTRATION_STATE_RESTORED);
+
+    /* and the one mix-up that would otherwise send a REGISTER for somebody
+     * else: bytes that are not a snapshot at all */
+    expect("bytes that are not a snapshot were read as one",
+           sipral_account_thaw(woken, account, (const uint8_t *)"not a snapshot",
+                               strlen("not a snapshot"), 0, 0) ==
+               SIPRAL_STATUS_INVALID_ARGUMENT);
+
+    /* time to ready has no answer without a cold start to measure from, which
+     * is why the two entry points ship together */
+    uint32_t has_value = 1;
+    uint64_t took = 1;
+    expect("time to ready would not answer",
+           sipral_account_time_to_ready(woken, account, &has_value, &took) ==
+               SIPRAL_STATUS_OK);
+    expect("a launch nobody declared was measured anyway", has_value == 0 && took == 0);
+    expect("the cold start was refused", sipral_stack_cold_start(woken, 0) == SIPRAL_STATUS_OK);
+
+    sipral_stack_destroy(woken);
+}
+
 /* -- one call's own codec order ----------------------------------------------
  *
  * D6: the order is a property of the call, not of the process. Two calls off
@@ -1484,6 +1562,7 @@ int main(void)
     headers_cross_a_call();
     a_call_names_its_own_codecs();
     every_codec_says_what_became_of_it();
+    a_registration_freezes_and_thaws();
 
     config.size = sizeof config;
     config.event_callback = on_event;

@@ -12,6 +12,32 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A registration that survives the process, through C.**
+  `sipral_account_freeze` writes an account's binding into a buffer the caller
+  sizes by asking — a null buffer and a capacity of zero get
+  `SIPRAL_STATUS_BUFFER_TOO_SMALL` with the length, which is the question and
+  not a failure — and `sipral_account_thaw` reads it back on a process that was
+  not there when it was written. The account comes up
+  `SIPRAL_REGISTRATION_STATE_RESTORED` rather than registered, because a
+  binding nobody has confirmed since the machine slept is a belief and not
+  evidence, and the refresh it books is what turns one into the other. How long
+  the snapshot sat unused is the caller's to say: nothing here reads a wall
+  clock and a monotonic instant does not survive the process that minted it.
+
+  The bytes are opaque across this boundary and their layout is not part of the
+  ABI — the version rule only stays enforceable while the library is the only
+  reader. The three ways a thaw is refused are three statuses, so a caller can
+  tell them apart without reading the sentence: a snapshot a newer build wrote,
+  an account that does not register at all, and bytes that are damaged or are
+  another account's. The account is left exactly as it was in all three.
+
+  `sipral_stack_cold_start` and `sipral_account_time_to_ready` ship with them,
+  because neither is any use alone: without a declared launch there is nothing
+  to measure from, and the reader could only ever answer "nothing". The number
+  is a product requirement rather than a curiosity — how long a queue rings each
+  agent before skipping to the next has to be longer than it, or a phone that
+  was asleep is skipped every time and its owner is told the queue was quiet.
+
 - **The codec order is a property of the call, not of the process.**
   `sipral_call_config_t::codecs` overrides `sipral_stack_config_t::codecs` for
   one call, the same comma-separated list of names, refused the same way for a

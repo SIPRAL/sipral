@@ -37,19 +37,20 @@
 
 use std::ffi::c_char;
 use std::net::IpAddr;
+use std::time::Duration;
 
 use sipral_core::endpoint::TransportId;
 use sipral_core::msg::Uri;
-use sipral_ua::{Link, Network, Recovery};
+use sipral_ua::{Link, Network, Recovery, SnapshotError};
 
 use crate::abi::{codes, record};
 use crate::call::ua_failed;
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::media::address;
-use crate::stack::{StackState, handle_failed, with_stack_at};
+use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
-use crate::text::{required_text, text};
+use crate::text::{bytes, copy_bytes_out, required_text, text};
 use crate::versioned::{Versioned, declared_size, write_versioned};
 
 codes! {
@@ -488,10 +489,209 @@ entry! {
     }
 }
 
+// -- a registration that survives the process --------------------------------
+
+/// Why a snapshot would not be read back.
+///
+/// `SnapshotError` is `#[non_exhaustive]`, and a reason this build has no
+/// number for is a reason a caller cannot act on differently from any other
+/// refusal, so it lands on the status a refused argument always lands on.
+fn snapshot_failed(error: SnapshotError) -> Fail {
+    let status = match error {
+        // the header this caller was built against is older than the one that
+        // wrote these bytes, which is the same thing a short struct says and
+        // is answered the same way
+        SnapshotError::FromTheFuture { .. } => SipralStatus::UnsupportedVersion,
+        // an account that never registers has nothing to restore into, and
+        // this is the answer `sipral_account_refresh_binding` already gives
+        // for the same account
+        SnapshotError::NotRegistering => SipralStatus::NotSupported,
+        _ => SipralStatus::InvalidArgument,
+    };
+    fail(status, error.to_string())
+}
+
+entry! {
+    /// Say the process has just started, so that time to ready is measured
+    /// from somewhere.
+    ///
+    /// The zero of [`sipral_account_time_to_ready`], and a declaration rather
+    /// than something this library could observe: a stack is created long
+    /// before the launch it belongs to is over, and only the application
+    /// knows which moment its users are waiting from. Every account's
+    /// measurement is cleared and taken again, so calling this twice restarts
+    /// the clock rather than confusing two launches.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle value.
+    fn sipral_stack_cold_start(stack: SipralHandle, now_ms: u64) {
+        with_stack_at(stack, now_ms, |state, now| {
+            state.agent.cold_start(now);
+            Ok(())
+        })
+    }
+}
+
+entry! {
+    /// Write an account's registration down, so a later start can carry it on
+    /// instead of paying for a whole handshake.
+    ///
+    /// `out_len` receives how many bytes it takes whether or not there was
+    /// room, so a caller passing a null `buffer` and a `capacity` of zero is
+    /// asking how much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`
+    /// with the answer — that is the question, not a failure. Nothing is
+    /// written to a buffer too short.
+    ///
+    /// **The bytes are opaque, and reading them is not part of this ABI.**
+    /// They carry a version, and a build reads only the layouts it was made
+    /// for; an application that parses them is an application that stops
+    /// working when the layout grows a field. Storing them is the
+    /// application's, and so is protecting them: a snapshot is not a secret,
+    /// but it names an address of record, which is a record of who uses this
+    /// device.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when there is nothing worth keeping — an
+    /// account that has never registered, one that never will, one whose
+    /// registration failed, or one whose binding has been given up. A cold
+    /// start after that is an ordinary cold start, which is what would have
+    /// happened anyway.
+    ///
+    /// The clock is read and not moved: this writes nothing and sends
+    /// nothing, so a snapshot taken on the way into suspend cannot be what
+    /// stops a later `now_ms` from being accepted.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// `capacity` of zero, and `out_len` must point at one `size_t` or be
+    /// null.
+    fn sipral_account_freeze(
+        stack: SipralHandle,
+        account: SipralHandle,
+        buffer: *mut u8,
+        capacity: usize,
+        out_len: *mut usize,
+        now_ms: u64,
+    ) {
+        with_stack(stack, |state| {
+            let id = state.accounts.get(account).map_err(handle_failed)?;
+            let now = state.instant(now_ms)?;
+            let Some(snapshot) = state.agent.freeze_registration(id, now) else {
+                return Err(fail(
+                    SipralStatus::WrongState,
+                    "this account has no registration worth writing down: it has never \
+                     registered, it never will, or the binding it had is gone",
+                ));
+            };
+            unsafe { copy_bytes_out(&snapshot, buffer, capacity, out_len) }
+        })
+    }
+}
+
+entry! {
+    /// Read one back, on an account that has been added and has not
+    /// registered.
+    ///
+    /// `asleep_ms` is how long the snapshot sat unused, and it is the
+    /// caller's to supply because nothing here reads a wall clock and a
+    /// monotonic instant does not survive the process that minted it. The
+    /// application is the only one that knows whether this is a wake from
+    /// suspend or a cold launch a week later. What is left of the binding's
+    /// life is what was left when it was written down, less that.
+    ///
+    /// The account comes up in
+    /// [`SIPRAL_REGISTRATION_STATE_RESTORED`](crate::event::SipralRegistrationState::Restored)
+    /// rather than registered: a binding nobody has confirmed since the
+    /// machine slept is a belief, not evidence, and the refresh this books is
+    /// what turns one into the other.
+    ///
+    /// Refused, with the account left exactly as it was:
+    /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` for bytes a newer build wrote,
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` for an account that does not register at
+    /// all, and `SIPRAL_STATUS_INVALID_ARGUMENT` for bytes that are not a
+    /// snapshot, are damaged, or are another account's — an address of record
+    /// that is not this account's is the one mix-up that would otherwise send
+    /// a REGISTER for somebody else.
+    ///
+    /// # Safety
+    ///
+    /// `snapshot` must be readable for `snapshot_len` bytes.
+    fn sipral_account_thaw(
+        stack: SipralHandle,
+        account: SipralHandle,
+        snapshot: *const u8,
+        snapshot_len: usize,
+        asleep_ms: u64,
+        now_ms: u64,
+    ) {
+        let Some(snapshot) = (unsafe { bytes(snapshot, snapshot_len, "snapshot") })? else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "snapshot is empty, and there is nothing in no bytes to restore",
+            ));
+        };
+        let asleep = Duration::from_millis(asleep_ms);
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.accounts.get(account).map_err(handle_failed)?;
+            state
+                .agent
+                .thaw_registration(id, snapshot, asleep, now)
+                .map_err(snapshot_failed)
+        })
+    }
+}
+
+entry! {
+    /// How long this account took to become reachable, measured from
+    /// [`sipral_stack_cold_start`].
+    ///
+    /// The number a queue needs: how long it rings each agent before giving
+    /// up and trying the next one has to be longer than this, or a phone that
+    /// was asleep is skipped every time and its owner is told the queue was
+    /// quiet.
+    ///
+    /// `out_has_value` is zero, and `out_ms` zero with it, until there is an
+    /// answer — before the account has registered, for an account that never
+    /// registers, and always when no cold start was ever declared, because
+    /// nothing marks the moment those became reachable. Zero milliseconds
+    /// with `out_has_value` set is a real answer and a different one.
+    ///
+    /// # Safety
+    ///
+    /// `out_has_value` must point at one `uint32_t` and `out_ms` at one
+    /// `uint64_t`.
+    fn sipral_account_time_to_ready(
+        stack: SipralHandle,
+        account: SipralHandle,
+        out_has_value: *mut u32,
+        out_ms: *mut u64,
+    ) {
+        if out_has_value.is_null() || out_ms.is_null() {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "out_has_value or out_ms is null",
+            ));
+        }
+        let ready = with_stack(stack, |state| {
+            let id = state.accounts.get(account).map_err(handle_failed)?;
+            Ok(state.agent.time_to_ready(id))
+        })?;
+        unsafe {
+            out_has_value.write(u32::from(ready.is_some()));
+            out_ms.write(
+                ready.map_or(0, |took| u64::try_from(took.as_millis()).unwrap_or(u64::MAX)),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SipralLink, SipralRecovery, SipralSuspending, sipral_account_rebind,
+        SipralLink, SipralRecovery, SipralSuspending, sipral_account_freeze, sipral_account_rebind,
+        sipral_account_thaw, sipral_account_time_to_ready, sipral_stack_cold_start,
         sipral_stack_interface_lost, sipral_stack_name_resolution_lost,
         sipral_stack_network_changed, sipral_stack_resumed, sipral_stack_suspending,
     };
@@ -1129,5 +1329,350 @@ mod tests {
             )
         };
         assert_eq!(status, SipralStatus::InvalidArgument);
+    }
+
+    // -- a registration that survives the process ------------------------
+
+    fn freeze(handle: SipralHandle, account: SipralHandle, now_ms: u64) -> (SipralStatus, Vec<u8>) {
+        let mut needed = usize::MAX;
+        let asked = unsafe {
+            sipral_account_freeze(handle, account, ptr::null_mut(), 0, &raw mut needed, now_ms)
+        };
+        if asked != SipralStatus::BufferTooSmall {
+            return (asked, Vec::new());
+        }
+        let mut room = vec![0_u8; needed];
+        let mut written = usize::MAX;
+        let status = unsafe {
+            sipral_account_freeze(
+                handle,
+                account,
+                room.as_mut_ptr(),
+                room.len(),
+                &raw mut written,
+                now_ms,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            written, needed,
+            "the second answer disagreed with the first"
+        );
+        (status, room)
+    }
+
+    fn thaw(
+        handle: SipralHandle,
+        account: SipralHandle,
+        snapshot: &[u8],
+        asleep_ms: u64,
+        now_ms: u64,
+    ) -> SipralStatus {
+        unsafe {
+            sipral_account_thaw(
+                handle,
+                account,
+                snapshot.as_ptr(),
+                snapshot.len(),
+                asleep_ms,
+                now_ms,
+            )
+        }
+    }
+
+    fn time_to_ready(handle: SipralHandle, account: SipralHandle) -> Option<u64> {
+        let mut has_value = u32::MAX;
+        let mut took = u64::MAX;
+        let status = unsafe {
+            sipral_account_time_to_ready(handle, account, &raw mut has_value, &raw mut took)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        if has_value == 0 {
+            assert_eq!(took, 0, "no answer came with a number anyway");
+            return None;
+        }
+        Some(took)
+    }
+
+    /// C3: a registration written down on the way into suspend and read back
+    /// on the way out, on a process that has been and gone. The account comes
+    /// up restored rather than registered, because nobody has confirmed the
+    /// binding since.
+    #[test]
+    fn a_frozen_registration_comes_back_restored() {
+        let mut observed = Observed::default();
+        let (first, account) = registered(&mut observed, &named_account(), 1_000);
+        let (status, snapshot) = freeze(first, account, 1_100);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(!snapshot.is_empty(), "a binding froze to nothing");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(first) },
+            SipralStatus::Ok
+        );
+
+        let mut woken = Observed::default();
+        let second = stack(&mut woken);
+        let restored = add(second, &named_account());
+        assert_eq!(
+            thaw(second, restored, &snapshot, 60_000, 1_000),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            state_of(second, restored),
+            SipralRegistrationState::Restored as u32,
+            "a binding nobody has confirmed came back as evidence"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(second) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The probe is the question, not a failure: a null buffer with a
+    /// capacity of zero says how much room to bring.
+    #[test]
+    fn freezing_into_no_room_says_how_much_is_needed() {
+        let mut observed = Observed::default();
+        let (handle, account) = registered(&mut observed, &named_account(), 1_000);
+        let mut needed = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sipral_account_freeze(handle, account, ptr::null_mut(), 0, &raw mut needed, 1_100)
+            },
+            SipralStatus::BufferTooSmall
+        );
+        assert!(needed > 0 && needed != usize::MAX, "{needed}");
+
+        // and one byte short of it is still too small, with nothing written
+        let mut room = vec![0xAB_u8; needed];
+        let mut written = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sipral_account_freeze(
+                    handle,
+                    account,
+                    room.as_mut_ptr(),
+                    needed - 1,
+                    &raw mut written,
+                    1_100,
+                )
+            },
+            SipralStatus::BufferTooSmall
+        );
+        assert_eq!(written, needed);
+        assert!(
+            room.iter().all(|byte| *byte == 0xAB),
+            "a buffer too short was written to anyway"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// An account with nothing worth keeping says so rather than handing back
+    /// zero bytes, which a caller could not tell from a buffer question.
+    #[test]
+    fn freezing_an_account_that_never_registered_is_wrong_state() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = add(handle, &named_account());
+        let mut needed = usize::MAX;
+        assert_eq!(
+            unsafe {
+                sipral_account_freeze(handle, account, ptr::null_mut(), 0, &raw mut needed, 1_000)
+            },
+            SipralStatus::WrongState
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The one mix-up that would otherwise send a REGISTER for somebody else.
+    #[test]
+    fn thawing_another_accounts_snapshot_is_refused_and_changes_nothing() {
+        let mut observed = Observed::default();
+        let (first, account) = registered(&mut observed, &named_account(), 1_000);
+        let (_, snapshot) = freeze(first, account, 1_100);
+
+        let elsewhere = add(first, &literal_account());
+        assert_eq!(
+            thaw(first, elsewhere, &snapshot, 0, 1_200),
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            state_of(first, elsewhere),
+            SipralRegistrationState::Idle as u32,
+            "the account that refused the snapshot was changed anyway"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(first) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_snapshot_are_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = add(handle, &named_account());
+        assert_eq!(
+            thaw(handle, account, b"not a snapshot", 0, 1_000),
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            thaw(handle, account, &[], 0, 1_000),
+            SipralStatus::InvalidArgument,
+            "no bytes at all were read as a snapshot"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// D4 and C3 meet here: what a snapshot has left is what it had when it
+    /// was written down, less the time the application says it sat unused.
+    /// A snapshot slept past its own life has nothing left, and the refresh
+    /// it books is due at once.
+    #[test]
+    fn what_a_snapshot_has_left_is_what_the_application_says_it_slept_through() {
+        let mut observed = Observed::default();
+        let (first, account) = registered(&mut observed, &named_account(), 1_000);
+        let (_, snapshot) = freeze(first, account, 1_100);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(first) },
+            SipralStatus::Ok
+        );
+
+        let mut woken = Observed::default();
+        let second = stack(&mut woken);
+        let restored = add(second, &named_account());
+        // the grant was an hour and the machine slept for a day
+        assert_eq!(
+            thaw(second, restored, &snapshot, 86_400_000, 1_000),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            state_of(second, restored),
+            SipralRegistrationState::Restored as u32
+        );
+        let result = crate::stack::tests::poll(second, 1_001);
+        assert!(
+            result.has_deadline == 1 && result.next_poll_in_ms < 1_000,
+            "a binding with nothing left is due in {} ms, not at once",
+            result.next_poll_in_ms
+        );
+        // and it is really sent, rather than only scheduled: the refresh is
+        // what turns a restored binding back into evidence
+        crate::stack::tests::poll(second, 2_000);
+        assert!(
+            !drain(second).is_empty(),
+            "nothing was sent for a binding that had run out"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(second) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// An account that does not register has nothing to restore into, and it
+    /// is told apart from a snapshot that is wrong.
+    #[test]
+    fn thawing_into_an_account_that_never_registers_is_not_supported() {
+        let mut observed = Observed::default();
+        let (first, account) = registered(&mut observed, &named_account(), 1_000);
+        let (_, snapshot) = freeze(first, account, 1_100);
+
+        let mut trunk = named_account();
+        trunk.registrar = ptr::null();
+        trunk.registrar_len = 0;
+        let unregistered = add(first, &trunk);
+        assert_eq!(
+            thaw(first, unregistered, &snapshot, 0, 1_200),
+            SipralStatus::NotSupported
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(first) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// The number a queue needs, and the three ways there is not one yet.
+    #[test]
+    fn time_to_ready_is_measured_from_the_cold_start_the_application_declared() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let account = add(handle, &named_account());
+        assert_eq!(
+            time_to_ready(handle, account),
+            None,
+            "an account that has not registered was given a number"
+        );
+
+        assert_eq!(
+            unsafe { sipral_stack_cold_start(handle, 1_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        register(handle, account, 1_000);
+        let mut out = drain(handle);
+        let request = out.pop().expect("the REGISTER");
+        receive(handle, &granted(&request, 3_600), 1_880);
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::Registered as u32
+        );
+        assert_eq!(
+            time_to_ready(handle, account),
+            Some(880),
+            "the launch was not measured from where the application put it"
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// Without a cold start there is nothing to measure from, so there is no
+    /// answer at all — and an entry point that could only ever say that is
+    /// why `sipral_stack_cold_start` exists beside it.
+    #[test]
+    fn time_to_ready_says_nothing_when_no_cold_start_was_declared() {
+        let mut observed = Observed::default();
+        let (handle, account) = registered(&mut observed, &named_account(), 1_000);
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::Registered as u32
+        );
+        assert_eq!(time_to_ready(handle, account), None);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_null_out_pointer_on_time_to_ready_is_a_bad_argument() {
+        let mut observed = Observed::default();
+        let (handle, account) = registered(&mut observed, &named_account(), 1_000);
+        let mut took = u64::MAX;
+        assert_eq!(
+            unsafe {
+                sipral_account_time_to_ready(handle, account, ptr::null_mut(), &raw mut took)
+            },
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
     }
 }

@@ -374,6 +374,7 @@ internal object SipralNative {
     external fun sipral_stack_describe(stack: Long, note: ByteArray): Int
     external fun sipral_stack_name(stack: Long, name: ByteArray, len: LongArray): Int
     external fun sipral_stack_codec_order(stack: Long, outCodecs: IntArray, count: LongArray): Int
+    external fun sipral_stack_freeze(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_call_playback(stack: Long, samples: ShortArray, written: LongArray): Int
     external fun sipral_call_capture(stack: Long, samples: ShortArray, packet: Long): Int
     external fun sipral_call_media_receive(stack: Long, data: ByteArray, arrival: LongArray): Int
@@ -514,6 +515,15 @@ object Sipral {
         val countSlot = LongArray(1)
         check(SipralNative.sipral_stack_codec_order(stack, outCodecs, countSlot))
         return countSlot[0]
+    }
+
+    /**
+     * Fill a buffer of opaque bytes the caller brings.
+     */
+    fun stackFreeze(stack: Long, buffer: ByteArray): Long {
+        val lenSlot = LongArray(1)
+        check(SipralNative.sipral_stack_freeze(stack, buffer, lenSlot))
+        return lenSlot[0]
     }
 
     /**
