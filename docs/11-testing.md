@@ -322,6 +322,27 @@ tone — not a second media join. Pass and fail are defined per flow, not
 judged at the time; a flow that did four things out of five is a failure
 naming the fifth, printed as `FAIL <flow> — <what did not hold>`.
 
+Since 8.5.2 the same flows run **a second time, through the C ABI**, driven by
+`interop/harness-c`. That is not redundancy. The Rust driver reaches
+`MediaEngine` and `UserAgent` as Rust types, which is not how anybody outside
+this repository will ever reach them, so it is structurally incapable of
+noticing a defect that lives in the boundary: a struct whose length the header
+and the library disagree about, a handle that goes stale, an entry point that
+wants a clock nobody passes it, a sequence that cannot be expressed from C at
+all. Those are what an integrator meets on the first afternoon, and this is
+what meets them first. It is C99 with warnings fatal and nothing linked but
+libc and the library, it learns what happened from `sipral_event_t` and from
+nothing else, and it prints and exits exactly as the Rust driver does so that
+`scripts/lab.sh` reads both with one parser. `scripts/check.sh` compiles it on
+every run without running it — what it needs is three servers — so an ABI
+change that would stop an integrator's program building fails at the moment it
+is made. **This is the phase-1 exit criterion and the precondition for
+freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
+
+It runs the first six flows below, which are the ones the C surface carries
+today; SRTP, DTMF over INFO and the codec-change resume stay with the Rust
+driver until the C one grows the calls they need.
+
 Run through Kamailio to FreeSWITCH and straight at Asterisk (`scripts/lab.sh
 kamailio` / `asterisk`), unless a column below says one server only:
 

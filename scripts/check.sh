@@ -622,6 +622,20 @@ if [ -s "$DYLIB" ]; then
         fail "bindings/c/smoke.c does not compile:"
         sed 's/^/        /' "$work/cc"
     fi
+    # and the lab's own C driver, compiled the same way and not run: what it
+    # needs is three servers in containers, which is `scripts/lab.sh`'s job and
+    # not this one's. Compiling it here is what keeps it honest between lab
+    # runs -- an ABI change that makes it stop building is a change an
+    # integrator would meet, and this is the step that meets it first.
+    if cc -std=c99 -Wall -Wextra -Werror -o "$work/harness-c" \
+        interop/harness-c/main.c -I bindings/c/include \
+        -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
+        >"$work/cc-harness" 2>&1; then
+        pass "interop/harness-c/main.c"
+    else
+        fail "interop/harness-c/main.c does not compile:"
+        sed 's/^/        /' "$work/cc-harness"
+    fi
     rm -rf "$work"
 else
     fail "$DYLIB: nothing to link against"

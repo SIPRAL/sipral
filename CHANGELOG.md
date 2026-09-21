@@ -12,6 +12,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The lab, driven a second time through the C ABI.** `interop/harness-c` runs
+  the same flows against the same servers with every byte going through
+  `sipral.h`: register, a call with audio, hold and resume, both transfers, and
+  a digit. It learns what happened from `sipral_event_t` and from nothing else,
+  and it matches the Rust driver's command line, output lines and exit code
+  exactly, so `scripts/lab.sh` reads both with one parser.
+
+  The Rust driver reaches `MediaEngine` and `UserAgent` as Rust types, which is
+  not how anybody outside this repository will ever reach them, so it cannot
+  notice a defect that lives in the boundary — a struct whose length the two
+  sides disagree about, a handle that goes stale, an entry point that wants a
+  clock nobody passes it. Those are what an integrator meets first, and now so
+  does the lab. `scripts/check.sh` compiles it on every run and does not run it,
+  which is the seventy-seventh check: an ABI change that would stop an
+  integrator's program building fails at the moment it is made.
+
+  It is the phase-1 exit criterion and the precondition for freezing the ABI,
+  and it passes: `the lab agrees`, both drivers, both servers.
+
 - **ICE in the full role, joined to a call.** The agent in `sipral-nat` — RFC
   8445's gathering, checklists, pacing, nomination, role conflicts, restarts,
   keepalives and RFC 7675's consent — has been written and tested since the

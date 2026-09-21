@@ -57,6 +57,40 @@ else
     HARNESS="$ROOT/target/release/sipral-interop"
 fi
 
+# The same flows again, through the C ABI rather than through the Rust API.
+# The Rust driver proves the stack; this one proves the header, which is a
+# different thing and the one an integrator actually meets. A defect that
+# lives in the boundary -- a struct whose length the two sides disagree
+# about, a handle that goes stale, an entry point that wants a clock nobody
+# passes it -- cannot fail the Rust driver by construction.
+#
+# It is skipped rather than fatal when the library is not there: the C driver
+# links the shared library, and a machine that built the Rust harness for a
+# different target has one and not the other. A skip says so.
+step "the harness, in C"
+if [ -n "${SIPRAL_HARNESS_C:-}" ]; then
+    [ -x "$SIPRAL_HARNESS_C" ] || { fail "SIPRAL_HARNESS_C is not an executable file"; exit 1; }
+    HARNESS_C="$SIPRAL_HARNESS_C"
+    pass "taken as given: $HARNESS_C"
+else
+    HARNESS_C=""
+    for suffix in so dylib; do
+        [ -f "$ROOT/target/release/libsipral_ffi.$suffix" ] || continue
+        if cc -std=c99 -Wall -Wextra -Werror \
+            -I "$ROOT/bindings/c/include" \
+            -o "$ROOT/target/release/harness-c" "$ROOT/interop/harness-c/main.c" \
+            -L "$ROOT/target/release" -lsipral_ffi \
+            -Wl,-rpath,"$ROOT/target/release" >/dev/null 2>&1; then
+            HARNESS_C="$ROOT/target/release/harness-c"
+            pass "built"
+        else
+            fail "cc interop/harness-c/main.c"
+        fi
+        break
+    done
+    [ -n "$HARNESS_C" ] || printf '  note  no libsipral_ffi to link against; the C flows are skipped\n'
+fi
+
 step "the lab"
 mkdir -p interop/pcap
 ( cd interop && docker compose up -d ) >/dev/null 2>&1 \
@@ -133,6 +167,39 @@ flows() {
             exit \$status"
 }
 
+# The same, driven through the C ABI. A function of its own rather than an
+# argument to the one above, because the two differ in more than the binary:
+# the C driver links the shared library, so the container needs that mounted
+# beside it, and its capture is written under its own name so that neither run
+# overwrites the other's.
+flows_c() {
+    local server="$1" capture="$2" beside
+    [ -n "$HARNESS_C" ] || return 0
+    # the library comes from wherever the binary did, not from this
+    # checkout's own target directory: the machine that runs the lab need not
+    # be the machine that built either, and on the one of ours that cannot
+    # build them the two live under /opt rather than here
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker run --rm --network sipral-interop_lab \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_REQUIRE_AUDIO=1 \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/$capture.pcap 2>/dev/null &
+            sleep 2
+            /harness-c $server 5060 9000
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
 # The same call again, over a link deliberately made bad. netem shapes egress,
 # so it is our packets that are delayed, lost in bursts and reordered; the echo
 # means the return path suffers too, since a packet that never arrived is never
@@ -190,6 +257,11 @@ bad_network() {
 if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
     step "register, call, hold, resume, transfer -- through the proxy"
     flows kamailio proxy && pass "kamailio to freeswitch" || fail "kamailio to freeswitch"
+    if [ -n "$HARNESS_C" ]; then
+        step "the same, through the C ABI -- through the proxy"
+        flows_c kamailio proxy-c && pass "kamailio to freeswitch, in C" \
+            || fail "kamailio to freeswitch, in C"
+    fi
 fi
 
 # No proxy in front of this one, and a different stack behind it. The point of
@@ -198,6 +270,10 @@ fi
 if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     step "register, call, hold, resume, transfer -- straight at Asterisk"
     flows asterisk asterisk && pass "asterisk" || fail "asterisk"
+    if [ -n "$HARNESS_C" ]; then
+        step "the same, through the C ABI -- straight at Asterisk"
+        flows_c asterisk asterisk-c && pass "asterisk, in C" || fail "asterisk, in C"
+    fi
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
