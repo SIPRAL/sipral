@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::dtmf::{EVENT_LEN, EventSender, HALF_CLOCK, Outgoing};
+use crate::emodel::{self, BurstRatio, CodecQualityModel, EModelInputs};
 use crate::playout::{Activity, BufferConfig, Insert, JitterBuffer, Pull, Quality, clock_ticks};
 use crate::rtcp::{
     CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, ReceiverReportBuilder,
@@ -16,6 +17,10 @@ use crate::rtcp::{
 };
 use crate::rtcp_stats::{ReceptionTracker, round_trip_time};
 use crate::rtcp_timer::{Due, IntervalTimer};
+use crate::rtcp_xr::{
+    JitterBufferAdaptive, PacketLossConcealment, RxConfig, UNAVAILABLE, VoipMetricsBlock,
+    XrPacketBuilder,
+};
 use crate::source::{SeqUpdate, SequenceState};
 use crate::srtp::{Master, Policy, Rekeyed, Security, SrtpError};
 use crate::wire::{
@@ -84,6 +89,15 @@ pub struct StreamConfig {
     /// second (§6.2). "RECOMMENDED that the fraction of the session
     /// bandwidth added for RTCP be fixed at 5%".
     pub rtcp_bandwidth: f64,
+    /// Whether the offer/answer exchange negotiated RTCP XR VoIP Metrics
+    /// reporting for this stream: an `a=rtcp-xr` attribute carrying the
+    /// `voip-metrics` metrics token (§5.1) was in the offer and answer,
+    /// per the direction-dependent rules of §5.2. [`RtpSession::build_report`]
+    /// includes a VoIP Metrics block only when this is set: §5.1 "When
+    /// the 'rtcp-xr' attribute is present, participants SHOULD NOT send
+    /// XR blocks other than the ones indicated by the parameters", and
+    /// this stack sends no XR block this stream was never asked for.
+    pub voip_metrics_xr: bool,
 }
 
 /// What became of a datagram.
@@ -158,6 +172,25 @@ pub enum RtcpReceived<'a> {
     /// the size, which §6.3.3 would otherwise fold into this session's own
     /// report interval.
     NotKeyed,
+}
+
+/// A [`Duration`] into the whole-millisecond field every RFC 3611 §4.7.3
+/// delay carries, saturating rather than wrapping a path slower than
+/// sixteen bits of milliseconds can name (65.535 seconds — no call is
+/// waiting that long for an RTCP round trip).
+fn duration_to_field_ms(duration: Duration) -> u16 {
+    u16::try_from(duration.as_millis()).unwrap_or(u16::MAX)
+}
+
+/// RFC 3611 §4.7.3's own worked conversion: "one way symmetric voice path
+/// delay = (RTD + ESD(A) + ESD(B)) / 2" — halved here because this stack
+/// only ever knows one of the two end-system delays the note assumes, its
+/// own, and the algebra collapses to a single division by the same two.
+fn one_way_symmetric_delay_ms(round_trip_delay_ms: u16, end_system_delay_ms: u16) -> u32 {
+    u32::midpoint(
+        u32::from(round_trip_delay_ms),
+        u32::from(end_system_delay_ms),
+    )
 }
 
 /// One RTP stream in each direction, plus the RTCP that goes with it.
@@ -235,6 +268,10 @@ struct Outbound {
     sent_since_report: bool,
 }
 
+// each bool here is an independent yes/no fact learned about the remote
+// side at a different point in the stream's life, not a state a caller
+// steps through, which is what the lint is guarding against
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct Inbound {
     accepted: PayloadTypes,
@@ -279,6 +316,9 @@ struct Inbound {
     /// leave `members` and `senders` alone rather than repeat the departure
     /// against a group that no longer includes it.
     departed: bool,
+    /// Whether RFC 3611 XR VoIP Metrics reporting was negotiated for this
+    /// stream. See [`StreamConfig::voip_metrics_xr`].
+    voip_metrics_xr: bool,
 }
 
 impl RtpSession {
@@ -337,6 +377,7 @@ impl RtpSession {
                 member_known: false,
                 sender_known: false,
                 departed: false,
+                voip_metrics_xr: config.voip_metrics_xr,
             },
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
@@ -973,6 +1014,82 @@ impl RtpSession {
         self.timer.due(now, unit_interval)
     }
 
+    /// This stream's VoIP Metrics Report Block (RFC 3611 §4.7), from what
+    /// its jitter buffer has classified so far and, if `codec` names one
+    /// G.113 Appendix I tabulates, the simplified E-model of
+    /// [`crate::emodel`]. Available whenever an inbound source is known,
+    /// independent of whether RTCP XR reporting was negotiated
+    /// ([`StreamConfig::voip_metrics_xr`]) — that flag gates only whether
+    /// [`RtpSession::build_report`] puts this on the wire as an XR packet;
+    /// the same figures are what an RFC 6035 quality report sends on call
+    /// end regardless.
+    ///
+    /// `None` when this stream has not yet identified a source to report
+    /// on ([`RtpSession::remote_ssrc`]).
+    #[must_use]
+    pub fn voip_metrics(&self, codec: Option<CodecQualityModel>) -> Option<VoipMetricsBlock> {
+        let ssrc = self.inbound.source?;
+        let burst_gap = self.inbound.buffer.burst_gap_metrics();
+        let round_trip_delay_ms = duration_to_field_ms(self.round_trip.unwrap_or_default());
+        // §4.7.3: "This value SHOULD be provided in all VoIP metrics
+        // reports. If an implementation is unable to provide the data,
+        // the value 0 MUST be used." This stack has no visibility into
+        // the sending side's own accumulation and encoding delay, so it
+        // cannot assemble the end-to-end figure §4.7.3 defines and uses
+        // that fallback rather than reporting only its own jitter-buffer
+        // half of it as though it were the whole thing.
+        let end_system_delay_ms = 0;
+        let one_way_delay_ms = one_way_symmetric_delay_ms(round_trip_delay_ms, end_system_delay_ms);
+        let report = emodel::evaluate(EModelInputs {
+            one_way_delay_ms,
+            packet_loss_percent: f64::from(burst_gap.loss_rate) * (100.0 / 256.0),
+            // No separate measurement of loss burstiness feeds this yet,
+            // so G.107's own §7.5 default applies: "when packet loss is
+            // random (i.e., independent) BurstR = 1".
+            burst_ratio: BurstRatio::RANDOM,
+            codec,
+        });
+        let quality = self.inbound.buffer.quality();
+        Some(VoipMetricsBlock {
+            ssrc,
+            loss_rate: burst_gap.loss_rate,
+            discard_rate: burst_gap.discard_rate,
+            burst_density: burst_gap.burst_density,
+            gap_density: burst_gap.gap_density,
+            burst_duration_ms: burst_gap.burst_duration_ms,
+            gap_duration_ms: burst_gap.gap_duration_ms,
+            round_trip_delay_ms,
+            end_system_delay_ms,
+            // §4.7.4: no signal-level detector runs over decoded audio in
+            // this crate, so every signal-related field it defines stays
+            // at the sentinel rather than a fabricated reading.
+            signal_level_dbm0: UNAVAILABLE.cast_signed(),
+            noise_level_dbm0: UNAVAILABLE.cast_signed(),
+            rerl_db: UNAVAILABLE,
+            gmin: self.inbound.buffer.gmin(),
+            r_factor: report.r_factor,
+            ext_r_factor: report.ext_r_factor,
+            mos_lq: report.mos_lq,
+            mos_cq: report.mos_cq,
+            // §4.7.6: this stack's jitter buffer adapts its delay
+            // (`crate::playout`'s own module documentation) but does not
+            // itself perform packet loss concealment — that lives with
+            // the codec, above this crate, and is not visible here.
+            rx_config: RxConfig {
+                plc: PacketLossConcealment::Unspecified,
+                jba: JitterBufferAdaptive::Adaptive,
+                jb_rate: 0,
+            },
+            jb_nominal_ms: duration_to_field_ms(quality.target_delay),
+            jb_maximum_ms: duration_to_field_ms(quality.delay),
+            // §4.7.7: "For a fixed jitter buffer, this SHOULD be the same
+            // as the Maximum Jitter Buffer Delay." This buffer's ceiling
+            // is fixed at its own configured maximum, not the momentary
+            // depth `jb_maximum_ms` reports.
+            jb_abs_max_ms: self.inbound.buffer.max_delay_ms(),
+        })
+    }
+
     /// Build the compound RTCP report [`RtpSession::rtcp_due`] said was due,
     /// and schedule the next one, returning the octets written and that
     /// deadline.
@@ -983,6 +1100,11 @@ impl RtpSession {
     /// session's own CNAME always is (§6.1). `ntp` is the wall clock at this
     /// instant, in the 64-bit form §6.4.1 asks a sender report to carry.
     ///
+    /// `codec`, forwarded to [`RtpSession::voip_metrics`], is only read
+    /// when this stream negotiated RTCP XR VoIP Metrics reporting
+    /// ([`StreamConfig::voip_metrics_xr`]); a stream that did not never
+    /// builds the block at all, let alone spends bytes sending it.
+    ///
     /// # Errors
     /// [`RtcpBuildError`], for a buffer too small. Nothing is scheduled and
     /// nothing is sent when this returns an error.
@@ -992,6 +1114,7 @@ impl RtpSession {
         now: Duration,
         ntp: u64,
         unit_interval: f64,
+        codec: Option<CodecQualityModel>,
     ) -> Result<(usize, Duration), RtcpBuildError> {
         if self.awaiting_keys() {
             return Err(RtcpBuildError::NotKeyed);
@@ -1002,6 +1125,11 @@ impl RtpSession {
             .source
             .map(|ssrc| self.inbound.rtcp.block(ssrc, &sequence, ntp));
         let reports: &[ReportBlock] = block.as_slice();
+        let voip_metrics = self
+            .inbound
+            .voip_metrics_xr
+            .then(|| self.voip_metrics(codec))
+            .flatten();
 
         let cname_item = [SdesItem {
             kind: CNAME,
@@ -1031,7 +1159,13 @@ impl RtpSession {
             })
         };
 
-        let compound = CompoundBuilder::new(report, sdes);
+        let mut compound = CompoundBuilder::new(report, sdes);
+        if let Some(voip_metrics) = voip_metrics {
+            compound = compound.with_xr(XrPacketBuilder {
+                ssrc: self.outbound.ssrc,
+                voip_metrics: Some(voip_metrics),
+            });
+        }
         let overhead = self.rtcp_overhead();
         let need = compound.encoded_len() + overhead;
         let offered = out.len();
@@ -1185,6 +1319,7 @@ impl RtpSession {
             RtcpPacket::ReceiverReport(rr) => Some(rr.ssrc()),
             RtcpPacket::Goodbye(_)
             | RtcpPacket::SourceDescription(_)
+            | RtcpPacket::ExtendedReport(_)
             | RtcpPacket::Other { .. } => None,
         }) {
             self.inbound.rtcp_source = Some(reporter);
@@ -1244,7 +1379,9 @@ impl RtpSession {
                         goodbye = Some(bye.reason().unwrap_or_default());
                     }
                 }
-                RtcpPacket::SourceDescription(_) | RtcpPacket::Other { .. } => {}
+                RtcpPacket::SourceDescription(_)
+                | RtcpPacket::ExtendedReport(_)
+                | RtcpPacket::Other { .. } => {}
             }
         }
         match goodbye {
@@ -1400,6 +1537,7 @@ mod tests {
             },
             cname: "tester@203.0.113.1".to_string(),
             rtcp_bandwidth: 800.0,
+            voip_metrics_xr: false,
         }
     }
 
@@ -2096,7 +2234,7 @@ mod tests {
         let mut session = session();
         let mut out = [0_u8; 256];
         let (n, next) = session
-            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .build_report(&mut out, Duration::ZERO, 0, 0.5, None)
             .expect("room");
         assert!(next > Duration::ZERO, "a deadline was scheduled");
 
@@ -2126,7 +2264,7 @@ mod tests {
 
         let mut out = [0_u8; 256];
         let (n, _) = session
-            .build_report(&mut out, Duration::ZERO, 0x0102_0304_0506_0708, 0.5)
+            .build_report(&mut out, Duration::ZERO, 0x0102_0304_0506_0708, 0.5, None)
             .expect("room");
         let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
         let Some(RtcpPacket::SenderReport(sr)) = compound.packets().next() else {
@@ -2145,7 +2283,7 @@ mod tests {
 
         let mut out = [0_u8; 256];
         let (n, _) = session
-            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .build_report(&mut out, Duration::ZERO, 0, 0.5, None)
             .expect("room");
         let compound = CompoundPacket::parse(&out[..n]).expect("a compound packet");
         let Some(RtcpPacket::ReceiverReport(rr)) = compound.packets().next() else {
@@ -2884,7 +3022,7 @@ mod tests {
             panic!("not due yet");
         };
         let (_, next) = session
-            .build_report(&mut [0_u8; 256], first, 0, 0.5)
+            .build_report(&mut [0_u8; 256], first, 0, 0.5, None)
             .expect("room");
         assert!(next > first, "the schedule moves forward, not back");
     }
@@ -2895,7 +3033,7 @@ mod tests {
         let mut session = session();
         let mut out = [0_u8; 256];
         let (n, _) = session
-            .build_report(&mut out, Duration::ZERO, 0, 0.5)
+            .build_report(&mut out, Duration::ZERO, 0, 0.5, None)
             .expect("room");
         assert!(crate::rtcp::is_rtcp(&out[..n]));
 
@@ -3019,7 +3157,7 @@ mod tests {
         let mut session = awaiting_session();
         let mut out = [0_u8; 256];
         assert_eq!(
-            session.build_report(&mut out, Duration::ZERO, 0, 0.5),
+            session.build_report(&mut out, Duration::ZERO, 0, 0.5, None),
             Err(RtcpBuildError::NotKeyed)
         );
         assert_eq!(
@@ -3250,7 +3388,7 @@ mod tests {
 
         let mut wire = vec![0_u8; 256];
         let (len, _) = caller
-            .build_report(&mut wire, Duration::ZERO, 0x1234_5678_9abc_def0, 0.5)
+            .build_report(&mut wire, Duration::ZERO, 0x1234_5678_9abc_def0, 0.5, None)
             .expect("room");
         assert_ne!(
             wire.get(8..12),
@@ -3274,7 +3412,7 @@ mod tests {
 
         let mut wire = vec![0_u8; 256];
         let (len, _) = caller
-            .build_report(&mut wire, Duration::ZERO, 0, 0.5)
+            .build_report(&mut wire, Duration::ZERO, 0, 0.5, None)
             .expect("room");
         let mut copy = wire.get(..len).unwrap_or_default().to_vec();
         assert_eq!(
@@ -3296,7 +3434,7 @@ mod tests {
         let mut plain = RtpSession::new(&config(), 0.5);
         let mut wire = vec![0_u8; 256];
         let (len, _) = plain
-            .build_report(&mut wire, Duration::ZERO, 0, 0.5)
+            .build_report(&mut wire, Duration::ZERO, 0, 0.5, None)
             .expect("room");
         let mut received = wire.get(..len).unwrap_or_default().to_vec();
         assert!(matches!(

@@ -47,6 +47,7 @@
 
 use std::time::Duration;
 
+use crate::voip_metrics::{BurstGapMetrics, GminTracker, PacketOutcome};
 use crate::wire::RtpPacket;
 
 /// The widest window that makes sense: at twenty milliseconds a packet, ten
@@ -94,6 +95,12 @@ const BASE_WINDOW: u32 = 512;
 /// Times the same packet length must repeat before it is believed over the one
 /// the negotiation promised.
 const SPAN_STREAK: u8 = 3;
+
+/// `Gmin` for this buffer's burst/gap classification (RFC 3611 §4.7.2): "A
+/// Gmin value of 16 is RECOMMENDED, as it results in gap characteristics
+/// that correspond to good quality ... and hence differentiates nicely
+/// between good and poor quality periods."
+const RECOMMENDED_GMIN: u8 = 16;
 
 /// Sixty-four bit words of recent playout history, one bit a frame.
 const LOSS_WORDS: usize = 8;
@@ -538,6 +545,19 @@ pub struct JitterBuffer {
     timing: Timing,
     loss: LossWindow,
     counts: Counters,
+    /// RFC 3611 §4.7.2's burst/gap classification, fed exactly once per
+    /// sequence number as its fate is finally decided: `Received` when a
+    /// held packet is played (in [`Self::pull`]), `Lost` when a slot comes
+    /// due empty or the window jumps clean past it (in [`Self::pull`] and
+    /// [`Self::slide`]), and `Discarded` when a held-but-unplayed packet
+    /// is evicted by a window jump (`Self::slide`). A late or duplicate
+    /// arrival ([`Insert::Late`], [`Insert::Duplicate`]) contributes
+    /// nothing: its sequence number was already resolved, or (duplicates)
+    /// SS4.7.1 excludes it outright ("excluding duplicate packet
+    /// discards"). A held-and-accepted packet is not fed here either — it
+    /// still awaits the outcome [`Self::pull`] gives it later, and feeding
+    /// it twice would double the count.
+    gmin: GminTracker,
 }
 
 impl JitterBuffer {
@@ -575,6 +595,7 @@ impl JitterBuffer {
             timing: Timing::new(clock_rate.max(1), config.packet_samples.max(1)),
             loss: LossWindow::new(),
             counts: Counters::default(),
+            gmin: GminTracker::new(RECOMMENDED_GMIN),
         }
     }
 
@@ -698,12 +719,14 @@ impl JitterBuffer {
             self.advance_base(1);
             self.counts.lost = self.counts.lost.saturating_add(1);
             self.loss.record(true);
+            self.gmin.observe(PacketOutcome::Lost);
             return Pull::Conceal;
         }
 
         self.advance_base(1);
         self.held = self.held.saturating_sub(1);
         self.loss.record(false);
+        self.gmin.observe(PacketOutcome::Received);
 
         let Some(slot) = self.slots.get_mut(index) else {
             // it was filled a moment ago, so this cannot happen either
@@ -787,6 +810,26 @@ impl JitterBuffer {
         }
     }
 
+    /// RFC 3611 §4.7.1's loss and discard rates and §4.7.2's burst/gap
+    /// densities and mean durations, from every sequence number this
+    /// buffer has resolved so far. Durations are in whole milliseconds,
+    /// from this buffer's own packet-time (`packets_to_duration(1)`), the
+    /// appendix's `m`.
+    #[must_use]
+    pub(crate) fn burst_gap_metrics(&self) -> BurstGapMetrics {
+        let packet_duration_ms =
+            u32::try_from(self.packets_to_duration(1).as_millis()).unwrap_or(u32::MAX);
+        self.gmin.metrics(packet_duration_ms)
+    }
+
+    /// The `Gmin` this buffer classifies bursts and gaps with (RFC 3611
+    /// §4.7.2's own field of the same name), fixed at
+    /// [`RECOMMENDED_GMIN`] for the life of the buffer.
+    #[must_use]
+    pub(crate) const fn gmin(&self) -> u8 {
+        self.gmin.gmin()
+    }
+
     /// How many packets are waiting.
     #[must_use]
     pub const fn held(&self) -> u16 {
@@ -803,6 +846,18 @@ impl JitterBuffer {
     #[must_use]
     pub const fn target(&self) -> u16 {
         self.target
+    }
+
+    /// The longest delay this buffer may ever choose, in milliseconds —
+    /// RFC 3611 §4.7.7's "Maximum Jitter Buffer Delay" field is the
+    /// momentary depth of a resizing buffer, but its "Absolute Maximum
+    /// Jitter Buffer Delay" is this fixed ceiling ("For a fixed jitter
+    /// buffer, this SHOULD be the same as the Maximum Jitter Buffer
+    /// Delay"; for an adaptive one it is the bound the momentary figure
+    /// can never cross).
+    #[must_use]
+    pub(crate) fn max_delay_ms(&self) -> u16 {
+        u16::try_from(self.packets_to_duration(self.max_delay).as_millis()).unwrap_or(u16::MAX)
     }
 
     /// The sequence number that comes out next, once the buffer has seen a
@@ -902,6 +957,17 @@ impl JitterBuffer {
         // consumer will never be told about any other way
         let skipped = u64::from(advance).saturating_sub(u64::from(displaced));
         self.counts.lost = self.counts.lost.saturating_add(skipped);
+        // Every one of the `advance` sequence numbers the window just
+        // jumped past is resolved right here, once each: the `displaced`
+        // of them that were held but never played are RFC 3611 §4.7.1
+        // discards (late or, here, overflow at "the receiving jitter
+        // buffer"); the rest were never received at all.
+        for _ in 0..displaced {
+            self.gmin.observe(PacketOutcome::Discarded);
+        }
+        for _ in 0..skipped {
+            self.gmin.observe(PacketOutcome::Lost);
+        }
         self.advance_base(advance);
         displaced
     }

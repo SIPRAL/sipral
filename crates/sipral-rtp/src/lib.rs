@@ -40,18 +40,25 @@
 )]
 
 mod dtmf;
+mod emodel;
 mod endpoint;
 mod playout;
 mod rtcp;
 mod rtcp_stats;
 mod rtcp_timer;
+mod rtcp_xr;
 mod source;
 pub mod srtp;
+mod voip_metrics;
 mod wire;
 
 pub use dtmf::{
     EVENT_LEN, EventError, EventReceiver, EventReport, EventSender, MAX_DURATION, MAX_VOLUME,
     Outcome, Outgoing, Reported, dtmf_digit,
+};
+pub use emodel::{
+    BurstRatio, CodecFamily, CodecQualityModel, EModelInputs, EModelReport, codec_quality_model,
+    evaluate as evaluate_e_model,
 };
 pub use endpoint::{Discard, Received, RtcpReceived, RtpSession, StreamConfig, StreamFormat};
 pub use playout::{Activity, BufferConfig, Frame, Insert, JitterBuffer, MAX_DEPTH, Pull, Quality};
@@ -62,6 +69,10 @@ pub use rtcp::{
     SenderReportBuilder, SourceDescription, SourceDescriptionBuilder, is_rtcp, paired_rtcp_port,
 };
 pub use rtcp_timer::Due;
+pub use rtcp_xr::{
+    BT_VOIP_METRICS, JitterBufferAdaptive, PacketLossConcealment, RtcpXrError, RxConfig,
+    UNAVAILABLE, VoipMetricsBlock, XR, XrPacket, XrPacketBuilder,
+};
 pub use source::{SeqUpdate, SequenceState};
 pub use wire::{
     BuildError, FIXED_HEADER_LEN, HeaderExtension, MAX_PAYLOAD_TYPE, PacketBuilder, PacketError,

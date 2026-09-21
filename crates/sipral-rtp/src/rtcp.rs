@@ -14,6 +14,7 @@
 
 use core::fmt;
 
+use crate::rtcp_xr::{RtcpXrError, XR, XrPacket, XrPacketBuilder};
 use crate::wire::{VERSION, put};
 
 const SR: u8 = 200;
@@ -595,6 +596,11 @@ pub enum RtcpPacket<'a> {
     SourceDescription(SourceDescription<'a>),
     /// §6.6.
     Goodbye(Goodbye<'a>),
+    /// RFC 3611 §2: an Extended Report packet, carrying zero or more of the
+    /// report blocks that RFC defines. Kept as its own variant, rather than
+    /// folded into `Other`, so a peer's VoIP Metrics block (§4.7) can be
+    /// read back out of a compound packet.
+    ExtendedReport(XrPacket<'a>),
     /// APP, or any packet type this crate does not define. Kept only so a
     /// compound packet can be walked past it: "an implementation SHOULD
     /// ignore incoming RTCP packets with types unknown to it" (§6.1).
@@ -620,6 +626,9 @@ impl<'a> RtcpPacket<'a> {
             RR => parse_rr(body, count).map(Self::ReceiverReport),
             SDES => SourceDescription::parse(body, count).map(Self::SourceDescription),
             BYE => parse_bye(body, count).map(Self::Goodbye),
+            XR => XrPacket::parse(body)
+                .map(Self::ExtendedReport)
+                .map_err(RtcpError::ExtendedReport),
             other => Ok(Self::Other { packet_type: other }),
         }
     }
@@ -944,6 +953,7 @@ pub enum SenderOrReceiver<'a> {
 pub struct CompoundBuilder<'a> {
     report: SenderOrReceiver<'a>,
     sdes: SourceDescriptionBuilder<'a>,
+    xr: Option<XrPacketBuilder>,
     bye: Option<GoodbyeBuilder<'a>>,
 }
 
@@ -956,8 +966,18 @@ impl<'a> CompoundBuilder<'a> {
         Self {
             report,
             sdes,
+            xr: None,
             bye: None,
         }
+    }
+
+    /// Append an Extended Report (RFC 3611 §2), for a peer that negotiated
+    /// it (§5). Nothing here decides whether that negotiation happened;
+    /// the caller includes this only once it has.
+    #[must_use]
+    pub const fn with_xr(mut self, xr: XrPacketBuilder) -> Self {
+        self.xr = Some(xr);
+        self
     }
 
     /// Append a goodbye, for a compound packet sent on hangup.
@@ -974,7 +994,10 @@ impl<'a> CompoundBuilder<'a> {
             SenderOrReceiver::Sender(sr) => sr.encoded_len(),
             SenderOrReceiver::Receiver(rr) => rr.encoded_len(),
         };
-        report + self.sdes.encoded_len() + self.bye.as_ref().map_or(0, GoodbyeBuilder::encoded_len)
+        report
+            + self.sdes.encoded_len()
+            + self.xr.as_ref().map_or(0, XrPacketBuilder::encoded_len)
+            + self.bye.as_ref().map_or(0, GoodbyeBuilder::encoded_len)
     }
 
     /// Write the compound packet into `out`, returning how many octets it
@@ -999,6 +1022,11 @@ impl<'a> CompoundBuilder<'a> {
             SenderOrReceiver::Receiver(rr) => rr.write(out)?,
         };
         at += self.sdes.write(out.get_mut(at..).unwrap_or_default())?;
+        if let Some(xr) = &self.xr {
+            at += xr
+                .write(out.get_mut(at..).unwrap_or_default())
+                .ok_or(RtcpBuildError::Short { need, got: at })?;
+        }
         if let Some(bye) = &self.bye {
             at += bye.write(out.get_mut(at..).unwrap_or_default())?;
         }
@@ -1062,6 +1090,8 @@ pub enum RtcpError {
     },
     /// A compound packet did not include an SDES CNAME (§6.1).
     MissingCname,
+    /// An Extended Report packet (RFC 3611) did not parse.
+    ExtendedReport(RtcpXrError),
 }
 
 impl fmt::Display for RtcpError {
@@ -1095,6 +1125,7 @@ impl fmt::Display for RtcpError {
                 available,
             } => write!(f, "BYE reason wants {declared} octets, {available} there"),
             Self::MissingCname => write!(f, "no SDES CNAME in the compound packet"),
+            Self::ExtendedReport(error) => write!(f, "extended report: {error}"),
         }
     }
 }
