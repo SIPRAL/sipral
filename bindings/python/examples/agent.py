@@ -50,13 +50,29 @@ async def run_call(call: Call) -> None:
                 call.hangup()
                 return
 
+    async def wait_for_remote_hangup() -> None:
+        # The far end can end the call itself, with no "#" ever sent; a
+        # peer that hangs up first is the ordinary case, not the
+        # exception, and this is what keeps that call's own thread and
+        # media socket from running forever with nobody listening.
+        while not call.ended:
+            await call.events.get()
+
     talking = asyncio.create_task(talk())
+    hanging_up = asyncio.create_task(listen_for_hangup())
+    ending = asyncio.create_task(wait_for_remote_hangup())
     try:
-        await listen_for_hangup()
+        await asyncio.wait({hanging_up, ending}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         talking.cancel()
+        hanging_up.cancel()
+        ending.cancel()
+        # Read before closing: `call.close()` releases the media handle,
+        # and a `sipral_media_statistics` call against a released one is
+        # `SIPRAL_STATUS_STALE_HANDLE`, not a number.
+        stats = call.media.statistics() if call.media else {}
         call.close()
-        print(f"ended {call.handle:x}: {call.media.statistics() if call.media else {}}")
+        print(f"ended {call.handle:x}: {stats}")
 
 
 async def main() -> None:

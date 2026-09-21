@@ -456,26 +456,43 @@ class Stack:
         """`sipral_stack_destroy`, and everything this wrapper opened.
 
         Whatever calls are still open are hung up first, while the poll
-        thread can still send what that queues: `Call.close` only calls
-        `sipral_call_hangup`, which enqueues the BYE; `_drain_transmit` is
-        what actually writes it to the socket, and that only happens from
-        inside this thread's own loop. Closing the calls after stopping
-        the thread instead would queue a BYE that nothing ever sends -- a
-        clean call reaching for the door on its way out and finding it
-        already locked.
+        thread can still send what that queues, and while each call is
+        still tracked and its media socket still open: `sipral_call_hangup`
+        only enqueues the BYE and, once it is answered, the RTCP BYE
+        `sipral_stack_poll_farewell` owes the far end
+        (`docs/08-ffi.md`, "A call that ends owes the far end an RTCP
+        BYE") -- `_drain_transmit` and `_drain_farewells` are what
+        actually write those, and that only happens from inside this
+        thread's own loop, through `Stack.call_for` and the call's own
+        `Media`. Calling `Call.close` on each call before that poll has
+        had a chance to run would forget the call and close its media
+        socket first, and a farewell drained afterwards would find
+        nothing left to send it through -- a clean call reaching for the
+        door on its way out and finding it already locked. So hanging up
+        happens first, `Call.close` -- which releases the media handle
+        and forgets the call -- only after the poll thread has had this
+        round to drain both queues.
         """
         if self._closed.is_set():
             return
         with self._lock:
             calls = list(self._calls.values())
         for call in calls:
-            call.close()
+            if not call.ended:
+                try:
+                    call.hangup()
+                except Exception:  # noqa: BLE001 -- best effort on the way out
+                    pass
         if calls:
             # One more round of polling for the hangups just queued to go
             # out and, on loopback, for their answers to come back and be
-            # read -- 200ms is comfortably more than a direct call over a
-            # local network needs and still bounded.
+            # read, and for the farewell each one then owes to be drained
+            # and sent while the call is still tracked and its media
+            # socket still open -- 200ms is comfortably more than a direct
+            # call over a local network needs and still bounded.
             time.sleep(0.2)
+        for call in calls:
+            call.close()
         self._closed.set()
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=5.0)

@@ -86,8 +86,11 @@ step "one version everywhere"
 ws=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' Cargo.toml)
 cs=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' bindings/dotnet/Sipral/Sipral.csproj 2>/dev/null)
 ci=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' bindings/dotnet/Sipral/SipralInfo.cs 2>/dev/null)
-if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ]; then pass "workspace, csproj and SipralInfo.cs all say $ws"; else
-    fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci"
+py=$(sed -n 's/^version = "\(.*\)"$/\1/p' bindings/python/pyproject.toml 2>/dev/null)
+if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ] && [ "$ws" = "$py" ]; then
+    pass "workspace, csproj, SipralInfo.cs and pyproject.toml all say $ws"
+else
+    fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci pyproject.toml=$py"
 fi
 
 step "no addresses to harvest"
