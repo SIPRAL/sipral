@@ -107,6 +107,14 @@ rustls-pki-types = { version = "1.15.1", optional = true }
 # feature cannot reach one. `cargo test -p sipral` without that feature builds
 # it and runs nothing that uses it, since the test itself is on `tls.rs`,
 # which `required-features` below keeps out of that build entirely.
+#
+# Its default features pull in `ring` on their own — signing a certificate
+# needs a crypto backend, and `ring` is the only one this workspace allows
+# (`THIRD-PARTY-NOTICES.md`) — so `ring` reaches this crate's dev-profile
+# unconditionally, the same way `opusic-sys` reaches its normal one under the
+# default `opus` feature: a native build needs nothing extra, and a target
+# cross-compiled without a matching C toolchain fails regardless of
+# `example-tls` or `--no-default-features`.
 [dev-dependencies]
 rcgen = "0.14.10"
 

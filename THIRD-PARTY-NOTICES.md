@@ -322,6 +322,18 @@ exists for the length of that one test and nowhere else; nothing it generates
 is committed, and `cargo test -p sipral` compiles it whether or not
 `example-tls` is enabled, but exercises it only from that one test.
 
+`rcgen` needs a crypto backend to actually sign a certificate, and its default
+features choose `ring` for it — the same `ring` (Apache-2.0 AND ISC) and
+`untrusted` (ISC) named in the table below, not a second copy. That makes
+`ring` reach this crate's dev-profile on its own, whether or not `example-tls`
+is enabled: `cargo test -p sipral` and `cargo build --examples` need a C
+compiler for it regardless of feature flags, the same way they already need
+one for `opusic-sys` under the default `opus` feature. Nothing here is a
+licensing exception — `ring` is already allowed — but it is a second, separate
+reason a build with no matching C toolchain (a cross-compile target with none
+installed, say) cannot check this crate's tests or examples, distinct from the
+`example-tls`-gated reason below.
+
 ## Examples only, never shipped
 
 `crates/sipral/examples/tls.rs` is the one place in this repository that
