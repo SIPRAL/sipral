@@ -646,6 +646,24 @@ follows the pair ICE selects, and a re-negotiation that moves the far end's
 media address opens it again. `docs/06-nat.md` says what is left and why only
 ICE closes it.
 
+**A far end that starts over.** Some peers begin a new DTLS association on
+every re-negotiation — Asterisk does, with a fresh ClientHello on the hold and
+`a=connection:new` on the resume — and RFC 6347 §4.2.8 says what a server does
+then: it "SHOULD proceed with a new handshake but MUST NOT destroy the existing
+association until the client has demonstrated reachability". The session runs
+the new handshake beside the old one, the cookie exchange first, so nothing
+costly is spent on a ClientHello whose sender cannot receive; the call keeps
+the old keys throughout; and when the new one finishes, with the far end's
+certificate checked against the same fingerprint, each direction moves to its
+new key the way a re-key does, the old receive context kept for the packets
+already in flight under it. One that never finishes is dropped without a word,
+the call still on the keys it had: its prompt arrives in the clear, and
+reporting it would hand anybody who can send from the far end's address a way
+to fail any call. The running connection used to take that ClientHello and
+ignore it, and the far end waited for a handshake that never came, with the
+call silent from the first re-offer on. Only as the server: a client whose
+server wants a new association is not told so by anything it could act on.
+
 **One certificate per call.** The engine makes its key and certificate once and
 renews them a day before they run out, which a desk phone or an agent running
 for months reaches every month. A call keeps the one it first described itself

@@ -377,6 +377,11 @@ const HANDSHAKE_RECORD: u8 = 22;
 #[derive(Debug)]
 struct Dtls {
     handshake: crate::dtls::Handshake,
+    /// A new association the far end has begun on this call while the one
+    /// above keys it (RFC 6347 §4.2.8), until it either produces keys — and
+    /// replaces it — or gives up and is dropped, with the call still on the
+    /// keys it had. See [`crate::dtls::Handshake::renewal`].
+    next: Option<crate::dtls::Handshake>,
     /// Where the far end's records come from, once one has arrived.
     ///
     /// The same latch RTP keeps, kept separately because no RTP arrives while
@@ -518,6 +523,7 @@ impl MediaSession {
             dtls: handshake.map(|handshake| Dtls {
                 handshake,
                 peer: None,
+                next: None,
             }),
             #[cfg(feature = "dtls")]
             dtls_out: Vec::new(),
@@ -885,7 +891,24 @@ impl MediaSession {
             }
             None => return Arrival::Dropped(Discard::ForeignAddress),
         }
-        dtls.handshake.on_datagram(datagram, now);
+        // RFC 6347 §4.2.8: a ClientHello that starts over, to a server whose
+        // association is up, begins a new one beside it. The running
+        // connection would take it and ignore it, and a far end that starts
+        // over on a re-negotiation — Asterisk does, on a hold — then waits for
+        // a handshake that never comes. One at a time: while one is being
+        // answered, everything goes to it
+        if dtls.next.is_none()
+            && dtls.handshake.role() == sipral_dtls::Role::Server
+            && dtls.handshake.is_keyed()
+            && crate::dtls::begins_an_association(datagram)
+            && let Ok(next) = dtls.handshake.renewal(now)
+        {
+            dtls.next = Some(next);
+        }
+        match dtls.next.as_mut() {
+            Some(next) => next.on_datagram(datagram, now),
+            None => dtls.handshake.on_datagram(datagram, now),
+        }
         self.settle_handshake();
         Arrival::Handshake
     }
@@ -941,12 +964,45 @@ impl MediaSession {
             return;
         };
         let peer = dtls.peer;
+        if let Some(next) = dtls.next.as_mut() {
+            match next.take_outcome() {
+                // "After a correct Finished message is received, the server
+                // MUST abandon the previous association" (§4.2.8). Each
+                // direction moves to its new key the way a re-key does: what
+                // this end sends, from now; what arrives, with the old context
+                // kept for the packets already in flight under it. The keys
+                // are new, so each index starting again repeats nothing
+                // (RFC 3711 §9.1)
+                Some(Ok(exported)) => {
+                    let suite = exported.suite;
+                    self.rtp
+                        .rekey_local(exported.policy, exported.local, Rekeyed::Key);
+                    self.rtp
+                        .rekey_remote(exported.policy, exported.remote, Rekeyed::Key);
+                    if let Some(next) = dtls.next.take() {
+                        dtls.handshake = next;
+                    }
+                    self.events.push_back(MediaEvent::Secured { suite, peer });
+                }
+                // one that gave up, or was never going to finish, is dropped
+                // and the call stays on the association it had. Not reported:
+                // the prompt for it arrives in the clear, and reporting what
+                // anybody who can send from the far end's address could
+                // provoke would be handing them a way to fail any call. A far
+                // end that did move and could not finish stops sending, and
+                // the stall watchdog says so
+                Some(Err(_)) => dtls.next = None,
+                None => {}
+            }
+            return;
+        }
         match dtls.handshake.take_outcome() {
-            Some(Ok((suite, security))) => {
+            Some(Ok(exported)) => {
+                let suite = exported.suite;
                 // `keyed` is false for a stream that was not waiting, which
                 // is a session that has already been keyed once: the event
                 // goes out with the keys or not at all
-                let installed = self.rtp.keyed(security);
+                let installed = self.rtp.keyed(exported.into_security());
                 if installed {
                     self.events.push_back(MediaEvent::Secured { suite, peer });
                 }
@@ -1008,7 +1064,17 @@ impl MediaSession {
             if !self.has_path() {
                 return None;
             }
-            let record = self.dtls.as_mut()?.handshake.take_outbound()?;
+            // a new association's records first: it is the one being set up,
+            // and the running one only ever answers retransmissions
+            let dtls = self.dtls.as_mut()?;
+            let record = match dtls
+                .next
+                .as_mut()
+                .and_then(crate::dtls::Handshake::take_outbound)
+            {
+                Some(record) => record,
+                None => dtls.handshake.take_outbound()?,
+            };
             self.dtls_out = record;
             // where the far end's own records come from, while the stream has
             // no latch of its own — and it has none for as long as the
@@ -1412,6 +1478,27 @@ impl MediaSession {
     pub fn close_handshake(&mut self) {
         if let Some(dtls) = self.dtls.as_mut() {
             dtls.handshake.close();
+            if let Some(next) = dtls.next.as_mut() {
+                next.close();
+            }
+        }
+    }
+
+    /// Begin a new association from this end, the way a far end that starts
+    /// over on a re-negotiation does (RFC 6347 §4.2.8): the half of it this
+    /// stack never starts by itself, played by a test so that the other half
+    /// can be seen answering it. `false` for a stream no handshake keys.
+    #[cfg(all(test, feature = "dtls"))]
+    pub(crate) fn start_the_handshake_over(&mut self, now: Instant) -> bool {
+        let Some(dtls) = self.dtls.as_mut() else {
+            return false;
+        };
+        match dtls.handshake.renewal(now) {
+            Ok(next) => {
+                dtls.next = Some(next);
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -1483,10 +1570,14 @@ impl MediaSession {
             .filter(|_| self.is_receiving() && !self.stalled)
             .map(|after| self.last_inbound + after);
         #[cfg(feature = "dtls")]
-        let handshake = self
-            .dtls
-            .as_ref()
-            .and_then(|dtls| dtls.handshake.poll_timeout());
+        let handshake = self.dtls.as_ref().and_then(|dtls| {
+            let running = dtls.handshake.poll_timeout();
+            let next = dtls
+                .next
+                .as_ref()
+                .and_then(crate::dtls::Handshake::poll_timeout);
+            [running, next].into_iter().flatten().min()
+        });
         #[cfg(not(feature = "dtls"))]
         let handshake = None;
         #[cfg(feature = "ice")]
@@ -1508,6 +1599,9 @@ impl MediaSession {
         #[cfg(feature = "dtls")]
         if let Some(dtls) = self.dtls.as_mut() {
             dtls.handshake.on_timeout(now);
+            if let Some(next) = dtls.next.as_mut() {
+                next.on_timeout(now);
+            }
             self.settle_handshake();
         }
         // and the agent, for the same reason: checks, consent and keepalives

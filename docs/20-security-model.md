@@ -379,7 +379,11 @@ this end directly rather than through the line's own proxy.
   stream's kind of keying, or reset what later certificates were compared
   against, and was adopted rather than refused; and a forged epoch-0
   retransmission that kept a bare `sipral_dtls::Connection` from ever giving
-  up. What it is not is a review by a specialist outside the project, which
+  up. The lab then found an eighth, against Asterisk: a far end that begins a
+  new association on a re-negotiation (RFC 6347 §4.2.8) had its ClientHello
+  ignored and the call went silent; the new handshake now runs beside the old
+  one and replaces it only once it has finished, the far end's certificate
+  checked again. What the review is not is a review by a specialist outside the project, which
   the commercial licence still waits on. Until there is one, the honest
   statement is that this protocol is written from the RFCs, tested against
   itself and attacked by its own project — not by anyone independent of it.

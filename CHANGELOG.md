@@ -224,6 +224,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A DTLS-SRTP call survives a far end that starts its handshake over.**
+  Asterisk begins a new association on every re-negotiation — a fresh
+  ClientHello on a hold, `a=connection:new` on the resume — and the running
+  connection took the ClientHello and ignored it, so the call went silent from
+  the first re-offer on. The lab's new DTLS flow found it. RFC 6347 §4.2.8 is
+  followed now: the new handshake runs beside the old one, the old keys carry
+  the call until it finishes, and each direction then moves to its new key the
+  way a re-key does. One that never finishes is dropped silently.
+
 - **Seven defects an adversarial review of DTLS-SRTP found, all of them
   availability or interoperability; none let media be read, forged or
   replayed.**

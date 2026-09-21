@@ -50,6 +50,7 @@
 //! opening it on terms nobody agreed.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sipral_core::auth::KeySource;
@@ -60,6 +61,7 @@ use sipral_dtls::setup::{Party, Setup, dtls_role};
 use sipral_dtls::x509::{Certificate, CertificateParams, Fingerprint};
 use sipral_dtls::{Config, Connection, Event, Random, Retransmission, Role, SrtpKeying, State};
 use sipral_rtp::srtp::{Master, Policy, Security, Suite};
+use zeroize::Zeroizing;
 
 use crate::error::MediaError;
 
@@ -257,7 +259,7 @@ pub(crate) struct Handshake {
     outbound: VecDeque<Vec<u8>>,
     /// The keys, once the handshake exported them, waiting to be collected by
     /// the session that will install them.
-    keyed: Option<Result<(Suite, Security), MediaError>>,
+    keyed: Option<Result<Exported, MediaError>>,
     /// Whether the handshake has already reported that it failed, so that a
     /// connection that keeps being driven does not report it again.
     reported: bool,
@@ -267,6 +269,46 @@ pub(crate) struct Handshake {
     /// Whether the budget above has run out, which the connection itself has
     /// no way of knowing.
     expired: bool,
+    /// What a new association on the same call is started with
+    /// ([`Handshake::renewal`]): the certificate this end presents, the
+    /// fingerprints the far end's has to match, and this handshake's own
+    /// randomness.
+    identity: Arc<Identity>,
+    peers: Vec<Fingerprint>,
+    keys: KeySource,
+}
+
+/// What a finished handshake exported, per direction, before it is made into
+/// a stream's contexts.
+///
+/// Kept apart rather than made into a [`Security`] on the spot, because a
+/// stream keyed once opens its contexts from it and a stream already running
+/// replaces each direction's (RFC 6347 §4.2.8, a new association) the way a
+/// re-key does, with the old receive context kept for the packets already in
+/// flight under it.
+pub(crate) struct Exported {
+    pub(crate) suite: Suite,
+    pub(crate) policy: Policy,
+    /// What protects what this end sends.
+    pub(crate) local: Master,
+    /// What opens what arrives.
+    pub(crate) remote: Master,
+}
+
+impl Exported {
+    /// The contexts a stream that was waiting for its keys opens with.
+    pub(crate) fn into_security(self) -> Security {
+        Security::new(self.policy, self.local, self.policy, self.remote)
+    }
+}
+
+impl core::fmt::Debug for Exported {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // two master keys and their salts: the suite is all a log may see
+        f.debug_struct("Exported")
+            .field("suite", &self.suite)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Handshake {
@@ -287,7 +329,7 @@ impl Handshake {
     /// [`MediaError::DtlsHandshake`] for a configuration no handshake can
     /// come of.
     pub(crate) fn start(
-        identity: &Identity,
+        identity: &Arc<Identity>,
         keying: &Keying,
         party: Party,
         ours: Setup,
@@ -323,15 +365,40 @@ impl Handshake {
         if peers.is_empty() {
             return Err(MediaError::DtlsFingerprint);
         }
+        let seed = Zeroizing::new(keys.block());
+        Self::begin(
+            Arc::clone(identity),
+            peers,
+            role,
+            KeySource::new(*seed),
+            now,
+        )
+        .map(Some)
+    }
+
+    /// A handshake in `role`, presenting `identity` and requiring a peer
+    /// certificate `peers` names, drawing its randomness from `keys`.
+    ///
+    /// The randomness is the handshake's own from here on: a stream seeded
+    /// once from the engine's, so that a new association the session starts
+    /// by itself (see [`Handshake::renewal`]) draws from somewhere that never
+    /// hands out a block the engine does.
+    fn begin(
+        identity: Arc<Identity>,
+        peers: Vec<Fingerprint>,
+        role: Role,
+        mut keys: KeySource,
+        now: Instant,
+    ) -> Result<Self, MediaError> {
         let schedule = Retransmission::default();
         let mut config = Config::new(
             role,
             identity.key.clone(),
             identity.certificate.clone(),
-            peers,
+            peers.clone(),
         );
         config.retransmission = schedule;
-        let mut source = Source::new(keys);
+        let mut source = Source::new(&mut keys);
         let connection =
             Connection::new(config, &mut source, now).map_err(|_| MediaError::DtlsHandshake)?;
         let mut handshake = Self {
@@ -343,11 +410,49 @@ impl Handshake {
                 .checked_add(budget(schedule))
                 .ok_or(MediaError::DtlsHandshake)?,
             expired: false,
+            identity,
+            peers,
+            keys,
         };
         // a client's ClientHello is already waiting, and a server's outbox is
         // empty; draining here means the caller never has to know which
         handshake.drain();
-        Ok(Some(handshake))
+        Ok(handshake)
+    }
+
+    /// A new association on the same call, in the same role, with the same
+    /// certificates on both sides: RFC 6347 §4.2.8.
+    ///
+    /// "In cases where a server believes it has an existing association on a
+    /// given host/port quartet and it receives an epoch=0 ClientHello, it
+    /// SHOULD proceed with a new handshake but MUST NOT destroy the existing
+    /// association until the client has demonstrated reachability either by
+    /// completing a cookie exchange or by completing a complete handshake
+    /// including delivering a verifiable Finished message." Some peers start
+    /// one on every re-negotiation — Asterisk does, on a hold and again on the
+    /// resume — and a server that ignored the ClientHello left the far end
+    /// waiting on a handshake that never came and the call silent. The session
+    /// runs the two side by side and keeps the old keys until this one has
+    /// produced new ones; see `MediaSession::receive`.
+    ///
+    /// # Errors
+    /// [`MediaError::DtlsHandshake`] for a configuration no handshake can come
+    /// of, which the one this was made from already came of.
+    pub(crate) fn renewal(&mut self, now: Instant) -> Result<Self, MediaError> {
+        let seed = Zeroizing::new(self.keys.block());
+        Self::begin(
+            Arc::clone(&self.identity),
+            self.peers.clone(),
+            self.role(),
+            KeySource::new(*seed),
+            now,
+        )
+    }
+
+    /// Whether this handshake has finished and produced keys: the only state
+    /// a new association can replace (RFC 6347 §4.2.8).
+    pub(crate) fn is_keyed(&self) -> bool {
+        matches!(self.connection.state(), State::Connected)
     }
 
     /// Take a datagram the demux said is a DTLS record.
@@ -397,7 +502,7 @@ impl Handshake {
     /// `None` while the handshake is still running, and `None` for ever after
     /// either answer has been taken: a session installs keys once and reports
     /// a failure once.
-    pub(crate) fn take_outcome(&mut self) -> Option<Result<(Suite, Security), MediaError>> {
+    pub(crate) fn take_outcome(&mut self) -> Option<Result<Exported, MediaError>> {
         self.keyed.take()
     }
 
@@ -474,21 +579,34 @@ impl Handshake {
 /// the arm that a future profile added on one side of the boundary and not the
 /// other would land in, loudly, rather than silently opening a stream with the
 /// wrong transform.
-fn security_of(keying: &SrtpKeying) -> Result<(Suite, Security), MediaError> {
+fn security_of(keying: &SrtpKeying) -> Result<Exported, MediaError> {
     let suite = suite_of(keying.profile())?;
     // RFC 5764 §4.1.2 fixes the key derivation rate at zero and agrees no
     // MKI, which is what `Policy::new` already sets: a single derivation and
     // no identifier
-    let policy = Policy::new(suite);
-    Ok((
+    Ok(Exported {
         suite,
-        Security::new(
-            policy,
-            Master::new(*keying.local_master_key(), *keying.local_master_salt()),
-            policy,
-            Master::new(*keying.remote_master_key(), *keying.remote_master_salt()),
-        ),
-    ))
+        policy: Policy::new(suite),
+        local: Master::new(*keying.local_master_key(), *keying.local_master_salt()),
+        remote: Master::new(*keying.remote_master_key(), *keying.remote_master_salt()),
+    })
+}
+
+/// Whether a datagram is the first flight of a new association: a plaintext
+/// epoch-0 handshake record whose message is a ClientHello with the first
+/// message sequence number (RFC 6347 §4.1, §4.2.2).
+///
+/// Read off the header alone, because this is asked of a record the running
+/// connection would otherwise take and ignore. The record header is thirteen
+/// octets — type, version, a sixteen-bit epoch, a forty-eight-bit sequence,
+/// a length — and the handshake header after it opens with the message type
+/// and, four octets on, the message sequence.
+pub(crate) fn begins_an_association(datagram: &[u8]) -> bool {
+    const CLIENT_HELLO: u8 = 1;
+    datagram.first() == Some(&22)
+        && datagram.get(3..5) == Some(&[0, 0][..])
+        && datagram.get(13) == Some(&CLIENT_HELLO)
+        && datagram.get(17..19) == Some(&[0, 0][..])
 }
 
 /// The transform a DTLS-SRTP protection profile names, on the media side of
@@ -627,6 +745,7 @@ mod tests {
     use sipral_dtls::setup::{Party, Setup};
     use sipral_dtls::{Random, Retransmission, Role};
     use sipral_rtp::srtp::Suite;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use crate::error::MediaError;
@@ -636,10 +755,10 @@ mod tests {
     /// checks it.
     const NOW_UNIX: u64 = 1_790_000_000;
 
-    fn identity(seed: u8) -> (Identity, KeySource) {
+    fn identity(seed: u8) -> (Arc<Identity>, KeySource) {
         let mut keys = KeySource::new([seed; 32]);
         let identity = Identity::new(&mut keys, NOW_UNIX).expect("an identity");
-        (identity, keys)
+        (Arc::new(identity), keys)
     }
 
     #[test]

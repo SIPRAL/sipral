@@ -5740,3 +5740,130 @@ fn a_certificate_renewed_while_a_call_rings_is_not_the_one_its_handshake_present
     }
     assert_eq!(failures(&pair), []);
 }
+
+/// Carry every handshake record either end owes the other, both ways, until
+/// nothing more moves.
+#[cfg(feature = "dtls")]
+fn cross_records(pair: &mut Pair, call: CallHandle, remote: CallHandle) {
+    for _ in 0..32 {
+        let mut crossed = false;
+        while let Some((_, _, mut record)) = pair.callee.engine.poll_transmit(pair.now) {
+            crossed = true;
+            let mut session = pair.caller.engine.session(call).expect("media");
+            session.receive(&mut record, callee_media(), pair.now);
+        }
+        while let Some((_, _, mut record)) = pair.caller.engine.poll_transmit(pair.now) {
+            crossed = true;
+            let mut session = pair.callee.engine.session(remote).expect("media");
+            session.receive(&mut record, caller_media(), pair.now);
+        }
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        if !crossed {
+            return;
+        }
+    }
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_far_end_that_starts_its_handshake_over_is_answered_and_the_call_moves_to_the_new_keys() {
+    // RFC 6347 §4.2.8. Asterisk starts a new association on a hold and on the
+    // resume; the running connection took its ClientHello and ignored it, the
+    // far end waited for a handshake that never came, and the call went silent
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+    let before = tone_after(&mut pair, call, remote);
+    assert!(
+        before > 4_000,
+        "the tone came through at {before} to begin with"
+    );
+
+    // the callee is the client here, which is the end that starts over
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .start_the_handshake_over(pair.now)
+    );
+    cross_records(&mut pair, call, remote);
+
+    let secured = |stack: &Stack| {
+        stack
+            .media_events()
+            .iter()
+            .filter(|event| matches!(event, MediaEvent::Secured { .. }))
+            .count()
+    };
+    assert_eq!(
+        secured(&pair.caller),
+        2,
+        "this end never took the new association"
+    );
+    assert_eq!(secured(&pair.callee), 2, "the far end never finished it");
+    assert_eq!(failures(&pair), []);
+    let after = tone_after(&mut pair, call, remote);
+    assert!(
+        after > 4_000,
+        "the two ends came out of the new association on different keys: {after}"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_new_association_that_is_never_finished_leaves_the_call_on_the_one_it_had() {
+    // the prompt for one arrives in the clear, so anybody who can send from
+    // the far end's address can make one begin: it must neither interrupt the
+    // call nor be reported as the call failing when it comes to nothing
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .start_the_handshake_over(pair.now)
+    );
+    // the ClientHello arrives, and nothing after it ever does
+    let (_, _, mut hello) = pair
+        .callee
+        .engine
+        .poll_transmit(pair.now)
+        .expect("a ClientHello");
+    {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        assert_eq!(
+            session.receive(&mut hello, callee_media(), pair.now),
+            Arrival::Handshake
+        );
+    }
+    while pair.caller.engine.poll_transmit(pair.now).is_some() {}
+    while pair.callee.engine.poll_transmit(pair.now).is_some() {}
+
+    let during = tone_after(&mut pair, call, remote);
+    assert!(
+        during > 4_000,
+        "the half-begun association cut the call: {during}"
+    );
+
+    // long past any handshake's budget
+    for _ in 0..40 {
+        pair.now += Duration::from_secs(5);
+        pair.caller.engine.handle_timeout(pair.now);
+        pair.callee.engine.handle_timeout(pair.now);
+        while pair.caller.engine.poll_transmit(pair.now).is_some() {}
+        while pair.callee.engine.poll_transmit(pair.now).is_some() {}
+    }
+    pair.caller.drain(pair.now, false);
+    pair.callee.drain(pair.now, false);
+    assert!(
+        !failures(&pair)
+            .iter()
+            .any(|(_, error)| matches!(error, MediaError::DtlsHandshake)),
+        "an association nobody finished was reported as the call failing: {:?}",
+        failures(&pair)
+    );
+    let after = tone_after(&mut pair, call, remote);
+    assert!(after > 4_000, "the call did not stay on its keys: {after}");
+}
