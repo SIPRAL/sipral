@@ -23,12 +23,13 @@ Steps 1 to 3 cover the large majority of carrier and PBX paths, and they are in
 phase 1. Steps 4 and 5 are phase 2.
 
 That is a deliberate ordering, not a refusal. Full ICE — gathering, checks,
-nomination, role conflicts, restarts, consent — is written, on top of the pieces
-here, and described under *ICE, full role* below; nothing reaches it from a
-call yet, and that wiring is phase 4. The place it earns its keep is a phone on
+nomination, role conflicts, restarts, consent — is written on top of the pieces
+here, described under *ICE, full role* below, and reached from a call through
+`IcePolicy` on the codec catalogue. The place it earns its keep is a phone on
 a carrier-grade NAT, or a peer that requires it; on a desktop whose peer is a
 carrier it adds setup time and packets for nothing, and it stays off there by
-default.
+default — which is the default everywhere, since a policy is per call and this
+one starts off.
 
 ### ICE-lite is for one of the two products, not both
 
