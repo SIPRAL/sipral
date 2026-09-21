@@ -96,6 +96,15 @@ impl Endpoint {
         Ok(SocketAddr::new(self.local.ip(), port))
     }
 
+    /// Forget a call's RTP socket once the call itself has ended, closing the
+    /// port along with it. A process that places or answers one call and
+    /// exits, such as `call.rs`, never notices its absence; one that keeps
+    /// running and keeps answering, such as `headless-agent.rs`, leaks a
+    /// bound socket per call otherwise — call this from a `CallEnded` handler.
+    pub(crate) fn close_media(&mut self, call: CallHandle) {
+        self.media.remove(&call);
+    }
+
     /// Write what is waiting, and drain every event the engine has.
     pub(crate) fn pump(&mut self, now: Instant) -> Vec<Event> {
         self.flush();

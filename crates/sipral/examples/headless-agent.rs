@@ -96,6 +96,12 @@ fn tick(endpoint: &mut Endpoint, echoes: &mut Echoes, now: Instant) -> bool {
             }
             Event::Signalling(UaEvent::CallEnded { call, .. }) => {
                 echoes.remove(&call);
+                // Without this, every call this agent has ever answered
+                // keeps its bound RTP socket alive in `endpoint.media` for
+                // the rest of the process's life — harmless for the examples
+                // that place one call and exit, real for the one that keeps
+                // answering (`Endpoint::close_media`'s own doc).
+                endpoint.close_media(call);
             }
             _ => {}
         }
