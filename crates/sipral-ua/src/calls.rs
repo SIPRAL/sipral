@@ -791,6 +791,12 @@ impl UserAgent {
             Err(_) => StatusCode::SERVER_ERROR,
         });
         self.report_transfer(call, reported, now);
+        // Before `forget`, for the same reason `report_transfer` is: an
+        // account that asked for an RFC 6035 quality report is answered by
+        // the facade above this crate reacting to the `CallEnded` event just
+        // queued, and by then `forget` has already taken the account and
+        // identity that report needs off this call (`quality_report.rs`).
+        self.stash_ended_call(call);
         self.forget(call);
     }
 

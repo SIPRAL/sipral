@@ -191,6 +191,21 @@ pub struct UserAgent {
     /// asks [`UserAgent::stop_recording`] more than once, and the second ask
     /// must not stop a recording that is no longer running.
     stopped_recording: Option<Result<Recording, RecordError>>,
+    /// What [`UserAgent::send_quality_report`] needs about a call whose
+    /// account asked for one (RFC 6035), kept past the moment `finish`
+    /// forgets the call itself: the `CallEnded` event that call queues is
+    /// what tells the facade above this crate to send the report, and by
+    /// the time that event is drained the call is already gone from
+    /// [`UserAgent::calls`]. See `crate::quality_report` for what stashes
+    /// and consumes this, and why it is bounded.
+    pub(crate) quality_report_snapshots: HashMap<CallHandle, crate::quality_report::EndedCall>,
+    /// Insertion order for [`UserAgent::quality_report_snapshots`], so the
+    /// oldest entry can be evicted first when the cap is reached: a call
+    /// whose account asked for a report but that never got a media session
+    /// for [`send_quality_report`](UserAgent::send_quality_report) to be
+    /// asked about (rejected before answer, cancelled) would otherwise sit
+    /// here for the rest of the process's life.
+    pub(crate) quality_report_order: VecDeque<CallHandle>,
 }
 
 impl UserAgent {
@@ -248,6 +263,8 @@ impl UserAgent {
             next_subscription: 0,
             next_announcement: 0,
             next_message: 0,
+            quality_report_snapshots: HashMap::new(),
+            quality_report_order: VecDeque::new(),
         })
     }
 

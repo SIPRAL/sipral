@@ -31,6 +31,7 @@ use sipral_core::endpoint::OutgoingRequest;
 use sipral_core::msg::HeaderName;
 use sipral_core::msg::Method;
 
+use crate::account::AccountId;
 use crate::agent::UserAgent;
 use crate::call::{CallHandle, CallIdentity, Direction};
 use crate::error::UaError;
@@ -40,6 +41,34 @@ const EVENT_PACKAGE: &[u8] = b"vq-rtcpxr";
 
 /// RFC 6035 SS4.5: the body's MIME type.
 const CONTENT_TYPE: &[u8] = b"application/vq-rtcpxr";
+
+/// How many calls' worth of [`EndedCall`] snapshot [`UserAgent::finish`]
+/// (`calls.rs`) is allowed to hold onto at once. A call whose account asked
+/// for a report but that this stack never calls
+/// [`UserAgent::send_quality_report`] about — refused before it was
+/// answered, cancelled, any call the facade above this crate never gave a
+/// media session — leaves its entry here unconsumed, so the count is capped
+/// and the oldest entry evicted rather than kept for the rest of the
+/// process's life.
+const SNAPSHOT_CAP: usize = 32;
+
+/// What [`UserAgent::send_quality_report`] needs to know about a call that
+/// [`UserAgent::calls`] no longer does.
+///
+/// `finish` (`calls.rs`) queues the `CallEnded` event a call's end is
+/// reported through and then, in the same breath, forgets the call: `From`,
+/// `To`, `Call-ID` and which account it belonged to are gone from
+/// [`UserAgent::calls`] before the facade above this crate ever gets to
+/// react to that event by calling `send_quality_report` about it. This is
+/// the snapshot of exactly those few facts, taken the moment before they
+/// would otherwise be lost, and only for a call whose account has
+/// something to publish to at all (`stash_ended_call`, below).
+#[derive(Clone, Debug)]
+pub(crate) struct EndedCall {
+    pub(crate) account: AccountId,
+    pub(crate) identity: CallIdentity,
+    pub(crate) direction: Direction,
+}
 
 /// The RFC 3611 VoIP Metrics figures this crate has no way to measure
 /// itself, exactly as `sipral_rtp::VoipMetricsBlock` and the codec that was
@@ -132,7 +161,26 @@ impl UserAgent {
         metrics: &QualityReportMetrics,
         now: Instant,
     ) -> Result<bool, UaError> {
-        let Some(account_id) = self.calls.get(&call).and_then(|held| held.account) else {
+        // The ordinary case is the call already forgotten: `finish`
+        // (`calls.rs`) queues the `CallEnded` event that tells the facade
+        // above this crate to call this method, and forgets the call in the
+        // same breath, before that event is ever drained. `self.calls` is
+        // still checked first rather than only the snapshot, so that a call
+        // asked about while it is still up — a test, or a future mid-call
+        // report — reads the live state rather than a stale copy of it.
+        let (account_id, identity, direction) = if let Some(held) = self.calls.get(&call) {
+            let Some(account_id) = held.account else {
+                return Ok(false);
+            };
+            let direction = held.direction;
+            let Some(identity) = self.call_identity(call) else {
+                return Ok(false);
+            };
+            (account_id, identity, direction)
+        } else if let Some(snapshot) = self.quality_report_snapshots.remove(&call) {
+            self.quality_report_order.retain(|held| *held != call);
+            (snapshot.account, snapshot.identity, snapshot.direction)
+        } else {
             return Ok(false);
         };
         let Some(account) = self.accounts.get(&account_id) else {
@@ -141,10 +189,6 @@ impl UserAgent {
         let Some(collector) = account.quality_report() else {
             return Ok(false);
         };
-        let Some(identity) = self.call_identity(call) else {
-            return Ok(false);
-        };
-        let direction = self.call_direction(call).unwrap_or(Direction::Outgoing);
 
         let mut to = Vec::with_capacity(collector.as_bytes().len() + 2);
         to.push(b'<');
@@ -165,6 +209,53 @@ impl UserAgent {
 
         self.endpoint.request(&request, now)?;
         Ok(true)
+    }
+
+    /// Keep what [`UserAgent::send_quality_report`] will need about `call`
+    /// past the `forget` (`calls.rs`) that is about to remove it from
+    /// [`UserAgent::calls`] — called from `finish`, immediately before that.
+    ///
+    /// A no-op unless there is a reason not to be one: a call with no
+    /// account, or one whose account never asked for a report
+    /// ([`Account::quality_report`](crate::account::Account::quality_report)),
+    /// has nothing this cache should remember, since nothing will ever ask
+    /// it. Every account that did ask is still bounded by [`SNAPSHOT_CAP`],
+    /// the oldest entry evicted first: a call that is rejected, cancelled,
+    /// or otherwise never reaches a media session for the facade above this
+    /// crate to call `send_quality_report` about leaves its entry here
+    /// unconsumed, and nothing else here ever removes it.
+    pub(crate) fn stash_ended_call(&mut self, call: CallHandle) {
+        let Some(held) = self.calls.get(&call) else {
+            return;
+        };
+        let Some(account_id) = held.account else {
+            return;
+        };
+        if self
+            .accounts
+            .get(&account_id)
+            .is_none_or(|account| account.quality_report().is_none())
+        {
+            return;
+        }
+        let direction = held.direction;
+        let Some(identity) = self.call_identity(call) else {
+            return;
+        };
+        if self.quality_report_snapshots.len() >= SNAPSHOT_CAP
+            && let Some(oldest) = self.quality_report_order.pop_front()
+        {
+            self.quality_report_snapshots.remove(&oldest);
+        }
+        self.quality_report_order.push_back(call);
+        self.quality_report_snapshots.insert(
+            call,
+            EndedCall {
+                account: account_id,
+                identity,
+                direction,
+            },
+        );
     }
 }
 

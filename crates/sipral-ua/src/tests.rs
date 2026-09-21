@@ -2933,6 +2933,75 @@ fn the_answer_to_our_bye_is_not_news() {
     );
 }
 
+/// A quality report is asked for after the `CallEnded` event that names the
+/// call, which is exactly the moment `finish` (`calls.rs`) has already
+/// forgotten it. Without the snapshot `finish` stashes right before that,
+/// `send_quality_report` would find no account to publish to at all —
+/// silently, since it reports "nothing to do" the same way it does for a
+/// call whose account never asked for a report.
+#[test]
+fn a_quality_report_still_finds_its_account_once_the_call_that_ended_is_forgotten() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().quality_report_uri(uri("sip:collector.example.org")));
+    let (call, _) = call_up(&mut agent, id, t0);
+    agent.hangup(call, t0).expect("the BYE goes");
+    sent(&mut agent);
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::LocalHangup)
+    );
+    assert!(
+        !agent.calls.contains_key(&call),
+        "the fixture only proves what it claims to if the call is really gone"
+    );
+
+    let sent_report = agent
+        .send_quality_report(call, &quality_metrics(), t0)
+        .expect("a transport is bound, so the PUBLISH goes");
+    assert!(
+        sent_report,
+        "the account asked for a report and the call is known well enough \
+         to publish about, even though `finish` already forgot it"
+    );
+    let publish = sent(&mut agent);
+    assert!(publish.starts_with(b"PUBLISH sip:collector.example.org SIP/2.0\r\n"));
+}
+
+/// A minimal, valid set of figures for [`crate::QualityReportMetrics`]: only
+/// the account and call bookkeeping matters to the test that uses this, not
+/// what the report says.
+fn quality_metrics() -> crate::QualityReportMetrics {
+    crate::QualityReportMetrics {
+        local_addr: local(),
+        local_ssrc: 1,
+        remote_addr: registrar(),
+        remote_ssrc: 2,
+        start: std::time::SystemTime::UNIX_EPOCH,
+        stop: std::time::SystemTime::UNIX_EPOCH,
+        payload_type: 0,
+        payload_desc: "PCMU",
+        sample_rate: 8_000,
+        loss_rate: 0,
+        discard_rate: 0,
+        burst_density: 0,
+        burst_duration_ms: 0,
+        gap_density: 0,
+        gap_duration_ms: 0,
+        gmin: 16,
+        round_trip_delay_ms: 0,
+        end_system_delay_ms: 0,
+        jitter_buffer_adaptive: 0,
+        jitter_buffer_rate: 0,
+        jitter_buffer_nominal_ms: 0,
+        jitter_buffer_maximum_ms: 0,
+        jitter_buffer_abs_max_ms: 0,
+        r_factor: None,
+        mos_lq_x10: None,
+        mos_cq_x10: None,
+    }
+}
+
 #[test]
 fn a_cancel_that_lost_its_race_leaves_a_call_that_is_hung_up() {
     // the 200 crossed the CANCEL. 13.2.2.4 still wants the ACK, and only then
