@@ -177,7 +177,7 @@ fn main() -> ExitCode {
     let dtls_pass = env::var("SIPRAL_PASS_DTLS").unwrap_or_else(|_| pass.clone());
     // 8.6.5's mailbox endpoint (interop/asterisk's `labuser-mwi`), kept apart
     // from `labuser` for the same reason the SDES one is: it is the one
-    // account `mailboxes=9007@default` is configured on
+    // account whose AOR has `mailboxes=9007@default`
     let mwi_user = env::var("SIPRAL_USER_MWI").unwrap_or_else(|_| "labuser-mwi".to_owned());
     let mwi_pass = env::var("SIPRAL_PASS_MWI").unwrap_or_else(|_| pass.clone());
     let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
@@ -308,9 +308,10 @@ enum Flow {
     Message,
     /// 8.6.5's message waiting indication flow (RFC 3842): a subscription to
     /// `message-summary` for this account's own mailbox, a call placed into
-    /// the lab's own voicemail extension (interop/asterisk's own extension
-    /// 9007, `app_voicemail`) to leave a message, and the mailbox's `new`
-    /// count read back higher once Asterisk's own MWI support reports it.
+    /// the lab's own mailbox extension (interop/asterisk's own extension
+    /// 9007, which announces a new message when the call ends), and the
+    /// mailbox's `new` count read back higher once Asterisk's own MWI
+    /// support reports it.
     Mwi,
 }
 
@@ -1097,8 +1098,8 @@ impl Script {
                 }
             }
             // a plain call is the one that carries the tone, so it waits.
-            // `Flow::Mwi`'s voicemail leg is the same shape: dwell on the
-            // tone so `app_voicemail` has something to record, then hang up
+            // `Flow::Mwi`'s mailbox leg is the same shape: dwell, then hang
+            // up, which is what makes 9007 announce the message
             Step::Talking if matches!(self.flow, Flow::Call | Flow::Srtp | Flow::Mwi) => {
                 self.listen_until = Some(now + dwell());
             }

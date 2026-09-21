@@ -78,10 +78,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
   `sipral_account_message` is the C entry point, and
   `SIPRAL_EVENT_KIND_MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and
-  `..._MESSAGES_WAITING` (34, 35, 36) the new events; 37 is now held for a
-  later task's RTCP-XR quality reports. The interop lab gained two flows
-  against Asterisk: a MESSAGE echoed by the lab's own dialplan, and a mailbox
-  whose count is read higher after a voicemail is left in it.
+  `..._MESSAGES_WAITING` (34, 35, 36) the new events. The interop lab gained
+  two flows against Asterisk: a MESSAGE echoed by the lab's own dialplan, and
+  a mailbox whose count is read higher after a call announces a message in
+  it.
 - **RTCP XR VoIP Metrics and RFC 6035 voice quality reports.** `sipral-rtp`
   builds and parses the RFC 3611 Extended Report packet and its VoIP
   Metrics Report Block: burst and gap loss (Appendix A.2's Gmin
@@ -306,6 +306,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A request challenged with a nonce another request already answered is
+  answered too.** A server that draws its nonce from the clock, as Asterisk
+  does, challenges a SUBSCRIBE sent in the same second as a REGISTER with the
+  nonce the REGISTER answered, and the digest cache read that as the
+  password refused and sent nothing more, so the subscription ended refused.
+  RFC 3261 §22.1 forbids re-sending credentials "that have just been
+  rejected", and a request that carried none had nothing rejected: the nonce
+  is now answered again, its `nc` counting on, and a refusal still stands
+  once a request that carried the answer is refused with the same nonce.
 - **A DTLS-SRTP call survives a far end that starts its handshake over.**
   Asterisk begins a new association on every re-negotiation — a fresh
   ClientHello on a hold, `a=connection:new` on the resume — and the running

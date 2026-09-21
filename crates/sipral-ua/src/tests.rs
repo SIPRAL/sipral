@@ -8879,6 +8879,54 @@ fn a_challenged_subscribe_goes_again_with_credentials_and_keeps_its_numbering() 
 }
 
 #[test]
+fn a_subscribe_challenged_with_the_nonce_the_register_answered_goes_again() {
+    // Asterisk draws its nonce from the clock, so a SUBSCRIBE sent in the
+    // same second as the REGISTER is refused with the nonce the REGISTER
+    // already answered. The lab's mailbox flow ended there, refused: the
+    // SUBSCRIBE had carried no credentials, so nothing had been rejected.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "secret")));
+    let clock_nonce = "WWW-Authenticate: Digest realm=\"asterisk\",\
+nonce=\"1790030428/0c6e1bb101ec6dce559767230783f15f\",opaque=\"2388489800029c2e\",\
+algorithm=MD5,qop=\"auth\"\r\n";
+    agent.register(id, t0).expect("the REGISTER goes");
+    let register = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(&register, 401, "Unauthorized", clock_nonce),
+        t0,
+    );
+    let answered = sent(&mut agent);
+    deliver(&mut agent, &granted(&answered, 300), t0);
+    events(&mut agent);
+
+    let aor = agent.account(id).expect("the account").aor().clone();
+    let handle = agent
+        .subscribe(id, &Subscribe::new(aor, "message-summary"), t0)
+        .expect("the SUBSCRIBE goes");
+    let first = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(
+        &mut agent,
+        &reply(&first, 401, "Unauthorized", clock_nonce),
+        t0,
+    );
+
+    let retry = only(&transmits(&mut agent), "SUBSCRIBE ");
+    let credentials =
+        String::from_utf8_lossy(&header(&retry, HeaderName::Authorization)).into_owned();
+    assert!(
+        credentials.contains("nc=00000002"),
+        "the nonce counts on from the REGISTER's answer: {credentials}"
+    );
+    assert_eq!(
+        agent.subscription_state(handle),
+        Some(SubscriptionState::Requesting),
+        "still asking, not ended"
+    );
+}
+
+#[test]
 fn a_challenge_that_comes_back_a_second_time_is_the_password_being_wrong() {
     let t0 = Instant::now();
     let mut agent = agent(t0);

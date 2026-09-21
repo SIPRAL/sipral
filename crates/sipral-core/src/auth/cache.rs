@@ -99,22 +99,30 @@ impl AuthCache {
         }
     }
 
-    /// Take in a 401 or a 407.
+    /// Take in a 401 or a 407, answering `request`.
     ///
-    /// `cnonce` is the client nonce to use for whatever is learned here; the
-    /// core draws no random numbers, so it arrives from the caller. `call_id`
-    /// is the one the refused request carried, which is how far a proxy's
-    /// challenge may be re-used (§22.3). Per realm, the topmost challenge that
-    /// can be answered wins — RFC 8760 §2.3 has the server list them "in the
-    /// order in which it would prefer to see them used", and §2.4 has the
-    /// client "use the topmost header field that it supports".
-    pub fn learn(&mut self, response: &RawMessage<'_>, cnonce: &str, call_id: &[u8]) -> Learned {
+    /// `request` is the one that was refused, as it went out: its `Call-ID`
+    /// is how far a proxy's challenge may be re-used (§22.3), and the
+    /// credentials it carried say whether a nonce coming back was a verdict
+    /// on them. `cnonce` is the client nonce to use for whatever is learned
+    /// here; the core draws no random numbers, so it arrives from the caller.
+    /// Per realm, the topmost challenge that can be answered wins — RFC 8760
+    /// §2.3 has the server list them "in the order in which it would prefer
+    /// to see them used", and §2.4 has the client "use the topmost header
+    /// field that it supports".
+    pub fn learn(
+        &mut self,
+        response: &RawMessage<'_>,
+        request: &RawMessage<'_>,
+        cnonce: &str,
+    ) -> Learned {
         let www = response.www_authenticate().map(|c| (c, false));
         let proxy = response.proxy_authenticate().map(|c| (c, true));
+        let carried = carried(request);
 
         let mut outcome = Learned::Unusable;
         let mut seen: Vec<(bool, Arc<str>)> = Vec::new();
-        let call_id: Arc<[u8]> = Arc::from(call_id);
+        let call_id: Arc<[u8]> = Arc::from(request.call_id().unwrap_or_default());
         for (challenge, is_proxy) in www.chain(proxy) {
             let Some(challenge) = readable(challenge, is_proxy) else {
                 continue;
@@ -126,7 +134,12 @@ impl AuthCache {
                 continue;
             }
             seen.push(realm);
-            outcome = worst(outcome, self.take(challenge, cnonce, &call_id));
+            let answered = carried.iter().any(|(proxy, realm, nonce)| {
+                *proxy == challenge.proxy
+                    && **realm == *challenge.realm.as_bytes()
+                    && **nonce == *challenge.nonce.as_bytes()
+            });
+            outcome = worst(outcome, self.take(challenge, cnonce, &call_id, answered));
         }
         outcome
     }
@@ -252,7 +265,15 @@ impl AuthCache {
         }
     }
 
-    fn take(&mut self, challenge: Challenge, cnonce: &str, call_id: &Arc<[u8]>) -> Learned {
+    /// `answered` is whether the refused request carried an answer to this
+    /// very challenge — its realm and its nonce.
+    fn take(
+        &mut self,
+        challenge: Challenge,
+        cnonce: &str,
+        call_id: &Arc<[u8]>,
+        answered: bool,
+    ) -> Learned {
         let existing = self.entries.iter_mut().find(|entry| {
             entry.challenge.proxy == challenge.proxy && entry.challenge.realm == challenge.realm
         });
@@ -269,12 +290,25 @@ impl AuthCache {
 
         // "though the request may be retried if the nonce was stale". A nonce
         // the server has expired comes back with `stale`, and answering the
-        // new one is what it is asking for; the same nonce without it means
-        // the password was wrong, whether it went out after a refusal or
-        // ahead of one.
+        // new one is what it is asking for; the same nonce without it, on a
+        // request that answered it, means the password was wrong, whether it
+        // went out after a refusal or ahead of one.
         if entry.challenge.nonce == challenge.nonce && !challenge.stale {
-            entry.refused = true;
-            return Learned::Refused;
+            if answered || entry.refused {
+                entry.refused = true;
+                return Learned::Refused;
+            }
+            // §22.1 forbids re-sending "the credentials that have just been
+            // rejected", and a request that carried none had nothing
+            // rejected: a server that draws its nonce from the clock hands
+            // the same one to every request in the same second, so the
+            // SUBSCRIBE that follows a REGISTER is challenged with the nonce
+            // the REGISTER already answered. It is still good, so it is
+            // answered again — and the count is left where it is, since `nc`
+            // numbers every request sent with one nonce (RFC 7616 §3.4).
+            // The request's own allowance still caps how often.
+            entry.call_id = Arc::clone(call_id);
+            return Learned::Retry;
         }
         entry.challenge = challenge;
         entry.cnonce = Arc::from(cnonce);
@@ -283,6 +317,24 @@ impl AuthCache {
         entry.call_id = Arc::clone(call_id);
         Learned::Retry
     }
+}
+
+/// The realm and nonce of every set of credentials `request` carried, with
+/// which of the two spaces each answered. Values that do not parse carried
+/// nothing anyone could have refused.
+fn carried(request: &RawMessage<'_>) -> Vec<(bool, Vec<u8>, Vec<u8>)> {
+    let www = request.authorization().map(|c| (c, false));
+    let proxy = request.proxy_authorization().map(|c| (c, true));
+    www.chain(proxy)
+        .filter_map(|(credentials, is_proxy)| {
+            let credentials = credentials.ok()?;
+            Some((
+                is_proxy,
+                credentials.realm()?.into_owned(),
+                credentials.nonce()?.into_owned(),
+            ))
+        })
+        .collect()
 }
 
 fn readable(challenge: Result<ChallengeRef<'_>, HeaderError>, proxy: bool) -> Option<Challenge> {
@@ -328,10 +380,38 @@ CSeq: 1 REGISTER\r\n"
     /// The `Call-ID` of the request every test here is answering for.
     const CALL: &[u8] = b"a84b4c76e66710";
 
+    /// Take in a refusal of a request that carried no credentials.
     fn learn(cache: &mut AuthCache, bytes: &[u8]) -> Learned {
-        let mut scratch = ParseScratch::new();
+        learn_after(cache, bytes, &[])
+    }
+
+    /// Take in a refusal of a request that carried `fields`.
+    fn learn_after(
+        cache: &mut AuthCache,
+        bytes: &[u8],
+        fields: &[(HeaderName<'static>, String)],
+    ) -> Learned {
+        let mut sent = format!(
+            "REGISTER sip:example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1\r\n\
+From: <sip:alice@example.com>;tag=alice1\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: {}\r\n\
+CSeq: 1 REGISTER\r\n",
+            String::from_utf8_lossy(CALL)
+        );
+        for (name, value) in fields {
+            sent.push_str(&name.to_string());
+            sent.push_str(": ");
+            sent.push_str(value);
+            sent.push_str("\r\n");
+        }
+        sent.push_str("Content-Length: 0\r\n\r\n");
+        let (mut scratch, mut sent_scratch) = (ParseScratch::new(), ParseScratch::new());
         let response = parse(bytes, &mut scratch, ParseMode::Strict).expect("a response");
-        cache.learn(&response, "0a4f113b", CALL)
+        let request =
+            parse(sent.as_bytes(), &mut sent_scratch, ParseMode::Strict).expect("a request");
+        cache.learn(&response, &request, "0a4f113b")
     }
 
     fn authorize(cache: &mut AuthCache) -> Vec<(HeaderName<'static>, String)> {
@@ -534,14 +614,71 @@ CSeq: 1 REGISTER\r\n"
             &[("WWW-Authenticate", &challenge("example.com", "n1", ""))],
         );
         assert_eq!(learn(&mut cache, &refused), Learned::Retry);
-        authorize(&mut cache);
+        let sent = authorize(&mut cache);
 
-        assert_eq!(learn(&mut cache, &refused), Learned::Refused);
+        assert_eq!(learn_after(&mut cache, &refused, &sent), Learned::Refused);
         assert!(
             authorize(&mut cache).is_empty(),
             "a UAC MUST NOT re-attempt with credentials that have just been rejected"
         );
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn the_same_nonce_on_a_request_that_did_not_answer_it_is_answered() {
+        // A server that draws its nonce from the clock challenges every
+        // request in one second with the same one: the SUBSCRIBE that follows
+        // a REGISTER is refused with the nonce the REGISTER already answered.
+        // Nothing was rejected — the SUBSCRIBE carried no credentials — so the
+        // nonce is answered again, counting on from where it was.
+        let mut cache = AuthCache::new();
+        let refused = refusal(
+            401,
+            &[("WWW-Authenticate", &challenge("example.com", "n1", ""))],
+        );
+        assert_eq!(learn(&mut cache, &refused), Learned::Retry);
+        let first = authorize(&mut cache);
+        assert!(first.first().expect("one").1.contains("nc=00000001"));
+
+        assert_eq!(learn(&mut cache, &refused), Learned::Retry);
+        let again = authorize(&mut cache);
+        assert!(
+            again.first().expect("one").1.contains("nc=00000002"),
+            "nc numbers every request sent with the nonce: {again:?}"
+        );
+
+        // and once that answer is refused in its turn, the password is wrong
+        assert_eq!(learn_after(&mut cache, &refused, &again), Learned::Refused);
+        // after which not even an unanswered request gets it again
+        assert_eq!(learn(&mut cache, &refused), Learned::Refused);
+    }
+
+    #[test]
+    fn an_answer_to_another_realm_or_nonce_is_not_this_one() {
+        let mut cache = AuthCache::new();
+        let refused = refusal(
+            401,
+            &[("WWW-Authenticate", &challenge("example.com", "n1", ""))],
+        );
+        assert_eq!(learn(&mut cache, &refused), Learned::Retry);
+        authorize(&mut cache);
+        let elsewhere = [(
+            HeaderName::Authorization,
+            "Digest username=\"alice\", realm=\"other.example\", nonce=\"n1\", \
+uri=\"sip:example.com\", response=\"00\""
+                .to_owned(),
+        )];
+        assert_eq!(
+            learn_after(&mut cache, &refused, &elsewhere),
+            Learned::Retry
+        );
+        let older = [(
+            HeaderName::Authorization,
+            "Digest username=\"alice\", realm=\"example.com\", nonce=\"n0\", \
+uri=\"sip:example.com\", response=\"00\""
+                .to_owned(),
+        )];
+        assert_eq!(learn_after(&mut cache, &refused, &older), Learned::Retry);
     }
 
     #[test]

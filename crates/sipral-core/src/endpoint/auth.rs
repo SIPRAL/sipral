@@ -507,13 +507,12 @@ impl Endpoint {
         // checker insists on and which also keeps the token draw in one place
         let cnonce = String::from_utf8_lossy(&self.tokens.token()).into_owned();
         let raw = request.as_raw();
-        let (Some(to), Ok(call_id)) = (
+        let (Some(to), Ok(_)) = (
             raw.header(HeaderName::To).and_then(destination),
             raw.call_id(),
         ) else {
             return;
         };
-        let call_id = call_id.to_vec();
         // taken before the cache is borrowed, for the same reason the cnonce
         // is read there; and taken rather than read because from here it
         // travels on the record below, which outlives this ledger
@@ -540,7 +539,7 @@ impl Endpoint {
             // of the exchange.
             return;
         }
-        if cache.learn(response, &cnonce, &call_id) != Learned::Retry {
+        if cache.learn(response, &raw, &cnonce) != Learned::Retry {
             // either nothing here can be answered (RFC 8760 §2.4: "The client
             // MUST ignore any challenge it does not understand"), or the same
             // nonce came back without `stale`, which §22.1 says not to answer
