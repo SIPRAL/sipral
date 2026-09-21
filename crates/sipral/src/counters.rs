@@ -416,6 +416,7 @@ mod tests {
             packets_sent: 0,
             octets_sent: 0,
             silent_for: Duration::ZERO,
+            voip_metrics: None,
         }
     }
 

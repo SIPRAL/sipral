@@ -8,6 +8,11 @@ use std::net::IpAddr;
 
 use super::media::{Direction, MediaDescription};
 
+/// RFC 3611 §5.1's `xr-format` token for the VoIP Metrics Report Block
+/// (§4.7): `"voip-metrics"`, the only one this stack ever writes or reads
+/// out of an `a=rtcp-xr` line.
+const VOIP_METRICS_XR_FORMAT: &str = "voip-metrics";
+
 /// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
 /// (§5.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +263,20 @@ impl Attribute {
             .is_none()
             .then(|| Direction::from_name(&self.name))?
     }
+
+    /// Whether this is an `a=rtcp-xr` line (RFC 3611 §5.1) that lists
+    /// `format` among its space-separated `xr-format` tokens — `format`
+    /// bare, such as `"voip-metrics"`, never one of the tokens that takes
+    /// its own `=` argument (`"rcvr-rtt"`, `"stat-summary"`, ...), which
+    /// this never matches since it compares whole tokens.
+    #[must_use]
+    pub fn requests_xr_format(&self, format: &str) -> bool {
+        self.name == "rtcp-xr"
+            && self
+                .value
+                .as_deref()
+                .is_some_and(|value| value.split_whitespace().any(|token| token == format))
+    }
 }
 
 impl fmt::Display for Attribute {
@@ -357,6 +376,24 @@ impl SessionDescription {
     #[must_use]
     pub fn connection_of<'a>(&'a self, media: &'a MediaDescription) -> Option<&'a Connection> {
         media.connection.as_ref().or(self.connection.as_ref())
+    }
+
+    /// Whether this description asks for the RFC 3611 `voip-metrics` XR
+    /// block on one stream: RFC 3611 §5.1, "It is both a session and a
+    /// media level attribute ... Any media level specification MUST
+    /// replace a session level specification, if one is present, for
+    /// that media block" — so a stream with its own `a=rtcp-xr` line
+    /// (whatever it lists) never falls back to the session's.
+    #[must_use]
+    pub fn wants_voip_metrics_xr(&self, media: &MediaDescription) -> bool {
+        media.attribute("rtcp-xr").map_or_else(
+            || {
+                self.attributes
+                    .iter()
+                    .any(|a| a.requests_xr_format(VOIP_METRICS_XR_FORMAT))
+            },
+            |a| a.requests_xr_format(VOIP_METRICS_XR_FORMAT),
+        )
     }
 
     /// The bytes, ready to go into a message body.

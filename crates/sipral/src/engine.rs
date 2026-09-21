@@ -2548,6 +2548,7 @@ mod keying_guards {
             dtmf: None,
             rtcp: RtcpPlan::Off,
             keying,
+            voip_metrics_xr: false,
         }
     }
 
@@ -2790,6 +2791,7 @@ mod counter_wiring {
             dtmf: None,
             rtcp: RtcpPlan::Off,
             keying: None,
+            voip_metrics_xr: false,
         };
         let config = MediaConfig {
             // short enough that the test does not need to fake a ten-second

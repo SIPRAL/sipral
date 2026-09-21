@@ -148,6 +148,31 @@ impl Codec {
         }
     }
 
+    /// The ITU-T G.113 Appendix I `Ie`/`Bpl` pair this codec is rated with,
+    /// for the RFC 3611 §4.7.5 R factor and MOS a call's VoIP Metrics
+    /// report carries — `None` for a codec Table I.4 does not tabulate.
+    ///
+    /// G.722 gets `None` rather than G.711's numbers: it is a different
+    /// codec with its own entry in G.113, not on this build's copy of the
+    /// Recommendation text, and reporting the R.711 figures for a
+    /// wideband stream would rate it either better or worse than it
+    /// actually sounds, in a direction nothing here has measured. Opus
+    /// gets `None` for the same reason: it postdates G.113's own codec
+    /// list. RFC 3611 §4.7.5's own answer for a metric this stack cannot
+    /// honestly compute is the sentinel, not a guess — see
+    /// `sipral_rtp::RtpSession::voip_metrics`.
+    #[must_use]
+    pub const fn quality_model(self) -> Option<sipral_rtp::CodecQualityModel> {
+        match self {
+            Self::Pcmu | Self::Pcma => Some(sipral_rtp::codec_quality_model(
+                sipral_rtp::CodecFamily::G711,
+            )),
+            Self::G722 => None,
+            #[cfg(feature = "opus")]
+            Self::Opus => None,
+        }
+    }
+
     /// The RTP timestamp clock, which is what the `a=rtpmap` line carries and
     /// what the timestamps on the wire count in.
     ///

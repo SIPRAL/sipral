@@ -470,6 +470,7 @@ impl MediaSession {
                 .clone()
                 .unwrap_or_else(|| format!("sipral@{}", plan.local.ip())),
             rtcp_bandwidth: config.rtcp_bandwidth,
+            voip_metrics_xr: plan.voip_metrics_xr,
         };
         // the first RTCP report's random factor draws from this call's own
         // seeded randomness like every later one does (RFC 3550 §6.2, §6.3.2)
@@ -667,6 +668,7 @@ impl MediaSession {
             packets_sent: self.packets_sent,
             octets_sent: self.octets_sent,
             silent_for: now.saturating_duration_since(self.last_inbound),
+            voip_metrics: self.rtp.voip_metrics(self.codec().quality_model()),
         }
     }
 }
@@ -1449,9 +1451,10 @@ impl MediaSession {
         }
         let ntp = self.clock.at(now);
         let draw = self.draws.unit();
+        let codec = self.codec().quality_model();
         let (length, _) = self
             .rtp
-            .build_report(&mut self.rtcp_out, elapsed, ntp, draw)
+            .build_report(&mut self.rtcp_out, elapsed, ntp, draw, codec)
             .ok()?;
         #[cfg(feature = "ice")]
         {

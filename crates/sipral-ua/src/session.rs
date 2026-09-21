@@ -350,6 +350,13 @@ impl Session {
 /// offer still carries it; `ptime` and `maxptime` are this end's own statement
 /// about what it wants to receive and stand whatever the offer says.
 ///
+/// `rtcp-xr` is mutual for the same reason and by the same rule, though what
+/// it negotiates runs the other way: RFC 3611 §5.2 has each side's own line
+/// ask the *other* to send XR reports, so repeating this end's line here
+/// (rather than the offer's) is what keeps asking the far end for them
+/// across a hold or an unrelated re-INVITE, exactly as leaving it out would
+/// silently withdraw the request.
+///
 /// **`crypto`, `fingerprint` and `setup` are deliberately not here**, and
 /// never need to be: a stream on a secure profile is not answered by this
 /// layer at all ([`Session::is_same_media`] hands it up). RFC 4568 §5.1.2
@@ -372,7 +379,7 @@ impl Session {
 /// with them, and there is more than one candidate line, so they are taken by
 /// name rather than one to a name.
 fn carried(ours: &MediaDescription, offered: &MediaDescription) -> Vec<Attribute> {
-    let mutual = ["rtcp-mux"]
+    let mutual = ["rtcp-mux", "rtcp-xr"]
         .iter()
         .filter(|name| offered.attribute(name).is_some());
     let ours_alone = ["ptime", "maxptime", "ice-ufrag", "ice-pwd", "ice-options"].iter();
@@ -721,6 +728,50 @@ mod tests {
         let answer = session.answer(&offer, false).expect("an answer");
         let media = answer.media.first().expect("the stream");
         assert!(media.attribute("rtcp-mux").is_none());
+    }
+
+    /// `rtcp-xr` is carried the same way multiplexing is, but what it
+    /// repeats is this end's own line, not the offer's: RFC 3611 SS5.2 has
+    /// each side's line ask the *other* to send XR, so an answer that
+    /// dropped it would be withdrawing this end's own request to keep
+    /// receiving quality reports across a hold.
+    #[test]
+    fn an_answer_repeats_this_ends_own_request_for_voip_metrics_xr() {
+        let mut session = Session::default();
+        session.set_local(description(
+            40_000,
+            vec![Attribute::with_value("rtcp-xr", "voip-metrics")],
+        ));
+        let offer = description(
+            40_002,
+            vec![Attribute::with_value("rtcp-xr", "voip-metrics")],
+        );
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, true).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert_eq!(
+            media.attribute("rtcp-xr").and_then(|a| a.value.as_deref()),
+            Some("voip-metrics")
+        );
+    }
+
+    /// And it is mutual too: nothing in the offer asking for XR leaves it
+    /// out of the answer, even though this end's own local description
+    /// still carries it.
+    #[test]
+    fn an_offer_that_does_not_ask_for_voip_metrics_xr_is_not_answered_with_it() {
+        let mut session = Session::default();
+        session.set_local(description(
+            40_000,
+            vec![Attribute::with_value("rtcp-xr", "voip-metrics")],
+        ));
+        let offer = description(40_002, Vec::new());
+        session.set_remote(offer.clone());
+
+        let answer = session.answer(&offer, false).expect("an answer");
+        let media = answer.media.first().expect("the stream");
+        assert!(media.attribute("rtcp-xr").is_none());
     }
 
     /// `ptime` is this end's own statement about what it wants to receive, so

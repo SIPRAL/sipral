@@ -460,6 +460,7 @@ mod tests {
             dtmf: None,
             rtcp: RtcpPlan::Off,
             keying,
+            voip_metrics_xr: false,
         }
     }
 

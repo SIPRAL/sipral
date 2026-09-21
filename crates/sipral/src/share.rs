@@ -221,6 +221,7 @@ mod tests {
             dtmf: None,
             rtcp: RtcpPlan::Off,
             keying: None,
+            voip_metrics_xr: false,
         };
         let identity = StreamIdentity {
             ssrc: 1,

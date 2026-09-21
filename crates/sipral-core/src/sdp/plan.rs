@@ -290,6 +290,12 @@ pub struct MediaCapabilities {
     pub rtcp_mux: bool,
     /// Whether to secure the stream, and how.
     pub srtp: SrtpSupport,
+    /// Whether to ask the peer for RFC 3611 XR VoIP Metrics reports
+    /// (§5.1's `a=rtcp-xr:voip-metrics`). Every build of this stack can
+    /// generate and read them, so this defaults on; the builder exists
+    /// for a caller that wants to opt out, and for tests that want an
+    /// offer without it.
+    pub voip_metrics_xr: bool,
 }
 
 impl MediaCapabilities {
@@ -301,6 +307,7 @@ impl MediaCapabilities {
             dtmf: false,
             rtcp_mux: false,
             srtp: SrtpSupport::None,
+            voip_metrics_xr: true,
         }
     }
 
@@ -322,6 +329,13 @@ impl MediaCapabilities {
     #[must_use]
     pub fn with_srtp(mut self, srtp: SrtpSupport) -> Self {
         self.srtp = srtp;
+        self
+    }
+
+    /// Say whether to ask for RFC 3611 XR VoIP Metrics reports.
+    #[must_use]
+    pub const fn with_voip_metrics_xr(mut self, voip_metrics_xr: bool) -> Self {
+        self.voip_metrics_xr = voip_metrics_xr;
         self
     }
 
@@ -397,6 +411,13 @@ impl MediaCapabilities {
         if self.rtcp_mux {
             stream.attributes.push(Attribute::flag("rtcp-mux"));
         }
+        if self.voip_metrics_xr {
+            // RFC 3611 SS5.1: presence in our own offer asks the answerer
+            // to send us the named block, "voip-metrics" here.
+            stream
+                .attributes
+                .push(Attribute::with_value("rtcp-xr", "voip-metrics"));
+        }
         match &self.srtp {
             SrtpSupport::None => {}
             SrtpSupport::Sdes(offered) => {
@@ -438,6 +459,14 @@ pub struct MediaPlan {
     pub rtcp: RtcpPlan,
     /// The keys, when the stream is secured.
     pub keying: Option<Keying>,
+    /// Whether this stream should send RFC 3611 XR VoIP Metrics reports:
+    /// the peer's description asked for them, at the media level or,
+    /// lacking that, the session level (§5.1, §5.2). Not the same
+    /// question as whether *we* offered or asked for them back — RFC
+    /// 3611 §5.2 has each side's own `a=rtcp-xr` line request XR
+    /// *from the other party*, so what decides whether this end sends is
+    /// what the peer's document said, not ours.
+    pub voip_metrics_xr: bool,
 }
 
 impl SessionDescription {
@@ -505,6 +534,7 @@ impl SessionDescription {
             dtmf: agreed_dtmf(ours, theirs, &payloads),
             rtcp,
             keying: keying(ours, remote, theirs, stream)?,
+            voip_metrics_xr: remote.wants_voip_metrics_xr(theirs),
         }))
     }
 
@@ -925,6 +955,66 @@ m=audio {port} RTP/AVP {formats}\r\n{lines}"
         assert_eq!(
             local.media_plan(&nothing_shared, 0).unwrap_err(),
             SdpError::NoCodec { stream: 0 }
+        );
+    }
+
+    #[test]
+    fn voip_metrics_xr_follows_the_peers_media_level_line() {
+        let local = ours(5004, "0", "");
+        let asked = theirs(49_170, "0", "a=rtcp-xr:voip-metrics\r\n");
+        let plan = local
+            .media_plan(&asked, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert!(
+            plan.voip_metrics_xr,
+            "the peer's own document asked for it, so this end sends"
+        );
+
+        let silent = theirs(49_170, "0", "");
+        let plan = local
+            .media_plan(&silent, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert!(!plan.voip_metrics_xr, "nothing asked for it");
+    }
+
+    #[test]
+    fn voip_metrics_xr_falls_back_to_the_peers_session_level_line_but_not_past_a_media_level_one() {
+        let local = ours(5004, "0", "");
+
+        // a session-level line applies when the stream has none of its own
+        let session_level = sdp("v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+a=rtcp-xr:voip-metrics\r\n\
+m=audio 49170 RTP/AVP 0\r\n");
+        let plan = local
+            .media_plan(&session_level, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert!(plan.voip_metrics_xr);
+
+        // RFC 3611 SS5.1: "Any media level specification MUST replace a
+        // session level specification" -- an empty media-level line turns
+        // it back off even with the session-level one still present
+        let overridden = sdp("v=0\r\n\
+o=- 2 2 IN IP4 198.51.100.9\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.9\r\n\
+t=0 0\r\n\
+a=rtcp-xr:voip-metrics\r\n\
+m=audio 49170 RTP/AVP 0\r\n\
+a=rtcp-xr:\r\n");
+        let plan = local
+            .media_plan(&overridden, 0)
+            .expect("a plan")
+            .expect("not rejected");
+        assert!(
+            !plan.voip_metrics_xr,
+            "the stream's own (empty) line replaces the session-level one"
         );
     }
 
@@ -1560,7 +1650,20 @@ KDR=1 UNENCRYPTED_SRTCP",
         assert_eq!(events.clock_rate, 48_000);
         assert_eq!(stream.fmtp(96), Some("0-15"));
         assert!(stream.has_rtcp_mux());
+        assert_eq!(
+            stream.attribute("rtcp-xr").and_then(|a| a.value.as_deref()),
+            Some("voip-metrics"),
+            "RFC 3611 SS5.1: every build of this stack asks for VoIP Metrics XR by default"
+        );
         assert_eq!(stream.direction(), Some(Direction::SendRecv));
+    }
+
+    #[test]
+    fn a_build_that_declines_voip_metrics_xr_writes_no_rtcp_xr_line() {
+        let stream = MediaCapabilities::new(vec![pcmu()])
+            .with_voip_metrics_xr(false)
+            .offer("audio", 5004, Direction::SendRecv);
+        assert!(stream.attribute("rtcp-xr").is_none());
     }
 
     #[test]

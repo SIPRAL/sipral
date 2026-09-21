@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use sipral_rtp::Quality;
+use sipral_rtp::{Quality, VoipMetricsBlock};
 
 use crate::codec::Codec;
 
@@ -60,6 +60,16 @@ pub struct StreamStatistics {
     ///
     /// [`MediaEvent::Stalled`]: crate::MediaEvent::Stalled
     pub silent_for: Duration,
+    /// The RFC 3611 §4.7 VoIP Metrics this stream would report: burst and
+    /// gap loss, delay, jitter buffer sizing, and the R factor and MOS
+    /// the simplified E-model of `sipral_rtp::evaluate_e_model` rates it
+    /// at. `Some` as soon as this stream has identified a source to
+    /// report on, independent of whether RTCP XR reporting was
+    /// negotiated for the call — that only decides whether the same
+    /// figures also go out over the wire (see
+    /// [`sipral_rtp::RtpSession::build_report`]); this field is what an
+    /// RFC 6035 quality report and this crate's own statistics both read.
+    pub voip_metrics: Option<VoipMetricsBlock>,
 }
 
 impl StreamStatistics {
@@ -135,6 +145,7 @@ mod tests {
             packets_sent: 0,
             octets_sent: 0,
             silent_for: Duration::ZERO,
+            voip_metrics: None,
         }
     }
 

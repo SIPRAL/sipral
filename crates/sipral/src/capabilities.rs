@@ -322,6 +322,7 @@ mod tests {
                 fingerprints: vec!["sha-256 AA:BB".to_owned()],
                 setup: None,
             }),
+            voip_metrics_xr: false,
         };
         // the list and the code that reads a plan have to agree: a build that
         // does not list DTLS-SRTP must refuse a plan keyed that way rather
