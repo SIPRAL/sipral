@@ -37,6 +37,34 @@ on a socket with no audio device and no room abstraction anywhere near it. The
 framing and control protocol for that mode is written and tested; joining it to
 the media pipeline is phase 5, and until then no audio reaches it.
 
+## Try it in sixty seconds
+
+No account, no server to run, nothing to configure:
+
+```bash
+cargo run --example call
+```
+
+This dials `sip:thetestcall@sip2sip.info`, a public IVR that sip2sip.info
+publishes for exactly this — reachable by anyone, no registration needed. It
+waits for the greeting, presses `2` to ask for its digits read back, sends a
+short string, and plays what comes back through the default output device.
+On a machine with no audio device, or with `--wav out.wav` on any machine, it
+writes what it heard into a WAV file instead.
+
+That one example is also the shortest way to read what embedding this stack
+looks like: a [`sipral::UserAgent`](crates/sipral/examples/call.rs) and a
+[`sipral::MediaEngine`] driven over sockets the application owns, RTP paced
+against a real clock, and PCM handed to a device or a file. The other
+examples in [`crates/sipral/examples/`](crates/sipral/examples/) build on the
+same shape: `register-and-call.rs` adds an account, a registrar, hold and
+transfer, with the destination on the command line; `tls.rs` is `call.rs`
+again with the signalling carried over TLS instead of plain UDP, using
+`rustls` as that one example's own dependency (`cargo run --example tls
+--features example-tls`); `headless-agent.rs` is a fifty-line agent that
+answers whatever calls it and repeats back whatever it hears, with no device
+and no room abstraction anywhere near it — the shape a voice agent embeds.
+
 ## Design in one paragraph
 
 The core opens no sockets, starts no threads, reads no clock and draws no random

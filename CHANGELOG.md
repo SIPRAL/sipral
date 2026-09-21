@@ -22,6 +22,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   RSASSA-PKCS1-v1_5 over SHA-256 under a 2048- to 8192-bit key, and this end
   still signs with its own P-256 key alone. The lab's DTLS flow now runs
   against FreeSWITCH as well as Asterisk, on both drivers.
+- **Four runnable examples, and a "try it in sixty seconds" README section.**
+  `call.rs` dials a public IVR with no account and no configuration, presses a
+  digit, and plays or records what comes back; `register-and-call.rs` adds an
+  account, a registrar, hold and blind transfer, all from the command line;
+  `tls.rs` is the same call over TLS, with `rustls` as that one example's own
+  optional dependency behind a Cargo feature reached by nothing else in the
+  crate; `headless-agent.rs` is a fifty-line agent with no device anywhere
+  near it, that answers and repeats back whatever it hears. `docs/04-ua.md`
+  now quotes the examples directly rather than describing them in prose that
+  nothing built.
 - **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end
