@@ -11867,6 +11867,66 @@ fn a_message_sent_inside_a_call_rides_the_dialog_and_is_reported_back() {
     )));
 }
 
+#[test]
+fn a_second_in_dialog_message_is_refused_on_a_route_not_known_to_be_congestion_controlled() {
+    // §8: "A UAC SHOULD NOT initiate overlapping MESSAGE transactions inside
+    // a dialog, and MUST NOT do so unless the route set for that dialog uses
+    // a congestion-controlled transport at every hop." The default account
+    // says nothing about its transport, so it gets the conservative MUST NOT.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent
+        .message_in_call(call, b"text/plain", b"first", t0)
+        .expect("the first MESSAGE goes");
+    assert_eq!(
+        agent.message_in_call(call, b"text/plain", b"second", t0),
+        Err(UaError::MessagePending),
+        "a second one is refused while the first has not been answered"
+    );
+}
+
+#[test]
+fn overlapping_in_dialog_messages_are_allowed_once_the_transport_is_congestion_controlled() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().transport_protocol(TransportProtocol::Tcp));
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent
+        .message_in_call(call, b"text/plain", b"first", t0)
+        .expect("the first MESSAGE goes");
+    assert!(
+        agent
+            .message_in_call(call, b"text/plain", b"second", t0)
+            .is_ok(),
+        "a congestion-controlled route is not held to the MUST NOT"
+    );
+}
+
+#[test]
+fn a_second_in_dialog_message_is_allowed_once_the_first_has_been_answered() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = call_up(&mut agent, id, t0);
+
+    agent
+        .message_in_call(call, b"text/plain", b"first", t0)
+        .expect("the first MESSAGE goes");
+    let request = only(&transmits(&mut agent), "MESSAGE ");
+    deliver(&mut agent, &reply(&request, 200, "OK", ""), t0);
+    events(&mut agent);
+    assert!(
+        agent
+            .message_in_call(call, b"text/plain", b"second", t0)
+            .is_ok(),
+        "the first has settled, so this is not an overlap any more"
+    );
+}
+
 // -- Message waiting indication (RFC 3842) -------------------------------
 
 /// The `message-summary` package's body, as §4.1's own example writes it.

@@ -69,6 +69,11 @@ pub enum UaError {
     /// §8: "A UAC MUST NOT initiate a new out-of-dialog MESSAGE transaction
     /// to a given URI if there is a previous out-of-dialog transaction
     /// pending for the same URI." One is still waiting for its final answer.
+    /// The same section's next sentence gives an in-dialog MESSAGE the same
+    /// refusal on a route not known to be congestion-controlled: "A UAC
+    /// SHOULD NOT initiate overlapping MESSAGE transactions inside a
+    /// dialog, and MUST NOT do so unless the route set for that dialog uses
+    /// a congestion-controlled transport at every hop."
     MessagePending,
 }
 

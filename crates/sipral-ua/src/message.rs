@@ -34,6 +34,16 @@
 //! given URI if there is a previous out-of-dialog transaction pending for
 //! the same URI." [`UserAgent::message`] refuses a second one with
 //! [`UaError::MessagePending`] until the first settles.
+//!
+//! **Nor more than one in-dialog MESSAGE on a congestion-unsafe route.** The
+//! same sentence of §8 continues: "Similarly, A UAC SHOULD NOT initiate
+//! overlapping MESSAGE transactions inside a dialog, and MUST NOT do so
+//! unless the route set for that dialog uses a congestion-controlled
+//! transport at every hop." [`UserAgent::message_in_call`] holds every call
+//! to that MUST NOT the same way [`Account::transport_protocol`] lifts the
+//! size ceiling: unset, or set to anything but a byte-stream protocol, a
+//! second in-dialog MESSAGE is refused with [`UaError::MessagePending`]
+//! while the first has not been answered.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -90,6 +100,15 @@ pub(crate) struct SentMessage {
     /// the drain, because whether this is a refusal or the first half of a
     /// retry is decided by whether a [`Event::Challenged`] follows it.
     unanswered: Option<OwnedMessage>,
+    /// The call this MESSAGE rode inside, for one sent by
+    /// [`UserAgent::message_in_call`] on a route that is not known to be
+    /// congestion-controlled — kept so §8's "MUST NOT [initiate overlapping
+    /// MESSAGE transactions inside a dialog] unless the route set for that
+    /// dialog uses a congestion-controlled transport at every hop" can be
+    /// checked against every other one still outstanding on the same call.
+    /// `None` for an out-of-dialog send, and for one on a route this layer
+    /// was told is congestion-controlled, which the rule does not bind.
+    overlap_call: Option<CallHandle>,
 }
 
 // -- sending -------------------------------------------------------------
@@ -154,6 +173,7 @@ impl UserAgent {
                 account: Some(account),
                 target: Some(target_key),
                 unanswered: None,
+                overlap_call: None,
             },
         );
         self.by_message
@@ -166,14 +186,21 @@ impl UserAgent {
     ///
     /// Nothing about the dialog changes: a MESSAGE never refreshes a
     /// session and is never mistaken for one. §8's per-URI rule does not
-    /// apply here — the destination is the dialog's own, already settled —
-    /// so more than one may be outstanding on the same call at once, the
-    /// same way `sipral_call_send_dtmf` lets more than one digit queue.
+    /// apply here — the destination is the dialog's own, already settled.
+    /// But §8 also has "A UAC SHOULD NOT initiate overlapping MESSAGE
+    /// transactions inside a dialog, and MUST NOT do so unless the route
+    /// set for that dialog uses a congestion-controlled transport at every
+    /// hop", which does apply: unless [`Account::transport_protocol`] says
+    /// this call's account is on a byte-stream transport, a second in-dialog
+    /// MESSAGE on `call` while an earlier one has not been answered is
+    /// refused the same as a second out-of-dialog one to a busy target.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`]; [`UaError::WrongState`] for a call with no
     /// dialog to send one in yet; [`UaError::MessageTooLarge`], as
-    /// [`UserAgent::message`]; or [`UaError::Send`].
+    /// [`UserAgent::message`]; [`UaError::MessagePending`] for a second
+    /// in-dialog MESSAGE on a route not known to be congestion-controlled;
+    /// or [`UaError::Send`].
     pub fn message_in_call(
         &mut self,
         call: CallHandle,
@@ -191,6 +218,15 @@ impl UserAgent {
             .and_then(|id| self.accounts.get(&id))
             .and_then(|config| config.protocol);
         check_outgoing_size(protocol, body.len())?;
+        let congestion_controlled = is_congestion_controlled(protocol);
+        if !congestion_controlled
+            && self
+                .messages
+                .values()
+                .any(|sent| sent.overlap_call == Some(call))
+        {
+            return Err(UaError::MessagePending);
+        }
         let request =
             OutgoingInDialogRequest::new(Method::Message).body(content_type, Arc::from(body));
         let id = self.endpoint.request_in_dialog(dialog, &request, now)?;
@@ -201,6 +237,7 @@ impl UserAgent {
                 account,
                 target: None,
                 unanswered: None,
+                overlap_call: (!congestion_controlled).then_some(call),
             },
         );
         self.by_message
@@ -216,10 +253,11 @@ impl UserAgent {
     }
 }
 
-/// A body §8's ceiling refuses, unless `protocol` says the transport it
-/// would leave on is congestion-controlled.
-fn check_outgoing_size(protocol: Option<TransportProtocol>, len: usize) -> Result<(), UaError> {
-    let congestion_controlled = matches!(
+/// Whether `protocol` names a byte-stream transport, the "positive
+/// knowledge" §8 asks for before either relaxing the size ceiling or
+/// allowing overlapping in-dialog transactions.
+const fn is_congestion_controlled(protocol: Option<TransportProtocol>) -> bool {
+    matches!(
         protocol,
         Some(
             TransportProtocol::Tcp
@@ -227,8 +265,13 @@ fn check_outgoing_size(protocol: Option<TransportProtocol>, len: usize) -> Resul
                 | TransportProtocol::Ws
                 | TransportProtocol::Wss
         )
-    );
-    if !congestion_controlled && len > MAX_UNSAFE_BODY_BYTES {
+    )
+}
+
+/// A body §8's ceiling refuses, unless `protocol` says the transport it
+/// would leave on is congestion-controlled.
+fn check_outgoing_size(protocol: Option<TransportProtocol>, len: usize) -> Result<(), UaError> {
+    if !is_congestion_controlled(protocol) && len > MAX_UNSAFE_BODY_BYTES {
         return Err(UaError::MessageTooLarge {
             size: len,
             limit: MAX_UNSAFE_BODY_BYTES,
