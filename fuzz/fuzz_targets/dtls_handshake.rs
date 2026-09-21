@@ -76,8 +76,10 @@ fuzz_target!(|data: &[u8]| {
         HandshakeMessage::Certificate(certificate) => {
             if let Some(first) = certificate.certificate_list.first() {
                 let _ = Fingerprint::of(HashFunction::Sha1, first).matches(first);
+                // either kind of key: a handshake reaches this only past the
+                // fingerprint, which is why it is called here directly
                 if let Ok(info) = SubjectPublicKeyInfo::from_certificate(first) {
-                    let _ = info.p256_key();
+                    let _ = info.certified_key();
                 }
             }
         }

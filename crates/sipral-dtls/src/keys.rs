@@ -11,6 +11,11 @@
 //! allows, a peer's point checked to be on the curve before anything is done
 //! with it (§5.11), a shared secret that keeps its leading zeros (§5.10), and
 //! signatures as the DER `Ecdsa-Sig-Value` the wire carries (§5.4).
+//!
+//! And the one key that is not P-256: an RSA key on the peer's side, which
+//! this end checks signatures with and never signs with. FreeSWITCH, left as
+//! it ships, certifies its DTLS-SRTP end with an RSA-4096 key, and a peer
+//! like that cannot be keyed with at all without it.
 
 use core::fmt;
 
@@ -19,8 +24,12 @@ use p256::ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
+use rsa::traits::PublicKeyParts;
+use rsa::{BoxedUint, Pkcs1v15Sign, RsaPublicKey};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::handshake::SignatureAndHash;
 use crate::{Error, Random};
 
 /// Octets in an uncompressed P-256 point: the form octet, then x and y.
@@ -215,6 +224,151 @@ impl PeerKey {
 impl fmt::Debug for PeerKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerKey").finish_non_exhaustive()
+    }
+}
+
+/// The shortest RSA modulus accepted, in bits: RFC 9325 §4.5, "servers MUST
+/// authenticate using certificates with at least a 2048-bit modulus".
+pub const MIN_RSA_BITS: u32 = 2048;
+/// The longest, in bits: the ceiling the primitive itself sets. A peer's key
+/// is read only once its certificate has matched the fingerprint signalling
+/// named, so the size is that peer's own choice; checking a signature under
+/// the largest key still takes one exponentiation by an exponent of at most
+/// 33 bits.
+pub const MAX_RSA_BITS: u32 = 8192;
+
+/// An RSA public key belonging to the peer, from its certificate: for
+/// checking what it signed, with RSASSA-PKCS1-v1_5 over SHA-256, the one RSA
+/// scheme this crate offers (RFC 5246 §7.4.1.4.1).
+#[derive(Clone, PartialEq, Eq)]
+pub struct RsaPeerKey {
+    key: RsaPublicKey,
+}
+
+impl RsaPeerKey {
+    /// A key from the big-endian magnitudes of its modulus and exponent, as
+    /// an `RSAPublicKey` carries them (RFC 3279 §2.3.1).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnacceptableRsaKey`] for a modulus shorter than
+    /// [`MIN_RSA_BITS`] or longer than [`MAX_RSA_BITS`], an even modulus, an
+    /// exponent below 2 or above 2^33 - 1, or one not below the modulus.
+    pub fn from_parts(modulus: &[u8], exponent: &[u8]) -> Result<Self, Error> {
+        let n = BoxedUint::from_be_slice_vartime(modulus);
+        let bits = n.bits_vartime();
+        if !(MIN_RSA_BITS..=MAX_RSA_BITS).contains(&bits) {
+            return Err(Error::UnacceptableRsaKey);
+        }
+        let e = BoxedUint::from_be_slice_vartime(exponent);
+        let max = usize::try_from(MAX_RSA_BITS).map_err(|_| Error::UnacceptableRsaKey)?;
+        RsaPublicKey::new_with_max_size(n, e, max)
+            .map(|key| Self { key })
+            .map_err(|_| Error::UnacceptableRsaKey)
+    }
+
+    /// Octets in the modulus, which is how long every signature under this
+    /// key is.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.key.size()
+    }
+
+    /// Never true: a modulus has octets. Here because a type with `len`
+    /// is expected to answer it.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Check an RSASSA-PKCS1-v1_5 signature over a SHA-256 digest computed
+    /// elsewhere.
+    ///
+    /// The padded block is rebuilt from the digest and compared whole
+    /// (RFC 8017 §8.2.2 step 3-4), not parsed, so nothing a forger puts
+    /// after the digest or inside the padding is ever skipped over.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadSignature`] for a signature that is not exactly as long as
+    /// the modulus (RFC 8017 §8.2.2 step 1), is not below it, or does not
+    /// verify.
+    pub fn verify_digest(&self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Error> {
+        if signature.len() != self.len() {
+            return Err(Error::BadSignature);
+        }
+        self.key
+            .verify(Pkcs1v15Sign::new::<Sha256>(), digest, signature)
+            .map_err(|_| Error::BadSignature)
+    }
+}
+
+impl fmt::Debug for RsaPeerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RsaPeerKey")
+            .field("bits", &self.key.n().bits_vartime())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The public key a peer's certificate carries, of either kind a DTLS-SRTP
+/// peer is found with: P-256, which this end uses itself and every WebRTC
+/// peer does, or RSA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertifiedKey {
+    /// An ECDSA key on P-256.
+    P256(PeerKey),
+    /// An RSA key.
+    Rsa(RsaPeerKey),
+}
+
+impl CertifiedKey {
+    /// The signature and hash pair a signature under this key has to name:
+    /// each kind of key has exactly one this crate verifies.
+    #[must_use]
+    pub const fn algorithm(&self) -> SignatureAndHash {
+        match self {
+            Self::P256(_) => SignatureAndHash::ECDSA_SHA256,
+            Self::Rsa(_) => SignatureAndHash::RSA_PKCS1_SHA256,
+        }
+    }
+
+    /// Check a signature over a SHA-256 digest computed elsewhere, made with
+    /// the pair `algorithm` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::IllegalValue`] when `algorithm` is not the pair this kind of
+    /// key signs with — an ECDSA signature claimed under an RSA key, say —
+    /// and [`Error::BadSignature`] when it is and the signature does not
+    /// verify.
+    pub fn verify_digest(
+        &self,
+        algorithm: SignatureAndHash,
+        digest: &[u8; 32],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        if algorithm != self.algorithm() {
+            return Err(Error::IllegalValue);
+        }
+        match self {
+            Self::P256(key) => key.verify_digest(digest, signature),
+            Self::Rsa(key) => key.verify_digest(digest, signature),
+        }
+    }
+
+    /// As [`CertifiedKey::verify_digest`], over `message` itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`CertifiedKey::verify_digest`].
+    pub fn verify(
+        &self,
+        algorithm: SignatureAndHash,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        self.verify_digest(algorithm, &Sha256::digest(message).into(), signature)
     }
 }
 

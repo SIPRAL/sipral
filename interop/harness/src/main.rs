@@ -196,8 +196,9 @@ fn main() -> ExitCode {
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::HoldCodecChange);
-        flows.push(Flow::Dtls);
     }
+    // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
+    flows.push(Flow::Dtls);
 
     let mut failures = 0;
     for flow in flows {
@@ -207,7 +208,9 @@ fn main() -> ExitCode {
         let (this_user, this_pass) = match flow {
             Flow::Srtp => (srtp_user.as_str(), srtp_pass.as_str()),
             Flow::DtmfInfo => (infodtmf_user.as_str(), infodtmf_pass.as_str()),
-            Flow::Dtls => (dtls_user.as_str(), dtls_pass.as_str()),
+            // Asterisk's own DTLS endpoint; the proxy knows only the one user,
+            // and FreeSWITCH behind it decides per extension, not per account
+            Flow::Dtls if server == "asterisk" => (dtls_user.as_str(), dtls_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -1063,8 +1066,8 @@ impl Script {
     /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
     /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
     /// only Asterisk runs the second, over its own `labuser-infodtmf`
-    /// endpoint), `Flow::Srtp` (9004) and `Flow::Dtls` (9005), the last two
-    /// Asterisk only — see `interop/asterisk/extensions.conf`.
+    /// endpoint), `Flow::Srtp` (9004, Asterisk only — see
+    /// `interop/asterisk/extensions.conf`) and `Flow::Dtls` (9005, on both).
     fn call_extension(&self) -> String {
         match self.flow {
             Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),

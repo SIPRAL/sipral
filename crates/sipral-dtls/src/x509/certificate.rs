@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 //! A self-signed X.509 v3 certificate for an ECDSA P-256 key, and the public
-//! key read back out of a peer's certificate.
+//! key read back out of a peer's certificate: P-256, or RSA.
 
 use core::fmt;
 
 use super::der::{self, Der};
 use super::fingerprint::{Fingerprint, HashFunction};
 use super::time;
-use crate::keys::{EcdsaKey, PeerKey};
+use crate::keys::{CertifiedKey, EcdsaKey, PeerKey, RsaPeerKey};
 use crate::{Error, Random};
 
 /// `ecdsa-with-SHA256`, 1.2.840.10045.4.3.2 (RFC 5758 §3.2).
@@ -18,6 +18,8 @@ const ECDSA_WITH_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x0
 const EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
 /// `secp256r1`, 1.2.840.10045.3.1.7 (RFC 5480 §2.1.1.1).
 const SECP256R1: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+/// `rsaEncryption`, 1.2.840.113549.1.1.1 (RFC 3279 §2.3.1).
+const RSA_ENCRYPTION: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
 /// `id-at-commonName`, 2.5.4.3 (RFC 5280 Appendix A.1).
 const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
 /// `ub-common-name` (RFC 5280 Appendix A.1), in characters.
@@ -220,6 +222,50 @@ impl<'a> SubjectPublicKeyInfo<'a> {
         }
         PeerKey::from_uncompressed(self.public_key)
     }
+
+    /// The key as RSA, when that is what it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::IllegalValue`] unless the algorithm is `rsaEncryption` with
+    /// the NULL parameters RFC 3279 §2.3.1 requires ("MUST have ASN.1 type
+    /// NULL"), and the key an `RSAPublicKey` of exactly two positive
+    /// INTEGERs in DER; [`Error::UnacceptableRsaKey`] for one
+    /// [`RsaPeerKey::from_parts`] refuses.
+    pub fn rsa_key(&self) -> Result<RsaPeerKey, Error> {
+        if self.algorithm != RSA_ENCRYPTION {
+            return Err(Error::IllegalValue);
+        }
+        let mut parameters = Der::new(self.parameters.ok_or(Error::IllegalValue)?);
+        let null = parameters.expect(der::NULL)?;
+        parameters.finish()?;
+        if !null.content.is_empty() {
+            return Err(Error::IllegalValue);
+        }
+        let mut outer = Der::new(self.public_key);
+        let key = outer.expect(der::SEQUENCE)?;
+        outer.finish()?;
+        let mut fields = Der::new(key.content);
+        let modulus = der::positive_integer(fields.expect(der::INTEGER)?.content)?;
+        let exponent = der::positive_integer(fields.expect(der::INTEGER)?.content)?;
+        fields.finish()?;
+        RsaPeerKey::from_parts(modulus, exponent)
+    }
+
+    /// The key, of whichever kind this crate verifies with.
+    ///
+    /// # Errors
+    ///
+    /// As [`SubjectPublicKeyInfo::p256_key`] or
+    /// [`SubjectPublicKeyInfo::rsa_key`], by the algorithm named, and
+    /// [`Error::IllegalValue`] for any other algorithm.
+    pub fn certified_key(&self) -> Result<CertifiedKey, Error> {
+        if self.algorithm == RSA_ENCRYPTION {
+            self.rsa_key().map(CertifiedKey::Rsa)
+        } else {
+            self.p256_key().map(CertifiedKey::P256)
+        }
+    }
 }
 
 /// The pieces of a certificate a reader needs.
@@ -331,7 +377,9 @@ fn whole_octets(content: &[u8]) -> Result<&[u8], Error> {
 #[cfg(test)]
 mod tests {
     use super::super::fingerprint::tests::{OPENSSL_SHA256, openssl_certificate};
+    use super::super::rsa_fixtures as rsa;
     use super::*;
+    use crate::handshake::SignatureAndHash;
     use crate::random::testing::Counter;
 
     const PARAMS: CertificateParams<'static> = CertificateParams {
@@ -629,6 +677,168 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn rsa(certificate: &str) -> CertifiedKey {
+        SubjectPublicKeyInfo::from_certificate(&unhex(certificate))
+            .unwrap()
+            .certified_key()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_rsa_key_another_implementation_certified_verifies_what_it_signed() {
+        for (certificate, signature, bits) in [
+            (rsa::CERTIFICATE_2048, rsa::SIGNATURE_2048, 2048),
+            (rsa::CERTIFICATE_4096, rsa::SIGNATURE_4096, 4096),
+        ] {
+            let key = rsa(certificate);
+            let CertifiedKey::Rsa(ref inner) = key else {
+                panic!("an RSA certificate read as {key:?}");
+            };
+            assert_eq!(inner.len() * 8, bits);
+            assert_eq!(key.algorithm(), SignatureAndHash::RSA_PKCS1_SHA256);
+            assert_eq!(
+                key.verify(
+                    SignatureAndHash::RSA_PKCS1_SHA256,
+                    rsa::MESSAGE,
+                    &unhex(signature)
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn an_rsa_signature_that_is_not_exactly_right_is_refused() {
+        let key = rsa(rsa::CERTIFICATE_2048);
+        let signature = unhex(rsa::SIGNATURE_2048);
+        let check = |message: &[u8], signature: &[u8]| {
+            key.verify(SignatureAndHash::RSA_PKCS1_SHA256, message, signature)
+        };
+        // every bit of the signature matters
+        for bit in 0..signature.len() * 8 {
+            let mut flipped = signature.clone();
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            assert_eq!(
+                check(rsa::MESSAGE, &flipped),
+                Err(Error::BadSignature),
+                "bit {bit}"
+            );
+        }
+        // and so does every bit of what it is over
+        let mut other = rsa::MESSAGE.to_vec();
+        other[0] ^= 1;
+        assert_eq!(check(&other, &signature), Err(Error::BadSignature));
+        // a signature one octet short or long of the modulus, even when the
+        // number is the same one (RFC 8017 §8.2.2 step 1)
+        let mut longer = vec![0];
+        longer.extend_from_slice(&signature);
+        assert_eq!(check(rsa::MESSAGE, &longer), Err(Error::BadSignature));
+        assert_eq!(
+            check(rsa::MESSAGE, &signature[1..]),
+            Err(Error::BadSignature)
+        );
+        assert_eq!(check(rsa::MESSAGE, &[]), Err(Error::BadSignature));
+        // a signature under another key
+        assert_eq!(
+            check(rsa::MESSAGE, &unhex(rsa::SIGNATURE_4096)),
+            Err(Error::BadSignature)
+        );
+        // an ECDSA pair claimed under an RSA key
+        assert_eq!(
+            key.verify(SignatureAndHash::ECDSA_SHA256, rsa::MESSAGE, &signature),
+            Err(Error::IllegalValue)
+        );
+    }
+
+    #[test]
+    fn an_rsa_key_shorter_than_2048_bits_is_refused() {
+        let info = SubjectPublicKeyInfo::from_certificate(&unhex(rsa::CERTIFICATE_1024))
+            .map(|info| info.certified_key());
+        assert_eq!(info, Ok(Err(Error::UnacceptableRsaKey)));
+    }
+
+    #[test]
+    fn only_an_rsa_key_under_rsa_encryption_with_null_parameters_is_an_rsa_key() {
+        let certificate = unhex(rsa::CERTIFICATE_2048);
+        let info = SubjectPublicKeyInfo::from_certificate(&certificate).unwrap();
+        assert_eq!(info.p256_key().err(), Some(Error::IllegalValue));
+        let (_, ecdsa) = ours();
+        let p256 = SubjectPublicKeyInfo::from_certificate(ecdsa.der()).unwrap();
+        assert_eq!(p256.rsa_key().err(), Some(Error::IllegalValue));
+
+        // the NULL after the identifier, made an empty OCTET STRING of the
+        // same length so that nothing around it moves
+        let identifier = [
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01,
+        ];
+        let at = certificate
+            .windows(identifier.len())
+            .position(|window| window == identifier)
+            .unwrap()
+            + identifier.len();
+        assert_eq!(certificate[at..at + 2], [0x05, 0x00]);
+        let mut not_null = certificate.clone();
+        not_null[at] = 0x04;
+        let info = SubjectPublicKeyInfo::from_certificate(&not_null).unwrap();
+        assert_eq!(info.rsa_key().err(), Some(Error::IllegalValue));
+    }
+
+    #[test]
+    fn rsa_parts_no_key_can_be_made_from_are_refused() {
+        let mut modulus = vec![0xC5; 256];
+        modulus[255] = 0x01;
+        assert!(RsaPeerKey::from_parts(&modulus, &[0x01, 0x00, 0x01]).is_ok());
+        let cases: [(&str, Vec<u8>, &[u8]); 5] = [
+            (
+                "even",
+                {
+                    let mut even = modulus.clone();
+                    even[255] = 0x02;
+                    even
+                },
+                &[0x01, 0x00, 0x01],
+            ),
+            (
+                "2047 bits",
+                {
+                    let mut short = modulus.clone();
+                    short[0] = 0x45;
+                    short
+                },
+                &[0x01, 0x00, 0x01],
+            ),
+            ("exponent 1", modulus.clone(), &[0x01]),
+            (
+                "exponent past 2^33 - 1",
+                modulus.clone(),
+                &[0x02, 0x00, 0x00, 0x00, 0x01],
+            ),
+            (
+                "longer than 8192 bits",
+                {
+                    let mut long = vec![0xC5; 1025];
+                    long[1024] = 0x01;
+                    long
+                },
+                &[0x01, 0x00, 0x01],
+            ),
+        ];
+        for (what, modulus, exponent) in cases {
+            assert_eq!(
+                RsaPeerKey::from_parts(&modulus, exponent).err(),
+                Some(Error::UnacceptableRsaKey),
+                "{what}"
+            );
         }
     }
 }

@@ -395,7 +395,8 @@ window, fragmentation and retransmission of the handshake flights, the
 `use_srtp` extension and the key export of RFC 5705, the peer's self-signed
 certificate checked against `a=fingerprint` and against nothing else, no
 renegotiation and no resumption. The primitives it needs — P-256 for ECDHE and
-ECDSA, AES-GCM, SHA-256, HMAC — are not written here: a constant-time
+ECDSA, AES-GCM, SHA-256, HMAC, and checking an RSA signature — are not written
+here: a constant-time
 elliptic curve is the one place a home-grown implementation is a risk rather
 than a virtue, so they come from the permissively licensed crate family that
 already supplies AES, each listed in the notices. The random values a
@@ -416,12 +417,13 @@ block; the RFC 5705 exporter and the key layout of RFC 5764 §4.2 for
 48-bit sequence number, AES-128-GCM protection per RFC 5288 and the
 anti-replay window of RFC 6347 §4.1.2.6; handshake fragmentation to a path MTU
 and reassembly bounded in message length, pieces and memory; strict codecs for
-every message of an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake, with
+every message of an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` or
+`ECDHE_RSA_WITH_AES_128_GCM_SHA256` handshake, with
 HelloVerifyRequest cookies and the `use_srtp`, `supported_groups`,
 `ec_point_formats`, `signature_algorithms`, `extended_master_secret` and
 `renegotiation_info` extensions; P-256 keys made from randomness the caller
-supplies; and a self-signed certificate written in DER, the key read out of a
-peer's, and fingerprints — `sha-256` written, `sha-1` also read — compared in
+supplies; and a self-signed certificate written in DER, the key — P-256 or
+RSA — read out of a peer's, and fingerprints — `sha-256` written, `sha-1` also read — compared in
 constant time.
 
 On top of that, `Connection`: the client and server state machines, sans-I/O
@@ -448,11 +450,25 @@ as RFC 8827 §6.5 requires; an invalid record is dropped without a word. Which
 end is the client comes from `a=setup` through `setup::dtls_role`, a pure
 function of RFC 4145's table: the active end sends the ClientHello.
 
-What is not there is the join: the `a=fingerprint` and `a=setup` lines, the
-RFC 7983 demultiplexing, `SrtpPolicy` and `MediaSession`, and the lab against
-FreeSWITCH and Asterisk. So everything above and below about what the engine
-does without DTLS still holds. One choice shapes every peer the join will
-meet: the extended master secret is required, because RFC 7627 §5.4 requires
+This end's own key is always P-256, and it signs with nothing else; the
+peer's may be RSA as well. FreeSWITCH, left as it ships, certifies its
+DTLS-SRTP end with an RSA-4096 key, and a peer like that cannot be keyed with
+at all otherwise: as a client it withholds its certificate from a request
+that names ECDSA alone, and as a server it can choose no suite a client
+offering only `ECDHE_ECDSA` would take. So a server asks for either kind
+(`ecdsa_sign` and `rsa_sign`, each with SHA-256), and a client offers
+`ECDHE_RSA_WITH_AES_128_GCM_SHA256` after the ECDSA suite and holds the
+server's certificate to the kind of key the suite it chose names (RFC 8422
+§2.1, §2.2). An RSA signature is checked as RSASSA-PKCS1-v1_5 over SHA-256,
+by rebuilding the whole padded block and comparing it rather than parsing
+it, under a key of 2048 bits at least (RFC 9325 §4.5) and 8192 at most. The
+arithmetic is the `rsa` crate's, which is used to verify and never to sign
+or decrypt.
+
+The join — the `a=fingerprint` and `a=setup` lines, the RFC 7983
+demultiplexing, `SrtpPolicy` and `MediaSession` — is described in the sections
+that follow, and the lab keys calls with it against both Asterisk and
+FreeSWITCH. One choice shapes every peer the join meets: the extended master secret is required, because RFC 7627 §5.4 requires
 a session without it to disable RFC 5705, the exporter every DTLS-SRTP key
 comes out of. RFC 5764 and RFC 8827 never mention the extension, so a peer
 whose TLS library predates RFC 7627 is one this crate will not key SRTP with.

@@ -14,7 +14,7 @@ use crate::handshake::{
     HandshakeType, HelloVerifyRequest, Message, NamedGroup, Reassembler, ServerHello,
     ServerKeyExchange, SignatureAndHash, SrtpProtectionProfile, Transcript, UseSrtp,
 };
-use crate::keys::{EphemeralKey, PeerKey};
+use crate::keys::{CertifiedKey, EphemeralKey};
 use crate::prf::{MasterSecret, RANDOM_LEN};
 use crate::record::{ProtocolVersion, WriteEpoch};
 use crate::{Error, Random, Role};
@@ -30,11 +30,11 @@ enum Step {
     ClientKeyExchange {
         client_random: [u8; RANDOM_LEN],
         profile: SrtpProtectionProfile,
-        peer: PeerKey,
+        peer: CertifiedKey,
     },
     CertificateVerify {
         profile: SrtpProtectionProfile,
-        peer: PeerKey,
+        peer: CertifiedKey,
         master: MasterSecret,
     },
     Finished {
@@ -282,11 +282,18 @@ impl Server {
         exchange.encode(&mut body).map_err(Failure::Internal)?;
         flight.push(core.message(HandshakeType::SERVER_KEY_EXCHANGE, body)?);
 
-        // RFC 5764 §4.1: in DTLS-SRTP the CertificateRequest "will be sent"
+        // RFC 5764 §4.1: in DTLS-SRTP the CertificateRequest "will be sent".
+        // Either kind of key the client may certify with: the suite binds
+        // only the server's, and a client left as FreeSWITCH ships holds an
+        // RSA one, which it withholds — an empty Certificate, and no way to
+        // key the call — from a request that names ECDSA alone
         let mut body = Vec::new();
         CertificateRequest {
-            certificate_types: vec![CertificateRequest::ECDSA_SIGN],
-            supported_signature_algorithms: vec![SignatureAndHash::ECDSA_SHA256],
+            certificate_types: vec![CertificateRequest::ECDSA_SIGN, CertificateRequest::RSA_SIGN],
+            supported_signature_algorithms: vec![
+                SignatureAndHash::ECDSA_SHA256,
+                SignatureAndHash::RSA_PKCS1_SHA256,
+            ],
             certificate_authorities: Vec::new(),
         }
         .encode(&mut body)
@@ -369,11 +376,17 @@ impl Server {
                 },
                 HandshakeMessage::CertificateVerify(verify),
             ) => {
-                if verify.signed.algorithm != SignatureAndHash::ECDSA_SHA256 {
+                // RFC 5246 §7.4.8: one of the pairs the request named, which
+                // for each kind of key is exactly one
+                if verify.signed.algorithm != peer.algorithm() {
                     return Err(Failure::IllegalParameter);
                 }
-                peer.verify_digest(&core.transcript.hash(), &verify.signed.signature)
-                    .map_err(|_| Failure::BadSignature)?;
+                peer.verify_digest(
+                    verify.signed.algorithm,
+                    &core.transcript.hash(),
+                    &verify.signed.signature,
+                )
+                .map_err(|_| Failure::BadSignature)?;
                 core.transcribe(message)?;
                 self.step = Step::Finished { profile, master };
                 Ok(())

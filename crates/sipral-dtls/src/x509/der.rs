@@ -15,6 +15,7 @@ use crate::wire::{self, Reader};
 
 pub(crate) const INTEGER: u8 = 0x02;
 pub(crate) const BIT_STRING: u8 = 0x03;
+pub(crate) const NULL: u8 = 0x05;
 pub(crate) const OBJECT_IDENTIFIER: u8 = 0x06;
 pub(crate) const UTF8_STRING: u8 = 0x0C;
 pub(crate) const UTC_TIME: u8 = 0x17;
@@ -80,6 +81,23 @@ pub(crate) fn unsigned_integer(out: &mut Vec<u8>, magnitude: &[u8]) -> Result<()
     }
     content.extend_from_slice(trimmed);
     write(out, INTEGER, &content)
+}
+
+/// The big-endian magnitude of an INTEGER's content octets, for a number that
+/// has to be positive: the one leading zero that keeps the top bit from
+/// reading as a sign is dropped, and everything X.690 §8.3 does not allow a
+/// positive number is refused — no octets at all (§8.3.1), a zero octet that
+/// was not needed (§8.3.2: the first nine bits "shall not all be zero"), and
+/// the top bit set with none, which is a negative number. Zero itself is
+/// refused too, since no key this reads for may be zero.
+pub(crate) fn positive_integer(content: &[u8]) -> Result<&[u8], Error> {
+    match content {
+        [] => Err(Error::Length),
+        [first, ..] if first & 0x80 != 0 => Err(Error::IllegalValue),
+        [0, rest @ ..] if rest.first().is_some_and(|next| next & 0x80 != 0) => Ok(rest),
+        [0, ..] => Err(Error::IllegalValue),
+        _ => Ok(content),
+    }
 }
 
 /// A BIT STRING of whole octets: no unused bits.
@@ -197,6 +215,38 @@ mod tests {
         let mut out = Vec::new();
         write(&mut out, SEQUENCE, &vec![7; content_len]).unwrap();
         out
+    }
+
+    #[test]
+    fn a_positive_integer_is_read_as_its_magnitude_and_nothing_else_is() {
+        assert_eq!(positive_integer(&[0x01]), Ok(&[0x01][..]));
+        assert_eq!(positive_integer(&[0x7F, 0xFF]), Ok(&[0x7F, 0xFF][..]));
+        // the zero that keeps the sign bit clear is not part of the number
+        assert_eq!(positive_integer(&[0x00, 0x80]), Ok(&[0x80][..]));
+        assert_eq!(positive_integer(&[0x00, 0xFF, 0x01]), Ok(&[0xFF, 0x01][..]));
+        assert_eq!(positive_integer(&[]), Err(Error::Length));
+        // negative
+        assert_eq!(positive_integer(&[0x80]), Err(Error::IllegalValue));
+        assert_eq!(positive_integer(&[0xFF, 0x00]), Err(Error::IllegalValue));
+        // a zero octet X.690 §8.3.2 does not allow
+        assert_eq!(positive_integer(&[0x00, 0x7F]), Err(Error::IllegalValue));
+        assert_eq!(
+            positive_integer(&[0x00, 0x00, 0x80]),
+            Err(Error::IllegalValue)
+        );
+        // zero
+        assert_eq!(positive_integer(&[0x00]), Err(Error::IllegalValue));
+    }
+
+    #[test]
+    fn what_the_writer_prints_the_reader_takes_back() {
+        for magnitude in [&[0x01][..], &[0x80], &[0x00, 0x00, 0x9A, 0x01], &[0x7F; 40]] {
+            let mut out = Vec::new();
+            unsigned_integer(&mut out, magnitude).unwrap();
+            let element = Der::new(&out).expect(INTEGER).unwrap();
+            let start = magnitude.iter().position(|&b| b != 0).unwrap();
+            assert_eq!(positive_integer(element.content), Ok(&magnitude[start..]));
+        }
     }
 
     #[test]

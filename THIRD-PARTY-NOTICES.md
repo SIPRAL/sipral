@@ -163,20 +163,25 @@ build, and none of them is linked into anything that ships.
 `sipral-dtls` is DTLS 1.2 for DTLS-SRTP, and everything in it that is protocol
 — the record layer, the handshake framing and messages, the PRF and the
 exporter, the certificate writer and reader — is written in-tree from the
-RFCs. The primitives are not: P-256 for ECDHE and ECDSA, AES-GCM, SHA-256 and
-HMAC come from the same RustCrypto family that supplies `aes`, because a
-constant-time elliptic curve is the one place an implementation of our own
-would be a risk rather than a virtue. SHA-1, used only to read an old
+RFCs. The primitives are not: P-256 for ECDHE and ECDSA, AES-GCM, SHA-256,
+HMAC, and the check of a peer's RSA signature come from the same RustCrypto
+family that supplies `aes`, because a constant-time elliptic curve is the one
+place an implementation of our own would be a risk rather than a virtue, and
+big-integer arithmetic is the one next to it. SHA-1, used only to read an old
 certificate fingerprint, is written in-tree like the other two copies.
 
 The facade depends on `sipral-dtls` behind the `dtls` feature, which is on by
-default, so these five crates are in a binary built from it unless that
-feature is turned off. A build with `--no-default-features` has none of them:
+default, so these crates are in a binary built from it unless that feature is
+turned off. A build with `--no-default-features` has none of them:
 `cargo tree` is where that is checked, and `scripts/check.sh` checks it there
 on every run.
 
-The crate names four of them — `p256`, `aes-gcm`, `sha2`, `hmac` — and
-`zeroize`; the rest arrive through those. Every licence below was read from
+The crate names five of them — `p256`, `aes-gcm`, `sha2`, `hmac`, `rsa` — and
+`zeroize`; the rest arrive through those. `rsa` is a release candidate, pinned
+exactly: its last stable release belongs to the previous generation of these
+crates and would bring a second SHA-2 in with it. It is used to verify and
+nothing else, which is why `deny.toml` sets aside the advisory about its
+private-key operations (RUSTSEC-2023-0071): no RSA private key is ever held. Every licence below was read from
 the component's own manifest, and every component ships its licence files
 beside it.
 
@@ -212,6 +217,8 @@ beside it.
 | `cfg-if` 1.0.4 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
 | `ctutils` 0.4.2 | constant-time comparison and selection | Apache-2.0 OR MIT |
 | `cmov` 0.5.4 | constant-time conditional moves `ctutils` uses | Apache-2.0 OR MIT |
+| `rsa` 0.10.0-rc.18 | RSA public keys and RSASSA-PKCS1-v1_5 verification; its signing and decryption are never called | MIT OR Apache-2.0 |
+| `crypto-primes` 0.7.2 | prime generation, arriving with `rsa`; unused here, since no key is generated | Apache-2.0 OR MIT |
 | `rand_core` 0.10.1 | randomness traits the curve crates name; no generator is linked | MIT OR Apache-2.0 |
 | `subtle` 2.6.1 | constant-time comparison and selection | BSD-3-Clause |
 

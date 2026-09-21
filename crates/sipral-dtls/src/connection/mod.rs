@@ -135,7 +135,7 @@ use crate::handshake::{
     self, Certificate as CertificateMessage, CipherSuite, Fragment, HandshakeType, Limits, Message,
     Offered, Reassembler, SrtpProtectionProfile, Transcript,
 };
-use crate::keys::{EcdsaKey, PeerKey};
+use crate::keys::{CertifiedKey, EcdsaKey};
 use crate::prf::MasterSecret;
 use crate::record::{self, ContentType, GcmProtection, ProtocolVersion, Record, ReplayWindow};
 use crate::x509::{Certificate, Fingerprint, HashFunction, SubjectPublicKeyInfo};
@@ -152,8 +152,12 @@ use server::Server;
 /// overheads a path may add without saying so.
 pub const DEFAULT_MAX_DATAGRAM: usize = 1200;
 
-/// The one cipher suite negotiated.
+/// The cipher suite a server negotiates, its own key being P-256.
 const SUITE: CipherSuite = CipherSuite::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+/// The suites a client offers, in that order: the one above, and the same
+/// with the server's key exchange signed by RSA, for a server that certifies
+/// with RSA. The record protection and the PRF are the same for both.
+const CLIENT_SUITES: [CipherSuite; 2] = [SUITE, CipherSuite::ECDHE_RSA_WITH_AES_128_GCM_SHA256];
 
 /// The SRTP profiles there are keys for. The NULL profiles are refused
 /// outright: RFC 8827 §6.5 forbids negotiating encryption away.
@@ -276,7 +280,9 @@ pub enum Failure {
     /// carried. RFC 8122 §5.1: "the endpoint MUST NOT establish the TLS
     /// connection".
     FingerprintMismatch,
-    /// The peer's certificate is not a DER certificate holding a P-256 key.
+    /// The peer's certificate is not a DER certificate holding a P-256 key or
+    /// an RSA key this crate accepts, or, from a server, not the kind of key
+    /// the suite it chose is signed with (RFC 8422 §2.1, §2.2).
     UnusableCertificate,
     /// A certificate that DTLS-SRTP requires was not presented: the peer sent
     /// an empty Certificate or none at all, or as a server did not ask for
@@ -351,7 +357,9 @@ impl fmt::Display for Failure {
             Self::FingerprintMismatch => {
                 f.write_str("the peer's certificate matches no fingerprint its signalling carried")
             }
-            Self::UnusableCertificate => f.write_str("the peer's certificate holds no P-256 key"),
+            Self::UnusableCertificate => {
+                f.write_str("the peer's certificate holds no key this end can verify with")
+            }
             Self::NoCertificate => {
                 f.write_str("a certificate DTLS-SRTP requires was not presented")
             }
@@ -651,7 +659,11 @@ impl Core {
 
     /// The peer's key, from the first certificate of its Certificate message,
     /// once that certificate is the one its signalling named.
-    fn peer_key(&self, message: &CertificateMessage) -> Result<PeerKey, Failure> {
+    ///
+    /// P-256 or RSA: the key is only ever checked against, so its kind is
+    /// the peer's business, and a peer that certifies with RSA — FreeSWITCH
+    /// as it ships — is refused by nothing else.
+    fn peer_key(&self, message: &CertificateMessage) -> Result<CertifiedKey, Failure> {
         let certificate = message
             .certificate_list
             .first()
@@ -660,7 +672,7 @@ impl Core {
             return Err(Failure::FingerprintMismatch);
         }
         SubjectPublicKeyInfo::from_certificate(certificate)
-            .and_then(|info| info.p256_key())
+            .and_then(|info| info.certified_key())
             .map_err(|_| Failure::UnusableCertificate)
     }
 

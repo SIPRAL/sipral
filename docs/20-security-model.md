@@ -383,7 +383,10 @@ this end directly rather than through the line's own proxy.
   new association on a re-negotiation (RFC 6347 §4.2.8) had its ClientHello
   ignored and the call went silent; the new handshake now runs beside the old
   one and replaces it only once it has finished, the far end's certificate
-  checked again. What the review is not is a review by a specialist outside the project, which
+  checked again. The lab found a ninth against FreeSWITCH, which certifies
+  with RSA and could not be keyed with at all; a peer's RSA signatures are now
+  verified — never made — with the `rsa` crate, and that path came after the
+  review above, so it has only had its own. What the review is not is a review by a specialist outside the project, which
   the commercial licence still waits on. Until there is one, the honest
   statement is that this protocol is written from the RFCs, tested against
   itself and attacked by its own project — not by anyone independent of it.

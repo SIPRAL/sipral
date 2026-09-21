@@ -33,6 +33,13 @@ aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "z
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # the PRF (RFC 5246 §5) and the HelloVerifyRequest cookie
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+# checking an RSA signature, for a peer whose certificate carries an RSA key:
+# FreeSWITCH, left as it ships, generates an RSA-4096 one. Verification only —
+# this end's own key is P-256 and it never signs with RSA — so no private RSA
+# key is ever held here. The release candidate rather than 0.9: 0.9 is the
+# previous RustCrypto generation, and would bring a second SHA-2 and a second
+# `digest` in beside the ones the four crates above share
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["sha2"] }
 # wiping master secrets, key blocks and exported SRTP keys where this crate
 # holds them; the write that survives the optimiser needs `unsafe`, which this
 # crate denies

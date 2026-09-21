@@ -1044,15 +1044,21 @@ static int selected(const char *wanted, const char *key)
 
 /* The account a flow places its call as.
  *
- * Two flows have one of their own on Asterisk, and for the reason the Rust
+ * Three flows have one of their own on Asterisk, and for the reason the Rust
  * harness gives: the SDES endpoint is `labuser-srtp`, so that the plain one
- * every other flow uses stays plain, and INFO's own `dtmf_mode` is
- * `labuser-infodtmf`'s. Same defaults, same variables to override them. */
-static void account_for(enum flow which, const char **user, const char **pass)
+ * every other flow uses stays plain, INFO's own `dtmf_mode` is
+ * `labuser-infodtmf`'s, and DTLS-SRTP is `labuser-dtls`'s. Same defaults, same
+ * variables to override them. Only on Asterisk: the proxy knows one user, and
+ * FreeSWITCH behind it decides per extension rather than per account. */
+static void account_for(enum flow which, const char *server, const char **user,
+                        const char **pass)
 {
     const char *named = NULL;
     const char *secret = NULL;
     const char *fallback = NULL;
+    if (strcmp(server, "asterisk") != 0) {
+        return;
+    }
     if (which == FLOW_SRTP) {
         named = getenv("SIPRAL_USER_SRTP");
         secret = getenv("SIPRAL_PASS_SRTP");
@@ -1161,11 +1167,12 @@ static void dwell(struct endpoint *end, unsigned millis)
 
 /* Whether a flow is run against this server at all.
  *
- * The last five only against Asterisk, and the Rust harness does the same for
+ * Four of them only against Asterisk, and the Rust harness does the same for
  * the same reasons: `interop/asterisk/extensions.conf` is the only dialplan in
  * the lab with an extension that names a digit back, the one Asterisk names
- * never came back through the proxy from FreeSWITCH, and the SDES endpoint,
- * the DTLS one and the INFO one exist only in Asterisk's own configuration.
+ * never came back through the proxy from FreeSWITCH, and the SDES endpoint and
+ * the INFO one exist only in Asterisk's own configuration. DTLS-SRTP runs on
+ * both, since `interop/freeswitch/lab.xml` answers 9005 as well.
  * `docs/11-testing.md` carries the reasons. A flow is not run where it is
  * known not to pass until somebody has found out why.
  */
@@ -1176,8 +1183,8 @@ static int runs_against(enum flow which, const char *server)
     case FLOW_DTMF_INFO:
     case FLOW_SRTP:
     case FLOW_HOLD_CODEC_CHANGE:
-    case FLOW_DTLS:
         return strcmp(server, "asterisk") == 0;
+    case FLOW_DTLS:
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -1655,7 +1662,7 @@ int main(int argc, char **argv)
         if (!runs_against(flow, server)) {
             continue;
         }
-        account_for(flow, &flow_user, &flow_pass);
+        account_for(flow, server, &flow_user, &flow_pass);
 
         trouble[0] = '\0';
         if (open_endpoint(&end, (unsigned)which, server, &remote, flow_user, flow_pass)

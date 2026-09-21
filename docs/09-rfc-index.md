@@ -64,7 +64,7 @@ by no call yet.
 | 5246 | TLS 1.2, where DTLS 1.2 defers to it: the PRF with SHA-256, the master secret, `verify_data`, the key block, AEAD record protection, the hello and key exchange messages and their checks, the alert protocol | sipral-dtls | phase 2; done |
 | 7627 | The extended master secret, required in both hellos: a peer without it is refused, and the exporter refuses a master secret made without it, since §5.4 requires such a session to disable RFC 5705 | sipral-dtls | phase 2; done |
 | 5288 | AES-GCM cipher suites: the nonce and the additional data of each protected record | sipral-dtls | phase 2; done |
-| 5289 | `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, the one suite negotiated | sipral-dtls | phase 2; done |
+| 5289 | `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, the suite a server negotiates, and `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, which a client also offers for a server certified with RSA | sipral-dtls | phase 2; done |
 | 8422 | ECC cipher suites: named curves and point formats, the ServerKeyExchange and ClientKeyExchange of ECDHE, ECDSA signatures in DER, public key validation | sipral-dtls | phase 2; done |
 | 5746 | `renegotiation_info`, empty on the initial handshake, which is the only one performed: sent empty by a client, echoed by a server, refused when it is not empty | sipral-dtls | phase 2; done |
 | 4145 | `a=setup`, which end starts the handshake. The role it gives — the active end is the DTLS client, `actpass` decided by the answer — is `setup::dtls_role` in `sipral-dtls`; the attribute itself is read and written by `sipral-core` | sipral-core, sipral-dtls | phase 2; done — the facade remembers what it wrote, since the role reads the offer's value and the answer's together |
@@ -72,6 +72,7 @@ by no call yet.
 | 8122 | `a=fingerprint`, the only thing a peer's certificate is checked against. `sha-256` fingerprints are written and `sha-1` ones read, and compared in constant time, in `sipral-dtls` | sipral-core, sipral-dtls | phase 2; done, and every `a=fingerprint` of a description is carried rather than the first |
 | 5280 | X.509 v3: a self-signed certificate written, a peer's read as far as its public key | sipral-dtls | phase 2; done |
 | 5480 / 5758 / 3279 | An ECDSA P-256 key and signature in a certificate: `id-ecPublicKey` with the named curve, `ecdsa-with-SHA256`, `Ecdsa-Sig-Value` | sipral-dtls | phase 2; done |
+| 3279 §2.3.1 / 8017 | An RSA key in a peer's certificate, `rsaEncryption` with NULL parameters, and RSASSA-PKCS1-v1_5 over SHA-256, verified only — this end never signs with RSA — under a modulus of 2048 to 8192 bits (RFC 9325 §4.5) | sipral-dtls | phase 2; done — proven in the lab against FreeSWITCH's own RSA-4096 certificate |
 | 7983 | Telling DTLS, STUN and RTP apart on one socket | sipral-nat | phase 2; done — `Demux::Dtls` on the first octet, read by `MediaSession::receive` |
 | 5761 | Multiplexing RTP and RTCP | sipral-rtp | phase 2 |
 | 6716 | Opus | sipral-media | phase 2 |

@@ -63,10 +63,19 @@ pub struct SignatureAndHash {
 }
 
 impl SignatureAndHash {
-    /// `{sha256(4), ecdsa(3)}`, the only pair this crate signs or verifies.
+    /// `{sha256(4), ecdsa(3)}`, the only pair this crate signs with, and one
+    /// of the two it verifies.
     pub const ECDSA_SHA256: Self = Self {
         hash: 4,
         signature: 3,
+    };
+    /// `{sha256(4), rsa(1)}`: RSASSA-PKCS1-v1_5 over SHA-256 (RFC 5246
+    /// §7.4.1.4.1), the other pair this crate verifies, for a peer whose
+    /// certificate carries an RSA key. Never signed with: this end's key is
+    /// P-256.
+    pub const RSA_PKCS1_SHA256: Self = Self {
+        hash: 4,
+        signature: 1,
     };
 
     pub(crate) const fn from_bytes([hash, signature]: [u8; 2]) -> Self {

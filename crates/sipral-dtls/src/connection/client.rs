@@ -7,14 +7,15 @@
 use std::mem;
 use std::time::Instant;
 
-use super::{Core, Failure, SUITE};
+use super::{CLIENT_SUITES, Core, Failure};
 use crate::handshake::{
     COMPRESSION_NULL, Certificate as CertificateMessage, CertificateRequest, CertificateVerify,
-    ClientHello, ClientKeyExchange, DigitallySigned, EcPointFormat, Extension, ExtensionType,
-    Extensions, Finished, HandshakeMessage, HandshakeType, HelloVerifyRequest, Message, NamedGroup,
-    ServerHello, ServerKeyExchange, SignatureAndHash, SrtpProtectionProfile, Transcript, UseSrtp,
+    CipherSuite, ClientHello, ClientKeyExchange, DigitallySigned, EcPointFormat, Extension,
+    ExtensionType, Extensions, Finished, HandshakeMessage, HandshakeType, HelloVerifyRequest,
+    Message, NamedGroup, ServerHello, ServerKeyExchange, SignatureAndHash, SrtpProtectionProfile,
+    Transcript, UseSrtp,
 };
-use crate::keys::{EphemeralKey, PeerKey};
+use crate::keys::{CertifiedKey, EphemeralKey};
 use crate::prf::{MasterSecret, RANDOM_LEN, VERIFY_DATA_LEN};
 use crate::record::ProtocolVersion;
 use crate::{Error, Random, Role};
@@ -38,13 +39,14 @@ const ANSWERABLE: [ExtensionType; 4] = [
 struct Chosen {
     server_random: [u8; RANDOM_LEN],
     profile: SrtpProtectionProfile,
+    suite: CipherSuite,
 }
 
 /// The message the client is waiting for, with what it has learned so far.
 enum Step {
     ServerHello,
     Certificate(Chosen),
-    ServerKeyExchange(Chosen, PeerKey),
+    ServerKeyExchange(Chosen, CertifiedKey),
     CertificateRequest(Chosen, Vec<u8>),
     ServerHelloDone(Chosen, Vec<u8>),
     Finished {
@@ -76,7 +78,7 @@ impl Client {
             random: client_random,
             session_id: Vec::new(),
             cookie: Vec::new(),
-            cipher_suites: vec![SUITE],
+            cipher_suites: CLIENT_SUITES.to_vec(),
             compression_methods: vec![COMPRESSION_NULL],
             extensions: Some(offered(profiles)?),
         };
@@ -131,6 +133,19 @@ impl Client {
             }
             (Step::Certificate(chosen), HandshakeMessage::Certificate(certificate)) => {
                 let peer = core.peer_key(&certificate)?;
+                // RFC 8422 §2.1 and §2.2: the suite the server chose says
+                // which kind of key its certificate "MUST contain"
+                let fits = match peer {
+                    CertifiedKey::P256(_) => {
+                        chosen.suite == CipherSuite::ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+                    }
+                    CertifiedKey::Rsa(_) => {
+                        chosen.suite == CipherSuite::ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                    }
+                };
+                if !fits {
+                    return Err(Failure::UnusableCertificate);
+                }
                 core.transcribe(message)?;
                 self.step = Step::ServerKeyExchange(chosen, peer);
                 Ok(())
@@ -210,7 +225,9 @@ impl Client {
         if hello.server_version != ProtocolVersion::DTLS_1_2 {
             return Err(Failure::ProtocolVersion);
         }
-        if hello.cipher_suite != SUITE || hello.compression_method != COMPRESSION_NULL {
+        if !CLIENT_SUITES.contains(&hello.cipher_suite)
+            || hello.compression_method != COMPRESSION_NULL
+        {
             return Err(Failure::IllegalParameter);
         }
         let extensions = hello
@@ -253,25 +270,32 @@ impl Client {
         Ok(Chosen {
             server_random: hello.random,
             profile: *profile,
+            suite: hello.cipher_suite,
         })
     }
 
     fn server_key_exchange(
         &self,
         chosen: &Chosen,
-        peer: &PeerKey,
+        peer: &CertifiedKey,
         exchange: &ServerKeyExchange,
     ) -> Result<(), Failure> {
+        // RFC 5246 §7.4.1.4.1: a pair this end offered, which for each kind
+        // of key is exactly one
         if exchange.named_curve != NamedGroup::SECP256R1
-            || exchange.signed_params.algorithm != SignatureAndHash::ECDSA_SHA256
+            || exchange.signed_params.algorithm != peer.algorithm()
         {
             return Err(Failure::IllegalParameter);
         }
         let content = exchange
             .signed_content(&self.random, &chosen.server_random)
             .map_err(Failure::Malformed)?;
-        peer.verify(&content, &exchange.signed_params.signature)
-            .map_err(|_| Failure::BadSignature)
+        peer.verify(
+            exchange.signed_params.algorithm,
+            &content,
+            &exchange.signed_params.signature,
+        )
+        .map_err(|_| Failure::BadSignature)
     }
 
     /// Flight 5: Certificate, ClientKeyExchange, CertificateVerify,
@@ -359,6 +383,7 @@ fn offered(profiles: &[SrtpProtectionProfile]) -> Result<Extensions, Error> {
     extensions.push(Extension::EcPointFormats(vec![EcPointFormat::UNCOMPRESSED]))?;
     extensions.push(Extension::SignatureAlgorithms(vec![
         SignatureAndHash::ECDSA_SHA256,
+        SignatureAndHash::RSA_PKCS1_SHA256,
     ]))?;
     extensions.push(Extension::UseSrtp(UseSrtp {
         profiles: profiles.to_vec(),

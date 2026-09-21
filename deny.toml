@@ -102,6 +102,15 @@ name = "audio-codec"
 
 [advisories]
 yanked = "deny"
+# The Marvin attack on `rsa`: a timing side channel in operations with an RSA
+# private key, decryption and signing, which leaks that key. sipral-dtls uses
+# the crate to check a peer's signatures with the peer's public key and holds
+# no RSA private key at all — this end's own key is P-256 — so there is no
+# secret for the channel to reach. Any use of an RSA private key added later
+# takes this line out first.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; no RSA private key is ever held" },
+]
 
 [sources]
 unknown-registry = "deny"

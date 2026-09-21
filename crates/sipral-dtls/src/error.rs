@@ -45,7 +45,12 @@ pub enum Error {
     SequenceExhausted,
     /// A public key is not an uncompressed point on P-256.
     InvalidPublicKey,
-    /// A signature did not verify, or is not a DER `Ecdsa-Sig-Value`.
+    /// An RSA public key is not one this crate verifies with: a modulus
+    /// shorter than 2048 bits or longer than 8192, even, or not above its
+    /// exponent, or an exponent out of range.
+    UnacceptableRsaKey,
+    /// A signature did not verify, is not a DER `Ecdsa-Sig-Value`, or is not
+    /// exactly as long as the RSA modulus it claims to be under.
     BadSignature,
     /// Signing failed inside the primitive.
     SigningFailed,
@@ -81,6 +86,7 @@ impl fmt::Display for Error {
             Self::Replayed => "record sequence number replayed or too old",
             Self::SequenceExhausted => "sequence number or epoch exhausted",
             Self::InvalidPublicKey => "not an uncompressed P-256 point",
+            Self::UnacceptableRsaKey => "RSA key of a size or form not accepted",
             Self::BadSignature => "signature did not verify",
             Self::SigningFailed => "signing failed",
             Self::RandomRejected => "random source keeps producing unusable keys",
@@ -114,6 +120,7 @@ mod tests {
             Error::Replayed => "record sequence number replayed or too old",
             Error::SequenceExhausted => "sequence number or epoch exhausted",
             Error::InvalidPublicKey => "not an uncompressed P-256 point",
+            Error::UnacceptableRsaKey => "RSA key of a size or form not accepted",
             Error::BadSignature => "signature did not verify",
             Error::SigningFailed => "signing failed",
             Error::RandomRejected => "random source keeps producing unusable keys",
@@ -139,6 +146,7 @@ mod tests {
             Error::Replayed,
             Error::SequenceExhausted,
             Error::InvalidPublicKey,
+            Error::UnacceptableRsaKey,
             Error::BadSignature,
             Error::SigningFailed,
             Error::RandomRejected,

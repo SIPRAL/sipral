@@ -194,6 +194,8 @@ pub struct CertificateRequest {
 impl CertificateRequest {
     /// `ecdsa_sign(64)` (RFC 8422 §5.5).
     pub const ECDSA_SIGN: u8 = 64;
+    /// `rsa_sign(1)` (RFC 5246 §7.4.4).
+    pub const RSA_SIGN: u8 = 1;
 
     /// Read a CertificateRequest body.
     ///

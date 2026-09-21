@@ -12,6 +12,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **DTLS-SRTP with a peer that certifies with RSA.** FreeSWITCH, left as it
+  ships, holds an RSA-4096 certificate, and no call with it could be keyed:
+  as a client it withheld its certificate from a request naming ECDSA alone,
+  and as a server it could pick no suite offered. A server now asks for either
+  kind of client certificate and a client also offers
+  `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, holding the server's certificate to
+  the kind its suite names; the peer's RSA signatures are verified as
+  RSASSA-PKCS1-v1_5 over SHA-256 under a 2048- to 8192-bit key, and this end
+  still signs with its own P-256 key alone. The lab's DTLS flow now runs
+  against FreeSWITCH as well as Asterisk, on both drivers.
 - **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end

@@ -15,9 +15,14 @@ use crate::wire::{self, Reader};
 pub struct CipherSuite(pub u16);
 
 impl CipherSuite {
-    /// `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (RFC 5289 §3), the only suite
-    /// this crate negotiates.
+    /// `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (RFC 5289 §3), the suite
+    /// this crate negotiates as a server, since its own key is P-256.
     pub const ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: Self = Self(0xC02B);
+    /// `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` (RFC 5289 §3), which a client
+    /// also offers, for a server whose certificate carries an RSA key. The
+    /// same key exchange, record protection and PRF as the suite above; only
+    /// what signs the server's key exchange differs.
+    pub const ECDHE_RSA_WITH_AES_128_GCM_SHA256: Self = Self(0xC02F);
     /// `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` (RFC 5746 §3.3): not a suite, but
     /// the same signal as an empty `renegotiation_info` extension.
     pub const EMPTY_RENEGOTIATION_INFO_SCSV: Self = Self(0x00FF);

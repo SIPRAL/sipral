@@ -70,4 +70,17 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="hangup"/>
     </condition>
   </extension>
+  <!-- DTLS-SRTP (RFC 5764), the same number Asterisk gives it. Secure media
+       made mandatory for this call alone, before the answer, so an offer
+       this end could not key is refused rather than answered in the clear;
+       the call is then the cadenced tone of 9002, played by this leg itself
+       since nothing is transferred on it. -->
+  <extension name="sipral_lab_dtls">
+    <condition field="destination_number" expression="^9005$">
+      <action application="set" data="rtp_secure_media=mandatory"/>
+      <action application="answer"/>
+      <action application="playback" data="tone_stream://%(1200,600,350,440);loops=-1"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
 </include>

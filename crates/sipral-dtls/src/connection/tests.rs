@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::handshake::{
     ClientHello, EcPointFormat, Extension, ExtensionType, Extensions, FragmentHeader,
-    HelloVerifyRequest, ServerHello, UseSrtp, encode_message, fragments,
+    HelloVerifyRequest, ServerHello, SignatureAndHash, UseSrtp, encode_message, fragments,
 };
 use crate::random::testing::Counter;
 use crate::record::{RecordHeader, encode_plaintext, records};
@@ -1777,10 +1777,56 @@ fn flip_last_octet(body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A ServerKeyExchange that names `{sha256, rsa}` for its signature, the
+/// signature itself untouched: `curve_type`, `named_curve`, the point with its
+/// one-octet length, and then the pair (RFC 8422 §5.4).
+fn server_key_exchange_claiming_rsa(body: &[u8]) -> Vec<u8> {
+    let mut out = body.to_vec();
+    let pair = 4 + usize::from(out[3]);
+    out[pair + 1] = SignatureAndHash::RSA_PKCS1_SHA256.signature;
+    out
+}
+
+/// A CertificateVerify that names `{sha256, rsa}`, its pair being the first
+/// two octets (RFC 5246 §4.7).
+fn certificate_verify_claiming_rsa(body: &[u8]) -> Vec<u8> {
+    let mut out = body.to_vec();
+    out[1] = SignatureAndHash::RSA_PKCS1_SHA256.signature;
+    out
+}
+
 /// A ServerHello the client refuses, and a client Certificate the server
 /// refuses, one way per rule.
-fn later_rewrites() -> [Rewrite; 7] {
+fn later_rewrites() -> [Rewrite; 10] {
     [
+        // a suite this client offers, but not the one the server's P-256
+        // certificate can sign for (RFC 8422 §2.2)
+        (
+            1,
+            HandshakeType::SERVER_HELLO,
+            |body| {
+                edit_server_hello(body, &|h| {
+                    h.cipher_suite = CipherSuite::ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+                })
+            },
+            Failure::UnusableCertificate,
+            AlertDescription::UNSUPPORTED_CERTIFICATE,
+        ),
+        // an RSA pair claimed for a signature under a P-256 key, each way
+        (
+            1,
+            HandshakeType::SERVER_KEY_EXCHANGE,
+            server_key_exchange_claiming_rsa,
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        (
+            0,
+            HandshakeType::CERTIFICATE_VERIFY,
+            certificate_verify_claiming_rsa,
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
         (
             1,
             HandshakeType::SERVER_HELLO,
@@ -1876,6 +1922,76 @@ fn each_way_a_hello_or_certificate_can_be_wrong_is_refused_with_its_own_reason()
             Failure::PeerAlert(alert),
             "{msg_type:?} {reason:?}"
         );
+    }
+}
+
+/// A Certificate message body carrying one certificate (RFC 5246 §7.4.2).
+fn certificate_body(der: &[u8]) -> Vec<u8> {
+    let one = u32::try_from(der.len()).unwrap().to_be_bytes();
+    let list = u32::try_from(der.len() + 3).unwrap().to_be_bytes();
+    let mut body = list[1..].to_vec();
+    body.extend_from_slice(&one[1..]);
+    body.extend_from_slice(der);
+    body
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_client_that_certifies_with_rsa_is_held_to_the_rsa_pair_and_its_signature() {
+    // A server told to expect an RSA certificate, and a client whose
+    // Certificate is rewritten to carry it: the key is read, so what the
+    // CertificateVerify then claims is checked against an RSA key. Nothing
+    // here can sign with RSA, so both cases are refusals — the right one each.
+    type Verify = fn(&[u8]) -> Vec<u8>;
+    let rsa_certificate = unhex(crate::x509::rsa_fixtures::CERTIFICATE_2048);
+    let rsa_fingerprint = Fingerprint::of(HashFunction::Sha256, &rsa_certificate);
+    let (one, other) = (identity(1), identity(2));
+    let cases: [(Verify, Failure, AlertDescription); 2] = [
+        // the P-256 pair the client really used, now under an RSA key
+        (
+            <[u8]>::to_vec,
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        // the RSA pair, over a modulus-length signature that is not one
+        (
+            |_| {
+                let mut out = vec![0x04, 0x01, 0x01, 0x00];
+                out.extend(core::iter::repeat_n(0x5A, 256));
+                out
+            },
+            Failure::BadSignature,
+            AlertDescription::DECRYPT_ERROR,
+        ),
+    ];
+    for (verify, reason, alert) in cases {
+        let mut configs = pair_configs(Role::Client, &one, &other);
+        configs[1] = Config::new(
+            Role::Server,
+            other.key.clone(),
+            other.certificate.clone(),
+            vec![rsa_fingerprint.clone()],
+        );
+        let mut pair = Pair::new(configs, Path::CLEAN, 37);
+        let certificate = rsa_certificate.clone();
+        pair.tamper = Some(Box::new(move |from, datagram| {
+            if from != 0 {
+                return datagram;
+            }
+            let swapped = rewrite(&datagram, HandshakeType::CERTIFICATE, &|_| {
+                certificate_body(&certificate)
+            });
+            rewrite(&swapped, HandshakeType::CERTIFICATE_VERIFY, &verify)
+        }));
+        pair.run(Duration::from_secs(10));
+        assert_eq!(refused(&pair.events[1]), reason);
+        assert_eq!(refused(&pair.events[0]), Failure::PeerAlert(alert));
     }
 }
 
