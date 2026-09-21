@@ -32,6 +32,26 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   near it, that answers and repeats back whatever it hears. `docs/04-ua.md`
   now quotes the examples directly rather than describing them in prose that
   nothing built.
+- **A Python binding, over the C ABI.** `tools/abi-gen`'s fifth back end
+  prints `bindings/python/sipral/_sipral_cffi.py`: a `cffi` ABI-mode `cdef`
+  naming the same types, constants and entry points the header does, and the
+  `dlopen` that turns it into `lib` — no C compiler needed to install it.
+  `sipral.Stack`, `sipral.Account` and `sipral.Call`, written by hand against
+  that raw layer, are the idiomatic surface: a background thread drives
+  `sipral_stack_poll` and the transport queues, events land on an
+  `asyncio.Queue` per stack and per call, DTMF digits get a queue of their
+  own, and a call's audio crosses as `bytes`/`memoryview`, paced by
+  `sipral_media_info_t::frame_ms` on a thread of its own once
+  `SIPRAL_EVENT_KIND_MEDIA_STARTED` mints the media handle. `bindings/python/tests/test_call.py`
+  runs two stacks against each other on loopback, with no registrar between
+  them, and answers `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` by treating the host
+  as a literal address, which is what a direct call like that one needs and
+  nothing more; `bindings/python/tests/test_abi.py` checks the generated
+  `cdef` against the header's own numbers and against `bindings/c/abi-sizes.txt`.
+  `bindings/python/examples/agent.py` is a complete headless voice agent in
+  under a hundred lines, talking through one `respond(pcm) -> pcm` function
+  a real model replaces. Packaging (wheels with the library bundled in) is a
+  later task; this one installs from the checkout with `pip install -e .`.
 - **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end

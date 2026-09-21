@@ -23,10 +23,14 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `dotnet/Sipral/SipralAbi.cs` | The .NET binding: P/Invoke and the layer above it |
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
+| `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
 
 Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
-`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs`, and the two
-readmes. Everything the packages build is generated.
+`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs`,
+`python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
+(the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
+`python/examples/agent.py`, and the readmes. Everything the packages build
+from declarations rather than write themselves is generated.
 
 `c/sipral.c` is the Swift package's one translation unit, and exists so that
 a header that will not compile is found by building the package. `c/smoke.c`

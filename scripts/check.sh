@@ -1226,6 +1226,40 @@ else
     skip "swift build: SwiftPM cannot read the manifest here (the Command Line Tools ship no PackageDescription module; a full Xcode does)"
 fi
 
+# Unlike dotnet/kotlinc/swift above, python3 and cffi are not optional
+# toolchains this step may find missing: bindings/python/sipral/_sipral_cffi.py
+# is one of the five files "the header and the bindings" step above already
+# regenerated and compared, so a machine that cannot import it has not
+# actually checked that step's own output. No C compiler is needed -- cffi's
+# ABI mode reads the cdef and dlopen's $DYLIB directly -- so the only two
+# things this can be missing on a machine that built the rest of this gate
+# are python3 itself and the cffi package.
+step "the python bindings"
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "python3 is not installed"
+elif ! python3 -c 'import cffi' >/dev/null 2>&1; then
+    fail "python3 has no cffi (pip install cffi)"
+elif [ ! -s "$DYLIB" ]; then
+    fail "the python bindings: $DYLIB is not there to load (the build step above must pass first)"
+else
+    if SIPRAL_LIBRARY="$ROOT/$DYLIB" python3 -c \
+        'import sys; sys.path.insert(0, "bindings/python"); import sipral' >/dev/null 2>&1; then
+        pass "python3 -c 'import sipral'"
+    else
+        fail "python3 could not import sipral against $DYLIB"
+    fi
+
+    work=$(mktemp -d)
+    if SIPRAL_LIBRARY="$ROOT/$DYLIB" python3 -m unittest discover \
+        -s "$ROOT/bindings/python/tests" -t "$ROOT/bindings/python" >"$work/out" 2>&1; then
+        pass "python3 -m unittest discover, bindings/python/tests"
+    else
+        fail "python3 -m unittest discover, bindings/python/tests:"
+        sed 's/^/        /' "$work/out"
+    fi
+    rm -rf "$work"
+fi
+
 step "dependency licences"
 if command -v cargo-deny >/dev/null 2>&1; then
     cargo deny check >/dev/null 2>&1 \

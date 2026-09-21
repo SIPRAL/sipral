@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+"""Two ways `_sipral_cffi.py` could quietly stop matching the ABI it was
+printed for, that a call placed between two stacks never exercises.
+
+Both files -- `bindings/c/include/sipral.h` and
+`bindings/python/sipral/_sipral_cffi.py` -- are printed from the same
+`sipral_ffi::abi::SURFACE` by `tools/abi-gen` (`docs/08-ffi.md`, "One
+declaration, and four files printed from it"), so in an honest build they
+cannot disagree; what these tests catch is this package answering from a
+stale `_sipral_cffi.py` that was not regenerated after the header moved.
+"""
+
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+from sipral._sipral_cffi import ffi, lib
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_HEADER = _REPO_ROOT / "bindings" / "c" / "include" / "sipral.h"
+_ABI_SIZES = _REPO_ROOT / "bindings" / "c" / "abi-sizes.txt"
+
+# `#define NAME ((TYPE)VALUE)`, as `tools/abi-gen/src/c.rs`'s `values`
+# prints every published constant.
+_DEFINE = re.compile(r"^#define\s+(SIPRAL_\w+)\s+\(\([\w\s]+\)(-?\d+)\)\s*$", re.MULTILINE)
+
+# `SIPRAL_NAME = 123,` inside one of the header's anonymous `enum { ... }`
+# blocks, as `tools/abi-gen/src/c.rs`'s `enumerations` prints one.
+_ENUMERATOR = re.compile(r"^\s*(SIPRAL_\w+)\s*=\s*(-?\d+),?\s*$", re.MULTILINE)
+
+
+class ConstantsMatchTheHeader(unittest.TestCase):
+    """Every `SIPRAL_*` numeral the header declares, read back off `lib`."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not _HEADER.is_file():
+            raise unittest.SkipTest(f"header not found at {_HEADER}; run from a checkout")
+        cls.text = _HEADER.read_text(encoding="utf-8")
+
+    def test_every_define_is_readable_and_equal(self) -> None:
+        found = _DEFINE.findall(self.text)
+        self.assertGreater(len(found), 20, "the header's own #define lines should number in the dozens")
+        for name, value in found:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(lib, name), f"{name} is in the header but not in _sipral_cffi.py")
+                self.assertEqual(int(getattr(lib, name)), int(value))
+
+    def test_every_enumerator_is_readable_and_equal(self) -> None:
+        found = _ENUMERATOR.findall(self.text)
+        self.assertGreater(len(found), 50, "the header declares many more enumerators than this")
+        for name, value in found:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(lib, name), f"{name} is in the header but not in _sipral_cffi.py")
+                self.assertEqual(int(getattr(lib, name)), int(value))
+
+
+class StructSizesMatchAbiSizes(unittest.TestCase):
+    """`ffi.sizeof` for every record `bindings/c/abi-sizes.txt` names.
+
+    cffi's ABI mode lays a struct out for itself from the `cdef` text --
+    nothing here links against a compiled definition -- so this is the one
+    check that would catch the `cdef` silently drifting from what a real C
+    compiler puts in `bindings/c/abi-sizes.txt`'s own second column, which
+    `scripts/check.sh` already keeps current against this build
+    (`docs/08-ffi.md`, "Versioning").
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not _ABI_SIZES.is_file():
+            raise unittest.SkipTest(f"{_ABI_SIZES} not found; run from a checkout")
+        cls.rows: list[tuple[str, int]] = []
+        for line in _ABI_SIZES.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, _first, current = line.split()
+            if current == "-":
+                continue  # filled in by the library alone; no caller declares one
+            cls.rows.append((name, int(current)))
+
+    def test_every_versioned_struct_is_the_size_this_build_says(self) -> None:
+        self.assertGreater(len(self.rows), 5)
+        for name, current in self.rows:
+            with self.subTest(struct=name):
+                self.assertEqual(ffi.sizeof(name), current)
+
+
+if __name__ == "__main__":
+    unittest.main()

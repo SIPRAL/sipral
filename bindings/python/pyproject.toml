@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sipral"
+version = "0.0.1"
+description = "Sipral - Session Initiation Protocol Rust Audio Layer. Python bindings, over the C ABI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "AGPL-3.0-only"
+authors = [{ name = "SIPRAL" }]
+keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Telecommunications Industry",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Communications :: Internet Phone",
+]
+dependencies = ["cffi>=1.15"]
+
+[project.urls]
+Homepage = "https://sipral.org"
+Repository = "https://github.com/SIPRAL/sipral"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sipral"]

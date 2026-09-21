@@ -25,6 +25,14 @@ obj/
 # Swift package build output
 .build/
 
+# Python binding: build artefacts and virtual environments, never committed
+__pycache__/
+*.pyc
+*.egg-info/
+bindings/python/build/
+bindings/python/dist/
+bindings/python/.venv/
+
 **/.env
 **/.env.*
 !**/.env.example

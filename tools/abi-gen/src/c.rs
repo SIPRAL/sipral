@@ -32,7 +32,12 @@ fn spelled(surface: &Surface, path: &str) -> String {
 }
 
 /// Documentation with every link in it spelled the C way.
-fn lines(surface: &Surface, doc: &[&str]) -> Vec<String> {
+///
+/// `pub(crate)` rather than private: the Python back end prints a `cdef` that
+/// declares the same types under the same names, and a doc comment that sent
+/// a C reader to `sipral_event_t::kind` is the sentence a Python reader wants
+/// too, so it reads this rather than carrying a second copy of the same walk.
+pub(crate) fn lines(surface: &Surface, doc: &[&str]) -> Vec<String> {
     plain_named(doc, &|path| spelled(surface, path))
 }
 
@@ -62,7 +67,10 @@ pub(crate) fn spell(ty: &Type) -> String {
     }
 }
 
-fn block(out: &mut String, indent: &str, doc: &[String]) {
+/// `pub(crate)`: printed the same way inside a `/** */` in the header and
+/// inside the `cdef` the Python back end builds, since cffi reads the same
+/// comment syntax C does.
+pub(crate) fn block(out: &mut String, indent: &str, doc: &[String]) {
     if doc.is_empty() {
         return;
     }
@@ -77,7 +85,10 @@ fn block(out: &mut String, indent: &str, doc: &[String]) {
     let _ = writeln!(out, "{indent} */");
 }
 
-fn parameters(read: &[Read<'_>]) -> String {
+/// `pub(crate)`: a parameter list reads the same in a function prototype and
+/// in the `cdef` the Python back end prints, since cffi's grammar for one is
+/// C's.
+pub(crate) fn parameters(read: &[Read<'_>]) -> String {
     if read.is_empty() {
         return "void".to_owned();
     }
@@ -95,7 +106,11 @@ fn parameters(read: &[Read<'_>]) -> String {
 }
 
 /// The names a plain integer answers to.
-fn aliases(out: &mut String, surface: &Surface) -> Result<(), Refused> {
+///
+/// `pub(crate)`: a `typedef` for a plain integer is the same declaration in
+/// the header and in the Python back end's `cdef`, which shares this rather
+/// than printing its own.
+pub(crate) fn aliases(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     for alias in surface.aliases {
         let Stands::For(target) = alias.stands else {
             continue;
@@ -128,7 +143,10 @@ fn values(out: &mut String, surface: &Surface) -> Result<(), Refused> {
 
 /// Every record named before any is defined, so that no declaration has to
 /// come before the one it mentions.
-fn forwards(out: &mut String, surface: &Surface) {
+///
+/// `pub(crate)`: the forward declarations a `cdef` needs are the same ones,
+/// for the same reason.
+pub(crate) fn forwards(out: &mut String, surface: &Surface) {
     out.push_str("/* Every record, named before any of them is defined, so that a\n");
     out.push_str(" * declaration never has to come before the one it mentions. */\n");
     for record in surface.records {
@@ -142,7 +160,10 @@ fn forwards(out: &mut String, surface: &Surface) {
     out.push('\n');
 }
 
-fn enumerations(out: &mut String, surface: &Surface) -> Result<(), Refused> {
+/// `pub(crate)`: an anonymous `enum` typed to a fixed-width `typedef` is what
+/// cffi reads too, so the Python back end prints this rather than a second
+/// derivation of it.
+pub(crate) fn enumerations(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     for enumeration in surface.enumerations {
         let mut doc = lines(surface, enumeration.doc);
         if !enumeration.reserved.is_empty() {
@@ -176,7 +197,9 @@ fn enumerations(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     Ok(())
 }
 
-fn callbacks(out: &mut String, surface: &Surface) -> Result<(), Refused> {
+/// `pub(crate)`: a function-pointer `typedef` for a callback is what
+/// `ffi.callback` in Python is built against too.
+pub(crate) fn callbacks(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     for alias in surface.aliases {
         let Stands::Callback(arguments, _) = alias.stands else {
             continue;
@@ -197,7 +220,10 @@ fn callbacks(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     Ok(())
 }
 
-fn structures(out: &mut String, surface: &Surface) -> Result<(), Refused> {
+/// `pub(crate)`: a struct or a union lays out the same way for cffi's ABI
+/// mode as for a C compiler, so the Python back end prints this `cdef` rather
+/// than a second copy of the member loop.
+pub(crate) fn structures(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     for record in surface.records {
         let keyword = match record.shape {
             Shape::Struct => "struct",

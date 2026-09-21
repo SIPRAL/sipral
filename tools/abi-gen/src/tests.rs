@@ -43,7 +43,7 @@ use crate::model::{
     screaming, snake, upper_camel, words,
 };
 use crate::names::{Spelling, audit};
-use crate::{c, csharp, kotlin, swift};
+use crate::{c, csharp, kotlin, python, swift};
 
 /// Where the golden files live.
 fn golden_path(name: &str) -> PathBuf {
@@ -678,6 +678,11 @@ fn the_jni_shim_is_what_it_was() {
     golden("synthetic_jni.c", &kotlin::shim(&SYNTHETIC).unwrap());
 }
 
+#[test]
+fn the_python_binding_is_what_it_was() {
+    golden("synthetic.py", &python::binding(&SYNTHETIC).unwrap());
+}
+
 /// The .NET static constructor and the call Swift's `abiMismatch` makes on
 /// its own behalf are read from the declarations, not written into the back
 /// end. Written in, they named `AbiCheck`, `AbiVersionMajor` and
@@ -688,6 +693,7 @@ fn the_load_check_is_read_from_the_declarations() {
     for (language, printed) in [
         ("C#", csharp::binding(&NOTHING)),
         ("Swift", swift::binding(&NOTHING)),
+        ("Python", python::binding(&NOTHING)),
     ] {
         match printed {
             Ok(text) => {

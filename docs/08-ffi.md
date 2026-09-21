@@ -790,12 +790,12 @@ is a three-valued `sipral_toggle_t` — default, on, off — because a zeroed st
 cannot otherwise tell "off" from "nothing was said", and
 `sipral_stack_settings_t` reads back what each of them came to.
 
-## One declaration, and four files printed from it
+## One declaration, and five files printed from it
 
 B7's failure is a C seam declared in several places that have to agree: a
 function added to the Rust and forgotten in one binding produced a build that
 compiled and failed at run time, on one platform, in the field. The answer here
-is that the header and the three bindings are not declarations at all. They are
+is that the header and the four bindings are not declarations at all. They are
 printed, by `tools/abi-gen`, from what `crates/sipral-ffi` declares, and they
 are committed — a consumer of a released library must not have to run a
 generator — and `scripts/check.sh` prints them again and fails when what is
@@ -855,10 +855,10 @@ still have to reach C somehow, and the only way to do that is `entry!`, which
 
 **What the descriptor records is the spelling, not the layout.** `usize` becomes
 `size_t` by a rule in the generator, `*const c_char` becomes `const char *`, and
-a rule that is wrong is wrong in the header and all three bindings at once — the
+a rule that is wrong is wrong in the header and all four bindings at once — the
 gate would compare wrong output against wrong output and pass. That is the
 price of one source of truth, and it is the right price: a mistake that is
-everywhere is a mistake somebody finds, where a mistake in one binding of three
+everywhere is a mistake somebody finds, where a mistake in one binding of four
 is the failure B7 exists for.
 
 **The names are read back after they are derived.** Each back end makes names
@@ -881,9 +881,9 @@ the one signature that is not an entry point, it is printed into the header
 as a function pointer and into the .NET binding as a delegate, and its
 parameters were the last names in the surface nothing read back.
 `tools/abi-gen/src/names.rs` is the pass, and `tools/abi-gen/golden/` holds a
-small synthetic surface printed as the five files the generator writes — the
-header, the Swift binding, the .NET binding, and the Kotlin binding with the
-JNI shim beside it — so a change to an emitter shows up there rather than
+small synthetic surface printed as the six files the generator writes — the
+header, the Swift binding, the .NET binding, the Kotlin binding with the
+JNI shim beside it, and the Python binding — so a change to an emitter shows up there rather than
 buried in `bindings/`. "Small" and "reaches every emitter path" pull against
 each other, so the second one is counted rather than claimed: a test takes
 the shapes of the real surface and the shapes of the synthetic one and fails
@@ -932,9 +932,9 @@ throw from. See "Kotlin" below for what that costs.
 
 A function, a struct, a union, an enumeration, a constant or an alias added,
 removed or renamed on the Rust side and not reaching the header or any of the
-three bindings. A member appended to a struct, a value added to an enumeration,
+four bindings. A member appended to a struct, a value added to an enumeration,
 a parameter added to a function, a type changed. The number an event kind
-spends, which travels into all four files. Every one of those is a difference
+spends, which travels into all five files. Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.
 
@@ -980,7 +980,7 @@ gate; `bindings/c/sipral.c` compiles it a second time as the Swift package's
 own translation unit.
 
 **It says nothing about meaning.** A member that keeps its name and its type and
-starts meaning something else travels into all four files intact. So does a
+starts meaning something else travels into all five files intact. So does a
 function whose behaviour changed under a signature that did not.
 
 **The built library is checked on this platform and no other.** The gate reads
@@ -1006,9 +1006,9 @@ archive into a program that also links libopus of its own has two definitions
 of each of those names for its linker to settle, and has to know that before
 it gets there. Link the `.dylib`, or link the archive knowing what is in it.
 
-**The packaging is written by hand.** `Package.swift`, the `.csproj`, the two
-readmes, `bindings/c/sipral.c` and `bindings/c/smoke.c` are not printed and not
-compared. What they build is.
+**The packaging is written by hand.** `Package.swift`, the `.csproj`,
+`bindings/python/pyproject.toml`, the readmes, `bindings/c/sipral.c` and
+`bindings/c/smoke.c` are not printed and not compared. What they build is.
 
 ## Swift
 
@@ -1180,6 +1180,98 @@ in and two more in the 486 a refused call went out on, a second element refused
 by name, every malformed packing thrown before the library is called, a
 listener that throws, and one that destroys its own stack.
 
+## Python
+
+The fifth back end, and the only one that needs no compiler to install:
+`tools/abi-gen/src/python.rs` prints `bindings/python/sipral/_sipral_cffi.py`,
+a `cffi` ABI-mode `cdef` — a restricted C grammar `cffi` reads and lays out
+for itself — naming the same aliases, constants, forward declarations,
+enumerations, callbacks, structures and function prototypes the header
+does, built out of the same printers `crate::c` already has rather than a
+second walk that could disagree with them. What it prints of its own is
+the published constants as `#define NAME NUMBER`, since ABI mode's own
+preprocessor takes a bare literal and refuses the cast the header's own
+`#define` wraps one in, and the load-and-check boilerplate around the
+`cdef`: `_library_name` and `_candidates` for where the shared library
+might be (`SIPRAL_LIBRARY`, then beside the package, then a checkout's own
+`target/release` and `target/debug`), `ffi.dlopen`, and a call to
+`sipral_abi_check` against the major and minor this file was printed from,
+raising `OSError` on a mismatch the same way every other binding's load
+check does — see "Checked at load is a promise four runtimes keep four
+different ways" below.
+
+`sipral.stack.Stack`, `sipral.account.Account` and `sipral.call.Call`, in
+`bindings/python/sipral/`, are written against `ffi`/`lib` by hand, the way
+`SipralAbi.swift` is the base the Swift package is written against. A
+`Stack` owns one UDP socket and one background thread: the thread drains
+`sipral_stack_receive_datagram`, `sipral_stack_poll` and
+`sipral_stack_poll_transmit` in a loop, the same one `interop/harness-c/main.c`
+writes in C, and delivers events by decoding `sipral_event_t` whole,
+inside the C callback, into a plain `sipral.events.Event` dataclass — never a
+`cffi` pointer past the callback that carries it, which is exactly the rule
+`docs/08-ffi.md`'s own "Signalling across the boundary" section states for
+every language here. Decoded events land on an `asyncio.Queue`, per stack
+and per call, reached with `loop.call_soon_threadsafe` from the poll
+thread; an event naming a call updates that `Call`'s own state — minting
+`Call.media` on `SIPRAL_EVENT_KIND_MEDIA_STARTED`, marking it ended on
+`SIPRAL_EVENT_KIND_CALL_ENDED` — before it is ever queued, so a coroutine
+woken by the queue never reads state the poll thread has not finished
+writing yet. `sipral.enums` builds `EventKind`, `Status`, `CallState` and
+the rest as Python `IntEnum`s by reading `lib`'s own attribute names at
+import time rather than copying the header's numbers into a second
+declaration, which is what lets an event kind or a status a later task
+spends, from a number `docs/08-ffi.md`'s own "A numbered space has one
+declaration" already reserved for it, come through as a plain,
+unrecognised `int` before this file is regenerated against it, rather
+than raising on the way into an enum with no member for it yet.
+
+`sipral.media.Media` is a call's audio, on a thread of its own, the same
+shape signalling has: `sipral_media_receive`, `sipral_media_playback`,
+`sipral_media_capture` and `sipral_media_poll_rtcp` run in a loop paced by
+`sipral_media_info_t::frame_ms`, and audio crosses as `bytes`/`memoryview`
+— `Media.send_audio` queues 16-bit mono PCM of any length, cut to one
+frame at a time as it is sent, and `Media.frames` is the far end's own
+audio, one frame per item, decoded the moment `sipral_media_playback`
+answers it. `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` is answered automatically,
+by `Stack._resolve`, treating the host the ABI hands over as a literal
+address: this package wires no DNS resolver of its own, and a numeric
+`host:port` target — what two stacks on loopback with no registrar
+between them, or a call placed straight at an address, both use — needs
+none. `sipral_stack_poll_farewell`'s own goodbye is drained on the same
+poll thread and sent through the ending call's own media socket, to the
+last address that socket actually heard from, since nothing in this ABI
+hands an address back for it any other way (`docs/08-ffi.md`, "A call
+that ends owes the far end an RTCP BYE").
+
+An ordinary `SIPRAL_STATUS_BUSY` — another thread calling `Call.answer` or
+`Account.register` while the poll thread is between two polls, both told
+apart from a real failure by `docs/08-ffi.md`'s own "Signalling on one
+stack is one thread at a time" — is retried for up to half a second by
+`sipral.errors.call` before it ever reaches an application as
+`sipral.SipralError`, and the poll thread's own draining never raises on
+one at all: a `SipralError` that reached the top of that thread would end
+it for good, and this stack would never poll again.
+
+`bindings/python/tests/test_abi.py` is what holds the generated `cdef` to
+account: every `#define` and enumerator the header declares, read back off
+`lib` and compared against the number the header itself gives it, and
+`ffi.sizeof` for every struct named in `bindings/c/abi-sizes.txt`, compared
+against that file's own current-build column — the one check nothing else
+here can stand in for, since `cffi`'s ABI mode lays a struct out for
+itself from the `cdef` text alone rather than linking against a compiled
+definition of it. `bindings/python/tests/test_call.py` is what
+`scripts/check.sh`'s `the python bindings` step runs: two stacks on
+loopback, with no registrar, placing a call, answering it, exchanging
+audio and DTMF, and reading back what it cost.
+
+What is not here: wheels with the native library bundled in, a real
+resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, and the decoded payload
+for every event kind this ABI declares — `sipral.events._decode_payload`
+reads the ones `sipral.stack.Stack`, `sipral.call.Call` and
+`sipral.media.Media` need, and a kind it has not grown a case for yet is
+still a whole `Event`, with `kind`, `kind_name` and `message`, and an empty
+`fields`, never an exception.
+
 ## Versioning
 
 The C ABI carries its own version, independent of the crate version. It is
@@ -1246,7 +1338,7 @@ taken **once, at the end**: nothing is published, so no build in the world is
 on an intermediate minor, and a bump per task costs a full gate run and a
 regenerated binding set for a version nobody can have.
 
-**Checked at load is a promise three runtimes keep three different ways, not
+**Checked at load is a promise four runtimes keep four different ways, not
 one mechanism.** .NET's `Sipral` gets a static constructor, printed by
 `tools/abi-gen`'s C# back end rather than written into `SipralAbi.cs` by
 hand — the CLR guarantees it runs before the class's first use, which is the
@@ -1281,6 +1373,15 @@ anything at all in the module, on whichever thread makes that call — not at
 import, which Swift gives no hook for — and a mismatch is what that first
 call throws: a `SipralError`, not a separate call the application has to
 remember to make and not a warning that is easy to miss.
+
+Python's own module, of the four, needs no trick to hang the check on: a
+module's top-level code runs exactly once, the first time anything imports
+it, which is already "at load" with nothing further to ask of the
+language. `sipral/_sipral_cffi.py` calls `sipral_abi_check` there, right
+after `ffi.dlopen`, and raises a plain `OSError` naming both versions on a
+mismatch — the same statement that loaded `lib` is the one that checked
+it, so there is no later call, no wrapped exception type, and no second
+touch that skips the check the way .NET's and Kotlin's both do.
 
 Skipping it is not safe on any binding, and on Swift it is not something a
 caller can do at all: there is no call into `Sipral` that reaches C without
