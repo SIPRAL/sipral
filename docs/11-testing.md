@@ -374,7 +374,11 @@ back, audible, refused, and the session's own `Quality` (loss, jitter, delay
 against target, how much the buffer shrank or stretched) — read off what
 `MediaSession::capture`, `receive` and `playback` actually did on the wire,
 frame by frame, the same as a real application watching its own socket would
-read it. `SIPRAL_REQUIRE_AUDIO=1` makes the plain call and the SRTP call —
+read it. Since 8.6.9 the same line also carries the R factor and the two
+mean opinion scores `StreamStatistics::voip_metrics` reports — "n/a" for
+G.722 and Opus, which G.113 tabulates no `Ie`/`Bpl` for, rather than a
+guessed number — so every flow that negotiates PCMU or PCMA reads a MOS.
+`SIPRAL_REQUIRE_AUDIO=1` makes the plain call and the SRTP call —
 the two that dwell on the far end's tone — fail outright if nothing came back
 audible; `scripts/lab.sh` sets it, and every impairment profile's "audio
 survived it" rests on it.

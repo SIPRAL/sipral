@@ -82,6 +82,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   later task's RTCP-XR quality reports. The interop lab gained two flows
   against Asterisk: a MESSAGE echoed by the lab's own dialplan, and a mailbox
   whose count is read higher after a voicemail is left in it.
+- **RTCP XR VoIP Metrics and RFC 6035 voice quality reports.** `sipral-rtp`
+  builds and parses the RFC 3611 Extended Report packet and its VoIP
+  Metrics Report Block: burst and gap loss (Appendix A.2's Gmin
+  classification), delay, jitter buffer sizing, and the R factor and MOS
+  from a simplified ITU-T G.107 E-model, using the active codec's G.113
+  Appendix I `Ie`/`Bpl` pair where one is tabulated and RFC 3611's own
+  "unavailable" sentinel where none is. Reporting is negotiated with
+  `a=rtcp-xr:voip-metrics` (RFC 3611 §5), on both offer and answer, and
+  carried through to `StreamStatistics::voip_metrics` and
+  `sipral_stream_stats_t`'s tail either way. An account with
+  `quality_report_uri` set gets one RFC 6035 `VQSessionReport: CallTerm`
+  published to it (over a PUBLISH, RFC 3903) when each of its calls ends.
 - **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end

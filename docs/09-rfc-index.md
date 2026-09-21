@@ -81,8 +81,8 @@ by no call yet.
 | ITU-T G.711 | A-law and µ-law | sipral-media | phase 1 |
 | ITU-T G.722 | 7 kHz at 64 kbit/s | sipral-media | phase 2 |
 | ITU-T G.729 | 8 kbit/s CS-ACELP, base with Annex A and Annex B, written from the Recommendation. The base patents are reported expired since 2017 and that is confirmed before it ships; G.729.1 and the later annexes stay out | sipral-media | phase 2 |
-| 3611 | RTCP-XR, the VoIP metrics block, with the R factor and MOS from ITU-T G.107 | sipral-rtp, sipral-media | phase 2 |
-| 6035 | Quality reports published as `vq-rtcpxr` when an account names a collector | sipral-ua | phase 2 |
+| 3611 | RTCP-XR: the XR packet and the VoIP Metrics report block (§4.7), including the Appendix A.2 burst/gap classification, negotiated with `a=rtcp-xr` (§5) on both offer and answer. The R factor and the two MOS fields come from a simplified ITU-T G.107 E-model, with the codec's own G.113 Appendix I `Ie`/`Bpl` mapped in `sipral`; a codec G.113 does not tabulate reports its own §4.7.5 "unavailable" sentinel rather than a guess | sipral-rtp, sipral-core, sipral | phase 2; done |
+| 6035 | Quality reports published as `vq-rtcpxr` over a PUBLISH (RFC 3903) when an account names a collector, once per call on call end. Only the `LocalMetrics` set is written; `RemoteMetrics` needs a channel to the far end's own measurement that does not exist | sipral-ua, sipral | phase 2; done |
 
 ## NAT
 

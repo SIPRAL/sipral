@@ -256,6 +256,84 @@ places, plainly:
    report clears `Outbound::sent_since_report`: a stream that falls silent
    sends RRs one interval sooner than §6.4 says.
 
+### RTCP XR and voice quality reports (task 8.6.9)
+
+RFC 3611 defines the Extended Report packet type (§2, `rtcp::XR` = 207 in
+the compound) and the VoIP Metrics Report Block it carries (§4.7):
+`rtcp_xr::VoipMetricsBlock`, read and written by `rtcp_xr::XrPacket` and
+`rtcp_xr::XrPacketBuilder` the same way every other RTCP packet type in
+this crate is. `RtcpPacket::ExtendedReport` is its own variant rather than
+folded into `RtcpPacket::Other`, so a peer's XR packet can be told apart
+from one this crate does not define, though nothing here reads the far
+end's own block back into anything the application sees — see below.
+
+**Negotiation.** §5's `a=rtcp-xr` attribute, with the `voip-metrics` token,
+decides whether a stream sends the block at all: `sipral-core`'s
+`sdp::plan::MediaCapabilities::voip_metrics_xr` writes it into every offer
+this stack makes (on by default — every build of this crate can generate
+and read the block), `sdp::plan::MediaPlan::voip_metrics_xr` reads it back
+off whichever description asked for it — the peer's, since §5.2 has each
+side's own line request the block *from the other party* — falling back
+from the media level to the session level per §5.1, and
+`sipral-ua::session::carried` repeats this end's own line across a hold or
+an unrelated re-INVITE the same way `rtcp-mux` already is.
+`RtpSession::build_report` reads the negotiated flag off `StreamConfig`
+and appends an XR packet to the compound only when it is set.
+
+**What the block reports, and how it is measured.** `voip_metrics::GminTracker`
+implements RFC 3611 Appendix A.2's event-driven burst/gap classification
+verbatim — the state names (`c11`, `c13`, ...) match the appendix's own
+pseudocode so a reviewer can check the two side by side — fed by
+`playout::JitterBuffer` exactly once per sequence number as its fate is
+resolved: `Received` or `Lost` at `JitterBuffer::pull`, `Discarded` or
+`Lost` at a window jump in `JitterBuffer::slide`. `Gmin` is fixed at its
+RFC-recommended 16 for the life of a buffer (§4.7.2). Round-trip delay is
+this session's own `round_trip_time`; end-system delay is always `0`
+(§4.7.3's own fallback: this crate has no visibility into the sending
+side's encode-and-accumulate delay); jitter buffer sizing comes from
+`playout::Quality`; every signal-related field (§4.7.4) is RFC 3611's own
+`127` "unavailable" sentinel, since nothing in this crate measures a
+signal or noise level over decoded audio.
+
+**The R factor and MOS.** `emodel::evaluate` is a simplified ITU-T G.107
+E-model: it takes G.107's own default value for every transmission
+parameter this crate cannot observe (§7.7's own "R = 93.2" baseline at
+every default) and computes only what a call actually measured — the
+delay impairment `Id` from one-way delay, and the codec/loss impairment
+`Ie,eff` from the codec's G.113 Appendix I `Ie`/`Bpl` pair and the
+measured loss rate. `emodel::codec_quality_model` tabulates G.113 Table
+I.4 for the one codec family it covers (G.711); the facade
+(`Codec::quality_model` in `sipral`) maps this crate's own codec catalogue
+onto it, `None` for G.722 and Opus, which G.113 does not tabulate — RFC
+3611 §4.7.5's own answer for a metric this stack cannot honestly compute
+is the sentinel, not a guess, and `emodel::evaluate` returns exactly that
+when handed `None`.
+
+**Where it surfaces.** `RtpSession::voip_metrics` assembles the whole
+block — independent of whether XR reporting was negotiated, since the
+same figures also feed the RFC 6035 quality report below — and
+`MediaSession::statistics` carries it as `StreamStatistics::voip_metrics`,
+`None` until a source is known. `sipral-ffi`'s `sipral_stream_stats_t`
+carries the same figures at its tail, each `voip_*` member paired with a
+`has_voip_*` flag for the fields RFC 3611 can report as unavailable.
+
+**The RFC 6035 report.** When a call ends, `MediaEngine::release` builds
+`sipral_ua::QualityReportMetrics` from the stream's `VoipMetricsBlock` and
+its own wall-clock span (`MediaSession::quality_report_metrics`,
+`MediaSession::session_span`) and hands it to
+`UserAgent::send_quality_report`, which publishes it as a `VQSessionReport:
+CallTerm` (RFC 6035 §4.6.1) over a PUBLISH (RFC 3903) with `Event:
+vq-rtcpxr`, `Content-Type: application/vq-rtcpxr`, when the call's account
+named a collector (`Account::quality_report_uri`) — a no-op otherwise, so
+nothing is sent for the common case of an account that never asked. The
+PUBLISH's own `Expires: 0` closes its published state at once: the report
+describes a call that has already ended and nothing refreshes it, and a
+collector that never answers has cost this end one datagram, never a
+retry. `MediaEvent::QualityReportSent` says whether the attempt went out,
+raised only when there was a collector to publish to at all. Only
+`LocalMetrics` is written; `RemoteMetrics` would be what the far end
+measured about this stream, and this crate has no channel to receive it.
+
 ### Jitter buffer
 
 The component that decides whether calls sound good, and therefore ours.
