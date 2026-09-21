@@ -61,9 +61,10 @@ you pick, or replace, or leave out entirely.
 | `sipral-core` | message parser and serializer, transactions, dialogs, SDP, authentication, the diagnostic record, session recording and replay. Sans-I/O, no allocation surprises, no clock of its own |
 | `sipral-ua` | registration, calls, hold, transfer, subscriptions and busy lamp field, push-announced calls, suspend and resume, screening of unwanted INVITEs. Built on the core |
 | `sipral-rtp` | RTP and RTCP, adaptive jitter buffer, packet loss concealment, DTMF, SRTP |
-| `sipral-nat` | STUN client, TURN client, ICE-lite. Written and tested; not yet reached from a call |
+| `sipral-nat` | STUN client, TURN client, and ICE in both roles — the lite one, and the full one with gathering, checklists, nomination, role conflicts, restarts and consent freshness. Written and tested; not yet reached from a call |
 | `sipral-dtls` | DTLS 1.2 for DTLS-SRTP: the client and server handshake with retransmission, the stateless cookie exchange, alerts and the SRTP key export, over the record layer, handshake framing and messages, key derivation, and self-signed certificates checked by fingerprint. Reached from a call behind the `dtls` feature |
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 follows in phase 2, written the same way, for the carrier that insists |
+| `sipral-io-common` | the parts of a device backend that are not about any device: the lock-free ring between the audio thread and an ordinary one, the gate that says when that thread is out of our memory, and volume, mute and the meter |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
 | `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
 | `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Not yet joined to the media pipeline |

@@ -12,6 +12,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **`sipral-io-common`**, holding the three parts of an audio device backend
+  that are not about any device: the lock-free ring where the thread the
+  system will not wait for meets an ordinary one, the gate that says when that
+  thread is out of our memory before the memory is freed, and volume, mute and
+  the meter. All three were written twice, once in `sipral-io-coreaudio` and
+  once in `sipral-io-wasapi`, and identically enough that the second copy's own
+  documentation said whose it was — 1,288 lines and 34 tests that existed
+  twice and now exist once, on the way to PipeWire and AAudio not being the
+  third and fourth copy. The counters stayed behind in each backend, because
+  past the four numbers both keep they count different things.
+
 - **A fuzz target for the ICE agent**, `fuzz/fuzz_targets/ice.rs`, the
   seventeenth. It is the one seam open to anybody before a key exists: an ICE
   agent binds the media port and answers connectivity checks on it, so

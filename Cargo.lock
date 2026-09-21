@@ -509,12 +509,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-io-common"
+version = "0.0.1"
+
+[[package]]
 name = "sipral-io-coreaudio"
 version = "0.0.1"
+dependencies = [
+ "sipral-io-common",
+]
 
 [[package]]
 name = "sipral-io-wasapi"
 version = "0.0.1"
+dependencies = [
+ "sipral-io-common",
+]
 
 [[package]]
 name = "sipral-media"

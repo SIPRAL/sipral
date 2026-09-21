@@ -66,13 +66,16 @@ still ahead.
 
    sipral-headless   PCM on a socket, no audio device
    sipral-io-*       CoreAudio, WASAPI, the device itself
+        │
+   sipral-io-common  the ring, the gate, volume — no device at all
 ```
 
 Dependencies point down only, and most of these crates have none. `sipral-core`
-depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`,
-`sipral-headless` and `sipral-io-*` name no Sipral crate at all. The last two
-stand outside the picture because nothing in it depends on them: an application
-links one of them, or neither, and never both.
+depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`
+and `sipral-headless` name no Sipral crate at all, and the two `sipral-io-*`
+name exactly one, `sipral-io-common`, which names none. The device crates and
+`sipral-headless` stand outside the picture because nothing in it depends on
+them: an application links one of them, or neither, and never both.
 
 One edge the picture allows and the design forbids: **`sipral-ua` does not
 depend on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
@@ -175,6 +178,23 @@ all.
 
 That second build is not a stripped-down first build. It is why the audio device
 layer was kept out of the core in the first place.
+
+Three things in a device backend are not about the device, and they are the
+three that are hard to get right: the lock-free ring where the thread the
+system will not wait for meets an ordinary one, the gate that says when that
+thread is out of our memory before the memory is freed, and volume, mute and
+the meter. They were written twice, once per backend, and the second copy's
+own documentation said it was the first copy's. They are `sipral-io-common`
+now — one file each, compiled and tested on every platform the workspace
+builds on rather than once per backend — so that PipeWire and AAudio are not
+the third and fourth copy.
+
+What stayed behind in each backend is what is genuinely its own, and the
+counters are the clearest case of the difference. Both keep the same four
+numbers — samples captured, dropped, played and invented — and then CoreAudio
+counts the times `AudioUnitRender` refused while WASAPI counts buffer gaps,
+refused `GetBuffer` calls, and a buffer-ready event that did not arrive. Those
+are not one measurement with two names, so they are not shared.
 
 ### sipral-ffi
 

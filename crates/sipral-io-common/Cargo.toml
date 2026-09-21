@@ -1,6 +1,6 @@
 [package]
-name = "sipral-io-wasapi"
-description = "Audio device I/O for Windows."
+name = "sipral-io-common"
+description = "The parts of a Sipral audio device backend that are not about any device."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,8 @@ categories.workspace = true
 publish.workspace = true
 
 [dependencies]
-sipral-io-common = { path = "../sipral-io-common", version = "0.0.1" }
 
 [lints.rust]
-unsafe_code = "allow"
 missing_docs = "warn"
 unreachable_pub = "warn"
 

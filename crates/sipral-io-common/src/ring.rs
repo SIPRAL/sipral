@@ -1,32 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! The one place the audio thread and an ordinary one meet.
+//! The one place a realtime thread and an ordinary one meet.
 //!
-//! The audio thread runs in the Pro Audio scheduling class and has a buffer to
-//! fill before Windows comes back for it. It cannot allocate, cannot take a
-//! lock that a non-realtime thread might be holding, cannot log and cannot
-//! block, because any of those turns a late frame into a glitch and a bad day
-//! into a dropped call. So the only thing between it and the rest of the
-//! process is this: memory allocated once at construction, two indices, and no
-//! way for either side to wait for the other. Whoever is late loses samples,
-//! and the loss is counted.
+//! The device callback runs on a thread the system will not wait for. It
+//! cannot allocate, cannot take a lock that a non-realtime thread might be
+//! holding, cannot log and cannot block, because any of those turns a late
+//! frame into a glitch and a bad day into a dropped call. So the only thing
+//! between the callback and the rest of the process is this: memory allocated
+//! once at construction, two indices, and no way for either side to wait for
+//! the other. Whoever is late loses samples, and the loss is counted.
 //!
 //! One producer and one consumer, never more. Which side is which depends on
-//! the direction: the audio thread produces what the microphone heard and
-//! consumes what goes to the speaker.
+//! the direction: the callback produces what the microphone heard and consumes
+//! what goes to the speaker.
 //!
-//! The samples live in atomics rather than behind an `UnsafeCell`, so the racy
-//! window at the head of the buffer is defined behaviour instead of something
-//! to argue about. The loads and stores of the samples themselves are relaxed
-//! and compile to ordinary ones; what orders them is the pair of acquire and
-//! release on the indices.
-//!
-//! This is the same ring as `sipral-io-coreaudio`'s, and deliberately so: the
-//! `sipral-io-*` crates do not depend on each other, and a shared crate for two
-//! hundred lines of atomics would be a dependency edge that buys nothing. The
-//! reasoning is the same because the problem is; only the prose about which
-//! thread is which changes.
+//! The samples live in atomics rather than behind an `UnsafeCell`, so the
+//! racy window at the head of the buffer is defined behaviour instead of
+//! something to argue about. The loads and stores of the samples themselves
+//! are relaxed and compile to ordinary ones; what orders them is the pair of
+//! acquire and release on the indices.
 
 use core::sync::atomic::{AtomicI16, AtomicUsize, Ordering};
 
@@ -38,7 +31,11 @@ const MIN_CAPACITY: usize = 2;
 /// two is where the arithmetic would overflow.
 const MAX_CAPACITY: usize = 1 << 22;
 
-pub(crate) struct Ring {
+/// A single-producer, single-consumer buffer of samples, sized once.
+///
+/// Neither side ever waits for the other: whoever is late loses samples,
+/// and the loss is counted where the caller keeps its counters.
+pub struct Ring {
     cells: Box<[AtomicI16]>,
     /// One less than a power-of-two length, so an index becomes a slot with an
     /// `and`. It also makes the indices wrap correctly: `usize::MAX + 1` is a
@@ -51,7 +48,8 @@ pub(crate) struct Ring {
 
 impl Ring {
     /// A ring holding at least `samples`, rounded up to a power of two.
-    pub(crate) fn new(samples: usize) -> Self {
+    #[must_use]
+    pub fn new(samples: usize) -> Self {
         Self::starting_at(samples, 0)
     }
 
@@ -73,10 +71,10 @@ impl Ring {
 
     /// Room for more, as the producer sees it.
     ///
-    /// Acquire on the consumer's index: the cells it has finished with are only
-    /// free once its release of that index is visible here, and the producer is
-    /// about to overwrite them.
-    pub(crate) fn free(&self) -> usize {
+    /// Acquire on the consumer's index: the cells it has finished with are
+    /// only free once its release of that index is visible here, and the
+    /// producer is about to overwrite them.
+    pub fn free(&self) -> usize {
         let write = self.write.load(Ordering::Relaxed);
         let read = self.read.load(Ordering::Acquire);
         self.cells.len() - write.wrapping_sub(read)
@@ -86,14 +84,14 @@ impl Ring {
     ///
     /// Acquire on the producer's index, which is what makes the samples it
     /// stored with relaxed writes visible here.
-    pub(crate) fn filled(&self) -> usize {
+    pub fn filled(&self) -> usize {
         let read = self.read.load(Ordering::Relaxed);
         let write = self.write.load(Ordering::Acquire);
         write.wrapping_sub(read)
     }
 
     /// Put in as much as fits, and say how much that was. Producer side only.
-    pub(crate) fn write(&self, samples: &[i16]) -> usize {
+    pub fn write(&self, samples: &[i16]) -> usize {
         // Relaxed: nobody but this side moves `write`, so there is nothing to
         // synchronise with in reading back our own value.
         let index = self.write.load(Ordering::Relaxed);
@@ -111,27 +109,27 @@ impl Ring {
     ///
     /// Between the check and the write only the consumer can act, and all it
     /// does is free more room, so a frame that fits stays fitting.
-    pub(crate) fn write_frame(&self, frame: &[i16]) -> bool {
+    pub fn write_frame(&self, frame: &[i16]) -> bool {
         self.free() >= frame.len() && self.write(frame) == frame.len()
     }
 
     /// Take as much as there is, and say how much that was. Consumer side only.
-    pub(crate) fn read(&self, out: &mut [i16]) -> usize {
+    pub fn read(&self, out: &mut [i16]) -> usize {
         // Relaxed for the same reason `write` reads its own index relaxed.
         let index = self.read.load(Ordering::Relaxed);
         let taken = self.filled().min(out.len());
         if let Some(head) = out.get_mut(..taken) {
             self.load_at(index, head);
         }
-        // Release: tells the producer these cells have been read out of, so its
-        // acquire in `free` is what keeps it from overwriting them early.
+        // Release: tells the producer these cells have been read out of, so
+        // its acquire in `free` is what keeps it from overwriting them early.
         self.read
             .store(index.wrapping_add(taken), Ordering::Release);
         taken
     }
 
     /// Take a whole frame or leave it.
-    pub(crate) fn read_frame(&self, frame: &mut [i16]) -> bool {
+    pub fn read_frame(&self, frame: &mut [i16]) -> bool {
         self.filled() >= frame.len() && self.read(frame) == frame.len()
     }
 

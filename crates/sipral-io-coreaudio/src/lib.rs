@@ -86,7 +86,6 @@ mod counters;
 mod device;
 mod format;
 mod latency;
-mod level;
 mod status;
 
 pub use counters::Counters;
@@ -96,13 +95,20 @@ pub use latency::{Latency, RenderDelay};
 pub use level::{Controls, Gain, Level};
 pub use status::{Error, OsStatus};
 
-// The ring and the gate are only ever instantiated by the platform code, but
-// what they are for is to be right, and that is worth compiling and testing
-// everywhere the workspace builds rather than only where the frameworks are.
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
-mod gate;
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
-mod ring;
+// Volume, mute and the meter are not about CoreAudio and were never written
+// here twice on purpose: `sipral-io-wasapi` had the same file. They live in
+// `sipral-io-common` now, and are re-exported so that a caller of this crate
+// sees the same names it always did.
+pub(crate) use sipral_io_common::level;
+
+// The ring and the gate used to be declared here under
+// `any(target_os = "macos", target_os = "ios", test)`, so that what they are
+// for — being right — was compiled and tested everywhere the workspace builds
+// and not only where the frameworks are. They are `sipral-io-common`'s now,
+// which compiles and tests them everywhere unconditionally, so this is left
+// naming only what actually reaches them.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) use sipral_io_common::{gate, ring};
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod abi;

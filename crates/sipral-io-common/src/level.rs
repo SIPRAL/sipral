@@ -3,30 +3,27 @@
 
 //! Volume, mute, and the number a meter is drawn from.
 //!
-//! The gain is applied to the samples on their way past. Windows has two
-//! volumes it could have been handed to instead and neither of them belongs to
-//! a call: `IAudioEndpointVolume` is the endpoint's own master, shared with
-//! everything else on the machine and left where the call put it, and
-//! `ISimpleAudioVolume` is the process's slot in the volume mixer, which is
-//! one setting for the whole process however many streams it has open and
-//! which Windows remembers between runs. What is done to the frames belongs to
-//! the stream and goes when the stream goes.
+//! The gain is applied to the samples on their way past rather than to the
+//! device's own volume control. A device's volume belongs to the machine:
+//! turning it down for a call turns down everything else the person is
+//! listening to, it stays down after the call, and it stays down after the
+//! process dies. What is done to the frames belongs to the stream and goes
+//! when the stream goes.
 //!
-//! It is applied at the endpoint end of the ring rather than at the caller's,
-//! because a mute has to be silent on the next period. The ring holds sixteen
-//! frames by default, so a gain applied on the way in would be heard a third
-//! of a second after the button was pressed.
+//! It is applied at the device end of the rings rather than at the caller's,
+//! because a mute has to be silent on the next frame the device asks for. The
+//! rings hold sixteen frames by default, so a gain applied on the way in would
+//! be heard a third of a second after the button was pressed.
 //!
-//! All of it runs on the audio thread, so it is integer arithmetic over
-//! samples that are being copied anyway — one multiply, one shift, one clamp
-//! and one comparison each — plus six relaxed atomics per pass. Nothing here
+//! All of it runs in the callback, so it is integer arithmetic over samples
+//! that are being copied anyway — one multiply, one shift, one clamp and one
+//! comparison each — plus six relaxed atomics per callback. Nothing here
 //! allocates, takes a lock, or reads a clock.
 
-// The half of this file the audio thread uses is only reached from the
-// platform code, and the types it hangs off are the portable surface and are
-// exported everywhere. So on a target with no WASAPI what is left here does
-// look unused, and is, until something on that target calls it.
-#![cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+// The half of this file the audio path uses is only reached from the platform
+// code, and the types it hangs off are the portable surface and are exported
+// everywhere. So on a target with no CoreAudio what is left here does look
+// unused, and is, until something on that target calls it.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -67,22 +64,23 @@ const FULL_SCALE: u16 = 32_768;
 const WINDOW_MILLIS: u32 = 100;
 
 /// Samples one meter window covers at a rate.
-pub(crate) const fn window_samples(sample_rate_hz: u32) -> u32 {
+#[must_use]
+pub const fn window_samples(sample_rate_hz: u32) -> u32 {
     let per_millisecond = sample_rate_hz / 1_000;
     if per_millisecond == 0 {
-        // no endpoint runs below a kilohertz; a window of no samples would be
-        // one that ends on every pass
+        // no device runs below a kilohertz; a window of no samples would be
+        // one that ends on every callback
         WINDOW_MILLIS
     } else {
         per_millisecond * WINDOW_MILLIS
     }
 }
 
-/// What the samples are multiplied by on their way to or from the endpoint.
+/// What the samples are multiplied by on their way to or from the device.
 ///
 /// Held as a whole number of 256ths rather than as a float, because the
-/// multiplication happens on the audio thread and integers are what the
-/// samples already are by then.
+/// multiplication happens in the callback and integers are what the samples
+/// already are.
 ///
 /// Both ends of the range are defined and neither of them wraps. A ratio below
 /// zero, or one that is not a number at all, is [`Gain::SILENT`]; one above
@@ -98,7 +96,7 @@ impl Gain {
     /// switch precisely so that unmuting gives back the volume that was set.
     pub const SILENT: Self = Self(0);
 
-    /// The samples as the endpoint gave them, or as the caller wrote them.
+    /// The samples as the device gave them, or as the caller wrote them.
     pub const UNITY: Self = Self(UNITY_SCALE);
 
     /// The loudest this crate will multiply by: four times, +12 dB.
@@ -202,19 +200,19 @@ impl fmt::Display for Level {
     }
 }
 
-/// The gain, the mute and the meter for one stream.
+/// The gain, the mute and the meter for one direction.
 ///
 /// One writer and any number of readers. Everything is relaxed: the audio
-/// thread is the only thing that writes the meter, a control that arrives one
-/// pass late is a slider that moved a few milliseconds ago, and an ordering
-/// here would put a fence in the audio thread for the sake of a volume change
-/// nobody can hear the timing of.
+/// callback is the only thing that writes the meter, a control that arrives
+/// one callback late is a slider that moved a few milliseconds ago, and an
+/// ordering here would put a fence in the callback for the sake of a volume
+/// change nobody can hear the timing of.
 #[derive(Debug)]
-pub(crate) struct Channel {
+pub struct Channel {
     scale: AtomicU16,
     muted: AtomicBool,
     clipped: AtomicU64,
-    /// Samples in a window, from the rate the endpoint turned out to run.
+    /// Samples in a window, from the rate the stream settled on.
     window: AtomicU32,
     /// The loudest in the window being filled, and in the last full one. The
     /// meter is the larger, which is what holds a peak for between one window
@@ -225,7 +223,10 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
-    pub(crate) fn new(window: u32) -> Self {
+    /// A channel at unity gain, unmuted, metering over a window of this many
+    /// samples.
+    #[must_use]
+    pub fn new(window: u32) -> Self {
         Self {
             scale: AtomicU16::new(UNITY_SCALE),
             muted: AtomicBool::new(false),
@@ -237,35 +238,42 @@ impl Channel {
         }
     }
 
-    /// Say what the rate turned out to be. The endpoint decides it, and on a
+    /// Say what the rate turned out to be. The device decides it, and on a
     /// reopen it can decide differently.
-    pub(crate) fn set_window(&self, window: u32) {
+    pub fn set_window(&self, window: u32) {
         self.window.store(window.max(1), Ordering::Relaxed);
     }
 
-    pub(crate) fn set_gain(&self, gain: Gain) {
+    /// Set the gain the audio path applies from its next sample on.
+    pub fn set_gain(&self, gain: Gain) {
         self.scale.store(gain.0, Ordering::Relaxed);
     }
 
-    pub(crate) fn gain(&self) -> Gain {
+    /// The gain in force.
+    pub fn gain(&self) -> Gain {
         Gain(self.scale.load(Ordering::Relaxed))
     }
 
-    pub(crate) fn set_muted(&self, muted: bool) {
+    /// Mute or unmute, heard on the next sample the device asks for.
+    pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
     }
 
-    pub(crate) fn is_muted(&self) -> bool {
+    /// Whether it is muted.
+    pub fn is_muted(&self) -> bool {
         self.muted.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn clipped(&self) -> u64 {
+    /// How many samples the gain has driven past full scale over the life of
+    /// the channel. It only ever grows, so two readings subtract into a rate,
+    /// and a rate that is not zero is a gain set too high.
+    pub fn clipped(&self) -> u64 {
         self.clipped.load(Ordering::Relaxed)
     }
 
     /// What a meter should show: the loudest of the window being filled and
     /// the last full one.
-    pub(crate) fn level(&self) -> Level {
+    pub fn level(&self) -> Level {
         Level(
             self.current
                 .load(Ordering::Relaxed)
@@ -274,8 +282,8 @@ impl Channel {
     }
 
     /// Forget what was heard. For a stream that has stopped, whose meter would
-    /// otherwise stay where the last pass left it and read as a live signal.
-    pub(crate) fn quiet(&self) {
+    /// otherwise stay where the last frame left it and read as a live signal.
+    pub fn quiet(&self) {
         self.current.store(0, Ordering::Relaxed);
         self.previous.store(0, Ordering::Relaxed);
         self.counted.store(0, Ordering::Relaxed);
@@ -283,12 +291,12 @@ impl Channel {
 
     /// Scale a block of samples where they lie, and note what came out.
     ///
-    /// `covered` is how much endpoint time the block accounts for, which is
-    /// not always its length: a starved render pass scales what there was and
-    /// leaves the rest silent, and the window has to advance by the silence
-    /// too, or a stream that stopped being fed would leave its meter frozen at
-    /// the last thing it heard.
-    pub(crate) fn apply(&self, samples: &mut [i16], covered: usize) {
+    /// `covered` is how much device time the block accounts for, which is not
+    /// always its length: a starved playback callback scales what there was
+    /// and pads the rest with silence, and the window has to advance by the
+    /// silence too, or a stream that stopped being fed would leave its meter
+    /// frozen at the last thing it heard.
+    pub fn apply(&self, samples: &mut [i16], covered: usize) {
         let scale = if self.muted.load(Ordering::Relaxed) {
             0
         } else {
@@ -332,7 +340,7 @@ impl Channel {
     }
 }
 
-/// The volume, the mute and the meter of one stream.
+/// The volume, the mute and the meter for one direction of one stream.
 ///
 /// A handle rather than methods on the stream, because the slider and the
 /// meter are on the thread that draws the window and the frames are on the
@@ -347,14 +355,15 @@ pub struct Controls {
 }
 
 impl Controls {
-    pub(crate) fn new(channel: &Arc<Channel>) -> Self {
+    /// A handle onto a channel the audio path already owns.
+    pub fn new(channel: &Arc<Channel>) -> Self {
         Self {
             channel: Arc::clone(channel),
         }
     }
 
-    /// Set what the samples are multiplied by. Takes effect on the next period
-    /// the endpoint asks for, which is one period away and not one ring away.
+    /// Set what the samples are multiplied by. Takes effect on the next block
+    /// the device asks for, which is one period away and not one ring away.
     pub fn set_gain(&self, gain: Gain) {
         self.channel.set_gain(gain);
     }
@@ -368,10 +377,10 @@ impl Controls {
     /// Mute or unmute, without disturbing the gain: unmuting gives back
     /// exactly the volume that was set before.
     ///
-    /// A muted stream keeps running rather than stopping. The endpoint is
-    /// still read and the ring still moves, at the rate it always did, so that
-    /// unmuting is heard immediately instead of replaying however much audio
-    /// piled up while nobody was listening.
+    /// A muted direction keeps running rather than stopping. The device is
+    /// still read and the rings still move, at the rate they always did, so
+    /// that unmuting is heard immediately instead of replaying however much
+    /// audio piled up while nobody was listening.
     pub fn set_muted(&self, muted: bool) {
         self.channel.set_muted(muted);
     }
@@ -562,8 +571,8 @@ mod tests {
         channel.apply(&mut spike, 4);
         assert_eq!(channel.level().peak(), 9_000);
 
-        // a starved render pass: four samples came out of the ring and the
-        // endpoint asked for two hundred, so two windows have gone by
+        // a starved playback callback: four samples came out of the ring and
+        // the device asked for two hundred, so two windows have gone by
         let mut nothing: [i16; 0] = [];
         channel.apply(&mut nothing, 200);
         channel.apply(&mut nothing, 200);

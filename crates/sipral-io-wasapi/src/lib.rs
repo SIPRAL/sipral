@@ -111,7 +111,6 @@ mod category;
 mod counters;
 mod device;
 mod format;
-mod level;
 mod status;
 
 pub use category::Category;
@@ -121,20 +120,29 @@ pub use format::{DeviceFormat, SampleFormat, StreamFormat};
 pub use level::{Controls, Gain, Level};
 pub use status::{Error, HResult};
 
-// The ring, the gate, the structure layouts and the conversions are only ever
-// reached by the platform code, but what they are for is to be right, and that
-// is worth compiling and testing everywhere the workspace builds rather than
-// only where the libraries are.
+// Volume, mute and the meter are not about WASAPI, and this file's own
+// documentation used to say it was `sipral-io-coreaudio`'s. It is
+// `sipral-io-common`'s now, re-exported so that a caller of this crate sees
+// the same names it always did.
+pub(crate) use sipral_io_common::level;
+
+// The ring and the gate used to be declared here under
+// `any(target_os = "windows", test)`, so that what they are for — being right
+// — was compiled and tested everywhere the workspace builds and not only
+// where the libraries are. They are `sipral-io-common`'s now, which compiles
+// and tests them everywhere unconditionally, so this is left naming only what
+// actually reaches them: the two modules that run on Windows.
+#[cfg(target_os = "windows")]
+pub(crate) use sipral_io_common::{gate, ring};
+
+// The structure layouts and the conversions are still this crate's own, and
+// the argument above still applies to them.
 #[cfg(any(target_os = "windows", test))]
 mod abi;
 #[cfg(any(target_os = "windows", test))]
 mod convert;
 #[cfg(any(target_os = "windows", test))]
-mod gate;
-#[cfg(any(target_os = "windows", test))]
 mod mixformat;
-#[cfg(any(target_os = "windows", test))]
-mod ring;
 
 #[cfg(target_os = "windows")]
 mod com;
