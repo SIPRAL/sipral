@@ -817,6 +817,11 @@ impl MediaSession {
                 payload: data,
             });
         };
+        // N9's third place. `send` spends no id while the pair is direct, and
+        // will spend one the moment a relayed pair has a refresh due; filling
+        // here costs one subtraction on a full pool and means the rule does
+        // not have to be remembered again then
+        ice.top_up();
         let (destination, payload) = ice.send(data, now).ok()?;
         Some(Datagram {
             destination,
@@ -1387,6 +1392,12 @@ impl MediaSession {
         let rtcp = self
             .control_destination()
             .filter(|_| !self.rtp.awaiting_keys())
+            // and for the same reason: `rtcp_due` both answers and
+            // reconsiders, so a report this deadline woke a caller for and
+            // `poll_rtcp` then refused would leave the deadline where it was
+            // — and every later poll would see it passed. A caller driven by
+            // this would spin for the whole of the checks
+            .filter(|_| self.has_path_or_none())
             .map(|_| self.origin + self.rtp.next_rtcp_deadline());
         let stall = self
             .stall_after
@@ -1474,8 +1485,25 @@ impl MediaSession {
     #[must_use]
     pub fn rtcp_deadline_passed(&self, now: Instant) -> bool {
         !self.rtp.awaiting_keys()
+            && self.has_path_or_none()
             && self.control_destination().is_some()
             && self.elapsed(now) >= self.rtp.next_rtcp_deadline()
+    }
+
+    /// Whether there is anywhere to send, for the two places that ask without
+    /// the `ice` feature having to exist.
+    ///
+    /// `true` in a build with no agent, which has had somewhere to send since
+    /// the description named it — and where the `self` it does not read is
+    /// the whole of the difference between the two builds.
+    #[cfg_attr(not(feature = "ice"), allow(clippy::unused_self))]
+    fn has_path_or_none(&self) -> bool {
+        #[cfg(feature = "ice")]
+        {
+            self.has_path()
+        }
+        #[cfg(not(feature = "ice"))]
+        true
     }
 
     /// This session's own timeline, which is what `sipral-rtp` counts in.

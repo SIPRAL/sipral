@@ -4422,6 +4422,24 @@ fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {
         session.poll_rtcp(pair.now).is_none(),
         "a report went out before a path was chosen"
     );
+    // and the clock does not wake a caller for a report it will refuse. The
+    // deadline `poll_rtcp` would have moved stays where it is when the report
+    // is refused, so publishing it would spin the caller's loop for the whole
+    // of the checks — the same failure the keying guard one line up avoids,
+    // and the reason both are asked before the schedule rather than after
+    assert!(
+        !session.rtcp_deadline_passed(pair.now + Duration::from_secs(30)),
+        "the clock says a report is due on a call with nowhere to send it"
+    );
+    // it does ask to be woken, and soon — but for the agent's own pacing,
+    // which is what makes a path exist at all, rather than for the report
+    let waking = session
+        .poll_timeout()
+        .expect("the agent has work and says when");
+    assert!(
+        waking <= pair.now + Duration::from_secs(1),
+        "the only deadline left is the report's, which is five seconds out"
+    );
 }
 
 #[cfg(feature = "ice")]
