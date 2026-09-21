@@ -112,14 +112,14 @@ impl UserAgent {
     /// Send `call`'s end-of-session voice quality report, if the account it
     /// belongs to asked for one ([`Account::quality_report_uri`]).
     ///
-    /// A no-op, `Ok(())`, when the call is not known, has no account, or
-    /// the account named no collector — the caller does not have to check
-    /// first. Otherwise builds and sends one PUBLISH and forgets it: RFC
-    /// 3903 SS3's initial `Expires` closes the published state at once
-    /// (`Expires: 0`), since this report describes a call that has already
-    /// ended and nothing here refreshes it, and no response to it changes
-    /// what this method does — a collector that never answers has cost
-    /// this end one UDP datagram, not a retry loop.
+    /// `Ok(false)` for the no-op — the call is not known, has no account,
+    /// or the account named no collector — so the caller does not have to
+    /// check first. `Ok(true)` once a PUBLISH has actually gone out: it
+    /// closes its own published state at once (RFC 3903 SS3's initial
+    /// `Expires: 0`), since this report describes a call that has already
+    /// ended and nothing here refreshes it, and this method neither waits
+    /// for nor reports on whatever answers it — a collector that never
+    /// answers has cost this end one UDP datagram, not a retry loop.
     ///
     /// # Errors
     /// Whatever [`sipral_core::endpoint::Endpoint::request`] refuses the
@@ -131,18 +131,18 @@ impl UserAgent {
         call: CallHandle,
         metrics: &QualityReportMetrics,
         now: Instant,
-    ) -> Result<(), UaError> {
+    ) -> Result<bool, UaError> {
         let Some(account_id) = self.calls.get(&call).and_then(|held| held.account) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(account) = self.accounts.get(&account_id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(collector) = account.quality_report() else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(identity) = self.call_identity(call) else {
-            return Ok(());
+            return Ok(false);
         };
         let direction = self.call_direction(call).unwrap_or(Direction::Outgoing);
 
@@ -164,7 +164,7 @@ impl UserAgent {
         .body(CONTENT_TYPE, Arc::from(body(&identity, direction, metrics)));
 
         self.endpoint.request(&request, now)?;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -559,9 +559,10 @@ mod tests {
     #[test]
     fn a_call_nobody_knows_sends_nothing_and_is_not_an_error() {
         let mut agent = UserAgent::new(EndpointConfig::default(), [7; 32]).expect("an agent");
-        agent
+        let sent = agent
             .send_quality_report(CallHandle(0), &metrics(), Instant::now())
             .expect("a call this agent never heard of is a no-op, not a refusal");
+        assert!(!sent);
     }
 
     #[test]

@@ -183,7 +183,7 @@ pub use sipral_media::processor::{NoProcessor, Processor};
 /// What the de-jitter buffer counted, which is most of what a stream statistic
 /// is.
 pub use sipral_rtp::srtp::Suite as SrtpSuite;
-pub use sipral_rtp::{Discard, Quality};
+pub use sipral_rtp::{Discard, Quality, UNAVAILABLE, VoipMetricsBlock};
 /// Which end placed a call, renamed on the way through: `sipral-ua` and
 /// `sipral-core::sdp` both have a `Direction` and they are about different
 /// things, so the one an application meets less often gets the longer name.

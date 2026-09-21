@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 use sipral::{
     Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, IcePolicy, MediaError,
     MediaSession, Playback, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
-    StreamStatistics,
+    StreamStatistics, UNAVAILABLE,
 };
 use sipral_core::sdp::SdpError;
 
@@ -617,6 +617,59 @@ record! {
         pub suffering: u32,
         /// How long since a packet last arrived. A live call sits at one frame.
         pub silent_for_ms: u64,
+        /// Whether an RFC 3611 VoIP Metrics report is available at all —
+        /// zero until this stream has identified a source to report on.
+        /// Every `voip_*` member below is meaningless while this is zero.
+        ///
+        /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+        /// unmoved, and what a caller built before these members existed
+        /// never sent reads them all as zero, this one included.
+        pub has_voip_metrics: u32,
+        /// RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
+        /// 100 and divide by 256 for a percentage).
+        pub voip_loss_rate_256: u32,
+        /// RFC 3611 SS4.7.1's discard rate, as its own 256ths.
+        pub voip_discard_rate_256: u32,
+        /// RFC 3611 SS4.7.2's burst density, as its own 256ths.
+        pub voip_burst_density_256: u32,
+        /// RFC 3611 SS4.7.2's mean burst duration.
+        pub voip_burst_duration_us: u64,
+        /// RFC 3611 SS4.7.2's gap density, as its own 256ths.
+        pub voip_gap_density_256: u32,
+        /// RFC 3611 SS4.7.2's mean gap duration.
+        pub voip_gap_duration_us: u64,
+        /// RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
+        /// threshold this stream's jitter buffer used, fixed for the
+        /// stream's whole life.
+        pub voip_gmin: u32,
+        /// RFC 3611 SS4.7.3's end-system delay. Zero for every build of
+        /// this stack today: SS4.7.3 defines it as the sending side's own
+        /// accumulation and encoding delay added to the receiving side's,
+        /// and nothing here has visibility into the sending side's half.
+        pub voip_end_system_delay_us: u64,
+        /// RFC 3611 SS4.7.7's nominal jitter buffer delay.
+        pub voip_jitter_buffer_nominal_us: u64,
+        /// RFC 3611 SS4.7.7's current maximum jitter buffer delay.
+        pub voip_jitter_buffer_maximum_us: u64,
+        /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay.
+        pub voip_jitter_buffer_abs_max_us: u64,
+        /// Whether `voip_r_factor` is available: zero when the active
+        /// codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
+        /// SS4.7.5's own `127` "unavailable" sentinel).
+        pub has_voip_r_factor: u32,
+        /// RFC 3611 SS4.7.5's R factor, `0..=100`.
+        pub voip_r_factor: u32,
+        /// Whether `voip_mos_lq_x10` is available, for the same reason as
+        /// `has_voip_r_factor`.
+        pub has_voip_mos_lq: u32,
+        /// RFC 3611 SS4.7.5's estimated listening-quality MOS, in tenths
+        /// (`14..=50`).
+        pub voip_mos_lq_x10: u32,
+        /// Whether `voip_mos_cq_x10` is available, for the same reason.
+        pub has_voip_mos_cq: u32,
+        /// RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
+        /// tenths.
+        pub voip_mos_cq_x10: u32,
     }
 }
 
@@ -800,6 +853,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
 /// The C shape of a statistics record.
 pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
     let quality = record.quality;
+    let voip = record.voip_metrics;
     SipralStreamStats {
         size: size_of::<SipralStreamStats>(),
         codec: named_codec(record.codec) as u32,
@@ -822,7 +876,31 @@ pub(crate) fn stream_stats(record: &StreamStatistics) -> SipralStreamStats {
         score: record.score(),
         suffering: u32::from(record.is_suffering()),
         silent_for_ms: millis(record.silent_for),
+        has_voip_metrics: u32::from(voip.is_some()),
+        voip_loss_rate_256: voip.map_or(0, |block| u32::from(block.loss_rate)),
+        voip_discard_rate_256: voip.map_or(0, |block| u32::from(block.discard_rate)),
+        voip_burst_density_256: voip.map_or(0, |block| u32::from(block.burst_density)),
+        voip_burst_duration_us: voip.map_or(0, |block| ms_to_us(block.burst_duration_ms)),
+        voip_gap_density_256: voip.map_or(0, |block| u32::from(block.gap_density)),
+        voip_gap_duration_us: voip.map_or(0, |block| ms_to_us(block.gap_duration_ms)),
+        voip_gmin: voip.map_or(0, |block| u32::from(block.gmin)),
+        voip_end_system_delay_us: voip.map_or(0, |block| ms_to_us(block.end_system_delay_ms)),
+        voip_jitter_buffer_nominal_us: voip.map_or(0, |block| ms_to_us(block.jb_nominal_ms)),
+        voip_jitter_buffer_maximum_us: voip.map_or(0, |block| ms_to_us(block.jb_maximum_ms)),
+        voip_jitter_buffer_abs_max_us: voip.map_or(0, |block| ms_to_us(block.jb_abs_max_ms)),
+        has_voip_r_factor: u32::from(voip.is_some_and(|block| block.r_factor != UNAVAILABLE)),
+        voip_r_factor: voip.map_or(0, |block| u32::from(block.r_factor)),
+        has_voip_mos_lq: u32::from(voip.is_some_and(|block| block.mos_lq != UNAVAILABLE)),
+        voip_mos_lq_x10: voip.map_or(0, |block| u32::from(block.mos_lq)),
+        has_voip_mos_cq: u32::from(voip.is_some_and(|block| block.mos_cq != UNAVAILABLE)),
+        voip_mos_cq_x10: voip.map_or(0, |block| u32::from(block.mos_cq)),
     }
+}
+
+/// A `u16` of milliseconds as microseconds, for the delay members that
+/// match the rest of this struct's unit rather than RFC 3611's own.
+fn ms_to_us(ms: u16) -> u64 {
+    u64::from(ms).saturating_mul(1_000)
 }
 
 /// Saturating rather than wrapping: an interval too long to count is one
@@ -2190,6 +2268,24 @@ a=sendrecv\r\n";
             score: -1.0,
             suffering: u32::MAX,
             silent_for_ms: u64::MAX,
+            has_voip_metrics: u32::MAX,
+            voip_loss_rate_256: u32::MAX,
+            voip_discard_rate_256: u32::MAX,
+            voip_burst_density_256: u32::MAX,
+            voip_burst_duration_us: u64::MAX,
+            voip_gap_density_256: u32::MAX,
+            voip_gap_duration_us: u64::MAX,
+            voip_gmin: u32::MAX,
+            voip_end_system_delay_us: u64::MAX,
+            voip_jitter_buffer_nominal_us: u64::MAX,
+            voip_jitter_buffer_maximum_us: u64::MAX,
+            voip_jitter_buffer_abs_max_us: u64::MAX,
+            has_voip_r_factor: u32::MAX,
+            voip_r_factor: u32::MAX,
+            has_voip_mos_lq: u32::MAX,
+            voip_mos_lq_x10: u32::MAX,
+            has_voip_mos_cq: u32::MAX,
+            voip_mos_cq_x10: u32::MAX,
         }
     }
 

@@ -1465,7 +1465,7 @@ impl MediaEngine {
                     managed.pending = None;
                 }
             }
-            UaEvent::CallEnded { call, .. } => self.release(*call, now),
+            UaEvent::CallEnded { call, .. } => self.release(*call, agent, now),
             UaEvent::DtmfReceived {
                 call,
                 digit,
@@ -1764,9 +1764,10 @@ impl MediaEngine {
         }
     }
 
-    /// The call is over: let the stream go, close any recording, and say what
-    /// it cost.
-    fn release(&mut self, call: CallHandle, now: Instant) {
+    /// The call is over: let the stream go, close any recording, say what
+    /// it cost, and publish the RFC 6035 report the account may have asked
+    /// for.
+    fn release(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
         self.calls.remove(&call);
         let Some(held) = self.sessions.remove(&call) else {
             return;
@@ -1804,6 +1805,23 @@ impl MediaEngine {
             while let Some(datagram) = session.poll_transmit(now) {
                 self.farewells
                     .push_back((call, datagram.destination, datagram.payload.to_vec()));
+            }
+        }
+        // Best effort, and never fatal: a call that has already ended is
+        // not going to un-end because a collector could not be reached.
+        // `Ok(false)` is `send_quality_report`'s own silent no-op for an
+        // account that named no collector, which raises nothing here
+        // either — there was never an attempt for the application to hear
+        // about.
+        if let Some(metrics) = session.quality_report_metrics(now) {
+            match agent.send_quality_report(call, &metrics, now) {
+                Ok(true) => self
+                    .events
+                    .push_back((call, MediaEvent::QualityReportSent { ok: true })),
+                Ok(false) => {}
+                Err(_) => self
+                    .events
+                    .push_back((call, MediaEvent::QualityReportSent { ok: false })),
             }
         }
         self.events
@@ -2876,7 +2894,7 @@ mod counter_wiring {
             WallClock::from_unix(now, 1_700_000_000, 0),
             [9; 32],
         );
-        let (_agent, call) = call_with_a_stalling_session(&mut engine, now);
+        let (mut agent, call) = call_with_a_stalling_session(&mut engine, now);
         let share = engine.share(call).expect("the session was inserted above");
         let kept_alive = engine
             .sessions
@@ -2884,7 +2902,7 @@ mod counter_wiring {
             .cloned()
             .expect("the session is still in the map");
 
-        engine.release(call, now);
+        engine.release(call, &mut agent, now);
 
         let mut touched = false;
         let outcome = share.with(|_session| touched = true);

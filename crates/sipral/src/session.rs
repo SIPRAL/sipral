@@ -51,8 +51,9 @@ use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
     PayloadTypes, Pull, Received, Reported, RtcpReceived, RtpSession, StreamConfig, StreamFormat,
-    is_rtcp,
+    UNAVAILABLE, is_rtcp,
 };
+use sipral_ua::QualityReportMetrics;
 
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate};
@@ -670,6 +671,58 @@ impl MediaSession {
             silent_for: now.saturating_duration_since(self.last_inbound),
             voip_metrics: self.rtp.voip_metrics(self.codec().quality_model()),
         }
+    }
+
+    /// The RFC 6035 quality report `sipral_ua::UserAgent::send_quality_report`
+    /// wants for this stream, from what it has measured so far. `None` when
+    /// this stream has not identified a source to report on yet
+    /// ([`sipral_rtp::RtpSession::voip_metrics`]) — a call ending before its
+    /// first RTP packet has nothing RFC 3611 measured to publish.
+    #[must_use]
+    pub(crate) fn quality_report_metrics(&self, now: Instant) -> Option<QualityReportMetrics> {
+        let block = self.rtp.voip_metrics(self.codec().quality_model())?;
+        let (start, stop) = self.session_span(now);
+        Some(QualityReportMetrics {
+            local_addr: self.plan.local,
+            local_ssrc: self.rtp.local_ssrc(),
+            remote_addr: self.plan.remote,
+            remote_ssrc: block.ssrc,
+            start,
+            stop,
+            payload_type: self.plan.codec.payload(),
+            payload_desc: self.codec().encoding_name(),
+            sample_rate: self.plan.codec.clock_rate(),
+            loss_rate: block.loss_rate,
+            discard_rate: block.discard_rate,
+            burst_density: block.burst_density,
+            burst_duration_ms: block.burst_duration_ms,
+            gap_density: block.gap_density,
+            gap_duration_ms: block.gap_duration_ms,
+            gmin: block.gmin,
+            round_trip_delay_ms: block.round_trip_delay_ms,
+            end_system_delay_ms: block.end_system_delay_ms,
+            jitter_buffer_adaptive: block.rx_config.jba as u8,
+            jitter_buffer_rate: block.rx_config.jb_rate,
+            jitter_buffer_nominal_ms: block.jb_nominal_ms,
+            jitter_buffer_maximum_ms: block.jb_maximum_ms,
+            jitter_buffer_abs_max_ms: block.jb_abs_max_ms,
+            r_factor: (block.r_factor != UNAVAILABLE).then_some(block.r_factor),
+            mos_lq_x10: (block.mos_lq != UNAVAILABLE).then_some(block.mos_lq),
+            mos_cq_x10: (block.mos_cq != UNAVAILABLE).then_some(block.mos_cq),
+        })
+    }
+
+    /// When this stream began, and `now`, both as Unix time — the span RFC
+    /// 6035's `Timestamps` line wants, read off this session's own wall
+    /// clock rather than one taken at the moment of the report, so a report
+    /// built well after the stream actually ended (a queued goodbye, a
+    /// slow poll loop) still names when the audio itself ran.
+    fn session_span(&self, now: Instant) -> (std::time::SystemTime, std::time::SystemTime) {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        (
+            epoch + Duration::from_secs(self.clock.unix_at(self.origin)),
+            epoch + Duration::from_secs(self.clock.unix_at(now)),
+        )
     }
 }
 

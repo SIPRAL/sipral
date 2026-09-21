@@ -165,6 +165,15 @@ record! {
         /// and one that claims otherwise gets a registrar that stops sending
         /// the wake-ups the device is relying on.
         pub push_wakes_itself: u32,
+        /// Where this account's end-of-call voice quality reports go (RFC
+        /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+        ///
+        /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+        /// unmoved, and what a caller built before this member existed
+        /// never sent reads as the null that already means "send none".
+        pub quality_report_uri: *const c_char,
+        /// How many bytes of it.
+        pub quality_report_uri_len: usize,
     }
 }
 
@@ -306,6 +315,13 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         )
     }?;
     let instance = unsafe { text(config.instance_id, config.instance_id_len, "instance_id") }?;
+    let quality_report_uri = unsafe {
+        text(
+            config.quality_report_uri,
+            config.quality_report_uri_len,
+            "quality_report_uri",
+        )
+    }?;
     let asked = unsafe {
         supplied(
             config.headers,
@@ -353,6 +369,9 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     }
     if let Some(instance) = instance {
         account = account.instance_id(instance);
+    }
+    if let Some(quality_report_uri) = quality_report_uri {
+        account = account.quality_report_uri(uri(quality_report_uri, "quality_report_uri")?);
     }
     if let Some(push) = unsafe { push_from(config) }? {
         account = account.push(push);
@@ -560,6 +579,8 @@ pub(crate) mod tests {
             push_param: ptr::null(),
             push_param_len: 0,
             push_wakes_itself: 0,
+            quality_report_uri: ptr::null(),
+            quality_report_uri_len: 0,
         }
     }
 

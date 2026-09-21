@@ -425,9 +425,18 @@ event_kinds! {
         /// `voice-message` class, the one a phone's message-waiting light is
         /// about.
         36 = MessagesWaiting, c"messages waiting";
-        // Held for task 8.6.9's RTCP-XR quality reports (RFC 3611, RFC
-        // 6035), so that it and 8.6.5 cannot land holding the same number.
-        reserved 37 = "RTCP-XR quality reports (RFC 3611, RFC 6035)";
+        /// The account this call belongs to asked for an RFC 6035 voice
+        /// quality report and the attempt to publish it has now been made,
+        /// once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
+        ///
+        /// `payload.media.quality_report_sent` says whether the PUBLISH
+        /// left this end — not whether a collector accepted it, which this
+        /// stack never waits to learn. Raised only when the account named
+        /// a collector to publish to at all
+        /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+        /// account named none raises nothing here, since nothing was ever
+        /// attempted.
+        37 = QualityReportSent, c"quality report sent";
     }
 }
 
@@ -754,6 +763,10 @@ record! {
         /// A [`SipralDigitSource`]: which of the two ways this stack accepts a
         /// digit reported this one, for [`SipralEventKind::DigitReceived`].
         pub source: u32,
+        /// Whether the RFC 6035 PUBLISH left this end, for
+        /// [`SipralEventKind::QualityReportSent`] and zero on every other
+        /// kind. Not whether a collector accepted it.
+        pub quality_report_sent: u32,
     }
 }
 
@@ -1072,6 +1085,7 @@ impl SipralMediaEvent {
             held_ms: 0,
             suite: 0,
             source: SipralDigitSource::Rtp as u32,
+            quality_report_sent: 0,
         }
     }
 }
@@ -1987,6 +2001,10 @@ pub(crate) fn media(
             payload.recorded_ms = millis(written);
             SipralEventKind::RecordingStopped
         }
+        MediaEvent::QualityReportSent { ok } => {
+            payload.quality_report_sent = u32::from(ok);
+            SipralEventKind::QualityReportSent
+        }
         _ => return None,
     };
     if let Some(sentence) = reason {
@@ -2386,7 +2404,8 @@ mod tests {
         assert_eq!(SipralEventKind::MessageReceived as u32, 34);
         assert_eq!(SipralEventKind::MessageSent as u32, 35);
         assert_eq!(SipralEventKind::MessagesWaiting as u32, 36);
-        assert_eq!(SipralEventKind::ALL.len(), 35, "and there are no others");
+        assert_eq!(SipralEventKind::QualityReportSent as u32, 37);
+        assert_eq!(SipralEventKind::ALL.len(), 36, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were

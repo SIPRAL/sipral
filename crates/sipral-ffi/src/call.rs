@@ -1622,6 +1622,8 @@ a=recvonly\r\n";
             push_param: ptr::null(),
             push_param_len: 0,
             push_wakes_itself: 0,
+            quality_report_uri: ptr::null(),
+            quality_report_uri_len: 0,
         }
     }
 

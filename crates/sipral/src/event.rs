@@ -105,6 +105,21 @@ pub enum MediaEvent {
     /// emitted, so anything an end-of-call record needs is in here rather than
     /// behind a lookup that would now fail.
     Ended(StreamStatistics),
+    /// The account this call belongs to asked for an RFC 6035 voice
+    /// quality report and the attempt to publish it has now been made,
+    /// once, on call end.
+    ///
+    /// Emitted only when there was a collector to publish to at all
+    /// (`Account::quality_report_uri` — see `sipral_ua`); a call whose
+    /// account named none raises nothing here, since nothing was ever
+    /// attempted for the application to hear about. Whether it is worth
+    /// telling anyone `ok` is `false` is the application's call: this
+    /// crate never retries either way.
+    QualityReportSent {
+        /// Whether the PUBLISH left this end. Not whether a collector
+        /// accepted it — this stack does not wait for that answer.
+        ok: bool,
+    },
     /// The far end pressed a key, or sent some other named telephone event
     /// (RFC 4733).
     ///
