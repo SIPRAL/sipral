@@ -770,6 +770,35 @@ Java_org_sipral_SipralNative_sipral_1subscription_1dialog_1text(JNIEnv *env, job
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1account_1message(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray target, jbyteArray contentType, jbyteArray body, jlongArray message, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *target_data = target ? (*env)->GetByteArrayElements(env, target, NULL) : NULL;
+    jsize target_size = target ? (*env)->GetArrayLength(env, target) : 0;
+    jbyte *contentType_data = contentType ? (*env)->GetByteArrayElements(env, contentType, NULL) : NULL;
+    jsize contentType_size = contentType ? (*env)->GetArrayLength(env, contentType) : 0;
+    jbyte *body_data = body ? (*env)->GetByteArrayElements(env, body, NULL) : NULL;
+    jsize body_size = body ? (*env)->GetArrayLength(env, body) : 0;
+    sipral_handle_t message_value = 0;
+    sipral_status_t status = sipral_account_message((sipral_handle_t)stack, (sipral_handle_t)account, (const char *)target_data, (size_t)target_size, (const char *)contentType_data, (size_t)contentType_size, (const uint8_t *)body_data, (size_t)body_size, &message_value, (uint64_t)nowMs);
+    if (target) {
+        (*env)->ReleaseByteArrayElements(env, target, target_data, JNI_ABORT);
+    }
+    if (contentType) {
+        (*env)->ReleaseByteArrayElements(env, contentType, contentType_data, JNI_ABORT);
+    }
+    if (body) {
+        (*env)->ReleaseByteArrayElements(env, body, body_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)message_value;
+        (*env)->SetLongArrayRegion(env, message, 0, 1, &slot);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1account_1announce(JNIEnv *env, jobject self, jlong stack, jlong account, jbyteArray caller, jlongArray announcement, jlongArray call, jlong nowMs)
 {
     (void)env;

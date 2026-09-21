@@ -212,7 +212,10 @@ Rules for the ABI:
   devices, is the one number still held. `..._MEDIA_SECURED` took 32 and
   `..._MEDIA_PATH_CHOSEN` took 33, both of which were nobody's and are the
   ordinary way a number is spent: at the end of the run, because no
-  reservation named it. The next free number is 34.
+  reservation named it. 34, 35 and 36 went the same way to
+  `..._MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and `..._MESSAGES_WAITING`
+  (RFC 3428, RFC 3842), and 37 is now held for the RTCP-XR quality reports a
+  later task adds. The next free number is 38.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -256,16 +259,16 @@ whoever adds a table.
   `SIPRAL_STATUS_INVALID_HANDLE` before it looks at a slot, naming the kind it
   actually got. Every handle of every kind, tag included, is put together by one
   function in `crates/sipral-ffi/src/handle.rs` that takes both, so a table
-  added later cannot mint without either. Six of the seven kinds are handed out
-  by a call the application made; the seventh, a dialog waiting to be resolved,
-  is minted by the library when it raises the event that carries it, and is
-  named rather than inserted so a dialog asking again keeps the handle it was
-  first given.
+  added later cannot mint without either. Seven of the eight kinds are handed
+  out by a call the application made; the eighth, a dialog waiting to be
+  resolved, is minted by the library when it raises the event that carries it,
+  and is named rather than inserted so a dialog asking again keeps the handle
+  it was first given.
 - **The widths.** Twenty-four bits of slot is sixteen million live objects on
   one stack. Eight bits of tag is 256 stacks alive in one process, and that is
   the limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and
-  writes no handle. Four bits of kind is sixteen values for the seven this
-  library mints; an eighth kind is still nine away. What is left for the
+  writes no handle. Four bits of kind is sixteen values for the eight this
+  library mints; a ninth kind is still eight away. What is left for the
   generation is twenty-eight bits rather than the thirty-two a handle with no
   kind could give it: ten calls a second through one slot ran for about
   thirteen and a half years on thirty-two bits and runs about three hundred and

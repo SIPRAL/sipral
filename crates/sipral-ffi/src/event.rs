@@ -30,6 +30,7 @@ use std::time::Duration;
 use sipral::SrtpSuite;
 use sipral::{DigitSource, MediaEvent};
 use sipral_core::endpoint::Event;
+use sipral_core::msg::HeaderName;
 use sipral_ua::{
     CallEndReason, CallHandle, CallIdentity, CallState, LifecycleState, RecoveryFailure,
     RegistrationFailure, RegistrationState, Rung, UaEvent, UserAgent,
@@ -408,6 +409,25 @@ event_kinds! {
         /// A call not using ICE never emits it, and that is most calls: the
         /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
         33 = MediaPathChosen, c"media path chosen";
+        /// A MESSAGE arrived (RFC 3428 §7) and has already been answered:
+        /// 200, because this stack delivers rather than relays.
+        /// `payload.message` carries the body, and `account`/`call` on
+        /// `sipral_event_t` say where it was addressed and whether it rode
+        /// inside a call's dialog.
+        34 = MessageReceived, c"message received";
+        /// A MESSAGE `sipral_account_message` sent reached its final answer,
+        /// or never will. `payload.message.status_code` is 200, a 202 from a
+        /// relay, a refusal, or the 408/503 this stack reports for one that
+        /// timed out or lost its transport.
+        35 = MessageSent, c"message sent";
+        /// A `message-summary` `NOTIFY` reported the state of a mailbox
+        /// (RFC 3842 §3.9). `payload.message` carries the counts of the
+        /// `voice-message` class, the one a phone's message-waiting light is
+        /// about.
+        36 = MessagesWaiting, c"messages waiting";
+        // Held for task 8.6.9's RTCP-XR quality reports (RFC 3611, RFC
+        // 6035), so that it and 8.6.5 cannot land holding the same number.
+        reserved 37 = "RTCP-XR quality reports (RFC 3611, RFC 6035)";
     }
 }
 
@@ -876,6 +896,66 @@ record! {
 }
 
 record! {
+    /// What a [`SipralEventKind::MessageReceived`], a
+    /// [`SipralEventKind::MessageSent`] and a
+    /// [`SipralEventKind::MessagesWaiting`] carry.
+    ///
+    /// One struct for all three, the way [`SipralSubscriptionEvent`] answers
+    /// for two kinds: a member meaningless on one kind is zero or null there.
+    /// The whole request or response, when there is one, rides in
+    /// `sipral_event_t::message` instead — `attach` points it at the same
+    /// bytes `content_type` and `body` are read out of, so both are valid for
+    /// exactly as long as the callback is.
+    #[derive(Clone, Copy)]
+    pub struct SipralMessageEvent {
+        /// [`SipralEventKind::MessageSent`]: which send, minted by
+        /// `sipral_account_message`. [`SIPRAL_HANDLE_NONE`] on the other two
+        /// kinds, and names nothing once this event has been raised about it.
+        pub message: SipralHandle,
+        /// [`SipralEventKind::MessagesWaiting`]: which subscription reported
+        /// it. [`SIPRAL_HANDLE_NONE`] on the other two kinds, which are not
+        /// subscriptions.
+        pub subscription: SipralHandle,
+        /// [`SipralEventKind::MessageSent`]: the final status. Zero on the
+        /// other two kinds.
+        pub status_code: u32,
+        /// [`SipralEventKind::MessageReceived`]: the `Content-Type` of the
+        /// body, as written. Null on the other two kinds, and on a MESSAGE
+        /// with no body at all.
+        pub content_type: *const c_char,
+        /// How many bytes of it.
+        pub content_type_len: usize,
+        /// [`SipralEventKind::MessageReceived`]: the body. Null the same as
+        /// `content_type`.
+        pub body: *const u8,
+        /// How many bytes of it.
+        pub body_len: usize,
+        /// [`SipralEventKind::MessagesWaiting`]: RFC 3842 §3.5's status
+        /// line, 1 for `yes` and 0 for `no`. Meaningless on the other two
+        /// kinds.
+        pub waiting: u32,
+        /// [`SipralEventKind::MessagesWaiting`]: new messages of the
+        /// `voice-message` class (RFC 3458 §6.2), the one a phone's
+        /// message-waiting light is about. Zero when the body named no
+        /// `voice-message` line, which a boolean-only notification does.
+        pub new_messages: u32,
+        /// The same, old.
+        pub old_messages: u32,
+        /// New messages flagged urgent.
+        pub urgent_new_messages: u32,
+        /// Old messages flagged urgent.
+        pub urgent_old_messages: u32,
+        /// [`SipralEventKind::MessagesWaiting`]: `Message-Account`, when the
+        /// notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
+        /// subscription to a group or collection of accounts). Null on the
+        /// other two kinds, and on a body that named none.
+        pub message_account: *const c_char,
+        /// How many bytes of it.
+        pub message_account_len: usize,
+    }
+}
+
+record! {
     /// The arm of an event that its kind names.
     ///
     /// Reading any other arm reads bytes the library did not write for it.
@@ -904,6 +984,10 @@ record! {
         pub announce: SipralAnnounceEvent,
         /// For [`SipralEventKind::ResolveNeeded`].
         pub resolve: SipralResolveEvent,
+        /// For [`SipralEventKind::MessageReceived`],
+        /// [`SipralEventKind::MessageSent`] and
+        /// [`SipralEventKind::MessagesWaiting`].
+        pub message: SipralMessageEvent,
     }
 }
 
@@ -1038,6 +1122,7 @@ pub(crate) struct Vocabulary<'a> {
     pub(crate) accounts: &'a mut Names<sipral_ua::AccountId>,
     pub(crate) calls: &'a mut Names<CallHandle>,
     pub(crate) subscriptions: &'a mut Names<sipral_ua::SubscriptionHandle>,
+    pub(crate) messages: &'a mut Names<sipral_ua::MessageHandle>,
     pub(crate) announcements: &'a mut Names<sipral_ua::AnnouncementId>,
     pub(crate) dialogs: &'a mut Names<sipral_core::transaction::DialogId>,
     /// Who is on every call this stack still knows, fixed when each was
@@ -1087,6 +1172,9 @@ pub(crate) fn translate(
         return Some(out);
     }
     if let Some(out) = about_a_subscription(known, event) {
+        return Some(out);
+    }
+    if let Some(out) = about_a_message(known, event) {
         return Some(out);
     }
     if let Some(out) = about_an_announcement(known, event) {
@@ -1287,6 +1375,114 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             );
             attach(&mut out, response.as_ref());
             Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// An event with nothing in it but zeroes, for a kind to fill in.
+const fn empty_message_payload() -> SipralMessageEvent {
+    SipralMessageEvent {
+        message: SIPRAL_HANDLE_NONE,
+        subscription: SIPRAL_HANDLE_NONE,
+        status_code: 0,
+        content_type: std::ptr::null(),
+        content_type_len: 0,
+        body: std::ptr::null(),
+        body_len: 0,
+        waiting: 0,
+        new_messages: 0,
+        old_messages: 0,
+        urgent_new_messages: 0,
+        urgent_old_messages: 0,
+        message_account: std::ptr::null(),
+        message_account_len: 0,
+    }
+}
+
+fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<SipralEvent> {
+    match *event {
+        UaEvent::MessageReceived {
+            account,
+            call,
+            ref request,
+        } => {
+            let raw = request.as_raw();
+            let mut payload = empty_message_payload();
+            // both point straight into `request`, which `attach` below also
+            // borrows from and which lives as long as the event this
+            // translation produced: no copy, and nothing to keep alive that
+            // is not already kept
+            if let Some(field) = raw.header(HeaderName::ContentType) {
+                payload.content_type = field.as_ptr().cast::<c_char>();
+                payload.content_type_len = field.len();
+            }
+            let body = raw.body();
+            if !body.is_empty() {
+                payload.body = body.as_ptr();
+                payload.body_len = body.len();
+            }
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::MessageReceived,
+                SipralEventPayload { message: payload },
+            );
+            out.account = account
+                .and_then(|id| known.accounts.name_of(id).ok())
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            out.call = call
+                .and_then(|handle| known.calls.name_of(handle).ok())
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            attach(&mut out, Some(request));
+            Some(out)
+        }
+        UaEvent::MessageSent {
+            message,
+            status,
+            ref response,
+        } => {
+            let mut payload = empty_message_payload();
+            payload.message = known
+                .messages
+                .name_of(message)
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            payload.status_code = u32::from(status.get());
+            let mut out = SipralEvent::of(
+                known.stack,
+                SipralEventKind::MessageSent,
+                SipralEventPayload { message: payload },
+            );
+            attach(&mut out, response.as_ref());
+            Some(out)
+        }
+        UaEvent::MessagesWaiting {
+            subscription,
+            waiting,
+            ref account,
+            new,
+            old,
+            urgent_new,
+            urgent_old,
+        } => {
+            let mut payload = empty_message_payload();
+            payload.subscription = known
+                .subscriptions
+                .name_of(subscription)
+                .unwrap_or(SIPRAL_HANDLE_NONE);
+            payload.waiting = u32::from(waiting);
+            payload.new_messages = new;
+            payload.old_messages = old;
+            payload.urgent_new_messages = urgent_new;
+            payload.urgent_old_messages = urgent_old;
+            if let Some(text) = account.as_deref() {
+                payload.message_account = text.as_ptr().cast::<c_char>();
+                payload.message_account_len = text.len();
+            }
+            Some(SipralEvent::of(
+                known.stack,
+                SipralEventKind::MessagesWaiting,
+                SipralEventPayload { message: payload },
+            ))
         }
         _ => None,
     }
@@ -2187,7 +2383,10 @@ mod tests {
         assert_eq!(SipralEventKind::CallAnnounced as u32, 31);
         assert_eq!(SipralEventKind::MediaSecured as u32, 32);
         assert_eq!(SipralEventKind::MediaPathChosen as u32, 33);
-        assert_eq!(SipralEventKind::ALL.len(), 32, "and there are no others");
+        assert_eq!(SipralEventKind::MessageReceived as u32, 34);
+        assert_eq!(SipralEventKind::MessageSent as u32, 35);
+        assert_eq!(SipralEventKind::MessagesWaiting as u32, 36);
+        assert_eq!(SipralEventKind::ALL.len(), 35, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2246,10 +2445,11 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        // one number is still held, and the loop this used to be is gone
-        // with the second: 16, for audio devices
+        // two numbers are held: 16, for audio devices, and 37, for RTCP-XR
+        // quality reports (task 8.6.9)
         assert_eq!(name(16), None, "16 is reserved, not live");
-        assert_eq!(name(34), None, "past the last kind");
+        assert_eq!(name(37), None, "37 is reserved, not live");
+        assert_eq!(name(38), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

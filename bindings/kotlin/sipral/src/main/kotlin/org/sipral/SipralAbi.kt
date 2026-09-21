@@ -677,6 +677,7 @@ enum class SipralDtmf(val value: Int) {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
+ * - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -968,6 +969,28 @@ enum class SipralEventKind(val value: Int) {
      * policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
      */
     MEDIA_PATH_CHOSEN(33),
+    /**
+     * A MESSAGE arrived (RFC 3428 §7) and has already been answered:
+     * 200, because this stack delivers rather than relays.
+     * `payload.message` carries the body, and `account`/`call` on
+     * `sipral_event_t` say where it was addressed and whether it rode
+     * inside a call's dialog.
+     */
+    MESSAGE_RECEIVED(34),
+    /**
+     * A MESSAGE `sipral_account_message` sent reached its final answer,
+     * or never will. `payload.message.status_code` is 200, a 202 from a
+     * relay, a refusal, or the 408/503 this stack reports for one that
+     * timed out or lost its transport.
+     */
+    MESSAGE_SENT(35),
+    /**
+     * A `message-summary` `NOTIFY` reported the state of a mailbox
+     * (RFC 3842 §3.9). `payload.message` carries the counts of the
+     * `voice-message` class, the one a phone's message-waiting light is
+     * about.
+     */
+    MESSAGES_WAITING(36),
     ;
 
     companion object {
@@ -3433,6 +3456,7 @@ internal object SipralNative {
     external fun sipral_subscription_dialog_count(stack: Long, subscription: Long, count: LongArray): Int
     external fun sipral_subscription_dialog_at(stack: Long, subscription: Long, index: Long, dialog: LongArray): Int
     external fun sipral_subscription_dialog_text(stack: Long, subscription: Long, index: Long, which: Long, buffer: ByteArray, needed: LongArray): Int
+    external fun sipral_account_message(stack: Long, account: Long, target: ByteArray, contentType: ByteArray, body: ByteArray, message: LongArray, nowMs: Long): Int
     external fun sipral_account_announce(stack: Long, account: Long, caller: ByteArray, announcement: LongArray, call: LongArray, nowMs: Long): Int
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
@@ -4250,6 +4274,32 @@ object Sipral {
         val neededSlot = LongArray(1)
         check(SipralNative.sipral_subscription_dialog_text(stack, subscription, index, which, buffer, neededSlot))
         return neededSlot[0]
+    }
+
+    /**
+     * Send an instant message outside any dialog (RFC 3428 §3).
+     *
+     * One MESSAGE goes out on `account`'s transport, to `target`. The
+     * handle written back names the send until its outcome arrives as
+     * `SIPRAL_EVENT_KIND_MESSAGE_SENT`, whether or not the request reached a
+     * transport at all.
+     *
+     * `body` is taken whole, including any byte a header field would
+     * refuse — it is a body, not a header — and `content_type` is checked
+     * the way any text argument at this boundary is.
+     *
+     * Safety
+     *
+     * `target` and `content_type` must be readable for their lengths, and
+     * UTF-8. `body` must be readable for `body_len` bytes, or null with a
+     * length of zero. `out_message` must point at one `sipral_handle_t`.
+     */
+    fun accountMessage(stack: Long, account: Long, target: String, contentType: String, body: ByteArray, nowMs: Long): Long {
+        val targetBytes = target.toByteArray(Charsets.UTF_8)
+        val contentTypeBytes = contentType.toByteArray(Charsets.UTF_8)
+        val messageSlot = LongArray(1)
+        check(SipralNative.sipral_account_message(stack, account, targetBytes, contentTypeBytes, body, messageSlot, nowMs))
+        return messageSlot[0]
     }
 
     /**

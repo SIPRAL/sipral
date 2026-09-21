@@ -193,10 +193,11 @@ pub use sipral_ua::Direction as CallDirection;
 /// that drive them.
 pub use sipral_ua::{
     Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
-    EndpointConfig, ForkPolicy, Hold, Incoming, Input, OutgoingCall, OutgoingExtras, Rate,
-    RateError, ReceiveError, Refusals, RegistrationFailure, RegistrationState, Replacing, Screen,
-    Screening, StatusCode, Transmit, TransportId, TransportProtocol, UaError, UaEvent, Uri,
-    UserAgent,
+    EndpointConfig, ForkPolicy, Hold, Incoming, Input, MAX_UNSAFE_BODY_BYTES, MessageHandle,
+    MessageSummary, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Refusals,
+    RegistrationFailure, RegistrationState, Replacing, Screen, Screening, StatusCode, Subscribe,
+    SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
+    TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 
 /// Crate version.

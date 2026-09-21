@@ -418,6 +418,7 @@ public enum SipralDtmf: UInt32, Sendable {
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
+/// - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -644,6 +645,22 @@ public enum SipralEventKind: UInt32, Sendable {
     /// A call not using ICE never emits it, and that is most calls: the
     /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
     case mediaPathChosen = 33
+    /// A MESSAGE arrived (RFC 3428 §7) and has already been answered:
+    /// 200, because this stack delivers rather than relays.
+    /// `payload.message` carries the body, and `account`/`call` on
+    /// `sipral_event_t` say where it was addressed and whether it rode
+    /// inside a call's dialog.
+    case messageReceived = 34
+    /// A MESSAGE `sipral_account_message` sent reached its final answer,
+    /// or never will. `payload.message.status_code` is 200, a 202 from a
+    /// relay, a refusal, or the 408/503 this stack reports for one that
+    /// timed out or lost its transport.
+    case messageSent = 35
+    /// A `message-summary` `NOTIFY` reported the state of a mailbox
+    /// (RFC 3842 §3.9). `payload.message` carries the counts of the
+    /// `voice-message` class, the one a phone's message-waiting light is
+    /// about.
+    case messagesWaiting = 36
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2026,6 +2043,41 @@ public enum Sipral {
             }
         try check(status)
         return needed
+    }
+
+    /// Send an instant message outside any dialog (RFC 3428 §3).
+    ///
+    /// One MESSAGE goes out on `account`'s transport, to `target`. The
+    /// handle written back names the send until its outcome arrives as
+    /// `SIPRAL_EVENT_KIND_MESSAGE_SENT`, whether or not the request reached a
+    /// transport at all.
+    ///
+    /// `body` is taken whole, including any byte a header field would
+    /// refuse — it is a body, not a header — and `content_type` is checked
+    /// the way any text argument at this boundary is.
+    ///
+    /// Safety
+    ///
+    /// `target` and `content_type` must be readable for their lengths, and
+    /// UTF-8. `body` must be readable for `body_len` bytes, or null with a
+    /// length of zero. `out_message` must point at one `sipral_handle_t`.
+    public static func accountMessage(stack: SipralHandle, account: SipralHandle, target: String, contentType: String, body: [UInt8], nowMs: UInt64) throws -> SipralHandle {
+        try ensureAbi()
+        var message = SipralHandle()
+        let status =
+            Array(target.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    Array(contentType.utf8).withUnsafeBufferPointer { raw3 in
+                        raw3.withMemoryRebound(to: CChar.self) { p3 in
+                            body.withUnsafeBufferPointer { p4 in
+                                sipral_account_message(stack, account, p2.baseAddress, p2.count, p3.baseAddress, p3.count, p4.baseAddress, p4.count, &message, nowMs)
+                            }
+                        }
+                    }
+                }
+            }
+        try check(status)
+        return message
     }
 
     /// A call is expected on this account, announced by a push (C2).

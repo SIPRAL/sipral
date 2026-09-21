@@ -189,9 +189,15 @@ pub(crate) fn ua_failed(error: &UaError) -> Fail {
         // an account configured without a registrar is the wrong account to
         // register rather than the wrong moment: a corrected configuration
         // would be taken, and no amount of waiting will change this one
-        UaError::Sdp(_) | UaError::NoRegistrar | UaError::Header(_) | UaError::InvalidDtmf(_) => {
-            SipralStatus::InvalidArgument
-        }
+        UaError::Sdp(_)
+        | UaError::NoRegistrar
+        | UaError::Header(_)
+        | UaError::InvalidDtmf(_)
+        | UaError::MessageTooLarge { .. } => SipralStatus::InvalidArgument,
+        // an out-of-dialog MESSAGE to this target is already in flight; the
+        // object this call is about is busy with a request of its own, the
+        // same reading `SipralStatus::Busy` already has elsewhere
+        UaError::MessagePending => SipralStatus::Busy,
         _ => SipralStatus::NotSent,
     };
     fail(status, error.to_string())

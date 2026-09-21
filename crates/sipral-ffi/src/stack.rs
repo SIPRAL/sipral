@@ -725,6 +725,10 @@ pub(crate) struct StackState {
     /// SUBSCRIBE be answered by two notifiers, and the sibling is named here
     /// when its event is translated rather than when a call asked for it.
     pub(crate) subscriptions: Names<SubscriptionHandle>,
+    /// Every MESSAGE this stack has sent and not yet reported the final
+    /// answer for. Removed the moment `SIPRAL_EVENT_KIND_MESSAGE_SENT` is
+    /// raised about it, the same as the layer below removes its own record.
+    pub(crate) messages: Names<sipral_ua::MessageHandle>,
     /// Every call a push announced and no INVITE has answered yet.
     pub(crate) announcements: Names<AnnouncementId>,
     /// Every dialog this stack has asked the application to resolve a next
@@ -1246,6 +1250,7 @@ pub(crate) unsafe fn create_on(
             accounts: Names::new(&tag, Kind::Account),
             calls: Names::new(&tag, Kind::Call),
             subscriptions: Names::new(&tag, Kind::Subscription),
+            messages: Names::new(&tag, Kind::Message),
             announcements: Names::new(&tag, Kind::Announcement),
             dialogs: Names::new(&tag, Kind::Dialog),
             identities: HashMap::new(),
@@ -1487,6 +1492,7 @@ fn drain(
     unclaimed: &mut usize,
 ) {
     let mut ended: Vec<CallHandle> = Vec::new();
+    let mut messages_sent: Vec<sipral_ua::MessageHandle> = Vec::new();
     while let Some(event) = state.engine.poll_event(&mut state.agent, now) {
         match event {
             Event::Signalling(said) => {
@@ -1517,6 +1523,9 @@ fn drain(
                 }
                 if let UaEvent::CallEnded { call, .. } = said {
                     ended.push(call);
+                }
+                if let UaEvent::MessageSent { message, .. } = said {
+                    messages_sent.push(message);
                 }
                 signalling(stack, state, said, raised, unclaimed);
             }
@@ -1552,6 +1561,12 @@ fn drain(
         // event from finding it, which there is not going to be one of
         state.identities.remove(&call);
     }
+    // MessageSent is the last word about a send, so the handle is retired the
+    // same way a call's is: after its own event is already translated and
+    // queued, which is the only place it still needed to be found
+    for message in messages_sent {
+        state.messages.forget(message);
+    }
 }
 
 fn signalling(
@@ -1584,6 +1599,7 @@ fn signalling(
         accounts: &mut state.accounts,
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
+        messages: &mut state.messages,
         announcements: &mut state.announcements,
         dialogs: &mut state.dialogs,
         identities: &state.identities,
@@ -1625,6 +1641,7 @@ fn media(
         accounts: &mut state.accounts,
         calls: &mut state.calls,
         subscriptions: &mut state.subscriptions,
+        messages: &mut state.messages,
         announcements: &mut state.announcements,
         dialogs: &mut state.dialogs,
         identities: &state.identities,

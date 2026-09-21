@@ -71,6 +71,7 @@ pub mod handle;
 pub mod header;
 pub mod lifecycle;
 pub mod media;
+pub mod message;
 mod names;
 pub mod record;
 pub mod resolve;

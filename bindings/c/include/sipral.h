@@ -275,6 +275,7 @@ typedef struct sipral_transport_wanted_event sipral_transport_wanted_event_t;
 typedef struct sipral_subscription_event sipral_subscription_event_t;
 typedef struct sipral_announce_event sipral_announce_event_t;
 typedef struct sipral_resolve_event sipral_resolve_event_t;
+typedef struct sipral_message_event sipral_message_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -893,6 +894,7 @@ enum {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
+ * - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1185,6 +1187,28 @@ enum {
      * policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
      */
     SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN = 33,
+    /**
+     * A MESSAGE arrived (RFC 3428 §7) and has already been answered:
+     * 200, because this stack delivers rather than relays.
+     * `payload.message` carries the body, and `account`/`call` on
+     * `sipral_event_t` say where it was addressed and whether it rode
+     * inside a call's dialog.
+     */
+    SIPRAL_EVENT_KIND_MESSAGE_RECEIVED = 34,
+    /**
+     * A MESSAGE `sipral_account_message` sent reached its final answer,
+     * or never will. `payload.message.status_code` is 200, a 202 from a
+     * relay, a refusal, or the 408/503 this stack reports for one that
+     * timed out or lost its transport.
+     */
+    SIPRAL_EVENT_KIND_MESSAGE_SENT = 35,
+    /**
+     * A `message-summary` `NOTIFY` reported the state of a mailbox
+     * (RFC 3842 §3.9). `payload.message` carries the counts of the
+     * `voice-message` class, the one a phone's message-waiting light is
+     * about.
+     */
+    SIPRAL_EVENT_KIND_MESSAGES_WAITING = 36,
 };
 
 /**
@@ -3560,6 +3584,93 @@ struct sipral_resolve_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_MESSAGE_RECEIVED, a
+ * SIPRAL_EVENT_KIND_MESSAGE_SENT and a
+ * SIPRAL_EVENT_KIND_MESSAGES_WAITING carry.
+ *
+ * One struct for all three, the way sipral_subscription_event_t answers
+ * for two kinds: a member meaningless on one kind is zero or null there.
+ * The whole request or response, when there is one, rides in
+ * `sipral_event_t::message` instead — `attach` points it at the same
+ * bytes `content_type` and `body` are read out of, so both are valid for
+ * exactly as long as the callback is.
+ */
+struct sipral_message_event {
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGE_SENT: which send, minted by
+     * `sipral_account_message`. SIPRAL_HANDLE_NONE on the other two
+     * kinds, and names nothing once this event has been raised about it.
+     */
+    sipral_handle_t message;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGES_WAITING: which subscription reported
+     * it. SIPRAL_HANDLE_NONE on the other two kinds, which are not
+     * subscriptions.
+     */
+    sipral_handle_t subscription;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGE_SENT: the final status. Zero on the
+     * other two kinds.
+     */
+    uint32_t status_code;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGE_RECEIVED: the `Content-Type` of the
+     * body, as written. Null on the other two kinds, and on a MESSAGE
+     * with no body at all.
+     */
+    const char *content_type;
+    /**
+     * How many bytes of it.
+     */
+    size_t content_type_len;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGE_RECEIVED: the body. Null the same as
+     * `content_type`.
+     */
+    const uint8_t *body;
+    /**
+     * How many bytes of it.
+     */
+    size_t body_len;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGES_WAITING: RFC 3842 §3.5's status
+     * line, 1 for `yes` and 0 for `no`. Meaningless on the other two
+     * kinds.
+     */
+    uint32_t waiting;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGES_WAITING: new messages of the
+     * `voice-message` class (RFC 3458 §6.2), the one a phone's
+     * message-waiting light is about. Zero when the body named no
+     * `voice-message` line, which a boolean-only notification does.
+     */
+    uint32_t new_messages;
+    /**
+     * The same, old.
+     */
+    uint32_t old_messages;
+    /**
+     * New messages flagged urgent.
+     */
+    uint32_t urgent_new_messages;
+    /**
+     * Old messages flagged urgent.
+     */
+    uint32_t urgent_old_messages;
+    /**
+     * SIPRAL_EVENT_KIND_MESSAGES_WAITING: `Message-Account`, when the
+     * notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
+     * subscription to a group or collection of accounts). Null on the
+     * other two kinds, and on a body that named none.
+     */
+    const char *message_account;
+    /**
+     * How many bytes of it.
+     */
+    size_t message_account_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -3606,6 +3717,12 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_RESOLVE_NEEDED.
      */
     sipral_resolve_event_t resolve;
+    /**
+     * For SIPRAL_EVENT_KIND_MESSAGE_RECEIVED,
+     * SIPRAL_EVENT_KIND_MESSAGE_SENT and
+     * SIPRAL_EVENT_KIND_MESSAGES_WAITING.
+     */
+    sipral_message_event_t message;
 };
 
 /**
@@ -4302,6 +4419,26 @@ sipral_status_t sipral_subscription_dialog_at(sipral_handle_t stack, sipral_hand
  * point at one `size_t`.
  */
 sipral_status_t sipral_subscription_dialog_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
+
+/**
+ * Send an instant message outside any dialog (RFC 3428 §3).
+ *
+ * One MESSAGE goes out on `account`'s transport, to `target`. The
+ * handle written back names the send until its outcome arrives as
+ * `SIPRAL_EVENT_KIND_MESSAGE_SENT`, whether or not the request reached a
+ * transport at all.
+ *
+ * `body` is taken whole, including any byte a header field would
+ * refuse — it is a body, not a header — and `content_type` is checked
+ * the way any text argument at this boundary is.
+ *
+ * Safety
+ *
+ * `target` and `content_type` must be readable for their lengths, and
+ * UTF-8. `body` must be readable for `body_len` bytes, or null with a
+ * length of zero. `out_message` must point at one `sipral_handle_t`.
+ */
+sipral_status_t sipral_account_message(sipral_handle_t stack, sipral_handle_t account, const char *target, size_t target_len, const char *content_type, size_t content_type_len, const uint8_t *body, size_t body_len, sipral_handle_t *out_message, uint64_t now_ms);
 
 /**
  * A call is expected on this account, announced by a push (C2).

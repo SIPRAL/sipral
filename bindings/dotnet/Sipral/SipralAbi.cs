@@ -620,6 +620,7 @@ public enum SipralDtmf : uint
 /// refuse it, which is what makes adding one safe.
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
+/// - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -912,6 +913,28 @@ public enum SipralEventKind : uint
     /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
     /// </summary>
     MediaPathChosen = 33,
+    /// <summary>
+    /// A MESSAGE arrived (RFC 3428 §7) and has already been answered:
+    /// 200, because this stack delivers rather than relays.
+    /// `payload.message` carries the body, and `account`/`call` on
+    /// `sipral_event_t` say where it was addressed and whether it rode
+    /// inside a call's dialog.
+    /// </summary>
+    MessageReceived = 34,
+    /// <summary>
+    /// A MESSAGE `sipral_account_message` sent reached its final answer,
+    /// or never will. `payload.message.status_code` is 200, a 202 from a
+    /// relay, a refusal, or the 408/503 this stack reports for one that
+    /// timed out or lost its transport.
+    /// </summary>
+    MessageSent = 35,
+    /// <summary>
+    /// A `message-summary` `NOTIFY` reported the state of a mailbox
+    /// (RFC 3842 §3.9). `payload.message` carries the counts of the
+    /// `voice-message` class, the one a phone's message-waiting light is
+    /// about.
+    /// </summary>
+    MessagesWaiting = 36,
 }
 
 /// <summary>
@@ -3469,6 +3492,95 @@ public struct SipralResolveEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.MessageReceived, a
+/// SipralEventKind.MessageSent and a
+/// SipralEventKind.MessagesWaiting carry.
+///
+/// One struct for all three, the way SipralSubscriptionEvent answers
+/// for two kinds: a member meaningless on one kind is zero or null there.
+/// The whole request or response, when there is one, rides in
+/// `sipral_event_t::message` instead — `attach` points it at the same
+/// bytes `content_type` and `body` are read out of, so both are valid for
+/// exactly as long as the callback is.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralMessageEvent
+{
+    /// <summary>
+    /// SipralEventKind.MessageSent: which send, minted by
+    /// `sipral_account_message`. SIPRAL_HANDLE_NONE on the other two
+    /// kinds, and names nothing once this event has been raised about it.
+    /// </summary>
+    public ulong Message;
+    /// <summary>
+    /// SipralEventKind.MessagesWaiting: which subscription reported
+    /// it. SIPRAL_HANDLE_NONE on the other two kinds, which are not
+    /// subscriptions.
+    /// </summary>
+    public ulong Subscription;
+    /// <summary>
+    /// SipralEventKind.MessageSent: the final status. Zero on the
+    /// other two kinds.
+    /// </summary>
+    public uint StatusCode;
+    /// <summary>
+    /// SipralEventKind.MessageReceived: the `Content-Type` of the
+    /// body, as written. Null on the other two kinds, and on a MESSAGE
+    /// with no body at all.
+    /// </summary>
+    public IntPtr ContentType;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ContentTypeLen;
+    /// <summary>
+    /// SipralEventKind.MessageReceived: the body. Null the same as
+    /// `content_type`.
+    /// </summary>
+    public IntPtr Body;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint BodyLen;
+    /// <summary>
+    /// SipralEventKind.MessagesWaiting: RFC 3842 §3.5's status
+    /// line, 1 for `yes` and 0 for `no`. Meaningless on the other two
+    /// kinds.
+    /// </summary>
+    public uint Waiting;
+    /// <summary>
+    /// SipralEventKind.MessagesWaiting: new messages of the
+    /// `voice-message` class (RFC 3458 §6.2), the one a phone's
+    /// message-waiting light is about. Zero when the body named no
+    /// `voice-message` line, which a boolean-only notification does.
+    /// </summary>
+    public uint NewMessages;
+    /// <summary>
+    /// The same, old.
+    /// </summary>
+    public uint OldMessages;
+    /// <summary>
+    /// New messages flagged urgent.
+    /// </summary>
+    public uint UrgentNewMessages;
+    /// <summary>
+    /// Old messages flagged urgent.
+    /// </summary>
+    public uint UrgentOldMessages;
+    /// <summary>
+    /// SipralEventKind.MessagesWaiting: `Message-Account`, when the
+    /// notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
+    /// subscription to a group or collection of accounts). Null on the
+    /// other two kinds, and on a body that named none.
+    /// </summary>
+    public IntPtr MessageAccount;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MessageAccountLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -3526,6 +3638,13 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralResolveEvent Resolve;
+    /// <summary>
+    /// For SipralEventKind.MessageReceived,
+    /// SipralEventKind.MessageSent and
+    /// SipralEventKind.MessagesWaiting.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralMessageEvent Message;
 }
 
 /// <summary>
@@ -4044,6 +4163,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_subscription_dialog_text(ulong stack, ulong subscription, nuint index, uint which, sbyte[] buffer, nuint capacity, out nuint needed);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_message(ulong stack, ulong account, sbyte[] target, nuint targetLen, sbyte[] contentType, nuint contentTypeLen, byte[] body, nuint bodyLen, out ulong message, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_announce(ulong stack, ulong account, sbyte[] caller, nuint callerLen, out ulong announcement, out ulong call, ulong nowMs);
@@ -5034,6 +5156,36 @@ public static class Sipral
     {
         Check(NativeMethods.sipral_subscription_dialog_text(stack, subscription, index, which, buffer, (nuint)buffer.Length, out var needed));
         return needed;
+    }
+
+    /// <summary>
+    /// Send an instant message outside any dialog (RFC 3428 §3).
+    ///
+    /// One MESSAGE goes out on `account`'s transport, to `target`. The
+    /// handle written back names the send until its outcome arrives as
+    /// `SIPRAL_EVENT_KIND_MESSAGE_SENT`, whether or not the request reached a
+    /// transport at all.
+    ///
+    /// `body` is taken whole, including any byte a header field would
+    /// refuse — it is a body, not a header — and `content_type` is checked
+    /// the way any text argument at this boundary is.
+    ///
+    /// Safety
+    ///
+    /// `target` and `content_type` must be readable for their lengths, and
+    /// UTF-8. `body` must be readable for `body_len` bytes, or null with a
+    /// length of zero. `out_message` must point at one `sipral_handle_t`.
+    /// </summary>
+    public static ulong AccountMessage(ulong stack, ulong account, string target, string contentType, byte[] body, ulong nowMs)
+    {
+        var targetBytes = Encoding.UTF8.GetBytes(target);
+        var targetSigned = new sbyte[targetBytes.Length];
+        Buffer.BlockCopy(targetBytes, 0, targetSigned, 0, targetBytes.Length);
+        var contentTypeBytes = Encoding.UTF8.GetBytes(contentType);
+        var contentTypeSigned = new sbyte[contentTypeBytes.Length];
+        Buffer.BlockCopy(contentTypeBytes, 0, contentTypeSigned, 0, contentTypeBytes.Length);
+        Check(NativeMethods.sipral_account_message(stack, account, targetSigned, (nuint)targetSigned.Length, contentTypeSigned, (nuint)contentTypeSigned.Length, body, (nuint)body.Length, out var message, nowMs));
+        return message;
     }
 
     /// <summary>
