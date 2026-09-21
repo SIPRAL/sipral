@@ -1016,8 +1016,8 @@ impl RtpSession {
 
     /// This stream's VoIP Metrics Report Block (RFC 3611 §4.7), from what
     /// its jitter buffer has classified so far and, if `codec` names one
-    /// G.113 Appendix I tabulates, the simplified E-model of
-    /// [`crate::emodel`]. Available whenever an inbound source is known,
+    /// G.113 Appendix I tabulates, the simplified E-model of ITU-T G.107.
+    /// Available whenever an inbound source is known,
     /// independent of whether RTCP XR reporting was negotiated
     /// ([`StreamConfig::voip_metrics_xr`]) — that flag gates only whether
     /// [`RtpSession::build_report`] puts this on the wire as an XR packet;

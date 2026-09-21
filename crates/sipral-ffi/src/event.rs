@@ -2464,10 +2464,14 @@ mod tests {
     /// declaration before this build will name it.
     #[test]
     fn a_number_held_for_a_feature_this_build_lacks_names_nothing() {
-        // two numbers are held: 16, for audio devices, and 37, for RTCP-XR
-        // quality reports (task 8.6.9)
+        // one number is held: 16, for audio devices; 34 to 37, held while
+        // MESSAGE and RTCP-XR were written apart, are live now
         assert_eq!(name(16), None, "16 is reserved, not live");
-        assert_eq!(name(37), None, "37 is reserved, not live");
+        assert_eq!(
+            name(37).as_deref(),
+            Some("quality report sent"),
+            "37 is live"
+        );
         assert_eq!(name(38), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);

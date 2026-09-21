@@ -139,7 +139,7 @@ pub struct QualityReportMetrics {
 
 impl UserAgent {
     /// Send `call`'s end-of-session voice quality report, if the account it
-    /// belongs to asked for one ([`Account::quality_report_uri`]).
+    /// belongs to asked for one ([`crate::Account::quality_report_uri`]).
     ///
     /// `Ok(false)` for the no-op — the call is not known, has no account,
     /// or the account named no collector — so the caller does not have to
