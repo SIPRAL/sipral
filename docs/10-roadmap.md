@@ -34,14 +34,15 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and five of the eight exit criteria met.** Every line of the
+**Status: written, and six of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
-`sipral-media` — and five flows run against three servers whenever
-`scripts/lab.sh` is run. What is left is one paid carrier account, the 24-hour
-fuzzing run, and the criterion added after the tree was read end to end: the
-lab drove the stack through a media join written for the lab, not through the
-one an application links, so what it proved was the harness. A phase whose
-proof runs on a path no customer uses has not exited.
+`sipral-media` — and the lab's flows run against three servers whenever
+`scripts/lab.sh` is run, twice: once through `sipral::MediaEngine`, the join an
+application links, and once through `sipral.h` from a C driver. That was the
+criterion added after the tree was read end to end, because until then the lab
+drove the stack through a media join written for the lab, and what it proved
+was the harness. What is left is one paid carrier account and the 24-hour
+fuzzing run.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -62,9 +63,10 @@ unit suite had ever asked.
   timeout, which is the gate `11-testing.md` sets for this criterion;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
   Asterisk;
-- the same flows, plus DTMF in both forms, run through `sipral::MediaEngine` —
-  the join an application links — and then through `sipral.h` from a C driver,
-  so that the path a customer ships is the path the lab proves;
+- **met** — the same flows, plus DTMF in both forms, run through
+  `sipral::MediaEngine` — the join an application links — and then through
+  `sipral.h` from a C driver, so that the path a customer ships is the path the
+  lab proves;
 - **met** — no request the stack can build leaves as an oversized datagram: the
   §18.1.1 promotion applies inside a dialog as it does outside one.
 
