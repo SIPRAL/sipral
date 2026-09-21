@@ -534,10 +534,10 @@ impl Network {
                 && peer.sockets.contains(&socket)
             {
                 peer.feed();
-                if let Received::Data { data, .. } =
+                if let Received::Data { range, .. } =
                     peer.agent.handle_datagram(socket, from, data, now)
                 {
-                    peer.received.push(data.to_vec());
+                    peer.received.push(data[range].to_vec());
                 }
             }
         }
@@ -685,10 +685,10 @@ impl Network {
             match node {
                 Node::Full(peer) if peer.nat == nat && peer.sockets.contains(&socket) => {
                     peer.feed();
-                    if let Received::Data { data, .. } =
+                    if let Received::Data { range, .. } =
                         peer.agent.handle_datagram(socket, from, data, now)
                     {
-                        peer.received.push(data.to_vec());
+                        peer.received.push(data[range].to_vec());
                     }
                     return;
                 }

@@ -145,10 +145,14 @@ fuzz_target!(|data: &[u8]| {
         if let Some(datagram) = datagrams.next() {
             let before = agent.selected_pair(stream, ComponentId::RTP);
             match agent.handle_datagram(BASE, from, datagram, now) {
-                Received::Data { data, .. } => {
+                Received::Data { range, .. } => {
+                    // the range has to index the datagram that was handed in,
+                    // or the caller panics on the slice — which for a stack
+                    // that unprotects in place is every packet of every
+                    // relayed call
                     assert!(
-                        data.len() <= datagram.len(),
-                        "unwrapping a datagram made it longer"
+                        range.end <= datagram.len() && range.start <= range.end,
+                        "a range that does not index what was passed in"
                     );
                 }
                 Received::Consumed => {}

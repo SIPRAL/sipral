@@ -178,7 +178,11 @@ What it does, in the order a session meets it:
   starts one pair per foundation, lowest component first.
 - **Checks.** Paced by Ta — the larger of the two agents' `a=ice-pacing`, a
   peer that writes none (every lite peer) counting as the default 50 ms,
-  bounded at ten seconds — carrying PRIORITY, USE-CANDIDATE when nominating,
+  bounded at ten seconds, and **for one session**: a restart goes back to this
+  agent's own proposal, because otherwise a peer that once asked for the ten
+  seconds RFC 8839 §5.5 allows would slow every check this agent sends for the
+  rest of its life, including across the restart a network change causes —
+  carrying PRIORITY, USE-CANDIDATE when nominating,
   ICE-CONTROLLING or ICE-CONTROLLED with the tiebreaker, MESSAGE-INTEGRITY
   under the short-term credential, and FINGERPRINT. The RTO is RFC 5245's
   `Ta × (Waiting + In-Progress)`, floored at 500 ms and capped at five seconds,
@@ -226,6 +230,13 @@ What it does, in the order a session meets it:
   remembered from before the answer (32), cancelled transactions, and the
   pacing a peer may ask for. No input panics the agent.
 
+- **What a datagram comes back as.** `Received::Data` answers with a position
+  in the datagram that was handed in, not with a borrow of it. A borrow would
+  hold the caller's buffer shared for as long as it held the answer, and what
+  a caller does next with a relayed packet is unprotect it in place — so the
+  type that said "here it is" would be the type that stopped it. `TurnClient`
+  answers the same way underneath, and the position comes from the layers that
+  already knew it rather than from arithmetic on addresses.
 - **Patience, and what it is not.** A checklist with nothing left to check is
   not a checklist that has failed. RFC 8863 is written for exactly that: the
   peer may still arrive with a check that forms a peer-reflexive pair and

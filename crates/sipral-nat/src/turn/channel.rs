@@ -79,6 +79,16 @@ impl<'a> ChannelData<'a> {
         self.data
     }
 
+    /// Where that data sits in the frame it was read from.
+    ///
+    /// A channel is four octets of header and then the application's own
+    /// packet, so the payload is always at the same place; this says it once
+    /// rather than leaving every caller to add the header length itself.
+    #[must_use]
+    pub const fn range(&self) -> core::ops::Range<usize> {
+        HEADER_LEN..HEADER_LEN + self.data.len()
+    }
+
     /// Read a message that something else has already delimited.
     ///
     /// The padding a stream transport adds belongs to the frame rather than to

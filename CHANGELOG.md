@@ -23,6 +23,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **`sipral_nat::ice::Received::Data` and `sipral_nat::turn::Input::Data` now
+  answer with a position rather than a borrow**, and both types have lost
+  their lifetime parameter. A borrow holds the caller's datagram shared for as
+  long as it holds the answer, and what a caller does next with a relayed
+  packet is unprotect it in place — so the type that said "here it is" was the
+  type that stopped it. The position comes from the layers that already knew
+  it: `stun::Attribute::range` and `turn::ChannelData::range` are new and
+  public for it.
+
+- **A peer's `a=ice-pacing` no longer outlives the session it was proposed
+  for.** RFC 8445 §14.2 makes Ta the larger of the two agents' values, and a
+  restart is a new session; `IceAgent::restart` now goes back to this agent's
+  own proposal. Carried forward, one peer asking for the ten seconds RFC 8839
+  §5.5 allows slowed every check, every gathering transaction and every
+  retransmission of that agent for the rest of its life — including across the
+  restart a network change causes, which is when pacing matters most.
+
 - **An ICE checklist with nothing left to check is now waited on, then
   failed** (RFC 8863), where before it stayed `Running` for the life of the
   call. Two situations reach it and neither is rare: a peer whose candidates

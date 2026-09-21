@@ -387,16 +387,23 @@ impl fmt::Display for SendError {
 impl core::error::Error for SendError {}
 
 /// What a buffer handed to the client turned out to be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Input<'a> {
+///
+/// Application data comes back as a position in that buffer rather than as a
+/// borrow of it. A borrow would freeze the caller's datagram for as long as it
+/// held the answer, and what the caller does next with a relayed packet is
+/// unprotect it in place — so the type that said "here it is" would be the
+/// type that stopped it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Input {
     /// Control traffic, already dealt with. Drain the events.
     Consumed,
-    /// Application data from a peer, borrowed from the buffer handed in.
+    /// Application data from a peer, at this position in the buffer handed in.
     Data {
         /// Who sent it.
         peer: SocketAddr,
-        /// What they sent.
-        data: &'a [u8],
+        /// Where in the buffer their packet is, with the relay's wrapping
+        /// taken off.
+        range: core::ops::Range<usize>,
     },
     /// The relay could not reach a peer and said why (§11.6).
     Unreachable {
@@ -677,7 +684,7 @@ impl TurnClient {
     }
 
     /// Take one datagram, or one frame off a stream.
-    pub fn handle_input<'a>(&mut self, bytes: &'a [u8], now: Instant) -> Input<'a> {
+    pub fn handle_input(&mut self, bytes: &[u8], now: Instant) -> Input {
         match bytes.first() {
             Some(0..=3) => self.on_stun(bytes, now),
             Some(64..=79) => self.on_channel_data(bytes),
@@ -929,7 +936,7 @@ impl TurnClient {
 
 /// Reading what arrives.
 impl TurnClient {
-    fn on_stun<'a>(&mut self, bytes: &'a [u8], now: Instant) -> Input<'a> {
+    fn on_stun(&mut self, bytes: &[u8], now: Instant) -> Input {
         let Ok(message) = Message::parse(bytes) else {
             return Input::Foreign;
         };
@@ -943,7 +950,7 @@ impl TurnClient {
         }
     }
 
-    fn on_indication<'a>(&self, message: &Message<'a>) -> Input<'a> {
+    fn on_indication(&self, message: &Message<'_>) -> Input {
         if message.method() != method::DATA || self.state != State::Allocated {
             return Input::Foreign;
         }
@@ -960,13 +967,13 @@ impl TurnClient {
         if let Some(icmp) = attribute::icmp(message) {
             return Input::Unreachable { peer, icmp };
         }
-        match message.find(AttributeType::DATA) {
-            Some(data) => Input::Data { peer, data },
+        match message.find_range(AttributeType::DATA) {
+            Some(range) => Input::Data { peer, range },
             None => Input::Foreign,
         }
     }
 
-    fn on_channel_data<'a>(&self, bytes: &'a [u8]) -> Input<'a> {
+    fn on_channel_data(&self, bytes: &[u8]) -> Input {
         if self.state != State::Allocated {
             return Input::Foreign;
         }
@@ -987,7 +994,7 @@ impl TurnClient {
         }
         Input::Data {
             peer: channel.peer,
-            data: frame.data(),
+            range: frame.range(),
         }
     }
 
@@ -2244,13 +2251,13 @@ mod tests {
 
         let mut frame = Vec::new();
         ChannelData::encode(number, b"voice", Transport::Udp, &mut frame).unwrap();
-        assert_eq!(
-            client.handle_input(&frame, now),
-            Input::Data {
-                peer: peer(),
-                data: b"voice"
-            }
-        );
+        let Input::Data { peer: from, range } = client.handle_input(&frame, now) else {
+            panic!("a bound channel carries data");
+        };
+        assert_eq!(from, peer());
+        // the range is into the frame the caller still owns, which is the
+        // whole point of answering with one
+        assert_eq!(&frame[range], b"voice");
 
         // a number nobody bound is not ours, whatever it holds
         let mut stray = Vec::new();
@@ -2287,13 +2294,11 @@ mod tests {
         let request = Message::parse(&request).unwrap();
         client.handle_input(&success(&request, |_| {}), now);
 
-        assert_eq!(
-            client.handle_input(&indication, now),
-            Input::Data {
-                peer: peer(),
-                data: b"voice"
-            }
-        );
+        let Input::Data { peer: from, range } = client.handle_input(&indication, now) else {
+            panic!("a permitted peer's indication carries data");
+        };
+        assert_eq!(from, peer());
+        assert_eq!(&indication[range], b"voice");
     }
 
     #[test]
@@ -2836,13 +2841,11 @@ mod tests {
         framer.push(&wire);
         let frame = framer.next_frame().unwrap().unwrap().to_vec();
         assert_eq!(frame.len(), 9);
-        assert_eq!(
-            client.handle_input(&frame, now),
-            Input::Data {
-                peer: peer(),
-                data: b"abcde"
-            }
-        );
+        let Input::Data { peer: from, range } = client.handle_input(&frame, now) else {
+            panic!("a bound channel carries data");
+        };
+        assert_eq!(from, peer());
+        assert_eq!(&frame[range], b"abcde");
 
         // and what goes out over the same transport is padded again
         let mut out = Vec::new();

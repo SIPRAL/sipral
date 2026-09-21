@@ -274,19 +274,28 @@ pub struct Route {
 }
 
 /// What a datagram handed to [`IceAgent::handle_datagram`] turned out to be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Received<'a> {
+///
+/// Application data comes back as a position in that datagram rather than as
+/// a borrow of it, because what the caller does next with it is unprotect it
+/// in place, and it cannot take a writable slice of a buffer this type is
+/// still holding a shared one of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Received {
     /// Application data for a stream: RTP, RTCP, or anything else that is not
-    /// STUN, unwrapped from TURN if it came through a relay. Receiving is
-    /// allowed on any candidate (RFC 8445 §12.2), so this says nothing about
-    /// which pair is selected.
+    /// STUN, with the relay's wrapping taken off if it came through one.
+    /// Receiving is allowed on any candidate (RFC 8445 §12.2), so this says
+    /// nothing about which pair is selected.
+    ///
+    /// The bytes are still whatever the peer sent: this layer separates STUN
+    /// from everything else and reads no further, so DTLS records and RTP
+    /// alike arrive here and the caller classifies them again.
     Data {
         /// The stream it belongs to.
         stream: StreamId,
         /// The component whose candidate it arrived on.
         component: ComponentId,
-        /// The payload, borrowed from the datagram.
-        data: &'a [u8],
+        /// Where the payload is in the datagram that was handed in.
+        range: core::ops::Range<usize>,
     },
     /// ICE, STUN or TURN traffic, already dealt with.
     Consumed,
@@ -905,6 +914,14 @@ impl IceAgent {
         self.valid.clear();
         self.remotes.clear();
         self.early.clear();
+        // Ta is "the larger of the two agents' values" for a session (RFC 8445
+        // §14.2), and a restart is a new session: back to this agent's own
+        // proposal, for the next `set_remote` to widen again if the peer asks.
+        // Carrying it forward let one peer's `a=ice-pacing` slow every check,
+        // every gathering transaction and every retransmission of this agent
+        // for the rest of its life — including across the restart that a
+        // network change makes, which is when the pacing matters most.
+        self.ta = self.config.ta;
         self.checks
             .retain(|check| check.purpose == Purpose::Consent { previous: true });
         for (index, stream) in self.streams.iter_mut().enumerate() {
@@ -933,13 +950,13 @@ impl IceAgent {
     /// Hand in a datagram that arrived on one of the host sockets.
     ///
     /// `local` is the socket it arrived on and `from` where it came from.
-    pub fn handle_datagram<'a>(
+    pub fn handle_datagram(
         &mut self,
         local: SocketAddr,
         from: SocketAddr,
-        data: &'a [u8],
+        data: &[u8],
         now: Instant,
-    ) -> Received<'a> {
+    ) -> Received {
         let Some(base) = self.bases.iter().position(|entry| entry.address == local) else {
             return Received::Foreign;
         };
@@ -956,7 +973,7 @@ impl IceAgent {
         let Some(host) = self.host_of(base) else {
             return Received::Foreign;
         };
-        self.arrive(host, from, data, now)
+        self.arrive(host, from, data, 0..data.len(), now)
     }
 
     /// Take the passing of time. Harmless to call early.
@@ -1120,37 +1137,38 @@ impl IceAgent {
             .min_by_key(|candidate| (rank(candidate.kind), u32::MAX - candidate.priority))
     }
 
-    fn on_relay_datagram<'a>(
-        &mut self,
-        relay: usize,
-        data: &'a [u8],
-        now: Instant,
-    ) -> Received<'a> {
+    fn on_relay_datagram(&mut self, relay: usize, data: &[u8], now: Instant) -> Received {
         self.feed_relay(relay);
         let Some(entry) = self.relays.get_mut(relay) else {
             return Received::Foreign;
         };
         let delivered = match entry.client.handle_input(data, now) {
-            Input::Data { peer, data } => entry.candidate.map(|local| (local, peer, data)),
+            Input::Data { peer, range } => entry.candidate.map(|local| (local, peer, range)),
             Input::Consumed | Input::Unreachable { .. } => None,
             Input::Foreign => return Received::Foreign,
         };
         self.drain_relay(relay, now);
         match delivered {
-            Some((local, peer, data)) => self.arrive(local, peer, data, now),
+            // the relay hands back a position in the same datagram, so the
+            // range the caller is given is still one into what it passed in
+            Some((local, peer, range)) => {
+                let inner = data.get(range.clone()).unwrap_or_default();
+                self.arrive(local, peer, inner, range, now)
+            }
             None => Received::Consumed,
         }
     }
 
     /// A datagram that arrived on a local candidate: a host socket, or a
     /// relayed address with the TURN wrapping already taken off.
-    fn arrive<'a>(
+    fn arrive(
         &mut self,
         local: usize,
         from: SocketAddr,
-        data: &'a [u8],
+        data: &[u8],
+        range: core::ops::Range<usize>,
         now: Instant,
-    ) -> Received<'a> {
+    ) -> Received {
         let Some(entry) = self.locals.get(local) else {
             return Received::Foreign;
         };
@@ -1159,7 +1177,7 @@ impl IceAgent {
             return Received::Data {
                 stream: StreamId(stream),
                 component,
-                data,
+                range,
             };
         }
         let Ok(message) = Message::parse(data) else {

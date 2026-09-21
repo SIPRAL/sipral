@@ -184,7 +184,22 @@ impl<'a> Attribute<'a> {
     pub const fn value(&self) -> &'a [u8] {
         self.value
     }
+
+    /// Where that value sits in the datagram the message was parsed from.
+    ///
+    /// The same bytes as [`Attribute::value`], said as a position rather than
+    /// as a borrow. A caller that must keep its buffer writable — anything
+    /// that decrypts in place — cannot hold a shared slice of it, and a
+    /// position costs it nothing to carry.
+    #[must_use]
+    pub const fn range(&self) -> core::ops::Range<usize> {
+        let start = self.offset + HEADER_LEN_OF_ATTRIBUTE;
+        start..start + self.value.len()
+    }
 }
+
+/// A type and a length, before every attribute value (§14).
+const HEADER_LEN_OF_ATTRIBUTE: usize = 4;
 
 /// The attributes of a message, in the order they appear.
 ///
@@ -522,9 +537,22 @@ impl<'a> Message<'a> {
     /// is concerned (§9).
     #[must_use]
     pub fn find(&self, kind: AttributeType) -> Option<&'a [u8]> {
+        self.found(kind).map(|attribute| attribute.value)
+    }
+
+    /// The same, as a position in the datagram rather than a borrow of it.
+    ///
+    /// For the one caller that hands the bytes on to somebody who will write
+    /// over them: a relay's DATA attribute is the application's own packet,
+    /// and the layer above unprotects it in place.
+    #[must_use]
+    pub fn find_range(&self, kind: AttributeType) -> Option<core::ops::Range<usize>> {
+        self.found(kind).map(|attribute| attribute.range())
+    }
+
+    fn found(&self, kind: AttributeType) -> Option<Attribute<'a>> {
         self.attributes()
             .find(|attribute| attribute.kind == kind && self.is_visible(attribute.offset, kind))
-            .map(|attribute| attribute.value)
     }
 
     /// Every occurrence of this type a receiver is allowed to act on.

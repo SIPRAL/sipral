@@ -1345,6 +1345,66 @@ fn no_datagram_panics_the_agent_in_any_state() {
     }
 }
 
+/// A peer's pacing is the peer's, for one session. RFC 8445 §14.2 has Ta be
+/// the larger of the two agents' values, and a restart is a new session with
+/// possibly a new peer at the other end of it.
+///
+/// Left carried forward, one peer asking for the ten seconds RFC 8839 §5.5
+/// allows would slow every check this agent ever sends again — and a restart
+/// is what a network change causes, which is when pacing matters most.
+#[test]
+fn a_peers_pacing_does_not_outlive_the_session_it_was_proposed_for() {
+    let (mut agent, stream, _ids, now) = gathered(Role::Controlling, config(false, false));
+    assert_eq!(agent.ta(), IceConfig::default().ta);
+
+    let mut slow = from_peer(vec![host(PEER, PEER_PRIORITY, "1")]);
+    slow.pacing = Some(Duration::from_secs(9));
+    agent.set_remote(stream, &slow, now).expect("the answer");
+    assert_eq!(agent.ta(), Duration::from_secs(9));
+
+    agent.restart(credentials("Anew")).expect("new credentials");
+    assert_eq!(
+        agent.ta(),
+        IceConfig::default().ta,
+        "a restart is a new session, and the peer's pacing was the old one's"
+    );
+}
+
+/// The reason [`Received::Data`] answers with a position rather than a
+/// borrow: a caller that keys its media has to write over the datagram it
+/// just handed in, and a borrow held by the answer would stop it.
+///
+/// This test is the shape of the facade's receive path, and it would not
+/// compile against an answer that borrowed.
+#[test]
+fn the_caller_can_still_write_over_a_datagram_the_agent_read() {
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    ids.feed(&mut agent);
+
+    // an RTP packet, which is what a media socket mostly carries
+    let mut datagram = vec![0x80, 0x00, 0x00, 0x01];
+    datagram.extend_from_slice(&[0x11; 168]);
+
+    let Received::Data { range, .. } =
+        agent.handle_datagram(address(LOCAL), address(PEER), &datagram, now)
+    else {
+        panic!("anything that is not STUN is the application's");
+    };
+    assert_eq!(range, 0..datagram.len());
+
+    // the answer is not holding the buffer, so this is allowed
+    let payload = &mut datagram[range];
+    payload[0] = 0x00;
+    assert_eq!(datagram[0], 0x00);
+}
+
 /// The case RFC 8863 is written for, and the one that used to have no way
 /// out: a peer whose candidates this agent cannot pair with anything, so no
 /// check is ever sent and none of the paths that fail a checklist is ever
