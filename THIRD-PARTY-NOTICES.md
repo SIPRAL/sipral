@@ -334,6 +334,12 @@ reason a build with no matching C toolchain (a cross-compile target with none
 installed, say) cannot check this crate's tests or examples, distinct from the
 `example-tls`-gated reason below.
 
+The same `[dev-dependencies]` name `getrandom` 0.2.17 (MIT OR Apache-2.0),
+the copy `ring` already brings in, for the examples' seeds: every example
+draws the two seeds a `UserAgent` and a `MediaEngine` are built with from the
+operating system, which is the part of using the library an example has to
+show. It is linked into the examples and tests alone.
+
 ## Examples only, never shipped
 
 `crates/sipral/examples/tls.rs` is the one place in this repository that

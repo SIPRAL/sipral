@@ -25,8 +25,12 @@
 
 // `udp_endpoint` needs `media_socket` at `crate::media_socket`, the same way
 // `call.rs` provides it, even though this file never names it itself.
+#[path = "common/entropy.rs"]
+mod entropy;
 #[path = "common/media_socket.rs"]
 mod media_socket;
+#[path = "common/srv.rs"]
+mod srv;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
 
@@ -142,12 +146,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let server = args.server.as_deref().unwrap_or(&args.domain);
     let remote = resolve(server)?;
     let now = Instant::now();
-    let agent = UserAgent::new(EndpointConfig::default(), [0x4a; 32])?;
+    let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
     let engine = MediaEngine::new(
         CodecCatalog::new(),
         MediaConfig::default(),
         WallClock::from_unix(now, 0, 0),
-        [0x4b; 32],
+        entropy::seed()?,
     );
     let mut endpoint = Endpoint::bind(
         SocketAddr::new(udp_endpoint::route_to(remote), 0),
@@ -284,14 +288,14 @@ fn advance(
     }
 }
 
+/// A server named with a port is that address; a bare domain is looked up
+/// the way RFC 3263 §4.2 has it, by its `_sip._udp` record first.
 fn resolve(server: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    let with_port = if server.contains(':') {
-        server.to_owned()
-    } else {
-        format!("{server}:5060")
-    };
-    with_port
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| format!("cannot resolve {server}").into())
+    if server.contains(':') {
+        return server
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| format!("cannot resolve {server}").into());
+    }
+    Ok(srv::resolve(server, "_sip._udp", 5060)?)
 }

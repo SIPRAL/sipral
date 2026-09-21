@@ -24,15 +24,19 @@
 //! own (`media_socket.rs`) into whatever plays or records it. Nothing here is
 //! specific to sip2sip.info beyond the URI and the two digit strings.
 
+#[path = "common/entropy.rs"]
+mod entropy;
 #[path = "common/media_socket.rs"]
 mod media_socket;
+#[path = "common/srv.rs"]
+mod srv;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
 #[path = "common/wav.rs"]
 mod wav;
 
 use std::env;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
@@ -58,7 +62,11 @@ const GREETING: Duration = Duration::from_millis(1_500);
 /// The script this example plays into the IVR once it is up: how long after
 /// the call connects, and what to send. `"2"` selects "read my digits back";
 /// the string after it is what gets read back.
-const SCRIPT: &[(Duration, &str)] = &[(GREETING, "2"), (Duration::from_millis(4_500), "1234#")];
+///
+/// The digits wait until the IVR has finished asking for them: sent at four
+/// and a half seconds they landed in the middle of its own prompt, which it
+/// does not listen through, and nothing was ever read back.
+const SCRIPT: &[(Duration, &str)] = &[(GREETING, "2"), (Duration::from_millis(8_000), "1234#")];
 
 /// How long this end waits, in total, before hanging up regardless of what
 /// the IVR did — long enough to hear the digits read back, short enough that
@@ -68,10 +76,8 @@ const CEILING: Duration = Duration::from_secs(25);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wav_path = wav_path_from_args();
 
-    let remote: SocketAddr = (SERVER, SIP_PORT)
-        .to_socket_addrs()?
-        .next()
-        .ok_or("cannot resolve sip2sip.info")?;
+    // the domain's SRV record, not its own address, which refuses SIP
+    let remote: SocketAddr = srv::resolve(SERVER, "_sip._udp", SIP_PORT)?;
     let bind_addr = SocketAddr::new(udp_endpoint::route_to(remote), 0);
     let now = Instant::now();
     let unix_seconds = SystemTime::now()
@@ -86,9 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog,
         MediaConfig::default(),
         WallClock::from_unix(now, unix_seconds, 0),
-        [0x2c; 32],
+        entropy::seed()?,
     );
-    let agent = UserAgent::new(EndpointConfig::default(), [0x71; 32])?;
+    let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
     let mut endpoint = Endpoint::bind(bind_addr, agent, engine, now)?;
 
     // Nobody at sip2sip.info reads this identity; it exists because every

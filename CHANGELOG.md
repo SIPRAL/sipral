@@ -31,7 +31,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   crate; `headless-agent.rs` is a fifty-line agent with no device anywhere
   near it, that answers and repeats back whatever it hears. `docs/04-ua.md`
   now quotes the examples directly rather than describing them in prose that
-  nothing built.
+  nothing built. The examples find a server by its domain's SRV record (RFC
+  3263 §4.2), since `sip2sip.info`'s own address refuses SIP, draw their seeds
+  from the operating system rather than from a constant, and record every
+  frame of a call, pauses included; both calls, UDP and TLS, have been placed
+  to the IVR and heard it answer the digits.
 - **A Python binding, over the C ABI.** `tools/abi-gen`'s fifth back end
   prints `bindings/python/sipral/_sipral_cffi.py`: a `cffi` ABI-mode `cdef`
   naming the same types, constants and entry points the header does, and the

@@ -37,6 +37,8 @@
     )
 )]
 
+#[path = "common/entropy.rs"]
+mod entropy;
 #[path = "common/media_socket.rs"]
 mod media_socket;
 #[path = "common/udp_endpoint.rs"]
@@ -135,12 +137,12 @@ fn tick(endpoint: &mut Endpoint, echoes: &mut Echoes, now: Instant) -> bool {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port) = args_or_defaults();
     let now = Instant::now();
-    let agent = UserAgent::new(EndpointConfig::default(), [0x5a; 32])?;
+    let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
     let engine = MediaEngine::new(
         CodecCatalog::new(),
         MediaConfig::default(),
         WallClock::from_unix(now, 0, 0),
-        [0x5b; 32],
+        entropy::seed()?,
     );
     // A real address, not a wildcard: `Endpoint::bind`'s own documentation
     // says why — it becomes what every call's offer or answer advertises,

@@ -27,15 +27,19 @@
 //! and, exactly like `call.rs`, add `--wav out.wav` on a machine with no
 //! audio device.
 
+#[path = "common/entropy.rs"]
+mod entropy;
 #[path = "common/media_socket.rs"]
 mod media_socket;
+#[path = "common/srv.rs"]
+mod srv;
 #[path = "common/wav.rs"]
 mod wav;
 
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -62,16 +66,17 @@ const HOST: &str = "sip2sip.info";
 const TLS_PORT: u16 = 5061;
 
 const GREETING: Duration = Duration::from_millis(1_500);
-const SCRIPT: &[(Duration, &str)] = &[(GREETING, "2"), (Duration::from_millis(4_500), "1234#")];
+/// The same script as `call.rs`, and timed the same way for the same reason:
+/// the digits wait for the IVR to finish asking for them.
+const SCRIPT: &[(Duration, &str)] = &[(GREETING, "2"), (Duration::from_millis(8_000), "1234#")];
 const CEILING: Duration = Duration::from_secs(25);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wav_path = wav_path_from_args();
 
-    let remote: SocketAddr = (HOST, TLS_PORT)
-        .to_socket_addrs()?
-        .next()
-        .ok_or("cannot resolve sip2sip.info")?;
+    // the domain's `_sips._tcp` record; the certificate is still checked
+    // against the domain itself, which is what RFC 5922 §4 has a client do
+    let remote: SocketAddr = srv::resolve(HOST, "_sips._tcp", TLS_PORT)?;
     let now = Instant::now();
     let unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -82,9 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog,
         MediaConfig::default(),
         WallClock::from_unix(now, unix_seconds, 0),
-        [0x3c; 32],
+        entropy::seed()?,
     );
-    let agent = UserAgent::new(EndpointConfig::default(), [0x81; 32])?;
+    let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
     let roots = TlsTransport::platform_roots();
     let mut endpoint = Endpoint::connect(remote, HOST, roots, agent, engine, now)?;
 

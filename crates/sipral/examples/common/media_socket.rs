@@ -26,7 +26,7 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use sipral::{MediaSession, Playback};
+use sipral::MediaSession;
 
 /// The largest frame any codec in this crate's default build produces, in
 /// samples: Opus's own, at its default twenty-millisecond packetisation and
@@ -85,9 +85,12 @@ impl MediaSocket {
     /// `sink`.
     ///
     /// `source` fills a buffer of `session.frame_samples()` samples every time
-    /// it is called, at the pace above; `sink` is given each frame
-    /// [`Playback::Packet`] produced, decoded or concealed alike, which is
-    /// what a real earpiece would be handed either way.
+    /// it is called, at the pace above; `sink` is given every frame the pace
+    /// makes due, whatever [`MediaSession::playback`] filled it with — a
+    /// decoded packet, a concealed one, comfort noise or silence — which is
+    /// what a real earpiece is handed. Handing it only the decoded ones drops
+    /// every pause a far end that stops sending in silence leaves, and a
+    /// recording of the call comes out a fifth of its length.
     pub(crate) fn turn(
         &mut self,
         session: &mut MediaSession,
@@ -139,9 +142,9 @@ impl MediaSocket {
             let Some(room) = played.get_mut(..frame) else {
                 break;
             };
-            if matches!(session.playback(room), Playback::Packet) {
-                sink(room);
-            }
+            // what filled the frame does not change that it is played
+            let _ = session.playback(room);
+            sink(room);
             self.next_play += PACE;
         }
     }

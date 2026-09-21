@@ -117,6 +117,13 @@ rustls-pki-types = { version = "1.15.1", optional = true }
 # `example-tls` or `--no-default-features`.
 [dev-dependencies]
 rcgen = "0.14.10"
+# the examples' seeds, from the operating system's entropy. The library draws
+# no randomness of its own and takes its seeds from the application, which is
+# what an example has to show being done; a constant there would give every
+# run the same tags and Call-IDs, and an SDES call the same key. 0.2 rather
+# than 0.4 because `ring` above already brings 0.2 in, and a second copy for
+# the same two system calls buys nothing.
+getrandom = "0.2.17"
 
 # the examples' own audio device, macOS and iOS only. `sipral-io-coreaudio`
 # does not depend on this crate, so pulling it in here for `examples/` opens

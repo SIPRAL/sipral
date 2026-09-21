@@ -858,6 +858,7 @@ dependencies = [
 name = "sipral"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "rcgen",
  "rustls",
  "rustls-native-certs",
