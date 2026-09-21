@@ -25,7 +25,7 @@ use sipral::{
     MediaConfig, MediaEvent, OutgoingCall, UaEvent, Uri,
 };
 
-use crate::{Endpoint, Fact, Flow, Script, Step, catalog, place_call};
+use crate::{Endpoint, Fact, Flow, Script, Step, catalog, catalog_for, place_call};
 
 const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -317,6 +317,148 @@ fn a_held_call_changes_codec_and_the_resume_keeps_the_new_one() {
     );
     let session = dialling.engine.session(call).expect("media");
     assert_eq!(session.codec(), Codec::Pcma, "the resume went back");
+    assert_eq!(session.direction(), Direction::SendRecv);
+    drop(session);
+
+    let _ = dialling.agent.hangup(call, Instant::now());
+}
+
+/// Whether either side's call finished its DTLS-SRTP handshake.
+fn secured(events: &[Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Media {
+                event: MediaEvent::Secured { .. },
+                ..
+            }
+        )
+    })
+}
+
+/// Every media failure either side reported, as text.
+fn media_failures(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Media {
+                event: MediaEvent::Failed(error),
+                ..
+            } => Some(error.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How much audible audio each side has heard on its one call.
+fn audible(dialling: &Endpoint, answering: &Endpoint) -> (u32, u32) {
+    let on = |endpoint: &Endpoint| {
+        endpoint
+            .media
+            .values()
+            .map(|media| media.heard().audible)
+            .max()
+            .unwrap_or(0)
+    };
+    (on(dialling), on(answering))
+}
+
+/// Let the tone run for a second or so, failing on any media failure.
+fn talk(dialling: &mut Endpoint, answering: &mut Endpoint, failed: &mut Vec<String>) {
+    for _ in 0..60 {
+        let (dialled, answered) = round(dialling, answering, Instant::now());
+        failed.extend(media_failures(&dialled));
+        failed.extend(media_failures(&answered));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `Flow::Dtls` between two of this crate's own endpoints: a call keyed by a
+/// handshake whose records cross real sockets through `Endpoint::run_media`,
+/// heard, held, resumed and heard again. What only the real lab can say is
+/// how Asterisk answers the two re-offers; that the records get out at all,
+/// and that a hold between two conforming ends leaves the association where
+/// it was, is said here.
+#[test]
+fn a_dtls_call_is_keyed_over_real_sockets_and_heard_again_after_a_hold() {
+    let keyed = |seed: u8| {
+        Endpoint::bind(
+            [seed; 32],
+            [seed ^ 0x5a; 32],
+            SocketAddr::new(LOOPBACK, 0),
+            catalog_for(Flow::Dtls),
+            Instant::now(),
+        )
+        .expect("binding on loopback")
+    };
+    let mut dialling = keyed(221);
+    let mut answering = keyed(222);
+    let _account = answering
+        .agent
+        .add_account(local_account(&answering, "answering"));
+    let account = dialling
+        .agent
+        .add_account(local_account(&dialling, "dialling"));
+    let target = answering.local;
+    let uri = Uri::parse_str(&format!("sip:answering@{target}")).expect("a URI");
+    let outgoing = OutgoingCall::new(uri).to_address(dialling.transport, target);
+    let media = CallMedia::new(catalog_for(Flow::Dtls), MediaConfig::default());
+    let call = place_call(
+        &mut dialling,
+        account,
+        outgoing,
+        media,
+        target,
+        Instant::now(),
+    )
+    .expect("the INVITE goes");
+
+    let mut failed = Vec::new();
+    let (mut near, mut far) = (false, false);
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the handshake never keyed both ends over real loopback sockets",
+        |dialled, answered| {
+            near |= secured(dialled);
+            far |= secured(answered);
+            near && far
+        },
+    );
+    talk(&mut dialling, &mut answering, &mut failed);
+    let before = audible(&dialling, &answering);
+    assert!(
+        before.0 > 0 && before.1 > 0,
+        "keyed, and the tone never came through: {before:?}"
+    );
+
+    for (what, held) in [("hold", true), ("resume", false)] {
+        let asked = if held {
+            dialling.agent.hold(call, Instant::now())
+        } else {
+            dialling.agent.resume(call, Instant::now())
+        };
+        asked.unwrap_or_else(|error| panic!("the {what} did not go: {error}"));
+        round_until(
+            &mut dialling,
+            &mut answering,
+            &format!("the {what} was never agreed"),
+            |dialled, answered| {
+                failed.extend(media_failures(dialled));
+                failed.extend(media_failures(answered));
+                session_changed(dialled)
+            },
+        );
+    }
+    talk(&mut dialling, &mut answering, &mut failed);
+    assert!(failed.is_empty(), "media failed: {failed:?}");
+    let after = audible(&dialling, &answering);
+    assert!(
+        after.0 > before.0 && after.1 > before.1,
+        "nothing more was heard after the resume: {before:?} then {after:?}"
+    );
+    let session = dialling.engine.session(call).expect("media");
+    assert!(session.is_encrypted());
     assert_eq!(session.direction(), Direction::SendRecv);
     drop(session);
 

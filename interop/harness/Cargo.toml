@@ -19,7 +19,12 @@ publish = false
 # encodes Opus, and this way the harness builds on a machine with no C++
 # toolchain. A workspace build still links libopus, because some other crate
 # in the graph asks for it and features unify.
-sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false }
+#
+# `dtls` back on, alone: the DTLS-SRTP flow runs a handshake on the media
+# path, and it is pure Rust.
+sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false, features = [
+    "dtls",
+] }
 # Kept for reading what arrived, which the facade does not re-export the
 # parsers for: `HeaderName` and `OwnedMessage` for a refusal's own Warning and
 # reason phrase, and `sdp::parse` for the format list an offer really carried.

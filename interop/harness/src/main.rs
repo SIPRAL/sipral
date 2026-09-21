@@ -129,12 +129,14 @@ fn catalog() -> CodecCatalog {
 }
 
 /// What `flow` places its call with: [`catalog`] for every flow except
-/// [`Flow::Srtp`], which is refused rather than answered plainly if the
-/// far end's own offer turns out not to carry a key — the whole point of
-/// the flow is that this call runs under SDES or does not run at all.
+/// [`Flow::Srtp`] and [`Flow::Dtls`], which are refused rather than answered
+/// plainly if the far end turns out not to key the call — the whole point of
+/// each is that the call runs under SDES, or under a DTLS-SRTP handshake, or
+/// does not run at all.
 fn catalog_for(flow: Flow) -> CodecCatalog {
     match flow {
         Flow::Srtp => catalog().with_srtp(SrtpPolicy::Required),
+        Flow::Dtls => catalog().with_srtp(SrtpPolicy::DtlsRequired),
         _ => catalog(),
     }
 }
@@ -164,6 +166,10 @@ fn main() -> ExitCode {
     let infodtmf_user =
         env::var("SIPRAL_USER_INFODTMF").unwrap_or_else(|_| "labuser-infodtmf".to_owned());
     let infodtmf_pass = env::var("SIPRAL_PASS_INFODTMF").unwrap_or_else(|_| pass.clone());
+    // and the DTLS-SRTP endpoint's (interop/asterisk's `labuser-dtls`), for
+    // the same reason again
+    let dtls_user = env::var("SIPRAL_USER_DTLS").unwrap_or_else(|_| "labuser-dtls".to_owned());
+    let dtls_pass = env::var("SIPRAL_PASS_DTLS").unwrap_or_else(|_| pass.clone());
     let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
 
     let Some(remote) = resolve(&server, port) else {
@@ -190,6 +196,7 @@ fn main() -> ExitCode {
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::HoldCodecChange);
+        flows.push(Flow::Dtls);
     }
 
     let mut failures = 0;
@@ -200,6 +207,7 @@ fn main() -> ExitCode {
         let (this_user, this_pass) = match flow {
             Flow::Srtp => (srtp_user.as_str(), srtp_pass.as_str()),
             Flow::DtmfInfo => (infodtmf_user.as_str(), infodtmf_pass.as_str()),
+            Flow::Dtls => (dtls_user.as_str(), dtls_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -268,6 +276,14 @@ enum Flow {
     /// change names a different codec than the one the call held on, and the
     /// resume keeps it.
     HoldCodecChange,
+    /// A call keyed by a DTLS-SRTP handshake on the media path (RFC 5764),
+    /// against the lab's own DTLS endpoint (interop/asterisk's own
+    /// `labuser-dtls`), heard, held, resumed and heard again. The hold and the
+    /// resume are both re-offers, which hand the DTLS roles back with
+    /// `actpass` (RFC 8842 §5.5); audio after the resume is what says the far
+    /// end answered them with the roles already in force (§5.3) and the
+    /// association the call was keyed by is still the one carrying it.
+    Dtls,
 }
 
 impl Flow {
@@ -282,6 +298,7 @@ impl Flow {
             Self::DtmfInfo => "DTMF, SIP INFO",
             Self::Srtp => "SRTP",
             Self::HoldCodecChange => "hold with a codec change",
+            Self::Dtls => "DTLS-SRTP, held and resumed",
         }
     }
 
@@ -297,6 +314,7 @@ impl Flow {
             Self::DtmfInfo => "dtmfinfo",
             Self::Srtp => "srtp",
             Self::HoldCodecChange => "holdcodec",
+            Self::Dtls => "dtls",
         }
     }
 }
@@ -324,7 +342,8 @@ enum Fact {
     /// `Flow::DtmfInfo`'s own INFO reached a final answer that says the far
     /// end took it.
     DigitSent,
-    /// The session negotiated SDES and is actually running under it.
+    /// The session is actually running under the keys it negotiated: SDES
+    /// ones from the description, or a DTLS-SRTP handshake that finished.
     Encrypted,
     /// The codec running after the resume differs from the one running
     /// during the hold.
@@ -501,6 +520,14 @@ impl Endpoint {
                 media.send(destination, &payload);
             }
         }
+        // the DTLS-SRTP handshake's records, which are how `Flow::Dtls` gets
+        // any keys at all: a ClientHello left in here is a call that comes up
+        // and never carries a frame
+        while let Some((call, destination, payload)) = self.engine.poll_transmit(now) {
+            if let Some(media) = self.media.get(&call) {
+                media.send(destination, &payload);
+            }
+        }
     }
 
     fn timers(&mut self, now: Instant) {
@@ -587,6 +614,9 @@ struct Script {
     listen_until: Option<Instant>,
     /// When to stop waiting for the far end to be worth handing over.
     settled_by: Option<Instant>,
+    /// How much audible audio had come back when the resume was agreed, so
+    /// `Flow::Dtls` can tell audio after it from audio before the hold.
+    audible_at_resume: Option<u32>,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -603,6 +633,9 @@ enum Step {
     /// `Flow::HoldCodecChange`, while the call is held: a re-offer naming a
     /// narrower list than the one the call held on.
     ChangingCodecs,
+    /// Done with what the flow came to do, and kept up to hear the tone
+    /// until `listen_until`; nothing but that timer moves it on.
+    Listening,
     /// `Flow::Dtmf4733`: a digit is on its way, or has gone, and this end is
     /// waiting to hear it named back.
     Dialling,
@@ -640,6 +673,7 @@ impl Script {
             asked: false,
             listen_until: None,
             settled_by: None,
+            audible_at_resume: None,
         }
     }
 
@@ -722,6 +756,9 @@ impl Script {
                     self.seen.saw(Fact::Held);
                 } else if self.seen.has(Fact::Held) {
                     self.seen.saw(Fact::Resumed);
+                    if self.audible_at_resume.is_none() {
+                        self.audible_at_resume = Some(self.heard(endpoint).audible);
+                    }
                 }
                 self.advance(endpoint, now);
             }
@@ -789,6 +826,18 @@ impl Script {
                         Some(format!("the resume went back to {}", codec.encoding_name()));
                 }
             }
+            // the handshake finished and its keys are in: the one event that
+            // says a DTLS-SRTP call is encrypted, since at `Started` it is
+            // still waiting for them
+            MediaEvent::Secured { .. } if Some(call) == self.call && self.flow == Flow::Dtls => {
+                self.seen.saw(Fact::Encrypted);
+            }
+            // a handshake that gave up, a role or a certificate the far end
+            // moved: this flow's whole claim, and nothing to wait out
+            MediaEvent::Failed(ref error) if Some(call) == self.call && self.flow == Flow::Dtls => {
+                self.seen.refused = Some(format!("media: {error}"));
+                self.hang_up(endpoint, now);
+            }
             MediaEvent::DigitReceived { digit, .. }
                 if Some(call) == self.call && digit == Some(TEST_DIGIT.as_char()) =>
             {
@@ -830,6 +879,9 @@ impl Script {
 
     /// The next thing this flow does, once the last one has happened.
     fn advance(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        if self.flow == Flow::Dtls && self.advance_keyed_hold(endpoint, now) {
+            return;
+        }
         match self.step {
             Step::Registering if self.flow == Flow::Register => {
                 self.step = Step::Done;
@@ -856,7 +908,7 @@ impl Script {
                     self.tried("hold", asked);
                 }
             }
-            Step::Holding if self.flow == Flow::Hold => {
+            Step::Holding if self.flow == Flow::Hold || self.flow == Flow::Dtls => {
                 self.step = Step::Resuming;
                 if let Some(call) = self.call {
                     let asked = endpoint.agent.resume(call, now);
@@ -925,8 +977,35 @@ impl Script {
             Step::Talking | Step::Resuming | Step::Dialling | Step::Transferring => {
                 self.hang_up(endpoint, now);
             }
-            Step::Placing | Step::Ending | Step::Done => (),
+            Step::Placing | Step::Listening | Step::Ending | Step::Done => (),
         }
+    }
+
+    /// `Flow::Dtls`'s own steps, the ones no other flow takes; `true` when
+    /// this was one of them. Keyed and heard before anything is re-offered,
+    /// so that the audio after the resume is measured against a call that had
+    /// some, and kept up after the resume to hear it. Factored out of
+    /// `advance` for the reason `send_dtmf_by_info` gives.
+    fn advance_keyed_hold(&mut self, endpoint: &mut Endpoint, now: Instant) -> bool {
+        match self.step {
+            Step::Talking => {
+                self.step = Step::Settling;
+                self.settled_by = Some(now + dwell());
+            }
+            Step::Settling => {
+                self.step = Step::Holding;
+                if let Some(call) = self.call {
+                    let asked = endpoint.agent.hold(call, now);
+                    self.tried("hold", asked);
+                }
+            }
+            Step::Resuming => {
+                self.step = Step::Listening;
+                self.listen_until = Some(now + dwell());
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// `Flow::HoldCodecChange`'s own `Step::Holding`: a narrower list than
@@ -980,16 +1059,17 @@ impl Script {
     }
 
     /// The extension this flow's primary call dials — `self.extension`
-    /// (9000 unless told otherwise) for every flow except the three that need
+    /// (9000 unless told otherwise) for every flow except the four that need
     /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
     /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
     /// only Asterisk runs the second, over its own `labuser-infodtmf`
-    /// endpoint) and `Flow::Srtp` (9004, Asterisk only — see
-    /// `interop/asterisk/extensions.conf`).
+    /// endpoint), `Flow::Srtp` (9004) and `Flow::Dtls` (9005), the last two
+    /// Asterisk only — see `interop/asterisk/extensions.conf`.
     fn call_extension(&self) -> String {
         match self.flow {
             Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
+            Flow::Dtls => "9005".to_owned(),
             _ => self.extension.clone(),
         }
     }
@@ -1054,7 +1134,47 @@ impl Script {
         if let Some(ref why) = self.seen.refused {
             return Err(why.clone());
         }
-        let owed: &[(Fact, &str)] = match self.flow {
+        for (fact, why) in self.owed() {
+            if !self.seen.has(*fact) {
+                return Err((*why).to_owned());
+            }
+        }
+        if self.flow == Flow::Srtp && !self.seen.has(Fact::Encrypted) {
+            return Err("the call connected but never ran under SDES".to_owned());
+        }
+        // Audio is asked for only when something is known to send it back, and
+        // only of the calls that dwell on the tone: the others hang up as soon
+        // as what they came to prove has happened. The SRTP call dwells on the
+        // same tone, and a stream that agreed a key and never decrypted a frame
+        // is the failure that flow exists to find.
+        if (self.flow == Flow::Call || self.flow == Flow::Srtp)
+            && require_audio
+            && heard.audible == 0
+        {
+            return Err(format!(
+                "nothing audible came back: {} sent, {} received, {} refused",
+                heard.sent, heard.received, heard.refused
+            ));
+        }
+        // and the DTLS call's claim is about after the re-offers, not before:
+        // audio before the hold only says the first handshake worked
+        if self.flow == Flow::Dtls
+            && require_audio
+            && heard.audible <= self.audible_at_resume.unwrap_or(heard.audible)
+        {
+            return Err(format!(
+                "nothing audible came back after the resume: {} audible in all, {} sent, \
+                 {} received, {} refused",
+                heard.audible, heard.sent, heard.received, heard.refused
+            ));
+        }
+        Ok(())
+    }
+
+    /// Every fact this flow has to have seen, each with the sentence that
+    /// says which one it did not.
+    const fn owed(&self) -> &'static [(Fact, &'static str)] {
+        match self.flow {
             Flow::Register => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Unregistered, "the binding was not given back"),
@@ -1130,30 +1250,19 @@ impl Script {
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
-        };
-        for (fact, why) in owed {
-            if !self.seen.has(*fact) {
-                return Err((*why).to_owned());
-            }
+            Flow::Dtls => &[
+                (Fact::Registered, "no binding was granted"),
+                (Fact::Up, "the call did not connect"),
+                (
+                    Fact::Encrypted,
+                    "the call connected but its DTLS-SRTP handshake never keyed it",
+                ),
+                (Fact::Held, "the hold was not agreed"),
+                (Fact::Resumed, "the resume was not agreed"),
+                (Fact::Ours, "the far end ended the call before we asked"),
+                (Fact::Over, "the call did not end"),
+            ],
         }
-        if self.flow == Flow::Srtp && !self.seen.has(Fact::Encrypted) {
-            return Err("the call connected but never ran under SDES".to_owned());
-        }
-        // Audio is asked for only when something is known to send it back, and
-        // only of the calls that dwell on the tone: the others hang up as soon
-        // as what they came to prove has happened. The SRTP call dwells on the
-        // same tone, and a stream that agreed a key and never decrypted a frame
-        // is the failure that flow exists to find.
-        if (self.flow == Flow::Call || self.flow == Flow::Srtp)
-            && require_audio
-            && heard.audible == 0
-        {
-            return Err(format!(
-                "nothing audible came back: {} sent, {} received, {} refused",
-                heard.sent, heard.received, heard.refused
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -1303,6 +1412,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::DtmfInfo => [97; 32],
         Flow::Srtp => [83; 32],
         Flow::HoldCodecChange => [89; 32],
+        Flow::Dtls => [101; 32],
     }
 }
 
@@ -1320,6 +1430,7 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::DtmfInfo => [197; 32],
         Flow::Srtp => [183; 32],
         Flow::HoldCodecChange => [189; 32],
+        Flow::Dtls => [201; 32],
     }
 }
 
@@ -1578,5 +1689,35 @@ mod tests {
                 "{flow:?} failed although the tone came back"
             );
         }
+    }
+
+    /// The DTLS flow's claim is about after the hold and the resume, the two
+    /// re-offers that hand the roles back: a tone that came back only before
+    /// them says the first handshake worked and nothing about the rest.
+    #[test]
+    fn a_dtls_call_heard_only_before_the_hold_fails_when_audio_is_required() {
+        let mut script = a_call_that_did_everything_but_carry_audio(Flow::Dtls);
+        script.seen.saw(Fact::Held);
+        script.seen.saw(Fact::Resumed);
+        script.audible_at_resume = Some(40);
+        let before = Heard {
+            sent: 300,
+            received: 150,
+            audible: 40,
+            refused: 1,
+        };
+        let verdict = script.verdict(before, true);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|why| why.contains("after the resume")),
+            "{verdict:?}"
+        );
+        assert_eq!(script.verdict(before, false), Ok(()));
+        let after = Heard {
+            audible: 90,
+            ..before
+        };
+        assert_eq!(script.verdict(after, true), Ok(()));
     }
 }
