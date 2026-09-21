@@ -40,6 +40,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `hold` select `holdcodec` too, and the RFC 4733 flow's key was not the one
   the Rust driver uses.
 
+- **The gate reads the tree's C the way glibc does.** The lab's C driver, the
+  smoke test, the Swift package's translation unit and the JNI shim are
+  compiled again against glibc's own headers for x86_64 and aarch64 Linux,
+  with `zig cc` and warnings fatal. glibc declares nothing beyond ISO C under a
+  strict `-std` unless a file asks for POSIX, and the Apple SDK declares it
+  regardless, so until now a file could pass here and fail on the machine it
+  runs on. `zig` joins the tools the gate needs.
+
 - **Two checks in the gate, both for mistakes it could not see.** A C file
   that includes a header ISO C does not define, or calls one of the POSIX
   extensions an ISO header declares only on request, must ask for POSIX before

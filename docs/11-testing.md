@@ -407,7 +407,12 @@ to give it one at all — a runner has no keychain. So the gate is a script.
 `scripts/check.sh` is it: `cargo fmt`, `cargo clippy` with warnings as errors,
 the test suite, `rustdoc` with warnings as errors, a release build, the symbols
 in the C library that build produces, `bindings/c/smoke.c` compiled against the
-header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
+header and run, the C that ships or drives the lab — that test, the Swift
+package's translation unit, the JNI shim and its thread helper, and the lab's C
+driver — compiled again against glibc's own headers for x86_64 and aarch64
+Linux with `zig cc` — glibc hides POSIX under a
+strict `-std` and the Apple SDK does not, so the compiler here alone passes a
+file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
 over all seventeen fuzz targets under their own nightly — which nothing else

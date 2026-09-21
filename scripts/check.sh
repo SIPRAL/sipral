@@ -358,8 +358,10 @@ done | grep 'Instant::now\|SystemTime::now' || true)
 # macro it then hides every declaration that is POSIX rather than ISO C --
 # clock_gettime, getaddrinfo, struct timespec, struct addrinfo. macOS exposes
 # them either way, so a file that compiles cleanly on this machine fails on
-# Linux, which is how the lab's C driver first met the lab. No compiler here
-# can see that. What can be seen is whether a file asked: one that includes a
+# Linux, which is how the lab's C driver first met the lab. The Apple compiler
+# cannot see that; "C compiled against glibc" further down reads each file
+# with glibc's own headers and does. This is the cheaper half, and the one
+# that says what to do: whether a file asked. One that includes a
 # header ISO C does not define, or calls one of the POSIX extensions an ISO
 # header only declares on request, names its _POSIX_C_SOURCE (or one of the
 # macros that imply it) before its first #include. jni.h is Java's and not
@@ -671,6 +673,56 @@ if [ -s "$DYLIB" ]; then
     rm -rf "$work"
 else
     fail "$DYLIB: nothing to link against"
+fi
+
+# The same C again, for Linux, because the compiler above cannot see what
+# glibc does. Under a strict -std, glibc declares nothing beyond ISO C unless
+# the file asks for POSIX, and the Apple SDK declares all of it anyway -- so a
+# file that compiles cleanly here stops compiling on the machine it runs on,
+# which is how the lab's C driver first met the lab. `zig cc` carries glibc's
+# own headers for every target it knows, so this is glibc's reading of each
+# file rather than a guess at it: compiled, warnings fatal, and not linked,
+# since the library it would link against is a Linux build this machine does
+# not make. Linking and running it is the lab's. The POSIX check above names
+# the one known way to fail this; this is what catches the next one.
+#
+# The JNI files are compiled against the JDK's headers from here, whose
+# jni_md.h is Darwin's. What that header decides -- how JNIEXPORT is spelt,
+# which C type a jlong is -- is not what can go wrong here; what the file
+# asks of libc is.
+step "C compiled against glibc"
+if command -v zig >/dev/null 2>&1; then
+    work=$(mktemp -d)
+    jdk="${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}"
+    for arch in x86_64 aarch64; do
+        compiled=1
+        for pair in "c99:interop/harness-c/main.c" "c11:bindings/c/smoke.c" "c99:bindings/c/sipral.c"; do
+            if ! zig cc -target "$arch-linux-gnu" -std="${pair%%:*}" -Wall -Wextra -Werror -pedantic \
+                -I bindings/c/include -c -o "$work/out.o" "${pair#*:}" >"$work/cc" 2>&1; then
+                fail "${pair#*:} does not compile against glibc for $arch:"
+                sed 's/^/        /' "$work/cc"
+                compiled=0
+            fi
+        done
+        if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
+            for file in bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
+                bindings/kotlin/sipral/src/test/jni/native_thread.c; do
+                if ! zig cc -target "$arch-linux-gnu" -std=c11 -Wall -Wextra -Werror \
+                    -I"$jdk/include" -I"$jdk/include/darwin" -I bindings/c/include \
+                    -c -o "$work/out.o" "$file" >"$work/cc" 2>&1; then
+                    fail "$file does not compile against glibc for $arch:"
+                    sed 's/^/        /' "$work/cc"
+                    compiled=0
+                fi
+            done
+        fi
+        [ "$compiled" -eq 1 ] && pass "zig cc -target $arch-linux-gnu"
+    done
+    [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ] \
+        || skip "the JNI files against glibc: no JDK carrying include/jni.h"
+    rm -rf "$work"
+else
+    fail "zig is not installed, and nothing else here can read C the way glibc does (brew install zig)"
 fi
 
 # Everything behind cfg(target_os = "windows") in sipral-io-wasapi, and the
