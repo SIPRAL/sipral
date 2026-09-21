@@ -278,6 +278,7 @@ struct seen {
     int confirmed;
     int ended;
     int media_started;
+    int media_secured;
     int media_failed;
     int transfer_done;
     int transfer_failed;
@@ -343,6 +344,9 @@ static void on_event(const sipral_event_t *event, void *user_data)
         break;
     case SIPRAL_EVENT_KIND_MEDIA_CHANGED:
         seen->codec_now = event->payload.media.codec;
+        break;
+    case SIPRAL_EVENT_KIND_MEDIA_SECURED:
+        seen->media_secured = 1;
         break;
     case SIPRAL_EVENT_KIND_MEDIA_FAILED:
         seen->media_failed = 1;
@@ -692,6 +696,29 @@ static int resumed(const struct endpoint *end)
     return (end->seen.held_once && !end->seen.held_here) || end->seen.ended;
 }
 
+/* `held`, given up on early if the handshake that keys this call has
+ * already failed -- waiting out the rest of the flow's patience for a hold
+ * that has nothing left to say would only hide the reason with a timeout. */
+static int held_or_unkeyable(const struct endpoint *end)
+{
+    return held(end) || end->seen.media_failed;
+}
+
+/* `resumed`, the same way. */
+static int resumed_or_unkeyable(const struct endpoint *end)
+{
+    return resumed(end) || end->seen.media_failed;
+}
+
+/* Real media has arrived -- as opposed to the handshake's own records, which
+ * `sipral_media_receive` reports as `SIPRAL_ARRIVAL_HANDSHAKE` and this
+ * driver never counts in `received` -- or the handshake has already failed,
+ * so there is nothing left this wait could be for. */
+static int keyed_media_arrived(const struct endpoint *end)
+{
+    return end->received > 0 || end->seen.media_failed;
+}
+
 static int handed_over(const struct endpoint *end)
 {
     return end->seen.transfer_done || end->seen.transfer_failed || end->seen.ended;
@@ -922,6 +949,7 @@ enum flow {
     FLOW_DTMF_INFO,
     FLOW_SRTP,
     FLOW_HOLD_CODEC_CHANGE,
+    FLOW_DTLS,
     FLOW_COUNT
 };
 
@@ -946,6 +974,8 @@ static const char *flow_name(enum flow which)
         return "SRTP";
     case FLOW_HOLD_CODEC_CHANGE:
         return "hold with a codec change";
+    case FLOW_DTLS:
+        return "DTLS-SRTP, held and resumed";
     case FLOW_COUNT:
     default:
         return "?";
@@ -975,6 +1005,8 @@ static const char *flow_key(enum flow which)
         return "srtp";
     case FLOW_HOLD_CODEC_CHANGE:
         return "holdcodec";
+    case FLOW_DTLS:
+        return "dtls";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1029,6 +1061,10 @@ static void account_for(enum flow which, const char **user, const char **pass)
         named = getenv("SIPRAL_USER_INFODTMF");
         secret = getenv("SIPRAL_PASS_INFODTMF");
         fallback = "labuser-infodtmf";
+    } else if (which == FLOW_DTLS) {
+        named = getenv("SIPRAL_USER_DTLS");
+        secret = getenv("SIPRAL_PASS_DTLS");
+        fallback = "labuser-dtls";
     } else {
         return;
     }
@@ -1125,11 +1161,11 @@ static void dwell(struct endpoint *end, unsigned millis)
 
 /* Whether a flow is run against this server at all.
  *
- * The last four only against Asterisk, and the Rust harness does the same for
+ * The last five only against Asterisk, and the Rust harness does the same for
  * the same reasons: `interop/asterisk/extensions.conf` is the only dialplan in
  * the lab with an extension that names a digit back, the one Asterisk names
- * never came back through the proxy from FreeSWITCH, and the SDES endpoint
- * and the INFO one exist only in Asterisk's own configuration.
+ * never came back through the proxy from FreeSWITCH, and the SDES endpoint,
+ * the DTLS one and the INFO one exist only in Asterisk's own configuration.
  * `docs/11-testing.md` carries the reasons. A flow is not run where it is
  * known not to pass until somebody has found out why.
  */
@@ -1140,6 +1176,7 @@ static int runs_against(enum flow which, const char *server)
     case FLOW_DTMF_INFO:
     case FLOW_SRTP:
     case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_DTLS:
         return strcmp(server, "asterisk") == 0;
     case FLOW_REGISTER:
     case FLOW_CALL:
@@ -1158,8 +1195,9 @@ static int runs_against(enum flow which, const char *server)
  * answers 9003 with `Read()` and names the digit straight back with
  * `SendDTMF()`, which is what makes the round trip provable from this end,
  * and it goes back over INFO to an endpoint whose `dtmf_mode` is INFO. SRTP
- * has 9004. Every other flow calls the extension the command line named, and
- * a bridge answers it.
+ * has 9004, DTLS-SRTP 9005 — its own number so a capture shows which leg
+ * keyed by handshake without reading the SDP. Every other flow calls the
+ * extension the command line named, and a bridge answers it.
  */
 static const char *extension_for(enum flow which, const char *named)
 {
@@ -1169,6 +1207,8 @@ static const char *extension_for(enum flow which, const char *named)
         return "9003";
     case FLOW_SRTP:
         return "9004";
+    case FLOW_DTLS:
+        return "9005";
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -1190,14 +1230,56 @@ static int secured(const struct endpoint *end)
     return sipral_media_info(end->media, &info) == SIPRAL_STATUS_OK && info.secured != 0;
 }
 
+/* Whether the DTLS-SRTP handshake that keys this call has failed, filling
+ * `trouble` with its reason if so.
+ *
+ * `SIPRAL_EVENT_KIND_MEDIA_FAILED` leaves the call itself up -- nothing else
+ * says the handshake went wrong -- so this is checked after every wait
+ * `FLOW_DTLS` takes, and the flow ends at once on the first one that finds it
+ * true rather than reporting whatever timed out next as if it were the
+ * fault. */
+static int keying_failed(const struct endpoint *end)
+{
+    if (!end->seen.media_failed) {
+        return 0;
+    }
+    if (trouble[0] == '\0') {
+        (void)snprintf(trouble, sizeof trouble, "the DTLS-SRTP handshake failed: %s",
+                       end->seen.fault);
+    }
+    return 1;
+}
+
+/* The SRTP policy a flow places its call with -- a `SIPRAL_SRTP_*`, or zero
+ * for the stack's own default, which every flow but these two takes. */
+static uint32_t srtp_for(enum flow which)
+{
+    switch (which) {
+    case FLOW_SRTP:
+        return (uint32_t)SIPRAL_SRTP_REQUIRED;
+    case FLOW_DTLS:
+        return (uint32_t)SIPRAL_SRTP_DTLS_REQUIRED;
+    case FLOW_REGISTER:
+    case FLOW_CALL:
+    case FLOW_HOLD:
+    case FLOW_BLIND:
+    case FLOW_ATTENDED:
+    case FLOW_DTMF:
+    case FLOW_DTMF_INFO:
+    case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_COUNT:
+    default:
+        return 0u;
+    }
+}
+
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
                     const char *extension, const char *other)
 {
     if (which == FLOW_REGISTER) {
         return flow_register(end);
     }
-    if (up_and_talking(end, server, extension_for(which, extension),
-                       which == FLOW_SRTP ? (uint32_t)SIPRAL_SRTP_REQUIRED : 0u)
+    if (up_and_talking(end, server, extension_for(which, extension), srtp_for(which))
         != 0) {
         return -1;
     }
@@ -1406,6 +1488,76 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         dwell(end, 1000u);
         if (end->seen.codec_now == end->seen.codec_started) {
             wrong_text("the resume went back to the codec the call held on");
+            return -1;
+        }
+        break;
+    }
+
+    case FLOW_DTLS: {
+        sipral_status_t status;
+        const char *require_audio = getenv("SIPRAL_REQUIRE_AUDIO");
+        unsigned audible_at_resume;
+
+        /* the handshake runs silently under the first packets of this call,
+         * and `received` only counts real RTP -- `sipral_media_receive`
+         * reports the handshake's own records as `SIPRAL_ARRIVAL_HANDSHAKE`
+         * and this driver does not count those -- so waiting for it is
+         * waiting for the far end's tone to prove the keys are in place,
+         * exactly as `Flow::Blind` waits to be worth handing over before it
+         * sends its own REFER */
+        (void)wait_until(end, keyed_media_arrived, DWELL_MS);
+        if (keying_failed(end)) {
+            return -1;
+        }
+
+        status = sipral_call_hold(end->stack, end->call, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_hold", status);
+            return -1;
+        }
+        if (!wait_until(end, held_or_unkeyable, FLOW_PATIENCE_MS) || end->seen.ended) {
+            wrong_text("the hold was never agreed");
+            return -1;
+        }
+        if (keying_failed(end)) {
+            return -1;
+        }
+
+        status = sipral_call_resume(end->stack, end->call, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_resume", status);
+            return -1;
+        }
+        if (!wait_until(end, resumed_or_unkeyable, FLOW_PATIENCE_MS) || end->seen.ended) {
+            wrong_text("the resume was never agreed");
+            return -1;
+        }
+        if (keying_failed(end)) {
+            return -1;
+        }
+
+        /* how many audible frames had already arrived, so what is judged
+         * after this is only what the resume itself carried back -- the
+         * hold and the resume are both re-offers that hand the DTLS roles
+         * back with a=setup:actpass (RFC 8842 §5.5), and audio heard only
+         * once they are both agreed is what says the far end answered with
+         * the roles already in force */
+        audible_at_resume = end->audible;
+        dwell(end, DWELL_MS);
+        if (keying_failed(end)) {
+            return -1;
+        }
+        if (!end->seen.media_secured) {
+            /* not the same question `MEDIA_STARTED` answers: a DTLS call is
+             * still waiting for its keys there, and this end has nothing to
+             * play until `SIPRAL_EVENT_KIND_MEDIA_SECURED` says the
+             * handshake finished */
+            wrong_text("the call connected but was never keyed by its DTLS-SRTP handshake");
+            return -1;
+        }
+        if (require_audio != NULL && require_audio[0] != '\0' && require_audio[0] != '0'
+            && end->audible <= audible_at_resume) {
+            wrong_text("nothing audible came back after the resume");
             return -1;
         }
         break;
