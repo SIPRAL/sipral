@@ -4423,3 +4423,59 @@ fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {
         "a report went out before a path was chosen"
     );
 }
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_call_that_lost_consent_stops_sending_rather_than_falling_back() {
+    // RFC 7675 §5.1: "the endpoint MUST cease transmission on that 5-tuple".
+    // The failure this guards is the quiet one in the other direction — a
+    // session that answered a lost path by forgetting it had an agent would
+    // put the audio straight back on the address the signalling named, which
+    // is the unchecked path the call chose not to trust
+    let (mut pair, call, remote) = ice_call();
+    pair.check_paths(call, remote);
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .ice_path()
+            .is_some(),
+        "the call has a checked path to lose"
+    );
+
+    // thirty seconds with no authenticated response on the selected pair,
+    // which is what the far end going away looks like from here
+    for _ in 0..40 {
+        pair.now += Duration::from_secs(1);
+        pair.caller.engine.handle_timeout(pair.now);
+        // drained but never delivered: the far end is gone
+        while pair.caller.engine.poll_transmit(pair.now).is_some() {}
+        pair.caller.drain(pair.now, false);
+    }
+
+    let lost = pair.caller.heard.iter().any(|event| {
+        matches!(
+            event,
+            Event::Media {
+                event: MediaEvent::Failed(MediaError::IcePathLost),
+                ..
+            }
+        )
+    });
+    assert!(lost, "consent ran out and the call was not told");
+
+    let mut session = pair.caller.engine.session(call).expect("media");
+    let frame = vec![100_i16; session.frame_samples()];
+    assert!(
+        session
+            .capture(&frame, pair.now)
+            .expect("the frame is refused, not broken")
+            .is_none(),
+        "audio went out after consent was withdrawn"
+    );
+    assert!(
+        session.poll_rtcp(pair.now).is_none(),
+        "a report went out after consent was withdrawn"
+    );
+}

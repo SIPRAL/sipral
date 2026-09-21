@@ -776,7 +776,14 @@ impl MediaSession {
             });
         }
         if lost {
-            self.ice = None;
+            // and the agent is **kept**. Dropping it here would be the exact
+            // opposite of what RFC 7675 §5.1 asks — "the endpoint MUST cease
+            // transmission on that 5-tuple" — because a session with no agent
+            // is a session that sends to the address the signalling named,
+            // which is the unchecked path this call chose not to trust. Kept,
+            // the agent answers `NoConsent` to every route asked of it and
+            // every producer here stops, which is the rule stated once in the
+            // layer that owns it.
             self.events
                 .push_back(MediaEvent::Failed(MediaError::IcePathLost));
         }
