@@ -244,15 +244,6 @@ impl Timer {
         Expiry::Retransmit
     }
 
-    /// The flight went out again on the peer's prompting: wait the current
-    /// value from now, without doubling it or spending an attempt, since a
-    /// peer that retransmits is a peer that is there.
-    pub(super) fn restart(&mut self, now: Instant) {
-        if self.deadline.is_some() {
-            self.deadline = now.checked_add(self.timeout);
-        }
-    }
-
     pub(super) const fn stop(&mut self) {
         self.deadline = None;
     }

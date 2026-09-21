@@ -616,6 +616,15 @@ impl Core {
 
     /// The peer sent a flight from before our last one again: send ours
     /// again, at most once per half of the initial timer.
+    ///
+    /// The give-up timer is left running on its own schedule. This prompt
+    /// travels in epoch 0, before any key exists, so nothing ties it to the
+    /// peer that owns the handshake — anyone able to spoof that address can
+    /// forge it, as often as the quiet gap above lets one through. Letting
+    /// it push the deadline back would let a forged stream of these hold a
+    /// handshake open forever, long past the point the real peer, if it is
+    /// even still there, would have been given up on. RFC 6347 §4.2.4 asks
+    /// only that the flight be sent again, not that the deadline move.
     fn on_peer_retransmission(&mut self, now: Instant) {
         let gap = self.settings.retransmission.initial / 2;
         if self
@@ -627,9 +636,7 @@ impl Core {
         }
         if let Err(failure) = self.transmit_flight(now) {
             self.fail(failure);
-            return;
         }
-        self.timer.restart(now);
     }
 
     /// The record keys of epoch 1, both directions, from the master secret.

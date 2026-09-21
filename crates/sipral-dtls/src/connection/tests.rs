@@ -641,6 +641,7 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
     let flight4 = hand.flight4();
     deliver(&mut hand.client, &flight4, hand.now);
+    let flight5_sent = hand.now;
     let flight5 = drain(&mut hand.client);
     let exchange = |datagrams: &[Vec<u8>]| {
         datagrams
@@ -662,10 +663,11 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     assert!(!again.is_empty());
     assert_eq!(exchange(&again), exchange(&flight5));
     assert!(events(&mut hand.client).is_empty());
-    // and the retransmission pushed the timer back rather than doubling it
+    // the retransmission is unauthenticated in epoch 0, so it does not touch
+    // the give-up deadline: it is still the one flight 5 started with
     assert_eq!(
         hand.client.poll_timeout(),
-        Some(now + Duration::from_secs(1))
+        Some(flight5_sent + Duration::from_secs(1))
     );
 
     // the server completes on flight 5, and again on its retransmission sends
@@ -691,6 +693,99 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     keyed(&events(&mut hand.client));
     assert!(drain(&mut hand.client).is_empty());
     assert_eq!(hand.client.poll_timeout(), None);
+}
+
+/// A 25-octet plaintext epoch-0 record holding one empty fragment of message
+/// `message_seq` — the shape `on_peer_retransmission` answers, and the
+/// shortest thing an off-path attacker who can spoof the peer's address can
+/// forge without a single key: no certificate, no master secret, nothing
+/// that ties it to whoever actually owns the handshake.
+fn forged_retransmission(msg_type: HandshakeType, message_seq: u16) -> Vec<u8> {
+    let mut fragment = Vec::new();
+    encode_message(msg_type, message_seq, &[], &mut fragment).unwrap();
+    let mut datagram = Vec::new();
+    encode_plaintext(
+        ContentType::HANDSHAKE,
+        ProtocolVersion::DTLS_1_2,
+        0,
+        u64::from(message_seq),
+        &fragment,
+        &mut datagram,
+    )
+    .unwrap();
+    datagram
+}
+
+#[test]
+fn a_forged_stream_of_epoch_zero_retransmissions_cannot_delay_giving_up() {
+    // The client sends its last flight and the real server falls silent —
+    // gone, or simply never heard from again. An off-path attacker who can
+    // spoof the server's address forges a retransmission of the ServerHello
+    // the client already has, at the fastest rate `on_peer_retransmission`
+    // still answers rather than ignoring as too soon. If that forged prompt
+    // could push the give-up deadline back, this stream would hold the
+    // handshake open forever; it must not, so the schedule below runs with
+    // the stream going the whole time and checks every deadline against it.
+    const INITIAL: Duration = Duration::from_millis(200);
+    const ATTEMPTS: u32 = 3;
+    let (one, other) = (identity(1), identity(2));
+    let mut client_config = config(Role::Client, &one, &other);
+    client_config.retransmission = Retransmission {
+        initial: INITIAL,
+        max: INITIAL,
+        attempts: ATTEMPTS,
+    };
+    let mut server_config = config(Role::Server, &other, &one);
+    server_config.cookie_exchange = false;
+    let start = Instant::now();
+    let mut client = Connection::new(client_config, &mut Counter::new(1), start).unwrap();
+    let mut server = Connection::new(server_config, &mut Counter::new(2), start).unwrap();
+
+    let hello = drain(&mut client);
+    deliver(&mut server, &hello, start);
+    let flight4 = drain(&mut server);
+    deliver(&mut client, &flight4, start);
+    let flight5 = drain(&mut client);
+    assert!(!flight5.is_empty(), "the client's last flight");
+    assert_eq!(client.state(), State::Handshaking);
+    let sent_at = start;
+
+    let probe = forged_retransmission(HandshakeType::SERVER_HELLO, 0);
+    let step = INITIAL / 2;
+    let mut now = sent_at;
+    for retransmission in 1..=ATTEMPTS {
+        let due = sent_at + INITIAL * retransmission;
+        while now + step <= due {
+            now += step;
+            client.handle_datagram(&probe, now);
+            drain(&mut client);
+        }
+        assert_eq!(
+            client.poll_timeout(),
+            Some(due),
+            "retransmission {retransmission}: a forged retransmission must not move the deadline"
+        );
+        client.handle_timeout(due);
+        assert!(
+            !drain(&mut client).is_empty(),
+            "retransmission {retransmission}: the real schedule still retransmits"
+        );
+        assert!(
+            events(&mut client).is_empty(),
+            "retransmission {retransmission}"
+        );
+        now = due;
+    }
+
+    let due = sent_at + INITIAL * (ATTEMPTS + 1);
+    while now + step <= due {
+        now += step;
+        client.handle_datagram(&probe, now);
+        drain(&mut client);
+    }
+    client.handle_timeout(due);
+    assert_eq!(refused(&events(&mut client)), Failure::Timeout);
+    assert_eq!(client.state(), State::Failed);
 }
 
 #[test]
