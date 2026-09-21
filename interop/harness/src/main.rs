@@ -53,7 +53,7 @@ use sipral::{
     Account, AccountId, CallHandle, CallMedia, CallState, Codec, CodecCatalog, Credentials,
     DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig, MediaEngine,
     MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, Subscribe, TransportId,
-    TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
+    TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent, VoipMetricsBlock, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
 
@@ -1317,6 +1317,19 @@ impl Script {
             .map(|session| session.statistics(now).quality)
     }
 
+    /// The primary call's RFC 3611 VoIP Metrics, the same way
+    /// [`Script::quality`] reads its `Quality`: what the call ended with, or
+    /// what it has measured so far if it is still up. `None` until this
+    /// stream has identified a source to report on.
+    fn voip_metrics(&self, endpoint: &mut Endpoint, now: Instant) -> Option<VoipMetricsBlock> {
+        if let Some(ended) = self.ended {
+            return ended.voip_metrics;
+        }
+        self.call
+            .and_then(|call| endpoint.engine.session(call))
+            .and_then(|session| session.statistics(now).voip_metrics)
+    }
+
     fn heard(&self, endpoint: &Endpoint) -> audio::Heard {
         self.call
             .and_then(|call| endpoint.media.get(&call))
@@ -1594,6 +1607,31 @@ fn run(
             quality.target_delay.as_millis(),
             quality.shrunk,
             quality.stretched
+        );
+    }
+    // RFC 3611's own read on the call, from the same stream — the R factor
+    // and the two mean opinion scores a simplified E-model rates it at, or
+    // "n/a" for a codec G.113 tabulates no Ie/Bpl for (SS4.7.5's own
+    // sentinel, never a guess).
+    if let Some(block) = script.voip_metrics(&mut endpoint, Instant::now()) {
+        use std::fmt::Write as _;
+        let mos = |value: u8| {
+            if value == UNAVAILABLE {
+                "n/a".to_string()
+            } else {
+                format!("{}.{}", value / 10, value % 10)
+            }
+        };
+        let r_factor = if block.r_factor == UNAVAILABLE {
+            "n/a".to_string()
+        } else {
+            block.r_factor.to_string()
+        };
+        let _ = write!(
+            said,
+            "; R {r_factor}, MOS-LQ {}, MOS-CQ {}",
+            mos(block.mos_lq),
+            mos(block.mos_cq)
         );
     }
     said.push(')');
