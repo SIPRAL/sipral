@@ -52,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sipral::{
     Account, AccountId, CallHandle, CallMedia, CallState, Codec, CodecCatalog, Credentials,
     DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig, MediaEngine,
-    MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, TransportId,
+    MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, Subscribe, TransportId,
     TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
@@ -103,6 +103,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 
 /// The digit `Flow::Dtmf4733` sends and expects back.
 const TEST_DIGIT: Digit = Digit::Number(5);
+
+/// `Flow::Message`'s own body. Not read back for a match — the lab's own
+/// dialplan is free to prefix it on the way back (`interop/asterisk`'s own
+/// extension 9006 does) — only that a MESSAGE came back at all.
+const MESSAGE_BODY: &str = "sipral interop lab";
 
 /// The codec order this harness offers, chosen by `SIPRAL_CODEC`.
 ///
@@ -170,6 +175,11 @@ fn main() -> ExitCode {
     // the same reason again
     let dtls_user = env::var("SIPRAL_USER_DTLS").unwrap_or_else(|_| "labuser-dtls".to_owned());
     let dtls_pass = env::var("SIPRAL_PASS_DTLS").unwrap_or_else(|_| pass.clone());
+    // 8.6.5's mailbox endpoint (interop/asterisk's `labuser-mwi`), kept apart
+    // from `labuser` for the same reason the SDES one is: it is the one
+    // account `mailboxes=9007@default` is configured on
+    let mwi_user = env::var("SIPRAL_USER_MWI").unwrap_or_else(|_| "labuser-mwi".to_owned());
+    let mwi_pass = env::var("SIPRAL_PASS_MWI").unwrap_or_else(|_| pass.clone());
     let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
 
     let Some(remote) = resolve(&server, port) else {
@@ -196,6 +206,8 @@ fn main() -> ExitCode {
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
         flows.push(Flow::HoldCodecChange);
+        flows.push(Flow::Message);
+        flows.push(Flow::Mwi);
     }
     // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
     flows.push(Flow::Dtls);
@@ -211,6 +223,7 @@ fn main() -> ExitCode {
             // Asterisk's own DTLS endpoint; the proxy knows only the one user,
             // and FreeSWITCH behind it decides per extension, not per account
             Flow::Dtls if server == "asterisk" => (dtls_user.as_str(), dtls_pass.as_str()),
+            Flow::Mwi => (mwi_user.as_str(), mwi_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -287,6 +300,18 @@ enum Flow {
     /// end answered them with the roles already in force (§5.3) and the
     /// association the call was keyed by is still the one carrying it.
     Dtls,
+    /// 8.6.5's MESSAGE flow (RFC 3428): an out-of-dialog MESSAGE sent to the
+    /// lab's own echo extension (interop/asterisk's own extension 9006),
+    /// which answers it with a MESSAGE of its own back to whoever sent it.
+    /// This end sees both: its own send answered with success, and the
+    /// echo arriving as `UaEvent::MessageReceived`.
+    Message,
+    /// 8.6.5's message waiting indication flow (RFC 3842): a subscription to
+    /// `message-summary` for this account's own mailbox, a call placed into
+    /// the lab's own voicemail extension (interop/asterisk's own extension
+    /// 9007, `app_voicemail`) to leave a message, and the mailbox's `new`
+    /// count read back higher once Asterisk's own MWI support reports it.
+    Mwi,
 }
 
 impl Flow {
@@ -302,6 +327,8 @@ impl Flow {
             Self::Srtp => "SRTP",
             Self::HoldCodecChange => "hold with a codec change",
             Self::Dtls => "DTLS-SRTP, held and resumed",
+            Self::Message => "MESSAGE, echoed",
+            Self::Mwi => "message waiting indication",
         }
     }
 
@@ -318,6 +345,8 @@ impl Flow {
             Self::Srtp => "srtp",
             Self::HoldCodecChange => "holdcodec",
             Self::Dtls => "dtls",
+            Self::Message => "message",
+            Self::Mwi => "mwi",
         }
     }
 }
@@ -354,6 +383,15 @@ enum Fact {
     /// We asked for the call to end, rather than watching it end by itself.
     Ours,
     Over,
+    /// `Flow::Message`'s own MESSAGE was answered 200 or 202.
+    MessageAccepted,
+    /// The lab's own echo dialplan sent a MESSAGE back.
+    MessageEchoed,
+    /// `Flow::Mwi`'s subscription to `message-summary` was granted.
+    Subscribed,
+    /// The mailbox's `new` count read higher after the voicemail was left
+    /// than it did at the subscription's first notification.
+    MailboxCounted,
 }
 
 /// What the run has seen. The conditions are read off this at the end, so that
@@ -620,6 +658,16 @@ struct Script {
     /// How much audible audio had come back when the resume was agreed, so
     /// `Flow::Dtls` can tell audio after it from audio before the hold.
     audible_at_resume: Option<u32>,
+    /// `Flow::Message`'s own send, so its outcome can be told from anybody
+    /// else's.
+    sent_message: Option<sipral::MessageHandle>,
+    /// `Flow::Mwi`'s subscription to `message-summary`.
+    subscription: Option<sipral::SubscriptionHandle>,
+    /// `Flow::Mwi`'s mailbox `new` count, read from the first notification —
+    /// before the voicemail call, whatever it already held from an earlier
+    /// run. The flow's claim is that a later notification reads higher than
+    /// this, not that it starts at zero.
+    mailbox_baseline: Option<u32>,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -646,6 +694,13 @@ enum Step {
     Transferring,
     Ending,
     Done,
+    /// `Flow::Message`: the MESSAGE is on its way, or has gone, and this end
+    /// is waiting for both its own answer and the echo.
+    Messaging,
+    /// `Flow::Mwi`: subscribed and waiting for a `message-summary` NOTIFY —
+    /// the first one, to read the mailbox's count before anything is left in
+    /// it, and the one after the voicemail call ends, to see it climb.
+    WatchingMailbox,
 }
 
 impl Script {
@@ -677,6 +732,9 @@ impl Script {
             listen_until: None,
             settled_by: None,
             audible_at_resume: None,
+            sent_message: None,
+            subscription: None,
+            mailbox_baseline: None,
         }
     }
 
@@ -786,9 +844,96 @@ impl Script {
                         None => reason.to_string(),
                     });
                 }
-                self.finish(endpoint, now);
+                self.finish_or_watch_mailbox(endpoint, now);
+            }
+            other => self.on_message_or_mwi(endpoint, other, now),
+        }
+    }
+
+    /// `Flow::Message` and `Flow::Mwi`'s own events. Factored out of
+    /// `on_signalling` for the reason `send_dtmf_by_info` is factored out of
+    /// `advance`, and matched here rather than guarded in the caller's own
+    /// `match` for the same reason.
+    fn on_message_or_mwi(&mut self, endpoint: &mut Endpoint, event: &UaEvent, now: Instant) {
+        match event {
+            UaEvent::MessageSent {
+                message, status, ..
+            } if self.flow == Flow::Message && Some(*message) == self.sent_message => {
+                if status.is_success() || status.get() == 202 {
+                    self.seen.saw(Fact::MessageAccepted);
+                } else {
+                    self.seen.refused = Some(format!("the MESSAGE was answered {}", status.get()));
+                    self.step = Step::Ending;
+                }
+                self.finish_message_flow(endpoint, now);
+            }
+            UaEvent::MessageReceived { .. } if self.flow == Flow::Message => {
+                self.seen.saw(Fact::MessageEchoed);
+                self.finish_message_flow(endpoint, now);
+            }
+            UaEvent::Subscribed { subscription, .. }
+                if self.flow == Flow::Mwi && Some(*subscription) == self.subscription =>
+            {
+                self.seen.saw(Fact::Subscribed);
+            }
+            UaEvent::SubscriptionEnded { reason, .. }
+                if self.flow == Flow::Mwi
+                    && self.subscription.is_some()
+                    && !self.seen.has(Fact::MailboxCounted) =>
+            {
+                self.seen.refused = Some(format!("the subscription ended: {reason}"));
+                self.step = Step::Ending;
+            }
+            UaEvent::MessagesWaiting {
+                subscription, new, ..
+            } if self.flow == Flow::Mwi && Some(*subscription) == self.subscription => {
+                self.on_mailbox_count(endpoint, *new, now);
             }
             _ => (),
+        }
+    }
+
+    /// `Flow::Mwi`'s own `UaEvent::CallEnded`: the voicemail call ending is
+    /// not the flow ending, since the claim is about the mailbox count
+    /// after it (`Fact::MailboxCounted`). Every other flow finishes as soon
+    /// as its call ends.
+    fn finish_or_watch_mailbox(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        if self.flow == Flow::Mwi
+            && self.seen.refused.is_none()
+            && !self.seen.has(Fact::MailboxCounted)
+        {
+            self.step = Step::WatchingMailbox;
+        } else {
+            self.finish(endpoint, now);
+        }
+    }
+
+    /// `Flow::Mwi`'s own reaction to a `message-summary` notification: the
+    /// first one is the baseline, read before anything is left in the
+    /// mailbox, and the primary call goes out right after it; a later one
+    /// that reads higher is the flow's claim proved.
+    fn on_mailbox_count(&mut self, endpoint: &mut Endpoint, new: u32, now: Instant) {
+        match self.mailbox_baseline {
+            None => {
+                self.mailbox_baseline = Some(new);
+                self.place_primary_call(endpoint, now);
+            }
+            Some(baseline) if new > baseline => {
+                self.seen.saw(Fact::MailboxCounted);
+                self.finish(endpoint, now);
+            }
+            Some(_) => (),
+        }
+    }
+
+    /// `Flow::Message` is over once its own send has been answered and the
+    /// echo has arrived; either may come first.
+    fn finish_message_flow(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        if self.step != Step::Ending
+            && self.seen.has(Fact::MessageAccepted)
+            && self.seen.has(Fact::MessageEchoed)
+        {
+            self.finish(endpoint, now);
         }
     }
 
@@ -891,19 +1036,11 @@ impl Script {
                 let _ = endpoint.agent.unregister(self.account, now);
                 self.step = Step::Ending;
             }
-            Step::Registering => {
-                self.step = Step::Placing;
-                let media = CallMedia::new(catalog_for(self.flow), MediaConfig::default());
-                let extension = self.call_extension();
-                match self.place_at(endpoint, &extension, media, now) {
-                    Ok(call) => self.call = Some(call),
-                    Err(error) => {
-                        self.seen.refused = Some(format!("call: {error}"));
-                        self.step = Step::Ending;
-                    }
-                }
-                self.step = Step::Talking;
+            Step::Registering if self.flow == Flow::Message => self.start_message(endpoint, now),
+            Step::Registering if self.flow == Flow::Mwi => {
+                self.start_watching_mailbox(endpoint, now);
             }
+            Step::Registering => self.place_primary_call(endpoint, now),
             Step::Talking if self.flow == Flow::Hold || self.flow == Flow::HoldCodecChange => {
                 self.step = Step::Holding;
                 if let Some(call) = self.call {
@@ -959,8 +1096,10 @@ impl Script {
                     self.tried("attended transfer", asked);
                 }
             }
-            // a plain call is the one that carries the tone, so it waits
-            Step::Talking if self.flow == Flow::Call || self.flow == Flow::Srtp => {
+            // a plain call is the one that carries the tone, so it waits.
+            // `Flow::Mwi`'s voicemail leg is the same shape: dwell on the
+            // tone so `app_voicemail` has something to record, then hang up
+            Step::Talking if matches!(self.flow, Flow::Call | Flow::Srtp | Flow::Mwi) => {
                 self.listen_until = Some(now + dwell());
             }
             Step::Talking if self.flow == Flow::Dtmf4733 => {
@@ -980,7 +1119,12 @@ impl Script {
             Step::Talking | Step::Resuming | Step::Dialling | Step::Transferring => {
                 self.hang_up(endpoint, now);
             }
-            Step::Placing | Step::Listening | Step::Ending | Step::Done => (),
+            Step::Placing
+            | Step::Listening
+            | Step::Ending
+            | Step::Done
+            | Step::Messaging
+            | Step::WatchingMailbox => (),
         }
     }
 
@@ -1045,6 +1189,71 @@ impl Script {
         self.listen_until = Some(now + dwell() + Duration::from_secs(2));
     }
 
+    /// Every flow but `Flow::Register`, `Flow::Message` and `Flow::Mwi`'s own
+    /// `Step::Registering`: place the primary, media-carrying call. Factored
+    /// out of `advance` for the reason `send_dtmf_by_info` gives.
+    fn place_primary_call(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::Placing;
+        let media = CallMedia::new(catalog_for(self.flow), MediaConfig::default());
+        let extension = self.call_extension();
+        match self.place_at(endpoint, &extension, media, now) {
+            Ok(call) => self.call = Some(call),
+            Err(error) => {
+                self.seen.refused = Some(format!("call: {error}"));
+                self.step = Step::Ending;
+            }
+        }
+        self.step = Step::Talking;
+    }
+
+    /// `Flow::Message`'s own `Step::Registering`: send the MESSAGE. Factored
+    /// out of `advance` for the reason `send_dtmf_by_info` gives.
+    fn start_message(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::Messaging;
+        let Ok(target) = Uri::parse_str(&format!("sip:9006@{}", self.server)) else {
+            self.seen.refused = Some("9006 is not a URI on this server".to_owned());
+            self.step = Step::Ending;
+            return;
+        };
+        match endpoint.agent.message(
+            self.account,
+            target,
+            b"text/plain",
+            MESSAGE_BODY.as_bytes(),
+            now,
+        ) {
+            Ok(handle) => self.sent_message = Some(handle),
+            Err(error) => {
+                self.seen.refused = Some(format!("message: {error}"));
+                self.step = Step::Ending;
+            }
+        }
+    }
+
+    /// `Flow::Mwi`'s own `Step::Registering`: subscribe to this account's own
+    /// mailbox. Factored out of `advance` for the reason `send_dtmf_by_info`
+    /// gives.
+    fn start_watching_mailbox(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::WatchingMailbox;
+        let Some(target) = endpoint
+            .agent
+            .account(self.account)
+            .map(|account| account.aor().clone())
+        else {
+            self.seen.refused = Some("no account to subscribe from".to_owned());
+            self.step = Step::Ending;
+            return;
+        };
+        let wanted = Subscribe::new(target, "message-summary");
+        match endpoint.agent.subscribe(self.account, &wanted, now) {
+            Ok(handle) => self.subscription = Some(handle),
+            Err(error) => {
+                self.seen.refused = Some(format!("subscribe: {error}"));
+                self.step = Step::Ending;
+            }
+        }
+    }
+
     /// Ask the stack for something, and remember it if it says no.
     ///
     /// Swallowing these is how a flow ends up reporting that the far end never
@@ -1062,17 +1271,21 @@ impl Script {
     }
 
     /// The extension this flow's primary call dials — `self.extension`
-    /// (9000 unless told otherwise) for every flow except the four that need
+    /// (9000 unless told otherwise) for every flow except the ones that need
     /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
     /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
     /// only Asterisk runs the second, over its own `labuser-infodtmf`
-    /// endpoint), `Flow::Srtp` (9004, Asterisk only — see
-    /// `interop/asterisk/extensions.conf`) and `Flow::Dtls` (9005, on both).
+    /// endpoint), `Flow::Srtp` (9004) and `Flow::Mwi`'s own voicemail
+    /// extension (9007), both Asterisk only — see
+    /// `interop/asterisk/extensions.conf` — and `Flow::Dtls` (9005, on both).
+    /// `Flow::Message` places no call at all; its own extension (9006) is
+    /// named directly in `advance`.
     fn call_extension(&self) -> String {
         match self.flow {
             Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),
+            Flow::Mwi => "9007".to_owned(),
             _ => self.extension.clone(),
         }
     }
@@ -1123,6 +1336,9 @@ impl Script {
     }
 
     fn finish(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        if let Some(subscription) = self.subscription.take() {
+            let _ = endpoint.agent.unsubscribe(subscription, now);
+        }
         let _ = endpoint.agent.unregister(self.account, now);
         self.step = Step::Done;
     }
@@ -1265,8 +1481,42 @@ impl Script {
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
+            Flow::Message => owed_message(),
+            Flow::Mwi => owed_mwi(),
         }
     }
+}
+
+/// `Flow::Message`'s own [`Script::owed`]. Factored out for the same reason
+/// `owed`'s other long arms are not: `clippy::too_many_lines` counts the
+/// whole function, not one `match` arm.
+const fn owed_message() -> &'static [(Fact, &'static str)] {
+    &[
+        (Fact::Registered, "no binding was granted"),
+        (
+            Fact::MessageAccepted,
+            "the MESSAGE was never answered with success",
+        ),
+        (Fact::MessageEchoed, "no MESSAGE came back"),
+    ]
+}
+
+/// `Flow::Mwi`'s own [`Script::owed`].
+const fn owed_mwi() -> &'static [(Fact, &'static str)] {
+    &[
+        (Fact::Registered, "no binding was granted"),
+        (
+            Fact::Subscribed,
+            "the message-summary subscription was never granted",
+        ),
+        (Fact::Up, "the voicemail call did not connect"),
+        (Fact::Ours, "the far end ended the call before we asked"),
+        (Fact::Over, "the call did not end"),
+        (
+            Fact::MailboxCounted,
+            "the mailbox's new-message count never went up after the voicemail was left",
+        ),
+    ]
 }
 
 /// Place a call with `media`'s catalogue, opening this call's own RTP socket
@@ -1416,6 +1666,8 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Srtp => [83; 32],
         Flow::HoldCodecChange => [89; 32],
         Flow::Dtls => [101; 32],
+        Flow::Message => [109; 32],
+        Flow::Mwi => [113; 32],
     }
 }
 
@@ -1434,6 +1686,8 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Srtp => [183; 32],
         Flow::HoldCodecChange => [189; 32],
         Flow::Dtls => [201; 32],
+        Flow::Message => [211; 32],
+        Flow::Mwi => [223; 32],
     }
 }
 

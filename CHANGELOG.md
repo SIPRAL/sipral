@@ -52,6 +52,36 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   under a hundred lines, talking through one `respond(pcm) -> pcm` function
   a real model replaces. Packaging (wheels with the library bundled in) is a
   later task; this one installs from the checkout with `pip install -e .`.
+- **SIP MESSAGE (RFC 3428) and message waiting indication (RFC 3842).**
+  `UserAgent::message` sends an instant message out of any dialog and
+  `UserAgent::message_in_call` sends one inside a call's dialog (§4's MAY);
+  both report their outcome as `UaEvent::MessageSent` — 200, a 202 from a
+  relay, a refusal, or the 408/503 RFC 3261 §8.1.3.1 gives one that got no
+  answer at all. An incoming MESSAGE is answered 200 immediately and delivered
+  whole as `UaEvent::MessageReceived`, `text/plain` always taken and any other
+  `Content-Type` checked against `Account::accepts_message_type`, answered 415
+  with an `Accept` otherwise; a body over this stack's own policy ceiling is
+  answered 413 unread. Outbound, a body over RFC 3428 §8's 1300-byte ceiling is
+  refused rather than fragmented over UDP unless `Account::transport_protocol`
+  says the transport is congestion-controlled, and a second out-of-dialog
+  MESSAGE to a target still waiting on its first is refused rather than sent
+  (§8's own congestion-safety rule).
+
+  Message waiting indication needs no new subscribe call: `Subscribe::new` already
+  takes any event package by name, and `message-summary` is one.
+  `application/simple-message-summary` is parsed into RFC 3458 §6.2's per-class
+  counts (`UserAgent::message_summary`), and `UaEvent::MessagesWaiting` reports
+  the `voice-message` class's new/old counts and urgent counts alongside the
+  status line's boolean. An unsolicited `message-summary` NOTIFY — several
+  PBXs send one without a subscription — is refused 481, the same answer RFC
+  6665 §4.1.3 already gives any other notification nobody asked for.
+
+  `sipral_account_message` is the C entry point, and
+  `SIPRAL_EVENT_KIND_MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and
+  `..._MESSAGES_WAITING` (34, 35, 36) the new events; 37 is now held for a
+  later task's RTCP-XR quality reports. The interop lab gained two flows
+  against Asterisk: a MESSAGE echoed by the lab's own dialplan, and a mailbox
+  whose count is read higher after a voicemail is left in it.
 - **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end

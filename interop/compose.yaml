@@ -43,6 +43,8 @@ services:
     volumes:
       - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      # 8.6.5's mailbox, for the message waiting indication flow
+      - ./asterisk/voicemail.conf:/etc/asterisk/voicemail.conf:ro
     networks: [lab]
 
 networks:
