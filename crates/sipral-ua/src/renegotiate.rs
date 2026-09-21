@@ -127,10 +127,18 @@ impl UserAgent {
 
     /// Offer a new session description inside a call.
     ///
-    /// For a codec change, a media address that moved, or anything else the
-    /// application decides. Hold and resume have their own calls because the
-    /// description they need is derivable and writing it out by hand is how
-    /// the direction attributes get wrong.
+    /// For a media address that moved, or anything else the application
+    /// decides, sent as it is written — direction attributes included. Hold
+    /// and resume have their own calls because the description they need is
+    /// derivable and writing it out by hand is how the direction attributes
+    /// get wrong, and a change that is not about direction at all has
+    /// [`UserAgent::change_formats`].
+    ///
+    /// Which way the call is held is read back out of what this sends rather
+    /// than kept from before it: a description that resumes a held call has
+    /// resumed it, and [`UserAgent::hold_state`] says so once it is agreed. A
+    /// flag kept from before would leave the next [`UserAgent::hold`] sending
+    /// nothing, because it would find the call already held.
     ///
     /// # Errors
     /// As [`UserAgent::hold`], plus [`UaError::Sdp`] when the description
@@ -140,7 +148,40 @@ impl UserAgent {
         let held = {
             let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             state.session.stamp(&mut description);
-            state.session.hold.local
+            state.session.holds_them(&description)
+        };
+        let fields = self.application_headers(call);
+        self.send_offer(call, description, held, false, &fields, now)
+    }
+
+    /// Offer a change to what a call's streams carry — the formats, chiefly
+    /// (RFC 3264 §8.3.2) — that is not a change to which way they flow.
+    ///
+    /// The description is taken whole, but every stream's direction in it is
+    /// this layer's to write, from which way the call is held, exactly as
+    /// [`UserAgent::hold`] and [`UserAgent::resume`] write it: a held call
+    /// stays held through a codec change, and one that started `recvonly`
+    /// stays `recvonly`. Whoever wrote the description does not need to know
+    /// either, which is the point — the direction the last exchange left on
+    /// this end's side is an answer to the far end, not a statement of what
+    /// this end wants, and copying it into an offer is how a call held from
+    /// the far end would end up held from both.
+    ///
+    /// # Errors
+    /// As [`UserAgent::reoffer`].
+    pub fn change_formats(
+        &mut self,
+        call: CallHandle,
+        sdp: &[u8],
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let mut description = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
+        let held = {
+            let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+            state.session.stamp(&mut description);
+            let held = state.session.hold.local;
+            state.session.direct(&mut description, held);
+            held
         };
         let fields = self.application_headers(call);
         self.send_offer(call, description, held, false, &fields, now)

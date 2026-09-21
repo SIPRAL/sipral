@@ -354,6 +354,38 @@ done | grep 'Instant::now\|SystemTime::now' || true)
     printf '%s\n' "$clock" | sed 's/^/        /'
 }
 
+# glibc under -std=c99 or c11 defines __STRICT_ANSI__, and with no feature-test
+# macro it then hides every declaration that is POSIX rather than ISO C --
+# clock_gettime, getaddrinfo, struct timespec, struct addrinfo. macOS exposes
+# them either way, so a file that compiles cleanly on this machine fails on
+# Linux, which is how the lab's C driver first met the lab. No compiler here
+# can see that. What can be seen is whether a file asked: one that includes a
+# header ISO C does not define, or calls one of the POSIX extensions an ISO
+# header only declares on request, names its _POSIX_C_SOURCE (or one of the
+# macros that imply it) before its first #include. jni.h is Java's and not
+# POSIX, and a quoted include is this tree's own.
+step "C that asks for POSIX before it uses it"
+iso='assert|complex|ctype|errno|fenv|float|inttypes|iso646|limits|locale|math|setjmp|signal|stdalign|stdarg|stdatomic|stdbool|stddef|stdint|stdio|stdlib|stdnoreturn|string|tgmath|threads|time|uchar|wchar|wctype'
+extensions='(clock_gettime|clock_getres|nanosleep|strdup|strndup|strtok_r|fileno|fdopen|getline|localtime_r|gmtime_r)[[:space:]]*\('
+unasked=""
+for file in $(tracked '*.c' '*.h'); do
+    beyond=$(grep -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*<' "$file" \
+        | grep -vE "<($iso)\.h>|<jni\.h>" | head -1)
+    called=$(grep -E "$extensions" "$file" | head -1)
+    [ -z "$beyond$called" ] && continue
+    asked=$(grep -nE '^#define _(POSIX_C_SOURCE|XOPEN_SOURCE|GNU_SOURCE|DEFAULT_SOURCE)\b' "$file" \
+        | head -1 | cut -d: -f1)
+    first=$(grep -nE '^[[:space:]]*#[[:space:]]*include' "$file" | head -1 | cut -d: -f1)
+    if [ -z "$asked" ] || { [ -n "$first" ] && [ "$asked" -gt "$first" ]; }; then
+        unasked="$unasked $file"
+    fi
+done
+[ -z "$unasked" ] && pass "every C file that reaches past ISO C says so first" || {
+    fail "C that needs POSIX and does not ask for it before its first #include:"
+    printf '        %s\n' $unasked
+    printf '        #define _POSIX_C_SOURCE 200809L above the includes, or glibc hides it.\n'
+}
+
 # RFC 4568 §9.2: "the SDP MUST be protected". A `{:?}` on a live stack is not
 # protection, and the reason this is a gate rather than a review note is that
 # the leak is never in the type that holds the key -- those redact themselves.
@@ -879,6 +911,62 @@ if printed=$(cargo run -q -p sipral-abi-gen -- --check 2>&1); then
 else
     fail "bindings/ is not what the declarations produce:"
     printf '%s\n' "$printed" | sed 's/^/        /'
+fi
+
+# sipral_abi_check compares numbers, not declarations, so a header whose
+# declarations moved and whose number did not is one no load-time check can
+# tell from the one before it: a binding generated against the new header
+# loads against a library built before the change and finds the symbol missing
+# at the first call. The Versioning section of docs/08-ffi.md makes a change
+# to any declaration a new minor at least, and leaves a patch for a fix that
+# changes none -- so what is compared is the declarations alone, with the
+# comments and the three version numbers taken out, and a corrected sentence
+# or a patch bump passes. Held against the last commit, which is the header
+# the tree last said was published, and not against anybody's memory.
+HEADER=bindings/c/include/sipral.h
+declarations() {
+    printf '%s\n' "$1" | awk '
+        {
+            line = $0; out = ""
+            while (length(line) > 0) {
+                if (inside) {
+                    at = index(line, "*/")
+                    if (at == 0) { line = ""; break }
+                    line = substr(line, at + 2); inside = 0
+                } else {
+                    at = index(line, "/*")
+                    if (at == 0) { out = out line; line = "" }
+                    else { out = out substr(line, 1, at - 1); line = substr(line, at + 2); inside = 1 }
+                }
+            }
+            if (out !~ /^[[:space:]]*$/ && out !~ /^#define SIPRAL_ABI_VERSION_(MAJOR|MINOR|PATCH) /) print out
+        }'
+}
+version_of() {
+    local number
+    for number in MAJOR MINOR; do
+        printf '%s\n' "$1" | grep -E "^#define SIPRAL_ABI_VERSION_$number " \
+            | grep -oE '[0-9]+' | tail -1
+    done | tr '\n' ' '
+}
+if published=$(git show HEAD:"$HEADER" 2>/dev/null); then
+    current=$(cat "$HEADER")
+    if [ "$(declarations "$published")" = "$(declarations "$current")" ]; then
+        pass "the header declares what the last commit's did"
+    else
+        read -r was_major was_minor <<<"$(version_of "$published")"
+        read -r is_major is_minor <<<"$(version_of "$current")"
+        if [ "$is_major" -gt "$was_major" ] \
+            || { [ "$is_major" -eq "$was_major" ] && [ "$is_minor" -gt "$was_minor" ]; }; then
+            pass "the declarations moved, and the ABI version with them ($was_major.$was_minor to $is_major.$is_minor)"
+        else
+            fail "$HEADER declares something new and the ABI version did not move past $was_major.$was_minor:"
+            printf '        raise SIPRAL_ABI_VERSION_MINOR in crates/sipral-ffi/src/version.rs\n'
+            printf '        and run cargo run -p sipral-abi-gen.\n'
+        fi
+    fi
+else
+    pass "no header in the last commit to hold this one against"
 fi
 
 # Sixteen fuzz targets in a workspace of its own, on a nightly pin of its

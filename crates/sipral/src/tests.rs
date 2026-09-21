@@ -4497,3 +4497,454 @@ fn a_call_that_lost_consent_stops_sending_rather_than_falling_back() {
         "a report went out after consent was withdrawn"
     );
 }
+
+// -- a codec change this end asks for ----------------------------------------
+
+/// Ask the caller's engine to move `call` onto `codecs`, and hand back the
+/// re-offer exactly as it went on the wire, once both ends have finished the
+/// exchange it started.
+fn change_codecs(pair: &mut Pair, call: CallHandle, codecs: &[&str]) -> SessionDescription {
+    pair.caller
+        .engine
+        .change_codecs(&mut pair.caller.agent, call, codecs, pair.now)
+        .expect("the re-offer goes");
+    let written = pair.caller.outbound();
+    let offer = written
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .map(|datagram| parse(&wire_message_body(datagram)).expect("an offer that reads"))
+        .expect("a re-INVITE went out");
+    for datagram in written {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    offer
+}
+
+/// The `a=` lines a stream carries under one name, in order.
+#[cfg(any(feature = "opus", feature = "dtls", feature = "ice"))]
+fn attribute_values(stream: &MediaDescription, name: &str) -> Vec<String> {
+    stream
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == name)
+        .map(|attribute| attribute.value.clone().unwrap_or_default())
+        .collect()
+}
+
+/// Everything a description says about a stream but its codecs: the lines a
+/// codec change must leave exactly as they were.
+fn all_but_the_codecs(stream: &MediaDescription) -> Vec<(String, Option<String>)> {
+    stream
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name != "rtpmap" && attribute.name != "fmtp")
+        .map(|attribute| (attribute.name.clone(), attribute.value.clone()))
+        .collect()
+}
+
+#[test]
+fn asking_for_another_codec_moves_the_call_and_nothing_else() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let first = pair.callee.offer_received().expect("the first offer");
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcmu
+    );
+
+    let offer = change_codecs(&mut pair, call, &["PCMA"]);
+
+    let (was, now) = (one_stream(&first), one_stream(&offer));
+    assert_eq!(
+        now.formats.first().map(String::as_str),
+        Some("8"),
+        "{offer}"
+    );
+    assert!(!now.formats.iter().any(|format| format == "0"), "{offer}");
+    // RFC 3264 §8: the same session, one version on, from the same place
+    assert_eq!(offer.origin.session_id, first.origin.session_id);
+    assert_eq!(offer.origin.version, first.origin.version + 1);
+    assert_eq!(offer.connection, first.connection);
+    assert_eq!((now.port, &now.proto), (was.port, &was.proto));
+    assert_eq!(all_but_the_codecs(&now), all_but_the_codecs(&was));
+
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert_eq!(session.codec(), Codec::Pcma, "one end never moved");
+    }
+    assert!(
+        pair.caller.media_events().iter().any(|event| matches!(
+            event,
+            MediaEvent::Changed {
+                codec: Codec::Pcma,
+                direction: Direction::SendRecv
+            }
+        )),
+        "the change was never reported"
+    );
+    assert_eq!(
+        pair.caller
+            .engine
+            .call_catalog(call)
+            .map(CodecCatalog::codecs),
+        Some(&[Codec::Pcma][..]),
+        "the list the far end accepted is not the call's own"
+    );
+}
+
+#[test]
+fn a_codec_change_on_a_held_call_leaves_it_held_and_the_resume_brings_the_new_codec() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    let offer = change_codecs(&mut pair, call, &["PCMA"]);
+    assert_eq!(
+        offer.direction_of(&one_stream(&offer)),
+        Direction::SendOnly,
+        "a codec change took the call off hold: {offer}"
+    );
+    {
+        let held = pair.callee.engine.session(remote).expect("media");
+        assert_eq!(held.codec(), Codec::Pcma);
+        assert_eq!(held.direction(), Direction::RecvOnly);
+    }
+    assert_eq!(
+        pair.caller.agent.hold_state(call).map(|hold| hold.local),
+        Some(true)
+    );
+
+    pair.caller
+        .agent
+        .resume(call, pair.now)
+        .expect("the resume");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let resumed = pair.callee.engine.session(remote).expect("media");
+    assert_eq!(resumed.codec(), Codec::Pcma, "the resume went back to PCMU");
+    assert_eq!(resumed.direction(), Direction::SendRecv);
+}
+
+#[test]
+fn a_refused_codec_change_leaves_the_call_on_the_list_it_had() {
+    // the far end keeps only PCMU, so an offer of PCMA alone is one it
+    // cannot answer — and §14.1 leaves the session exactly as it was
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order"),
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+    );
+    let call = pair.connect();
+
+    let _ = change_codecs(&mut pair, call, &["PCMA"]);
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::SessionChangeFailed { .. })
+        )),
+        "the far end accepted what it cannot decode"
+    );
+    let remote = pair.callee.call().expect("the callee knows the call");
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("the refusal kept the stream"),
+    ] {
+        assert_eq!(session.codec(), Codec::Pcmu);
+        assert_eq!(session.direction(), Direction::SendRecv);
+    }
+    assert_eq!(
+        pair.caller
+            .engine
+            .call_catalog(call)
+            .map(CodecCatalog::codecs),
+        Some(&[Codec::Pcmu, Codec::Pcma][..]),
+        "a refused list became the call's own"
+    );
+
+    // and nothing is left waiting on it: the next change goes
+    let offer = change_codecs(&mut pair, call, &["PCMU"]);
+    assert_eq!(
+        one_stream(&offer).formats.first().map(String::as_str),
+        Some("0")
+    );
+}
+
+#[cfg(feature = "opus")]
+#[test]
+fn a_codec_change_does_not_move_the_number_a_dynamic_format_has() {
+    // the call opened on Opus at 96 with its events at 97, on Opus's clock.
+    // Numbered from the catalogue alone, the same two codecs the other way
+    // round give Opus 96 again but put PCMU's own events — a different
+    // format, on another clock — at 97, which RFC 3264 §8.3.2 keeps for the
+    // forty-eight kilohertz ones for the whole session
+    let catalog = CodecCatalog::with_order(&["opus", "PCMU"])
+        .expect("an order")
+        .with_dtmf(true);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let first = one_stream(&pair.callee.offer_received().expect("the first offer"));
+    let number_of = |stream: &MediaDescription, encoding: &str| {
+        attribute_values(stream, "rtpmap")
+            .into_iter()
+            .find(|map| map.contains(encoding))
+            .and_then(|map| map.split_once(' ').map(|(number, _)| number.to_owned()))
+    };
+    assert_eq!(number_of(&first, "opus/").as_deref(), Some("96"));
+    assert_eq!(
+        number_of(&first, "telephone-event/48000").as_deref(),
+        Some("97")
+    );
+
+    let offer = one_stream(&change_codecs(&mut pair, call, &["PCMU", "opus"]));
+    assert_eq!(
+        number_of(&offer, "opus/").as_deref(),
+        Some("96"),
+        "Opus moved"
+    );
+    let events = number_of(&offer, "telephone-event/8000").expect("events are offered");
+    assert!(
+        events != "96" && events != "97",
+        "telephone-event/8000 took {events}, a number this call already gave \
+         something else: {:?}",
+        attribute_values(&offer, "rtpmap")
+    );
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcmu
+    );
+}
+
+#[test]
+fn a_codec_change_on_a_call_keyed_by_sdes_offers_the_key_it_already_has() {
+    // a key drawn afresh would be a re-key nobody asked for, in the middle of
+    // a change that is about something else
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let first = one_stream(&pair.callee.offer_received().expect("the first offer"));
+
+    let offer = one_stream(&change_codecs(&mut pair, call, &["PCMA"]));
+    assert_eq!(crypto_line(&offer), crypto_line(&first));
+    assert!(crypto_line(&offer).is_some(), "the key was dropped");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    let session = pair.caller.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::Pcma);
+    assert!(
+        session.is_encrypted(),
+        "the change took the encryption away"
+    );
+    drop(session);
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} after the change",
+        loudness(&played)
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_codec_change_on_a_dtls_call_keeps_the_association_it_has() {
+    // RFC 8842 §3.1: a fingerprint or a role that moved asks for a new DTLS
+    // association, which this stack does not start — so the change carries
+    // both exactly as the call already has them
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    let first = one_stream(&pair.callee.offer_received().expect("the first offer"));
+
+    let offer = one_stream(&change_codecs(&mut pair, call, &["PCMA"]));
+    for name in ["fingerprint", "setup"] {
+        assert_eq!(
+            attribute_values(&offer, name),
+            attribute_values(&first, name),
+            "a={name} moved"
+        );
+    }
+    assert!(
+        !pair.caller.media_events().iter().any(|event| matches!(
+            event,
+            MediaEvent::Failed(MediaError::DtlsFingerprintChanged)
+        )),
+        "the change was read as a new certificate"
+    );
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").codec(),
+        Codec::Pcma
+    );
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} after the change",
+        loudness(&played)
+    );
+}
+
+/// The same from the end that answered, whose last description carries the
+/// role it answered with rather than `actpass`. It is offered again as it
+/// stands — the deviation from RFC 8842 §5.5 `docs/05-media.md` explains — so
+/// the far end, answering it the way RFC 4145 has it answered, keeps the
+/// roles the running association has, and nothing is re-keyed.
+#[cfg(feature = "dtls")]
+#[test]
+fn a_codec_change_from_the_end_that_answered_keeps_the_dtls_roles() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    let answered = one_stream(&pair.caller.answer_received().expect("the answer"));
+    let role = attribute_values(&answered, "setup");
+    assert!(
+        role == ["active"] || role == ["passive"],
+        "the answer took no role: {role:?}"
+    );
+
+    pair.callee
+        .engine
+        .change_codecs(&mut pair.callee.agent, remote, &["PCMA"], pair.now)
+        .expect("the re-offer goes");
+    let written = pair.callee.outbound();
+    let offer = written
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .map(|datagram| parse(&wire_message_body(datagram)).expect("an offer that reads"))
+        .expect("a re-INVITE went out");
+    for datagram in written {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+
+    let stream = one_stream(&offer);
+    assert_eq!(attribute_values(&stream, "setup"), role, "the role moved");
+    assert_eq!(
+        attribute_values(&stream, "fingerprint"),
+        attribute_values(&answered, "fingerprint"),
+        "the certificate moved"
+    );
+    for (side, heard) in [("caller", &pair.caller), ("callee", &pair.callee)] {
+        assert!(
+            !heard
+                .media_events()
+                .iter()
+                .any(|event| matches!(event, MediaEvent::Failed(_))),
+            "the {side} refused the change: {:?}",
+            heard.media_events()
+        );
+    }
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert_eq!(session.codec(), Codec::Pcma);
+        assert!(session.is_encrypted());
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} after the change",
+        loudness(&played)
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_codec_change_on_an_ice_call_does_not_restart_it() {
+    // RFC 8445 §9: new credentials in an offer are an ICE restart
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let first = one_stream(&pair.callee.offer_received().expect("the first offer"));
+
+    let offer = change_codecs(&mut pair, call, &["PCMA"]);
+    let stream = one_stream(&offer);
+    for name in ["ice-ufrag", "ice-pwd", "candidate"] {
+        assert_eq!(
+            attribute_values(&stream, name),
+            attribute_values(&first, name),
+            "a={name} moved"
+        );
+    }
+    assert!(offer.attribute("ice-pacing").is_some(), "{offer}");
+}
+
+#[test]
+fn a_codec_change_names_a_codec_this_build_has_or_goes_nowhere() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+
+    let refused =
+        pair.caller
+            .engine
+            .change_codecs(&mut pair.caller.agent, call, &["G729"], pair.now);
+    assert!(
+        matches!(refused, Err(MediaError::UnsupportedCodec { .. })),
+        "{refused:?}"
+    );
+    assert!(
+        pair.caller.outbound().is_empty(),
+        "an offer went out for a codec that is not here"
+    );
+
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the BYE goes");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let ended = pair
+        .caller
+        .engine
+        .change_codecs(&mut pair.caller.agent, call, &["PCMA"], pair.now);
+    assert_eq!(ended, Err(MediaError::NoSuchCall));
+}

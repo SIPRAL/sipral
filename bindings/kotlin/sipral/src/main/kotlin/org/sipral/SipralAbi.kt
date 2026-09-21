@@ -3395,7 +3395,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 19)
+        agree(0, 20)
     }
 
     /**
@@ -3452,6 +3452,7 @@ internal object SipralNative {
     external fun sipral_call_set_headers(stack: Long, call: Long, headersBytes: ByteArray?, headersLengths: LongArray?): Int
     external fun sipral_call_hold(stack: Long, call: Long, nowMs: Long): Int
     external fun sipral_call_resume(stack: Long, call: Long, nowMs: Long): Int
+    external fun sipral_call_change_codecs(stack: Long, call: Long, codecs: ByteArray, nowMs: Long): Int
     external fun sipral_call_accept_session(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
@@ -3533,7 +3534,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 19
+    const val ABI_VERSION_MINOR: Long = 20
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -4690,6 +4691,43 @@ object Sipral {
      */
     fun callResume(stack: Long, call: Long, nowMs: Long) {
         check(SipralNative.sipral_call_resume(stack, call, nowMs))
+    }
+
+    /**
+     * Offer a call again on another list of codecs (RFC 3264 §8.3.2).
+     *
+     * `codecs` names them the way `sipral_call_config_t::codecs` does:
+     * separated by commas, in the order to offer them. Only the codecs
+     * change. Everything else the call has agreed is offered again as it
+     * is — its media address, its SRTP key or DTLS fingerprint, its ICE
+     * credentials — so nothing is re-keyed and nothing restarts, and a call
+     * on hold stays on hold: `sipral_call_resume` takes it off, on the new
+     * list. A dynamic payload type keeps the codec it has named on this
+     * call, and a codec new to it gets a number nothing has had.
+     *
+     * The list becomes the call's own once the far end accepts it, and
+     * `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
+     * on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
+     * leaves the call on the list it had.
+     *
+     * For a call whose media the stack describes: one placed or answered
+     * with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
+     * this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+     * list that is empty, names a codec twice or has a stray comma;
+     * `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
+     * for, one with none agreed yet, one whose stream was refused (a change
+     * of codecs does not bring it back), one still early with a far end that
+     * never listed UPDATE, or while another change is on its way;
+     * `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
+     * dynamic payload type number already taken.
+     *
+     * Safety
+     *
+     * `codecs` must be readable for `codecs_len` bytes.
+     */
+    fun callChangeCodecs(stack: Long, call: Long, codecs: String, nowMs: Long) {
+        val codecsBytes = codecs.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_call_change_codecs(stack, call, codecsBytes, nowMs))
     }
 
     /**

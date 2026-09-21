@@ -12,6 +12,42 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A live call re-offered on another codec list.** `MediaEngine::change_codecs`
+  and `sipral_call_change_codecs` offer a call again on the codecs named, in
+  that order (RFC 3264 §8.3.2), and move nothing else: the description this end
+  last wrote is carried with only its formats replaced, so the SDES key, the
+  DTLS fingerprint and `a=setup`, the ICE credentials and the address all stay
+  as they are, and nothing is re-keyed or restarted. A held call stays held,
+  and `resume` takes it off on the new list. Every dynamic payload type keeps
+  the codec it has named on the call, from either end — an offer numbered from
+  the catalogue alone breaks that the moment a codec leaves the front of the
+  list — and a codec new to the call gets a number nothing has had. The list
+  becomes the call's own when the far end accepts it; a refusal leaves the
+  call where it was. `UserAgent::change_formats` is the signalling half: it
+  sends a description whole but writes every stream's direction itself, from
+  the hold state.
+
+  Until now there was no way to do this through the facade, and the lab
+  proved it: the Rust driver wrote that one re-offer by hand, with no key, no
+  fingerprint and payload numbers of its own choosing. It goes through the
+  engine now, and so does the C driver's.
+
+- **The C driver runs every flow the Rust one does.** SRTP, DTMF by INFO and
+  the hold with a codec change join the six it had, against Asterisk as the
+  Rust driver runs them, with the same accounts and extensions. `SIPRAL_FLOWS`
+  now matches whole names, as the Rust driver's does: a substring match had
+  `hold` select `holdcodec` too, and the RFC 4733 flow's key was not the one
+  the Rust driver uses.
+
+- **Two checks in the gate, both for mistakes it could not see.** A C file
+  that includes a header ISO C does not define, or calls one of the POSIX
+  extensions an ISO header declares only on request, must ask for POSIX before
+  its first `#include`: glibc hides those declarations under a strict `-std`
+  and macOS does not, so no compiler on a Mac can find the file that fails on
+  Linux. And the printed header cannot change without the ABI version moving
+  past the last commit's, which `sipral_abi_check` needs in order to tell two
+  surfaces apart at all.
+
 - **The lab, driven a second time through the C ABI.** `interop/harness-c` runs
   the same flows against the same servers with every byte going through
   `sipral.h`: register, a call with audio, hold and resume, both transfers, and
@@ -90,6 +126,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **ABI 0.20.** It covers two changes to the printed header: ICE's own
+  (`SipralIce`, `SIPRAL_FEATURE_ICE`, event 33, the `ice` member on both
+  config structs, and `now_ms` on `sipral_media_capture`), which went out
+  without the minor moving, and `sipral_call_change_codecs`. The gate now
+  refuses the first kind.
+
 - **`sipral_media_capture` takes `now_ms`**, in the position its three
   siblings put it and read exactly as they read theirs. ICE has to be told
   that traffic went out on the pair it chose — RFC 8445 §11 is what lets it
@@ -139,6 +181,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   connects the call.
 
 ### Fixed
+
+- **A resume written by hand no longer leaves the call reading as held.**
+  `UserAgent::reoffer` kept the hold flag it had before the re-offer instead
+  of reading it back out of what it sent, so a description that resumed a held
+  call left `hold_state` saying "held here" — and the next `hold` found the
+  call held already, sent nothing, and returned success.
+
+- **A re-offer naming no codec this call holds is refused, not accepted.** The
+  engine answered one with its stream refused, which RFC 3264 §6 allows and
+  which left the call without audio for the rest of its life over a codec the
+  far end had merely proposed. It is answered 488 now (RFC 3261 §14.2) and the
+  session stands; an offer that took the stream away itself is still answered.
 
 - **The peer's ICE password no longer reaches a log.** `a=ice-pwd` is
   redacted in `Attribute`'s `Debug` beside the `a=crypto` master key, and

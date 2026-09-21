@@ -780,7 +780,9 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::DigitTooLong { .. }
         | MediaError::UnknownDigit { .. }
         | MediaError::RenderDelayTooLong { .. } => SipralStatus::InvalidArgument,
-        MediaError::TooManyDigits => SipralStatus::Exhausted,
+        // the numbers a session can bind ran out, which a corrected value
+        // does not fix and a different build does not either
+        MediaError::TooManyDigits | MediaError::NoPayloadType => SipralStatus::Exhausted,
         MediaError::NoSuchCall
         | MediaError::NoDescription
         | MediaError::NotRecording

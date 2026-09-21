@@ -47,6 +47,10 @@ pub enum MediaError {
         /// What its `a=rtpmap` called it.
         encoding: String,
     },
+    /// A codec new to the call cannot be offered on it: every dynamic payload
+    /// type number has already been given to something else, and RFC 3264
+    /// §8.3.2 does not let a number be given again within a session.
+    NoPayloadType,
     /// The description this end wrote or the one that arrived could not be
     /// read.
     Description(SdpError),
@@ -427,6 +431,9 @@ impl fmt::Display for MediaError {
                     "the answer settled on {encoding}, payload type {payload}, which this build cannot decode"
                 )
             }
+            Self::NoPayloadType => f.write_str(
+                "every dynamic payload type has already named another codec on this call",
+            ),
             Self::Description(error) => write!(f, "session description: {error}"),
             Self::NoCommonCodec => f.write_str("the two descriptions have no codec in common"),
             Self::StreamRefused => {
@@ -501,6 +508,7 @@ mod tests {
         let refusals = [
             MediaError::NoCodecs,
             MediaError::NoCommonCodec,
+            MediaError::NoPayloadType,
             MediaError::StreamRefused,
             MediaError::NoDescription,
             MediaError::NoSuchCall,

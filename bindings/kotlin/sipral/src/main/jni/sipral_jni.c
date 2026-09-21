@@ -1222,6 +1222,20 @@ Java_org_sipral_SipralNative_sipral_1call_1resume(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1change_1codecs(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray codecs, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *codecs_data = codecs ? (*env)->GetByteArrayElements(env, codecs, NULL) : NULL;
+    jsize codecs_size = codecs ? (*env)->GetArrayLength(env, codecs) : 0;
+    sipral_status_t status = sipral_call_change_codecs((sipral_handle_t)stack, (sipral_handle_t)call, (const char *)codecs_data, (size_t)codecs_size, (uint64_t)nowMs);
+    if (codecs) {
+        (*env)->ReleaseByteArrayElements(env, codecs, codecs_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1accept_1session(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray sdp, jlong nowMs)
 {
     (void)env;

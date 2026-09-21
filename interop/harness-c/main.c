@@ -90,6 +90,11 @@
 #define TEST_DIGIT "5"
 #define DIGIT_MS 200u
 
+/* What the hold-with-a-codec-change flow moves the call onto: the other G.711
+ * law, which every server in the lab takes and which the call cannot already
+ * be on, since the catalogue offers PCMU first. */
+#define CHANGED_CODECS "PCMA"
+
 /* -- the clock ------------------------------------------------------------ */
 
 /* Milliseconds since some point before this process started.
@@ -277,8 +282,19 @@ struct seen {
     int transfer_done;
     int transfer_failed;
     int digit_named_back;
+    int dtmf_sent;
+    uint32_t dtmf_sent_status;
     int held_here;
     int held_once;
+    /* every session change agreed, so a flow can tell one from the next */
+    int session_changes;
+    /* a change this end offered and the far end refused for good -- a 491
+     * goes out again by itself and is not counted */
+    int change_refused;
+    uint32_t change_status;
+    /* the codec the call came up on, and the one it is on now */
+    uint32_t codec_started;
+    uint32_t codec_now;
     int events;
     char fault[192];
 };
@@ -309,12 +325,24 @@ static void on_event(const sipral_event_t *event, void *user_data)
         if (seen->held_here) {
             seen->held_once = 1;
         }
+        seen->session_changes++;
+        break;
+    case SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED:
+        if (event->payload.call.retry_in_ms == 0) {
+            seen->change_refused = 1;
+            seen->change_status = event->payload.call.status_code;
+        }
         break;
     case SIPRAL_EVENT_KIND_CALL_ENDED:
         seen->ended = 1;
         break;
     case SIPRAL_EVENT_KIND_MEDIA_STARTED:
         seen->media_started = 1;
+        seen->codec_started = event->payload.media.codec;
+        seen->codec_now = event->payload.media.codec;
+        break;
+    case SIPRAL_EVENT_KIND_MEDIA_CHANGED:
+        seen->codec_now = event->payload.media.codec;
         break;
     case SIPRAL_EVENT_KIND_MEDIA_FAILED:
         seen->media_failed = 1;
@@ -326,7 +354,15 @@ static void on_event(const sipral_event_t *event, void *user_data)
         }
         break;
     case SIPRAL_EVENT_KIND_DIGIT_RECEIVED:
-        seen->digit_named_back = 1;
+        /* the digit this end pressed, and not merely a digit: a dialplan that
+         * named back something else has not heard this one */
+        if (event->payload.media.digit == (uint32_t)(unsigned char)TEST_DIGIT[0]) {
+            seen->digit_named_back = 1;
+        }
+        break;
+    case SIPRAL_EVENT_KIND_DTMF_SENT:
+        seen->dtmf_sent = 1;
+        seen->dtmf_sent_status = event->payload.call.status_code;
         break;
     case SIPRAL_EVENT_KIND_TRANSFER_DONE:
         /* both outcomes arrive here; the status code says which */
@@ -366,6 +402,9 @@ struct endpoint {
 
     uint64_t next_frame_ms;
     uint64_t media_since_ms;
+    /* how many session changes had been agreed when this end asked for the
+     * one it is now waiting on */
+    int changes_before;
     uint32_t phase;
     size_t frame_samples;
     uint32_t sample_rate;
@@ -663,6 +702,18 @@ static int named_back(const struct endpoint *end)
     return end->seen.digit_named_back || end->seen.ended;
 }
 
+static int info_answered_and_named_back(const struct endpoint *end)
+{
+    return (end->seen.dtmf_sent && end->seen.digit_named_back) || end->seen.ended;
+}
+
+/* The change this end asked for, agreed or refused. */
+static int change_settled(const struct endpoint *end)
+{
+    return end->seen.session_changes > end->changes_before || end->seen.change_refused
+           || end->seen.ended;
+}
+
 /* -- opening and closing an end ------------------------------------------- */
 
 /* The entropy a flow's stack is given.
@@ -835,9 +886,10 @@ static int open_media(struct endpoint *end, sipral_handle_t call)
 }
 
 /* Place a call at an extension on this server, and give it the RTP socket the
- * endpoint bound. */
+ * endpoint bound. `srtp` is a `SIPRAL_SRTP_*`, or zero for the stack's own
+ * policy. */
 static int place(struct endpoint *end, const char *server, const char *extension,
-                 sipral_handle_t *out_call)
+                 uint32_t srtp, sipral_handle_t *out_call)
 {
     sipral_call_config_t call;
     char target[192];
@@ -849,6 +901,7 @@ static int place(struct endpoint *end, const char *server, const char *extension
     call.target_len = strlen(target);
     call.media_address = end->rtp_address;
     call.media_address_len = strlen(end->rtp_address);
+    call.srtp = srtp;
     status = sipral_call_place(end->stack, end->account, &call, out_call, now_ms());
     if (status != SIPRAL_STATUS_OK) {
         wrong("sipral_call_place", status);
@@ -866,6 +919,9 @@ enum flow {
     FLOW_BLIND,
     FLOW_ATTENDED,
     FLOW_DTMF,
+    FLOW_DTMF_INFO,
+    FLOW_SRTP,
+    FLOW_HOLD_CODEC_CHANGE,
     FLOW_COUNT
 };
 
@@ -884,6 +940,12 @@ static const char *flow_name(enum flow which)
         return "attended transfer";
     case FLOW_DTMF:
         return "DTMF, RFC 4733";
+    case FLOW_DTMF_INFO:
+        return "DTMF, SIP INFO";
+    case FLOW_SRTP:
+        return "SRTP";
+    case FLOW_HOLD_CODEC_CHANGE:
+        return "hold with a codec change";
     case FLOW_COUNT:
     default:
         return "?";
@@ -906,10 +968,73 @@ static const char *flow_key(enum flow which)
     case FLOW_ATTENDED:
         return "attended";
     case FLOW_DTMF:
-        return "dtmf4733";
+        return "dtmf";
+    case FLOW_DTMF_INFO:
+        return "dtmfinfo";
+    case FLOW_SRTP:
+        return "srtp";
+    case FLOW_HOLD_CODEC_CHANGE:
+        return "holdcodec";
     case FLOW_COUNT:
     default:
         return "?";
+    }
+}
+
+/* Whether `SIPRAL_FLOWS` names this flow: a comma-separated list of keys,
+ * compared whole. A substring match would have `hold` select `holdcodec`
+ * too, which is not what anybody who typed it meant. */
+static int selected(const char *wanted, const char *key)
+{
+    size_t length = strlen(key);
+    const char *at = wanted;
+    while (*at != '\0') {
+        const char *end;
+        const char *stop;
+        while (*at == ' ' || *at == ',') {
+            at++;
+        }
+        end = strchr(at, ',');
+        if (end == NULL) {
+            end = at + strlen(at);
+        }
+        stop = end;
+        while (stop > at && stop[-1] == ' ') {
+            stop--;
+        }
+        if ((size_t)(stop - at) == length && strncmp(at, key, length) == 0) {
+            return 1;
+        }
+        at = end;
+    }
+    return 0;
+}
+
+/* The account a flow places its call as.
+ *
+ * Two flows have one of their own on Asterisk, and for the reason the Rust
+ * harness gives: the SDES endpoint is `labuser-srtp`, so that the plain one
+ * every other flow uses stays plain, and INFO's own `dtmf_mode` is
+ * `labuser-infodtmf`'s. Same defaults, same variables to override them. */
+static void account_for(enum flow which, const char **user, const char **pass)
+{
+    const char *named = NULL;
+    const char *secret = NULL;
+    const char *fallback = NULL;
+    if (which == FLOW_SRTP) {
+        named = getenv("SIPRAL_USER_SRTP");
+        secret = getenv("SIPRAL_PASS_SRTP");
+        fallback = "labuser-srtp";
+    } else if (which == FLOW_DTMF_INFO) {
+        named = getenv("SIPRAL_USER_INFODTMF");
+        secret = getenv("SIPRAL_PASS_INFODTMF");
+        fallback = "labuser-infodtmf";
+    } else {
+        return;
+    }
+    *user = named != NULL && named[0] != '\0' ? named : fallback;
+    if (secret != NULL && secret[0] != '\0') {
+        *pass = secret;
     }
 }
 
@@ -946,7 +1071,7 @@ static int flow_register(struct endpoint *end)
 
 /* Register, place a call, and wait for it to be answered with media. */
 static int up_and_talking(struct endpoint *end, const char *server,
-                          const char *extension)
+                          const char *extension, uint32_t srtp)
 {
     sipral_status_t status = sipral_account_register(end->stack, end->account, now_ms());
     if (status != SIPRAL_STATUS_OK) {
@@ -958,7 +1083,7 @@ static int up_and_talking(struct endpoint *end, const char *server,
         wrong_text("not registered, so there is nobody to place a call as");
         return -1;
     }
-    if (place(end, server, extension, &end->call) != 0) {
+    if (place(end, server, extension, srtp, &end->call) != 0) {
         return -1;
     }
     if (!wait_until(end, answered, FLOW_PATIENCE_MS)) {
@@ -1000,29 +1125,69 @@ static void dwell(struct endpoint *end, unsigned millis)
 
 /* Whether a flow is run against this server at all.
  *
- * The digit is asked for only of Asterisk, and the Rust harness does the same
- * for the same two reasons: `interop/asterisk/extensions.conf` is the only
- * dialplan in the lab with an extension that names a digit back, and the one
- * Asterisk names never came back through the proxy from FreeSWITCH.
- * `docs/11-testing.md` carries the reason. A flow is not run where it is
+ * The last four only against Asterisk, and the Rust harness does the same for
+ * the same reasons: `interop/asterisk/extensions.conf` is the only dialplan in
+ * the lab with an extension that names a digit back, the one Asterisk names
+ * never came back through the proxy from FreeSWITCH, and the SDES endpoint
+ * and the INFO one exist only in Asterisk's own configuration.
+ * `docs/11-testing.md` carries the reasons. A flow is not run where it is
  * known not to pass until somebody has found out why.
  */
 static int runs_against(enum flow which, const char *server)
 {
-    return which != FLOW_DTMF || strcmp(server, "asterisk") == 0;
+    switch (which) {
+    case FLOW_DTMF:
+    case FLOW_DTMF_INFO:
+    case FLOW_SRTP:
+    case FLOW_HOLD_CODEC_CHANGE:
+        return strcmp(server, "asterisk") == 0;
+    case FLOW_REGISTER:
+    case FLOW_CALL:
+    case FLOW_HOLD:
+    case FLOW_BLIND:
+    case FLOW_ATTENDED:
+    case FLOW_COUNT:
+    default:
+        return 1;
+    }
 }
 
 /* Which extension a flow calls.
  *
- * Only the digit needs one of its own: `interop/asterisk/extensions.conf`
+ * The digits need one of their own: `interop/asterisk/extensions.conf`
  * answers 9003 with `Read()` and names the digit straight back with
- * `SendDTMF()`, which is what makes the round trip provable from this end.
- * Every other flow calls the extension the command line named, and a bridge
- * answers it.
+ * `SendDTMF()`, which is what makes the round trip provable from this end,
+ * and it goes back over INFO to an endpoint whose `dtmf_mode` is INFO. SRTP
+ * has 9004. Every other flow calls the extension the command line named, and
+ * a bridge answers it.
  */
 static const char *extension_for(enum flow which, const char *named)
 {
-    return which == FLOW_DTMF ? "9003" : named;
+    switch (which) {
+    case FLOW_DTMF:
+    case FLOW_DTMF_INFO:
+        return "9003";
+    case FLOW_SRTP:
+        return "9004";
+    case FLOW_REGISTER:
+    case FLOW_CALL:
+    case FLOW_HOLD:
+    case FLOW_BLIND:
+    case FLOW_ATTENDED:
+    case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_COUNT:
+    default:
+        return named;
+    }
+}
+
+/* Whether the call's media runs under a key, asked of the library. */
+static int secured(const struct endpoint *end)
+{
+    sipral_media_info_t info;
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    return sipral_media_info(end->media, &info) == SIPRAL_STATUS_OK && info.secured != 0;
 }
 
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
@@ -1031,13 +1196,26 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     if (which == FLOW_REGISTER) {
         return flow_register(end);
     }
-    if (up_and_talking(end, server, extension_for(which, extension)) != 0) {
+    if (up_and_talking(end, server, extension_for(which, extension),
+                       which == FLOW_SRTP ? (uint32_t)SIPRAL_SRTP_REQUIRED : 0u)
+        != 0) {
         return -1;
     }
 
     switch (which) {
     case FLOW_CALL:
         dwell(end, DWELL_MS);
+        break;
+
+    case FLOW_SRTP:
+        /* the same tone as the plain call, and judged the same way: a stream
+         * that agreed a key and never decrypted a frame is the failure this
+         * flow exists to find, and it looks like silence */
+        dwell(end, DWELL_MS);
+        if (!secured(end)) {
+            wrong_text("the call connected but never ran under SDES");
+            return -1;
+        }
         break;
 
     case FLOW_HOLD: {
@@ -1095,7 +1273,7 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         dwell(end, 500u);
         /* the second leg: placing it is itself the settling wait the blind
          * flow has to take deliberately */
-        if (place(end, server, other, &end->consulted) != 0) {
+        if (place(end, server, other, 0u, &end->consulted) != 0) {
             return -1;
         }
         end->seen.confirmed = 0;
@@ -1143,6 +1321,96 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         break;
     }
 
+    case FLOW_DTMF_INFO: {
+        sipral_status_t status;
+        dwell(end, 500u);
+        status = sipral_call_send_dtmf(end->stack, end->call, TEST_DIGIT,
+                                       strlen(TEST_DIGIT), SIPRAL_DTMF_INFO_RELAY, 0u,
+                                       now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_send_dtmf", status);
+            return -1;
+        }
+        /* both halves: the far end answered the INFO, and the endpoint's own
+         * echo named the digit back -- over INFO too, which exercises this
+         * end's receiving half against a real peer as well as its sending one */
+        if (!wait_until(end, info_answered_and_named_back, FLOW_PATIENCE_MS)) {
+            wrong_text(end->seen.dtmf_sent ? "the digit sent by INFO was never named back"
+                                           : "the INFO was never answered");
+            return -1;
+        }
+        if (end->seen.ended) {
+            wrong_text("the call ended before the digit was named back");
+            return -1;
+        }
+        if (end->seen.dtmf_sent_status < 200u || end->seen.dtmf_sent_status >= 300u) {
+            (void)snprintf(trouble, sizeof trouble, "the INFO was answered %u",
+                           (unsigned)end->seen.dtmf_sent_status);
+            return -1;
+        }
+        break;
+    }
+
+    case FLOW_HOLD_CODEC_CHANGE: {
+        sipral_status_t status;
+        dwell(end, 500u);
+        status = sipral_call_hold(end->stack, end->call, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_hold", status);
+            return -1;
+        }
+        if (!wait_until(end, held, FLOW_PATIENCE_MS) || end->seen.ended) {
+            wrong_text("the hold was never agreed");
+            return -1;
+        }
+        /* a narrower list, offered while the call is held -- which the change
+         * keeps: only the codecs move */
+        end->changes_before = end->seen.session_changes;
+        status = sipral_call_change_codecs(end->stack, end->call, CHANGED_CODECS,
+                                           strlen(CHANGED_CODECS), now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_change_codecs", status);
+            return -1;
+        }
+        if (!wait_until(end, change_settled, FLOW_PATIENCE_MS) || end->seen.ended) {
+            wrong_text("the codec change was never answered");
+            return -1;
+        }
+        if (end->seen.change_refused) {
+            (void)snprintf(trouble, sizeof trouble,
+                           "the far end refused the codec change (%u)",
+                           (unsigned)end->seen.change_status);
+            return -1;
+        }
+        /* the media's own report of the change comes out of the same drain as
+         * the signalling's, a turn or two behind it */
+        dwell(end, 200u);
+        if (!end->seen.held_here) {
+            wrong_text("the codec change took the call off hold");
+            return -1;
+        }
+        if (end->seen.codec_now == end->seen.codec_started) {
+            wrong_text("the codec change never moved the call off the one it held on");
+            return -1;
+        }
+        status = sipral_call_resume(end->stack, end->call, now_ms());
+        if (status != SIPRAL_STATUS_OK) {
+            wrong("sipral_call_resume", status);
+            return -1;
+        }
+        if (!wait_until(end, resumed, FLOW_PATIENCE_MS) || end->seen.ended) {
+            wrong_text("the resume was never agreed");
+            return -1;
+        }
+        /* and audio on the new codec, so the counters say something */
+        dwell(end, 1000u);
+        if (end->seen.codec_now == end->seen.codec_started) {
+            wrong_text("the resume went back to the codec the call held on");
+            return -1;
+        }
+        break;
+    }
+
     case FLOW_REGISTER:
     case FLOW_COUNT:
     default:
@@ -1164,7 +1432,7 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
 static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
-    if (which != FLOW_CALL) {
+    if (which != FLOW_CALL && which != FLOW_SRTP) {
         return 1;
     }
     if (end->sent == 0) {
@@ -1225,18 +1493,21 @@ int main(int argc, char **argv)
     for (which = 0; which < (int)FLOW_COUNT; which++) {
         struct endpoint end;
         enum flow flow = (enum flow)which;
+        const char *flow_user = user;
+        const char *flow_pass = pass;
         int outcome;
 
-        if (wanted != NULL && wanted[0] != '\0'
-            && strstr(wanted, flow_key(flow)) == NULL) {
+        if (wanted != NULL && wanted[0] != '\0' && !selected(wanted, flow_key(flow))) {
             continue;
         }
         if (!runs_against(flow, server)) {
             continue;
         }
+        account_for(flow, &flow_user, &flow_pass);
 
         trouble[0] = '\0';
-        if (open_endpoint(&end, (unsigned)which, server, &remote, user, pass) != 0) {
+        if (open_endpoint(&end, (unsigned)which, server, &remote, flow_user, flow_pass)
+            != 0) {
             printf("  FAIL  %s — %s\n", flow_name(flow), trouble);
             failed++;
             continue;

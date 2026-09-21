@@ -139,6 +139,7 @@ mod error;
 mod event;
 mod ice;
 mod keying;
+mod payloads;
 mod pipeline;
 mod record;
 mod session;

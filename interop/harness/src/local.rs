@@ -87,23 +87,11 @@ fn call_ended(events: &[Event]) -> bool {
         .any(|event| matches!(event, Event::Signalling(UaEvent::CallEnded { .. })))
 }
 
-/// Whether a session change reports the stream flowing both ways again —
-/// what `Flow::HoldCodecChange`'s own `Fact::Resumed` reads, since a
-/// re-offer through `crate::reoffer_onto` does not flip
-/// `UaEvent::SessionChanged`'s own `hold.local` (see that flow's comment).
-fn resumed(events: &[Event]) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            event,
-            Event::Media {
-                event: MediaEvent::Changed {
-                    direction: Direction::SendRecv,
-                    ..
-                },
-                ..
-            }
-        )
-    })
+/// Whether a session change was agreed, held or not.
+fn session_changed(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, Event::Signalling(UaEvent::SessionChanged { .. })))
 }
 
 /// One round of both endpoints: pump, answer anything that came in, run
@@ -257,21 +245,14 @@ fn a_digit_sent_by_info_reaches_the_far_end_over_real_loopback_sockets() {
     assert_eq!(heard, Some((Some('7'), DigitSource::Info)));
 }
 
-/// `Flow::HoldCodecChange`'s own mechanism, in full: a call is held, and a
-/// re-offer through `crate::reoffer_onto` while it is held both moves it to
-/// a different codec — `sipral::MediaEngine` carries the running session
-/// onto it rather than leaving the old one in place — and reports the
-/// stream flowing both ways again, over real sockets. The second half is
-/// the one that needed watching red: `UserAgent::reoffer` keeps whatever
-/// `UaEvent::SessionChanged.hold.local` already was rather than reading it
-/// back out of the SDP it was just handed, so a first version of this flow
-/// that read that flag for `Fact::Resumed` never saw it move — see
-/// `crate::Script::on_media`'s own comment on `MediaEvent::Changed`, which
-/// reads `sipral::MediaSession`'s own direction instead. This is the one
-/// piece of that flow's mechanism this crate can check without the real
-/// lab; how Asterisk itself takes the re-offer is not.
+/// `Flow::HoldCodecChange`'s own mechanism, in full, over real sockets: a
+/// call is held, `sipral::MediaEngine::change_codecs` moves it onto another
+/// codec while it stays held — the running session carried onto it rather
+/// than left in place — and `UserAgent::resume` takes it off hold on the new
+/// list rather than the one it was placed with. How Asterisk itself takes
+/// the two re-offers is the lab's to say.
 #[test]
-fn reoffer_onto_resumes_a_held_call_between_two_real_endpoints_onto_a_different_codec() {
+fn a_held_call_changes_codec_and_the_resume_keeps_the_new_one() {
     let mut dialling = endpoint(211);
     let mut answering = endpoint(212);
     let _account = answering
@@ -290,11 +271,7 @@ fn reoffer_onto_resumes_a_held_call_between_two_real_endpoints_onto_a_different_
         .session(call)
         .map(|session| session.codec())
         .expect("the dialling side has media on a call that is up");
-    assert_ne!(
-        before,
-        Codec::Pcma,
-        "already on the codec the re-offer names"
-    );
+    assert_ne!(before, Codec::Pcma, "already on the codec the change names");
 
     dialling
         .agent
@@ -304,48 +281,44 @@ fn reoffer_onto_resumes_a_held_call_between_two_real_endpoints_onto_a_different_
         &mut dialling,
         &mut answering,
         "the hold was never agreed",
-        |dialled, _| {
-            dialled
-                .iter()
-                .any(|event| matches!(event, Event::Signalling(UaEvent::SessionChanged { .. })))
-        },
+        |dialled, _| session_changed(dialled),
     );
 
-    crate::reoffer_onto(&mut dialling, call, &["PCMA"], Instant::now()).expect("the re-offer goes");
-
-    let mut after = None;
-    let mut saw_resumed = false;
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
-        let (dialled, _) = round(&mut dialling, &mut answering, Instant::now());
-        saw_resumed |= resumed(&dialled);
-        after = dialling.engine.session(call).map(|session| session.codec());
-        if after == Some(Codec::Pcma) && saw_resumed {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    dialling
+        .engine
+        .change_codecs(&mut dialling.agent, call, &["PCMA"], Instant::now())
+        .expect("the change goes");
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the change was never agreed",
+        |dialled, _| session_changed(dialled),
+    );
     assert_eq!(
-        after,
+        dialling.engine.session(call).map(|session| session.codec()),
         Some(Codec::Pcma),
-        "the re-offer went and the far end answered, but the codec never moved"
+        "the change was agreed, but the codec never moved"
     );
-    assert!(
-        saw_resumed,
-        "the codec moved but nothing ever reported the stream flowing both ways again"
-    );
-    // confirms the premise `Script::on_media`'s own comment states: the UA
-    // level flag really did stay put through a `reoffer`-driven resume, so
-    // reading it for `Fact::Resumed` would have been wrong. If
-    // `UserAgent::reoffer` is ever taught to read the direction back out of
-    // the SDP it is handed, this starts failing and both it and that
-    // workaround can go.
     assert_eq!(
         dialling.agent.hold_state(call).map(|hold| hold.local),
         Some(true),
-        "UserAgent::reoffer no longer keeps the stale hold flag — main.rs's \
-         own workaround for it can be removed"
+        "the codec change took the call off hold"
     );
+
+    dialling
+        .agent
+        .resume(call, Instant::now())
+        .expect("the resume goes");
+    round_until(
+        &mut dialling,
+        &mut answering,
+        "the resume was never agreed",
+        |dialled, _| session_changed(dialled),
+    );
+    let session = dialling.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::Pcma, "the resume went back");
+    assert_eq!(session.direction(), Direction::SendRecv);
+    drop(session);
 
     let _ = dialling.agent.hangup(call, Instant::now());
 }
@@ -357,15 +330,18 @@ fn origin_of(body: &[u8]) -> Option<sipral_core::sdp::Origin> {
         .map(|description| description.origin)
 }
 
+/// One re-offer `Flow::HoldCodecChange` sends, and how it is sent.
+type Offer = fn(&mut Endpoint, CallHandle);
+
 /// RFC 3264 §8: "When issuing an offer that modifies the session, the "o="
 /// line of the new SDP MUST be identical to that in the previous SDP, except
 /// that the version in the origin field MUST increment by one from the
-/// previous SDP." `Flow::HoldCodecChange`'s resume is exactly such an offer,
-/// written by `crate::reoffer_onto`, so the far end has to see the session id,
-/// the user name and the address the call already had — and the version one
-/// past the hold's.
+/// previous SDP." `Flow::HoldCodecChange` sends two such offers after the
+/// hold — the codec change and the resume — so the far end has to see the
+/// session id, the user name and the address the call already had on all
+/// three, and a version one past the last on each.
 #[test]
-fn reoffer_onto_keeps_the_origin_line_the_call_already_had() {
+fn a_codec_change_keeps_the_origin_line_the_call_already_had() {
     let mut dialling = endpoint(251);
     let mut answering = endpoint(252);
     let _account = answering
@@ -404,48 +380,62 @@ fn reoffer_onto_keeps_the_origin_line_the_call_already_had() {
             confirmed(dialled)
         },
     );
-    dialling
-        .agent
-        .hold(call, Instant::now())
-        .expect("the hold goes");
-    round_until(
-        &mut dialling,
-        &mut answering,
-        "the hold was never agreed",
-        |dialled, answered| {
-            note(answered);
-            dialled
-                .iter()
-                .any(|event| matches!(event, Event::Signalling(UaEvent::SessionChanged { .. })))
-        },
-    );
+    // the flow's own three offers, in its own order, each agreed before the
+    // next goes
+    let offers: [(&str, Offer); 3] = [
+        ("the hold", |end, call| {
+            end.agent.hold(call, Instant::now()).expect("the hold goes");
+        }),
+        ("the change", |end, call| {
+            end.engine
+                .change_codecs(&mut end.agent, call, &["PCMA"], Instant::now())
+                .expect("the change goes");
+        }),
+        ("the resume", |end, call| {
+            end.agent
+                .resume(call, Instant::now())
+                .expect("the resume goes");
+        }),
+    ];
+    for (what, offer) in offers {
+        offer(&mut dialling, call);
+        round_until(
+            &mut dialling,
+            &mut answering,
+            &format!("{what} was never agreed"),
+            |dialled, answered| {
+                note(answered);
+                session_changed(dialled)
+            },
+        );
+    }
 
-    crate::reoffer_onto(&mut dialling, call, &["PCMA"], Instant::now()).expect("the re-offer goes");
-    round_until(
-        &mut dialling,
-        &mut answering,
-        "the re-offer was never answered",
-        |dialled, answered| {
-            note(answered);
-            resumed(dialled)
-        },
-    );
-
-    let [placed, held, reoffered] = origins.as_slice() else {
-        panic!("expected the offer, the hold and the re-offer, and the far end saw {origins:#?}");
+    let [placed, later @ ..] = origins.as_slice() else {
+        panic!("the far end saw no offer at all");
     };
-    for (what, origin) in [("the hold", held), ("the re-offer", reoffered)] {
+    assert_eq!(
+        later.len(),
+        3,
+        "expected the hold, the change and the resume after the offer, and the far end saw \
+         {origins:#?}"
+    );
+    let mut previous = placed;
+    for (what, origin) in ["the hold", "the change", "the resume"]
+        .into_iter()
+        .zip(later)
+    {
         assert_eq!(
             (&origin.username, origin.session_id, &origin.address),
             (&placed.username, placed.session_id, &placed.address),
             "{what} moved the o= line the call was placed with"
         );
+        assert_eq!(
+            origin.version,
+            previous.version + 1,
+            "{what}'s version is not one past the one before it"
+        );
+        previous = origin;
     }
-    assert_eq!(
-        reoffered.version,
-        held.version + 1,
-        "the re-offer's version is not one past the hold's"
-    );
 
     let _ = dialling.agent.hangup(call, Instant::now());
 }

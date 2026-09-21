@@ -89,12 +89,13 @@ use crate::event::{DigitSource, Event, MediaEvent};
 #[cfg(feature = "dtls")]
 use crate::keying::SrtpPolicy;
 use crate::keying::{self};
+use crate::payloads::Payloads;
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 use crate::share::{self, Held, SessionGuard, SessionShare};
 
 /// The media type this stack negotiates. There is no video, deliberately, and
 /// an offered stream of anything else is refused rather than half-taken.
-const AUDIO: &str = "audio";
+pub(crate) const AUDIO: &str = "audio";
 
 /// RFC 4733's named events, which ride alongside a codec rather than being
 /// one, and which an answer therefore keeps without there being a codec behind
@@ -158,6 +159,38 @@ struct Managed {
     /// of the call — this is a one-way door, and ringing with media a second
     /// time is refused rather than reopened.
     rung_with_media: bool,
+    /// Every dynamic payload type number either end has written on this
+    /// call's stream, and the codec it named — what RFC 3264 §8.3.2 says a
+    /// number goes on naming for as long as the session lasts, and what
+    /// [`MediaEngine::change_codecs`] numbers its offer against.
+    payloads: Payloads,
+    /// The codecs [`MediaEngine::change_codecs`] offered and the far end has
+    /// not answered yet. They become [`Managed::catalog`] when it accepts;
+    /// until then a refusal leaves the call on the list it had, as RFC 3261
+    /// §14.1 leaves the session.
+    pending: Option<Pending>,
+}
+
+/// A codec change on its way to the far end.
+#[derive(Clone, Debug)]
+struct Pending {
+    /// What the call's catalogue becomes once the offer is accepted.
+    catalog: CodecCatalog,
+    /// The formats the offer listed, which is how the description that comes
+    /// back is told apart from one describing something else.
+    formats: Vec<String>,
+}
+
+impl Managed {
+    /// Remember the numbers both halves of the negotiation bind.
+    fn note_payloads(&mut self) {
+        if let Some(local) = self.local.as_ref() {
+            self.payloads.note(local);
+        }
+        if let Some(remote) = self.remote.as_ref() {
+            self.payloads.note(remote);
+        }
+    }
 }
 
 /// What one call opens with, when it is not this engine's defaults.
@@ -689,6 +722,8 @@ impl MediaEngine {
                 ice,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
+                payloads: Payloads::default(),
+                pending: None,
             },
         );
         Ok(call)
@@ -764,6 +799,8 @@ impl MediaEngine {
                 ice,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
+                payloads: Payloads::default(),
+                pending: None,
             },
         );
         Ok(new)
@@ -1045,6 +1082,95 @@ impl MediaEngine {
     }
 }
 
+// -- changing a call in progress ---------------------------------------------
+
+impl MediaEngine {
+    /// Offer a call again on `codecs`, in that order, instead of the list it
+    /// was placed or answered with (RFC 3264 §8.3.2).
+    ///
+    /// Only the codecs change. Everything else is the description this end
+    /// last wrote for the call, carried across as it was: the media address,
+    /// the transport profile, the SRTP key or the DTLS fingerprint and
+    /// `a=setup`, the ICE credentials and candidates, multiplexing. So the
+    /// answer re-keys nothing, restarts no handshake and no connectivity
+    /// check, and moves nothing the call did not ask to move — a key drawn
+    /// afresh here would be a re-key nobody asked for, and a fingerprint
+    /// written afresh would be one RFC 8842 §3.1 reads as a new DTLS
+    /// association. It is also what a hold does, which is the other re-offer
+    /// this end sends.
+    ///
+    /// Which way the call flows is the user agent's to write
+    /// ([`UserAgent::change_formats`]): a call held here stays held through
+    /// the change, and [`UserAgent::resume`] takes it off hold on the new
+    /// list. Every dynamic payload type keeps the codec it has named on this
+    /// call, from either end, and a codec new to it gets a number nothing has
+    /// had — the MUST in §8.3.2 that an offer numbered from the catalogue
+    /// alone would break the moment a codec left the front of the list.
+    ///
+    /// The list is this call's own once the far end accepts it, and a
+    /// refusal leaves the call on the list it had, as RFC 3261 §14.1 leaves
+    /// the session. What the answer settled on arrives the way any
+    /// renegotiation's does: [`MediaEvent::Changed`], carrying the codec.
+    ///
+    /// # Errors
+    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
+    /// [`MediaError::NoDescription`] before this end has described it;
+    /// [`MediaError::StreamRefused`] for a call whose stream was refused,
+    /// which a change of codecs does not bring back; what
+    /// [`CodecCatalog::with_codecs`] refuses; [`MediaError::NoPayloadType`];
+    /// and [`MediaError::Signalling`] when the user agent will not send it —
+    /// [`UaError::ChangeInProgress`] while another change is on its way,
+    /// chiefly.
+    pub fn change_codecs(
+        &mut self,
+        agent: &mut UserAgent,
+        call: CallHandle,
+        codecs: &[&str],
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
+        let catalog = managed.catalog.clone().with_codecs(codecs)?;
+        let mut offer = managed.local.clone().ok_or(MediaError::NoDescription)?;
+        let mut payloads = managed.payloads.clone();
+        if let Some(remote) = managed.remote.as_ref() {
+            payloads.note(remote);
+        }
+        payloads.note(&offer);
+        let version = managed.version.saturating_add(1);
+
+        let stream = offer
+            .media
+            .iter_mut()
+            .find(|stream| stream.media == AUDIO && !stream.is_rejected())
+            .ok_or(MediaError::StreamRefused)?;
+        let mut written = catalog
+            .capabilities()
+            .offer(AUDIO, stream.port, Direction::SendRecv);
+        payloads.renumber(&mut written)?;
+        let codec_line =
+            |attribute: &Attribute| attribute.name == "rtpmap" || attribute.name == "fmtp";
+        stream.attributes.retain(|attribute| !codec_line(attribute));
+        let lines: Vec<Attribute> = written
+            .attributes
+            .into_iter()
+            .filter(|attribute| codec_line(attribute))
+            .collect();
+        stream.attributes.splice(0..0, lines);
+        stream.formats = written.formats;
+        let formats = stream.formats.clone();
+        offer.origin.version = version;
+
+        agent.change_formats(call, &offer.to_bytes(), now)?;
+        // bound from the moment it is written, whatever the far end says
+        payloads.note(&offer);
+        if let Some(managed) = self.calls.get_mut(&call) {
+            managed.payloads = payloads;
+            managed.pending = Some(Pending { catalog, formats });
+        }
+        Ok(())
+    }
+}
+
 // -- draining ----------------------------------------------------------------
 
 impl MediaEngine {
@@ -1175,6 +1301,18 @@ impl MediaEngine {
                 ..
             } => self.redescribed(*call, local.as_deref(), remote.as_deref(), now),
             UaEvent::Reoffer { call, request } => self.answer_reoffer(*call, request, agent, now),
+            // §14.1: the session stands exactly as it was, so the list it
+            // stands on is the one it had. A 491 is going out again by
+            // itself, and the change is still on its way.
+            UaEvent::SessionChangeFailed {
+                call,
+                retry_in: None,
+                ..
+            } => {
+                if let Some(managed) = self.calls.get_mut(call) {
+                    managed.pending = None;
+                }
+            }
             UaEvent::CallEnded { call, .. } => self.release(*call, now),
             UaEvent::DtmfReceived {
                 call,
@@ -1237,6 +1375,8 @@ impl MediaEngine {
                 #[cfg(feature = "ice")]
                 ice: None,
                 rung_with_media: false,
+                payloads: Payloads::default(),
+                pending: None,
             },
         );
     }
@@ -1290,6 +1430,17 @@ impl MediaEngine {
         };
         if let Some(described) = local.and_then(|bytes| parse(bytes).ok()) {
             managed.version = managed.version.max(described.origin.version);
+            // the change this end offered, accepted: the list it named is
+            // this call's own from here on, and the plan below is worked out
+            // against it
+            if managed
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Some(&pending.formats) == live_formats(&described))
+                && let Some(pending) = managed.pending.take()
+            {
+                managed.catalog = pending.catalog;
+            }
             managed.local = Some(described);
         }
         if let Some(described) = remote.and_then(|bytes| parse(bytes).ok()) {
@@ -1308,11 +1459,16 @@ impl MediaEngine {
         agent: &mut UserAgent,
         now: Instant,
     ) {
-        let Some(managed) = self.calls.get(&call) else {
+        let offered = body_description(Some(request));
+        let Some(managed) = self.calls.get_mut(&call) else {
             return;
         };
-        let (Some(address), Some(offer)) = (managed.address, body_description(Some(request)))
-        else {
+        // §8.3.2 binds a number from the moment either end writes it, and an
+        // offer about to be refused was still written
+        if let Some(offer) = offered.as_ref() {
+            managed.payloads.note(offer);
+        }
+        let (Some(address), Some(offer)) = (managed.address, offered) else {
             // an offer this engine cannot answer is refused rather than left
             // to be retransmitted until the call dies
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
@@ -1356,6 +1512,19 @@ impl MediaEngine {
             keys.as_ref(),
             keyed(dtls.as_ref()),
         ) {
+            // RFC 3261 §14.2: "If the new session description is not
+            // acceptable, the UAS can reject it by returning a 488", and the
+            // session stands exactly as it was. Answering with every stream
+            // refused would be accepting it instead — and a call whose one
+            // stream is refused carries no audio for the rest of its life,
+            // over a codec the far end merely proposed. An offer that took
+            // the stream away itself is still answered: that one asked for it
+            Ok(answer)
+                if offer.media.iter().any(|stream| !stream.is_rejected())
+                    && answer.media.iter().all(MediaDescription::is_rejected) =>
+            {
+                let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            }
             Ok(mut answer) => {
                 // RFC 8839 §4.4: an answer that left the attributes out is a
                 // peer reading that ICE has been withdrawn mid-session
@@ -1433,6 +1602,9 @@ impl MediaEngine {
 impl MediaEngine {
     /// Work out what the two descriptions agreed and make the stream match it.
     fn settle(&mut self, call: CallHandle, now: Instant) {
+        if let Some(managed) = self.calls.get_mut(&call) {
+            managed.note_payloads();
+        }
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
@@ -1594,6 +1766,16 @@ impl MediaEngine {
     fn fail(&mut self, call: CallHandle, error: MediaError) {
         self.events.push_back((call, MediaEvent::Failed(error)));
     }
+}
+
+/// The formats of the stream this facade carries, as a description lists
+/// them.
+fn live_formats(description: &SessionDescription) -> Option<&Vec<String>> {
+    description
+        .media
+        .iter()
+        .find(|stream| stream.media == AUDIO && !stream.is_rejected())
+        .map(|stream| &stream.formats)
 }
 
 /// The borrowed form the description writers take, from the owned pair the

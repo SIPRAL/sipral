@@ -4103,6 +4103,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_resume(ulong stack, ulong call, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_change_codecs(ulong stack, ulong call, sbyte[] codecs, nuint codecsLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_accept_session(ulong stack, ulong call, byte[] sdp, nuint sdpLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -4321,7 +4324,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 19;
+    public const uint AbiVersionMinor = 20;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -5480,6 +5483,46 @@ public static class Sipral
     public static void CallResume(ulong stack, ulong call, ulong nowMs)
     {
         Check(NativeMethods.sipral_call_resume(stack, call, nowMs));
+    }
+
+    /// <summary>
+    /// Offer a call again on another list of codecs (RFC 3264 §8.3.2).
+    ///
+    /// `codecs` names them the way `sipral_call_config_t::codecs` does:
+    /// separated by commas, in the order to offer them. Only the codecs
+    /// change. Everything else the call has agreed is offered again as it
+    /// is — its media address, its SRTP key or DTLS fingerprint, its ICE
+    /// credentials — so nothing is re-keyed and nothing restarts, and a call
+    /// on hold stays on hold: `sipral_call_resume` takes it off, on the new
+    /// list. A dynamic payload type keeps the codec it has named on this
+    /// call, and a codec new to it gets a number nothing has had.
+    ///
+    /// The list becomes the call's own once the far end accepts it, and
+    /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
+    /// on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
+    /// leaves the call on the list it had.
+    ///
+    /// For a call whose media the stack describes: one placed or answered
+    /// with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
+    /// this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// list that is empty, names a codec twice or has a stray comma;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
+    /// for, one with none agreed yet, one whose stream was refused (a change
+    /// of codecs does not bring it back), one still early with a far end that
+    /// never listed UPDATE, or while another change is on its way;
+    /// `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
+    /// dynamic payload type number already taken.
+    ///
+    /// Safety
+    ///
+    /// `codecs` must be readable for `codecs_len` bytes.
+    /// </summary>
+    public static void CallChangeCodecs(ulong stack, ulong call, string codecs, ulong nowMs)
+    {
+        var codecsBytes = Encoding.UTF8.GetBytes(codecs);
+        var codecsSigned = new sbyte[codecsBytes.Length];
+        Buffer.BlockCopy(codecsBytes, 0, codecsSigned, 0, codecsBytes.Length);
+        Check(NativeMethods.sipral_call_change_codecs(stack, call, codecsSigned, (nuint)codecsSigned.Length, nowMs));
     }
 
     /// <summary>

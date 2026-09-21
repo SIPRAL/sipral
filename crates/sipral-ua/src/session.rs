@@ -141,10 +141,42 @@ impl Session {
         let mut offer = self.local.clone()?;
         self.version = self.version.saturating_add(1);
         offer.origin.version = self.version;
-        for (index, media) in offer.media.iter_mut().enumerate() {
+        self.direct(&mut offer, held);
+        Some(offer)
+    }
+
+    /// Write every stream's direction the way this end wants it while
+    /// `held`, whatever the description said before.
+    pub(crate) fn direct(&self, description: &mut SessionDescription, held: bool) {
+        for (index, media) in description.media.iter_mut().enumerate() {
             set_direction(media, self.wanted(index, held));
         }
-        Some(offer)
+    }
+
+    /// Whether a description this end is about to offer asks the far end to
+    /// stop sending — `holds_us` read from the other side of the call.
+    ///
+    /// Against what each stream is when nothing is held, because that is
+    /// what a hold is measured from: a stream that started `sendonly` or
+    /// `inactive` has nothing §8.4 can take away from it, and `holding`
+    /// leaves it exactly as it was, so it says nothing either way. Every
+    /// stream that can be held has to be, for the reason `holds_us` gives.
+    pub(crate) fn holds_them(&self, description: &SessionDescription) -> bool {
+        let mut any = false;
+        for (index, media) in description.media.iter().enumerate() {
+            let unheld = self.wanted(index, false);
+            if media.is_rejected() || holding(unheld) == unheld {
+                continue;
+            }
+            any = true;
+            if matches!(
+                description.direction_of(media),
+                Direction::SendRecv | Direction::RecvOnly
+            ) {
+                return false;
+            }
+        }
+        any
     }
 
     /// The answer to an offer that arrived, when this end can write one.

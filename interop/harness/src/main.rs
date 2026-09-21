@@ -53,10 +53,9 @@ use sipral::{
     Account, AccountId, CallHandle, CallMedia, CallState, Codec, CodecCatalog, Credentials,
     DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig, MediaEngine,
     MediaEvent, OutgoingCall, Quality, SrtpPolicy, StreamStatistics, TransportId,
-    TransportProtocol, UaError, UaEvent, Uri, UserAgent, WallClock,
+    TransportProtocol, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
-use sipral_core::sdp::{Connection, Direction, Origin, SessionDescription};
 
 use crate::audio::Media;
 
@@ -264,9 +263,10 @@ enum Flow {
     /// A call placed with SDES required, against the lab's own SRTP endpoint
     /// (interop/asterisk's own `labuser-srtp`).
     Srtp,
-    /// A hold whose resume re-offers a narrower codec list than the call
-    /// held on (the 8.2.1 case), so the far end's own answer names a
-    /// different codec than it did during the hold.
+    /// A held call moved onto a narrower codec list while it stays held, and
+    /// then resumed on it (the 8.2.1 case): the far end's answer to the
+    /// change names a different codec than the one the call held on, and the
+    /// resume keeps it.
     HoldCodecChange,
 }
 
@@ -370,11 +370,6 @@ struct Endpoint {
     /// One RTP socket per call that has media, opened before the call is
     /// placed or answered so its port can go in the offer or the answer.
     media: HashMap<CallHandle, Media>,
-    /// The `o=` line this end last described each call with, read off the
-    /// `UaEvent::SessionChanged` that reported it, for the one offer the
-    /// harness writes itself (`reoffer_onto`): RFC 3264 §8 has an offer that
-    /// modifies a session keep that line identical but for the version.
-    origins: HashMap<CallHandle, Origin>,
     /// The SIP socket's own read buffer, kept here rather than on the stack
     /// of [`Endpoint::read_sip`], which every one of this loop's turns calls.
     sip_inbox: Vec<u8>,
@@ -429,7 +424,6 @@ impl Endpoint {
             local,
             transport,
             media: HashMap::new(),
-            origins: HashMap::new(),
             sip_inbox: vec![0_u8; 65_535],
         })
     }
@@ -474,15 +468,6 @@ impl Endpoint {
         self.flush();
         let mut events = Vec::new();
         while let Some(event) = self.engine.poll_event(&mut self.agent, now) {
-            if let Event::Signalling(UaEvent::SessionChanged {
-                call,
-                local: Some(local),
-                ..
-            }) = &event
-                && let Ok(described) = sipral_core::sdp::parse(local)
-            {
-                self.origins.insert(*call, described.origin);
-            }
             events.push(event);
         }
         events
@@ -590,7 +575,7 @@ struct Script {
     /// The second leg of an attended transfer.
     consulted: Option<CallHandle>,
     /// What the primary call settled on when it first came up, kept so
-    /// `Flow::HoldCodecChange` can tell whether the resume actually moved it.
+    /// `Flow::HoldCodecChange` can tell whether the change actually moved it.
     original_codec: Option<Codec>,
     /// What the primary call's media cost, from the `MediaEvent::Ended` that
     /// closed it: by the time a flow is judged its call has usually ended, and
@@ -615,9 +600,9 @@ enum Step {
     Settling,
     Holding,
     Resuming,
-    /// `Flow::HoldCodecChange`'s own resume: a re-offer naming a narrower
-    /// catalogue than the one the call held on.
-    Reoffering,
+    /// `Flow::HoldCodecChange`, while the call is held: a re-offer naming a
+    /// narrower list than the one the call held on.
+    ChangingCodecs,
     /// `Flow::Dtmf4733`: a digit is on its way, or has gone, and this end is
     /// waiting to hear it named back.
     Dialling,
@@ -713,6 +698,25 @@ impl Script {
                     self.seen.refused = Some(format!("the INFO was answered {}", status.get()));
                 }
             }
+            // a 491 goes out again by itself; anything else is the far end
+            // saying no to a hold, a resume or a codec change, and waiting
+            // for the flow's patience to run out would only hide which
+            UaEvent::SessionChangeFailed {
+                status,
+                retry_in: None,
+                response,
+                ..
+            } => {
+                self.seen.refused = Some(match status {
+                    Some(status) => format!(
+                        "the far end refused the session change ({}{})",
+                        status.get(),
+                        explained(response.as_ref())
+                    ),
+                    None => "the session change was never answered".to_owned(),
+                });
+                self.hang_up(endpoint, now);
+            }
             UaEvent::SessionChanged { hold, .. } => {
                 if hold.local {
                     self.seen.saw(Fact::Held);
@@ -767,28 +771,22 @@ impl Script {
                     self.seen.saw(Fact::Encrypted);
                 }
             }
-            MediaEvent::Changed {
-                codec,
-                direction: Direction::SendRecv,
-            } if Some(call) == self.call
-                && self.flow == Flow::HoldCodecChange
-                && self.seen.has(Fact::Held) =>
+            MediaEvent::Changed { codec, .. }
+                if Some(call) == self.call
+                    && self.flow == Flow::HoldCodecChange
+                    && self.seen.has(Fact::Held) =>
             {
-                // `Flow::HoldCodecChange`'s own resume, and only its: it goes
-                // through `reoffer_onto`, whose `UserAgent::reoffer` keeps
-                // whatever `UaEvent::SessionChanged.hold.local` already was
-                // rather than reading the direction back out of the SDP it
-                // was just handed — the ordinary hold and resume write that
-                // flag themselves and need none of this. What the far end's
-                // answer actually settled the stream's direction to is
-                // `sipral::MediaSession`'s own, carried on this same event,
-                // so that is what stands for "resumed" here instead — and,
-                // as in the ordinary hold flow, only once the hold was agreed:
-                // a change to flowing both ways before it is not a resume,
-                // and a codec that moved then is not the resume's change
-                self.seen.saw(Fact::Resumed);
+                // the change asked for while the call was held, and then the
+                // resume after it. Only once the hold was agreed: a codec that
+                // moved before it is not the change this flow asked for. And
+                // a resume that went back to the codec the call held on is
+                // the change undone, which the far end's own answer to it is
+                // the one place to see
                 if self.original_codec.is_some_and(|was| was != codec) {
                     self.seen.saw(Fact::CodecChanged);
+                } else if self.seen.has(Fact::CodecChanged) {
+                    self.seen.refused =
+                        Some(format!("the resume went back to {}", codec.encoding_name()));
                 }
             }
             MediaEvent::DigitReceived { digit, .. }
@@ -865,13 +863,12 @@ impl Script {
                     self.tried("resume", asked);
                 }
             }
-            Step::Holding => {
-                // Flow::HoldCodecChange: resume onto a narrower list than the
-                // call held on, in one re-INVITE
-                self.step = Step::Reoffering;
+            Step::Holding => self.change_codecs_while_held(endpoint, now),
+            Step::ChangingCodecs => {
+                self.step = Step::Resuming;
                 if let Some(call) = self.call {
-                    let asked = reoffer_onto(endpoint, call, &["PCMA"], now);
-                    self.tried("resume with a codec change", asked);
+                    let asked = endpoint.agent.resume(call, now);
+                    self.tried("resume", asked);
                 }
             }
             // not straight into the REFER: see SETTLE. The attended flow needs
@@ -925,14 +922,24 @@ impl Script {
                 self.listen_until = Some(now + dwell() + Duration::from_secs(2));
             }
             Step::Talking if self.flow == Flow::DtmfInfo => self.send_dtmf_by_info(endpoint, now),
-            Step::Talking
-            | Step::Resuming
-            | Step::Reoffering
-            | Step::Dialling
-            | Step::Transferring => {
+            Step::Talking | Step::Resuming | Step::Dialling | Step::Transferring => {
                 self.hang_up(endpoint, now);
             }
             Step::Placing | Step::Ending | Step::Done => (),
+        }
+    }
+
+    /// `Flow::HoldCodecChange`'s own `Step::Holding`: a narrower list than
+    /// the call held on, offered while it is still held — which the change
+    /// keeps. Factored out of `advance` for the reason `send_dtmf_by_info`
+    /// gives.
+    fn change_codecs_while_held(&mut self, endpoint: &mut Endpoint, now: Instant) {
+        self.step = Step::ChangingCodecs;
+        if let Some(call) = self.call {
+            let asked = endpoint
+                .engine
+                .change_codecs(&mut endpoint.agent, call, &["PCMA"], now);
+            self.tried("codec change", asked);
         }
     }
 
@@ -960,7 +967,7 @@ impl Script {
     ///
     /// Swallowing these is how a flow ends up reporting that the far end never
     /// answered, when the truth is that nothing was ever sent.
-    fn tried(&mut self, what: &str, outcome: Result<(), UaError>) {
+    fn tried<E: core::fmt::Display>(&mut self, what: &str, outcome: Result<(), E>) {
         if let Err(error) = outcome {
             self.seen.refused = Some(format!("{what}: {error}"));
             self.step = Step::Ending;
@@ -1118,7 +1125,7 @@ impl Script {
                 (Fact::Resumed, "the resume was not agreed"),
                 (
                     Fact::CodecChanged,
-                    "the codec after the resume was the same one the call held on",
+                    "the codec change never moved the call off the one it held on",
                 ),
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
@@ -1175,56 +1182,6 @@ pub(crate) fn place_call(
         .map_err(|error| error.to_string())?;
     endpoint.media.insert(call, placeholder);
     Ok(call)
-}
-
-/// Change a live call onto `order`'s catalogue, in one re-INVITE.
-///
-/// `sipral::MediaEngine` writes an application's offers for
-/// [`MediaEngine::place_with`], [`MediaEngine::ring_with`] and
-/// [`MediaEngine::answer_with`], but has no equivalent for an application
-/// asking to re-offer a live call on a catalogue of its own choosing —
-/// [`UserAgent::hold`] and [`UserAgent::resume`] keep the one already
-/// negotiated. `UserAgent::reoffer`'s own documentation names exactly this
-/// case ("a codec change ... anything else the application decides") and
-/// says writing hold and resume by hand is how the direction attributes get
-/// wrong; a plain `SendRecv` list is neither of those, so this is that
-/// sanctioned seam, not a second offer-writer for the ordinary flows. The
-/// media consequence — a live codec change, statistics carried across it, an
-/// SRTP context re-keyed if one is running — is still entirely
-/// [`sipral::MediaEngine::poll_event`]'s: this only writes the bytes that
-/// tell it to.
-///
-/// The `o=` line is the one this end last described the call with, version
-/// and all, and `UserAgent::reoffer` moves the version on by one: RFC 3264 §8
-/// has an offer that modifies a session keep that line identical to the
-/// previous one but for a version one higher. So a call has to have been
-/// described once through a `UaEvent::SessionChanged` first — the hold that
-/// comes before this in `Flow::HoldCodecChange` is that — and one that has
-/// not is [`UaError::NoSession`].
-fn reoffer_onto(
-    endpoint: &mut Endpoint,
-    call: CallHandle,
-    order: &[&str],
-    now: Instant,
-) -> Result<(), UaError> {
-    let Some(address) = endpoint
-        .media
-        .get(&call)
-        .and_then(|media| media.port().ok())
-        .map(|port| SocketAddr::new(route_to(endpoint.local), port))
-    else {
-        return Err(UaError::NoSuchCall);
-    };
-    let Some(origin) = endpoint.origins.get(&call).cloned() else {
-        return Err(UaError::NoSession);
-    };
-    let catalog = CodecCatalog::with_order(order).unwrap_or_else(|_| catalog());
-    let offer = catalog
-        .capabilities()
-        .offer("audio", address.port(), Direction::SendRecv);
-    let mut description = SessionDescription::new(origin, Connection::new(address.ip()));
-    description.media.push(offer);
-    endpoint.agent.reoffer(call, &description.to_bytes(), now)
 }
 
 /// The address that reaches the lab, not a wildcard. What this is given is
@@ -1441,15 +1398,14 @@ mod tests {
         seen
     }
 
-    /// `Flow::HoldCodecChange` reads its resume off the media's own direction,
-    /// and the ordinary hold flow only counts a resume that follows a hold. A
-    /// session that changes to flowing both ways before any hold was agreed —
-    /// a far end that moved its media address, a re-INVITE of its own — is
-    /// not the resume, and a codec that moved then is not the change this
-    /// flow's resume asked for; counting either lets the flow pass on
-    /// something that happened before the hold did.
+    /// `Flow::HoldCodecChange` counts a codec change only once the hold was
+    /// agreed. A session that moved codec before any hold — a far end that
+    /// re-offered on its own — is not the change this flow asked for, and
+    /// counting it lets the flow pass on something that happened before the
+    /// hold did. And a resume that lands back on the codec the call held on
+    /// is the change undone, not a second one.
     #[test]
-    fn a_change_that_flows_both_ways_before_the_hold_is_not_the_resume() {
+    fn a_codec_that_moves_before_the_hold_is_not_the_change_this_flow_asked_for() {
         let far_end = UdpSocket::bind(SocketAddr::new(LOOPBACK, 0)).expect("a far end");
         let remote = far_end.local_addr().expect("bound");
         let (mut endpoint, mut script) = scripted(Flow::HoldCodecChange, remote);
@@ -1468,28 +1424,40 @@ mod tests {
         script.call = Some(call);
         script.original_codec = Some(Codec::Pcmu);
 
-        let both_ways_on_another_codec = Event::Media {
+        let moved_to = |codec, direction| Event::Media {
             call,
-            event: MediaEvent::Changed {
-                codec: Codec::Pcma,
-                direction: Direction::SendRecv,
-            },
+            event: MediaEvent::Changed { codec, direction },
         };
-        script.on_event(&mut endpoint, &both_ways_on_another_codec, Instant::now());
-        assert!(
-            !script.seen.has(Fact::Resumed),
-            "a change before any hold counted as the resume"
+        script.on_event(
+            &mut endpoint,
+            &moved_to(Codec::Pcma, Direction::SendRecv),
+            Instant::now(),
         );
         assert!(
             !script.seen.has(Fact::CodecChanged),
-            "a codec that moved before any hold counted as the resume's change"
+            "a codec that moved before any hold counted as the change"
         );
 
         script.seen.saw(Fact::Held);
-        script.on_event(&mut endpoint, &both_ways_on_another_codec, Instant::now());
+        script.on_event(
+            &mut endpoint,
+            &moved_to(Codec::Pcma, Direction::SendOnly),
+            Instant::now(),
+        );
         assert!(
-            script.seen.has(Fact::Resumed) && script.seen.has(Fact::CodecChanged),
-            "the same change after the hold is the resume, onto another codec"
+            script.seen.has(Fact::CodecChanged),
+            "the same change while held is the one this flow asked for"
+        );
+        assert!(script.seen.refused.is_none());
+
+        script.on_event(
+            &mut endpoint,
+            &moved_to(Codec::Pcmu, Direction::SendRecv),
+            Instant::now(),
+        );
+        assert!(
+            script.seen.refused.is_some(),
+            "a resume back onto the codec the call held on passed"
         );
     }
 

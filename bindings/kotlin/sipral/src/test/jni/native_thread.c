@@ -14,6 +14,11 @@
  * on a message can only be read back out of the message.
  */
 
+/* Before any header: pthread.h is POSIX and not ISO C, and glibc under a
+ * strict -std hides what a file does not ask for. `scripts/check.sh` says why
+ * every C file here that reaches past ISO C asks first. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <jni.h>
 #include <pthread.h>
 #include <stdlib.h>

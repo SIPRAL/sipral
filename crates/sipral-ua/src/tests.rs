@@ -3605,6 +3605,117 @@ fn holding_a_call_that_is_already_held_sends_nothing() {
     );
 }
 
+/// The same held call, re-offered on PCMA with the direction turned back up.
+const RESUMED_ON_PCMA: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 8\r\na=sendrecv\r\n";
+/// What the far end says to it.
+const THEIR_PCMA: &[u8] = b"v=0\r\no=- 2 4 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/AVP 8\r\n";
+
+#[test]
+fn a_reoffer_that_resumes_a_held_call_leaves_it_resumed() {
+    // the flag used to be kept from before the re-offer, so a description
+    // that resumed the call left it reading as held — and the next hold,
+    // finding it held already, sent nothing and said it had worked
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .reoffer(call, RESUMED_ON_PCMA, t0)
+        .expect("the re-INVITE goes");
+    let again = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&again, 200, "OK", "desk", Some(THEIR_PCMA)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: false
+        })
+    );
+
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let held = sent(&mut agent);
+    assert!(held.starts_with(b"INVITE "), "the second hold went nowhere");
+    assert!(body_of(&held).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn a_codec_change_keeps_a_held_call_held() {
+    // RFC 3264 §8.3.2 changes the formats and nothing else: whoever wrote the
+    // description said sendrecv, and the call is still held
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .change_formats(call, RESUMED_ON_PCMA, t0)
+        .expect("the re-INVITE goes");
+    let change = sent(&mut agent);
+    let offer = body_of(&change);
+    assert!(offer.contains("m=audio 8000 RTP/AVP 8\r\n"), "{offer}");
+    assert!(offer.contains("a=sendonly\r\n"), "{offer}");
+    assert!(!offer.contains("a=sendrecv\r\n"), "{offer}");
+    // RFC 3264 §8: past the hold's own version, whatever the caller wrote
+    assert!(offer.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"), "{offer}");
+    deliver(
+        &mut agent,
+        &answered(&change, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(true));
+}
+
+#[test]
+fn a_codec_change_on_a_call_held_from_the_far_end_does_not_hold_it_from_here() {
+    // this end's last description is its answer to their hold, recvonly — a
+    // statement about what they asked for, which copied into an offer would
+    // tell them this end will not send either
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "theirhold", 1, Some(THEIR_HOLD)),
+        t0,
+    );
+    deliver(&mut agent, &reversed(&ack, "ACK", "theirack", 1, None), t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let copied: &[u8] = b"v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 8\r\na=recvonly\r\n";
+    agent
+        .change_formats(call, copied, t0)
+        .expect("the re-INVITE goes");
+    let offer = body_of(&sent(&mut agent));
+    assert!(offer.contains("a=sendrecv\r\n"), "{offer}");
+    assert!(!offer.contains("a=recvonly\r\n"), "{offer}");
+}
+
 #[test]
 fn a_confirmed_call_changes_by_reinvite_even_when_update_is_allowed() {
     // RFC 3311 §5.1: "Although UPDATE can be used on confirmed dialogs, it is

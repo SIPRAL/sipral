@@ -852,6 +852,65 @@ entry! {
 }
 
 entry! {
+    /// Offer a call again on another list of codecs (RFC 3264 §8.3.2).
+    ///
+    /// `codecs` names them the way `sipral_call_config_t::codecs` does:
+    /// separated by commas, in the order to offer them. Only the codecs
+    /// change. Everything else the call has agreed is offered again as it
+    /// is — its media address, its SRTP key or DTLS fingerprint, its ICE
+    /// credentials — so nothing is re-keyed and nothing restarts, and a call
+    /// on hold stays on hold: `sipral_call_resume` takes it off, on the new
+    /// list. A dynamic payload type keeps the codec it has named on this
+    /// call, and a codec new to it gets a number nothing has had.
+    ///
+    /// The list becomes the call's own once the far end accepts it, and
+    /// `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
+    /// on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
+    /// leaves the call on the list it had.
+    ///
+    /// For a call whose media the stack describes: one placed or answered
+    /// with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
+    /// this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// list that is empty, names a codec twice or has a stray comma;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
+    /// for, one with none agreed yet, one whose stream was refused (a change
+    /// of codecs does not bring it back), one still early with a far end that
+    /// never listed UPDATE, or while another change is on its way;
+    /// `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
+    /// dynamic payload type number already taken.
+    ///
+    /// # Safety
+    ///
+    /// `codecs` must be readable for `codecs_len` bytes.
+    fn sipral_call_change_codecs(
+        stack: SipralHandle,
+        call: SipralHandle,
+        codecs: *const c_char,
+        codecs_len: usize,
+        now_ms: u64,
+    ) {
+        let list = unsafe { required_text(codecs, codecs_len, "codecs") }?;
+        let named = crate::media::names_in(list)?;
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            state
+                .engine
+                .change_codecs(&mut state.agent, id, &named, now)
+                .map_err(|error| match error {
+                    // the call is real — the handle was just found — so what
+                    // the engine does not know is its media
+                    sipral::MediaError::NoSuchCall => fail(
+                        SipralStatus::WrongState,
+                        "the stack writes no description for this call: it was placed or \
+                         answered without media_address, so its offers are the application's",
+                    ),
+                    other => media_failed(&other),
+                })
+        })
+    }
+}
+
+entry! {
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
@@ -1418,10 +1477,10 @@ pub(crate) mod tests {
     use super::{
         SipralCallConfig, SipralDtmf, dtmf_form, keypad, sipral_call_accept_session,
         sipral_call_accept_transfer, sipral_call_answer, sipral_call_answer_media,
-        sipral_call_consult, sipral_call_hangup, sipral_call_hold, sipral_call_hold_state,
-        sipral_call_place, sipral_call_reject, sipral_call_reject_session, sipral_call_resume,
-        sipral_call_ring, sipral_call_ring_media, sipral_call_send_dtmf, sipral_call_state,
-        sipral_call_transfer, sipral_call_transfer_to, tone_length,
+        sipral_call_change_codecs, sipral_call_consult, sipral_call_hangup, sipral_call_hold,
+        sipral_call_hold_state, sipral_call_place, sipral_call_reject, sipral_call_reject_session,
+        sipral_call_resume, sipral_call_ring, sipral_call_ring_media, sipral_call_send_dtmf,
+        sipral_call_state, sipral_call_transfer, sipral_call_transfer_to, tone_length,
     };
     use crate::account::{
         SipralAccountConfig, sipral_account_add, sipral_account_register, sipral_account_remove,
@@ -3730,6 +3789,106 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// The far end's answer to a codec change onto PCMA.
+    const ALAW_REANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 2 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 8\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=sendrecv\r\n";
+
+    fn change_codecs(
+        stack: SipralHandle,
+        call: SipralHandle,
+        list: &str,
+        now_ms: u64,
+    ) -> SipralStatus {
+        let (codecs, codecs_len) = as_text(list);
+        unsafe { sipral_call_change_codecs(stack, call, codecs, codecs_len, now_ms) }
+    }
+
+    #[test]
+    fn a_codec_change_asked_for_from_c_moves_the_call_onto_the_codec_named() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            let (codecs, codecs_len) = as_text("PCMU,PCMA");
+            config.codecs = codecs;
+            config.codecs_len = codecs_len;
+        });
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+
+        assert_eq!(
+            change_codecs(handle, call, "PCMA", 1_200),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let reinvite = one(handle);
+        assert!(start_line(&reinvite).starts_with("INVITE"));
+        let offered = String::from_utf8_lossy(&body(&reinvite)).into_owned();
+        assert!(offered.contains(" RTP/AVP 8"), "{offered}");
+        assert!(!offered.contains("PCMU"), "{offered}");
+        // another change while this one is on its way is the user agent's
+        // refusal, said as a state
+        assert_eq!(
+            change_codecs(handle, call, "PCMU", 1_250),
+            SipralStatus::WrongState
+        );
+
+        deliver(handle, &accepted(&reinvite, ALAW_REANSWER, false), 1_300);
+        poll(handle, 1_300);
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaChanged),
+            "the codec moved and nothing said so: {:?}",
+            observed.kinds()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_codec_change_that_cannot_be_offered_says_why_and_sends_nothing() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let (handle, call) = up(&observed, handle, account, ANSWER);
+        for (list, expected) in [
+            ("", SipralStatus::InvalidArgument),
+            ("PCMU,,PCMA", SipralStatus::InvalidArgument),
+            ("PCMU,pcmu", SipralStatus::InvalidArgument),
+            ("G729", SipralStatus::NotSupported),
+        ] {
+            assert_eq!(
+                change_codecs(handle, call, list, 1_200),
+                expected,
+                "{list:?}"
+            );
+            assert!(sent(handle).is_empty(), "{list:?} sent something");
+        }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        // a call whose description is the application's own
+        let mut observed = Observed::default();
+        let (handle, call) = connected(&mut observed);
+        let _ = sent(handle);
+        assert_eq!(
+            change_codecs(handle, call, "PCMU", 2_000),
+            SipralStatus::WrongState
+        );
+        assert!(
+            last_error_text().contains("media_address"),
+            "{}",
+            last_error_text()
+        );
+        assert!(sent(handle).is_empty());
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     /// A half-wired feature behind this ABI is worse than an absent one, so the
     /// consultation leg says what it cannot do rather than taking a media
     /// address it would then ignore.
@@ -3769,6 +3928,9 @@ Content-Length: 0\r\n\r\n";
             unsafe { sipral_call_hangup(handle, SIPRAL_HANDLE_NONE, 0) },
             unsafe { sipral_call_hold(handle, SIPRAL_HANDLE_NONE, 0) },
             unsafe { sipral_call_resume(handle, SIPRAL_HANDLE_NONE, 0) },
+            // a real list, because the names are read before the handle is
+            // looked up, the same as the way of sending a digit is
+            change_codecs(handle, SIPRAL_HANDLE_NONE, "PCMU", 0),
             unsafe { sipral_call_reject(handle, SIPRAL_HANDLE_NONE, 486, 0) },
             unsafe {
                 sipral_call_answer(handle, SIPRAL_HANDLE_NONE, ANSWER.as_ptr(), ANSWER.len(), 0)

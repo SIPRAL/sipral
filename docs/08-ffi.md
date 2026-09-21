@@ -556,6 +556,17 @@ and an event for a change that was not one would be the same false signal
 `ring`/`ring_with` learned not to send on the ACK that merely confirms a call
 already settled.
 
+**And asks for its own codec changes.** `sipral_call_change_codecs(stack,
+call, codecs, codecs_len, now_ms)` re-offers a managed call on another list,
+named the way `sipral_call_config_t::codecs` names one. Only the codecs
+change — `docs/05-media.md` says what is carried unchanged and why, and how
+each payload type number keeps its codec — and a held call stays held, so
+`sipral_call_resume` afterwards takes it off hold on the new list. The outcome
+is `SIPRAL_EVENT_KIND_MEDIA_CHANGED` naming the codec the answer settled on,
+or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` with the call left on the list it
+had. A call placed or answered with `sdp` is the application's to re-offer,
+and is `SIPRAL_STATUS_WRONG_STATE` here.
+
 **SRTP is a policy, chosen from C, for a call this stack describes.**
 `sipral_stack_config_t::srtp` is the stack's default and `sipral_call_config_t::srtp`
 overrides it for one call; both are a `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`,

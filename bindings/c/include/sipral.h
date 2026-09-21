@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)19)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)20)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -4669,6 +4669,40 @@ sipral_status_t sipral_call_hold(sipral_handle_t stack, sipral_handle_t call, ui
  * Safe to call with any handle values.
  */
 sipral_status_t sipral_call_resume(sipral_handle_t stack, sipral_handle_t call, uint64_t now_ms);
+
+/**
+ * Offer a call again on another list of codecs (RFC 3264 §8.3.2).
+ *
+ * `codecs` names them the way `sipral_call_config_t::codecs` does:
+ * separated by commas, in the order to offer them. Only the codecs
+ * change. Everything else the call has agreed is offered again as it
+ * is — its media address, its SRTP key or DTLS fingerprint, its ICE
+ * credentials — so nothing is re-keyed and nothing restarts, and a call
+ * on hold stays on hold: `sipral_call_resume` takes it off, on the new
+ * list. A dynamic payload type keeps the codec it has named on this
+ * call, and a codec new to it gets a number nothing has had.
+ *
+ * The list becomes the call's own once the far end accepts it, and
+ * `SIPRAL_EVENT_KIND_MEDIA_CHANGED` names the codec its answer settled
+ * on. A refusal arrives as `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` and
+ * leaves the call on the list it had.
+ *
+ * For a call whose media the stack describes: one placed or answered
+ * with `media_address` set. `SIPRAL_STATUS_NOT_SUPPORTED` for a name
+ * this build has no codec behind; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+ * list that is empty, names a codec twice or has a stray comma;
+ * `SIPRAL_STATUS_WRONG_STATE` for a call the stack writes no description
+ * for, one with none agreed yet, one whose stream was refused (a change
+ * of codecs does not bring it back), one still early with a far end that
+ * never listed UPDATE, or while another change is on its way;
+ * `SIPRAL_STATUS_EXHAUSTED` when a codec new to the call finds every
+ * dynamic payload type number already taken.
+ *
+ * Safety
+ *
+ * `codecs` must be readable for `codecs_len` bytes.
+ */
+sipral_status_t sipral_call_change_codecs(sipral_handle_t stack, sipral_handle_t call, const char *codecs, size_t codecs_len, uint64_t now_ms);
 
 /**
  * Accept a change the far end offered, reported as

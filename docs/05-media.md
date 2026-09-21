@@ -853,6 +853,65 @@ own overhead from whatever buffer it is handed and refuses a short one before
 a sequence number is spent, so a buffer that stopped being big enough would be
 a refused frame with a reason on it rather than a truncated packet.
 
+## A codec change this end asks for
+
+`MediaEngine::change_codecs(agent, call, codecs, now)` offers a live call again
+on another codec list (RFC 3264 §8.3.2), and `sipral_call_change_codecs` is the
+same from C. Only the codecs move. The offer is the description this end last
+wrote for the call with its `m=` formats and its `a=rtpmap` and `a=fmtp` lines
+replaced, so everything else is carried as it stands: the address, the
+transport profile, the SDES key or the DTLS fingerprint and `a=setup`, the ICE
+credentials and candidates, multiplexing. A key drawn afresh would be a re-key
+nobody asked for, in the middle of a change about something else; a
+fingerprint written afresh is what RFC 8842 §3.1 reads as asking for a new
+DTLS association, which this stack does not start; new ICE credentials are a
+restart. A hold carries all of them unchanged for the same reasons, and the
+codec change is the second re-offer this end writes, so it behaves the same.
+Which way the call flows is the user agent's to write
+(`UserAgent::change_formats`): a held call stays held through the change, and
+`resume` takes it off hold on the new list.
+
+**One deviation, and why.** RFC 8842 §5.5 asks every subsequent offer for
+`a=setup:actpass`. For a call this end placed, that is what it last wrote and
+what goes. For a call this end answered, the last description carries the role
+it answered with, `active` or `passive`, and that goes instead — as it already
+does in a hold. `actpass` would hand the far end the choice again, and a far
+end that chose the other role would be asking for a new association (§3.1),
+which this stack, running one per call, cannot follow; a concrete role leaves
+RFC 4145 one answer, the one already in force, and §5.3 has every answerer
+take it. The price is a MUST not met to the letter. Meeting it means writing
+`actpass` and refusing by name an answer that moves the roles, the way a
+moved fingerprint is refused, in the hold and the codec change alike.
+
+**Payload types keep their codec.** §8.3.2: "the mapping from a particular
+dynamic payload type number to a particular codec within that media stream
+MUST NOT change for the duration of a session." A catalogue numbers its
+dynamic formats from 96 in order, which is right for a call's first
+description and wrong for a later one — the same list without Opus hands
+Opus's number to whatever comes next, and `telephone-event` moves whenever the
+list in front of it does. So each call keeps every binding either end has
+written on its stream, those in an offer that was refused included, and the
+change is renumbered against them before it goes: a codec already bound keeps
+its number, and one new to the call gets a number nothing has had.
+`telephone-event` on another clock is another format and gets its own. All
+thirty-two dynamic numbers taken is `MediaError::NoPayloadType`, never a
+number reused.
+
+**The list becomes the call's own when the far end accepts it.** A refusal
+(`UaEvent::SessionChangeFailed`) leaves the call on the list it had, as RFC 3261
+§14.1 leaves the session; a 491 goes out again by itself, and the change is
+still on its way while it does. What the answer settled on arrives the way any
+re-negotiation's does, as `MediaEvent::Changed` with the codec on it.
+
+**A re-offer this end can take nothing from is refused.** The same exchange
+from the other side: an offer from the far end naming no codec this call's
+catalogue holds is answered 488, which is what RFC 3261 §14.2 has a UAS do with
+a session description it cannot accept, and the session stands. Answering it
+with the stream refused instead — port zero, which RFC 3264 §6 allows for a
+stream — would be accepting it, and would leave the call without audio for the
+rest of its life over a codec the far end merely proposed. An offer that took
+the stream away itself is still answered, because that one asked for it.
+
 ## sipral-media
 
 The pipeline between the codec and whatever produces or consumes samples.

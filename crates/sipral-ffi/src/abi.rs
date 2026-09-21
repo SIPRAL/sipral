@@ -665,6 +665,7 @@ pub const SURFACE: Surface = Surface {
         crate::call::sipral_call_set_headers::ABI,
         crate::call::sipral_call_hold::ABI,
         crate::call::sipral_call_resume::ABI,
+        crate::call::sipral_call_change_codecs::ABI,
         crate::call::sipral_call_accept_session::ABI,
         crate::call::sipral_call_reject_session::ABI,
         crate::call::sipral_call_send_dtmf::ABI,
