@@ -122,7 +122,9 @@ use crate::event::{SipralEvent, SipralEventCallback, Vocabulary};
 use crate::handle::{
     HandleTable, Kind, Refused, SIPRAL_HANDLE_NONE, STACK_TAGS, SipralHandle, StackTag, StackTags,
 };
-use crate::media::{SipralStreamStats, catalog_of, srtp_policy, stream_stats, toggle_of, toggled};
+use crate::media::{
+    SipralStreamStats, catalog_of, ice_policy, srtp_policy, stream_stats, toggle_of, toggled,
+};
 use crate::names::Names;
 use crate::status::SipralStatus;
 use crate::text::{bytes, required_text, text};
@@ -394,6 +396,16 @@ record! {
         /// until it is asked to. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
         pub srtp: u32,
+        /// What every call on this stack does about ICE unless
+        /// `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
+        /// or zero for this build's own built-in default, which is
+        /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
+        /// for the reason `docs/06-nat.md` tabulates. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        ///
+        /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub ice: u32,
     }
 }
 
@@ -1103,6 +1115,7 @@ unsafe fn engine_for(
         toggled(config.offer_dtmf, "offer_dtmf", true)?,
         toggled(config.offer_rtcp_mux, "offer_rtcp_mux", false)?,
         srtp_policy(config.srtp, "srtp")?,
+        ice_policy(config.ice, "ice")?,
     )?;
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
     Ok(MediaEngine::new(catalog, media, clock, media_seed))
@@ -2001,6 +2014,7 @@ pub(crate) mod tests {
             media_stall_ms: 0,
             media_clock_unix_seconds: 0,
             srtp: 0,
+            ice: 0,
         }
     }
 

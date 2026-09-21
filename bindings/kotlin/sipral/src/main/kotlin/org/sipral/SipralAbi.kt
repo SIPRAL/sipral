@@ -257,6 +257,57 @@ enum class SipralSrtp(val value: Int) {
 }
 
 /**
+ * What a call or a stack says about ICE. Names for
+ * `sipral_stack_config_t::ice` (the stack's default) and
+ * `sipral_call_config_t::ice` (a per-call override).
+ *
+ * Zero is not one of them, and it is not the same absence on the two
+ * structs: on the stack it means this build's own built-in default
+ * (`IcePolicy::default()`, which is SipralIce.OFF); on a call it
+ * means the stack's own setting, whatever that came to.
+ *
+ * A call that offers ICE also asks for RFC 5761 multiplexing, whatever
+ * `offer_rtcp_mux` says, because an ICE stream with a second component
+ * needs a second address and this ABI names one.
+ */
+enum class SipralIce(val value: Int) {
+    /**
+     * IcePolicy::Off: do not offer it, and do not answer a peer that
+     * does. The default, and `docs/06-nat.md` says why at length.
+     */
+    OFF(1),
+    /**
+     * IcePolicy::Offered: offer it, and use it against a peer that
+     * offers it back.
+     *
+     * A peer that does not — an Asterisk with `ice_support=no`, which is
+     * its default — is answered without it and the call runs on the
+     * signalled address and symmetric RTP, exactly as it would have. An
+     * application that names this **must** drain
+     * sipral_media_poll_transmit: a check that never leaves is a
+     * call that never chooses a path.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_ICE`.
+     */
+    OFFERED(2),
+    /**
+     * IcePolicy::Required: offer it, and let no stream on this call
+     * carry audio on a path ICE did not check.
+     *
+     * Each of the three ways a peer can fail to do ICE ends the call's
+     * media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
+     * back. That is the whole difference between this and `Offered`.
+     */
+    REQUIRED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralIce? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
  * One codec this ABI has a number for. Names for every member that says
  * which.
  *
@@ -444,6 +495,19 @@ enum class SipralMediaFault(val value: Int) {
      * Something else the layer below reported and this ABI has no word for.
      */
     OTHER(8),
+    /**
+     * ICE could not carry this call: the far end described none this
+     * stack could use and the policy was `SIPRAL_ICE_REQUIRED`, the far
+     * end took `a=rtcp-mux` out of an answer to an ICE offer, or consent
+     * to send on the pair that was chosen was withdrawn part-way through
+     * (RFC 7675 §5).
+     *
+     * A code of its own because it is the one an application can act on
+     * differently: the call is up and the signalling is sound, and what
+     * changed is only that no path could be checked. A deployment with a
+     * non-ICE profile to fall back to falls back here.
+     */
+    ICE(9),
     ;
 
     companion object {
@@ -882,6 +946,28 @@ enum class SipralEventKind(val value: Int) {
      * of it.
      */
     MEDIA_SECURED(32),
+    /**
+     * `sipral_media_event_t`: ICE chose the path this call's media takes
+     * (RFC 8445 §8.1.1), and audio can move.
+     *
+     * The moment the connectivity checks stop, and the answer to "why is
+     * this call sending to an address the signalling never named" —
+     * which, behind a NAT, is the ordinary outcome rather than a fault.
+     * It arrives again if a nomination of higher priority replaces the
+     * pair part-way through the call.
+     *
+     * The two addresses of the pair are deliberately not carried here,
+     * for the reason `SIPRAL_EVENT_KIND_MEDIA_SECURED` gives about its
+     * own: every packet `sipral_media_capture` and
+     * `sipral_media_poll_transmit` hand back already names the
+     * destination to send it to, so an application that puts this
+     * stack's media on a socket at all has the address the moment it
+     * matters. `sipral_media_statistics` does not repeat it either.
+     *
+     * A call not using ICE never emits it, and that is most calls: the
+     * policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
+     */
+    MEDIA_PATH_CHOSEN(33),
     ;
 
     companion object {
@@ -2689,6 +2775,18 @@ class SipralStackConfig(
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
      */
     val srtp: Long = 0,
+    /**
+     * What every call on this stack does about ICE unless
+     * `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
+     * or zero for this build's own built-in default, which is
+     * `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
+     * for the reason `docs/06-nat.md` tabulates. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     *
+     * Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val ice: Long = 0,
 )
 
 /**
@@ -2934,6 +3032,21 @@ class SipralCallConfig(
      * unmoved.
      */
     val codecs: String? = null,
+    /**
+     * What this call does about ICE, overriding
+     * `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
+     * take the stack's own setting. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     *
+     * Read only for a call this stack describes the media of —
+     * `media_address` set — for the reason `srtp` gives: a call placed
+     * with `sdp` is a session the application wrote, and the candidates
+     * in it are already the application's own to write or not.
+     *
+     * Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+     * unmoved.
+     */
+    val ice: Long = 0,
 )
 
 /**
@@ -3306,7 +3419,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -3329,9 +3442,9 @@ internal object SipralNative {
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
-    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, call: LongArray, nowMs: Long): Int
+    external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
-    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, nowMs: Long): Int
+    external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, nowMs: Long): Int
     external fun sipral_call_answer(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_answer_media(stack: Long, call: Long, mediaAddress: ByteArray, nowMs: Long): Int
     external fun sipral_call_reject(stack: Long, call: Long, code: Long, nowMs: Long): Int
@@ -3343,9 +3456,9 @@ internal object SipralNative {
     external fun sipral_call_reject_session(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_send_dtmf(stack: Long, call: Long, digits: ByteArray, via: Long, durationMs: Long, nowMs: Long): Int
     external fun sipral_call_transfer(stack: Long, call: Long, target: ByteArray, nowMs: Long): Int
-    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, consultation: LongArray, nowMs: Long): Int
+    external fun sipral_call_consult(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, consultation: LongArray, nowMs: Long): Int
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
-    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, placed: LongArray, nowMs: Long): Int
+    external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
@@ -3361,7 +3474,7 @@ internal object SipralNative {
     external fun sipral_media_statistics(media: Long, nowMs: Long, stats: LongArray): Int
     external fun sipral_media_receive(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
     external fun sipral_media_playback(media: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
-    external fun sipral_media_capture(media: Long, samples: ShortArray, packet: Long): Int
+    external fun sipral_media_capture(media: Long, nowMs: Long, samples: ShortArray, packet: Long): Int
     external fun sipral_media_poll_rtcp(media: Long, nowMs: Long, packet: Long): Int
     external fun sipral_media_poll_transmit(media: Long, nowMs: Long, packet: Long): Int
     external fun sipral_stack_poll_farewell(stack: Long, call: LongArray, outPacket: Long): Int
@@ -3520,6 +3633,24 @@ object Sipral {
      * `sipral_media_poll_transmit`; see there.
      */
     const val FEATURE_DTLS_SRTP: Long = 128
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. ICE in the full role (RFC 8445), with
+     * consent freshness (RFC 7675) and the SDP attributes of RFC 8839: a
+     * call's media path is chosen by checking it rather than taken from what
+     * the signalling said.
+     *
+     * Behind a compile-time feature for the reason DTLS-SRTP is, and off by
+     * policy even where it is compiled in — `docs/06-nat.md` tabulates what
+     * it costs on the wire and why it buys nothing against a PBX that learns
+     * the caller's address from the media it receives. Both `SIPRAL_ICE_OFFERED`
+     * and `SIPRAL_ICE_REQUIRED` keep their numbers in a build without it, and
+     * naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+     *
+     * An application that sets one of those policies must also drain
+     * `sipral_media_poll_transmit`; see there.
+     */
+    const val FEATURE_ICE: Long = 256
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -3759,7 +3890,7 @@ object Sipral {
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -4350,7 +4481,7 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val callSlot = LongArray(1)
-        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, callSlot, nowMs))
+        check(SipralNative.sipral_call_place(stack, account, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, callSlot, nowMs))
         return callSlot[0]
     }
 
@@ -4425,7 +4556,7 @@ object Sipral {
         val configMediaAddress = config.mediaAddress?.toByteArray(Charsets.UTF_8)
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
-        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, nowMs))
+        check(SipralNative.sipral_call_ring_media(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, nowMs))
     }
 
     /**
@@ -4692,7 +4823,7 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val consultationSlot = LongArray(1)
-        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, consultationSlot, nowMs))
+        check(SipralNative.sipral_call_consult(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, consultationSlot, nowMs))
         return consultationSlot[0]
     }
 
@@ -4745,7 +4876,7 @@ object Sipral {
         val (configHeadersBytes, configHeadersLengths) = SipralHeader.packed(config.headers)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
         val placedSlot = LongArray(1)
-        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, placedSlot, nowMs))
+        check(SipralNative.sipral_call_accept_transfer(stack, call, configTarget, config.sdp, configDestination, config.keepAllForks, configMediaAddress, configHeadersBytes, configHeadersLengths, config.srtp, config.transport, configCodecs, config.ice, placedSlot, nowMs))
         return placedSlot[0]
     }
 
@@ -5048,9 +5179,17 @@ object Sipral {
      * whole one is what a peer hears as a stutter.
      *
      * A `len` of zero in the packet means the frame was deliberately not sent:
-     * this end is holding the far end, or silence suppression swallowed it.
-     * The RTP timestamp moves by a frame either way, because RFC 3550 §5.1
-     * makes it a measure of time rather than of packets.
+     * this end is holding the far end, silence suppression swallowed it, or
+     * ICE has not chosen a path for this call yet. The RTP timestamp moves by
+     * a frame in the first two cases, because RFC 3550 §5.1 makes it a
+     * measure of time rather than of packets; in the third nothing is
+     * encoded at all, since there is no packet for the timestamp to belong
+     * to and a codec that carries state would have moved it for nothing.
+     *
+     * `now_ms` is read as the stack reads it and moves nothing, as with every
+     * media entry point. It is what tells ICE that traffic went out on the
+     * pair it chose, which is what RFC 8445 §11 lets it stop sending
+     * keepalives for.
      *
      * Safety
      *
@@ -5059,8 +5198,8 @@ object Sipral {
      * long it is and whose buffers are writable for the capacities beside
      * them.
      */
-    fun mediaCapture(media: Long, samples: ShortArray, packet: Long) {
-        check(SipralNative.sipral_media_capture(media, samples, packet))
+    fun mediaCapture(media: Long, nowMs: Long, samples: ShortArray, packet: Long) {
+        check(SipralNative.sipral_media_capture(media, nowMs, samples, packet))
     }
 
     /**

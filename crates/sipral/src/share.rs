@@ -238,6 +238,8 @@ mod tests {
                 clock: WallClock::from_unix(now, 1_700_000_000, 0),
                 #[cfg(feature = "dtls")]
                 handshake: None,
+                #[cfg(feature = "ice")]
+                ice: None,
                 now,
             },
         )

@@ -241,6 +241,53 @@ public enum SipralSrtp : uint
 }
 
 /// <summary>
+/// What a call or a stack says about ICE. Names for
+/// `sipral_stack_config_t::ice` (the stack's default) and
+/// `sipral_call_config_t::ice` (a per-call override).
+///
+/// Zero is not one of them, and it is not the same absence on the two
+/// structs: on the stack it means this build's own built-in default
+/// (`IcePolicy::default()`, which is SipralIce.Off); on a call it
+/// means the stack's own setting, whatever that came to.
+///
+/// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
+/// `offer_rtcp_mux` says, because an ICE stream with a second component
+/// needs a second address and this ABI names one.
+/// </summary>
+public enum SipralIce : uint
+{
+    /// <summary>
+    /// IcePolicy::Off: do not offer it, and do not answer a peer that
+    /// does. The default, and `docs/06-nat.md` says why at length.
+    /// </summary>
+    Off = 1,
+    /// <summary>
+    /// IcePolicy::Offered: offer it, and use it against a peer that
+    /// offers it back.
+    ///
+    /// A peer that does not — an Asterisk with `ice_support=no`, which is
+    /// its default — is answered without it and the call runs on the
+    /// signalled address and symmetric RTP, exactly as it would have. An
+    /// application that names this **must** drain
+    /// sipral_media_poll_transmit: a check that never leaves is a
+    /// call that never chooses a path.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_ICE`.
+    /// </summary>
+    Offered = 2,
+    /// <summary>
+    /// IcePolicy::Required: offer it, and let no stream on this call
+    /// carry audio on a path ICE did not check.
+    ///
+    /// Each of the three ways a peer can fail to do ICE ends the call's
+    /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
+    /// back. That is the whole difference between this and `Offered`.
+    /// </summary>
+    Required = 3,
+}
+
+/// <summary>
 /// One codec this ABI has a number for. Names for every member that says
 /// which.
 ///
@@ -413,6 +460,19 @@ public enum SipralMediaFault : uint
     /// Something else the layer below reported and this ABI has no word for.
     /// </summary>
     Other = 8,
+    /// <summary>
+    /// ICE could not carry this call: the far end described none this
+    /// stack could use and the policy was `SIPRAL_ICE_REQUIRED`, the far
+    /// end took `a=rtcp-mux` out of an answer to an ICE offer, or consent
+    /// to send on the pair that was chosen was withdrawn part-way through
+    /// (RFC 7675 §5).
+    ///
+    /// A code of its own because it is the one an application can act on
+    /// differently: the call is up and the signalling is sound, and what
+    /// changed is only that no path could be checked. A deployment with a
+    /// non-ICE profile to fall back to falls back here.
+    /// </summary>
+    Ice = 9,
 }
 
 /// <summary>
@@ -830,6 +890,28 @@ public enum SipralEventKind : uint
     /// of it.
     /// </summary>
     MediaSecured = 32,
+    /// <summary>
+    /// `sipral_media_event_t`: ICE chose the path this call's media takes
+    /// (RFC 8445 §8.1.1), and audio can move.
+    ///
+    /// The moment the connectivity checks stop, and the answer to "why is
+    /// this call sending to an address the signalling never named" —
+    /// which, behind a NAT, is the ordinary outcome rather than a fault.
+    /// It arrives again if a nomination of higher priority replaces the
+    /// pair part-way through the call.
+    ///
+    /// The two addresses of the pair are deliberately not carried here,
+    /// for the reason `SIPRAL_EVENT_KIND_MEDIA_SECURED` gives about its
+    /// own: every packet `sipral_media_capture` and
+    /// `sipral_media_poll_transmit` hand back already names the
+    /// destination to send it to, so an application that puts this
+    /// stack's media on a socket at all has the address the moment it
+    /// matters. `sipral_media_statistics` does not repeat it either.
+    ///
+    /// A call not using ICE never emits it, and that is most calls: the
+    /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
+    /// </summary>
+    MediaPathChosen = 33,
 }
 
 /// <summary>
@@ -1952,6 +2034,18 @@ public struct SipralStackConfig
     /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
     /// </summary>
     public uint Srtp;
+    /// <summary>
+    /// What every call on this stack does about ICE unless
+    /// `sipral_call_config_t::ice` says otherwise for it: a `SipralIce`,
+    /// or zero for this build's own built-in default, which is
+    /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
+    /// for the reason `docs/06-nat.md` tabulates. Any other value is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+    ///
+    /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint Ice;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2459,6 +2553,21 @@ public struct SipralCallConfig
     /// How many bytes of it.
     /// </summary>
     public nuint CodecsLen;
+    /// <summary>
+    /// What this call does about ICE, overriding
+    /// `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
+    /// take the stack's own setting. Any other value is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+    ///
+    /// Read only for a call this stack describes the media of —
+    /// `media_address` set — for the reason `srtp` gives: a call placed
+    /// with `sdp` is a session the application wrote, and the candidates
+    /// in it are already the application's own to write or not.
+    ///
+    /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+    /// unmoved.
+    /// </summary>
+    public uint Ice;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4060,7 +4169,7 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_media_playback(ulong media, short[] samples, nuint capacity, out nuint written, out uint source);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_media_capture(ulong media, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
+    internal static extern SipralStatus sipral_media_capture(ulong media, ulong nowMs, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_poll_rtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet);
@@ -4312,6 +4421,24 @@ public static class Sipral
     /// `sipral_media_poll_transmit`; see there.
     /// </summary>
     public const uint FeatureDtlsSrtp = 128;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. ICE in the full role (RFC 8445), with
+    /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839: a
+    /// call's media path is chosen by checking it rather than taken from what
+    /// the signalling said.
+    ///
+    /// Behind a compile-time feature for the reason DTLS-SRTP is, and off by
+    /// policy even where it is compiled in — `docs/06-nat.md` tabulates what
+    /// it costs on the wire and why it buys nothing against a PBX that learns
+    /// the caller's address from the media it receives. Both `SIPRAL_ICE_OFFERED`
+    /// and `SIPRAL_ICE_REQUIRED` keep their numbers in a build without it, and
+    /// naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    ///
+    /// An application that sets one of those policies must also drain
+    /// `sipral_media_poll_transmit`; see there.
+    /// </summary>
+    public const uint FeatureIce = 256;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -5855,9 +5982,17 @@ public static class Sipral
     /// whole one is what a peer hears as a stutter.
     ///
     /// A `len` of zero in the packet means the frame was deliberately not sent:
-    /// this end is holding the far end, or silence suppression swallowed it.
-    /// The RTP timestamp moves by a frame either way, because RFC 3550 §5.1
-    /// makes it a measure of time rather than of packets.
+    /// this end is holding the far end, silence suppression swallowed it, or
+    /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
+    /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
+    /// measure of time rather than of packets; in the third nothing is
+    /// encoded at all, since there is no packet for the timestamp to belong
+    /// to and a codec that carries state would have moved it for nothing.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point. It is what tells ICE that traffic went out on the
+    /// pair it chose, which is what RFC 8445 §11 lets it stop sending
+    /// keepalives for.
     ///
     /// Safety
     ///
@@ -5866,9 +6001,9 @@ public static class Sipral
     /// long it is and whose buffers are writable for the capacities beside
     /// them.
     /// </summary>
-    public static void MediaCapture(ulong media, short[] samples, ref SipralMediaPacket packet)
+    public static void MediaCapture(ulong media, ulong nowMs, short[] samples, ref SipralMediaPacket packet)
     {
-        Check(NativeMethods.sipral_media_capture(media, samples, (nuint)samples.Length, ref packet));
+        Check(NativeMethods.sipral_media_capture(media, nowMs, samples, (nuint)samples.Length, ref packet));
     }
 
     /// <summary>

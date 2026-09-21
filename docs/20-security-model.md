@@ -371,7 +371,11 @@ this end directly rather than through the line's own proxy.
   which narrows the window to the same race symmetric RTP already runs: an
   attacker has to beat the far end's first flight rather than pick its
   moment. Closing it needs the candidate exchange of ICE, which this stack
-  negotiates and does not assume (`docs/06-nat.md`).
+  negotiates and does not assume (`docs/06-nat.md`) — and which is now there
+  to be asked for: on a call whose checks have chosen a pair, the latch is
+  bypassed and the agent's signed transaction is what says whose datagram
+  this is. On every call that has not, which is every call at the default
+  policy, the latch is still the whole of the answer.
 
 ## The unsafe surface
 
@@ -431,15 +435,27 @@ adversarial bytes; the codec and DSP layer downstream of RTP does not yet, and
 has not had the same kind of dedicated adversarial reading the parser and the
 transaction and dialog stores already went through.
 
-**`sipral-nat`.** The wire formats are fuzzed — `stun` and `turn` targets
-exist and exercise the message parsers and their accessors — but the state
-machines that act on what those parsers decode, in particular the TURN client
-(`crates/sipral-nat/src/turn/client.rs`, 2,893 lines) and the full ICE agent,
-have not had that same reading. It costs nothing today: `docs/06-nat.md` says
-outright that "at this commit `sipral-nat` is linked by nothing — not by
-`sipral-ua`, not by the facade, not by the C ABI," so none of it is reachable
-from a live call regardless of how it is written. The reading has to happen
-before that stops being true, not after.
+**`sipral-nat`.** The wire formats are fuzzed — `stun`, `turn` and `ice`
+targets exist and exercise the message parsers, their accessors and the
+agent's own handling of a datagram — but the state machines that act on what
+those parsers decode have not had a dedicated adversarial reading.
+
+**This stopped costing nothing.** Until the ICE seam, the answer here was that
+`sipral-nat` was linked by nothing and none of it was reachable from a live
+call regardless of how it was written. That is no longer true of the ICE
+agent: with `IcePolicy` anything but `Off`, the agent binds the call's media
+socket and `handle_datagram` runs on bytes from an unauthenticated stranger
+before SRTP and before the DTLS handshake — it is now the *first* code in this
+stack that adversarial input on the media path reaches. The `ice` fuzz target
+exists for exactly that and has run without a crash, and the agent's own
+authenticator refuses anything not signed under the short-term credential
+(`stun/message.rs`, `constant_time_eq`); what has not happened is a person
+reading the checklist and nomination machinery with an attacker's eye. The
+default is `Off`, so a deployment that has not asked for ICE is where it was.
+
+The TURN client (`crates/sipral-nat/src/turn/client.rs`, 2,893 lines) is still
+reachable from nothing: the seam gathers host candidates only, and configures
+no TURN server. That reading has to happen before the step that adds one.
 
 **`RawMessage::validate`'s absence from the live dispatch path**, described
 above under parsing, is a gap in wiring rather than in reading: the code that

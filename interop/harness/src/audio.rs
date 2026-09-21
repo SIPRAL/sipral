@@ -187,7 +187,8 @@ impl Media {
             } else if let Some(silence) = samples.get_mut(..frame) {
                 silence.fill(0);
             }
-            if let Ok(Some(datagram)) = session.capture(samples.get(..frame).unwrap_or_default())
+            if let Ok(Some(datagram)) =
+                session.capture(samples.get(..frame).unwrap_or_default(), now)
                 && self
                     .socket
                     .send_to(datagram.payload, datagram.destination)

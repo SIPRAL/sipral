@@ -138,6 +138,48 @@ pub enum MediaError {
     /// flowing as though it had.
     #[cfg(feature = "dtls")]
     DtlsFingerprintChanged,
+    /// The ICE agent refused what it was given: an address RFC 8445 §5.1.1.1
+    /// rules out of a candidate, credentials outside RFC 8839 §5.4's shape,
+    /// or a peer that changed its credentials without restarting ICE.
+    ///
+    /// The cause is carried rather than flattened, because the three are
+    /// different faults: the first is this end's own configuration, the
+    /// second is a peer that wrote a fragment nobody can use, and the third
+    /// is a peer that restarted ICE without saying so.
+    #[cfg(feature = "ice")]
+    Ice(sipral_nat::ice::IceError),
+    /// The call is set to [`IcePolicy::Required`] and the far end described
+    /// no usable ICE: no attributes at all, candidates none of which can be
+    /// paired, or a description whose default destinations are missing from
+    /// its own candidate lines (RFC 8839 §4.2.5, an ICE mismatch).
+    ///
+    /// Under [`IcePolicy::Offered`] every one of those is a fallback to the
+    /// signalled address instead, which is the whole difference between the
+    /// two and the reason they are separate settings.
+    ///
+    /// [`IcePolicy::Required`]: crate::IcePolicy::Required
+    /// [`IcePolicy::Offered`]: crate::IcePolicy::Offered
+    #[cfg(feature = "ice")]
+    IceRequired,
+    /// The call offered ICE and did not agree to multiplex its control
+    /// traffic, so the stream has an RTCP component whose address this end
+    /// cannot name.
+    ///
+    /// The mirror of [`MediaError::DtlsNeedsRtcpMux`], and refused for the
+    /// same shape of reason: an offer written under an ICE policy always asks
+    /// for `a=rtcp-mux`, so this is a peer that took the attribute out, and
+    /// an offer that named a second component without a second address would
+    /// fail this stack's own mismatch check.
+    #[cfg(feature = "ice")]
+    IceNeedsRtcpMux,
+    /// Consent to send on the pair ICE selected is gone: no authenticated
+    /// response for thirty seconds, or a 403 revoking it (RFC 7675 §5).
+    ///
+    /// Nothing more may be sent on that pair and the same credentials may not
+    /// be used on it again. This stack has no re-offer of its own yet, so the
+    /// only remedy available to an application is to end the call.
+    #[cfg(feature = "ice")]
+    IcePathLost,
     /// The call asked for SRTP and would have carried audio without it: a
     /// plain offer arriving at a call set to [`SrtpPolicy::Required`], or a
     /// plain re-offer inside one.
@@ -307,9 +349,64 @@ impl From<std::io::Error> for MediaError {
     }
 }
 
+impl MediaError {
+    /// The refusals about how a call is secured and how its path is chosen.
+    ///
+    /// Lifted out of [`fmt::Display`] because the one match there had grown
+    /// past what a reader holds at once, and because these are the group that
+    /// travels together: every one of them is a call that could have carried
+    /// audio and was not allowed to, and every one of them is one fixed
+    /// sentence. `None` for everything else, which the match below still
+    /// answers.
+    fn about_the_path(&self) -> Option<&'static str> {
+        Some(match self {
+            #[cfg(feature = "dtls")]
+            Self::DtlsFingerprint => "the peer's a=fingerprint could not be read",
+            #[cfg(feature = "dtls")]
+            Self::DtlsHandshake => "the DTLS handshake produced no keys",
+            #[cfg(feature = "dtls")]
+            Self::DtlsClosed => "the far end closed the DTLS connection before it was keyed",
+            #[cfg(feature = "dtls")]
+            Self::DtlsProfile => "the handshake agreed an SRTP profile this build cannot open",
+            #[cfg(feature = "dtls")]
+            Self::DtlsNeedsRtcpMux => {
+                "DTLS-SRTP here needs RTP and RTCP on one port, and the answer did not"
+            }
+            #[cfg(feature = "dtls")]
+            Self::DtlsFingerprintChanged => {
+                "the far end named a different certificate part-way through the call"
+            }
+            #[cfg(feature = "ice")]
+            Self::IceRequired => {
+                "this call requires ICE and the far end described none it could use"
+            }
+            #[cfg(feature = "ice")]
+            Self::IceNeedsRtcpMux => {
+                "ICE here needs RTP and RTCP on one port, and the answer did not"
+            }
+            #[cfg(feature = "ice")]
+            Self::IcePathLost => "consent to send on the path ICE selected has been withdrawn",
+            Self::SrtpRequired => "this call requires SRTP and the far end described none",
+            Self::UnusableKeying => "the crypto line asks for terms this build will not be held to",
+            _ => return None,
+        })
+    }
+}
+
+/// What a variant with no sentence of its own would print.
+///
+/// Nothing reaches it: [`MediaError::about_the_path`] answers for every arm
+/// the match in [`fmt::Display`] does not, and
+/// `every_media_error_says_something_of_its_own` is the test that keeps that
+/// true as variants are added. It exists because a `Display` that panicked
+/// would turn a log line into an abort.
+const UNNAMED: &str = "this call's media was refused and this build has no sentence for why";
+
 impl fmt::Display for MediaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "ice")]
+            Self::Ice(error) => write!(f, "ice: {error}"),
             Self::UnsupportedCodec { name } => {
                 write!(f, "this build has no codec called {name}; it has ")?;
                 for (index, codec) in Codec::ALL.iter().enumerate() {
@@ -346,32 +443,6 @@ impl fmt::Display for MediaError {
             Self::DtlsRole => {
                 f.write_str("the two a=setup values do not say which end starts the handshake")
             }
-            #[cfg(feature = "dtls")]
-            Self::DtlsFingerprint => f.write_str("the peer's a=fingerprint could not be read"),
-            #[cfg(feature = "dtls")]
-            Self::DtlsHandshake => f.write_str("the DTLS handshake produced no keys"),
-            #[cfg(feature = "dtls")]
-            Self::DtlsClosed => {
-                f.write_str("the far end closed the DTLS connection before it was keyed")
-            }
-            #[cfg(feature = "dtls")]
-            Self::DtlsProfile => {
-                f.write_str("the handshake agreed an SRTP profile this build cannot open")
-            }
-            #[cfg(feature = "dtls")]
-            Self::DtlsNeedsRtcpMux => {
-                f.write_str("DTLS-SRTP here needs RTP and RTCP on one port, and the answer did not")
-            }
-            #[cfg(feature = "dtls")]
-            Self::DtlsFingerprintChanged => {
-                f.write_str("the far end named a different certificate part-way through the call")
-            }
-            Self::SrtpRequired => {
-                f.write_str("this call requires SRTP and the far end described none")
-            }
-            Self::UnusableKeying => {
-                f.write_str("the crypto line asks for terms this build will not be held to")
-            }
             #[cfg(feature = "opus")]
             Self::Codec(error) => write!(f, "codec: {error}"),
             Self::PacketTooLong { need, got } => {
@@ -405,8 +476,77 @@ impl fmt::Display for MediaError {
                 f.write_str("the recording stopped: the call moved to a codec at another rate")
             }
             Self::Signalling(error) => write!(f, "user agent: {error}"),
+            // every refusal about how a call is secured and how its path is
+            // chosen, which `about_the_path` holds because the match here had
+            // grown past what a reader holds at once
+            other => f.write_str(other.about_the_path().unwrap_or(UNNAMED)),
         }
     }
 }
 
 impl core::error::Error for MediaError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{MediaError, UNNAMED};
+
+    /// The dead branch, held dead.
+    ///
+    /// [`MediaError::about_the_path`] answers for every arm the match in
+    /// `Display` does not, so `UNNAMED` can only be printed by a variant that
+    /// was added to neither. This is what notices, rather than a caller
+    /// reading a log line that explains nothing.
+    #[test]
+    fn every_media_error_says_something_of_its_own() {
+        let refusals = [
+            MediaError::NoCodecs,
+            MediaError::NoCommonCodec,
+            MediaError::StreamRefused,
+            MediaError::NoDescription,
+            MediaError::NoSuchCall,
+            MediaError::NoDtlsSrtp,
+            MediaError::SrtpRequired,
+            MediaError::UnusableKeying,
+            MediaError::NoDtmf,
+            MediaError::TooManyDigits,
+            MediaError::NotRecording,
+            MediaError::AlreadyRecording,
+            MediaError::CodecChanged,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsIdentity,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsRole,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsFingerprint,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsHandshake,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsClosed,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsProfile,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsNeedsRtcpMux,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsFingerprintChanged,
+            #[cfg(feature = "ice")]
+            MediaError::Ice(sipral_nat::ice::IceError::NoUsableHost),
+            #[cfg(feature = "ice")]
+            MediaError::IceRequired,
+            #[cfg(feature = "ice")]
+            MediaError::IceNeedsRtcpMux,
+            #[cfg(feature = "ice")]
+            MediaError::IcePathLost,
+        ];
+        let mut said: Vec<String> = Vec::new();
+        for refusal in refusals {
+            let sentence = refusal.to_string();
+            assert_ne!(sentence, UNNAMED, "{refusal:?} has no sentence of its own");
+            assert!(!sentence.is_empty(), "{refusal:?} says nothing at all");
+            assert!(
+                !said.contains(&sentence),
+                "{refusal:?} says what another refusal already said: {sentence}"
+            );
+            said.push(sentence);
+        }
+    }
+}

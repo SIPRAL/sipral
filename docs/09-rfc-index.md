@@ -91,11 +91,11 @@ by no call yet.
 | 5389 | STUN, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
 | 8656 | TURN | sipral-nat | phase 2; written, not linked |
 | 8445 | ICE, lite role | sipral-nat | phase 2; written, not linked |
-| 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat | phase 4; written, not linked |
-| 7675 | STUN consent freshness, for a session ICE established | sipral-nat | phase 4; written, not linked |
+| 8445 | ICE, full role: gathering, checks, nomination, role conflicts, restarts. Off by default on a desktop | sipral-nat, sipral | phase 4; host candidates only, no STUN or TURN server |
+| 7675 | STUN consent freshness, for a session ICE established | sipral-nat, sipral | phase 4 |
 | 5245 | ICE, previous version, for compatibility | sipral-nat | phase 2; written, not linked |
-| 8863 | ICE patiently awaiting connectivity: a checklist with nothing left to check is waited on, not failed | sipral-nat | phase 4; written, not linked |
-| 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`, `a=ice-pacing`, `a=ice-mismatch`); `a=remote-candidates` waits for an offer that would carry one | sipral-nat | phase 2; written, not linked |
+| 8863 | ICE patiently awaiting connectivity: a checklist with nothing left to check is waited on, not failed | sipral-nat, sipral | phase 4 |
+| 8839 | SDP offer/answer procedures for ICE (`a=ice-lite`, `a=candidate`, `a=ice-pacing`, `a=ice-mismatch`); `a=remote-candidates` waits for an offer that would carry one | sipral-nat, sipral, sipral-ua | phase 2; the facade writes the attributes and the user agent carries them onto an answer it writes itself |
 | 7362 | Latching: hosted NAT traversal for media | sipral-rtp | phase 1 |
 
 ## Deliberately not implemented

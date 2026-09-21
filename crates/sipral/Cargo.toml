@@ -39,9 +39,20 @@ publish = true
 # any offer this stack writes, `Capabilities::srtp_keying` says so before a
 # call is placed, and a peer that offers `UDP/TLS/RTP/SAVP` has its stream
 # refused rather than answered with keys that cannot arrive.
-default = ["opus", "dtls"]
+#
+# `ice` is the third, and it is off the same pattern again. It brings nothing
+# new into the build — `sipral-nat` is already here for `dtls` — so the cost
+# it is weighed against is not size but the wire: 143 bytes per candidate in a
+# body `docs/06-nat.md` argues has to fit a datagram, and a round of checks
+# before the first audio packet. On by default all the same, because what it
+# defaults *to* is [`IcePolicy::Off`]: the feature decides whether an
+# application can ask for ICE at all, and the policy decides whether this call
+# does. A build that must not carry the agent at all turns it off, and then
+# `Capabilities` says so before a call is placed.
+default = ["opus", "dtls", "ice"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
+ice = ["dep:sipral-nat"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a

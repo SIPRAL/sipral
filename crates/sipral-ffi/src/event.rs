@@ -388,6 +388,26 @@ event_kinds! {
         /// whether to hang it up is a decision with a person on the other end
         /// of it.
         32 = MediaSecured, c"media secured";
+        /// `sipral_media_event_t`: ICE chose the path this call's media takes
+        /// (RFC 8445 §8.1.1), and audio can move.
+        ///
+        /// The moment the connectivity checks stop, and the answer to "why is
+        /// this call sending to an address the signalling never named" —
+        /// which, behind a NAT, is the ordinary outcome rather than a fault.
+        /// It arrives again if a nomination of higher priority replaces the
+        /// pair part-way through the call.
+        ///
+        /// The two addresses of the pair are deliberately not carried here,
+        /// for the reason `SIPRAL_EVENT_KIND_MEDIA_SECURED` gives about its
+        /// own: every packet `sipral_media_capture` and
+        /// `sipral_media_poll_transmit` hand back already names the
+        /// destination to send it to, so an application that puts this
+        /// stack's media on a socket at all has the address the moment it
+        /// matters. `sipral_media_statistics` does not repeat it either.
+        ///
+        /// A call not using ICE never emits it, and that is most calls: the
+        /// policy is `SIPRAL_ICE_OFF` unless something asked otherwise.
+        33 = MediaPathChosen, c"media path chosen";
     }
 }
 
@@ -1736,6 +1756,8 @@ pub(crate) fn media(
             payload.fault = fault_of(error) as u32;
             SipralEventKind::MediaFailed
         }
+        #[cfg(feature = "ice")]
+        MediaEvent::PathChosen { .. } => SipralEventKind::MediaPathChosen,
         #[cfg(feature = "dtls")]
         MediaEvent::Secured { suite, .. } => {
             // the address the handshake came from is deliberately not carried
@@ -2164,7 +2186,8 @@ mod tests {
         assert_eq!(SipralEventKind::Notified as u32, 30);
         assert_eq!(SipralEventKind::CallAnnounced as u32, 31);
         assert_eq!(SipralEventKind::MediaSecured as u32, 32);
-        assert_eq!(SipralEventKind::ALL.len(), 31, "and there are no others");
+        assert_eq!(SipralEventKind::MediaPathChosen as u32, 33);
+        assert_eq!(SipralEventKind::ALL.len(), 32, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2226,7 +2249,7 @@ mod tests {
         // one number is still held, and the loop this used to be is gone
         // with the second: 16, for audio devices
         assert_eq!(name(16), None, "16 is reserved, not live");
-        assert_eq!(name(33), None, "past the last kind");
+        assert_eq!(name(34), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

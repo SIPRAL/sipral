@@ -12,6 +12,43 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **ICE in the full role, joined to a call.** The agent in `sipral-nat` — RFC
+  8445's gathering, checklists, pacing, nomination, role conflicts, restarts,
+  keepalives and RFC 7675's consent — has been written and tested since the
+  week before and reached by nothing. It is reached now: `IcePolicy` on
+  `CodecCatalog` and `SIPRAL_ICE_OFF` / `_OFFERED` / `_REQUIRED` on
+  `sipral_stack_config_t` and `sipral_call_config_t`, off by default in every
+  one of them for the reason `docs/06-nat.md` tabulates. An offer under it
+  carries `a=ice-ufrag`, `a=ice-pwd`, `a=ice-options`, one host candidate and
+  a session-level `a=ice-pacing`; a connectivity check arriving on the media
+  socket reaches the agent rather than being read as a broken RTP packet and
+  thrown away; and nothing this end builds goes out before the agent has a
+  path for it. `MediaEvent::PathChosen` and
+  `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN` (33) say when there is one, and
+  `MediaSession::ice_path` answers it at any other moment.
+
+  What the switch turns on is host candidates and nothing else. With no server
+  to gather from, gathering finishes before the call that started it returns,
+  which is what keeps an offer one pass of work and is why neither the Rust
+  API nor the C ABI grew a two-phase description. Server-reflexive candidates
+  are the next step and change none of the above.
+
+  **A peer that does not do ICE keeps its call.** No ICE attributes, no usable
+  candidate, or a description whose own default destinations are missing from
+  its candidate lines each drop the agent and leave the stream on `c=`/`m=`
+  and symmetric RTP — RFC 8445 §2.6, and without it turning ICE on against an
+  Asterisk with `ice_support=no`, which is its default, would turn a call that
+  works into a call with no audio. `IcePolicy::Required` is for a deployment
+  that would rather have neither and ends the media with
+  `MediaError::IceRequired` instead.
+
+- **`sipral_nat::ice::IceAgent::route`**, which answers where application data
+  for a component would go without sending any and without counting as traffic
+  for the keepalive timer. It exists for a caller whose producer borrows its
+  own buffer: one that cannot learn there is nowhere to send by trying, since
+  by then it has built a frame it must throw away or taken a handshake record
+  out of a flight it cannot put back.
+
 - **`sipral-io-common`**, holding the three parts of an audio device backend
   that are not about any device: the lock-free ring where the thread the
   system will not wait for meets an ordinary one, the gate that says when that
@@ -33,6 +70,25 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the agent than several hundred thousand random runs did.
 
 ### Changed
+
+- **`sipral_media_capture` takes `now_ms`**, in the position its three
+  siblings put it and read exactly as they read theirs. ICE has to be told
+  that traffic went out on the pair it chose — RFC 8445 §11 is what lets it
+  stop sending keepalives — and the capture path was the one producer with no
+  clock at all. `MediaSession::capture` and `MediaSession::poll_transmit` take
+  one for the same reason. The ABI's major is 0 and `docs/08-ffi.md` says in
+  plain words that it is not frozen; this is the kind of change that is free
+  now and impossible later.
+
+- **An answer the user agent writes itself no longer withdraws ICE from a call
+  that had it.** `sipral-ua` answers a hold, a resume and a peer moving its
+  address without handing the description up, and it carried forward
+  `rtcp-mux`, `ptime` and `maxptime` and nothing else. RFC 8839 §4.4 wants the
+  username fragment, the password and the candidates on every description of a
+  session, so an answer without them reads as ICE being withdrawn mid-call —
+  which takes a checked path away from a call that had one, silently, from a
+  layer that has never read a candidate. Exactly the failure the function's own
+  documentation already described for multiplexing.
 
 - **`sipral_nat::ice::Received::Data` and `sipral_nat::turn::Input::Data` now
   answer with a position rather than a borrow**, and both types have lost

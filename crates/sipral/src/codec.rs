@@ -40,6 +40,7 @@ use sipral_media::opus;
 use sipral_media::{g711, g722};
 
 use crate::error::MediaError;
+use crate::ice::IcePolicy;
 use crate::keying::{self, SrtpPolicy};
 
 /// The packetisation this stack offers unless told otherwise. Twenty
@@ -337,6 +338,7 @@ pub struct CodecCatalog {
     dtmf: bool,
     rtcp_mux: bool,
     srtp: SrtpPolicy,
+    ice: IcePolicy,
 }
 
 impl CodecCatalog {
@@ -358,6 +360,7 @@ impl CodecCatalog {
             dtmf: true,
             rtcp_mux: false,
             srtp: SrtpPolicy::NotOffered,
+            ice: IcePolicy::Off,
         }
     }
 
@@ -463,6 +466,29 @@ impl CodecCatalog {
         self.srtp
     }
 
+    /// Say what this call does about ICE.
+    ///
+    /// Per call rather than per engine, and off by default: see [`IcePolicy`]
+    /// for both halves of the reason.
+    ///
+    /// A policy that offers ICE also asks for RFC 5761 multiplexing, whatever
+    /// [`CodecCatalog::with_rtcp_mux`] was told and in the same way a DTLS
+    /// policy does. Without it the stream has a second ICE component, and a
+    /// facade that knows one local address cannot give the second one a
+    /// candidate — an offer written that way fails this stack's own mismatch
+    /// check (RFC 8839 §4.2.5) before any peer sees it.
+    #[must_use]
+    pub const fn with_ice(mut self, ice: IcePolicy) -> Self {
+        self.ice = ice;
+        self
+    }
+
+    /// What this call does about ICE.
+    #[must_use]
+    pub const fn ice(&self) -> IcePolicy {
+        self.ice
+    }
+
     /// What is offered, in the order it is offered.
     #[must_use]
     pub fn codecs(&self) -> &[Codec] {
@@ -511,7 +537,9 @@ impl CodecCatalog {
             .collect();
         MediaCapabilities::new(codecs)
             .with_dtmf(self.dtmf)
-            .with_rtcp_mux(self.rtcp_mux)
+            // an ICE stream has one component, and that is what asking for
+            // multiplexing makes true
+            .with_rtcp_mux(self.rtcp_mux || self.ice.offers())
     }
 
     /// The same, with the keying a description under this policy carries.

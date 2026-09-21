@@ -508,7 +508,7 @@ fn playback_takes_one_frame_per_frame_of_time_however_often_the_loop_turns() {
         let rate = session.sample_rate();
         for _ in 0..10 {
             crate::audio::tone(&mut samples, &mut phase, rate);
-            if let Ok(Some(datagram)) = session.capture(&samples) {
+            if let Ok(Some(datagram)) = session.capture(&samples, Instant::now()) {
                 burst.push((datagram.destination, datagram.payload.to_vec()));
             }
         }

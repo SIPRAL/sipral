@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sipral::{CallMedia, CodecCatalog, SrtpPolicy};
+use sipral::{CallMedia, CodecCatalog, IcePolicy, SrtpPolicy};
 use sipral_core::endpoint::TransportId;
 use sipral_core::msg::{HeaderName, StatusCode, Uri};
 use sipral_ua::{ForkPolicy, HeadersFor, OutgoingCall, OutgoingExtras, UaError};
@@ -148,6 +148,19 @@ record! {
         pub codecs: *const c_char,
         /// How many bytes of it.
         pub codecs_len: usize,
+        /// What this call does about ICE, overriding
+        /// `sipral_stack_config_t::ice` for it: a `SipralIce`, or zero to
+        /// take the stack's own setting. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        ///
+        /// Read only for a call this stack describes the media of —
+        /// `media_address` set — for the reason `srtp` gives: a call placed
+        /// with `sdp` is a session the application wrote, and the candidates
+        /// in it are already the application's own to write or not.
+        ///
+        /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
+        /// unmoved.
+        pub ice: u32,
     }
 }
 
@@ -335,9 +348,10 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 fn call_media(
     state: &StackState,
     srtp: Option<SrtpPolicy>,
+    ice: Option<IcePolicy>,
     codecs: Option<&[&str]>,
 ) -> Result<Option<CallMedia>, Fail> {
-    if srtp.is_none() && codecs.is_none() {
+    if srtp.is_none() && ice.is_none() && codecs.is_none() {
         return Ok(None);
     }
     let mut catalog = state.engine.catalog().clone();
@@ -348,6 +362,9 @@ fn call_media(
     }
     if let Some(policy) = srtp {
         catalog = catalog.with_srtp(policy);
+    }
+    if let Some(policy) = ice {
+        catalog = catalog.with_ice(policy);
     }
     Ok(Some(CallMedia::new(catalog, state.media_config())))
 }
@@ -480,13 +497,14 @@ entry! {
         // checked here, before the account is even looked up, so a bad value
         // never reaches the point of building anything
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let ice = crate::media::ice_policy(config.ice, "ice")?;
         let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.accounts.get(account).map_err(handle_failed)?;
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let placed = match call_media(state, srtp, codecs.as_deref())? {
+                    let placed = match call_media(state, srtp, ice, codecs.as_deref())? {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -610,10 +628,11 @@ entry! {
         let config = unsafe { read_versioned(config) }?;
         let local = unsafe { ring_media_address(&config) }?;
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let ice = crate::media::ice_policy(config.ice, "ice")?;
         let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            match call_media(state, srtp, codecs.as_deref())? {
+            match call_media(state, srtp, ice, codecs.as_deref())? {
                 // the stack's own catalogue, untouched: this is what `srtp`
                 // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
@@ -1142,6 +1161,7 @@ entry! {
         // as `sipral_call_place` for a value this ABI names nothing for and
         // for a codec this build has no encoder for
         crate::media::srtp_policy(config.srtp, "srtp")?;
+        crate::media::ice_policy(config.ice, "ice")?;
         unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
@@ -1237,6 +1257,7 @@ entry! {
         }
         let media = unsafe { managed_media(&config) }?;
         let srtp = crate::media::srtp_policy(config.srtp, "srtp")?;
+        let ice = crate::media::ice_policy(config.ice, "ice")?;
         let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
@@ -1260,7 +1281,7 @@ entry! {
                 headers: &headers,
             };
             let placed = if let Some(local) = media {
-                let placed = match call_media(state, srtp, codecs.as_deref())? {
+                let placed = match call_media(state, srtp, ice, codecs.as_deref())? {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -1558,6 +1579,7 @@ a=recvonly\r\n";
             transport: 0,
             codecs: ptr::null(),
             codecs_len: 0,
+            ice: 0,
         }
     }
 
@@ -1615,6 +1637,7 @@ a=recvonly\r\n";
             transport: 0,
             codecs: ptr::null(),
             codecs_len: 0,
+            ice: 0,
         }
     }
 

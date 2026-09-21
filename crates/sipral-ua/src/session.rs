@@ -267,15 +267,34 @@ impl Session {
 /// had not read. A secured call re-offered to a user agent writing its own
 /// answers is the gap `docs/05-media.md` names, and it is a gap rather than a
 /// silence.
+///
+/// **ICE is here, and for exactly the reason the paragraph above gives about
+/// multiplexing.** RFC 8839 §4.4 wants the username fragment, the password
+/// and the candidates on every description of a session; an answer that left
+/// them out is a peer reading that ICE has been withdrawn in the middle of a
+/// call, which takes a checked path away from a call that had one and puts
+/// the media back on whatever the signalling says — silently, and from a
+/// layer that never read a candidate. Copying them forward is safe in a way
+/// copying a key is not: they are this end's own published values, unchanged
+/// for the life of the session unless a restart changes both at once, and a
+/// restart is a new offer rather than an answer. `ice-ufrag` and `ice-pwd`
+/// are this end's whatever the offer says; `candidate` and `ice-options` go
+/// with them, and there is more than one candidate line, so they are taken by
+/// name rather than one to a name.
 fn carried(ours: &MediaDescription, offered: &MediaDescription) -> Vec<Attribute> {
     let mutual = ["rtcp-mux"]
         .iter()
         .filter(|name| offered.attribute(name).is_some());
-    let ours_alone = ["ptime", "maxptime"].iter();
-    mutual
+    let ours_alone = ["ptime", "maxptime", "ice-ufrag", "ice-pwd", "ice-options"].iter();
+    let single = mutual
         .chain(ours_alone)
-        .filter_map(|name| ours.attribute(name).cloned())
-        .collect()
+        .filter_map(|name| ours.attribute(name).cloned());
+    let candidates = ours
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "candidate")
+        .cloned();
+    single.chain(candidates).collect()
 }
 
 /// §8.4: "If the stream to be placed on hold was previously a sendrecv media
@@ -363,6 +382,84 @@ mod tests {
             "crypto",
             "1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         )]
+    }
+
+    /// What an answer this layer writes itself carries forward from what
+    /// this end said last time, given an offer that still asks for it.
+    fn answered(ours: Vec<Attribute>, offered: Vec<Attribute>) -> MediaDescription {
+        let mut session = Session::default();
+        session.set_local(description(40_000, ours));
+        let offer = description(40_002, offered);
+        session.set_remote(offer.clone());
+        let answer = session.answer(&offer, false).expect("this end can answer");
+        answer
+            .media
+            .first()
+            .cloned()
+            .expect("the answer has the stream")
+    }
+
+    /// RFC 8839 §4.4: the attributes go on every description of the session.
+    ///
+    /// The user agent answers a hold, a resume and a peer moving its address
+    /// without handing the description up, so if this did not carry ICE
+    /// forward the peer would read an answer with no credentials in it as ICE
+    /// being withdrawn part-way through a call — taking a checked path away
+    /// from a call that had one, silently, from a layer that has never read a
+    /// candidate.
+    #[test]
+    fn an_answer_this_layer_writes_does_not_withdraw_ice() {
+        let ours = vec![
+            Attribute::with_value("ice-ufrag", "8hhY"),
+            Attribute::with_value("ice-pwd", "asd88fgpdd777uzjYhagZg"),
+            Attribute::with_value("ice-options", "ice2"),
+            Attribute::with_value("candidate", "1 1 UDP 2130706431 192.0.2.1 40000 typ host"),
+            Attribute::with_value("candidate", "2 1 UDP 2130706430 192.0.2.9 40004 typ host"),
+        ];
+        let theirs = vec![
+            Attribute::with_value("ice-ufrag", "9uB6"),
+            Attribute::with_value("ice-pwd", "YH75Fviy6338Vbrhrlp8Yh"),
+        ];
+        let answer = answered(ours, theirs);
+        assert_eq!(
+            answer
+                .attribute("ice-ufrag")
+                .and_then(|line| line.value.as_deref()),
+            Some("8hhY"),
+            "this end's own fragment, not the peer's"
+        );
+        assert_eq!(
+            answer
+                .attribute("ice-pwd")
+                .and_then(|line| line.value.as_deref()),
+            Some("asd88fgpdd777uzjYhagZg")
+        );
+        assert_eq!(
+            answer
+                .attribute("ice-options")
+                .and_then(|line| line.value.as_deref()),
+            Some("ice2")
+        );
+        // both of them, and a helper that took one attribute per name would
+        // have kept only the first
+        assert_eq!(
+            answer
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.name == "candidate")
+                .count(),
+            2
+        );
+    }
+
+    /// And the other half: a call that never used ICE does not grow any of it
+    /// because the far end re-offered.
+    #[test]
+    fn an_answer_does_not_invent_ice_a_call_never_had() {
+        let answer = answered(Vec::new(), Vec::new());
+        assert!(answer.attribute("ice-ufrag").is_none());
+        assert!(answer.attribute("ice-pwd").is_none());
+        assert!(answer.attribute("candidate").is_none());
     }
 
     /// Only a session that has heard from the far end can compare anything.

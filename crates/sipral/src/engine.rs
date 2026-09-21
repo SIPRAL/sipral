@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::auth::KeySource;
 use sipral_core::msg::OwnedMessage;
-#[cfg(feature = "dtls")]
+#[cfg(any(feature = "dtls", feature = "ice"))]
 use sipral_core::sdp::RtcpPlan;
 use sipral_core::sdp::{
     AcceptedStream, Attribute, Connection, Direction, KeySalt, Keying, MASTER_KEY, MASTER_SALT,
@@ -135,6 +135,18 @@ struct Managed {
     /// offer's value and the answer's together, and only one of the two ever
     /// arrives from the far end. `None` on every call not keyed this way.
     dtls: Option<(Side, String)>,
+    /// What this end has settled about ICE on this call: its credentials, its
+    /// role, its tiebreaker and its candidates.
+    ///
+    /// Written when the call's first description is, and then repeated on
+    /// every later one — RFC 8839 §4.4.1.1.1 wants the attributes on each,
+    /// and a hold re-offer that drew fresh credentials would read to the peer
+    /// as an ICE restart nobody asked for. `None` on every call not using it,
+    /// which is every call whose catalogue leaves [`IcePolicy`] off.
+    ///
+    /// [`IcePolicy`]: crate::IcePolicy
+    #[cfg(feature = "ice")]
+    ice: Option<crate::ice::LocalIce>,
     /// Whether [`MediaEngine::ring_with`] has already described and opened
     /// this call's session, before it was answered.
     ///
@@ -317,6 +329,136 @@ impl MediaEngine {
         Ok(None)
     }
 
+    /// What this call says about ICE in the description about to be written.
+    ///
+    /// `Ok(None)` for a catalogue that does not offer it, which is the
+    /// default. For one that does, the credentials and candidates this call
+    /// already has if it has any, and a fresh draw if it does not: RFC 8839
+    /// §4.4.1.1.1 puts the attributes on every description of a session, and
+    /// drawing again part-way through is how an ICE restart is announced.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::ice::LocalIce::draw`]: an address RFC 8445 §5.1.1.1 rules
+    /// out of a candidate is refused here rather than offered as one no peer
+    /// can reach.
+    #[cfg(feature = "ice")]
+    fn ice_lines(
+        &mut self,
+        call: Option<CallHandle>,
+        catalog: &CodecCatalog,
+        address: SocketAddr,
+        we_are_offerer: bool,
+        now: Instant,
+    ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
+        if !catalog.ice().offers() {
+            return Ok(None);
+        }
+        if let Some(existing) = call
+            .and_then(|call| self.calls.get(&call))
+            .and_then(|managed| managed.ice.clone())
+        {
+            return Ok(Some(existing));
+        }
+        crate::ice::LocalIce::draw(&mut self.keys, address, we_are_offerer, now).map(Some)
+    }
+
+    /// Without the feature there is nothing to gather and no attribute to
+    /// write, and every description this engine writes names one address.
+    #[cfg(not(feature = "ice"))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn ice_lines(
+        &mut self,
+        _call: Option<CallHandle>,
+        _catalog: &CodecCatalog,
+        _address: SocketAddr,
+        _we_are_offerer: bool,
+        _now: Instant,
+    ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
+        Ok(None)
+    }
+
+    /// The ICE agent a settled plan calls for, gathered and told what the
+    /// peer said — or `None` for a call that is not using ICE.
+    ///
+    /// N7, written out: three different peers end here with `None`, and the
+    /// stream then runs on `c=`/`m=` and symmetric RTP exactly as it did
+    /// before this engine knew what ICE was. A peer that wrote no ICE
+    /// attributes at all — an Asterisk with `ice_support=no`, which is the
+    /// default — is the first and the commonest. A peer whose candidates are
+    /// all unusable is the second. A description whose own default
+    /// destinations are missing from its candidate lines is the third: RFC
+    /// 8839 §4.2.5's ICE mismatch, which is what an ALG rewriting `c=` and
+    /// the `m=` port without touching `a=candidate` looks like from here.
+    ///
+    /// Under [`IcePolicy::Required`] each of the three is
+    /// [`MediaError::IceRequired`] instead. That is the whole difference
+    /// between the two policies.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::IceRequired`] as above, [`MediaError::IceNeedsRtcpMux`]
+    /// for a peer that took `a=rtcp-mux` out of its answer, and
+    /// [`MediaError::Ice`] for credentials the agent refuses.
+    ///
+    /// [`IcePolicy::Required`]: crate::IcePolicy::Required
+    #[cfg(feature = "ice")]
+    fn ice_for(
+        &mut self,
+        call: CallHandle,
+        plan: &MediaPlan,
+        now: Instant,
+    ) -> Result<Option<crate::ice::Ice>, MediaError> {
+        let Some(managed) = self.calls.get(&call) else {
+            return Ok(None);
+        };
+        let Some(local) = managed.ice.clone() else {
+            return Ok(None);
+        };
+        let required = managed.catalog.ice().requires();
+        let refuse = |()| {
+            if required {
+                Err(MediaError::IceRequired)
+            } else {
+                Ok(None)
+            }
+        };
+        let (Some(address), Some(remote)) = (managed.address, managed.remote.as_ref()) else {
+            return refuse(());
+        };
+        let Some(stream) = remote.media.iter().find(|media| !media.is_rejected()) else {
+            return refuse(());
+        };
+        // whether the peer does ICE at all is asked first, and before
+        // anything is held against it. A peer that described none did not
+        // "take `a=rtcp-mux` out of an ICE answer" — it answered a call it
+        // never agreed to run this way, and `a=rtcp-mux` is a thing such a
+        // peer does not ask for either. Complaining about the multiplexing
+        // there would report the second-order fault and hide the first
+        let Some(peer) = sipral_nat::ice::parse_remote(remote, stream) else {
+            return refuse(());
+        };
+        let muxed = matches!(plan.rtcp, RtcpPlan::Muxed | RtcpPlan::Off);
+        if peer.mismatch
+            || peer.candidates.is_empty()
+            || sipral_nat::ice::ice_mismatch(remote, stream, &peer, muxed)
+        {
+            return refuse(());
+        }
+        // and only now: a peer that did agree to ICE and took `a=rtcp-mux`
+        // out left this stream a second ICE component, and this facade knows
+        // one local address. The offer asked for multiplexing —
+        // `CodecCatalog::capabilities` makes an ICE policy force it — so this
+        // is a peer that answered something else
+        if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) {
+            return Err(MediaError::IceNeedsRtcpMux);
+        }
+        let seed = self.keys.block();
+        let mut ice = local.agent(address, seed, now)?;
+        ice.set_remote(&peer, now)?;
+        Ok(Some(ice))
+    }
+
     /// The handshake a settled plan calls for, ready to be driven.
     ///
     /// `Ok(None)` for a call not keyed this way, and for one whose peer
@@ -365,12 +507,12 @@ impl MediaEngine {
     /// The octets are copied out rather than lent, for the reason
     /// [`MediaEngine::poll_rtcp`] gives: a handshake is a few datagrams once
     /// per call.
-    #[cfg(feature = "dtls")]
+    #[cfg(any(feature = "dtls", feature = "ice"))]
     #[must_use]
-    pub fn poll_transmit(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         for (call, held) in &self.sessions {
             let mut slot = share::lock(held);
-            if let Some(datagram) = slot.session.poll_transmit() {
+            if let Some(datagram) = slot.session.poll_transmit(now) {
                 return Some((*call, datagram.destination, datagram.payload.to_vec()));
             }
         }
@@ -525,7 +667,9 @@ impl MediaEngine {
         // without SDES starts from the same SSRC and the same sequence number
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
-        let offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let ice = self.ice_lines(None, &catalog, local, true, now)?;
+        let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        describe_ice(&mut offer, ice.as_ref());
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
@@ -541,6 +685,8 @@ impl MediaEngine {
                 catalog,
                 config,
                 dtls,
+                #[cfg(feature = "ice")]
+                ice,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
             },
@@ -597,7 +743,9 @@ impl MediaEngine {
         let (identity, session_id) = draw(agent);
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
-        let offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let ice = self.ice_lines(None, &catalog, local, true, now)?;
+        let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        describe_ice(&mut offer, ice.as_ref());
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
         self.calls.insert(
@@ -612,6 +760,8 @@ impl MediaEngine {
                 catalog,
                 config,
                 dtls,
+                #[cfg(feature = "ice")]
+                ice,
                 // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
             },
@@ -709,7 +859,8 @@ impl MediaEngine {
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), now)?;
-        let description = write_answer(
+        let ice = self.ice_lines(Some(call), &catalog, local, false, now)?;
+        let mut description = write_answer(
             &catalog,
             &offer,
             local,
@@ -718,6 +869,7 @@ impl MediaEngine {
             keys.as_ref(),
             keyed(dtls.as_ref()),
         )?;
+        describe_ice(&mut description, ice.as_ref());
         let bytes = description.to_bytes();
         agent.ring(call, Some(Arc::from(bytes)), now)?;
         if let Some(managed) = self.calls.get_mut(&call) {
@@ -727,6 +879,10 @@ impl MediaEngine {
             managed.catalog = catalog;
             managed.config = config;
             managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
+            #[cfg(feature = "ice")]
+            {
+                managed.ice = ice;
+            }
             managed.rung_with_media = true;
         }
         // no event tells this engine when a 183 has gone out the way
@@ -816,7 +972,8 @@ impl MediaEngine {
             Side::Offering
         };
         let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), now)?;
-        let description = match offered {
+        let ice = self.ice_lines(Some(call), &catalog, local, offered.is_none(), now)?;
+        let mut description = match offered {
             Some(offer) => write_answer(
                 &catalog,
                 &offer,
@@ -835,6 +992,7 @@ impl MediaEngine {
                 keyed(dtls.as_ref()),
             ),
         };
+        describe_ice(&mut description, ice.as_ref());
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
         if let Some(managed) = self.calls.get_mut(&call) {
@@ -844,6 +1002,10 @@ impl MediaEngine {
             managed.catalog = catalog;
             managed.config = config;
             managed.dtls = dtls.map(|(_, setup)| (side, setup));
+            #[cfg(feature = "ice")]
+            {
+                managed.ice = ice;
+            }
         }
         Ok(())
     }
@@ -1069,8 +1231,11 @@ impl MediaEngine {
                 catalog: self.catalog.clone(),
                 config: self.config.clone(),
                 // nothing has been written for this call yet: what it will
-                // say about DTLS-SRTP is decided when it is rung or answered
+                // say about DTLS-SRTP, and about ICE, is decided when it is
+                // rung or answered
                 dtls: None,
+                #[cfg(feature = "ice")]
+                ice: None,
                 rung_with_media: false,
             },
         );
@@ -1174,6 +1339,14 @@ impl MediaEngine {
                 return;
             }
         };
+        let ice = match self.ice_lines(Some(call), &catalog, address, false, now) {
+            Ok(ice) => ice,
+            Err(error) => {
+                self.events.push_back((call, MediaEvent::Failed(error)));
+                let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+                return;
+            }
+        };
         match write_answer(
             &catalog,
             &offer,
@@ -1183,13 +1356,20 @@ impl MediaEngine {
             keys.as_ref(),
             keyed(dtls.as_ref()),
         ) {
-            Ok(answer) => {
+            Ok(mut answer) => {
+                // RFC 8839 §4.4: an answer that left the attributes out is a
+                // peer reading that ICE has been withdrawn mid-session
+                describe_ice(&mut answer, ice.as_ref());
                 let bytes = answer.to_bytes();
                 if agent.accept_reoffer(call, Some(&bytes), now).is_ok()
                     && let Some(managed) = self.calls.get_mut(&call)
                 {
                     managed.version = version;
                     managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
+                    #[cfg(feature = "ice")]
+                    {
+                        managed.ice = ice;
+                    }
                     // the descriptions themselves arrive back as
                     // UaEvent::SessionChanged, which is what settles the plan
                 }
@@ -1238,7 +1418,7 @@ impl MediaEngine {
         #[cfg(feature = "dtls")]
         {
             session.close_handshake();
-            while let Some(datagram) = session.poll_transmit() {
+            while let Some(datagram) = session.poll_transmit(now) {
                 self.farewells
                     .push_back((call, datagram.destination, datagram.payload.to_vec()));
             }
@@ -1362,6 +1542,14 @@ impl MediaEngine {
                         return;
                     }
                 };
+                #[cfg(feature = "ice")]
+                let ice = match self.ice_for(call, plan, now) {
+                    Ok(ice) => ice,
+                    Err(error) => {
+                        self.fail(call, error);
+                        return;
+                    }
+                };
                 MediaSession::open(
                     plan,
                     frame_length,
@@ -1372,6 +1560,8 @@ impl MediaEngine {
                         clock: self.clock,
                         #[cfg(feature = "dtls")]
                         handshake,
+                        #[cfg(feature = "ice")]
+                        ice,
                         now,
                     },
                 )
@@ -1467,6 +1657,42 @@ fn peer_setup(offer: &SessionDescription) -> Option<String> {
 
 /// The offer `catalog` makes, for media arriving at `address`, keyed with
 /// `keys` where the catalogue offers SDES.
+/// Put a call's ICE attributes on a description that has just been written.
+///
+/// Media-level for the credentials and the candidates (RFC 8839 §5.1, §5.4,
+/// §5.6), session-level for the pacing (§5.5) — and both go on *after* the
+/// description is built rather than into the vocabulary that builds it,
+/// because [`SessionDescription::answer`] constructs a fresh description and
+/// carries only the timing across. An `a=ice-pacing` written before that call
+/// would not survive it.
+///
+/// One stream, because this facade describes one: [`write_answer`] says why.
+#[cfg(feature = "ice")]
+fn describe_ice(description: &mut SessionDescription, local: Option<&crate::ice::LocalIce>) {
+    let Some(local) = local else {
+        return;
+    };
+    let Some(stream) = description
+        .media
+        .iter_mut()
+        .find(|media| !media.is_rejected())
+    else {
+        return;
+    };
+    sipral_nat::ice::write_stream(stream, local.credentials(), local.candidates());
+    // the Ta this agent proposes, which `IceConfig::default` is built with
+    // and `crate::ice` does not move
+    sipral_nat::ice::write_pacing(description, sipral_nat::ice::DEFAULT_TA);
+}
+
+/// Without the feature there is no agent, so there is nothing to write.
+#[cfg(not(feature = "ice"))]
+const fn describe_ice(
+    _description: &mut SessionDescription,
+    _local: Option<&crate::ice::LocalIce>,
+) {
+}
+
 fn write_offer(
     catalog: &CodecCatalog,
     address: SocketAddr,
@@ -2112,6 +2338,8 @@ mod counter_wiring {
                 clock: WallClock::from_unix(now, 1_700_000_000, 0),
                 #[cfg(feature = "dtls")]
                 handshake: None,
+                #[cfg(feature = "ice")]
+                ice: None,
                 now,
             },
         )

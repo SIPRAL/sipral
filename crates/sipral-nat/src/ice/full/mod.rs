@@ -1085,6 +1085,40 @@ impl IceAgent {
         Ok(route)
     }
 
+    /// Where [`Self::send`] would put a component's data, without sending any.
+    ///
+    /// The same question and the same rule as [`Self::send`] — the selected
+    /// pair, the previous session's during a restart, otherwise the
+    /// highest-priority valid pair — asked without handing over the data and
+    /// without counting as traffic for the keepalive timer.
+    ///
+    /// It exists for a caller whose producer borrows its own buffer: one that
+    /// cannot find out there is nowhere to send by trying, because by then it
+    /// has already built a frame it will have to throw away, or taken a
+    /// handshake record out of a flight it cannot put back. Asking first is
+    /// what lets "there is no route" be a precondition rather than a failure.
+    ///
+    /// # Errors
+    ///
+    /// No such stream or component, no pair to send on, or consent lost.
+    pub fn route(&self, stream: StreamId, component: ComponentId) -> Result<Route, SendError> {
+        let (via, destination) = self.data_route(stream.0, component)?;
+        let local = self.locals.get(via).ok_or(SendError::NoRoute)?;
+        let source = local.socket;
+        match local.relay {
+            None => Ok(Route {
+                source,
+                destination,
+            }),
+            // a relayed pair's data goes to the server, not to the peer, and
+            // the caller is told the address it will actually send to
+            Some(relay) => Ok(Route {
+                source,
+                destination: self.relays.get(relay).ok_or(SendError::NoRoute)?.server,
+            }),
+        }
+    }
+
     /// The selected pair for a component, once there is one.
     #[must_use]
     pub fn selected_pair(&self, stream: StreamId, component: ComponentId) -> Option<SelectedPair> {

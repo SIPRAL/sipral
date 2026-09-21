@@ -162,10 +162,10 @@ self-signed certificate a peer checks against `a=fingerprint`. Like
 The facade depends on it, and on `sipral-nat` beside it, behind the `dtls`
 feature: the handshake runs on the call's own media socket, and telling its
 records from the RTP there is the first-octet rule of RFC 7983, which lives in
-`sipral-nat` because ICE will need it in the same place. Both edges are
-optional and both disappear with the feature, which is what lets a build that
-will only ever place SDES calls leave four cryptographic crates out of its
-binary.
+`sipral-nat` because ICE needs it in the same place. The `ice` feature is the
+second edge into that crate and reaches the full agent; both features are
+optional, and with both off a build that will only ever place SDES calls
+leaves four cryptographic crates and the agent out of its binary.
 
 Detail in [05-media.md](05-media.md).
 

@@ -160,6 +160,24 @@ pub struct Capabilities {
     /// catalogue: a Cargo feature belongs to the crate that declares it, and
     /// another crate's is not evidence about this one.
     pub opus: bool,
+    /// Whether this build can run ICE in the full role (RFC 8445), which is
+    /// what makes [`IcePolicy::Offered`] and [`IcePolicy::Required`] mean
+    /// anything.
+    ///
+    /// Behind a compile-time feature for the reason DTLS-SRTP is: a build
+    /// that will only ever place calls to one PBX on one network has no use
+    /// for a checklist, and off is what the policy defaults to anyway. The
+    /// numbers the ABI gives the two policies keep their values in a build
+    /// without it, and naming one there is refused rather than quietly
+    /// placing the call on a path nothing checked.
+    ///
+    /// An application that sets one of those policies must also drain
+    /// `sipral_media_poll_transmit`: a connectivity check that never leaves
+    /// is a call that never chooses a path.
+    ///
+    /// [`IcePolicy::Offered`]: crate::IcePolicy::Offered
+    /// [`IcePolicy::Required`]: crate::IcePolicy::Required
+    pub ice: bool,
 }
 
 impl Capabilities {
@@ -182,6 +200,7 @@ impl Capabilities {
             srtp_keying: &KEYING,
             subscriptions: true,
             opus: contains_opus(&Codec::ALL),
+            ice: cfg!(feature = "ice"),
         }
     }
 }

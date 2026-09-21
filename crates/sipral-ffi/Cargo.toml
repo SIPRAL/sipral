@@ -39,9 +39,20 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # good. A build without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to
 # the policies and "nothing due" to the poll, and `SIPRAL_FEATURE_DTLS_SRTP`
 # says so before an application asks.
-default = ["opus", "dtls"]
+#
+# `ice` is the third, carried up the same way and on by default, and it
+# branches here for the same reason `dtls` does: the arms that name an ICE
+# policy and the event that says which path was chosen name types that exist
+# only where the facade compiled them. The header does not branch on it
+# either — `SIPRAL_ICE_OFFERED`, `SIPRAL_ICE_REQUIRED` and
+# `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN` are in every build of it. A build
+# without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to the policies
+# and never emits the event, and `SIPRAL_FEATURE_ICE` says so before an
+# application asks.
+default = ["opus", "dtls", "ice"]
 opus = ["sipral/opus"]
 dtls = ["sipral/dtls"]
+ice = ["sipral/ice"]
 
 [dependencies]
 # the facade, which is what carries media across this boundary. The two below

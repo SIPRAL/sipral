@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "dtls")]
+#[cfg(any(feature = "dtls", feature = "ice"))]
 use std::net::SocketAddr;
 
 use sipral_core::sdp::Direction;
@@ -155,6 +155,25 @@ pub enum MediaEvent {
         /// handshake in which this end sent every record and the far end
         /// answered from nowhere, which no completed handshake can be.
         peer: Option<SocketAddr>,
+    },
+    /// ICE chose the path this call's media will take (RFC 8445 §8.1.1).
+    ///
+    /// The moment the checks stop and the audio starts, and the answer to
+    /// "why is this call going to an address the signalling never named" —
+    /// which, for a call behind a NAT, is the ordinary outcome rather than a
+    /// fault. It arrives again if a nomination of higher priority replaces
+    /// the pair part-way through the call; each one names the pair in force
+    /// from that moment.
+    ///
+    /// A call not using ICE never emits it, and that is most calls: the
+    /// policy is off by default, and a peer that described no ICE leaves the
+    /// stream on the address its signalling named.
+    #[cfg(feature = "ice")]
+    PathChosen {
+        /// This end of the pair: the socket the media goes out of.
+        local: SocketAddr,
+        /// The far end of it, which is where the media goes.
+        remote: SocketAddr,
     },
     /// Media could not be started or could not be kept: an answer naming a
     /// codec this build has no decoder for, a description that could not be

@@ -93,6 +93,21 @@ constants! {
     /// An application that sets one of those policies must also drain
     /// `sipral_media_poll_transmit`; see there.
     pub const SIPRAL_FEATURE_DTLS_SRTP: u32 = 1 << 7;
+    /// See [`SIPRAL_FEATURE_DTMF`]. ICE in the full role (RFC 8445), with
+    /// consent freshness (RFC 7675) and the SDP attributes of RFC 8839: a
+    /// call's media path is chosen by checking it rather than taken from what
+    /// the signalling said.
+    ///
+    /// Behind a compile-time feature for the reason DTLS-SRTP is, and off by
+    /// policy even where it is compiled in — `docs/06-nat.md` tabulates what
+    /// it costs on the wire and why it buys nothing against a PBX that learns
+    /// the caller's address from the media it receives. Both `SIPRAL_ICE_OFFERED`
+    /// and `SIPRAL_ICE_REQUIRED` keep their numbers in a build without it, and
+    /// naming one there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    ///
+    /// An application that sets one of those policies must also drain
+    /// `sipral_media_poll_transmit`; see there.
+    pub const SIPRAL_FEATURE_ICE: u32 = 1 << 8;
 }
 
 record! {
@@ -191,6 +206,10 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     // one would promise what the build below cannot do
     if capabilities.srtp_keying.contains(&SrtpKeying::Dtls) {
         features |= SIPRAL_FEATURE_DTLS_SRTP;
+    }
+    // and the same again: the facade's own answer, not this crate's flag
+    if capabilities.ice {
+        features |= SIPRAL_FEATURE_ICE;
     }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),

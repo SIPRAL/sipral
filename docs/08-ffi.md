@@ -209,9 +209,10 @@ Rules for the ABI:
   destination the application is asked to resolve. All three have since been
   taken where they stood — `SIPRAL_EVENT_KIND_DTMF_SENT` at 27,
   `..._RECOVERY` at 28 and `..._RESOLVE_NEEDED` at 29 — and 16, for audio
-  devices, is the one number still held. `..._MEDIA_SECURED` took 32, which
-  was nobody's and is the ordinary way a number is spent: at the end of the
-  run, because no reservation named it. The next free number is 33.
+  devices, is the one number still held. `..._MEDIA_SECURED` took 32 and
+  `..._MEDIA_PATH_CHOSEN` took 33, both of which were nobody's and are the
+  ordinary way a number is spent: at the end of the run, because no
+  reservation named it. The next free number is 34.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -707,7 +708,14 @@ promise this ABI cannot keep before the offer this task exists to carry.
 them opens a socket or touches a device: `sipral_media_receive` for a datagram
 that arrived, `sipral_media_playback` for the frame due for the earpiece,
 `sipral_media_capture` for one from the microphone, and
-`sipral_media_poll_rtcp` for the control traffic RFC 3550 §6.3 schedules. The
+`sipral_media_poll_rtcp` for the control traffic RFC 3550 §6.3 schedules.
+Three of the four take `now_ms`, read as every other entry point reads it and
+moving nothing: `playback` is the exception, because a frame for the earpiece
+is due when it is asked for. `capture` takes one because ICE has to be told
+that traffic went out on the pair it chose — RFC 8445 §11 is what lets it stop
+sending keepalives — and because a call whose checks have not chosen a path
+yet answers a `len` of zero rather than sending to the address the signalling
+named. The
 last asks one call rather than the stack, so the thread that sends a call's
 audio sends its reports too: it is called after every captured frame, and
 whenever `sipral_stack_poll` reports a deadline for a call that is not

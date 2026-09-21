@@ -379,7 +379,8 @@ crates/sipral-core/src/sdp/session.rs:KeyLine
 crates/sipral-core/src/sdp/crypto.rs:KeySalt
 crates/sipral-ua/src/account.rs:Push
 crates/sipral-nat/src/ice/full/mod.rs:Credentials
-crates/sipral-nat/src/ice/sdp.rs:RemoteIce"
+crates/sipral-nat/src/ice/sdp.rs:RemoteIce
+crates/sipral/src/ice.rs:Ice"
 derived=""
 for pair in $redacting; do
     file=${pair%%:*}
@@ -390,7 +391,7 @@ for pair in $redacting; do
         continue
     fi
     # the declaration, and whether its own derive list carries Debug
-    line=$(grep -n "^pub struct $name\b" "$file" | head -1 | cut -d: -f1)
+    line=$(grep -nE "^pub(\(crate\))? struct $name\b" "$file" | head -1 | cut -d: -f1)
     if [ -z "$line" ]; then
         derived="$derived
         $file no longer declares $name"
@@ -409,7 +410,7 @@ for pair in $redacting; do
         $file $name has no Debug of its own"
     fi
 done
-[ -z "$derived" ] && pass "the four that carry key material write their own" || {
+[ -z "$derived" ] && pass "every type that carries key material writes its own" || {
     fail "a type that carries key material prints it:"
     printf '%s\n' "$derived"
     printf '        docs/05-media.md says why: the redaction goes at the bottom,\n'

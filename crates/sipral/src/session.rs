@@ -45,6 +45,8 @@ use sipral_media::comfort_noise::{ComfortNoise, Generator, PAYLOAD_TYPE as COMFO
 use sipral_media::g711::Law;
 use sipral_media::processor::Processor;
 use sipral_media::vad::{self, Vad};
+#[cfg(feature = "ice")]
+use sipral_nat::ice::{IceEvent, Received as IceReceived};
 use sipral_rtp::srtp::{Master, Policy, Rekeyed};
 use sipral_rtp::{
     Activity, BufferConfig, BuildError, Discard, Due as RtcpDue, EVENT_LEN, EventReceiver, Outcome,
@@ -136,6 +138,14 @@ pub enum Arrival {
     /// what this arrival is the signal to drain.
     #[cfg(feature = "dtls")]
     Handshake,
+    /// ICE traffic, dealt with by the agent: a connectivity check, its
+    /// response, a consent request or a keepalive (RFC 8445 §7, RFC 7675).
+    ///
+    /// Whatever it produced in reply is waiting in
+    /// [`MediaSession::poll_transmit`] — which is what this arrival is the
+    /// signal to drain, exactly as [`Arrival::Handshake`] is.
+    #[cfg(feature = "ice")]
+    Check,
     /// Something arrived on a stream that agreed to be secured and has no
     /// keys yet, so there was nothing to verify it with.
     ///
@@ -242,22 +252,27 @@ pub(crate) struct StreamIdentity {
 /// What the engine brings to opening a session, as against what the
 /// negotiation decided.
 ///
-/// Four things a description cannot hold: the numbers this stream starts
+/// Five things a description cannot hold: the numbers this stream starts
 /// counting from, the wall clock its reports will carry, the handshake that
-/// will key it, and the instant it is being opened at. Grouped rather than
-/// listed because they travel together and always have — every one of them
-/// comes from the engine and none of them is a property of the call.
-// `Copy` where there is nothing to move: without the `dtls` feature the whole
+/// will key it, the ICE agent that will choose its path, and the instant it
+/// is being opened at. Grouped rather than listed because they travel
+/// together and always have — every one of them comes from the engine and
+/// none of them is a property of the call.
+// `Copy` where there is nothing to move: without `dtls` and `ice` the whole
 // of it is three numbers and an instant, and clippy is right that passing it
-// by value then consumes nothing. With the feature it owns a handshake, and
+// by value then consumes nothing. With either feature it owns something, and
 // the move is the point.
-#[cfg_attr(not(feature = "dtls"), derive(Clone, Copy))]
+#[cfg_attr(not(any(feature = "dtls", feature = "ice")), derive(Clone, Copy))]
 pub(crate) struct Start {
     pub(crate) identity: StreamIdentity,
     pub(crate) clock: WallClock,
     /// The DTLS-SRTP handshake that will key this stream, already started.
     #[cfg(feature = "dtls")]
     pub(crate) handshake: Option<crate::dtls::Handshake>,
+    /// The ICE agent that will choose this stream's path, already gathered
+    /// and already told what the peer said.
+    #[cfg(feature = "ice")]
+    pub(crate) ice: Option<crate::ice::Ice>,
     pub(crate) now: Instant,
 }
 
@@ -319,6 +334,35 @@ pub struct MediaSession {
     /// thing this session puts on the wire.
     #[cfg(feature = "dtls")]
     dtls_out: Vec<u8>,
+
+    /// The ICE agent for this call, once the negotiation produced one.
+    ///
+    /// `None` is every call that is not using ICE, and that is the ordinary
+    /// case: the policy is off by default, and a peer that answered without
+    /// ICE attributes leaves it `None` too. Nothing on the media path behaves
+    /// differently for such a call than it did before this field existed —
+    /// which is the whole of the fallback RFC 8445 §2.6 asks for.
+    #[cfg(feature = "ice")]
+    ice: Option<crate::ice::Ice>,
+}
+
+/// Which of this session's own buffers a datagram was built in.
+///
+/// Every producer here builds into a buffer the session owns and hands back a
+/// borrow of it. When ICE picked the path, the bytes are wrapped for that
+/// path first and the borrow is of the wrapping instead — so what goes out
+/// has to be named rather than passed, or the borrow of one field would have
+/// to outlive the mutable borrow of the other.
+#[cfg(feature = "ice")]
+#[derive(Clone, Copy)]
+enum Built {
+    /// `rtp_out`: audio, or a named event.
+    Rtp,
+    /// `rtcp_out`: a report, or the BYE.
+    Rtcp,
+    /// `dtls_out`: a record of the handshake that keys the call.
+    #[cfg(feature = "dtls")]
+    Handshake,
 }
 
 /// The content type of a DTLS handshake record (RFC 6347 §4.1), which is the
@@ -386,6 +430,8 @@ impl MediaSession {
             clock,
             #[cfg(feature = "dtls")]
             handshake,
+            #[cfg(feature = "ice")]
+            ice,
             now,
         } = start;
         let agreed = Codec::of_plan(plan)?;
@@ -468,6 +514,8 @@ impl MediaSession {
             }),
             #[cfg(feature = "dtls")]
             dtls_out: Vec::new(),
+            #[cfg(feature = "ice")]
+            ice,
         })
     }
 
@@ -621,6 +669,17 @@ impl MediaSession {
     /// application that put both on one socket does not have to sort them
     /// itself.
     pub fn receive(&mut self, datagram: &mut [u8], from: SocketAddr, now: Instant) -> Arrival {
+        // ICE first, and before the classification below, because a
+        // connectivity check is not RTP, is not RTCP and is not a handshake
+        // record: it is the agent's own traffic, and until this line existed
+        // it reached `rtp.receive` and was thrown away as a broken packet.
+        // A relayed datagram also has the relay's wrapping taken off here, so
+        // everything below reads the bytes the peer actually sent.
+        #[cfg(feature = "ice")]
+        let datagram = match self.receive_check(datagram, from, now) {
+            Ok(payload) => payload,
+            Err(arrival) => return arrival,
+        };
         #[cfg(feature = "dtls")]
         if sipral_nat::classify(datagram) == sipral_nat::Demux::Dtls {
             return self.receive_handshake(datagram, from, now);
@@ -637,6 +696,134 @@ impl MediaSession {
             Received::Dropped(Discard::NotKeyed) => Arrival::NotKeyed,
             Received::Dropped(why) => Arrival::Dropped(why),
         }
+    }
+
+    /// Let the agent have the datagram first, and give back what is left for
+    /// the rest of the path to read.
+    ///
+    /// `Err` is a datagram this session is done with: the agent consumed it,
+    /// or it came from somewhere the agent does not know. `Ok` is application
+    /// data, at the position the agent put it — which for a relayed pair is
+    /// past the channel header and for every other one is the whole datagram.
+    ///
+    /// A call not using ICE takes the datagram back unchanged, which is what
+    /// makes this line free for the calls that are the overwhelming majority.
+    #[cfg(feature = "ice")]
+    fn receive_check<'a>(
+        &mut self,
+        datagram: &'a mut [u8],
+        from: SocketAddr,
+        now: Instant,
+    ) -> Result<&'a mut [u8], Arrival> {
+        let Some(ice) = self.ice.as_mut() else {
+            return Ok(datagram);
+        };
+        // N9: the pool is filled immediately before the agent is moved, not
+        // on a schedule of its own. An agent with no id cannot answer a check
+        // and puts its own deadline in the past, which spins the caller's loop
+        // while consent runs out on a call that was working
+        ice.top_up();
+        let taken = ice.handle_datagram(from, datagram, now);
+        self.drain_ice(now);
+        match taken {
+            IceReceived::Consumed => Err(Arrival::Check),
+            IceReceived::Foreign => Err(Arrival::Dropped(Discard::ForeignAddress)),
+            // `range` indexes the datagram that was handed in, so the `None`
+            // arm is unreachable: it would be `sipral-nat` reporting a
+            // position in a buffer it was not given. It is written rather
+            // than unwrapped because a panic on the media path is worse than
+            // a dropped packet, and the fuzz target `ice` asserts the range
+            // indexes the datagram precisely so this stays unreachable.
+            IceReceived::Data { range, .. } => datagram.get_mut(range).ok_or(Arrival::Check),
+        }
+    }
+
+    /// Turn what the agent has to say into this session's own events.
+    ///
+    /// Called after everything that can move the agent, in the one place, so
+    /// that "a lost path is reported exactly once" is a property of the
+    /// session rather than of every caller.
+    #[cfg(feature = "ice")]
+    fn drain_ice(&mut self, now: Instant) {
+        let Some(ice) = self.ice.as_mut() else {
+            return;
+        };
+        let mut lost = false;
+        let mut selected = None;
+        while let Some(event) = ice.poll_event() {
+            match event {
+                IceEvent::Selected { pair, .. } => selected = Some(pair),
+                // RFC 7675 §5: nothing more may be sent on that pair, and the
+                // same credentials may not be used on it again. This stack
+                // has no re-offer of its own yet, so the only remedy an
+                // application has is to end the call — which is what the
+                // event's own documentation says, rather than leaving it to
+                // be worked out from the silence
+                IceEvent::ConsentLost { .. } | IceEvent::Failed | IceEvent::StreamFailed { .. } => {
+                    lost = true;
+                }
+                IceEvent::GatheringComplete | IceEvent::Completed | IceEvent::RoleChanged(_) => {}
+            }
+        }
+        if let Some(pair) = selected {
+            // symmetric RTP's latch is the poor version of the check the
+            // agent has already run, and leaving it armed would cut the audio
+            // for good the first time a mid-call re-selection moved the pair
+            self.rtp.relocate(pair.remote);
+            self.events.push_back(MediaEvent::PathChosen {
+                local: pair.local,
+                remote: pair.remote,
+            });
+        }
+        if lost {
+            self.ice = None;
+            self.events
+                .push_back(MediaEvent::Failed(MediaError::IcePathLost));
+        }
+        let _ = now;
+    }
+
+    /// Put a datagram this session built on the path ICE chose, or on the
+    /// signalled one when this call is not using ICE.
+    ///
+    /// N5's precondition, in the one place all four producers reach it: a
+    /// producer asks for the route *before* it hands anything over, because
+    /// by the time it has built a frame or taken a handshake record out of a
+    /// flight it is too late to be told there is nowhere to send.
+    #[cfg(feature = "ice")]
+    fn on_path(
+        &mut self,
+        built: Built,
+        length: usize,
+        signalled: SocketAddr,
+        now: Instant,
+    ) -> Option<Datagram<'_>> {
+        let data: &[u8] = match built {
+            Built::Rtp => self.rtp_out.get(..length).unwrap_or_default(),
+            Built::Rtcp => self.rtcp_out.get(..length).unwrap_or_default(),
+            #[cfg(feature = "dtls")]
+            Built::Handshake => self.dtls_out.get(..length).unwrap_or_default(),
+        };
+        let Some(ice) = self.ice.as_mut() else {
+            return Some(Datagram {
+                destination: signalled,
+                payload: data,
+            });
+        };
+        let (destination, payload) = ice.send(data, now).ok()?;
+        Some(Datagram {
+            destination,
+            payload,
+        })
+    }
+
+    /// Whether there is anywhere to send, asked without sending.
+    ///
+    /// `true` for a call not using ICE, which has had somewhere to send since
+    /// the description named it.
+    #[cfg(feature = "ice")]
+    fn has_path(&self) -> bool {
+        self.ice.as_ref().is_none_or(|ice| ice.route().is_some())
     }
 
     /// Take a record of the handshake that keys this call.
@@ -710,20 +897,73 @@ impl MediaSession {
     /// deadline [`MediaSession::poll_timeout`] named. A handshake that is not
     /// drained is a handshake whose ClientHello never leaves, and a call that
     /// is up with no audio and no error.
-    #[cfg(feature = "dtls")]
+    ///
+    /// `now` is read and moves nothing, as everywhere else here. It is what
+    /// tells the agent that traffic went out on the pair it chose, which is
+    /// what RFC 8445 §11 lets it stop sending keepalives for.
+    #[cfg(any(feature = "dtls", feature = "ice"))]
     #[must_use]
-    pub fn poll_transmit(&mut self) -> Option<Datagram<'_>> {
-        let record = self.dtls.as_mut()?.handshake.take_outbound()?;
-        self.dtls_out = record;
-        Some(Datagram {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<Datagram<'_>> {
+        // the agent's own traffic first, and ungated: a check is how a route
+        // comes to exist, so gating it on there being one would be a session
+        // that never starts
+        #[cfg(feature = "ice")]
+        {
+            let ready = match self.ice.as_mut() {
+                Some(ice) => {
+                    ice.top_up();
+                    ice.take_probe()
+                }
+                None => None,
+            };
+            // the address comes back by value and the bytes are read in a
+            // second borrow: a borrow of the bytes taken here would be held
+            // open by the datagram this returns, and the handshake below
+            // needs `self` mutably
+            if let Some(destination) = ready {
+                return Some(Datagram {
+                    destination,
+                    payload: self.ice.as_ref().map_or(&[][..], crate::ice::Ice::probe),
+                });
+            }
+        }
+        #[cfg(feature = "dtls")]
+        {
+            // N5: asked before `take_outbound`, never after. Taking the
+            // record first and dropping it for want of a route destroys a
+            // flight the handshake will not rebuild, and the call then fails
+            // for a reason nothing on the path can explain
+            #[cfg(feature = "ice")]
+            if !self.has_path() {
+                return None;
+            }
+            let record = self.dtls.as_mut()?.handshake.take_outbound()?;
+            self.dtls_out = record;
             // the stream's own address, which is the signalled one until a
             // packet has been seen from somewhere else and the latched one
             // afterwards: a handshake follows symmetric RTP and follows a
             // re-negotiation that moved the stream, with no second copy of
             // the answer to keep in step
-            destination: self.rtp.destination(),
-            payload: &self.dtls_out,
-        })
+            let signalled = self.rtp.destination();
+            #[cfg(feature = "ice")]
+            {
+                let length = self.dtls_out.len();
+                self.on_path(Built::Handshake, length, signalled, now)
+            }
+            #[cfg(not(feature = "ice"))]
+            {
+                let _ = now;
+                Some(Datagram {
+                    destination: signalled,
+                    payload: &self.dtls_out,
+                })
+            }
+        }
+        #[cfg(not(feature = "dtls"))]
+        {
+            let _ = now;
+            None
+        }
     }
 
     /// Take a datagram off the control socket, for a call whose RTCP has a
@@ -885,17 +1125,42 @@ impl MediaSession {
     )]
     /// [`MediaError::PacketTooLong`] for a payload no buffer here can hold,
     /// which no codec in this build produces.
-    pub fn capture(&mut self, samples: &[i16]) -> Result<Option<Datagram<'_>>, MediaError> {
+    pub fn capture(
+        &mut self,
+        samples: &[i16],
+        now: Instant,
+    ) -> Result<Option<Datagram<'_>>, MediaError> {
+        // N5: the route is asked for before the frame is built, not after.
+        // Encoding a frame and then throwing it away because there is nowhere
+        // to send it costs the encoder's state as well as the work — Opus
+        // carries one frame's history into the next — and the RTP timestamp
+        // would have moved for a packet that never existed
+        #[cfg(feature = "ice")]
+        if !self.has_path() {
+            return Ok(None);
+        }
         // the processor is lifted out for the length of the frame so that the
         // audio it produces can be borrowed from it while the rest of the
         // session is still being written to
         let mut echo = self.echo.take();
         let sent = self.encode_frame(samples, echo.as_mut());
         self.echo = echo;
-        Ok(sent?.map(|length| Datagram {
-            destination: self.rtp.destination(),
-            payload: self.rtp_out.get(..length).unwrap_or_default(),
-        }))
+        let Some(length) = sent? else {
+            return Ok(None);
+        };
+        let signalled = self.rtp.destination();
+        #[cfg(feature = "ice")]
+        {
+            Ok(self.on_path(Built::Rtp, length, signalled, now))
+        }
+        #[cfg(not(feature = "ice"))]
+        {
+            let _ = now;
+            Ok(Some(Datagram {
+                destination: signalled,
+                payload: self.rtp_out.get(..length).unwrap_or_default(),
+            }))
+        }
     }
 
     /// One captured frame as far as the octets in `rtp_out`, or `None` for a
@@ -1025,6 +1290,13 @@ impl MediaSession {
         if self.rtp.awaiting_keys() {
             return None;
         }
+        // and for the same reason one line up: `rtcp_due` reconsiders the
+        // schedule as it answers, so a report refused after asking would
+        // leave the deadline in the past and spin a caller driven by it
+        #[cfg(feature = "ice")]
+        if !self.has_path() {
+            return None;
+        }
         let destination = self.control_destination()?;
         let elapsed = self.elapsed(now);
         if !matches!(self.rtp.rtcp_due(elapsed, self.draws.unit()), RtcpDue::Send) {
@@ -1036,6 +1308,11 @@ impl MediaSession {
             .rtp
             .build_report(&mut self.rtcp_out, elapsed, ntp, draw)
             .ok()?;
+        #[cfg(feature = "ice")]
+        {
+            self.on_path(Built::Rtcp, length, destination, now)
+        }
+        #[cfg(not(feature = "ice"))]
         Some(Datagram {
             destination,
             payload: self.rtcp_out.get(..length).unwrap_or_default(),
@@ -1081,6 +1358,11 @@ impl MediaSession {
             .rtp
             .send_bye(&mut self.rtcp_out, elapsed, b"", draw)
             .ok()?;
+        #[cfg(feature = "ice")]
+        {
+            self.on_path(Built::Rtcp, length, destination, now)
+        }
+        #[cfg(not(feature = "ice"))]
         Some(Datagram {
             destination,
             payload: self.rtcp_out.get(..length).unwrap_or_default(),
@@ -1110,7 +1392,11 @@ impl MediaSession {
             .and_then(|dtls| dtls.handshake.poll_timeout());
         #[cfg(not(feature = "dtls"))]
         let handshake = None;
-        [rtcp, stall, handshake].into_iter().flatten().min()
+        #[cfg(feature = "ice")]
+        let ice = self.ice.as_ref().and_then(crate::ice::Ice::deadline);
+        #[cfg(not(feature = "ice"))]
+        let ice = None;
+        [rtcp, stall, handshake, ice].into_iter().flatten().min()
     }
 
     /// Time has passed. The only thing this decides is whether the stream has
@@ -1127,6 +1413,15 @@ impl MediaSession {
             dtls.handshake.on_timeout(now);
             self.settle_handshake();
         }
+        // and the agent, for the same reason: checks, consent and keepalives
+        // are all on its own clock, and an agent driven only when the
+        // watchdog happens to be armed is an agent that never checks anything
+        #[cfg(feature = "ice")]
+        if let Some(ice) = self.ice.as_mut() {
+            ice.top_up();
+            ice.handle_timeout(now);
+            self.drain_ice(now);
+        }
         let Some(after) = self.stall_after else {
             return;
         };
@@ -1138,6 +1433,23 @@ impl MediaSession {
             self.stalled = true;
             self.events.push_back(MediaEvent::Stalled { silent_for });
         }
+    }
+
+    /// The path ICE chose for this call: the local socket and the peer, once
+    /// there is a selected pair (RFC 8445 §12.1).
+    ///
+    /// `None` until the checks settle, and `None` for ever on a call that is
+    /// not using ICE — which is most calls, and which
+    /// [`MediaSession::destination`] answers for instead. What
+    /// [`MediaEvent::PathChosen`] reports at the moment it changes, for an
+    /// application that would rather ask than keep the event.
+    #[cfg(feature = "ice")]
+    #[must_use]
+    pub fn ice_path(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.ice
+            .as_ref()?
+            .selected_pair()
+            .map(|pair| (pair.local, pair.remote))
     }
 
     /// Whether inbound audio is currently considered stopped.

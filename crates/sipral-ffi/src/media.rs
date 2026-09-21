@@ -61,7 +61,7 @@ use std::slice;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, MediaError,
+    Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, IcePolicy, MediaError,
     MediaSession, Playback, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
     StreamStatistics,
 };
@@ -165,6 +165,47 @@ codes! {
         /// `a=crypto` included, since that key travelled in a body this
         /// policy exists to avoid trusting.
         DtlsRequired = 5,
+    }
+}
+
+codes! {
+    /// What a call or a stack says about ICE. Names for
+    /// `sipral_stack_config_t::ice` (the stack's default) and
+    /// `sipral_call_config_t::ice` (a per-call override).
+    ///
+    /// Zero is not one of them, and it is not the same absence on the two
+    /// structs: on the stack it means this build's own built-in default
+    /// (`IcePolicy::default()`, which is [`SipralIce::Off`]); on a call it
+    /// means the stack's own setting, whatever that came to.
+    ///
+    /// A call that offers ICE also asks for RFC 5761 multiplexing, whatever
+    /// `offer_rtcp_mux` says, because an ICE stream with a second component
+    /// needs a second address and this ABI names one.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralIce: u32 {
+        /// [`IcePolicy::Off`]: do not offer it, and do not answer a peer that
+        /// does. The default, and `docs/06-nat.md` says why at length.
+        Off = 1,
+        /// [`IcePolicy::Offered`]: offer it, and use it against a peer that
+        /// offers it back.
+        ///
+        /// A peer that does not — an Asterisk with `ice_support=no`, which is
+        /// its default — is answered without it and the call runs on the
+        /// signalled address and symmetric RTP, exactly as it would have. An
+        /// application that names this **must** drain
+        /// [`sipral_media_poll_transmit`]: a check that never leaves is a
+        /// call that never chooses a path.
+        ///
+        /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+        /// `SIPRAL_FEATURE_ICE`.
+        Offered = 2,
+        /// [`IcePolicy::Required`]: offer it, and let no stream on this call
+        /// carry audio on a path ICE did not check.
+        ///
+        /// Each of the three ways a peer can fail to do ICE ends the call's
+        /// media with `SIPRAL_EVENT_KIND_MEDIA_FAILED` instead of falling
+        /// back. That is the whole difference between this and `Offered`.
+        Required = 3,
     }
 }
 
@@ -286,6 +327,17 @@ codes! {
         Codec = 7,
         /// Something else the layer below reported and this ABI has no word for.
         Other = 8,
+        /// ICE could not carry this call: the far end described none this
+        /// stack could use and the policy was `SIPRAL_ICE_REQUIRED`, the far
+        /// end took `a=rtcp-mux` out of an answer to an ICE offer, or consent
+        /// to send on the pair that was chosen was withdrawn part-way through
+        /// (RFC 7675 §5).
+        ///
+        /// A code of its own because it is the one an application can act on
+        /// differently: the call is up and the signalling is sound, and what
+        /// changed is only that no path could be checked. A deployment with a
+        /// non-ICE profile to fall back to falls back here.
+        Ice = 9,
     }
 }
 
@@ -690,6 +742,11 @@ pub(crate) fn fault_of(error: &MediaError) -> SipralMediaFault {
         | MediaError::NotRecording
         | MediaError::AlreadyRecording
         | MediaError::CodecChanged => SipralMediaFault::Recording,
+        #[cfg(feature = "ice")]
+        MediaError::Ice(_)
+        | MediaError::IceRequired
+        | MediaError::IceNeedsRtcpMux
+        | MediaError::IcePathLost => SipralMediaFault::Ice,
         _ => SipralMediaFault::Other,
     }
 }
@@ -835,8 +892,48 @@ pub(crate) fn srtp_policy(value: u32, name: &'static str) -> Result<Option<SrtpP
     }
 }
 
+/// A `sipral_stack_config_t::ice` or `sipral_call_config_t::ice` value, as an
+/// [`IcePolicy`] the caller actually named — `None` for the zero that means
+/// "unspecified", which the two structs resolve differently, exactly as
+/// [`srtp_policy`] describes.
+///
+/// # Errors
+///
+/// `SIPRAL_STATUS_NOT_SUPPORTED` for a policy this build has no agent to
+/// honour, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a value that names none
+/// of them.
+pub(crate) fn ice_policy(value: u32, name: &'static str) -> Result<Option<IcePolicy>, Fail> {
+    match value {
+        0 => Ok(None),
+        1 => Ok(Some(IcePolicy::Off)),
+        // the numbers are in the header of every build, because a value that
+        // has left it is spent; what a build without the feature has is no
+        // agent to honour them with, and saying so is better than placing the
+        // call on an unchecked path the policy was chosen to avoid
+        #[cfg(feature = "ice")]
+        2 => Ok(Some(IcePolicy::Offered)),
+        #[cfg(feature = "ice")]
+        3 => Ok(Some(IcePolicy::Required)),
+        #[cfg(not(feature = "ice"))]
+        2 | 3 => Err(fail(
+            SipralStatus::NotSupported,
+            format!(
+                "{name} names ICE and this build has none: SIPRAL_FEATURE_ICE is clear in \
+                 sipral_capabilities"
+            ),
+        )),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "{name} is {other}, and ice is 0 to leave it unspecified, 1 for off, 2 for \
+                 offered or 3 for required"
+            ),
+        )),
+    }
+}
+
 /// The catalogue a stack was asked for: an order, a frame length, what an
-/// offer says about itself, and what it says about SRTP.
+/// offer says about itself, and what it says about SRTP and about ICE.
 ///
 /// A name this build has no encoder for is refused here, where the caller still
 /// knows which string it passed, rather than ignored later where nothing can
@@ -847,6 +944,7 @@ pub(crate) fn catalog_of(
     dtmf: bool,
     rtcp_mux: bool,
     srtp: Option<SrtpPolicy>,
+    ice: Option<IcePolicy>,
 ) -> Result<CodecCatalog, Fail> {
     let mut catalog = match order {
         Some(list) => ordered(list)?,
@@ -859,6 +957,9 @@ pub(crate) fn catalog_of(
     }
     if let Some(policy) = srtp {
         catalog = catalog.with_srtp(policy);
+    }
+    if let Some(policy) = ice {
+        catalog = catalog.with_ice(policy);
     }
     Ok(catalog.with_dtmf(dtmf).with_rtcp_mux(rtcp_mux))
 }
@@ -1507,9 +1608,17 @@ entry! {
     /// whole one is what a peer hears as a stutter.
     ///
     /// A `len` of zero in the packet means the frame was deliberately not sent:
-    /// this end is holding the far end, or silence suppression swallowed it.
-    /// The RTP timestamp moves by a frame either way, because RFC 3550 §5.1
-    /// makes it a measure of time rather than of packets.
+    /// this end is holding the far end, silence suppression swallowed it, or
+    /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
+    /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
+    /// measure of time rather than of packets; in the third nothing is
+    /// encoded at all, since there is no packet for the timestamp to belong
+    /// to and a codec that carries state would have moved it for nothing.
+    ///
+    /// `now_ms` is read as the stack reads it and moves nothing, as with every
+    /// media entry point. It is what tells ICE that traffic went out on the
+    /// pair it chose, which is what RFC 8445 §11 lets it stop sending
+    /// keepalives for.
     ///
     /// # Safety
     ///
@@ -1519,6 +1628,7 @@ entry! {
     /// them.
     fn sipral_media_capture(
         media: SipralHandle,
+        now_ms: u64,
         samples: *const i16,
         sample_count: usize,
         packet: *mut SipralMediaPacket,
@@ -1528,7 +1638,8 @@ entry! {
         if samples.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "samples is null"));
         }
-        with_media(media, |session, _| {
+        with_media(media, |session, entry| {
+            let now = entry.instant(now_ms)?;
             let frame = session.frame_samples();
             if sample_count != frame {
                 return Err(fail(
@@ -1537,7 +1648,9 @@ entry! {
                 ));
             }
             let taken = unsafe { slice::from_raw_parts(samples, frame) };
-            let sent = session.capture(taken).map_err(|error| media_failed(&error))?;
+            let sent = session
+                .capture(taken, now)
+                .map_err(|error| media_failed(&error))?;
             match sent {
                 Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
                 None => Ok(()),
@@ -1612,15 +1725,19 @@ entry! {
             // the clock is read and checked like every other entry point's,
             // so that a caller which drives this one alone still cannot walk
             // a stack's time backwards
-            let _ = entry.instant(now_ms)?;
-            #[cfg(feature = "dtls")]
-            match session.poll_transmit() {
+            #[cfg_attr(
+                not(any(feature = "dtls", feature = "ice")),
+                allow(clippy::let_underscore_untyped)
+            )]
+            let now = entry.instant(now_ms)?;
+            #[cfg(any(feature = "dtls", feature = "ice"))]
+            match session.poll_transmit(now) {
                 Some(datagram) => unsafe { put(&mut out, datagram.destination, datagram.payload) },
                 None => Ok(()),
             }
-            #[cfg(not(feature = "dtls"))]
+            #[cfg(not(any(feature = "dtls", feature = "ice")))]
             {
-                let _ = session;
+                let _ = (session, now);
                 Ok(())
             }
         })?;
@@ -2028,7 +2145,7 @@ a=sendrecv\r\n";
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
         let status = unsafe {
-            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         packet.len
@@ -2302,7 +2419,7 @@ a=sendrecv\r\n";
     /// `an_order_that_names_opus_follows_the_catalogue` gives.
     #[test]
     fn an_order_naming_a_codec_that_cannot_cut_the_frame_length_is_refused() {
-        let refused = catalog_of(Some("opus"), 7, true, false, None)
+        let refused = catalog_of(Some("opus"), 7, true, false, None, None)
             .expect_err("no build here cuts a seven-millisecond Opus frame");
         assert_eq!(
             refused.status,
@@ -2320,7 +2437,7 @@ a=sendrecv\r\n";
     /// the setting itself.
     #[test]
     fn a_frame_length_every_codec_in_the_order_cuts_is_taken() {
-        let taken = catalog_of(Some("PCMU"), 7, true, false, None)
+        let taken = catalog_of(Some("PCMU"), 7, true, false, None, None)
             .expect("G.711 cuts a whole number of samples at any millisecond");
         assert_eq!(taken.frame_length(), 7);
     }
@@ -2356,11 +2473,11 @@ a=sendrecv\r\n";
     /// the one door this ABI has into `sipral::SrtpPolicy`.
     #[test]
     fn catalog_of_applies_srtp_only_when_one_was_named() {
-        let default = catalog_of(None, 0, true, false, None).expect("a plain catalogue");
+        let default = catalog_of(None, 0, true, false, None, None).expect("a plain catalogue");
         assert_eq!(default.srtp(), SrtpPolicy::default());
 
-        let required =
-            catalog_of(None, 0, true, false, Some(SrtpPolicy::Required)).expect("a catalogue");
+        let required = catalog_of(None, 0, true, false, Some(SrtpPolicy::Required), None)
+            .expect("a catalogue");
         assert_eq!(required.srtp(), SrtpPolicy::Required);
     }
 
@@ -2398,7 +2515,10 @@ a=sendrecv\r\n";
             // loud, so that nothing on the way down mistakes it for silence
             // and swallows the frame before the encoder sees it
             Ok(session
-                .capture(&vec![8_000_i16; session.frame_samples() / 2])
+                .capture(
+                    &vec![8_000_i16; session.frame_samples() / 2],
+                    Instant::now(),
+                )
                 .err())
         })
         .expect("the call has media");
@@ -2905,6 +3025,7 @@ a=sendrecv\r\n";
             unsafe {
                 sipral_media_capture(
                     SIPRAL_HANDLE_NONE,
+                    0,
                     samples.as_ptr(),
                     samples.len(),
                     &raw mut packet,
@@ -3089,7 +3210,7 @@ a=sendrecv\r\n";
         let mut packet = buffers.packet();
         let samples = [3_000_i16; FRAME];
         let status = unsafe {
-            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let (payload, destination) = buffers.taken(&packet);
@@ -3119,7 +3240,7 @@ a=sendrecv\r\n";
         let mut packet = buffers.packet();
         let short = [0_i16; 80];
         let status =
-            unsafe { sipral_media_capture(media, short.as_ptr(), short.len(), &raw mut packet) };
+            unsafe { sipral_media_capture(media, 0, short.as_ptr(), short.len(), &raw mut packet) };
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert!(last_error_text().contains("160"));
         assert_eq!(
@@ -3152,7 +3273,7 @@ a=sendrecv\r\n";
         };
         let samples = [1_000_i16; FRAME];
         let status = unsafe {
-            sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+            sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
         };
         assert_eq!(status, SipralStatus::BufferTooSmall);
         assert_eq!(
@@ -3309,7 +3430,7 @@ a=sendrecv\r\n";
                 )
             }),
             ("capture", unsafe {
-                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+                sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
             }),
             ("receive", unsafe {
                 sipral_media_receive(
@@ -3517,7 +3638,7 @@ a=sendrecv\r\n";
             let mut packet = buffers.packet();
             let samples = [1_000_i16; FRAME];
             let status = unsafe {
-                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+                sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
             };
             let _ = done.send(status);
         });
@@ -3592,7 +3713,7 @@ a=sendrecv\r\n";
             let mut packet = buffers.packet();
             let samples = [1_000_i16; FRAME];
             let status = unsafe {
-                sipral_media_capture(media, samples.as_ptr(), samples.len(), &raw mut packet)
+                sipral_media_capture(media, 0, samples.as_ptr(), samples.len(), &raw mut packet)
             };
             let _ = done.send(status);
         });
@@ -3792,8 +3913,9 @@ a=sendrecv\r\n";
         // reached for directly: the packet is what the far end actually sees
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
-        let status =
-            unsafe { sipral_media_capture(media, [0_i16; FRAME].as_ptr(), FRAME, &raw mut packet) };
+        let status = unsafe {
+            sipral_media_capture(media, 0, [0_i16; FRAME].as_ptr(), FRAME, &raw mut packet)
+        };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
         let (rtp, _) = buffers.taken(&packet);
         let ssrc = u32::from_be_bytes(

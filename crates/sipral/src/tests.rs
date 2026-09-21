@@ -331,7 +331,7 @@ impl Pair {
             .engine
             .session(call)
             .expect("the caller's media")
-            .capture(tone)
+            .capture(tone, self.now)
             .expect("the frame encodes")
             .map(|datagram| datagram.payload.to_vec())
             .expect("a frame that is neither held nor suppressed goes out");
@@ -356,7 +356,7 @@ impl Pair {
                 .session(call)
                 .expect("the caller's media");
             session
-                .capture(tone)
+                .capture(tone, self.now)
                 .expect("the frame encodes")
                 .map(|datagram| datagram.payload.to_vec())
         };
@@ -405,10 +405,10 @@ impl Pair {
         for _ in 0..64 {
             let mut moved = false;
             let mut pending = Vec::new();
-            while let Some((_, _, record)) = self.caller.engine.poll_transmit() {
+            while let Some((_, _, record)) = self.caller.engine.poll_transmit(self.now) {
                 pending.push((record, true));
             }
-            while let Some((_, _, record)) = self.callee.engine.poll_transmit() {
+            while let Some((_, _, record)) = self.callee.engine.poll_transmit(self.now) {
                 pending.push((record, false));
             }
             for (mut record, from_caller) in pending {
@@ -958,7 +958,7 @@ fn a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard() {
         .engine
         .session(call)
         .expect("the caller's media")
-        .capture(&samples)
+        .capture(&samples, Instant::now())
         .expect("the frame encodes")
         .map(|datagram| datagram.payload.to_vec())
         .expect("a frame that is neither held nor suppressed goes out");
@@ -1218,7 +1218,10 @@ fn a_call_that_agreed_dtls_srtp_sends_nothing_until_the_handshake_has_keyed_it()
     // call, which is longer than the handshake it is waiting for
     for frame in 0..50 {
         let mut session = pair.caller.engine.session(call).expect("media");
-        let sent = session.capture(&tone).expect("the frame encodes").is_some();
+        let sent = session
+            .capture(&tone, Instant::now())
+            .expect("the frame encodes")
+            .is_some();
         drop(session);
         assert!(
             !sent,
@@ -1240,7 +1243,10 @@ fn a_call_that_agreed_dtls_srtp_sends_nothing_until_the_handshake_has_keyed_it()
         assert!(!session.is_awaiting_keys());
     }
     let mut session = pair.caller.engine.session(call).expect("media");
-    let went = session.capture(&tone).expect("the frame encodes").is_some();
+    let went = session
+        .capture(&tone, Instant::now())
+        .expect("the frame encodes")
+        .is_some();
     drop(session);
     assert!(went, "the call stayed silent after it was keyed");
 }
@@ -1763,7 +1769,7 @@ fn a_processor_is_handed_the_audio_the_call_played() {
             .engine
             .session(remote)
             .expect("the callee's media")
-            .capture(&silence)
+            .capture(&silence, Instant::now())
             .expect("the frame encodes");
         pair.advance();
     }
@@ -2254,7 +2260,9 @@ fn hold_reaches_the_media_and_resume_gives_it_back() {
     assert!(!held.is_sending(), "the held end is still sending");
     assert!(held.is_receiving(), "the held end has stopped listening");
     assert!(
-        held.capture(&[100; 160]).expect("no error").is_none(),
+        held.capture(&[100; 160], Instant::now())
+            .expect("no error")
+            .is_none(),
         "a held stream put a packet on the wire"
     );
     drop(held);
@@ -2268,7 +2276,12 @@ fn hold_reaches_the_media_and_resume_gives_it_back() {
 
     let mut resumed = pair.callee.engine.session(remote).expect("media");
     assert_eq!(resumed.direction(), Direction::SendRecv);
-    assert!(resumed.capture(&[100; 160]).expect("no error").is_some());
+    assert!(
+        resumed
+            .capture(&[100; 160], Instant::now())
+            .expect("no error")
+            .is_some()
+    );
 }
 
 /// A6's other half: loss and jitter the receiver works out for itself, but the
@@ -2295,7 +2308,7 @@ fn the_round_trip_time_comes_back_from_rtcp() {
             .engine
             .session(remote)
             .expect("media")
-            .capture(&samples)
+            .capture(&samples, Instant::now())
             .expect("it encodes")
             .map(|out| out.payload.to_vec());
         let mut session = pair.caller.engine.session(call).expect("media");
@@ -2418,6 +2431,8 @@ fn the_first_rtcp_report_is_scheduled_from_this_calls_own_seed() {
                 clock: WallClock::from_unix(now, 1_700_000_000, 0),
                 #[cfg(feature = "dtls")]
                 handshake: None,
+                #[cfg(feature = "ice")]
+                ice: None,
                 now,
             },
         )
@@ -2584,7 +2599,7 @@ fn a_recording_takes_both_directions_of_a_live_call() {
             .engine
             .session(remote)
             .expect("media")
-            .capture(&level)
+            .capture(&level, Instant::now())
             .expect("the far end speaks too");
         pair.advance();
     }
@@ -2720,6 +2735,8 @@ fn session(local: &SessionDescription, remote: &SessionDescription, now: Instant
             clock: WallClock::from_unix(now, 1_700_000_000, 0),
             #[cfg(feature = "dtls")]
             handshake: None,
+            #[cfg(feature = "ice")]
+            ice: None,
             now,
         },
     )
@@ -2750,7 +2767,7 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     for index in 0..30 {
         tone(&mut samples, 8_000, &mut phase);
         let datagram = sender
-            .capture(&samples)
+            .capture(&samples, Instant::now())
             .expect("it encodes")
             .map(|out| out.payload.to_vec());
         // every seventh packet is lost on the way
@@ -2902,6 +2919,8 @@ fn an_answer_this_build_cannot_decode_is_refused_by_name() {
             clock: WallClock::from_unix(now, 1_700_000_000, 0),
             #[cfg(feature = "dtls")]
             handshake: None,
+            #[cfg(feature = "ice")]
+            ice: None,
             now,
         },
     );
@@ -2955,7 +2974,7 @@ fn plan_of(local: &SessionDescription, remote: &SessionDescription) -> crate::Me
 
 /// One packet's worth of audio, as it goes on the wire.
 fn one_packet(from: &mut MediaSession) -> Vec<u8> {
-    from.capture(&[1_000_i16; 160])
+    from.capture(&[1_000_i16; 160], Instant::now())
         .expect("the frame encodes")
         .expect("a frame goes out")
         .payload
@@ -3229,7 +3248,7 @@ fn talk(pair: &mut Pair, call: CallHandle, packets: usize) -> Vec<u8> {
         } else {
             frame
         };
-        if let Some(out) = session.capture(&audio).expect("it encodes") {
+        if let Some(out) = session.capture(&audio, Instant::now()).expect("it encodes") {
             last = out.payload.to_vec();
         }
         drop(session);
@@ -3266,7 +3285,7 @@ fn a_codec_change_carries_the_sequence_number_on_rather_than_rewinding_it() {
         .engine
         .session(call)
         .expect("media")
-        .capture(&[100_i16; 160])
+        .capture(&[100_i16; 160], Instant::now())
         .expect("it encodes")
         .expect("a frame goes out")
         .payload
@@ -3489,7 +3508,7 @@ fn a_codec_change_that_moves_the_rate_keeps_the_processor_too() {
     );
     // and it is fed frames of the new size rather than the old
     let frame = vec![100_i16; session.frame_samples()];
-    session.capture(&frame).expect("it encodes");
+    session.capture(&frame, Instant::now()).expect("it encodes");
 }
 
 /// A guard rather than a proof, and worth saying which: audio crossed a codec
@@ -3532,7 +3551,7 @@ fn audio_still_crosses_after_a_codec_change() {
             .engine
             .session(call)
             .expect("media")
-            .capture(&samples)
+            .capture(&samples, Instant::now())
             .expect("it encodes")
             .map(|out| out.payload.to_vec());
         if let Some(mut datagram) = outbound {
@@ -4088,5 +4107,319 @@ fn two_engines_sharing_an_endpoint_seed_still_negotiate_different_keys() {
         first, second,
         "the same endpoint seed must not make two different media seeds \
          negotiate the same key"
+    );
+}
+
+// -- ICE ---------------------------------------------------------------------
+
+/// A pair whose two ends both offer ICE, connected.
+#[cfg(feature = "ice")]
+fn ice_call() -> (Pair, CallHandle, CallHandle) {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    (pair, call, remote)
+}
+
+/// A pair that offers ICE to a peer that does not do it at all — an Asterisk
+/// with `ice_support=no`, which is its default.
+#[cfg(feature = "ice")]
+fn one_sided_ice_call(ours: crate::IcePolicy) -> (Pair, CallHandle, CallHandle) {
+    let mine = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(ours);
+    let theirs = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::asymmetric(mine, theirs);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    (pair, call, remote)
+}
+
+#[cfg(feature = "ice")]
+impl Pair {
+    /// Run the connectivity checks between the two ends, over the media path
+    /// and over nothing else, and say how many datagrams crossed.
+    ///
+    /// The same three-step shape a real driver needs and `shake_hands`
+    /// describes: drain `poll_transmit` to empty, deliver, move the clock,
+    /// drain again. A driver that skips the clock is a driver whose calls
+    /// never pace a second check, which is what this reproduces if it is got
+    /// wrong.
+    fn check_paths(&mut self, call: CallHandle, remote: CallHandle) -> usize {
+        let mut crossed = 0;
+        for _ in 0..64 {
+            let mut pending = Vec::new();
+            while let Some((_, _, probe)) = self.caller.engine.poll_transmit(self.now) {
+                pending.push((probe, true));
+            }
+            while let Some((_, _, probe)) = self.callee.engine.poll_transmit(self.now) {
+                pending.push((probe, false));
+            }
+            let moved = !pending.is_empty();
+            for (mut probe, from_caller) in pending {
+                crossed += 1;
+                let (mut session, from) = if from_caller {
+                    (
+                        self.callee.engine.session(remote).expect("media"),
+                        caller_media(),
+                    )
+                } else {
+                    (
+                        self.caller.engine.session(call).expect("media"),
+                        callee_media(),
+                    )
+                };
+                session.receive(&mut probe, from, self.now);
+            }
+            let chosen = self
+                .caller
+                .engine
+                .session(call)
+                .is_some_and(|session| session.ice_path().is_some())
+                && self
+                    .callee
+                    .engine
+                    .session(remote)
+                    .is_some_and(|session| session.ice_path().is_some());
+            if chosen && !moved {
+                break;
+            }
+            self.advance();
+            self.caller.engine.handle_timeout(self.now);
+            self.callee.engine.handle_timeout(self.now);
+            // and drained, because a session's events reach the application
+            // through the engine and a test that never asks sees none
+            self.caller.drain(self.now, false);
+            self.callee.drain(self.now, true);
+        }
+        crossed
+    }
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn an_offer_that_carries_ice_names_a_candidate_and_asks_to_multiplex() {
+    let (pair, _, _) = ice_call();
+    let described = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer");
+    let offer = one_stream(&described);
+    let ufrag = offer
+        .attribute("ice-ufrag")
+        .and_then(|line| line.value.as_deref())
+        .expect("the offer carries a username fragment");
+    let pwd = offer
+        .attribute("ice-pwd")
+        .and_then(|line| line.value.as_deref())
+        .expect("the offer carries a password");
+    // RFC 8839 §5.4's shape, which is what the peer's agent will check
+    assert!((4..=32).contains(&ufrag.len()), "ufrag is {}", ufrag.len());
+    assert!((22..=256).contains(&pwd.len()), "pwd is {}", pwd.len());
+    let candidates: Vec<&str> = offer
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "candidate")
+        .filter_map(|attribute| attribute.value.as_deref())
+        .collect();
+    assert_eq!(candidates.len(), 1, "one address, one component, one host");
+    assert!(
+        candidates[0].contains("typ host") && candidates[0].contains("192.0.2.1"),
+        "{}",
+        candidates[0]
+    );
+    // N4's consequence: an ICE stream has one component, and asking for
+    // multiplexing is what makes that true. The catalogue never said so
+    assert!(
+        offer.attribute("rtcp-mux").is_some(),
+        "an ICE offer has to ask for one port"
+    );
+    // RFC 8839 §5.5, session-level, and written after `answer()` built the
+    // description rather than into the vocabulary that builds it
+    assert_eq!(
+        described
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == "ice-pacing")
+            .and_then(|attribute| attribute.value.as_deref()),
+        Some("50")
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn two_stacks_check_each_other_and_the_tone_crosses_on_the_pair_they_chose() {
+    let (mut pair, call, remote) = ice_call();
+    let crossed = pair.check_paths(call, remote);
+    assert!(crossed > 0, "nothing was checked");
+
+    // both ends chose, and each chose the other's address
+    let ours = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("media")
+        .ice_path()
+        .expect("the caller chose a path");
+    let theirs = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("media")
+        .ice_path()
+        .expect("the callee chose a path");
+    assert_eq!(ours, (caller_media(), callee_media()));
+    assert_eq!(theirs, (callee_media(), caller_media()));
+
+    // and each was told once, which is what an application draws on
+    let chosen = pair
+        .caller
+        .heard
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Media {
+                    event: MediaEvent::PathChosen { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(chosen, 1, "the caller was told {chosen} times");
+
+    // and the audio crosses, which is the whole point of having checked
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} through the checked call",
+        loudness(&played)
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_peer_that_does_not_do_ice_still_gets_its_audio() {
+    // the regression the whole fallback exists to prevent: an Asterisk with
+    // `ice_support=no` — its default — used to be a call that worked, and
+    // turning ICE on must not turn it into a call with no audio
+    let (mut pair, call, remote) = one_sided_ice_call(crate::IcePolicy::Offered);
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .ice_path()
+            .is_none(),
+        "there is no pair to choose against a peer that described none"
+    );
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone came back at {} on a call that fell back",
+        loudness(&played)
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_call_that_requires_ice_refuses_the_peer_that_has_none_rather_than_falling_back() {
+    let (mut pair, call, _) = one_sided_ice_call(crate::IcePolicy::Required);
+    // the media is refused; the call itself is untouched, which is what every
+    // other media failure here does too
+    assert!(
+        pair.caller.engine.session(call).is_none(),
+        "a required policy opened a stream on a path nothing checked"
+    );
+    let failed: Vec<&MediaError> = pair
+        .caller
+        .heard
+        .iter()
+        .filter_map(|event| match event {
+            Event::Media {
+                event: MediaEvent::Failed(error),
+                ..
+            } => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![&MediaError::IceRequired]);
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {
+    // RFC 8839 §4.4: the attributes go on every description of a session. The
+    // user agent writes this one itself — the facade never sees it — so what
+    // keeps them there is `carried` in `sipral-ua`, and this is its test from
+    // the outside
+    let (mut pair, call, _) = ice_call();
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("a confirmed call can be held");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    let held = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw the hold re-offer");
+    let stream = one_stream(&held);
+    assert!(
+        stream.attribute("ice-ufrag").is_some() && stream.attribute("ice-pwd").is_some(),
+        "the hold re-offer withdrew ICE from a call that had it"
+    );
+    assert_eq!(
+        stream
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == "candidate")
+            .count(),
+        1,
+        "and it withdrew the candidate"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {
+    // N5's precondition, from the outside: a producer that had no route and
+    // sent anyway would be sending to the signalled address, which is exactly
+    // the path ICE exists not to trust
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let mut session = pair.caller.engine.session(call).expect("media");
+    assert!(session.ice_path().is_none(), "nothing has been checked yet");
+    let frame = vec![100_i16; session.frame_samples()];
+    assert!(
+        session
+            .capture(&frame, pair.now)
+            .expect("the frame is refused, not broken")
+            .is_none(),
+        "audio went out before a path was chosen"
+    );
+    assert!(
+        session.poll_rtcp(pair.now).is_none(),
+        "a report went out before a path was chosen"
     );
 }
