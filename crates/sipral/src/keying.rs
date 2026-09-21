@@ -193,6 +193,34 @@ pub(crate) fn answer_line(accepted: &CryptoPolicy, keys: KeySalt) -> Crypto {
     CryptoPolicy::new(accepted.tag, accepted.suite, keys).to_crypto()
 }
 
+/// How a stream is keyed, as a kind rather than as keys: in the clear, by
+/// SDES keys out of the descriptions, or by a DTLS-SRTP handshake on the
+/// media path.
+///
+/// What a running stream cannot turn into another of. Each is a different
+/// state of `RtpSession` — no context, a context from the description, a
+/// context still being waited for — and a stream that has sent under one has
+/// no way to carry on under another; a re-negotiation that asks for it is
+/// refused rather than adopted, since adopting the plan would leave the
+/// stream running the old kind while the far end runs the new.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shape {
+    Clear,
+    Sdes,
+    Dtls,
+}
+
+impl Shape {
+    /// The kind a negotiated plan's keying is.
+    pub(crate) const fn of(keying: Option<&Keying>) -> Self {
+        match keying {
+            None => Self::Clear,
+            Some(Keying::Sdes { .. }) => Self::Sdes,
+            Some(Keying::Dtls { .. }) => Self::Dtls,
+        }
+    }
+}
+
 /// The key a stream this end described is sending under: the first key of
 /// its first crypto line that reads, or `None` where it carries none.
 ///

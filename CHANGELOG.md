@@ -40,6 +40,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `hold` select `holdcodec` too, and the RFC 4733 flow's key was not the one
   the Rust driver uses.
 
+- **A DTLS-SRTP call in the lab, from both drivers.** Placed under
+  `DtlsRequired` against Asterisk's own DTLS endpoint, heard, held, resumed and
+  heard again: the hold and the resume are both re-offers that hand the roles
+  back with `actpass`, and audio after them is what says the far end kept the
+  association. The Rust driver had never run a handshake — it built the facade
+  without DTLS and never sent a handshake record — and a loopback test now keys
+  a call between two of its own endpoints over real sockets before the lab is
+  asked to.
+
 - **The gate reads the tree's C the way glibc does.** The lab's C driver, the
   smoke test, the Swift package's translation unit and the JNI shim are
   compiled again against glibc's own headers for x86_64 and aarch64 Linux,
@@ -214,6 +223,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   connects the call.
 
 ### Fixed
+
+- **Seven defects an adversarial review of DTLS-SRTP found, all of them
+  availability or interoperability; none let media be read, forged or
+  replayed.**
+  - Without ICE, the handshake's latch closed on the first datagram whose first
+    octet was 22, from anywhere: one packet from a stranger kept a call from
+    ever keying. Only the host the signalling named may close it now.
+  - This end's flights went to the signalled port whatever port the far end's
+    records came from, since RTP cannot latch before there are keys. They go to
+    the latched address now.
+  - The latch stayed where it was when ICE selected another pair or a
+    re-negotiation moved the far end, and dropped its records as a stranger's.
+  - A certificate renewed between a call's offer and its answer was the one its
+    handshake presented, not the one its offer named, so the far end refused
+    it. A call keeps the certificate it first described itself with.
+  - A re-negotiation that changed a running stream's kind of keying — clear,
+    SDES, DTLS — was adopted, leaving SRTP sent to a far end expecting RTP or
+    the reverse, and the plan later certificates were compared against empty.
+    It is refused as the new `MediaError::KeyingChanged`: 488 to a re-offer,
+    not adopted from an answer.
+  - A forged epoch-0 retransmission kept `sipral_dtls::Connection` from ever
+    giving up on a handshake: answering one postponed the deadline without
+    spending an attempt. It is answered and the deadline stays.
 
 - **A hold on a secured call reaches the end that asked for it.** The far
   end's answer to it came from the user agent, which wrote the stream without

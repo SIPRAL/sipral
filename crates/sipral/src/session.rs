@@ -60,7 +60,7 @@ use crate::dtmf::{self, DIGIT_GAP, Dialling, Digit, Due, LONGEST_DIGIT, SHORTEST
 use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
-use crate::keying::{self, Opening};
+use crate::keying::{self, Opening, Shape};
 use crate::pipeline::Coder;
 use crate::record::{Recorder, RecordingSink};
 use crate::stats::StreamStatistics;
@@ -387,13 +387,20 @@ struct Dtls {
     /// authenticated — there is nothing to authenticate it with — so without
     /// a latch one forged datagram from anywhere on the path would end any
     /// call on this stack that had agreed to be encrypted. The latch closes
-    /// on the first *handshake* record to arrive, never on an alert, which
-    /// narrows that to the same race the RTP latch already has: an attacker
-    /// must beat the far end's first flight rather than pick its moment.
+    /// on the first *handshake* record to arrive, never on an alert, and —
+    /// without ICE — only on one from the host the signalling named
+    /// ([`MediaSession::handshake_source_possible`]): an attacker must send
+    /// from the far end's own address, and beat its first flight, rather
+    /// than pick a moment from anywhere.
     ///
     /// Narrows, and does not close. Closing it needs the candidate exchange
     /// of ICE, which this stack negotiates and does not assume; see
-    /// `docs/06-nat.md`.
+    /// `docs/06-nat.md`. With ICE the pair the agent selects moves it, and a
+    /// re-negotiation that moves the far end's media address opens it again
+    /// for the first record from the new one.
+    ///
+    /// This end's own flights go here while RTP has no latch, which it has
+    /// none of until there are keys: see [`MediaSession::poll_transmit`].
     peer: Option<SocketAddr>,
 }
 
@@ -770,6 +777,14 @@ impl MediaSession {
             // agent has already run, and leaving it armed would cut the audio
             // for good the first time a mid-call re-selection moved the pair
             self.rtp.relocate(pair.remote);
+            // and the handshake's latch goes with it, for the same reason: a
+            // far end that began its handshake on one pair and then nominated
+            // another would otherwise have every record from the pair it
+            // chose dropped, while this end's flights went there
+            #[cfg(feature = "dtls")]
+            if let Some(dtls) = self.dtls.as_mut() {
+                dtls.peer = Some(pair.remote);
+            }
             self.events.push_back(MediaEvent::PathChosen {
                 local: pair.local,
                 remote: pair.remote,
@@ -847,6 +862,7 @@ impl MediaSession {
     /// finish is the handshake's own budget.
     #[cfg(feature = "dtls")]
     fn receive_handshake(&mut self, datagram: &[u8], from: SocketAddr, now: Instant) -> Arrival {
+        let possible = self.handshake_source_possible(from);
         let Some(dtls) = self.dtls.as_mut() else {
             // the keys are in, or the handshake gave up: a record arriving
             // now is a retransmission the far end has not stopped sending, or
@@ -862,13 +878,56 @@ impl MediaSession {
             // 22 is a handshake. Latching on one of those and not on an alert
             // is what keeps an unauthenticated alert — the one thing a peer
             // can send before there are keys that ends the connection — from
-            // arriving from anywhere at all
-            None if datagram.first() == Some(&HANDSHAKE_RECORD) => dtls.peer = Some(from),
+            // arriving from anywhere at all. And only from a source that could
+            // be the far end: see `handshake_source_possible`
+            None if possible && datagram.first() == Some(&HANDSHAKE_RECORD) => {
+                dtls.peer = Some(from);
+            }
             None => return Arrival::Dropped(Discard::ForeignAddress),
         }
         dtls.handshake.on_datagram(datagram, now);
         self.settle_handshake();
         Arrival::Handshake
+    }
+
+    /// Open the handshake's latch again, for a re-negotiation that moved the
+    /// far end's media address: RTP's own latch has just been dropped for
+    /// the same reason, and the next record from the new host closes this
+    /// one again. A no-op without a handshake, and without the feature.
+    #[cfg_attr(not(feature = "dtls"), allow(clippy::unused_self))]
+    fn forget_handshake_source(&mut self) {
+        #[cfg(feature = "dtls")]
+        if let Some(dtls) = self.dtls.as_mut() {
+            dtls.peer = None;
+        }
+    }
+
+    /// Whether a handshake record from `from` may close this call's DTLS
+    /// latch.
+    ///
+    /// Nothing before the fingerprint check authenticates anything, so the
+    /// first record the latch takes decides whose records the handshake is
+    /// run with. Taken from anywhere, one datagram from anybody who read the
+    /// port out of the description — one octet, 22 — closed it on the
+    /// sender, and every record from the real far end was then dropped until
+    /// the handshake gave up: a single packet that kept any encrypted call
+    /// from ever being keyed. So without ICE only the host the signalling
+    /// named may close it, which is the rule RTCP already has before its own
+    /// latch (`rtcp_origin_possible` in `sipral-rtp`), applied before there
+    /// are any keys. Any port on that host, as there, for a far end behind a
+    /// NAT that keeps its address and moves its port. What is left is an
+    /// attacker who can send from the far end's own address, which is the
+    /// race `Dtls::peer` has always documented and only ICE closes.
+    ///
+    /// With ICE the agent has already dropped every source that is not a
+    /// candidate it checked, and the pair it chose moves the latch itself.
+    #[cfg(feature = "dtls")]
+    fn handshake_source_possible(&self, from: SocketAddr) -> bool {
+        #[cfg(feature = "ice")]
+        if self.ice.is_some() {
+            return true;
+        }
+        from.ip() == self.rtp.destination().ip()
     }
 
     /// Install what the handshake produced, or report why there will be none.
@@ -951,22 +1010,30 @@ impl MediaSession {
             }
             let record = self.dtls.as_mut()?.handshake.take_outbound()?;
             self.dtls_out = record;
-            // the stream's own address, which is the signalled one until a
-            // packet has been seen from somewhere else and the latched one
-            // afterwards: a handshake follows symmetric RTP and follows a
-            // re-negotiation that moved the stream, with no second copy of
-            // the answer to keep in step
-            let signalled = self.rtp.destination();
+            // where the far end's own records come from, while the stream has
+            // no latch of its own — and it has none for as long as the
+            // handshake runs, because nothing on RTP can close one before
+            // there are keys to authenticate a packet with. Following the
+            // stream's address alone left a far end whose port the path had
+            // moved sending ClientHellos to an answer that went elsewhere.
+            // Once RTP has latched, on a packet that authenticated, that is
+            // the better witness and is followed instead; before the far end
+            // has said anything, the signalled address is all there is
+            let latched = self.dtls.as_ref().and_then(|dtls| dtls.peer);
+            let destination = match (self.rtp.latched(), latched) {
+                (None, Some(peer)) => peer,
+                _ => self.rtp.destination(),
+            };
             #[cfg(feature = "ice")]
             {
                 let length = self.dtls_out.len();
-                self.on_path(Built::Handshake, length, signalled, now)
+                self.on_path(Built::Handshake, length, destination, now)
             }
             #[cfg(not(feature = "ice"))]
             {
                 let _ = now;
                 Some(Datagram {
-                    destination: signalled,
+                    destination,
                     payload: &self.dtls_out,
                 })
             }
@@ -1606,6 +1673,7 @@ impl MediaSession {
             // old one say nothing about the new
             self.rtp.resync();
             self.last_inbound = now;
+            self.forget_handshake_source();
         }
         if let Some(Rekey {
             policy,
@@ -1697,6 +1765,7 @@ impl MediaSession {
         let was_clock = self.plan.codec.clock_rate();
         let frame_ticks = agreed.frame_ticks(frame_ms);
 
+        let moved = plan.remote != self.plan.remote;
         self.rtp.reformat(&StreamFormat {
             payload_type: plan.codec.payload(),
             accepted: accepted(plan),
@@ -1705,6 +1774,9 @@ impl MediaSession {
             silence_suppression: config.silence_suppression,
             playout: BufferConfig::new(frame_ticks),
         });
+        if moved {
+            self.forget_handshake_source();
+        }
         if let Some(Rekey {
             policy,
             master,
@@ -1812,13 +1884,17 @@ impl MediaSession {
     /// under a keystream already spent: the reuse RFC 3711 §9.1 exists to
     /// forbid. So the terms follow and the index does not restart.
     ///
-    /// A change of shape is neither, and is not decided here. Encryption
-    /// turning on or off mid-call, or SDES giving way to DTLS, is not
-    /// expressible as a context for a stream that is running; the session
-    /// keeps the keys it has, and the engine's `keying_holds` is where a
-    /// stream that lost a required policy is refused.
+    /// A change of shape is neither, and is refused. Encryption turning on or
+    /// off mid-call, or SDES giving way to DTLS, is not expressible as a
+    /// context for a stream that is running ([`Shape`]). Adopting such a plan
+    /// used to leave the stream on the old keys while the plan said the new:
+    /// SRTP sent to a far end expecting RTP, RTP sent to one that had been
+    /// told it was DTLS-SRTP, and — since the plan is also what later
+    /// re-negotiations compare against — a certificate that had gone away and
+    /// come back as another one compared against nothing at all.
     ///
     /// # Errors
+    /// [`MediaError::KeyingChanged`] for a change of shape.
     /// [`MediaError::DtlsFingerprintChanged`] for a re-negotiation that names
     /// a different certificate. RFC 5763 §6.6 asks for a **new** DTLS
     /// association there, which this does not start; what it does instead is
@@ -1831,6 +1907,9 @@ impl MediaSession {
         was: &MediaPlan,
         plan: &MediaPlan,
     ) -> Result<(Option<Rekey>, Option<Rekey>), MediaError> {
+        if Shape::of(was.keying.as_ref()) != Shape::of(plan.keying.as_ref()) {
+            return Err(MediaError::KeyingChanged);
+        }
         #[cfg(feature = "dtls")]
         if let (
             Some(Keying::Dtls {

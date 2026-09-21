@@ -88,7 +88,7 @@ use crate::error::MediaError;
 use crate::event::{DigitSource, Event, MediaEvent};
 #[cfg(feature = "dtls")]
 use crate::keying::SrtpPolicy;
-use crate::keying::{self};
+use crate::keying::{self, Shape};
 use crate::payloads::Payloads;
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 use crate::share::{self, Held, SessionGuard, SessionShare};
@@ -143,6 +143,13 @@ struct Managed {
     /// offer's value and the answer's together, and only one of the two ever
     /// arrives from the far end. `None` on every call not keyed this way.
     dtls: Option<(Side, String)>,
+    /// The key and certificate this call named in its first description
+    /// under a DTLS policy, kept for the rest of the call: its handshake is
+    /// started with them and every later description writes their
+    /// fingerprint, whatever this engine has renewed to since. `None` until
+    /// that description is written, and on every call not keyed this way.
+    #[cfg(feature = "dtls")]
+    dtls_identity: Option<Arc<Identity>>,
     /// What this end has settled about ICE on this call: its credentials, its
     /// role, its tiebreaker and its candidates.
     ///
@@ -269,8 +276,12 @@ pub struct MediaEngine {
     ///
     /// `None` until then, because a stack that never places an encrypted call
     /// should not spend a P-256 key pair on starting up.
+    ///
+    /// Shared rather than owned, because a call keeps the one it first
+    /// described itself with ([`Managed::dtls_identity`]) for as long as it
+    /// lasts, and a renewal here must not take it away from under the call.
     #[cfg(feature = "dtls")]
-    identity: Option<Identity>,
+    identity: Option<Arc<Identity>>,
 }
 
 impl MediaEngine {
@@ -315,16 +326,49 @@ impl MediaEngine {
     /// [`MediaError::DtlsIdentity`], which a sound media seed does not
     /// produce.
     #[cfg(feature = "dtls")]
-    fn identity(&mut self, now: Instant) -> Result<&Identity, MediaError> {
+    fn identity(&mut self, now: Instant) -> Result<Arc<Identity>, MediaError> {
         let unix = self.clock.unix_at(now);
         if self.identity.as_ref().is_none_or(|had| had.is_stale(unix)) {
             // a fresh one rather than a refused call: `MediaEngine` is made
             // once and a desk phone runs for months, so a certificate that
             // outlives its own period is the ordinary case rather than a
-            // fault
-            self.identity = Some(Identity::new(&mut self.keys, unix)?);
+            // fault. Calls already described keep the one they named
+            self.identity = Some(Arc::new(Identity::new(&mut self.keys, unix)?));
         }
-        self.identity.as_ref().ok_or(MediaError::DtlsIdentity)
+        self.identity.clone().ok_or(MediaError::DtlsIdentity)
+    }
+
+    /// The identity a description just written for a call named, when it was
+    /// written under a DTLS policy: this engine's own, which `dtls_lines` has
+    /// just made sure is there and current. What the call keeps.
+    #[cfg(feature = "dtls")]
+    fn named(&self, keyed: bool) -> Option<Arc<Identity>> {
+        if keyed { self.identity.clone() } else { None }
+    }
+
+    /// The identity a call named in the first description it wrote under a
+    /// DTLS policy, or this engine's own for one that has not written one
+    /// yet.
+    ///
+    /// A renewal between a call's offer and its handshake used to hand the
+    /// handshake the new certificate, whose hash was not the fingerprint the
+    /// far end had been given — RFC 8122 §5.1's "MUST NOT establish the
+    /// connection", once a month, on every call ringing at the time — and a
+    /// running call's next re-offer or answer then wrote a fingerprint that
+    /// read as a new association (RFC 8842 §3.1).
+    #[cfg(feature = "dtls")]
+    fn identity_for(
+        &mut self,
+        call: Option<CallHandle>,
+        now: Instant,
+    ) -> Result<Arc<Identity>, MediaError> {
+        match call
+            .and_then(|call| self.calls.get(&call))
+            .and_then(|managed| managed.dtls_identity.clone())
+        {
+            Some(bound) => Ok(bound),
+            None => self.identity(now),
+        }
     }
 
     /// The `a=fingerprint` this end writes into the description it is about
@@ -367,7 +411,7 @@ impl MediaEngine {
             (Side::Answering, Some(role)) => crate::dtls::setup_to_keep(role, theirs.as_deref())?,
             _ => crate::dtls::setup_to_write(side.party(), theirs.as_deref())?,
         };
-        let fingerprint = self.identity(now)?.fingerprint().to_owned();
+        let fingerprint = self.identity_for(running, now)?.fingerprint().to_owned();
         Ok(Some((fingerprint, setup.name().to_owned())))
     }
 
@@ -384,6 +428,31 @@ impl MediaEngine {
         _now: Instant,
     ) -> Result<Option<(String, String)>, MediaError> {
         Ok(None)
+    }
+
+    /// Whether answering `offer` with `answer` would move a running stream
+    /// onto another kind of keying ([`Shape`]).
+    ///
+    /// Read off the plan the two would settle, which is the one `settle`
+    /// will work out once they are agreed, rather than off either
+    /// description alone: an offer carrying both an `a=crypto` and an
+    /// `a=fingerprint` settles on whichever the answer took. A call with no
+    /// stream running yet has nothing to move, and a pair that settles no
+    /// plan at all is refused where the plan is worked out.
+    fn changes_keying(
+        &self,
+        call: CallHandle,
+        answer: &SessionDescription,
+        offer: &SessionDescription,
+    ) -> bool {
+        let Some(held) = self.sessions.get(&call) else {
+            return false;
+        };
+        let running = Shape::of(share::lock(held).session.plan().keying.as_ref());
+        matches!(
+            answer.media_plan(offer, 0),
+            Ok(Some(plan)) if Shape::of(plan.keying.as_ref()) != running
+        )
     }
 
     /// Whether a re-offer keeps the certificate the call's association was
@@ -580,12 +649,10 @@ impl MediaEngine {
             return Err(MediaError::DtlsRole);
         };
         let ours = Setup::parse(&ours).map_err(|_| MediaError::DtlsRole)?;
-        // minted first, so that the split borrow below sees a certificate
-        // that is already there
-        self.identity(now)?;
-        let Self { identity, keys, .. } = self;
-        let identity = identity.as_ref().ok_or(MediaError::DtlsIdentity)?;
-        crate::dtls::Handshake::start(identity, keying, side.party(), ours, keys, now)
+        // the certificate the call's own description named, whatever this
+        // engine presents to calls described since
+        let identity = self.identity_for(Some(call), now)?;
+        crate::dtls::Handshake::start(&identity, keying, side.party(), ours, &mut self.keys, now)
     }
 
     /// A record of the DTLS-SRTP handshake that one call owes the far end,
@@ -777,6 +844,8 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config,
+                #[cfg(feature = "dtls")]
+                dtls_identity: self.named(dtls.is_some()),
                 dtls,
                 #[cfg(feature = "ice")]
                 ice,
@@ -854,6 +923,8 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config,
+                #[cfg(feature = "dtls")]
+                dtls_identity: self.named(dtls.is_some()),
                 dtls,
                 #[cfg(feature = "ice")]
                 ice,
@@ -969,12 +1040,18 @@ impl MediaEngine {
         describe_ice(&mut description, ice.as_ref());
         let bytes = description.to_bytes();
         agent.ring(call, Some(Arc::from(bytes)), now)?;
+        #[cfg(feature = "dtls")]
+        let named = self.named(dtls.is_some());
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.local = Some(description);
             managed.address = Some(local);
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            #[cfg(feature = "dtls")]
+            {
+                managed.dtls_identity = managed.dtls_identity.take().or(named);
+            }
             managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
             #[cfg(feature = "ice")]
             {
@@ -1092,12 +1169,18 @@ impl MediaEngine {
         describe_ice(&mut description, ice.as_ref());
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
+        #[cfg(feature = "dtls")]
+        let named = self.named(dtls.is_some());
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.local = Some(description);
             managed.address = Some(local);
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
+            #[cfg(feature = "dtls")]
+            {
+                managed.dtls_identity = managed.dtls_identity.take().or(named);
+            }
             managed.dtls = dtls.map(|(_, setup)| (side, setup));
             #[cfg(feature = "ice")]
             {
@@ -1441,6 +1524,8 @@ impl MediaEngine {
                 // say about DTLS-SRTP, and about ICE, is decided when it is
                 // rung or answered
                 dtls: None,
+                #[cfg(feature = "dtls")]
+                dtls_identity: None,
                 #[cfg(feature = "ice")]
                 ice: None,
                 rung_with_media: false,
@@ -1641,11 +1726,28 @@ impl MediaEngine {
                 // RFC 8839 §4.4: an answer that left the attributes out is a
                 // peer reading that ICE has been withdrawn mid-session
                 describe_ice(&mut answer, ice.as_ref());
+                // the plan this answer would settle, read the way `settle`
+                // will read it: a running stream cannot change the kind of
+                // keying it runs under, so a re-offer asking for that is
+                // refused here, with the session standing, rather than
+                // answered and then not followed
+                if self.changes_keying(call, &answer, &offer) {
+                    self.events
+                        .push_back((call, MediaEvent::Failed(MediaError::KeyingChanged)));
+                    let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+                    return;
+                }
+                #[cfg(feature = "dtls")]
+                let named = self.named(dtls.is_some());
                 let bytes = answer.to_bytes();
                 if agent.accept_reoffer(call, Some(&bytes), now).is_ok()
                     && let Some(managed) = self.calls.get_mut(&call)
                 {
                     managed.version = version;
+                    #[cfg(feature = "dtls")]
+                    {
+                        managed.dtls_identity = managed.dtls_identity.take().or(named);
+                    }
                     managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
                     #[cfg(feature = "ice")]
                     {

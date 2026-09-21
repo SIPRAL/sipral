@@ -5454,3 +5454,289 @@ t=0 0\r\nm=audio 40002 {proto} 0\r\na=rtpmap:0 PCMU/8000\r\n{crypto}a={direction
         );
     }
 }
+
+// -- the DTLS latch, and what a running stream may not change -------------------
+
+#[cfg(feature = "dtls")]
+#[test]
+fn one_octet_from_a_stranger_does_not_take_a_calls_handshake() {
+    // the latch used to close on the first datagram whose first octet was 22,
+    // from anywhere: one packet from somebody who read the port out of the
+    // description, and the real far end's records were dropped until the
+    // handshake gave up
+    let (mut pair, call, remote) = dtls_call();
+    let stranger: SocketAddr = "203.0.113.9:40000".parse().expect("an address");
+    let taken = {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        session.receive(&mut [22_u8], stranger, pair.now)
+    };
+    assert_eq!(taken, Arrival::Dropped(crate::Discard::ForeignAddress));
+
+    pair.shake_hands(call, remote);
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert!(
+            session.is_encrypted(),
+            "the stranger kept the call from keying"
+        );
+    }
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_far_end_whose_port_the_path_moved_is_answered_where_its_records_come_from() {
+    // no RTP latch can close before there are keys, so the answer to a
+    // ClientHello used to go to the signalled port whatever port it came from
+    let (mut pair, call, remote) = dtls_call();
+    let moved: SocketAddr = "192.0.2.2:50002".parse().expect("an address");
+    let mut destinations = Vec::new();
+    for _ in 0..16 {
+        let mut crossed = false;
+        while let Some((_, _, mut record)) = pair.callee.engine.poll_transmit(pair.now) {
+            crossed = true;
+            let mut session = pair.caller.engine.session(call).expect("media");
+            session.receive(&mut record, moved, pair.now);
+        }
+        while let Some((_, destination, mut record)) = pair.caller.engine.poll_transmit(pair.now) {
+            crossed = true;
+            destinations.push(destination);
+            let mut session = pair.callee.engine.session(remote).expect("media");
+            session.receive(&mut record, caller_media(), pair.now);
+        }
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        if !crossed {
+            break;
+        }
+    }
+    assert!(!destinations.is_empty(), "this end never answered");
+    assert!(
+        destinations.iter().all(|destination| *destination == moved),
+        "the flight went to the signalled port: {destinations:?}"
+    );
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("media")
+            .is_encrypted()
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_far_end_that_moves_its_media_address_is_heard_from_the_new_one() {
+    // the handshake's latch stayed on the old address, so a far end that
+    // moved and still had a flight to retransmit was dropped as a stranger
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+
+    // the callee's own description is the answer the caller received
+    let mut moved = pair.caller.answer_received().expect("the answer");
+    moved.origin.version += 5;
+    for stream in &mut moved.media {
+        stream.port = 50_002;
+    }
+    pair.callee
+        .agent
+        .reoffer(remote, &moved.to_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    assert_eq!(failures(&pair), []);
+
+    let new: SocketAddr = "192.0.2.2:50002".parse().expect("an address");
+    let heard = {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        session.receive(&mut [22_u8, 254, 253, 0, 0], new, pair.now)
+    };
+    assert_eq!(
+        heard,
+        Arrival::Handshake,
+        "the new address was taken for a stranger"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_re_offer_that_takes_the_encryption_off_a_running_call_is_refused_by_name() {
+    // under an offered policy the plain answer was allowed, and adopted: the
+    // stream went on sending SRTP to a far end now expecting RTP, and the
+    // plan it compares later certificates against had none left in it
+    for keyed in [SrtpPolicy::DtlsOffered, SrtpPolicy::Offered] {
+        let catalog = CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_srtp(keyed);
+        let mut pair = Pair::new(catalog);
+        let call = pair.connect();
+        let remote = pair.callee.call().expect("the callee knows the call");
+        if keyed == SrtpPolicy::DtlsOffered {
+            pair.shake_hands(call, remote);
+        }
+        let mut plain = pair.caller.answer_received().expect("the answer");
+        plain.origin.version += 5;
+        for stream in &mut plain.media {
+            stream.proto = "RTP/AVP".to_owned();
+            stream
+                .attributes
+                .retain(|a| !matches!(a.name.as_str(), "crypto" | "fingerprint" | "setup"));
+        }
+        pair.callee
+            .agent
+            .reoffer(remote, &plain.to_bytes(), pair.now)
+            .expect("the re-INVITE goes");
+        pair.callee.drain(pair.now, false);
+        pair.settle();
+
+        assert!(
+            failures(&pair).contains(&("caller", MediaError::KeyingChanged)),
+            "{keyed:?}: {:?}",
+            failures(&pair)
+        );
+        assert!(
+            pair.callee.heard.iter().any(|event| matches!(
+                event,
+                Event::Signalling(UaEvent::SessionChangeFailed { .. })
+            )),
+            "{keyed:?}: the re-offer was answered"
+        );
+        assert!(
+            pair.caller
+                .engine
+                .session(call)
+                .expect("media")
+                .is_encrypted(),
+            "{keyed:?}"
+        );
+    }
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_clear_call_re_offered_under_dtls_is_refused_rather_than_left_in_the_clear() {
+    // the plain call this policy took was answered DTLS-SRTP when re-offered
+    // it, and no handshake ever started: this end said it would be the client
+    // and went on sending RTP in the clear
+    let mut pair = Pair::asymmetric(
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_srtp(SrtpPolicy::DtlsOffered),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert!(
+        !pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .is_encrypted()
+    );
+
+    let mut keyed = pair.callee.offer_received().expect("the offer");
+    keyed.origin.version += 5;
+    for stream in &mut keyed.media {
+        stream.proto = "UDP/TLS/RTP/SAVP".to_owned();
+        stream
+            .attributes
+            .push(sipral_core::sdp::Attribute::with_value(
+                "fingerprint",
+                "sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:\
+AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+            ));
+        stream
+            .attributes
+            .push(sipral_core::sdp::Attribute::with_value("setup", "actpass"));
+        stream
+            .attributes
+            .push(sipral_core::sdp::Attribute::flag("rtcp-mux"));
+    }
+    pair.caller
+        .agent
+        .reoffer(call, &keyed.to_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    assert!(
+        failures(&pair).contains(&("callee", MediaError::KeyingChanged)),
+        "{:?}",
+        failures(&pair)
+    );
+    assert!(
+        pair.caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::SessionChangeFailed { .. })
+        )),
+        "the re-offer was answered"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_certificate_renewed_while_a_call_rings_is_not_the_one_its_handshake_presents() {
+    // the engine renews its certificate a day before it runs out. One renewed
+    // between a call's offer and its answer used to hand the handshake the new
+    // certificate, whose hash was not the fingerprint the far end was given
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let offered = pair.caller.outbound();
+
+    // a month on, as far as this engine's clock can tell, another call is
+    // placed, and the certificate is renewed under the first one
+    let month = pair.now + Duration::from_secs(29 * 24 * 60 * 60 + 60 * 60);
+    let other = pair.caller.account("carol", callee_sip());
+    pair.caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            other,
+            OutgoingCall::new(uri("sip:carol@example.com")).to_address(UDP, callee_sip()),
+            "192.0.2.1:41000".parse().expect("an address"),
+            month,
+        )
+        .expect("the second INVITE goes");
+    let _ = pair.caller.outbound();
+
+    for datagram in offered {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert!(
+            session.is_encrypted(),
+            "the handshake presented a certificate the offer never named"
+        );
+    }
+    assert_eq!(failures(&pair), []);
+}

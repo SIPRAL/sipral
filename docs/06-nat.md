@@ -122,20 +122,28 @@ Two things follow from having the agent, and both are visible from outside.
 Offering ICE asks for `a=rtcp-mux` whatever the catalogue said, because a
 stream with a second component needs a second address and the facade knows
 one; a peer that takes the attribute back out is `MediaError::IceNeedsRtcpMux`
-rather than a stream with an unaddressable half. And the DTLS-SRTP latch is
-bypassed once a pair is selected: the agent has already checked that path with
-a signed transaction, and the latch is the poor version of the same question —
-leaving it armed would cut the audio for good the first time a mid-call
-re-selection moved the pair.
+rather than a stream with an unaddressable half. And the latches follow the
+pair the agent selects, symmetric RTP's and the DTLS-SRTP handshake's alike:
+the agent has already checked that path with a signed transaction, and a latch
+is the poor version of the same question — leaving either armed on the old
+address would cut the audio, or the handshake, for good the first time a
+mid-call re-selection moved the pair.
 
-The latch still does its own work on every call that is not using ICE, which
-is most of them. A DTLS-SRTP handshake is authenticated by a fingerprint the
-signalling carried, and the fatal alert that can end it arrives before there
-is any key to authenticate *it* with. The media session latches on the address
-the first handshake record came from and refuses every other — the same latch
-symmetric RTP keeps, applied one protocol earlier. It narrows the race and
-does not close it; closing it is what the candidate exchange is for
-(`docs/20-security-model.md`), and now there is one.
+The handshake's latch still does its own work on every call that is not using
+ICE, which is most of them. A DTLS-SRTP handshake is authenticated by a
+fingerprint the signalling carried, and the fatal alert that can end it
+arrives before there is any key to authenticate *it* with. The media session
+latches on the address the first handshake record came from — only from the
+host the signalling named, any port on it, the rule RTCP already keeps — and
+refuses every other; a far end that moves its media address in a
+re-negotiation opens it again. This end's own flights go to that address
+while the stream has no RTP latch, which it cannot have before there are keys,
+so a far end whose port the path moved is still answered. It narrows the race
+and does not close it: without ICE, a far end behind a NAT that hides its
+address is one this end cannot key by handshake at all, and an attacker who
+can send from the far end's own address can still win the latch. Closing both
+is what the candidate exchange is for (`docs/20-security-model.md`), and now
+there is one.
 
 ## STUN
 

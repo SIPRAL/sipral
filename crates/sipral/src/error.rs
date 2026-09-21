@@ -144,6 +144,18 @@ pub enum MediaError {
     /// the media would keep flowing as though it had.
     #[cfg(feature = "dtls")]
     DtlsFingerprintChanged,
+    /// A re-negotiation would change how a running stream is keyed: turn
+    /// encryption on or off, or move it between SDES and a DTLS-SRTP
+    /// handshake.
+    ///
+    /// A stream that has sent under one kind of keying has no way to carry
+    /// on under another, and adopting the plan anyway left it running the
+    /// old kind while the far end ran the new — encrypted audio to a peer
+    /// expecting it in the clear, or the reverse, and a call that went silent
+    /// with nothing said. So a re-offer that asks for it is answered 488 and
+    /// an answer that does it is not adopted; either way the session keeps
+    /// running as it was, and the call is told.
+    KeyingChanged,
     /// A re-negotiation would swap which end is the DTLS client and which the
     /// server (RFC 8842 §3.1).
     ///
@@ -394,6 +406,9 @@ impl MediaError {
             Self::DtlsFingerprintChanged => {
                 "the far end named a different certificate part-way through the call"
             }
+            Self::KeyingChanged => {
+                "the far end asked to change how the call is encrypted part-way through"
+            }
             #[cfg(feature = "dtls")]
             Self::DtlsRoleChanged => {
                 "the far end asked to swap the DTLS client and server part-way through the call"
@@ -556,6 +571,7 @@ mod tests {
             MediaError::DtlsFingerprintChanged,
             #[cfg(feature = "dtls")]
             MediaError::DtlsRoleChanged,
+            MediaError::KeyingChanged,
             #[cfg(feature = "ice")]
             MediaError::Ice(sipral_nat::ice::IceError::NoUsableHost),
             #[cfg(feature = "ice")]

@@ -353,29 +353,52 @@ this end directly rather than through the line's own proxy.
   on someone else's behalf and never terminates one signalling leg to
   originate another, so the class of attack that targets those roles has
   nothing here to land on (`docs/01-architecture.md`, `docs/09-rfc-index.md`).
-- **DTLS-SRTP is reachable from a call, and has not had its review.** The
-  handshake in `crates/sipral-dtls` — both roles, the record layer,
-  fingerprint checking in constant time — is joined to the facade behind the
-  `dtls` feature, which is on by default (`docs/05-media.md`). Its own
-  documentation commits it to an adversarial cryptography review "before it
-  ships under the commercial licence", and **that review has not happened**.
-  Until it does, the honest statement about a DTLS-SRTP call on this stack is
-  that its protocol is written from the RFCs and tested against itself, not
-  that its cryptography has been attacked by anyone but its author.
+- **DTLS-SRTP is reachable from a call, and has had an internal adversarial
+  review, not an external one.** The handshake in `crates/sipral-dtls` — both
+  roles, the record layer, fingerprint checking in constant time — is joined
+  to the facade behind the `dtls` feature, which is on by default
+  (`docs/05-media.md`). Its own documentation commits it to an adversarial
+  cryptography review "before it ships under the commercial licence". The
+  project's own has been done, area by area — the two handshake state
+  machines, the record layer and its replay window, the key schedule and the
+  RFC 5705 export, certificates and the fingerprint binding, and the join to
+  the media path — each read by a reviewer asked only to find how it breaks,
+  and every finding then argued against by another.
+
+  It found no way to read, forge or replay media, to downgrade the protocol or
+  its suite, or to be taken for the far end: the certificate is checked
+  against the signalled fingerprint before anything derived from the handshake
+  is trusted, the GCM nonces never repeat under a key, and the SRTP keys are
+  exported to the directions the roles give them. It found seven defects of
+  availability and interoperability, and all seven are fixed: a latch any
+  stranger could close with one datagram (below); a handshake's flights sent
+  to the signalled port rather than the one the far end's records came from; a
+  latch left behind when ICE moved the pair or a re-negotiation moved the far
+  end; a certificate renewal that handed a ringing call's handshake a
+  certificate its offer never named; a re-negotiation that changed a running
+  stream's kind of keying, or reset what later certificates were compared
+  against, and was adopted rather than refused; and a forged epoch-0
+  retransmission that kept a bare `sipral_dtls::Connection` from ever giving
+  up. What it is not is a review by a specialist outside the project, which
+  the commercial licence still waits on. Until there is one, the honest
+  statement is that this protocol is written from the RFCs, tested against
+  itself and attacked by its own project — not by anyone independent of it.
 
   One limit is known and is a property of the design rather than of the code.
   A DTLS connection ends on any fatal alert, and an alert arriving before the
   keys exist cannot be authenticated, because there is nothing yet to
   authenticate it with. `MediaSession` therefore latches on the address the
-  first *handshake* record arrives from and refuses records from any other,
-  which narrows the window to the same race symmetric RTP already runs: an
-  attacker has to beat the far end's first flight rather than pick its
-  moment. Closing it needs the candidate exchange of ICE, which this stack
-  negotiates and does not assume (`docs/06-nat.md`) — and which is now there
-  to be asked for: on a call whose checks have chosen a pair, the latch is
-  bypassed and the agent's signed transaction is what says whose datagram
-  this is. On every call that has not, which is every call at the default
-  policy, the latch is still the whole of the answer.
+  first *handshake* record arrives from and refuses records from any other —
+  and, without ICE, only from the host the signalling named, since one octet
+  from anywhere used to be enough to take the latch and keep the call from
+  ever keying. That narrows the window to an attacker who can send from the
+  far end's own address and beat its first flight. Closing it needs the
+  candidate exchange of ICE, which this stack negotiates and does not assume
+  (`docs/06-nat.md`) — and which is now there to be asked for: on a call whose
+  checks have chosen a pair, the latch follows the pair and the agent's
+  signed transaction is what says whose datagram this is. On every call that
+  has not, which is every call at the default policy, the latch is still the
+  whole of the answer.
 
 ## The unsafe surface
 

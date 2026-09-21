@@ -248,12 +248,12 @@ pub(crate) struct Handshake {
     /// octets, because `sipral-dtls` allocates each datagram and there is no
     /// buffer of the session's to borrow one from.
     ///
-    /// Where they go is not kept here. The session addresses each record with
-    /// [`RtpSession::destination`](sipral_rtp::RtpSession::destination), which
-    /// is the latched address once one has been seen and the signalled one
-    /// before that — so a handshake follows symmetric RTP and follows a
-    /// re-negotiation that moved the stream, without a second copy of the
-    /// answer to keep in step.
+    /// Where they go is not kept here. The session addresses each record: to
+    /// the address the far end's own records came from while RTP has no latch
+    /// of its own — which is the whole handshake, since RTP can only latch on
+    /// a packet it has keys to authenticate — and to the signalled address
+    /// before the far end has said anything. See
+    /// [`MediaSession::poll_transmit`](crate::MediaSession::poll_transmit).
     outbound: VecDeque<Vec<u8>>,
     /// The keys, once the handshake exported them, waiting to be collected by
     /// the session that will install them.

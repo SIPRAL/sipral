@@ -626,6 +626,35 @@ agree `a=rtcp-mux` is refused with `MediaError::DtlsNeedsRtcpMux`: RFC 5764
 And a DTLS server has no flight to retransmit, so its connection would never
 time out at all — the facade gives every handshake the budget the client's own
 schedule spends, and reports `MediaError::DtlsHandshake` when it runs out.
+Inside `sipral-dtls` a flight the far end retransmits is answered by sending
+this end's again, and it does not move the point at which this end gives up:
+that prompt arrives in the clear, before there are keys, so anybody who can
+send from the far end's address could forge it, and a stream of them used to
+hold a handshake open for ever.
+
+**Whose records the handshake takes.** Nothing before the fingerprint check
+authenticates anything, so the first handshake record decides whom the
+handshake is run with, and the session latches on its address. Without ICE only
+the host the signalling named may close that latch — any port on it, the rule
+RTCP already keeps — because one octet from anywhere used to be enough: a
+stranger who read the port out of the description closed it on their own address, and the
+far end's records were dropped until the handshake gave up. This end's flights
+go to the latched address while RTP has no latch of its own, which it cannot
+have before there are keys to authenticate a packet with; they used to go to
+the signalled port whatever port the far end was sending from. The latch
+follows the pair ICE selects, and a re-negotiation that moves the far end's
+media address opens it again. `docs/06-nat.md` says what is left and why only
+ICE closes it.
+
+**One certificate per call.** The engine makes its key and certificate once and
+renews them a day before they run out, which a desk phone or an agent running
+for months reaches every month. A call keeps the one it first described itself
+with for as long as it lasts: its handshake presents that certificate and every
+later description of it names that fingerprint. A renewal between a call's
+offer and its answer used to hand the handshake the new certificate, whose hash
+was not the fingerprint the far end had been given (RFC 8122 §5.1: the far end
+"MUST NOT establish the connection"), and a running call's next re-offer
+named a certificate RFC 8842 §3.1 reads as a new association.
 
 Without the `dtls` feature there is no handshake and no certificate: a plan
 that comes back keyed that way is refused with `MediaError::NoDtlsSrtp` rather
@@ -673,6 +702,18 @@ and drops the crypto line is refused — 488, the session standing — under
 keys already in use. Such an offer is malformed in any case (§5.1.2 requires
 the attribute on a secure profile), so refusing it is the honest answer, but a
 peer that used to get away with it is now told no.
+
+**A running stream keeps its kind of keying.** In the clear, by SDES keys from
+the descriptions, or by a DTLS-SRTP handshake: each is a different state of the
+stream, and one that has sent under one of them has no way to carry on under
+another. A re-offer that would move it — encryption turned off under a policy
+that only offered it, a plain call re-offered DTLS-SRTP, SDES giving way to a
+handshake — is answered 488 and reported as `MediaError::KeyingChanged`, and an
+answer that does the same is not adopted. They used to be adopted: the stream
+went on sending SRTP to a far end now expecting RTP, or answered as a DTLS
+client and never sent a ClientHello, and the plan later certificates are
+compared against was left with nothing in it, so a certificate that went away
+in one re-offer came back as another in the next without being refused.
 
 ## Ringing with media (task 8.4.9)
 
