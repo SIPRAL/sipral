@@ -53,6 +53,12 @@ default = ["opus", "dtls", "ice"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 ice = ["dep:sipral-nat"]
+# `tls.rs` alone: a feature cannot turn on a dev-dependency, only a normal
+# one, so `rustls` sits here, optional, reached by nothing this crate ships.
+# It is how that one example supplies the TLS this crate never links itself
+# (`docs/01-architecture.md`, "who owns the sockets, the resolver and TLS") —
+# proof of the seam, not a dependency an application inherits.
+example-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a
@@ -79,6 +85,43 @@ sipral-nat = { path = "../sipral-nat", version = "0.0.1", optional = true }
 # needs a write the optimiser is not allowed to remove, and that needs
 # `unsafe`, which this crate denies.
 zeroize = "=1.9.0"
+# `example-tls`, used by `examples/tls.rs` alone: `default-features = false`
+# plus `ring` drops the default `aws_lc_rs` provider, which needs `cmake` to
+# build; `ring` needs only a C compiler, already required elsewhere in this
+# workspace. Both providers' licences are in `deny.toml`'s allow list, so this
+# is a build-footprint choice, not a licensing one.
+rustls = { version = "0.23.45", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+], optional = true }
+# the platform trust store, so the example checks a real certificate chain the
+# way an application would rather than trusting anything that arrives.
+rustls-native-certs = { version = "0.8.4", optional = true }
+rustls-pki-types = { version = "1.15.1", optional = true }
+
+# `tls.rs`'s own test, which proves the TLS transport against a local server
+# rather than one on the Internet: a throwaway self-signed certificate, minted
+# fresh per test run rather than committed. Unconditional, not behind
+# `example-tls`, for the reason `rustls` above is not a dev-dependency: a
+# feature cannot reach one. `cargo test -p sipral` without that feature builds
+# it and runs nothing that uses it, since the test itself is on `tls.rs`,
+# which `required-features` below keeps out of that build entirely.
+[dev-dependencies]
+rcgen = "0.14.10"
+
+# the examples' own audio device, macOS and iOS only. `sipral-io-coreaudio`
+# does not depend on this crate, so pulling it in here for `examples/` opens
+# no cycle; on every other target the examples that need it write a WAV file
+# instead (see `crates/sipral/examples/call.rs`).
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
+sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "0.0.1" }
+
+# without this, `cargo build --examples` fails on every target that has not
+# opted into `example-tls`, and `cargo test --workspace` is one of them
+[[example]]
+name = "tls"
+required-features = ["example-tls"]
 
 [lints]
 workspace = true

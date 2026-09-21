@@ -313,3 +313,34 @@ crate rather than opening the allow-list.
 
 The RFC 4475 torture test corpus under `fixtures/rfc4475/` is IETF Trust
 material, reproduced under the IETF Trust Legal Provisions.
+
+`crates/sipral`'s own `[dev-dependencies]` carry `rcgen` 0.14.10 (MIT OR
+Apache-2.0) and, through it, `yasna`, `pem`, `time` and a handful of smaller
+crates, all MIT or Apache-2.0 or both. It mints a throwaway, self-signed TLS
+certificate inside `examples/tls.rs`'s own test, for a local server that
+exists for the length of that one test and nowhere else; nothing it generates
+is committed, and `cargo test -p sipral` compiles it whether or not
+`example-tls` is enabled, but exercises it only from that one test.
+
+## Examples only, never shipped
+
+`crates/sipral/examples/tls.rs` is the one place in this repository that
+links a TLS implementation, behind the `example-tls` feature, off by default
+and reached by nothing else in the crate — `docs/01-architecture.md` explains
+why `sipral` itself never will. `cargo build --workspace` does not compile it,
+and a product embedding this crate does not link it either, unless it goes out
+of its way to enable the feature and depend on the example's own code.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `rustls` 0.23.45 | the TLS 1.2/1.3 client, `default-features = false` plus `ring`/`std`/`tls12` | MIT OR Apache-2.0 OR ISC |
+| `rustls-native-certs` 0.8.4 | reads the platform's trust store into a `rustls::RootCertStore` | MIT OR Apache-2.0 OR ISC |
+| `rustls-pki-types` 1.15.1 | the certificate and server-name types both of the above share | MIT OR Apache-2.0 |
+| `ring` (via `rustls`'s `ring` feature) | the cryptographic provider `rustls` calls into; chosen over the default `aws_lc_rs` because it needs only a C compiler, not `cmake` | Apache-2.0 AND ISC |
+
+`ring` pulls in `untrusted` (ISC) and the usual `cfg-if`/`getrandom` layer,
+already in the allowed set. `rustls-native-certs` reaches `security-framework`
+and `security-framework-sys` on macOS (both MIT OR Apache-2.0), and
+`openssl-probe`, `home` or `rustls-pemfile` depending on platform, all of them
+MIT OR Apache-2.0. Every one of them is in `deny.toml`'s allow-list; nothing
+here needed an exception.
