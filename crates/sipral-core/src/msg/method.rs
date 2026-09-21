@@ -131,6 +131,10 @@ impl StatusCode {
     pub const SESSION_PROGRESS: Self = Self(183);
     /// 200 OK.
     pub const OK: Self = Self(200);
+    /// 202, which RFC 3428 §7 has a MESSAGE relay send instead of a 200: "the
+    /// message was accepted, but end to end delivery has not been
+    /// guaranteed".
+    pub const ACCEPTED: Self = Self(202);
     /// 400, "the request could not be understood due to malformed syntax"
     /// (§21.4.1).
     pub const BAD_REQUEST: Self = Self(400);
@@ -142,6 +146,11 @@ impl StatusCode {
     pub const BUSY_HERE: Self = Self(486);
     /// 487 Request Terminated.
     pub const REQUEST_TERMINATED: Self = Self(487);
+    /// 413, "the server is refusing to process a request because the request
+    /// entity is larger than the server is willing or able to process"
+    /// (§21.4.11). This stack answers a MESSAGE with it when the body is
+    /// larger than the policy limit RFC 3428 leaves to the UAS.
+    pub const REQUEST_ENTITY_TOO_LARGE: Self = Self(413);
     /// 415, "The server is refusing to service the request because the
     /// message body of the request is in a format not supported by the server
     /// for the requested method" (§21.4.13).
@@ -231,6 +240,7 @@ impl StatusCode {
             182 => "Queued",
             183 => "Session Progress",
             200 => "OK",
+            202 => "Accepted",
             300 => "Multiple Choices",
             301 => "Moved Permanently",
             302 => "Moved Temporarily",

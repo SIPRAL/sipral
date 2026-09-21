@@ -32,8 +32,8 @@ by no call yet.
 | 3891 | The Replaces header | sipral-ua | phase 1 |
 | 3892 | The `Referred-By` header, copied onto the INVITE a REFER triggers (§2.2). The signed token that would authenticate it is not implemented, so the header proves nothing | sipral-ua | phase 1 |
 | 6665 | Event notification framework: the subscriber, with the dialog the NOTIFY opens, refresh, expiry, Timer N, forking and re-subscription. The notifier role is `refer` alone (RFC 3515), and `Allow-Events` is read but not yet advertised | sipral-ua | phase 2 |
-| 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body reaches the application whole; parsed to a count in phase 2 | sipral-ua | phase 2 |
-| 3428 | The MESSAGE method, pager-mode instant messaging in both directions | sipral-ua | phase 2 |
+| 3842 | Message waiting indication: the subscription is the framework's, and the `application/simple-message-summary` body is parsed into per-class counts, `UaEvent::MessagesWaiting` reporting the `voice-message` one | sipral-ua | phase 2, built |
+| 3428 | The MESSAGE method, pager-mode instant messaging in both directions, in and out of a dialog, with the §8 size policy and 200/202/415/413 | sipral-ua | phase 2, built |
 | 3608 | Service-Route, learned from the 200 OK to REGISTER and preloaded on the INVITEs and SUBSCRIBEs the account starts towards its registrar; not on the REGISTER itself | sipral-ua | phase 2, built |
 | 4235 | Dialog event package, and the `application/dialog-info+xml` reader a busy lamp field is built on | sipral-ua | phase 2 |
 | 3856 | Presence event package: the subscription is the framework's, and the PIDF body reaches the application whole | sipral-ua | phase 2 |

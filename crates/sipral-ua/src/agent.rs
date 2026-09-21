@@ -43,6 +43,7 @@ use crate::error::UaError;
 use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
 use crate::headers::HeadersFor;
 use crate::lifecycle::Machine;
+use crate::message::{MessageHandle, SentMessage};
 use crate::parked::Parked;
 use crate::registration::{
     Registration, backoff_delay, echoed, granted_expiry, min_expires, read_registrar_info,
@@ -128,6 +129,13 @@ pub struct UserAgent {
     /// The SUBSCRIBE each one has in flight. One entry per subscription,
     /// replaced when it sends the next, so a refresh an hour does not grow it.
     pub(crate) by_subscribe: HashMap<AnyTransactionId, SubscriptionHandle>,
+    /// The MESSAGEs this layer sent and has not yet reported a final answer
+    /// for (RFC 3428). Removed the moment `UaEvent::MessageSent` goes out:
+    /// unlike a subscription, one of these has nothing left to do once it is
+    /// answered.
+    pub(crate) messages: HashMap<MessageHandle, SentMessage>,
+    /// The MESSAGE transaction each one has in flight.
+    pub(crate) by_message: HashMap<AnyTransactionId, MessageHandle>,
     /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
     /// would not let out over a datagram, waiting for a stream.
     pub(crate) parked: Vec<Parked>,
@@ -159,6 +167,7 @@ pub struct UserAgent {
     pub(crate) next_call: u32,
     pub(crate) next_subscription: u32,
     pub(crate) next_announcement: u32,
+    pub(crate) next_message: u32,
     /// The signalling seed this agent was built with (`docs/18-replay.md`).
     ///
     /// Kept so that [`UserAgent::start_recording`] can hand a [`Recorder`] the
@@ -222,6 +231,8 @@ impl UserAgent {
             challenged_offers: HashMap::new(),
             subscriptions: HashMap::new(),
             by_subscribe: HashMap::new(),
+            messages: HashMap::new(),
+            by_message: HashMap::new(),
             parked: Vec::new(),
             events: VecDeque::new(),
             guard: Guard::default(),
@@ -236,6 +247,7 @@ impl UserAgent {
             next_call: 0,
             next_subscription: 0,
             next_announcement: 0,
+            next_message: 0,
         })
     }
 
@@ -733,6 +745,7 @@ impl UserAgent {
         self.settle_request_challenges(now);
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
+        self.settle_message_challenges();
         self.settle_announcements(now);
     }
 
@@ -774,6 +787,11 @@ impl UserAgent {
         // its own has had its turn, which is what puts the general case under
         // the special one rather than over it.
         let event = self.on_subscription_event(event, now)?;
+        // MESSAGE opens no dialog and carries no subscription, so it has
+        // nothing to compete with here: it is claimed by its own method,
+        // in or out of any dialog, and everything above has already taken
+        // what is its own
+        let event = self.on_message_event(event, now)?;
         self.on_session_event(event, now)
     }
 

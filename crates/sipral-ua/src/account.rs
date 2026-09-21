@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sipral_core::auth::Credentials;
-use sipral_core::endpoint::TransportId;
+use sipral_core::endpoint::{TransportId, TransportProtocol};
 use sipral_core::msg::{HeaderName, Uri};
 
 /// One hour, which is what most registrars grant anyway.
@@ -229,6 +229,12 @@ pub struct Account {
     pub(crate) remote: SocketAddr,
     pub(crate) extra: Vec<Extra>,
     pub(crate) push: Option<Push>,
+    /// `text/plain` and this list are the bodies a MESSAGE to this account is
+    /// answered rather than 415'd. See [`Account::accepts_message_type`].
+    pub(crate) message_types: Vec<Box<[u8]>>,
+    /// What `transport` is, when the caller chose to say. See
+    /// [`Account::transport_protocol`].
+    pub(crate) protocol: Option<TransportProtocol>,
 }
 
 impl Account {
@@ -296,6 +302,8 @@ impl Account {
             remote,
             extra: Vec::new(),
             push: None,
+            message_types: Vec::new(),
+            protocol: None,
         }
     }
 
@@ -391,6 +399,43 @@ impl Account {
             name: Box::from(name.canonical().as_bytes()),
             value: Box::from(value),
         });
+        self
+    }
+
+    /// Take a MESSAGE addressed to this account whose body is `media_type`,
+    /// beyond `text/plain`, which RFC 3428 §7 makes mandatory and needs no
+    /// call here.
+    ///
+    /// A `Content-Type` this list and `text/plain` do not name is refused
+    /// with a 415 carrying an `Accept` built from the two — see
+    /// [`crate::UaEvent::MessageReceived`]. Call again for every type the
+    /// application can render; `message/cpim`, which §7's MAY singles out, is
+    /// one call like any other.
+    #[must_use]
+    pub fn accepts_message_type(mut self, media_type: &[u8]) -> Self {
+        self.message_types.push(Box::from(media_type));
+        self
+    }
+
+    /// Say that `transport` speaks `protocol`, so that a MESSAGE this account
+    /// sends is not held to RFC 3428 §8's 1300-byte ceiling.
+    ///
+    /// Left unset, every out-of-dialog MESSAGE this account sends is
+    /// conservative about its size the way §8 asks a UAC to be when it does
+    /// not know better: "the size of MESSAGE requests outside of a media
+    /// session MUST NOT exceed 1300 bytes, unless the UAC has positive
+    /// knowledge that the message will not traverse a congestion-unsafe link
+    /// at any hop". This is that knowledge, for the one hop this end actually
+    /// controls. It is not the whole guarantee §8 asks for — "SIP does not
+    /// provide a mechanism to prevent a downstream hop from sending a request
+    /// over UDP... use of a congestion-controlled transport by the UAC is not
+    /// sufficient" — so calling this says only that the local hop will not be
+    /// the one that turns a large body into a fragmented UDP datagram; a
+    /// congestion-unsafe hop further on is still the network's to have and
+    /// this stack's to have no knowledge of.
+    #[must_use]
+    pub const fn transport_protocol(mut self, protocol: TransportProtocol) -> Self {
+        self.protocol = Some(protocol);
         self
     }
 

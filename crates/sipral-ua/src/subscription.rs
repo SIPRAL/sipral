@@ -74,6 +74,7 @@ use crate::agent::UserAgent;
 use crate::dialoginfo::{Applied, DialogInfo, DialogInfoTable};
 use crate::error::UaError;
 use crate::event::UaEvent;
+use crate::mwi::MessageSummary;
 use crate::parked::{Parked, call_needs_a_stream};
 use crate::registration::{
     RegistrarInfo, anonymous, backoff_delay, dialog_contact, refresh_after, retry_after,
@@ -422,6 +423,11 @@ pub(crate) struct Subscription {
     waiting_for_stream: Option<AnyTransactionId>,
     /// RFC 4235 §4.3's table, for the one package that has one.
     table: DialogInfoTable,
+    /// The last `application/simple-message-summary` document a `NOTIFY`
+    /// carried (RFC 3842 §3.5). Unlike `table`, this is a whole snapshot
+    /// every time — §3.5 defines no version and no partial state — so
+    /// nothing here merges; a fresh document simply replaces it.
+    summary: Option<Arc<MessageSummary>>,
 }
 
 impl Subscription {
@@ -444,6 +450,7 @@ impl Subscription {
             unanswered: None,
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
+            summary: None,
         }
     }
 
@@ -472,6 +479,7 @@ impl Subscription {
             unanswered: None,
             waiting_for_stream: None,
             table: DialogInfoTable::default(),
+            summary: None,
         }
     }
 
@@ -630,6 +638,24 @@ impl UserAgent {
         let held = self.subscriptions.get(&subscription)?;
         held.state.is_live().then_some(&held.table)
     }
+
+    /// The last `application/simple-message-summary` document a `message-summary`
+    /// subscription was told (RFC 3842 §3.5).
+    ///
+    /// `None` while the subscription is not live, for the same reason
+    /// [`UserAgent::dialog_info`] answers nothing then: a mailbox count
+    /// nothing is refreshing is not evidence about the mailbox. Unlike
+    /// `dialog_info`'s table, this is never merged — §3.5 defines no version
+    /// and no partial state, so every `NOTIFY` carries the whole picture and
+    /// this is simply the last one.
+    #[must_use]
+    pub fn message_summary(&self, subscription: SubscriptionHandle) -> Option<&MessageSummary> {
+        let held = self.subscriptions.get(&subscription)?;
+        held.state
+            .is_live()
+            .then_some(held.summary.as_deref())
+            .flatten()
+    }
 }
 
 // -- sending -----------------------------------------------------------------
@@ -681,6 +707,7 @@ impl UserAgent {
         held.unanswered = None;
         held.lapses_at = None;
         held.table = DialogInfoTable::default();
+        held.summary = None;
         // §4.1.2.4: "a subscriber starts a Timer N, set to 64*T1, when it
         // sends a SUBSCRIBE request", and the same window is the one a fork
         // may still arrive in
@@ -1314,6 +1341,7 @@ impl UserAgent {
         let pending = state.state() == Substate::Pending;
         self.settle_subscription(subscription, stated, pending, now);
         let info = self.merge_dialog_info(subscription, request, now);
+        self.merge_message_summary(subscription, request);
         self.events.push_back(UaEvent::Notified {
             subscription,
             request: request.clone(),
@@ -1435,6 +1463,57 @@ impl UserAgent {
         if !waiting {
             self.refresh_subscription(subscription, now);
         }
+    }
+
+    /// Read an `application/simple-message-summary` body and raise
+    /// [`UaEvent::MessagesWaiting`] for it (RFC 3842 §3.9: "the subscriber
+    /// SHOULD immediately render the message status and summary information
+    /// to the end user").
+    ///
+    /// A body that will not read is left exactly as `merge_dialog_info`
+    /// leaves one: nothing here changes, and the last good reading stands —
+    /// a mailbox light showing what was last known beats one showing what a
+    /// malformed body happened to contain. A `NOTIFY` for `message-summary`
+    /// that arrives with no matching subscription at all never reaches
+    /// here: `match_notify` answers it 481 before a package is even
+    /// dispatched to, which is RFC 6665 §4.1.3's own answer to an
+    /// unsolicited notification and applies to every package alike,
+    /// `message-summary` included — a PBX that sends one without a
+    /// subscription, which several do, gets the same 481 an unsolicited
+    /// `dialog` `NOTIFY` gets, and `docs/04-ua.md` says so.
+    fn merge_message_summary(&mut self, subscription: SubscriptionHandle, request: &OwnedMessage) {
+        let raw = request.as_raw();
+        let body = raw.body();
+        if body.is_empty()
+            || !raw
+                .content_type()
+                .is_ok_and(|kind| kind.is("application", "simple-message-summary"))
+        {
+            return;
+        }
+        let Ok(document) = MessageSummary::parse(body) else {
+            return;
+        };
+        let document = Arc::new(document);
+        let (waiting, account, voice) = (
+            document.waiting,
+            document.account.clone(),
+            document.voice_message().cloned(),
+        );
+        if let Some(held) = self.subscriptions.get_mut(&subscription) {
+            held.summary = Some(document);
+        } else {
+            return;
+        }
+        self.events.push_back(UaEvent::MessagesWaiting {
+            subscription,
+            waiting,
+            account,
+            new: voice.as_ref().map_or(0, |class| class.new),
+            old: voice.as_ref().map_or(0, |class| class.old),
+            urgent_new: voice.as_ref().map_or(0, |class| class.new_urgent),
+            urgent_old: voice.as_ref().map_or(0, |class| class.old_urgent),
+        });
     }
 }
 
@@ -1776,8 +1855,9 @@ impl UserAgent {
         // §4.1.2.4 puts an attempt that has not been notified yet in a neutral
         // state, and for RFC 4235 that is an empty table. Nothing may be read
         // out of it while the subscription is not live, which is what
-        // `dialog_info` is for
+        // `dialog_info` and `message_summary` are for
         held.table = DialogInfoTable::default();
+        held.summary = None;
         self.forget_subscription_dialog(subscription, dialog);
         self.events.push_back(UaEvent::SubscriptionEnded {
             subscription,

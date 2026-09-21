@@ -20,6 +20,7 @@ use crate::announce::Announcement;
 use crate::call::{CallEndReason, CallHandle, CallState};
 use crate::dialoginfo::DialogInfo;
 use crate::lifecycle::{LifecycleState, RecoveryFailure, Rung};
+use crate::message::MessageHandle;
 use crate::registration::RegistrarInfo;
 use crate::session::Hold;
 use crate::subscription::{SubscriptionEnd, SubscriptionHandle, SubscriptionState};
@@ -468,6 +469,67 @@ pub enum UaEvent {
         retry_in: Option<Duration>,
         /// The refusal, whole, when there was one.
         response: Option<OwnedMessage>,
+    },
+    /// A MESSAGE arrived (RFC 3428 §7) and has already been answered: 200,
+    /// because this stack delivers rather than relays.
+    ///
+    /// `account` is the line it was addressed to, when one could be told —
+    /// absent the same way [`UaEvent::IncomingCall`]'s is for a request this
+    /// agent does not register the name in. `call` is set when the MESSAGE
+    /// rode inside a dialog (§4's MAY); `None` for the ordinary out-of-dialog
+    /// case. The `Content-Type` and the body are read from `request`, which
+    /// carries the whole MESSAGE.
+    MessageReceived {
+        /// The account it was addressed to, when known.
+        account: Option<AccountId>,
+        /// The call it arrived inside, when it did.
+        call: Option<CallHandle>,
+        /// The MESSAGE, whole.
+        request: OwnedMessage,
+    },
+    /// A MESSAGE this end sent reached its final answer, or never will.
+    ///
+    /// `status` is 200 when the far end delivered it, 202 when it went
+    /// through a relay that could not promise delivery (§4), a 415 carrying
+    /// an `Accept` the far end could not read the body against, a 413 over
+    /// its size policy, or the 408/503 this stack reports for one that timed
+    /// out or lost its transport (RFC 3261 §8.1.3.1's reading of the same for
+    /// any non-INVITE request). `response` is the answer whole, when one
+    /// arrived.
+    MessageSent {
+        /// Which send.
+        message: MessageHandle,
+        /// The final status.
+        status: StatusCode,
+        /// The response, whole, when there was one.
+        response: Option<OwnedMessage>,
+    },
+    /// A message-summary NOTIFY reported the state of a mailbox (RFC 3842
+    /// §3.9).
+    ///
+    /// `new`, `old` and the urgent counts are the `voice-message` class's
+    /// (RFC 3458 §6.2) — the one a phone's message-waiting light is about —
+    /// read from
+    /// [`UserAgent::message_summary`](crate::UserAgent::message_summary)'s
+    /// full document, which keeps every class a notifier reported. `waiting`
+    /// is §3.5's boolean status line alone, sent by every notifier even one
+    /// with nothing more detailed to say; a body that never names
+    /// `voice-message` still carries it, with the four counts at zero.
+    MessagesWaiting {
+        /// Which subscription.
+        subscription: SubscriptionHandle,
+        /// The overall status line.
+        waiting: bool,
+        /// `Message-Account`, when the notifier sent one.
+        account: Option<Box<str>>,
+        /// New voice messages.
+        new: u32,
+        /// Old ones.
+        old: u32,
+        /// New ones flagged urgent.
+        urgent_new: u32,
+        /// Old ones flagged urgent.
+        urgent_old: u32,
     },
     /// A call arrived carrying a `Replaces` that named one already up, and
     /// took it over (RFC 3891). The replaced call is being hung up.

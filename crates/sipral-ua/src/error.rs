@@ -57,6 +57,19 @@ pub enum UaError {
     /// A digit no keypad has, or a duration nothing holds a key for: see
     /// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info).
     InvalidDtmf(DtmfError),
+    /// A MESSAGE body is larger than RFC 3428 §8 lets this end send without
+    /// positive knowledge of a congestion-safe hop: see
+    /// [`Account::transport_protocol`](crate::Account::transport_protocol).
+    MessageTooLarge {
+        /// How large the body is.
+        size: usize,
+        /// The ceiling it was checked against.
+        limit: usize,
+    },
+    /// §8: "A UAC MUST NOT initiate a new out-of-dialog MESSAGE transaction
+    /// to a given URI if there is a previous out-of-dialog transaction
+    /// pending for the same URI." One is still waiting for its final answer.
+    MessagePending,
 }
 
 impl fmt::Display for UaError {
@@ -78,6 +91,14 @@ impl fmt::Display for UaError {
             Self::Sdp(ref error) => write!(f, "cannot read the description: {error}"),
             Self::Header(refused) => write!(f, "cannot take the header field: {refused}"),
             Self::InvalidDtmf(reason) => write!(f, "cannot send that digit: {reason}"),
+            Self::MessageTooLarge { size, limit } => write!(
+                f,
+                "the body is {size} bytes, over the {limit}-byte ceiling for a MESSAGE this end \
+                 cannot prove will not cross a congestion-unsafe hop"
+            ),
+            Self::MessagePending => f.write_str(
+                "an out-of-dialog MESSAGE to this target is already waiting for its final answer",
+            ),
         }
     }
 }

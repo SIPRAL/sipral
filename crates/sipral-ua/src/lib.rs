@@ -58,6 +58,8 @@ mod error;
 mod event;
 mod headers;
 mod lifecycle;
+mod message;
+mod mwi;
 mod options;
 mod parked;
 mod registration;
@@ -93,6 +95,8 @@ pub use headers::{HeaderRefused, HeadersFor};
 pub use lifecycle::{
     Idle, LifecycleState, Link, Network, Recovery, RecoveryFailure, Rung, Suspending,
 };
+pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
+pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
 pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};

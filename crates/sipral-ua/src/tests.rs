@@ -2439,11 +2439,11 @@ fn unregistering_removes_this_binding_and_not_everybody_elses() {
 
 #[test]
 fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
-    // a MESSAGE inside a call (RFC 3428): nothing here has an opinion about
+    // a PUBLISH inside a call (RFC 3903): nothing here has an opinion about
     // it, so it reaches the application as the core wrote it rather than
-    // being dropped. INFO used to be this test's example; 8.3.11 gave it a
-    // policy of its own, so it no longer proves the point this test exists
-    // for
+    // being dropped. INFO used to be this test's example, and then MESSAGE;
+    // 8.3.11 gave the first a policy of its own and 8.6.5 gave the second
+    // one, so neither proves the point this test exists for any longer
     let t0 = Instant::now();
     let mut agent = agent(t0);
     agent.add_account(account());
@@ -2463,7 +2463,7 @@ fn a_request_this_layer_has_no_policy_for_is_passed_through_whole() {
     deliver(&mut agent, &in_dialog(&ok, "ACK", "in1ack", 1), t0);
     events(&mut agent);
 
-    deliver(&mut agent, &in_dialog(&ok, "MESSAGE", "in1msg", 2), t0);
+    deliver(&mut agent, &in_dialog(&ok, "PUBLISH", "in1pub", 2), t0);
     assert!(
         events(&mut agent).iter().any(|event| matches!(
             *event,
@@ -11579,5 +11579,415 @@ fn an_info_with_no_body_at_all_reaches_the_application_unanswered() {
         seen.iter()
             .all(|event| !matches!(event, UaEvent::DtmfReceived { .. })),
         "an INFO with no body names no digit"
+    );
+}
+
+// -- MESSAGE (RFC 3428) -------------------------------------------------
+
+/// An out-of-dialog MESSAGE addressed to this account's line, as a far end
+/// would send it.
+fn incoming_message(content_type: &str, body: &[u8], branch: &str) -> Vec<u8> {
+    let mut out = format!(
+        "MESSAGE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch}\r\n\
+Max-Forwards: 70\r\n\
+From: Bob <sip:bob@example.com>;tag={branch}\r\n\
+To: <sip:alice@example.com>\r\n\
+Call-ID: msg-{branch}\r\n\
+CSeq: 1 MESSAGE\r\n\
+Content-Type: {content_type}\r\n\
+Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+#[test]
+fn an_out_of_dialog_message_carries_no_contact_and_reports_a_200() {
+    // §4: "User Agents MUST NOT insert Contact header fields into MESSAGE
+    // requests." §7: a 200 means this end delivered it.
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .message(id, uri("sip:bob@example.com"), b"text/plain", b"hello", t0)
+        .expect("the MESSAGE goes");
+    let request = only(&transmits(&mut agent), "MESSAGE ");
+    assert!(header(&request, HeaderName::Contact).is_empty());
+    assert_eq!(header(&request, HeaderName::To), b"<sip:bob@example.com>");
+
+    deliver(&mut agent, &reply(&request, 200, "OK", ""), t0);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::MessageSent { message, status, .. }
+                if message == handle && status == StatusCode::OK
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_202_from_a_relay_is_told_apart_from_a_200() {
+    // §4: "If the UAC receives a 202 Accepted response, the message has been
+    // delivered to a gateway, store and forward server, or some other
+    // service that may eventually deliver the message."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .message(id, uri("sip:bob@example.com"), b"text/plain", b"hi", t0)
+        .expect("the MESSAGE goes");
+    let request = only(&transmits(&mut agent), "MESSAGE ");
+    deliver(&mut agent, &reply(&request, 202, "Accepted", ""), t0);
+    let seen = events(&mut agent);
+    assert!(seen.iter().any(|event| matches!(
+        *event,
+        UaEvent::MessageSent { status, .. } if status.get() == 202
+    )));
+}
+
+#[test]
+fn a_timed_out_message_is_reported_with_408() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .message(id, uri("sip:bob@example.com"), b"text/plain", b"hi", t0)
+        .expect("the MESSAGE goes");
+    transmits(&mut agent);
+    agent.handle_timeout(t0 + Duration::from_secs(64));
+    let seen = events(&mut agent);
+    assert!(seen.iter().any(|event| matches!(
+        *event,
+        UaEvent::MessageSent { status, .. } if status == StatusCode::REQUEST_TIMEOUT
+    )));
+}
+
+#[test]
+fn a_second_out_of_dialog_message_to_the_same_target_is_refused_while_the_first_is_pending() {
+    // §8: "A UAC MUST NOT initiate a new out-of-dialog MESSAGE transaction to
+    // a given URI if there is a previous out-of-dialog transaction pending
+    // for the same URI."
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent
+        .message(id, uri("sip:bob@example.com"), b"text/plain", b"one", t0)
+        .expect("the first MESSAGE goes");
+    assert_eq!(
+        agent.message(id, uri("sip:bob@example.com"), b"text/plain", b"two", t0),
+        Err(UaError::MessagePending)
+    );
+    // a different target is unaffected
+    assert!(
+        agent
+            .message(id, uri("sip:carol@example.com"), b"text/plain", b"two", t0)
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_body_over_the_udp_ceiling_is_refused_unless_the_transport_is_congestion_controlled() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let big = vec![b'x'; 1301];
+    let plain = agent.add_account(account());
+    assert_eq!(
+        agent.message(plain, uri("sip:bob@example.com"), b"text/plain", &big, t0),
+        Err(UaError::MessageTooLarge {
+            size: 1301,
+            limit: 1300,
+        })
+    );
+
+    // the account's own transport now actually is a byte stream, not just
+    // told it is one, so the ceiling this policy lifts is the only thing
+    // standing between the send and the wire
+    let (mut agent, _) = over_tcp(t0);
+    let tcp = agent.add_account(
+        Account::new(
+            uri("sip:alice@example.com"),
+            uri("sip:example.com"),
+            uri("sip:alice@192.0.2.1"),
+            TCP,
+            registrar(),
+        )
+        .transport_protocol(TransportProtocol::Tcp),
+    );
+    assert!(
+        agent
+            .message(tcp, uri("sip:bob@example.com"), b"text/plain", &big, t0)
+            .is_ok(),
+        "a congestion-controlled transport is not held to 8's ceiling"
+    );
+}
+
+#[test]
+fn an_incoming_message_is_answered_200_and_delivered_whole() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let account_id = agent.add_account(account());
+    deliver(
+        &mut agent,
+        &incoming_message("text/plain", b"hi there", "m1"),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(answer.starts_with(b"SIP/2.0 200 "));
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            UaEvent::MessageReceived { account: Some(id), call: None, request }
+                if *id == account_id && request.as_raw().body() == b"hi there"
+        )),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_content_type_nobody_declared_is_refused_415_with_an_accept() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    deliver(
+        &mut agent,
+        &incoming_message("application/xml", b"<x/>", "m2"),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(
+        answer.starts_with(b"SIP/2.0 415 "),
+        "{}",
+        text(&answer, HeaderName::CallId)
+    );
+    assert!(
+        header(&answer, HeaderName::Accept)
+            .windows(b"text/plain".len())
+            .any(|window| window == b"text/plain")
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::MessageReceived { .. })),
+        "a refused body is not delivered"
+    );
+}
+
+#[test]
+fn a_content_type_the_account_declared_is_taken() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account().accepts_message_type(b"application/xml"));
+    deliver(
+        &mut agent,
+        &incoming_message("application/xml", b"<x/>", "m3"),
+        t0,
+    );
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(answer.starts_with(b"SIP/2.0 200 "));
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::MessageReceived { .. }))
+    );
+}
+
+#[test]
+fn a_body_over_the_incoming_ceiling_is_refused_413() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    agent.add_account(account());
+    let huge = vec![b'x'; 32 * 1024 + 1];
+    deliver(&mut agent, &incoming_message("text/plain", &huge, "m4"), t0);
+    let answer = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(answer.starts_with(b"SIP/2.0 413 "));
+}
+
+/// A MESSAGE from the far end, inside a dialog this end opened (mirroring
+/// `reversed`'s tags, the way `incoming_info` does for an INFO).
+fn incoming_message_in_dialog(ack: &[u8], branch: &str, cseq: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = format!(
+        "MESSAGE sip:alice@192.0.2.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.9:5060;branch=z9hG4bK{branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: {}\r\n\
+To: {}\r\n\
+Call-ID: {}\r\n\
+CSeq: {cseq} MESSAGE\r\n\
+Content-Type: text/plain\r\n\
+Content-Length: {}\r\n\r\n",
+        text(ack, HeaderName::To),
+        text(ack, HeaderName::From),
+        text(ack, HeaderName::CallId),
+        body.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+#[test]
+fn a_message_sent_inside_a_call_rides_the_dialog_and_is_reported_back() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+
+    let handle = agent
+        .message_in_call(call, b"text/plain", b"in a call", t0)
+        .expect("the MESSAGE goes inside the dialog");
+    let request = only(&transmits(&mut agent), "MESSAGE ");
+    // the same Call-ID the ACK travelled on: it is this call's dialog
+    assert_eq!(
+        header(&request, HeaderName::CallId),
+        header(&ack, HeaderName::CallId)
+    );
+    deliver(&mut agent, &reply(&request, 200, "OK", ""), t0);
+    assert!(events(&mut agent).iter().any(|event| matches!(
+        *event,
+        UaEvent::MessageSent { message, status: StatusCode::OK, .. } if message == handle
+    )));
+
+    // and a MESSAGE the far end sends inside the same dialog names the call
+    deliver(
+        &mut agent,
+        &incoming_message_in_dialog(&ack, "inmsg", 2, b"reply"),
+        t0,
+    );
+    let answered = only(&transmits(&mut agent), "SIP/2.0 ");
+    assert!(answered.starts_with(b"SIP/2.0 200 "));
+    assert!(events(&mut agent).iter().any(|event| matches!(
+        event,
+        UaEvent::MessageReceived { call: Some(reported), .. } if *reported == call
+    )));
+}
+
+// -- Message waiting indication (RFC 3842) -------------------------------
+
+/// The `message-summary` package's body, as §4.1's own example writes it.
+fn simple_message_summary(
+    waiting: bool,
+    new: u32,
+    old: u32,
+    urgent_new: u32,
+    urgent_old: u32,
+) -> String {
+    format!(
+        "Messages-Waiting: {}\r\n\
+Message-Account: sip:alice@vmail.example.com\r\n\
+Voice-Message: {new}/{old} ({urgent_new}/{urgent_old})\r\n",
+        if waiting { "yes" } else { "no" }
+    )
+}
+
+#[test]
+fn a_message_summary_notify_raises_the_counts_it_carried() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:alice@vmail.example.com"), "message-summary"),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    let body = simple_message_summary(true, 2, 8, 0, 2);
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "message-summary",
+            "active;expires=3600",
+            Some(("application/simple-message-summary", &body)),
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            *event,
+            UaEvent::MessagesWaiting {
+                subscription,
+                waiting: true,
+                new: 2,
+                old: 8,
+                urgent_new: 0,
+                urgent_old: 2,
+                ..
+            } if subscription == handle
+        )),
+        "{seen:?}"
+    );
+    let summary = agent
+        .message_summary(handle)
+        .expect("the subscription is live and has a summary");
+    assert_eq!(
+        summary.account.as_deref(),
+        Some("sip:alice@vmail.example.com")
+    );
+}
+
+#[test]
+fn message_summary_says_nothing_once_the_subscription_stops() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:alice@vmail.example.com"), "message-summary"),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    let body = simple_message_summary(true, 1, 0, 0, 0);
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "message-summary",
+            "active;expires=3600",
+            Some(("application/simple-message-summary", &body)),
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(agent.message_summary(handle).is_some());
+
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            2,
+            "notifier",
+            "message-summary",
+            "terminated;reason=timeout",
+            None,
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(
+        agent.message_summary(handle).is_none(),
+        "a subscription that is not live is not evidence about the mailbox"
     );
 }
