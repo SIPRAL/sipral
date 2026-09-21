@@ -141,9 +141,11 @@ pub struct Capabilities {
     /// Which key exchanges a call can complete, and therefore which ones are
     /// worth showing a control for.
     ///
-    /// SDES is in it. DTLS-SRTP is not, and the enumeration has a variant for
-    /// it so that its absence is something an application can read rather
-    /// than something it has to know.
+    /// SDES is always in it. DTLS-SRTP joins it when the `dtls` feature is
+    /// compiled in, which it is by default; a build without it keeps the
+    /// enumeration's variant and leaves the slice short, so that the absence
+    /// is something an application can read rather than something it has to
+    /// know.
     pub srtp_keying: &'static [SrtpKeying],
     /// Whether RFC 6665 subscriptions and the dialog-state package this
     /// crate wraps ([`sipral_ua::UserAgent::subscribe`]) are compiled in.

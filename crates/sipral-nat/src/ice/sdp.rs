@@ -10,6 +10,7 @@
 //! [`sipral_core::sdp::SessionDescription`], so a caller never sees them as
 //! strings assembled by hand.
 
+use core::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -159,7 +160,15 @@ fn rtcp_destination(media: &MediaDescription, rtp: SocketAddr) -> Option<SocketA
 
 /// What the peer said about ICE for one data stream, read out of its offer
 /// or answer (RFC 8839 §5).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// [`Debug`] leaves the password out, the way [`Credentials`] does on this
+/// end's own. It is the same secret seen from the other side: whoever holds
+/// it can sign a connectivity check the peer will believe, and a check the
+/// peer believes is how the media gets pointed somewhere. This type derived
+/// its `Debug` while `Credentials` wrote one by hand, which is the usual
+/// shape of this mistake — one end is remembered and the other is not, and
+/// the half that leaks is the half that came in off the network.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RemoteIce {
     /// The username fragment this stream's checks must be signed against.
     pub ufrag: String,
@@ -182,6 +191,19 @@ pub struct RemoteIce {
     /// Whether the stream carries `a=ice-mismatch` (RFC 8839 §5.3): the peer
     /// does ICE, just not on this stream.
     pub mismatch: bool,
+}
+
+impl fmt::Debug for RemoteIce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteIce")
+            .field("ufrag", &self.ufrag)
+            .field("lite", &self.lite)
+            .field("ice2", &self.ice2)
+            .field("candidates", &self.candidates)
+            .field("pacing", &self.pacing)
+            .field("mismatch", &self.mismatch)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Read one stream's ICE parameters, falling back to the session level for
@@ -658,5 +680,34 @@ mod tests {
         assert!(remote.ice2);
         assert!(!remote.lite);
         assert_eq!(remote.candidates, candidates);
+    }
+
+    /// The peer's password is the peer's half of the same secret, and a
+    /// description read off the network is exactly the thing a reader reaches
+    /// for `{:?}` on when a call will not connect.
+    #[test]
+    fn the_peers_password_does_not_reach_a_log_either() {
+        let credentials = Credentials::new("9uB6", "YH75Fviy6338Vbrhrlp8Yh").expect("shape");
+        let mut description = session();
+        let mut media = audio_media();
+        write_stream(&mut media, &credentials, &[]);
+        description.media.push(media);
+        let remote = parse_remote(&description, &description.media[0]).expect("ICE is declared");
+
+        let printed = format!("{remote:?}");
+        assert!(!printed.contains("YH75Fviy6338Vbrhrlp8Yh"), "{printed}");
+        assert!(printed.contains("9uB6"), "{printed}");
+    }
+
+    /// And so does the description it came out of, which carries the same
+    /// password one layer down as an `a=ice-pwd` attribute.
+    #[test]
+    fn nor_does_the_description_it_was_read_from() {
+        let credentials = Credentials::new("9uB6", "YH75Fviy6338Vbrhrlp8Yh").expect("shape");
+        let mut media = audio_media();
+        write_stream(&mut media, &credentials, &[]);
+
+        let printed = format!("{media:?}");
+        assert!(!printed.contains("YH75Fviy6338Vbrhrlp8Yh"), "{printed}");
     }
 }

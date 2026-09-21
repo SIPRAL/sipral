@@ -5,7 +5,7 @@
 
 One directory per fuzz target, holding the inputs a run starts from. They are
 committed, which the rest of a fuzzing corpus is not, for one reason: a clone
-that gets sixteen targets and no corpus gets sixteen targets that begin from
+that gets seventeen targets and no corpus gets seventeen targets that begin from
 the empty input, and a coverage-guided fuzzer then spends its first hours
 rediscovering that a SIP message starts with a method name.
 

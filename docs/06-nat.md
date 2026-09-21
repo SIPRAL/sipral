@@ -226,18 +226,38 @@ What it does, in the order a session meets it:
   remembered from before the answer (32), cancelled transactions, and the
   pacing a peer may ask for. No input panics the agent.
 
+- **Patience, and what it is not.** A checklist with nothing left to check is
+  not a checklist that has failed. RFC 8863 is written for exactly that: the
+  peer may still arrive with a check that forms a peer-reflexive pair and
+  carries the call (§7.3.1.3), and the commonest reason there is nothing left
+  to check is that it has not got here yet. So a checklist Fails
+  `IceConfig::patience` after it was formed, not when its last pair does — the
+  default being one whole STUN transaction, 39.5 seconds, long enough that a
+  peer whose first check was lost has retransmitted every time it is going to.
+  A checklist that never had a pair at all goes through the same door: it used
+  to stay Running for the life of the call with `deadline()` answering `None`,
+  so a caller that slept until the agent next had something to do slept for
+  ever, on a call that was never going to carry a packet.
+
 Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
-agent's datagram model does not carry it), `a=remote-candidates` (RFC 8839
-§4.4.1.2.2, which the offer written after nomination will need), and the wait
-RFC 8863 bounds for a checklist that never had a pair — such a checklist simply
-stays Running.
+agent's datagram model does not carry it), and `a=remote-candidates` (RFC 8839
+§4.4.1.2.2). The second is not written because nothing yet writes an offer it
+would go in: it belongs in the updated offer a controlling agent sends after
+nomination, and only when the selected pair differs from the default candidate
+pair — which cannot happen while the facade gathers one candidate per
+component. It comes with the pass that lifts that.
 
 It is proven against itself and against the lite agent over a simulated
 network: endpoint-independent mapping with address-dependent filtering, a
 symmetric NAT on both sides that leaves only the relay, a symmetric NAT facing
 a filtering one that meets on a peer-reflexive candidate, role conflicts from
 both starting roles, a restart, consent lost and revoked, and a path losing 30%
-of its packets. The lab flows against coturn and Asterisk come with the wiring.
+of its packets. `fuzz/fuzz_targets/ice.rs` drives the same agent from the other
+side — arbitrary datagrams from arbitrary sources on the media port, which is
+what this port is open to before any key exists — seeded with checks signed the
+way the agent will check them, because an unsigned datagram dies in the
+authenticator and reaches none of the state machine. The lab flows against
+coturn and Asterisk come with the wiring.
 
 ## IPv6
 

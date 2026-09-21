@@ -159,9 +159,9 @@ pub struct Attribute {
 }
 
 impl fmt::Debug for Attribute {
-    /// Everything as it was read, except the master key on an `a=crypto`
-    /// line, which is the one thing an attribute can carry that must never
-    /// reach a log.
+    /// Everything as it was read, except the two things an attribute can
+    /// carry that must never reach a log: the master key on an `a=crypto`
+    /// line, and the password on an `a=ice-pwd` one.
     ///
     /// Written here rather than on the descriptions above it because there is
     /// no way to hold one of those without holding these: a redaction on
@@ -171,8 +171,15 @@ impl fmt::Debug for Attribute {
     /// "the SDP MUST be protected" — and a `{:?}` on a live stack is not
     /// protection.
     ///
-    /// The tag and the suite stay. They are what a reader needs when a
-    /// negotiation has gone wrong, and neither is secret.
+    /// The two are redacted differently because they are shaped differently.
+    /// An `a=crypto` line names a tag and a suite before its key, and both are
+    /// what a reader needs when a negotiation has gone wrong; neither is
+    /// secret, so both stay. An `a=ice-pwd` line is the password and nothing
+    /// else (RFC 8839 §5.4), so there is nothing in it to keep. It is the
+    /// short-term credential every connectivity check on the call is signed
+    /// with (RFC 8445 §7.1.2.3): a reader who has it can answer checks as
+    /// either end and can steer the media to itself, which is the whole of
+    /// what ICE decides.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut shown = f.debug_struct("Attribute");
         shown.field("name", &self.name);
@@ -181,6 +188,7 @@ impl fmt::Debug for Attribute {
                 let named: Vec<&str> = value.split_ascii_whitespace().take(2).collect();
                 shown.field("value", &Some(format!("{} <redacted>", named.join(" "))))
             }
+            Some(_) if self.name == "ice-pwd" => shown.field("value", &Some("<redacted>")),
             other => shown.field("value", &other),
         }
         .finish()
@@ -405,5 +413,63 @@ fn address_type_of(address: IpAddr) -> &'static str {
     match address {
         IpAddr::V4(_) => "IP4",
         IpAddr::V6(_) => "IP6",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Attribute;
+
+    /// A key that would open the media if it reached a log, written the way
+    /// RFC 4568 §9.1 writes one.
+    const KEY: &str =
+        "1 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR|2^20|1:32";
+
+    /// RFC 8839 §5.4 gives the password 22 to 256 characters of `ice-char`.
+    const PWD: &str = "asd88fgpdd777uzjYhagZg";
+
+    #[test]
+    fn an_inline_key_does_not_reach_a_log() {
+        let printed = format!("{:?}", Attribute::with_value("crypto", KEY));
+        assert!(
+            !printed.contains("PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR"),
+            "{printed}"
+        );
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
+    /// The tag and the suite are what a reader needs when a negotiation has
+    /// gone wrong, and neither is secret.
+    #[test]
+    fn what_an_inline_key_keeps_is_what_a_reader_needs() {
+        let printed = format!("{:?}", Attribute::with_value("crypto", KEY));
+        assert!(printed.contains('1'), "{printed}");
+        assert!(printed.contains("AES_CM_128_HMAC_SHA1_80"), "{printed}");
+    }
+
+    /// The short-term credential every connectivity check on the call is
+    /// signed with. A reader who has it can answer checks as either end.
+    #[test]
+    fn an_ice_password_does_not_reach_a_log() {
+        let printed = format!("{:?}", Attribute::with_value("ice-pwd", PWD));
+        assert!(!printed.contains(PWD), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
+    /// Only the password. A username fragment is carried in every check on
+    /// the wire and is how a reader tells one session's checks from another's.
+    #[test]
+    fn a_username_fragment_is_not_a_secret_and_stays() {
+        let printed = format!("{:?}", Attribute::with_value("ice-ufrag", "8hhY"));
+        assert!(printed.contains("8hhY"), "{printed}");
+    }
+
+    /// The redaction is on the name, so a description a peer sent is covered
+    /// as surely as one this stack wrote, and at whichever level it sits:
+    /// RFC 8839 §5.4 allows `a=ice-pwd` at the session level too.
+    #[test]
+    fn an_ordinary_attribute_is_printed_as_it_was_read() {
+        let printed = format!("{:?}", Attribute::with_value("rtpmap", "0 PCMU/8000"));
+        assert!(printed.contains("0 PCMU/8000"), "{printed}");
     }
 }

@@ -177,6 +177,27 @@ so nothing but this parser's own bound on the accepted characters and on how
 long a tone lasts says what a peer may claim, and this is what proves it
 never panics on a claim that breaks it.
 
+And one for the ICE agent itself. `stun` and `turn` above read a message;
+`ice` drives the state machine over them, where a datagram is not merely
+parsed but changes what the agent believes about its peer. It builds an agent
+the way the agent insists on being built — `new`, `add_stream`, `gather`,
+`set_remote`, none of which is fuzzed, because an agent that never reached
+`gather` answers `Received::Foreign` to everything and would fuzz nothing —
+and then feeds it arbitrary datagrams from a source the input chooses, topping
+up the transaction-id pool and taking the clock forward between them. It
+asserts what the agent must never do rather than only that it does not panic:
+every probe leaves from a socket it was given, `send` appends to the caller's
+buffer instead of overwriting it, and a datagram the agent reports as
+`Foreign` has not moved the selected pair.
+
+Its seeds are the reason it reaches anything. A connectivity check is
+authenticated before it is acted on, so an unsigned datagram dies at the door
+and a coverage-guided fuzzer will not forge an HMAC to get past it: the seeds
+carry checks signed with the same password the harness publishes, one of them
+nominating, plus a response and a role conflict answering the first
+transaction id the harness hands out. Those six seeds alone reach more of the
+agent than several hundred thousand random runs did before they existed.
+
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
 ./scripts/fuzz.sh 600              # every target, ten minutes each
@@ -196,14 +217,14 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than sixteen runs beginning at
+targets with something to start from rather than seventeen runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Fifteen of the
-sixteen families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing. Sixteen of the
+seventeen families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -229,7 +250,7 @@ The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
 five minutes each by default — before a release and overnight, not before
 every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all sixteen, under the nightly that `fuzz/` pins, so
+do on every run is **build** all seventeen, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -365,7 +386,7 @@ in the C library that build produces, `bindings/c/smoke.c` compiled against the
 header and run, `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all sixteen fuzz targets under their own nightly — which nothing else
+over all seventeen fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

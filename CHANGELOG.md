@@ -12,6 +12,46 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A fuzz target for the ICE agent**, `fuzz/fuzz_targets/ice.rs`, the
+  seventeenth. It is the one seam open to anybody before a key exists: an ICE
+  agent binds the media port and answers connectivity checks on it, so
+  `handle_datagram` runs on bytes from an unauthenticated stranger earlier
+  than SRTP and earlier than the DTLS handshake. Its seeds carry checks signed
+  the way the agent will check them, since an unsigned one dies in the
+  authenticator and reaches nothing behind it — the seeds alone reach more of
+  the agent than several hundred thousand random runs did.
+
+### Changed
+
+- **An ICE checklist with nothing left to check is now waited on, then
+  failed** (RFC 8863), where before it stayed `Running` for the life of the
+  call. Two situations reach it and neither is rare: a peer whose candidates
+  were all unusable leaves a checklist with no pairs at all, and a checklist
+  whose pairs have all failed is the same thing one round trip later. Both
+  used to leave `IceAgent::deadline()` answering `None`, so a caller that
+  slept until the agent next had something to do slept for ever, on a call
+  that was never going to carry a packet. The wait is `IceConfig::patience`,
+  one whole STUN transaction by default, and it is a window rather than a
+  delay: a check arriving inside it still forms a peer-reflexive pair and
+  connects the call.
+
+### Fixed
+
+- **The peer's ICE password no longer reaches a log.** `a=ice-pwd` is
+  redacted in `Attribute`'s `Debug` beside the `a=crypto` master key, and
+  `sipral_nat::ice::RemoteIce` — the parsed form of the same value — writes
+  its own `Debug` instead of deriving one. ICE signs every connectivity check
+  with it (RFC 8445 §7.1.2.3), so a reader who has it can answer checks as
+  either end and steer the media to itself. Both are now named in the gate
+  that asserts a type holding key material never derives `Debug`, which
+  previously listed four types and now lists six.
+
+- `Capabilities::srtp_keying`, `crates/sipral-ffi/src/event.rs` and
+  `THIRD-PARTY-NOTICES.md` each still described the tree as it was before
+  DTLS-SRTP was wired in: a documented claim that DTLS is absent from the
+  keying list, a doc comment cut in half by an item inserted into the middle
+  of it, and a notice saying nothing that ships depends on `sipral-dtls`.
+
 - **DTLS-SRTP keys a call.** Twelve thousand lines of handshake had been
   written, tested and depended on by nothing; this is the joint. A catalogue
   set to `SrtpPolicy::DtlsOffered` or `DtlsRequired` writes

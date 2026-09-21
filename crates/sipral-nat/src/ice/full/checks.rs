@@ -143,8 +143,16 @@ impl IceAgent {
         self.sort_pairs();
         self.enforce_pair_limit();
         self.unfreeze_new(first);
+        let patience = self.config.patience;
         if let Some(entry) = self.streams.get_mut(stream) {
             entry.formed = true;
+            // RFC 8863: from here on everything this agent can do it has
+            // done, and anything further is the peer's to send. The wait
+            // starts here rather than at `gather`, because before the peer's
+            // parameters arrive there is nothing to be patient about, and it
+            // is set even when pairs were formed: a checklist whose pairs all
+            // fail arrives at the same place one round trip later.
+            entry.patience_until = now.checked_add(patience);
         }
         self.wake_pacer(now);
     }
@@ -930,11 +938,21 @@ impl IceAgent {
     }
 
     /// §7.2.5.4: a checklist whose pairs have all finished without a valid
-    /// pair for every component has Failed.
+    /// pair for every component has Failed — but not the instant they finish.
     ///
-    /// A checklist that never had a pair is left Running: a peer behind a NAT
-    /// can still reach it with a check that forms one (RFC 8863 is what
-    /// bounds that wait, and it is not implemented here).
+    /// RFC 8863 is the whole of the difference. A checklist with nothing left
+    /// to check is not a checklist that has failed: a peer behind a NAT may
+    /// still arrive with a check that forms a peer-reflexive pair and carries
+    /// the call (§7.3.1.3), and the commonest reason there is nothing left to
+    /// check is that the peer has not got here yet. So the agent waits
+    /// [`IceConfig::patience`] from the moment its checklist was formed, and
+    /// only then says so.
+    ///
+    /// A checklist that never had a pair at all goes through this same door.
+    /// It used to leave by a different one — an early return that meant such
+    /// a checklist stayed Running for the life of the call, with `deadline()`
+    /// answering `None`, so a correct caller was entitled to sleep for ever
+    /// on a call that was never going to connect.
     pub(super) fn update_checklist(&mut self, stream: usize, now: Instant) {
         let Some(entry) = self.streams.get(stream) else {
             return;
@@ -942,15 +960,13 @@ impl IceAgent {
         if entry.state != ChecklistState::Running || !entry.formed {
             return;
         }
-        let mut pairs = self
+        if entry.patience_until.is_some_and(|until| now < until) {
+            return;
+        }
+        let finished = self
             .pairs
             .iter()
             .filter(|pair| pair.stream == stream)
-            .peekable();
-        if pairs.peek().is_none() {
-            return;
-        }
-        let finished = pairs
             .all(|pair| matches!(pair.state, PairState::Succeeded | PairState::Failed))
             && entry.triggered.is_empty()
             && !self.checks.iter().any(|check| {
@@ -1113,6 +1129,29 @@ impl IceAgent {
                 self.check_failed(&check, pair, now);
             }
         }
+        self.patience_timeout(now);
+    }
+
+    /// Every checklist whose patience (RFC 8863) has run out, asked once
+    /// whether it has anything left to check.
+    ///
+    /// This is the only caller of [`Self::update_checklist`] that does not
+    /// need a check to have been answered first, and it is the whole reason a
+    /// checklist with no pairs can now Fail: the other three callers are
+    /// reached from a response or a timeout on a check, and a checklist with
+    /// no pairs never sent one.
+    fn patience_timeout(&mut self, now: Instant) {
+        let spent: Vec<usize> = self
+            .streams
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.state == ChecklistState::Running && entry.formed)
+            .filter(|(_, entry)| entry.patience_until.is_some_and(|until| until <= now))
+            .map(|(stream, _)| stream)
+            .collect();
+        for stream in spent {
+            self.update_checklist(stream, now);
+        }
     }
 
     pub(super) fn checks_deadline(&self) -> Option<Instant> {
@@ -1129,7 +1168,15 @@ impl IceAgent {
         } else {
             None
         };
-        [checks, nomination].into_iter().flatten().min()
+        // without this term `deadline()` answers `None` for a checklist that
+        // has nothing to check, and a caller that sleeps on it sleeps for ever
+        let patience = self
+            .streams
+            .iter()
+            .filter(|entry| entry.state == ChecklistState::Running && entry.formed)
+            .filter_map(|entry| entry.patience_until)
+            .min();
+        [checks, nomination, patience].into_iter().flatten().min()
     }
 
     /// Recompute every priority after a role switch (RFC 8445 §7.2.5.1:

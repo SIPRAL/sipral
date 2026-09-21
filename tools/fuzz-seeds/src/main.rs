@@ -4,7 +4,7 @@
 //! The seed corpus the fuzz targets start from, written out of this
 //! repository's own writers.
 //!
-//! A public clone that gets sixteen targets and no corpus gets sixteen
+//! A public clone that gets seventeen targets and no corpus gets seventeen
 //! targets that begin from the empty input, and a coverage-guided fuzzer
 //! spends its first hours rediscovering that a SIP message starts with a
 //! method name. So the seeds are committed -- and because they are committed
@@ -939,6 +939,134 @@ fn stun_seeds() -> Result<Vec<Seed>, Wrong> {
     Ok(out)
 }
 
+/// The three bytes the `ice` target reads off the front before anything else
+/// is a datagram: the shape of the session, how many candidates the peer
+/// offered, and how wide a datagram is cut.
+///
+/// Zero is the ordinary call in every bit of the shape — this end offered, the
+/// peer is a full agent that speaks RFC 8445, the stream is not one an ALG
+/// rewrote — and the top two bits choose which address the datagrams claim to
+/// come from, so zero is the peer's own candidate rather than a stranger's.
+const ICE_ORDINARY: [u8; 3] = [0, 1, 255];
+
+/// The password this end publishes in `a=ice-pwd`, and therefore the one a
+/// check sent *to* it is signed with (RFC 8445 §7.1.2.3). It has to be the
+/// same string the target hands `Credentials::new`, or every signed seed
+/// below is an unsigned seed that dies in the agent's authenticator and
+/// reaches none of the code the target exists to reach.
+const ICE_LOCAL_PWD: &[u8] = b"asd88fgpdd777uzjYhagZg";
+
+/// `USERNAME` on a check arriving here: the fragment of the agent being
+/// checked first, then the fragment of the one doing the checking (§7.1.2.3).
+const ICE_USERNAME: &[u8] = b"8hhY:9uB6";
+
+/// The first transaction id the target hands the agent, which is how a
+/// response seed can be a response to something rather than to nothing.
+const ICE_FIRST_ID: [u8; 12] = [
+    ICE_ORDINARY[0],
+    ICE_ORDINARY[2],
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
+
+fn ice_seeds() -> Result<Vec<Seed>, Wrong> {
+    let peer = TransactionId::new([
+        0x2f, 0x1a, 0x7b, 0x0c, 0x93, 0x44, 0xe1, 0x08, 0x5d, 0xc6, 0x21, 0x3f,
+    ]);
+    let mut out = Vec::new();
+
+    // a connectivity check from the peer, signed the way the agent will check
+    // it. Everything past `server::authenticate` is reached only by a seed
+    // that gets this right, which is most of what the target is for.
+    let mut check = MessageBuilder::new(Class::Request, StunMethod::BINDING, peer);
+    check
+        .add(AttributeType::USERNAME, ICE_USERNAME)
+        .and_then(|()| check.add_u32(AttributeType::PRIORITY, 0x7E7F_00FF))
+        .and_then(|()| check.add(AttributeType::ICE_CONTROLLED, &[0x11; 8]))
+        .and_then(|()| check.add_message_integrity(ICE_LOCAL_PWD))
+        .and_then(|()| check.add_fingerprint())
+        .map_err(|why| Wrong(format!("the ICE check seed does not build: {why:?}")))?;
+    out.push(("check-signed", check.finish()));
+
+    // the same, nominating. The peer said ICE-CONTROLLED, so it is not the
+    // agent that gets to nominate, and RFC 8445 §7.3.1.5 has this answered
+    // with a signed 400 rather than followed -- the refusal is the path worth
+    // keeping a seed for.
+    let mut nominating = MessageBuilder::new(Class::Request, StunMethod::BINDING, peer);
+    nominating
+        .add(AttributeType::USERNAME, ICE_USERNAME)
+        .and_then(|()| nominating.add_u32(AttributeType::PRIORITY, 0x7E7F_00FF))
+        .and_then(|()| nominating.add(AttributeType::ICE_CONTROLLED, &[0x11; 8]))
+        .and_then(|()| nominating.add(AttributeType::USE_CANDIDATE, &[]))
+        .and_then(|()| nominating.add_message_integrity(ICE_LOCAL_PWD))
+        .and_then(|()| nominating.add_fingerprint())
+        .map_err(|why| Wrong(format!("the ICE nomination seed does not build: {why:?}")))?;
+    out.push(("check-use-candidate", nominating.finish()));
+
+    // an answer to the first check the agent itself sends, carrying a mapped
+    // address nobody named: the peer-reflexive path of §7.2.5.2.1
+    let mut answered = MessageBuilder::new(
+        Class::Success,
+        StunMethod::BINDING,
+        TransactionId::new(ICE_FIRST_ID),
+    );
+    answered
+        .add_xor_address(
+            AttributeType::XOR_MAPPED_ADDRESS,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200)), 51_001),
+        )
+        .and_then(|()| answered.add_message_integrity(b"YH75Fviy6338Vbrhrlp8Yh"))
+        .and_then(|()| answered.add_fingerprint())
+        .map_err(|why| Wrong(format!("the ICE response seed does not build: {why:?}")))?;
+    out.push(("check-answered-peer-reflexive", answered.finish()));
+
+    // a role conflict: 487, which switches this agent's role and redraws its
+    // tiebreaker (§7.2.5.1)
+    let mut conflict = MessageBuilder::new(
+        Class::Error,
+        StunMethod::BINDING,
+        TransactionId::new(ICE_FIRST_ID),
+    );
+    conflict
+        .add_error_code(487, b"Role Conflict")
+        .and_then(|()| conflict.add_message_integrity(b"YH75Fviy6338Vbrhrlp8Yh"))
+        .and_then(|()| conflict.add_fingerprint())
+        .map_err(|why| {
+            Wrong(format!(
+                "the ICE role-conflict seed does not build: {why:?}"
+            ))
+        })?;
+    out.push(("check-refused-role-conflict", conflict.finish()));
+
+    for (name, bytes) in &out {
+        Message::parse(bytes)
+            .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
+    }
+
+    // and the other half of what arrives on a media socket, which the agent
+    // has to hand back rather than read: an RTP packet, and the four bytes a
+    // truncated STUN header is
+    out.push(("media-not-stun", vec![0x80, 0x00, 0x12, 0x34]));
+    out.push(("four-bytes", vec![0x00, 0x01, 0x00, 0x00]));
+
+    Ok(out
+        .into_iter()
+        .map(|(name, bytes)| {
+            let mut seed = ICE_ORDINARY.to_vec();
+            seed.extend_from_slice(&bytes);
+            (name, seed)
+        })
+        .collect())
+}
+
 fn turn_seeds() -> Result<Vec<Seed>, Wrong> {
     let channel = ChannelNumber::new(0x4001)
         .ok_or_else(|| Wrong("0x4001 is inside the channel range".to_owned()))?;
@@ -1310,6 +1438,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("dtmf_info", dtmf_info_seeds()?),
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
+        ("ice", ice_seeds()?),
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),
         ("rtcp", rtcp_seeds()?),

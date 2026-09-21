@@ -10,7 +10,7 @@ use super::sim_tests::{STUN_SERVER, TURN_SERVER, address};
 use super::{agent, config, credentials};
 use crate::ice::{
     Candidate, CandidateType, ComponentId, Credentials, Foundation, IceAgent, IceConfig, IceError,
-    IceEvent, PairState, Received, RemoteIce, Role, StreamId, Transmit, pair_priority,
+    IceEvent, IceState, PairState, Received, RemoteIce, Role, StreamId, Transmit, pair_priority,
 };
 use crate::stun::{
     AttributeType, Class, Integrity, Message, MessageBuilder, Method, TransactionId, error_code,
@@ -297,6 +297,12 @@ fn a_response_from_where_the_check_was_not_sent_fails_the_pair() {
     });
     agent.handle_datagram(address(LOCAL), address("198.51.100.99:6000"), &answer, now);
     assert_eq!(agent.pairs[0].state, PairState::Failed);
+
+    // the pair is gone at once; the checklist is not. RFC 8863 has the agent
+    // wait out `patience` first, because the peer may yet arrive with a check
+    // that forms a pair this end could not form for itself
+    assert!(!events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
+    agent.handle_timeout(now + IceConfig::default().patience);
     assert!(events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
 }
 
@@ -802,6 +808,9 @@ fn a_nomination_the_agent_will_not_act_on_is_refused_on_every_path() {
         &elsewhere,
         now,
     );
+    // the checklist Fails once patience runs out, not on the response itself
+    let now = now + IceConfig::default().patience;
+    agent.handle_timeout(now);
     assert!(events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
     assert_refused(
         &mut agent,
@@ -1334,4 +1343,96 @@ fn no_datagram_panics_the_agent_in_any_state() {
             let _ = agent.deadline();
         }
     }
+}
+
+/// The case RFC 8863 is written for, and the one that used to have no way
+/// out: a peer whose candidates this agent cannot pair with anything, so no
+/// check is ever sent and none of the paths that fail a checklist is ever
+/// reached.
+///
+/// Before the timer this checklist stayed Running for the life of the call
+/// with `deadline()` answering `None` — so a caller that slept until the
+/// agent next had something to do slept for ever, on a call that was never
+/// going to carry a packet.
+#[test]
+fn a_checklist_that_never_had_a_pair_is_waited_on_and_then_fails() {
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    // an IPv6 candidate against an IPv4 base: RFC 8445 §6.1.2.2 pairs only
+    // candidates of the same family, so nothing can be formed
+    let mut unpairable = host("198.51.100.20:6000", PEER_PRIORITY, "1");
+    unpairable.address = address("[2001:db8::1]:6000");
+    agent
+        .set_remote(stream, &from_peer(vec![unpairable]), now)
+        .expect("the answer");
+    ids.feed(&mut agent);
+
+    assert!(agent.pairs.is_empty(), "nothing should have paired");
+    assert_eq!(agent.state(), IceState::Running);
+
+    // the agent now has something to do, and says when
+    let deadline = agent
+        .deadline()
+        .expect("a checklist with no pairs has a deadline");
+    assert!(
+        deadline <= now + IceConfig::default().patience,
+        "the wait is bounded by patience"
+    );
+
+    // and it is patience, not a moment less
+    agent.handle_timeout(
+        now + IceConfig::default()
+            .patience
+            .saturating_sub(Duration::from_millis(1)),
+    );
+    assert!(!events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
+
+    agent.handle_timeout(now + IceConfig::default().patience);
+    let told = events(&mut agent);
+    assert!(
+        told.contains(&IceEvent::StreamFailed { stream }),
+        "{told:?}"
+    );
+    assert!(told.contains(&IceEvent::Failed), "{told:?}");
+    assert_eq!(agent.state(), IceState::Failed);
+}
+
+/// The other half of the same rule: patience is not a delay on failure, it is
+/// a window in which the peer can still connect the call. A check that
+/// arrives inside it forms a peer-reflexive pair and the checklist lives.
+#[test]
+fn a_peer_that_arrives_inside_the_wait_still_connects_the_call() {
+    // controlling here, because the check the peer sends says ICE-CONTROLLED
+    // and two agents that both believe they are controlled is a role
+    // conflict, which is a different rule being tested somewhere else
+    let (mut agent, stream, mut ids, now) = gathered(Role::Controlling, config(false, false));
+    let mut unpairable = host("198.51.100.20:6000", PEER_PRIORITY, "1");
+    unpairable.address = address("[2001:db8::1]:6000");
+    agent
+        .set_remote(stream, &from_peer(vec![unpairable]), now)
+        .expect("the answer");
+    ids.feed(&mut agent);
+    assert!(agent.pairs.is_empty());
+
+    // the peer reaches us from an address nobody named, a round trip before
+    // patience would have run out
+    let arrived = now
+        + IceConfig::default()
+            .patience
+            .saturating_sub(Duration::from_secs(1));
+    agent.handle_datagram(
+        address(LOCAL),
+        address(PEER),
+        &check_from_peer(9, Some(PEER_PRIORITY), false),
+        arrived,
+    );
+    assert!(
+        !agent.pairs.is_empty(),
+        "a check from a source nobody knew is a peer-reflexive pair (RFC 8445 §7.3.1.3)"
+    );
+
+    // and the checklist is not failed at the moment the old wait would have
+    // expired, because it now has something to check
+    agent.handle_timeout(now + IceConfig::default().patience);
+    assert!(!events(&mut agent).contains(&IceEvent::StreamFailed { stream }));
+    assert_eq!(agent.state(), IceState::Running);
 }

@@ -139,7 +139,7 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
 }
 
 # The other place bytes of no obvious origin could land. fuzz/corpus/ is
-# committed -- a clone that gets sixteen targets and no corpus gets sixteen
+# committed -- a clone that gets seventeen targets and no corpus gets seventeen
 # targets that start from the empty input -- and two things keep it from
 # becoming somewhere unvetted material is dropped. Both are checked here.
 #
@@ -180,7 +180,7 @@ stray=$(git ls-files fixtures | cut -d/ -f2 | sort -u | grep -vxE 'rfc4475|repla
 # committed and never will be.
 #
 # The declared names are read out of the manifest rather than written here:
-# a list of sixteen kept by hand beside a list of sixteen kept by cargo is
+# a list of seventeen kept by hand beside a list of seventeen kept by cargo is
 # two lists, and they drift.
 # One ASCII letter on at least one side of a Romanian letter. Written as an
 # alternation rather than a bracket because under LC_ALL=C a bracket over
@@ -358,18 +358,28 @@ done | grep 'Instant::now\|SystemTime::now' || true)
 # protection, and the reason this is a gate rather than a review note is that
 # the leak is never in the type that holds the key -- those redact themselves.
 # It is in whatever derives `Debug` above them. So the rule is stated the way
-# it can be checked: the four types that carry key material or a device token
-# write their own `Debug`, and a derive on one of them is what this catches.
+# it can be checked: every type that carries key material or a device token
+# writes its own `Debug`, and a derive on one of them is what this catches.
 #
-# WHAT IS READ. The declaration of each of the four, and the twenty lines
-# after it, which is where a `#[derive]` on it would be. WHAT IS NOT READ.
-# Anything that merely holds one of the four -- that is the point of putting
-# the redaction at the bottom, and a holder deriving `Debug` is correct.
+# The last two are the two ends of one secret. ICE signs every connectivity
+# check with a short-term password (RFC 8445 §7.1.2.3), each end draws its own
+# and sends it in the description, so the credential exists twice: `Credentials`
+# is ours and `RemoteIce` is the peer's, read off the network. `Credentials`
+# wrote its `Debug` by hand from the start and `RemoteIce` derived one, which
+# is the usual shape of this -- one end is remembered and the other is not,
+# and the half that leaks is the half that came in from outside.
+#
+# WHAT IS READ. The declaration of each, and the line before it, which is where
+# a `#[derive]` on it would be. WHAT IS NOT READ. Anything that merely holds
+# one of them -- that is the point of putting the redaction at the bottom, and
+# a holder deriving `Debug` is correct.
 step "nothing that holds a key derives Debug"
 redacting="crates/sipral-core/src/sdp/session.rs:Attribute
 crates/sipral-core/src/sdp/session.rs:KeyLine
 crates/sipral-core/src/sdp/crypto.rs:KeySalt
-crates/sipral-ua/src/account.rs:Push"
+crates/sipral-ua/src/account.rs:Push
+crates/sipral-nat/src/ice/full/mod.rs:Credentials
+crates/sipral-nat/src/ice/sdp.rs:RemoteIce"
 derived=""
 for pair in $redacting; do
     file=${pair%%:*}
@@ -862,7 +872,7 @@ fi
 # target that stops building, or drifts out of the format the rest of the
 # tree keeps, is then found the next time somebody fuzzes -- which is before
 # a release, which is the worst moment to find it. So the gate formats,
-# lints and builds them. It does not run them: sixteen targets at five
+# lints and builds them. It does not run them: seventeen targets at five
 # minutes each is an hour, and that is what scripts/fuzz.sh is for.
 #
 # The toolchain is named out of fuzz/rust-toolchain.toml and passed
@@ -895,7 +905,7 @@ else
         # Where on disk is cargo's answer and not a guess: cargo-fuzz builds
         # with plain `cargo build`, which honours CARGO_TARGET_DIR, so a
         # machine that sets it puts the binaries somewhere fuzz/target/ is
-        # not -- and a step that looks in fuzz/target/ then reports sixteen
+        # not -- and a step that looks in fuzz/target/ then reports seventeen
         # targets missing, or worse finds yesterday's.
         targets=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" fuzz list 2>/dev/null)
         built_into=$(cd "$ROOT/fuzz" && cargo "+$NIGHTLY" metadata --no-deps --format-version 1 \

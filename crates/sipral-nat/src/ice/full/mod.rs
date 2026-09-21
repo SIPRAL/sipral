@@ -137,6 +137,22 @@ pub struct IceConfig {
     /// The basic period between consent checks (RFC 7675 §5.1), randomised by
     /// ±20% on every check; no gap is ever shorter than four seconds.
     pub consent_interval: Duration,
+    /// How long a checklist that has nothing to check is waited on before it
+    /// Fails — the timer of RFC 8863, whose whole subject is that an agent
+    /// with no pair left is not an agent that has failed.
+    ///
+    /// Two situations reach it, and neither is rare. A peer whose candidates
+    /// were all unusable — a different address family, an FQDN, TCP only —
+    /// leaves a checklist with no pairs at all. A checklist whose pairs have
+    /// all failed is the same thing one step later. In both, a peer behind a
+    /// NAT can still arrive with a check that forms a peer-reflexive pair and
+    /// connects the call (§7.3.1.3), so failing at once would throw away a
+    /// call that was about to work.
+    ///
+    /// The default is [`crate::turn::DEFAULT_TI`], the life of one whole STUN
+    /// transaction: long enough that a peer whose first check was lost has
+    /// retransmitted every time it is going to, and no longer.
+    pub patience: Duration,
 }
 
 impl Default for IceConfig {
@@ -151,6 +167,7 @@ impl Default for IceConfig {
             nomination_wait: Duration::from_secs(1),
             keepalive: DEFAULT_KEEPALIVE,
             consent_interval: DEFAULT_CONSENT_INTERVAL,
+            patience: crate::turn::DEFAULT_TI,
         }
     }
 }
@@ -505,6 +522,11 @@ struct Stream {
     state: ChecklistState,
     triggered: VecDeque<u32>,
     components: Vec<Component>,
+    /// When patience with a checklist that has nothing to check runs out
+    /// (RFC 8863). Set when the checklist is formed — which is the first
+    /// moment this agent has done everything it can and the rest is the
+    /// peer's — and cleared by a restart, which starts the wait again.
+    patience_until: Option<Instant>,
 }
 
 struct Component {
@@ -737,6 +759,7 @@ impl IceAgent {
             formed: false,
             state: ChecklistState::Running,
             triggered: VecDeque::new(),
+            patience_until: None,
             components: components.iter().map(|id| Component::new(*id)).collect(),
         });
         let block = self.preference_block();
@@ -889,6 +912,9 @@ impl IceAgent {
             stream.formed = false;
             stream.state = ChecklistState::Running;
             stream.triggered.clear();
+            // a restart is a fresh session on the same sockets, so the wait
+            // starts again rather than carrying the old one's remainder
+            stream.patience_until = None;
             let mut ids: Vec<ComponentId> = self
                 .bases
                 .iter()

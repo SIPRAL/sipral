@@ -106,10 +106,20 @@ a live message, and it is worth closing rather than assuming closed.
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), nine added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `headless`, `rtcp`, `rtp_dtmf`, `srtp_unprotect`,
-`stun`, `turn`), two for DTLS (`dtls_record`, `dtls_handshake`), and one for
-DTMF over SIP INFO (`dtmf_info`). The exit gate is 24 hours per target with no
-crash and no hang; `scripts/check.sh` builds all sixteen on every run so none
-of them rots uncompiled between releases.
+`stun`, `turn`), two for DTLS (`dtls_record`, `dtls_handshake`), one for
+DTMF over SIP INFO (`dtmf_info`), and one for the ICE agent (`ice`). The exit
+gate is 24 hours per target with no crash and no hang; `scripts/check.sh`
+builds all seventeen on every run so none of them rots uncompiled between
+releases.
+
+`ice` is the newest and covers the one seam that is open to anybody before a
+key exists at all: an ICE agent binds the media port and answers connectivity
+checks on it, so `handle_datagram` runs on bytes from an unauthenticated
+stranger earlier than SRTP, earlier than the DTLS handshake, earlier than
+anything that could say who the peer is. Its seeds carry checks signed the way
+the agent will check them, which is the difference between fuzzing the state
+machine and fuzzing the authenticator in front of it: the seeds alone reach
+more of the agent than several hundred thousand random runs did.
 
 ## The refusals that exist on purpose
 
@@ -219,18 +229,33 @@ account of what the stack decided (`docs/14-diagnostics.md`) — holds neither
 seed and no key material of any kind; it is deliberately a different artefact
 from a replay recording, with a different, narrower, safety promise.
 
-**Nothing that holds key material derives `Debug`.** Four types —
+**Nothing that holds key material derives `Debug`.** Six types —
 `KeySalt` (`crates/sipral-core/src/sdp/crypto.rs`), `Attribute` and `KeyLine`
-(`crates/sipral-core/src/sdp/session.rs`), and `Push`
+(`crates/sipral-core/src/sdp/session.rs`), `Push`
 (`crates/sipral-ua/src/account.rs`, the RFC 8599 wake-up token, the same shape
-of secret) — each has a hand-written `Debug` that prints `<redacted>` in place
-of the material and nothing derived, and `KeySalt` additionally zeroises on
-`Drop`. `scripts/check.sh` asserts both properties for exactly these four
-named types: no `#[derive(..., Debug, ...)]` immediately above the struct, and
-a hand-written `impl fmt::Debug for` it somewhere in the file — so a future
-edit that adds the derive back, or removes the hand-written impl without
-noticing, fails the gate rather than shipping a build that prints every key on
-the machine the first time something logs a call.
+of secret), and the two ends of ICE's short-term credential, `Credentials`
+(`crates/sipral-nat/src/ice/full/mod.rs`) and `RemoteIce`
+(`crates/sipral-nat/src/ice/sdp.rs`) — each has a hand-written `Debug` that
+prints `<redacted>` in place of the material and nothing derived, and
+`KeySalt` additionally zeroises on `Drop`. `scripts/check.sh` asserts both
+properties for exactly these six named types: no `#[derive(..., Debug, ...)]`
+immediately above the struct, and a hand-written `impl fmt::Debug for` it
+somewhere in the file — so a future edit that adds the derive back, or removes
+the hand-written impl without noticing, fails the gate rather than shipping a
+build that prints every key on the machine the first time something logs a
+call.
+
+The last two are worth saying separately, because they are the same secret
+twice and only one of them was remembered. ICE signs every connectivity check
+with a password each end draws and publishes in its own description (RFC 8445
+§7.1.2.3), so the credential exists on both sides of the call: `Credentials`
+is this end's and `RemoteIce` is the peer's, read off the network.
+`Credentials` wrote its `Debug` by hand from the start; `RemoteIce` derived
+one, and the half that leaked was the half that came in from outside. Whoever
+holds an ICE password can sign a check the peer believes, and a check the peer
+believes is how the media gets pointed somewhere. `a=ice-pwd` is redacted one
+layer down as well, in `Attribute`, so a `{:?}` on a whole description is
+covered whether or not anything has parsed it into a `RemoteIce` yet.
 
 **What SDES does and does not protect.** `a=crypto` (RFC 4568) carries the
 master key inside the SDP body, in the SIP message, in the clear as far as
@@ -399,7 +424,7 @@ concealment, comfort noise, voice-activity detection, and the in-tree G.722
 codec — `crates/sipral-media/src/resample.rs`, `drift.rs`, `plc.rs`,
 `comfort_noise.rs`, `vad.rs`, `g722/` — all run on audio derived from an RTP
 payload the far end chose, once a call is
-negotiated — and none of the sixteen fuzz targets under `fuzz/fuzz_targets/`
+negotiated — and none of the seventeen fuzz targets under `fuzz/fuzz_targets/`
 reaches them. The message parser, the SDP parser, the crypto-attribute reader
 and the RTP/RTCP/SRTP wire formats each have a target that feeds them
 adversarial bytes; the codec and DSP layer downstream of RTP does not yet, and

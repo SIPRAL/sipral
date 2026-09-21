@@ -1680,15 +1680,6 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
     }
 }
 
-/// Say a media event the way C says it.
-///
-/// `None` for one this ABI has no word for, as with a signalling event: the
-/// layer below is free to grow a vocabulary faster than this one, and a number
-/// is counted rather than invented.
-///
-/// `reason` and `statistics` are the caller's, because both are built for the
-/// duration of one delivery and neither can be borrowed from the event itself:
-/// a `MediaError` is a Rust value with no C shape, and the statistics have to
 /// The transform a call is running, on this side of the boundary.
 #[cfg(feature = "dtls")]
 const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
@@ -1700,6 +1691,15 @@ const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     }
 }
 
+/// Say a media event the way C says it.
+///
+/// `None` for one this ABI has no word for, as with a signalling event: the
+/// layer below is free to grow a vocabulary faster than this one, and a number
+/// is counted rather than invented.
+///
+/// `reason` and `statistics` are the caller's, because both are built for the
+/// duration of one delivery and neither can be borrowed from the event itself:
+/// a `MediaError` is a Rust value with no C shape, and the statistics have to
 /// be converted before they have one.
 pub(crate) fn media(
     known: &mut Vocabulary<'_>,

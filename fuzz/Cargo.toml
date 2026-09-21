@@ -151,3 +151,10 @@ path = "fuzz_targets/dtls_handshake.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ice"
+path = "fuzz_targets/ice.rs"
+test = false
+doc = false
+bench = false
