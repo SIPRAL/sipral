@@ -95,8 +95,12 @@ mails=$(others '*.rs' '*.md' '*.toml' '*.sh' '*.yml' '*.yaml' \
     '*.h' '*.c' '*.swift' '*.cs' '*.kt' \
     | xargs grep -InE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
     | grep -v 'users\.noreply\.github\.com' \
+    | grep -v 'thetestcall@sip2sip\.info' \
     | grep -vE '@([A-Za-z0-9.-]+\.)?(example\.(com|net|org)|[A-Za-z0-9-]+\.(example|invalid|test|localhost))\b' || true)
-# RFC 2606 reserved domains are SIP URIs in walkthroughs, not addresses anyone can harvest
+# RFC 2606 reserved domains are SIP URIs in walkthroughs, not addresses anyone can harvest.
+# `thetestcall@sip2sip.info` is the same case for a real domain: sip2sip.info
+# publishes that extension itself, for anyone to dial with no account, as its
+# own public IVR — not a mailbox, and not anybody's to harvest.
 [ -z "$mails" ] && pass "no email address in the tree" || {
     fail "email address in published files:"; printf '        %s\n' "$mails"
 }
