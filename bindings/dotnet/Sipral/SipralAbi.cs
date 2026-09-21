@@ -620,7 +620,6 @@ public enum SipralDtmf : uint
 /// refuse it, which is what makes adding one safe.
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
 /// </summary>
 public enum SipralEventKind : uint
 {
@@ -935,6 +934,20 @@ public enum SipralEventKind : uint
     /// about.
     /// </summary>
     MessagesWaiting = 36,
+    /// <summary>
+    /// The account this call belongs to asked for an RFC 6035 voice
+    /// quality report and the attempt to publish it has now been made,
+    /// once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
+    ///
+    /// `payload.media.quality_report_sent` says whether the PUBLISH
+    /// left this end — not whether a collector accepted it, which this
+    /// stack never waits to learn. Raised only when the account named
+    /// a collector to publish to at all
+    /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+    /// account named none raises nothing here, since nothing was ever
+    /// attempted.
+    /// </summary>
+    QualityReportSent = 37,
 }
 
 /// <summary>
@@ -2430,6 +2443,19 @@ public struct SipralAccountConfig
     /// the wake-ups the device is relying on.
     /// </summary>
     public uint PushWakesItself;
+    /// <summary>
+    /// Where this account's end-of-call voice quality reports go (RFC
+    /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+    ///
+    /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+    /// unmoved, and what a caller built before this member existed
+    /// never sent reads as the null that already means "send none".
+    /// </summary>
+    public IntPtr QualityReportUri;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint QualityReportUriLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -2903,6 +2929,95 @@ public struct SipralStreamStats
     /// How long since a packet last arrived. A live call sits at one frame.
     /// </summary>
     public ulong SilentForMs;
+    /// <summary>
+    /// Whether an RFC 3611 VoIP Metrics report is available at all —
+    /// zero until this stream has identified a source to report on.
+    /// Every `voip_*` member below is meaningless while this is zero.
+    ///
+    /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+    /// unmoved, and what a caller built before these members existed
+    /// never sent reads them all as zero, this one included.
+    /// </summary>
+    public uint HasVoipMetrics;
+    /// <summary>
+    /// RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
+    /// 100 and divide by 256 for a percentage).
+    /// </summary>
+    public uint VoipLossRate256;
+    /// <summary>
+    /// RFC 3611 SS4.7.1's discard rate, as its own 256ths.
+    /// </summary>
+    public uint VoipDiscardRate256;
+    /// <summary>
+    /// RFC 3611 SS4.7.2's burst density, as its own 256ths.
+    /// </summary>
+    public uint VoipBurstDensity256;
+    /// <summary>
+    /// RFC 3611 SS4.7.2's mean burst duration.
+    /// </summary>
+    public ulong VoipBurstDurationUs;
+    /// <summary>
+    /// RFC 3611 SS4.7.2's gap density, as its own 256ths.
+    /// </summary>
+    public uint VoipGapDensity256;
+    /// <summary>
+    /// RFC 3611 SS4.7.2's mean gap duration.
+    /// </summary>
+    public ulong VoipGapDurationUs;
+    /// <summary>
+    /// RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
+    /// threshold this stream's jitter buffer used, fixed for the
+    /// stream's whole life.
+    /// </summary>
+    public uint VoipGmin;
+    /// <summary>
+    /// RFC 3611 SS4.7.3's end-system delay. Zero for every build of
+    /// this stack today: SS4.7.3 defines it as the sending side's own
+    /// accumulation and encoding delay added to the receiving side's,
+    /// and nothing here has visibility into the sending side's half.
+    /// </summary>
+    public ulong VoipEndSystemDelayUs;
+    /// <summary>
+    /// RFC 3611 SS4.7.7's nominal jitter buffer delay.
+    /// </summary>
+    public ulong VoipJitterBufferNominalUs;
+    /// <summary>
+    /// RFC 3611 SS4.7.7's current maximum jitter buffer delay.
+    /// </summary>
+    public ulong VoipJitterBufferMaximumUs;
+    /// <summary>
+    /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay.
+    /// </summary>
+    public ulong VoipJitterBufferAbsMaxUs;
+    /// <summary>
+    /// Whether `voip_r_factor` is available: zero when the active
+    /// codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
+    /// SS4.7.5's own `127` "unavailable" sentinel).
+    /// </summary>
+    public uint HasVoipRFactor;
+    /// <summary>
+    /// RFC 3611 SS4.7.5's R factor, `0..=100`.
+    /// </summary>
+    public uint VoipRFactor;
+    /// <summary>
+    /// Whether `voip_mos_lq_x10` is available, for the same reason as
+    /// `has_voip_r_factor`.
+    /// </summary>
+    public uint HasVoipMosLq;
+    /// <summary>
+    /// RFC 3611 SS4.7.5's estimated listening-quality MOS, in tenths
+    /// (`14..=50`).
+    /// </summary>
+    public uint VoipMosLqX10;
+    /// <summary>
+    /// Whether `voip_mos_cq_x10` is available, for the same reason.
+    /// </summary>
+    public uint HasVoipMosCq;
+    /// <summary>
+    /// RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
+    /// tenths.
+    /// </summary>
+    public uint VoipMosCqX10;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3296,6 +3411,12 @@ public struct SipralMediaEvent
     /// digit reported this one, for SipralEventKind.DigitReceived.
     /// </summary>
     public uint Source;
+    /// <summary>
+    /// Whether the RFC 6035 PUBLISH left this end, for
+    /// SipralEventKind.QualityReportSent and zero on every other
+    /// kind. Not whether a collector accepted it.
+    /// </summary>
+    public uint QualityReportSent;
 }
 
 /// <summary>

@@ -861,7 +861,7 @@ Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -915,6 +915,10 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.push_param = (const char *)configPushParam_data;
     config_value.push_param_len = (size_t)configPushParam_size;
     config_value.push_wakes_itself = (uint32_t)configPushWakesItself;
+    jbyte *configQualityReportUri_data = configQualityReportUri ? (*env)->GetByteArrayElements(env, configQualityReportUri, NULL) : NULL;
+    jsize configQualityReportUri_size = configQualityReportUri ? (*env)->GetArrayLength(env, configQualityReportUri) : 0;
+    config_value.quality_report_uri = (const char *)configQualityReportUri_data;
+    config_value.quality_report_uri_len = (size_t)configQualityReportUri_size;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -963,6 +967,9 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     }
     if (configPushParam) {
         (*env)->ReleaseByteArrayElements(env, configPushParam, configPushParam_data, JNI_ABORT);
+    }
+    if (configQualityReportUri) {
+        (*env)->ReleaseByteArrayElements(env, configQualityReportUri, configQualityReportUri_data, JNI_ABORT);
     }
     if (ready) {
         {
@@ -1674,7 +1681,7 @@ Java_org_sipral_SipralNative_sipral_1media_1statistics(JNIEnv *env, jobject self
     stats_value.size = sizeof stats_value;
     sipral_status_t status = sipral_media_statistics((sipral_handle_t)media, (uint64_t)nowMs, &stats_value);
     {
-        jlong slots[21];
+        jlong slots[39];
         slots[0] = (jlong)stats_value.size;
         slots[1] = (jlong)stats_value.codec;
         slots[2] = (jlong)stats_value.has_round_trip;
@@ -1704,7 +1711,25 @@ Java_org_sipral_SipralNative_sipral_1media_1statistics(JNIEnv *env, jobject self
         }
         slots[19] = (jlong)stats_value.suffering;
         slots[20] = (jlong)stats_value.silent_for_ms;
-        (*env)->SetLongArrayRegion(env, stats, 0, 21, slots);
+        slots[21] = (jlong)stats_value.has_voip_metrics;
+        slots[22] = (jlong)stats_value.voip_loss_rate_256;
+        slots[23] = (jlong)stats_value.voip_discard_rate_256;
+        slots[24] = (jlong)stats_value.voip_burst_density_256;
+        slots[25] = (jlong)stats_value.voip_burst_duration_us;
+        slots[26] = (jlong)stats_value.voip_gap_density_256;
+        slots[27] = (jlong)stats_value.voip_gap_duration_us;
+        slots[28] = (jlong)stats_value.voip_gmin;
+        slots[29] = (jlong)stats_value.voip_end_system_delay_us;
+        slots[30] = (jlong)stats_value.voip_jitter_buffer_nominal_us;
+        slots[31] = (jlong)stats_value.voip_jitter_buffer_maximum_us;
+        slots[32] = (jlong)stats_value.voip_jitter_buffer_abs_max_us;
+        slots[33] = (jlong)stats_value.has_voip_r_factor;
+        slots[34] = (jlong)stats_value.voip_r_factor;
+        slots[35] = (jlong)stats_value.has_voip_mos_lq;
+        slots[36] = (jlong)stats_value.voip_mos_lq_x10;
+        slots[37] = (jlong)stats_value.has_voip_mos_cq;
+        slots[38] = (jlong)stats_value.voip_mos_cq_x10;
+        (*env)->SetLongArrayRegion(env, stats, 0, 39, slots);
     }
     return (jint)status;
 }

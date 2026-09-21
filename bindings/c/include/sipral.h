@@ -894,7 +894,6 @@ enum {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
- * - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
  */
 typedef uint32_t sipral_event_kind_t;
 enum {
@@ -1209,6 +1208,20 @@ enum {
      * about.
      */
     SIPRAL_EVENT_KIND_MESSAGES_WAITING = 36,
+    /**
+     * The account this call belongs to asked for an RFC 6035 voice
+     * quality report and the attempt to publish it has now been made,
+     * once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
+     *
+     * `payload.media.quality_report_sent` says whether the PUBLISH
+     * left this end — not whether a collector accepted it, which this
+     * stack never waits to learn. Raised only when the account named
+     * a collector to publish to at all
+     * (`sipral_account_settings_t::quality_report_uri`); a call whose
+     * account named none raises nothing here, since nothing was ever
+     * attempted.
+     */
+    SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT = 37,
 };
 
 /**
@@ -2626,6 +2639,19 @@ struct sipral_account_config {
      * the wake-ups the device is relying on.
      */
     uint32_t push_wakes_itself;
+    /**
+     * Where this account's end-of-call voice quality reports go (RFC
+     * 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+     *
+     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before this member existed
+     * never sent reads as the null that already means "send none".
+     */
+    const char *quality_report_uri;
+    /**
+     * How many bytes of it.
+     */
+    size_t quality_report_uri_len;
 };
 
 /**
@@ -3044,6 +3070,95 @@ struct sipral_stream_stats {
      * How long since a packet last arrived. A live call sits at one frame.
      */
     uint64_t silent_for_ms;
+    /**
+     * Whether an RFC 3611 VoIP Metrics report is available at all —
+     * zero until this stream has identified a source to report on.
+     * Every `voip_*` member below is meaningless while this is zero.
+     *
+     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before these members existed
+     * never sent reads them all as zero, this one included.
+     */
+    uint32_t has_voip_metrics;
+    /**
+     * RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
+     * 100 and divide by 256 for a percentage).
+     */
+    uint32_t voip_loss_rate_256;
+    /**
+     * RFC 3611 SS4.7.1's discard rate, as its own 256ths.
+     */
+    uint32_t voip_discard_rate_256;
+    /**
+     * RFC 3611 SS4.7.2's burst density, as its own 256ths.
+     */
+    uint32_t voip_burst_density_256;
+    /**
+     * RFC 3611 SS4.7.2's mean burst duration.
+     */
+    uint64_t voip_burst_duration_us;
+    /**
+     * RFC 3611 SS4.7.2's gap density, as its own 256ths.
+     */
+    uint32_t voip_gap_density_256;
+    /**
+     * RFC 3611 SS4.7.2's mean gap duration.
+     */
+    uint64_t voip_gap_duration_us;
+    /**
+     * RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
+     * threshold this stream's jitter buffer used, fixed for the
+     * stream's whole life.
+     */
+    uint32_t voip_gmin;
+    /**
+     * RFC 3611 SS4.7.3's end-system delay. Zero for every build of
+     * this stack today: SS4.7.3 defines it as the sending side's own
+     * accumulation and encoding delay added to the receiving side's,
+     * and nothing here has visibility into the sending side's half.
+     */
+    uint64_t voip_end_system_delay_us;
+    /**
+     * RFC 3611 SS4.7.7's nominal jitter buffer delay.
+     */
+    uint64_t voip_jitter_buffer_nominal_us;
+    /**
+     * RFC 3611 SS4.7.7's current maximum jitter buffer delay.
+     */
+    uint64_t voip_jitter_buffer_maximum_us;
+    /**
+     * RFC 3611 SS4.7.7's absolute maximum jitter buffer delay.
+     */
+    uint64_t voip_jitter_buffer_abs_max_us;
+    /**
+     * Whether `voip_r_factor` is available: zero when the active
+     * codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
+     * SS4.7.5's own `127` "unavailable" sentinel).
+     */
+    uint32_t has_voip_r_factor;
+    /**
+     * RFC 3611 SS4.7.5's R factor, `0..=100`.
+     */
+    uint32_t voip_r_factor;
+    /**
+     * Whether `voip_mos_lq_x10` is available, for the same reason as
+     * `has_voip_r_factor`.
+     */
+    uint32_t has_voip_mos_lq;
+    /**
+     * RFC 3611 SS4.7.5's estimated listening-quality MOS, in tenths
+     * (`14..=50`).
+     */
+    uint32_t voip_mos_lq_x10;
+    /**
+     * Whether `voip_mos_cq_x10` is available, for the same reason.
+     */
+    uint32_t has_voip_mos_cq;
+    /**
+     * RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
+     * tenths.
+     */
+    uint32_t voip_mos_cq_x10;
 };
 
 /**
@@ -3398,6 +3513,12 @@ struct sipral_media_event {
      * digit reported this one, for SIPRAL_EVENT_KIND_DIGIT_RECEIVED.
      */
     uint32_t source;
+    /**
+     * Whether the RFC 6035 PUBLISH left this end, for
+     * SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT and zero on every other
+     * kind. Not whether a collector accepted it.
+     */
+    uint32_t quality_report_sent;
 };
 
 /**

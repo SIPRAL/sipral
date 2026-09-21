@@ -418,7 +418,6 @@ public enum SipralDtmf: UInt32, Sendable {
 ///
 /// Numbers already spent on features this build does not have:
 /// - 16: the set of audio devices changed (A2)
-/// - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
 public enum SipralEventKind: UInt32, Sendable {
     /// The stack is running on this thread.
     ///
@@ -661,6 +660,18 @@ public enum SipralEventKind: UInt32, Sendable {
     /// `voice-message` class, the one a phone's message-waiting light is
     /// about.
     case messagesWaiting = 36
+    /// The account this call belongs to asked for an RFC 6035 voice
+    /// quality report and the attempt to publish it has now been made,
+    /// once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
+    ///
+    /// `payload.media.quality_report_sent` says whether the PUBLISH
+    /// left this end — not whether a collector accepted it, which this
+    /// stack never waits to learn. Raised only when the account named
+    /// a collector to publish to at all
+    /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+    /// account named none raises nothing here, since nothing was ever
+    /// attempted.
+    case qualityReportSent = 37
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.

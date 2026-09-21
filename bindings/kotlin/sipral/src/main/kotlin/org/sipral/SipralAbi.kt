@@ -677,7 +677,6 @@ enum class SipralDtmf(val value: Int) {
  *
  * Numbers already spent on features this build does not have:
  * - 16: the set of audio devices changed (A2)
- * - 37: RTCP-XR quality reports (RFC 3611, RFC 6035)
  */
 enum class SipralEventKind(val value: Int) {
     /**
@@ -991,6 +990,20 @@ enum class SipralEventKind(val value: Int) {
      * about.
      */
     MESSAGES_WAITING(36),
+    /**
+     * The account this call belongs to asked for an RFC 6035 voice
+     * quality report and the attempt to publish it has now been made,
+     * once, after `SIPRAL_EVENT_KIND_CALL_ENDED`.
+     *
+     * `payload.media.quality_report_sent` says whether the PUBLISH
+     * left this end — not whether a collector accepted it, which this
+     * stack never waits to learn. Raised only when the account named
+     * a collector to publish to at all
+     * (`sipral_account_settings_t::quality_report_uri`); a call whose
+     * account named none raises nothing here, since nothing was ever
+     * attempted.
+     */
+    QUALITY_REPORT_SENT(37),
     ;
 
     companion object {
@@ -2405,9 +2418,98 @@ data class SipralStreamStats(
      * How long since a packet last arrived. A live call sits at one frame.
      */
     val silentForMs: Long,
+    /**
+     * Whether an RFC 3611 VoIP Metrics report is available at all —
+     * zero until this stream has identified a source to report on.
+     * Every `voip_*` member below is meaningless while this is zero.
+     *
+     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before these members existed
+     * never sent reads them all as zero, this one included.
+     */
+    val hasVoipMetrics: Long,
+    /**
+     * RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
+     * 100 and divide by 256 for a percentage).
+     */
+    val voipLossRate256: Long,
+    /**
+     * RFC 3611 SS4.7.1's discard rate, as its own 256ths.
+     */
+    val voipDiscardRate256: Long,
+    /**
+     * RFC 3611 SS4.7.2's burst density, as its own 256ths.
+     */
+    val voipBurstDensity256: Long,
+    /**
+     * RFC 3611 SS4.7.2's mean burst duration.
+     */
+    val voipBurstDurationUs: Long,
+    /**
+     * RFC 3611 SS4.7.2's gap density, as its own 256ths.
+     */
+    val voipGapDensity256: Long,
+    /**
+     * RFC 3611 SS4.7.2's mean gap duration.
+     */
+    val voipGapDurationUs: Long,
+    /**
+     * RFC 3611 SS4.7.2's `Gmin`: the burst/gap classification
+     * threshold this stream's jitter buffer used, fixed for the
+     * stream's whole life.
+     */
+    val voipGmin: Long,
+    /**
+     * RFC 3611 SS4.7.3's end-system delay. Zero for every build of
+     * this stack today: SS4.7.3 defines it as the sending side's own
+     * accumulation and encoding delay added to the receiving side's,
+     * and nothing here has visibility into the sending side's half.
+     */
+    val voipEndSystemDelayUs: Long,
+    /**
+     * RFC 3611 SS4.7.7's nominal jitter buffer delay.
+     */
+    val voipJitterBufferNominalUs: Long,
+    /**
+     * RFC 3611 SS4.7.7's current maximum jitter buffer delay.
+     */
+    val voipJitterBufferMaximumUs: Long,
+    /**
+     * RFC 3611 SS4.7.7's absolute maximum jitter buffer delay.
+     */
+    val voipJitterBufferAbsMaxUs: Long,
+    /**
+     * Whether `voip_r_factor` is available: zero when the active
+     * codec is one ITU-T G.113 tabulates no `Ie`/`Bpl` for (RFC 3611
+     * SS4.7.5's own `127` "unavailable" sentinel).
+     */
+    val hasVoipRFactor: Long,
+    /**
+     * RFC 3611 SS4.7.5's R factor, `0..=100`.
+     */
+    val voipRFactor: Long,
+    /**
+     * Whether `voip_mos_lq_x10` is available, for the same reason as
+     * `has_voip_r_factor`.
+     */
+    val hasVoipMosLq: Long,
+    /**
+     * RFC 3611 SS4.7.5's estimated listening-quality MOS, in tenths
+     * (`14..=50`).
+     */
+    val voipMosLqX10: Long,
+    /**
+     * Whether `voip_mos_cq_x10` is available, for the same reason.
+     */
+    val hasVoipMosCq: Long,
+    /**
+     * RFC 3611 SS4.7.5's estimated conversational-quality MOS, in
+     * tenths.
+     */
+    val voipMosCqX10: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 21
+        const val SLOTS: Int = 39
 
         fun of(slots: LongArray): SipralStreamStats = SipralStreamStats(
             slots[0],
@@ -2431,6 +2533,24 @@ data class SipralStreamStats(
             Float.fromBits(slots[18].toInt()),
             slots[19],
             slots[20],
+            slots[21],
+            slots[22],
+            slots[23],
+            slots[24],
+            slots[25],
+            slots[26],
+            slots[27],
+            slots[28],
+            slots[29],
+            slots[30],
+            slots[31],
+            slots[32],
+            slots[33],
+            slots[34],
+            slots[35],
+            slots[36],
+            slots[37],
+            slots[38],
         )
     }
 }
@@ -2944,6 +3064,15 @@ class SipralAccountConfig(
      * the wake-ups the device is relying on.
      */
     val pushWakesItself: Long = 0,
+    /**
+     * Where this account's end-of-call voice quality reports go (RFC
+     * 6035, carried by a PUBLISH, RFC 3903), or null to send none.
+     *
+     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
+     * unmoved, and what a caller built before this member existed
+     * never sent reads as the null that already means "send none".
+     */
+    val qualityReportUri: String? = null,
 )
 
 /**
@@ -3461,7 +3590,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -4431,8 +4560,9 @@ object Sipral {
         val configPushProvider = config.pushProvider?.toByteArray(Charsets.UTF_8)
         val configPushPrid = config.pushPrid?.toByteArray(Charsets.UTF_8)
         val configPushParam = config.pushParam?.toByteArray(Charsets.UTF_8)
+        val configQualityReportUri = config.qualityReportUri?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, accountSlot))
         return accountSlot[0]
     }
 
