@@ -51,6 +51,10 @@ fuzz_target!(|data: &[u8]| {
                     let _ = source;
                 }
             }
+            RtcpPacket::ExtendedReport(xr) => {
+                let _ = xr.ssrc();
+                let _ = xr.voip_metrics();
+            }
             RtcpPacket::Other { packet_type } => {
                 let _ = packet_type;
             }

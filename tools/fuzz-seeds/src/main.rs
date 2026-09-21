@@ -65,9 +65,10 @@ use sipral_nat::stun::{
 use sipral_nat::turn::{ChannelData, ChannelNumber, StreamFraming, Transport};
 use sipral_rtp::srtp::{KEY, Master, Policy, Protector, SALT, SrtpError, Suite, Unprotector};
 use sipral_rtp::{
-    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, PacketBuilder,
-    ReceiverReportBuilder, RtpHeader, RtpPacket, SdesItem, SenderInfo, SenderOrReceiver,
-    SenderReportBuilder, SourceDescriptionBuilder,
+    CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, JitterBufferAdaptive,
+    PacketBuilder, PacketLossConcealment, ReceiverReportBuilder, RtpHeader, RtpPacket, RxConfig,
+    SdesItem, SenderInfo, SenderOrReceiver, SenderReportBuilder, SourceDescriptionBuilder,
+    UNAVAILABLE, VoipMetricsBlock, XrPacketBuilder,
 };
 use sipral_ua::dtmf::parse_info;
 use sipral_ua::{DialogInfo, MessageSummary};
@@ -818,6 +819,33 @@ fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
         reports: &[],
     });
     let sources = [SSRC];
+    let voip_metrics = VoipMetricsBlock {
+        ssrc: SSRC,
+        loss_rate: 12,
+        discard_rate: 3,
+        burst_density: 84,
+        gap_density: 10,
+        burst_duration_ms: 120,
+        gap_duration_ms: 520,
+        round_trip_delay_ms: 45,
+        end_system_delay_ms: 60,
+        signal_level_dbm0: -18,
+        noise_level_dbm0: -62,
+        rerl_db: 40,
+        gmin: 16,
+        r_factor: 82,
+        ext_r_factor: UNAVAILABLE,
+        mos_lq: 38,
+        mos_cq: 36,
+        rx_config: RxConfig {
+            plc: PacketLossConcealment::Standard,
+            jba: JitterBufferAdaptive::Adaptive,
+            jb_rate: 5,
+        },
+        jb_nominal_ms: 20,
+        jb_maximum_ms: 60,
+        jb_abs_max_ms: 200,
+    };
     let mut out = Vec::new();
     for (name, builder) in [
         (
@@ -829,6 +857,25 @@ fn rtcp_seeds() -> Result<Vec<Seed>, Wrong> {
             CompoundBuilder::new(receiver, sdes).with_bye(GoodbyeBuilder {
                 sources: &sources,
                 reason: b"hangup",
+            }),
+        ),
+        (
+            // RFC 3611: the VoIP Metrics Report Block (SS4.7) the far end's
+            // negotiated `a=rtcp-xr:voip-metrics` asked this stack to send.
+            "receiver-report-and-voip-metrics-xr",
+            CompoundBuilder::new(receiver, sdes).with_xr(XrPacketBuilder {
+                ssrc: SSRC,
+                voip_metrics: Some(voip_metrics),
+            }),
+        ),
+        (
+            // RFC 3611 SS2: "report blocks: variable length. Zero or more" --
+            // an XR packet is well formed with none, and a peer that only
+            // wants the packet type acknowledged sends exactly this.
+            "receiver-report-and-empty-xr",
+            CompoundBuilder::new(receiver, sdes).with_xr(XrPacketBuilder {
+                ssrc: SSRC,
+                voip_metrics: None,
             }),
         ),
     ] {
