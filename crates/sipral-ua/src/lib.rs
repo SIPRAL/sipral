@@ -62,6 +62,7 @@ mod message;
 mod mwi;
 mod options;
 mod parked;
+mod quality_report;
 mod registration;
 mod reliable;
 mod renegotiate;
@@ -97,6 +98,7 @@ pub use lifecycle::{
 };
 pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
+pub use quality_report::QualityReportMetrics;
 pub use registration::{PushEcho, RegistrarInfo, SnapshotError};
 #[cfg(feature = "reference-loop")]
 pub use runtime::{Control, Handler, Runtime};

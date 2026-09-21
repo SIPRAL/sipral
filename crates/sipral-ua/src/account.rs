@@ -235,6 +235,9 @@ pub struct Account {
     /// What `transport` is, when the caller chose to say. See
     /// [`Account::transport_protocol`].
     pub(crate) protocol: Option<TransportProtocol>,
+    /// Where this account's end-of-call voice quality reports go (RFC 6035,
+    /// carried by a PUBLISH, RFC 3903), or `None` to send none.
+    pub(crate) quality_report_uri: Option<Uri>,
 }
 
 impl Account {
@@ -304,6 +307,7 @@ impl Account {
             push: None,
             message_types: Vec::new(),
             protocol: None,
+            quality_report_uri: None,
         }
     }
 
@@ -390,6 +394,22 @@ impl Account {
     pub fn push(mut self, push: Push) -> Self {
         self.push = Some(push);
         self
+    }
+
+    /// Where to send an end-of-call voice quality report (RFC 6035),
+    /// carried by a PUBLISH (RFC 3903). Left unset, no call on this
+    /// account ever sends one — the report is opt in, per destination,
+    /// rather than something a build turns on for every account.
+    #[must_use]
+    pub fn quality_report_uri(mut self, uri: Uri) -> Self {
+        self.quality_report_uri = Some(uri);
+        self
+    }
+
+    /// Where this account's voice quality reports go, if it sends any.
+    #[must_use]
+    pub const fn quality_report(&self) -> Option<&Uri> {
+        self.quality_report_uri.as_ref()
     }
 
     /// A header field on every REGISTER this account sends.

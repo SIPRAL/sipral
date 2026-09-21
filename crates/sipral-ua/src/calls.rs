@@ -566,6 +566,14 @@ impl UserAgent {
         self.calls.get(&call).and_then(|held| held.dialog)
     }
 
+    /// Whether this end placed the call or answered it, which is what
+    /// decides which of [`CallIdentity`]'s two URIs is this end's own and
+    /// which is the far end's.
+    #[must_use]
+    pub fn call_direction(&self, call: CallHandle) -> Option<Direction> {
+        self.calls.get(&call).map(|held| held.direction)
+    }
+
     /// The `From` and `To` of the request that opened this call, and its
     /// `Call-ID`.
     ///
