@@ -193,6 +193,16 @@ pub(crate) fn answer_line(accepted: &CryptoPolicy, keys: KeySalt) -> Crypto {
     CryptoPolicy::new(accepted.tag, accepted.suite, keys).to_crypto()
 }
 
+/// The key a stream this end described is sending under: the first key of
+/// its first crypto line that reads, or `None` where it carries none.
+///
+/// This end's own description, which carries one line — the one it offered,
+/// or the one it answered with — so there is no choosing between lines here.
+pub(crate) fn key_in_force(stream: &MediaDescription) -> Option<KeySalt> {
+    let policy = crypto_lines(stream).find_map(|line| line.policy())?;
+    policy.keys.into_iter().next().map(|inline| inline.keys)
+}
+
 /// The offered line this end will answer: "the first valid supported crypto
 /// attribute in the list" (§5.1.2), which is the offerer's own order of
 /// preference.

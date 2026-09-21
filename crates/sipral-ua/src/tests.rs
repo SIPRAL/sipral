@@ -3716,6 +3716,183 @@ t=0 0\r\nm=audio 8000 RTP/AVP 8\r\na=recvonly\r\n";
     assert!(!offer.contains("a=recvonly\r\n"), "{offer}");
 }
 
+/// A call keyed by SDES, from both ends.
+const SECURED_OFFER: &[u8] = b"v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n";
+const SECURED_ANSWER: &[u8] = b"v=0\r\no=- 2 2 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\r\n";
+/// The far end holding it, every line it had repeated.
+const THEIR_SECURED_HOLD: &[u8] =
+    b"v=0\r\no=- 2 3 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\n\
+t=0 0\r\nm=audio 9000 RTP/SAVP 0\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\r\n\
+a=sendonly\r\n";
+
+#[test]
+fn a_hold_from_the_far_end_on_a_secured_call_goes_to_whoever_holds_the_keys() {
+    // the answer has to name the tag it took with this end's own key
+    // (RFC 4568 §5.1.2), which is not a line this layer can write: the one it
+    // used to write had no key at all, and the end that asked for the hold
+    // saw its negotiation fail
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let placed = OutgoingCall::new(uri("sip:bob@example.com")).offer(Arc::from(SECURED_OFFER));
+    agent.call(id, &placed, t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(SECURED_ANSWER)),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "keyedhold", 1, Some(THEIR_SECURED_HOLD)),
+        t0,
+    );
+    assert!(
+        transmits(&mut agent)
+            .iter()
+            .all(|bytes| bytes.starts_with(b"SIP/2.0 100 ")),
+        "the hold was answered by a layer holding no key"
+    );
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Reoffer { .. })),
+        "the hold never reached the layer that can answer it"
+    );
+}
+
+#[test]
+fn an_answer_written_for_a_call_held_here_keeps_it_held() {
+    // the application answers the far end's codec change the way it answers
+    // any offer, sendrecv. Sent as written, that takes the call off hold on
+    // the wire while this end still says it is held
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codecwhileheld", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    let listening: &[u8] = b"v=0\r\no=- 1 4 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 8\r\na=sendrecv\r\n";
+    agent
+        .accept_reoffer(call, Some(listening), t0)
+        .expect("the 200 goes");
+    let answer = body_of(&sent(&mut agent));
+    assert!(answer.contains("a=sendonly\r\n"), "{answer}");
+    assert!(!answer.contains("a=sendrecv\r\n"), "{answer}");
+    assert!(answer.contains("m=audio 8000 RTP/AVP 8\r\n"), "{answer}");
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(true));
+}
+
+#[test]
+fn an_answer_with_nothing_held_goes_out_byte_for_byte() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    // written oddly on purpose: a layer that re-wrote it would tidy it
+    let odd: &[u8] = b"v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\na=sendrecv\r\nm=audio 8000 RTP/AVP 8\r\n";
+    agent
+        .accept_reoffer(call, Some(odd), t0)
+        .expect("the 200 goes");
+    assert_eq!(body_of(&sent(&mut agent)).as_bytes(), odd);
+}
+
+#[test]
+fn an_answer_that_cannot_be_read_leaves_the_offer_waiting_to_be_answered() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    assert!(matches!(
+        agent.accept_reoffer(call, Some(b"not a description"), t0),
+        Err(UaError::Sdp(_))
+    ));
+    agent
+        .reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, t0)
+        .expect("the request is still there to be refused");
+    assert!(sent(&mut agent).starts_with(b"SIP/2.0 488 "));
+}
+
+#[test]
+fn a_refresh_the_application_answers_still_says_what_the_session_timer_is() {
+    // RFC 4028 §9: the 2xx to a refresh carries Session-Expires. A refresh
+    // that also changes the codec is handed up, and its answer used to go
+    // without one
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uas"),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    let mut refresh = reversed(&ack, "INVITE", "timedcodec", 1, Some(THEIR_NEW_CODEC));
+    let head = refresh
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(refresh.len(), |at| at + 1);
+    let mut with = refresh[..head].to_vec();
+    with.extend_from_slice(b"Session-Expires: 600;refresher=uas\r\n");
+    with.extend_from_slice(&refresh[head..]);
+    refresh = with;
+    deliver(&mut agent, &refresh, t0 + Duration::from_secs(300));
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .accept_reoffer(call, Some(ANSWER), t0 + Duration::from_secs(300))
+        .expect("the 200 goes");
+    let answer = sent(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(
+        header(&answer, HeaderName::SessionExpires),
+        b"600;refresher=uas"
+    );
+}
+
 #[test]
 fn a_confirmed_call_changes_by_reinvite_even_when_update_is_allowed() {
     // RFC 3311 §5.1: "Although UPDATE can be used on confirmed dialogs, it is

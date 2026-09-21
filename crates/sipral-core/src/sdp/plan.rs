@@ -758,7 +758,7 @@ fn keying(
         }));
     }
 
-    if is_secured(&our_stream.proto) || is_secured(&their_stream.proto) {
+    if our_stream.is_secured() || their_stream.is_secured() {
         return Err(SdpError::CryptoMissing { stream });
     }
     Ok(None)
@@ -826,14 +826,6 @@ fn attribute_value<'a>(
         .or_else(|| session.attribute(name))?
         .value
         .as_deref()
-}
-
-/// Whether a transport token is one of the secure profiles, which is what
-/// makes an absent key a refusal rather than a plain call.
-fn is_secured(proto: &str) -> bool {
-    proto
-        .split('/')
-        .any(|token| token.eq_ignore_ascii_case("SAVP") || token.eq_ignore_ascii_case("SAVPF"))
 }
 
 #[cfg(test)]

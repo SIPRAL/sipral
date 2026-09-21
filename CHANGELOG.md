@@ -16,8 +16,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and `sipral_call_change_codecs` offer a call again on the codecs named, in
   that order (RFC 3264 §8.3.2), and move nothing else: the description this end
   last wrote is carried with only its formats replaced, so the SDES key, the
-  DTLS fingerprint and `a=setup`, the ICE credentials and the address all stay
-  as they are, and nothing is re-keyed or restarted. A held call stays held,
+  DTLS fingerprint, the ICE credentials and the address all stay as they are,
+  and nothing is re-keyed or restarted; `a=setup` goes as `actpass`, as RFC
+  8842 §5.5 asks of every re-offer. A held call stays held,
   and `resume` takes it off on the new list. Every dynamic payload type keeps
   the codec it has named on the call, from either end — an offer numbered from
   the catalogue alone breaks that the moment a codec leaves the front of the
@@ -126,6 +127,30 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **Every re-offer hands the DTLS roles back, and a far end that moves them
+  is refused by name.** RFC 8842 §5.5 asks each subsequent offer for
+  `a=setup:actpass`; the hold, the resume and the codec change now write it
+  whichever role the call has, where a call this end had answered used to
+  carry the role it answered with. Each re-offer this end answers takes the
+  role the running association gives it (§5.3) — to `actpass`, a fresh answer
+  said `active` every time, which from a DTLS server is asking to become the
+  client. A far end that takes the other role anyway is asking for a new
+  association, which this stack does not start: its answer is not adopted and
+  is reported as the new `MediaError::DtlsRoleChanged`, and a re-offer that
+  leaves this end only the other role is answered 488 under the same name. A
+  re-offer naming another certificate is answered 488 too, as
+  `MediaError::DtlsFingerprintChanged`, where it used to be accepted and then
+  not followed.
+
+- **Every re-offer on a secured call is answered by the facade.** `sipral-ua`
+  hands them up, holds and refreshes included, because their answers need a
+  key, or a certificate and a role, that only the layer holding them can
+  write; see Fixed. An application that describes its own secured calls now
+  hears the far end's hold as `SIPRAL_EVENT_KIND_SESSION_OFFERED`, as it hears
+  a codec change. An SDES answer repeats the key this end already sends under
+  rather than drawing one, which RFC 4568 §7.1.4 warns leaves the far end
+  unable to read this end until the answer arrives.
+
 - **ABI 0.20.** It covers two changes to the printed header: ICE's own
   (`SipralIce`, `SIPRAL_FEATURE_ICE`, event 33, the `ice` member on both
   config structs, and `now_ms` on `sipral_media_capture`), which went out
@@ -181,6 +206,44 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   connects the call.
 
 ### Fixed
+
+- **A hold on a secured call reaches the end that asked for it.** The far
+  end's answer to it came from the user agent, which wrote the stream without
+  its `a=crypto` line under SDES and without `a=fingerprint` and `a=setup`
+  under DTLS-SRTP. The end that held the call then failed its own
+  negotiation — `CryptoMissing` — and its media never went on hold, while on
+  the wire the answer had withdrawn the key or the certificate. This was the
+  gap `docs/05-media.md` named for SDES; under DTLS-SRTP it caught every hold.
+
+- **A call held here stays held through the far end's re-offer.** The facade
+  answers every re-offer it is handed `sendrecv`, narrowed only by the offer,
+  so a codec change or a session refresh from the far end took a held call
+  off hold on the wire — and this end's stream started sending into a call its
+  user believed was on hold, while `hold_state` still said "held here".
+  `UserAgent::accept_reoffer` now narrows any answer to the hold this end asked
+  for, and leaves one with nothing held here byte for byte.
+
+- **A call the application describes is left to the application.** The
+  engine keeps a record of every incoming call, and on one the application
+  had answered with a description of its own it refused every re-offer
+  handed up with 488 before the application saw it — the application's own
+  `accept_reoffer` then failed for want of a request to answer — and after a
+  plain hold it opened a media stream of its own on the call, with its own
+  SSRC and RTCP, beside the one the application was running. It acts only on
+  calls it describes now.
+
+- **A certificate written differently is not a new certificate.** The check
+  that refuses a moved DTLS certificate compared the `a=fingerprint` lines in
+  order and as written, so a far end repeating the same certificate with its
+  lines in another order, in lower case or with one twice had the
+  renegotiation refused. They are compared as the set they name.
+
+- **`UserAgent::accept_reoffer` answers a refresh with its timer, and survives
+  a bad answer.** The 200 carried no `Session-Expires` (RFC 4028 §9), which
+  every answer the user agent writes itself does. And an answer that did not
+  parse had already consumed the pending request, so it could no longer be
+  answered or refused, and the re-INVITE ran on unanswered until it ended the
+  call.
 
 - **A resume written by hand no longer leaves the call reading as held.**
   `UserAgent::reoffer` kept the hold flag it had before the re-offer instead

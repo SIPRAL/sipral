@@ -240,6 +240,44 @@ impl MediaDescription {
     pub fn has_rtcp_mux(&self) -> bool {
         self.has_flag("rtcp-mux")
     }
+
+    /// Whether the stream is described on one of the secure profiles —
+    /// `RTP/SAVP`, `RTP/SAVPF`, `UDP/TLS/RTP/SAVP` and the rest — which is
+    /// what makes an absent key a refusal rather than a plain call.
+    ///
+    /// Token by token and without regard to case, so that `rtp/savp` is the
+    /// profile it plainly is and `RTP/AVP` is not mistaken for one.
+    #[must_use]
+    pub fn is_secured(&self) -> bool {
+        self.proto
+            .split('/')
+            .any(|token| token.eq_ignore_ascii_case("SAVP") || token.eq_ignore_ascii_case("SAVPF"))
+    }
+
+    /// Hand the DTLS roles back to the answer, on a stream about to be
+    /// offered again (RFC 8842 §5.5).
+    ///
+    /// "When an offerer sends a subsequent offer and does not want to
+    /// establish a new DTLS association ... the offerer MUST insert in the
+    /// offer an SDP 'setup' attribute with an 'actpass' attribute value" —
+    /// whatever role the stream has had so far, which leaves it to the
+    /// answerer, under §5.3, to answer with the roles already in force. A
+    /// stream the description last carried as an answer says `active` or
+    /// `passive`, and this is what turns that into an offer.
+    ///
+    /// Only a stream keyed by a handshake, told by its own `a=fingerprint`:
+    /// `a=setup` is RFC 4145's before it is DTLS's, and a stream with no
+    /// fingerprint is left exactly as it was.
+    pub fn offer_roles_again(&mut self) {
+        if self.attribute("fingerprint").is_none() {
+            return;
+        }
+        for attribute in &mut self.attributes {
+            if attribute.name == "setup" {
+                attribute.value = Some("actpass".to_owned());
+            }
+        }
+    }
 }
 
 impl fmt::Display for MediaDescription {
@@ -405,5 +443,52 @@ mod tests {
         assert_eq!(media.ptime(), Some(20));
         assert!(media.has_rtcp_mux());
         assert_eq!(media.direction(), Some(Direction::RecvOnly));
+    }
+
+    #[test]
+    fn the_secure_profiles_are_told_from_the_plain_one_token_by_token() {
+        for (proto, secured) in [
+            ("RTP/AVP", false),
+            ("RTP/AVPF", false),
+            ("RTP/SAVP", true),
+            ("rtp/savp", true),
+            ("RTP/SAVPF", true),
+            ("UDP/TLS/RTP/SAVP", true),
+            ("UDP/TLS/RTP/SAVPF", true),
+            // a token that merely contains the letters is not the profile
+            ("RTP/XSAVP", false),
+        ] {
+            let media = MediaDescription::new("audio", 49_170, proto, vec!["0".to_owned()]);
+            assert_eq!(media.is_secured(), secured, "{proto}");
+        }
+    }
+
+    #[test]
+    fn a_stream_offered_again_hands_the_dtls_roles_back_and_nothing_else() {
+        for role in ["active", "passive", "actpass"] {
+            let mut media =
+                MediaDescription::new("audio", 49_170, "UDP/TLS/RTP/SAVP", vec!["0".to_owned()]);
+            media.attributes = vec![
+                Attribute::with_value("fingerprint", "sha-256 AB:CD"),
+                Attribute::with_value("setup", role),
+                Attribute::flag("sendrecv"),
+            ];
+            media.offer_roles_again();
+            assert_eq!(
+                media
+                    .attribute("setup")
+                    .and_then(|setup| setup.value.as_deref()),
+                Some("actpass"),
+                "{role}"
+            );
+            assert_eq!(media.attributes.len(), 3, "{role}: {:?}", media.attributes);
+        }
+
+        // RFC 4145's own use of the attribute, on a stream no handshake keys
+        let mut tcp = MediaDescription::new("audio", 9, "TCP/RTP/AVP", vec!["0".to_owned()]);
+        tcp.attributes = vec![Attribute::with_value("setup", "active")];
+        let before = tcp.clone();
+        tcp.offer_roles_again();
+        assert_eq!(tcp, before);
     }
 }

@@ -4367,9 +4367,12 @@ fn a_call_that_requires_ice_refuses_the_peer_that_has_none_rather_than_falling_b
 #[test]
 fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {
     // RFC 8839 §4.4: the attributes go on every description of a session. The
-    // user agent writes this one itself — the facade never sees it — so what
-    // keeps them there is `carried` in `sipral-ua`, and this is its test from
-    // the outside
+    // user agent writes both of these itself — the facade never sees either —
+    // so what keeps them there is the copy of this end's last description the
+    // hold is made from, and `carried` in `sipral-ua` for the answer, and
+    // this is their test from the outside. Read off the session change: the
+    // INVITE that opened the call has them too, and a test that read that
+    // one would pass whatever the hold did
     let (mut pair, call, _) = ice_call();
     pair.caller
         .agent
@@ -4377,24 +4380,28 @@ fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {
         .expect("a confirmed call can be held");
     pair.caller.drain(pair.now, false);
     pair.settle();
-    let held = pair
-        .callee
-        .offer_received()
-        .expect("the callee saw the hold re-offer");
-    let stream = one_stream(&held);
-    assert!(
-        stream.attribute("ice-ufrag").is_some() && stream.attribute("ice-pwd").is_some(),
-        "the hold re-offer withdrew ICE from a call that had it"
-    );
+    let (answer, held) = last_described(&pair.callee).expect("the callee saw the hold");
     assert_eq!(
-        stream
-            .attributes
-            .iter()
-            .filter(|attribute| attribute.name == "candidate")
-            .count(),
-        1,
-        "and it withdrew the candidate"
+        held.direction_of(&one_stream(&held)),
+        Direction::SendOnly,
+        "that was not the hold: {held}"
     );
+    for (what, description) in [("re-offer", &held), ("answer", &answer)] {
+        let stream = one_stream(description);
+        assert!(
+            stream.attribute("ice-ufrag").is_some() && stream.attribute("ice-pwd").is_some(),
+            "the hold's {what} withdrew ICE from a call that had it"
+        );
+        assert_eq!(
+            stream
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.name == "candidate")
+                .count(),
+            1,
+            "and the {what} withdrew the candidate"
+        );
+    }
 }
 
 #[cfg(feature = "ice")]
@@ -4816,10 +4823,9 @@ fn a_codec_change_on_a_dtls_call_keeps_the_association_it_has() {
 }
 
 /// The same from the end that answered, whose last description carries the
-/// role it answered with rather than `actpass`. It is offered again as it
-/// stands — the deviation from RFC 8842 §5.5 `docs/05-media.md` explains — so
-/// the far end, answering it the way RFC 4145 has it answered, keeps the
-/// roles the running association has, and nothing is re-keyed.
+/// role it answered with. RFC 8842 §5.5 has the re-offer say `actpass`
+/// anyway, and §5.3 has the far end answer it with the roles already in
+/// force — so the association stays as it was and nothing is re-keyed.
 #[cfg(feature = "dtls")]
 #[test]
 fn a_codec_change_from_the_end_that_answered_keeps_the_dtls_roles() {
@@ -4855,12 +4861,26 @@ fn a_codec_change_from_the_end_that_answered_keeps_the_dtls_roles() {
     pair.settle();
 
     let stream = one_stream(&offer);
-    assert_eq!(attribute_values(&stream, "setup"), role, "the role moved");
+    assert_eq!(
+        attribute_values(&stream, "setup"),
+        ["actpass"],
+        "RFC 8842 §5.5: a re-offer hands the roles back"
+    );
     assert_eq!(
         attribute_values(&stream, "fingerprint"),
         attribute_values(&answered, "fingerprint"),
         "the certificate moved"
     );
+    // and the far end answered it with the role it has, which is the other
+    // one to this end's: RFC 4145 §4.1 leaves this end its own
+    let (_, reanswered) = last_described(&pair.callee).expect("the change settled");
+    let kept = attribute_values(&one_stream(&reanswered), "setup");
+    let theirs = if role == ["active"] {
+        "passive"
+    } else {
+        "active"
+    };
+    assert_eq!(kept, [theirs], "the far end took another role");
     for (side, heard) in [("caller", &pair.caller), ("callee", &pair.callee)] {
         assert!(
             !heard
@@ -4947,4 +4967,490 @@ fn a_codec_change_names_a_codec_this_build_has_or_goes_nowhere() {
         .engine
         .change_codecs(&mut pair.caller.agent, call, &["PCMA"], pair.now);
     assert_eq!(ended, Err(MediaError::NoSuchCall));
+}
+
+// -- re-offers on a call that is held or secured ---------------------------------
+
+/// What the two ends last described, as the latest session change reported
+/// it — this end's half first.
+fn last_described(stack: &Stack) -> Option<(SessionDescription, SessionDescription)> {
+    stack.heard.iter().rev().find_map(|event| match event {
+        Event::Signalling(UaEvent::SessionChanged {
+            local: Some(local),
+            remote: Some(remote),
+            ..
+        }) => Some((parse(local.as_ref()).ok()?, parse(remote.as_ref()).ok()?)),
+        _ => None,
+    })
+}
+
+/// Settle as [`Pair::settle`] does, with every description one side sends
+/// passed through `edit` on its way: a far end writing what this stack
+/// never would.
+#[cfg(feature = "dtls")]
+fn settle_editing(pair: &mut Pair, caller_writes: bool, edit: &dyn Fn(&str) -> String) {
+    for _ in 0..12 {
+        let mut dialled = pair.caller.outbound();
+        let mut answered = pair.callee.outbound();
+        if dialled.is_empty() && answered.is_empty() {
+            break;
+        }
+        let edited = if caller_writes {
+            &mut dialled
+        } else {
+            &mut answered
+        };
+        for datagram in edited.iter_mut() {
+            let body = wire_message_body(datagram);
+            if body.starts_with(b"v=0") {
+                let rewritten = edit(&String::from_utf8_lossy(&body));
+                *datagram = with_body(datagram, "application/sdp", &rewritten);
+            }
+        }
+        for datagram in dialled {
+            pair.callee.deliver(&datagram, caller_sip(), pair.now);
+        }
+        for datagram in answered {
+            pair.caller.deliver(&datagram, callee_sip(), pair.now);
+        }
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, true);
+    }
+}
+
+/// Whether either end reported media failing, and what.
+fn failures(pair: &Pair) -> Vec<(&'static str, MediaError)> {
+    let mut found = Vec::new();
+    for (side, heard) in [("caller", &pair.caller), ("callee", &pair.callee)] {
+        for event in heard.media_events() {
+            if let MediaEvent::Failed(error) = event {
+                found.push((side, error.clone()));
+            }
+        }
+    }
+    found
+}
+
+/// Talk for eight frames and say how loud what came out was.
+fn tone_after(pair: &mut Pair, call: CallHandle, remote: CallHandle) -> i64 {
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    loudness(&played)
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_hold_from_either_end_of_a_dtls_call_is_answered_and_keeps_the_association() {
+    // the answer used to be the user agent's, and it carried neither the
+    // certificate nor the role: the end that asked for the hold read a
+    // secured stream with no key on it, and the hold never reached its media
+    for caller_holds in [true, false] {
+        let label = if caller_holds { "caller" } else { "callee" };
+        let (mut pair, call, remote) = dtls_call();
+        pair.shake_hands(call, remote);
+        let offered = one_stream(&pair.callee.offer_received().expect("the first offer"));
+        let answered = one_stream(&pair.caller.answer_received().expect("the answer"));
+        if caller_holds {
+            pair.caller.agent.hold(call, pair.now).expect("the hold");
+            pair.caller.drain(pair.now, false);
+        } else {
+            pair.callee.agent.hold(remote, pair.now).expect("the hold");
+            pair.callee.drain(pair.now, false);
+        }
+        pair.settle();
+        assert_eq!(failures(&pair), [], "{label} held");
+
+        let holder = if caller_holds {
+            &pair.caller
+        } else {
+            &pair.callee
+        };
+        let (offer, answer) = last_described(holder).expect("the hold settled");
+        let (offer, answer) = (one_stream(&offer), one_stream(&answer));
+        assert_eq!(attribute_values(&offer, "setup"), ["actpass"], "{label}");
+        // the answering end's own certificate, and the role it already has:
+        // the caller offered actpass and the callee took active
+        let (theirs, role) = if caller_holds {
+            (&answered, "active")
+        } else {
+            (&offered, "passive")
+        };
+        assert_eq!(
+            attribute_values(&answer, "fingerprint"),
+            attribute_values(theirs, "fingerprint"),
+            "{label} held: the answer withdrew or moved the certificate"
+        );
+        assert_eq!(attribute_values(&answer, "setup"), [role], "{label} held");
+
+        let directions = (
+            pair.caller.engine.session(call).expect("media").direction(),
+            pair.callee
+                .engine
+                .session(remote)
+                .expect("media")
+                .direction(),
+        );
+        let expected = if caller_holds {
+            (Direction::SendOnly, Direction::RecvOnly)
+        } else {
+            (Direction::RecvOnly, Direction::SendOnly)
+        };
+        assert_eq!(directions, expected, "{label}: the hold missed the media");
+
+        if caller_holds {
+            pair.caller
+                .agent
+                .resume(call, pair.now)
+                .expect("the resume");
+            pair.caller.drain(pair.now, false);
+        } else {
+            pair.callee
+                .agent
+                .resume(remote, pair.now)
+                .expect("the resume");
+            pair.callee.drain(pair.now, false);
+        }
+        pair.settle();
+        assert_eq!(failures(&pair), [], "{label} resumed");
+        let loud = tone_after(&mut pair, call, remote);
+        assert!(loud > 4_000, "{label}: the tone came back at {loud}");
+        for session in [
+            pair.caller.engine.session(call).expect("media"),
+            pair.callee.engine.session(remote).expect("media"),
+        ] {
+            assert_eq!(session.direction(), Direction::SendRecv, "{label}");
+            assert!(session.is_encrypted(), "{label}: the keys went");
+        }
+    }
+}
+
+#[test]
+fn a_hold_from_the_far_end_of_an_sdes_call_is_answered_with_the_key_in_use() {
+    // RFC 4568 §7.1.4: an answerer that changes its key leaves the offerer
+    // unable to read it until the answer arrives, and a hold is no reason to
+    // open that window
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let first = one_stream(&pair.callee.offer_received().expect("the first offer"));
+
+    pair.callee.agent.hold(remote, pair.now).expect("the hold");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    assert_eq!(failures(&pair), []);
+    let (_, answer) = last_described(&pair.callee).expect("the hold settled");
+    let answer = one_stream(&answer);
+    assert_eq!(
+        crypto_line(&answer).map(|line| line.key_params),
+        crypto_line(&first).map(|line| line.key_params),
+        "the answer to a hold re-keyed"
+    );
+    {
+        let held = pair.caller.engine.session(call).expect("media");
+        assert_eq!(held.direction(), Direction::RecvOnly);
+        assert!(held.is_encrypted());
+    }
+
+    pair.callee
+        .agent
+        .resume(remote, pair.now)
+        .expect("the resume");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    assert_eq!(failures(&pair), []);
+    let loud = tone_after(&mut pair, call, remote);
+    assert!(loud > 4_000, "the tone came back at {loud}");
+}
+
+#[test]
+fn a_codec_change_from_the_far_end_leaves_a_call_held_here_on_hold() {
+    // the engine answers every offer sendrecv; sent as written, that took the
+    // call off hold on the wire and started this end's stream sending into a
+    // call its user believed was on hold
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+
+    pair.callee
+        .engine
+        .change_codecs(&mut pair.callee.agent, remote, &["PCMA"], pair.now)
+        .expect("the re-offer goes");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+
+    let (answer, _) = last_described(&pair.caller).expect("the change settled");
+    assert_eq!(
+        answer.direction_of(&one_stream(&answer)),
+        Direction::SendOnly,
+        "{answer}"
+    );
+    assert_eq!(
+        pair.caller.agent.hold_state(call).map(|hold| hold.local),
+        Some(true)
+    );
+    let held = pair.caller.engine.session(call).expect("media");
+    assert_eq!(held.codec(), Codec::Pcma);
+    assert_eq!(held.direction(), Direction::SendOnly);
+    drop(held);
+    let other = pair.callee.engine.session(remote).expect("media");
+    assert_eq!(other.codec(), Codec::Pcma);
+    assert_eq!(other.direction(), Direction::RecvOnly);
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn an_answer_that_takes_the_other_dtls_role_is_refused_by_name() {
+    // the callee is the client; its hold hands the roles back, and a far end
+    // that answers by taking the client's role for itself is asking for an
+    // association this end does not start
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+    pair.callee.agent.hold(remote, pair.now).expect("the hold");
+    pair.callee.drain(pair.now, false);
+    settle_editing(&mut pair, true, &|body| {
+        body.replace("a=setup:passive", "a=setup:active")
+    });
+
+    assert!(
+        failures(&pair).contains(&("callee", MediaError::DtlsRoleChanged)),
+        "{:?}",
+        failures(&pair)
+    );
+    let session = pair.callee.engine.session(remote).expect("media");
+    assert!(session.is_encrypted(), "the refusal threw the keys away");
+    assert_eq!(
+        session.direction(),
+        Direction::SendRecv,
+        "a refused plan was adopted"
+    );
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_re_offer_that_asks_for_the_other_dtls_role_is_refused_with_488() {
+    // an older peer's concrete value: the callee, the client, re-offering
+    // `passive` asks this end to become the client in its place
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    pair.callee
+        .engine
+        .change_codecs(&mut pair.callee.agent, remote, &["PCMA"], pair.now)
+        .expect("the re-offer goes");
+    settle_editing(&mut pair, false, &|body| {
+        body.replace("a=setup:actpass", "a=setup:passive")
+    });
+
+    assert!(
+        failures(&pair).contains(&("caller", MediaError::DtlsRoleChanged)),
+        "{:?}",
+        failures(&pair)
+    );
+    assert!(
+        pair.callee.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::SessionChangeFailed { .. })
+        )),
+        "the re-offer was answered"
+    );
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert_eq!(session.codec(), Codec::Pcmu, "the session did not stand");
+        assert!(session.is_encrypted());
+    }
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_re_offer_that_names_another_certificate_is_refused_with_488() {
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    pair.callee
+        .engine
+        .change_codecs(&mut pair.callee.agent, remote, &["PCMA"], pair.now)
+        .expect("the re-offer goes");
+    settle_editing(&mut pair, false, &|body| {
+        let mut moved = String::new();
+        for line in body.lines() {
+            if line.starts_with("a=fingerprint:") {
+                moved.push_str(
+                    "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:\
+AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+                );
+            } else {
+                moved.push_str(line);
+            }
+            moved.push_str("\r\n");
+        }
+        moved
+    });
+
+    assert!(
+        failures(&pair).contains(&("caller", MediaError::DtlsFingerprintChanged)),
+        "{:?}",
+        failures(&pair)
+    );
+    assert!(
+        pair.callee.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::SessionChangeFailed { .. })
+        )),
+        "the re-offer was answered"
+    );
+    let session = pair.caller.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::Pcmu, "the session did not stand");
+    assert!(session.is_encrypted());
+}
+
+#[cfg(feature = "dtls")]
+#[test]
+fn a_re_offer_that_writes_the_same_certificate_differently_is_not_a_new_one() {
+    // RFC 8842 §3.1 counts fingerprints "modified, added, or removed"; the
+    // same lines in lower case and one of them twice are none of those
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::DtlsOffered);
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    pair.shake_hands(call, remote);
+    pair.callee
+        .engine
+        .change_codecs(&mut pair.callee.agent, remote, &["PCMA"], pair.now)
+        .expect("the re-offer goes");
+    settle_editing(&mut pair, false, &|body| {
+        let mut rewritten = String::new();
+        for line in body.lines() {
+            if line.starts_with("a=fingerprint:") {
+                let lower = line.to_ascii_lowercase();
+                rewritten.push_str(&lower);
+                rewritten.push_str("\r\n");
+                rewritten.push_str(&lower);
+            } else {
+                rewritten.push_str(line);
+            }
+            rewritten.push_str("\r\n");
+        }
+        rewritten
+    });
+
+    assert_eq!(failures(&pair), []);
+    for session in [
+        pair.caller.engine.session(call).expect("media"),
+        pair.callee.engine.session(remote).expect("media"),
+    ] {
+        assert_eq!(session.codec(), Codec::Pcma, "the change was refused");
+        assert!(session.is_encrypted());
+    }
+}
+
+#[test]
+fn a_call_the_application_describes_answers_its_own_re_offers() {
+    // the application answered with a description of its own, so it is the
+    // only one that can answer a re-offer on the call: the engine used to
+    // refuse every one of them 488 first — every hold, once holds on a
+    // secured call were handed up — and to open a stream of its own on the
+    // call after a plain one
+    for secured in [false, true] {
+        let mut catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+        if secured {
+            catalog = catalog.with_srtp(SrtpPolicy::Offered);
+        }
+        let mut pair = Pair::new(catalog);
+        let remote = pair.ring();
+        let (proto, crypto) = if secured {
+            (
+                "RTP/SAVP",
+                "a=crypto:1 AES_CM_128_HMAC_SHA1_80 \
+inline:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB\r\n",
+            )
+        } else {
+            ("RTP/AVP", "")
+        };
+        let described = |version: u32, direction: &str| {
+            format!(
+                "v=0\r\no=- 5 {version} IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\n\
+t=0 0\r\nm=audio 40002 {proto} 0\r\na=rtpmap:0 PCMU/8000\r\n{crypto}a={direction}\r\n"
+            )
+        };
+        pair.callee
+            .agent
+            .answer(
+                remote,
+                Some(Arc::from(described(5, "sendrecv").as_bytes())),
+                pair.now,
+            )
+            .expect("the 200 goes");
+        pair.settle();
+        let call = pair.caller.call().expect("the caller knows the call");
+
+        pair.caller.agent.hold(call, pair.now).expect("the hold");
+        pair.caller.drain(pair.now, false);
+        pair.settle();
+        let refused = |pair: &Pair| {
+            pair.caller.heard.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Signalling(UaEvent::SessionChangeFailed { .. })
+                )
+            })
+        };
+        assert!(
+            !refused(&pair),
+            "secured={secured}: the engine refused a hold on a call it does not describe"
+        );
+        if secured {
+            assert!(
+                pair.callee
+                    .heard
+                    .iter()
+                    .any(|event| matches!(event, Event::Signalling(UaEvent::Reoffer { .. }))),
+                "the hold never reached the application"
+            );
+            pair.callee
+                .agent
+                .accept_reoffer(remote, Some(described(6, "recvonly").as_bytes()), pair.now)
+                .expect("the application answers it");
+            pair.settle();
+            assert!(!refused(&pair));
+        }
+        assert_eq!(
+            pair.caller.agent.hold_state(call).map(|hold| hold.local),
+            Some(true),
+            "secured={secured}"
+        );
+        assert!(
+            pair.callee.engine.session(remote).is_none(),
+            "secured={secured}: the engine opened a stream on the application's call"
+        );
+        assert!(
+            pair.callee.media_events().is_empty(),
+            "secured={secured}: {:?}",
+            pair.callee.media_events()
+        );
+    }
 }

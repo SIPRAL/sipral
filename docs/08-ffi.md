@@ -556,6 +556,15 @@ and an event for a change that was not one would be the same false signal
 `ring`/`ring_with` learned not to send on the ACK that merely confirms a call
 already settled.
 
+A call the application describes hears as `SIPRAL_EVENT_KIND_SESSION_OFFERED`
+every re-offer this stack cannot answer for it: a codec change, a stream
+added or dropped, and anything at all on a secure profile — a hold included,
+because its answer has to carry the application's own SDES key, or its
+fingerprint and the DTLS role the call already has, and those are the
+application's. `sipral_call_accept_session` keeps a hold this end asked for in
+whatever answer it is given, so answering `sendrecv` to the far end's change
+does not take a call off hold behind its user's back.
+
 **And asks for its own codec changes.** `sipral_call_change_codecs(stack,
 call, codecs, codecs_len, now_ms)` re-offers a managed call on another list,
 named the way `sipral_call_config_t::codecs` names one. Only the codecs

@@ -1348,6 +1348,18 @@ impl MediaSession {
         }
     }
 
+    /// Which end of the call's DTLS association this one is, or `None` for a
+    /// stream no handshake keys.
+    ///
+    /// Answered for as long as the session lasts, finished or not: the role
+    /// is what every later negotiation on the call has to leave where it is
+    /// (RFC 8842 §5.3), and the engine asks it of the running session rather
+    /// than working it out again from descriptions that may have moved on.
+    #[cfg(feature = "dtls")]
+    pub(crate) fn dtls_role(&self) -> Option<sipral_dtls::Role> {
+        self.dtls.as_ref().map(|dtls| dtls.handshake.role())
+    }
+
     /// The RTCP BYE that says this end has left (RFC 3550 §6.6).
     ///
     /// Sent once, when the call ends and before the socket is closed. A far
@@ -1828,7 +1840,7 @@ impl MediaSession {
                 fingerprints: now, ..
             }),
         ) = (&was.keying, &plan.keying)
-            && had != now
+            && !crate::dtls::same_fingerprints(had, now)
         {
             return Err(MediaError::DtlsFingerprintChanged);
         }

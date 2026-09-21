@@ -135,13 +135,27 @@ pub enum MediaError {
     /// (RFC 5763 §6.6).
     ///
     /// §6.6 asks for a new DTLS association there, and this stack does not
-    /// start one: it refuses the plan instead, so the session keeps running
-    /// on keys both ends still agree on and the call is told. Carrying on
-    /// silently would be worse than either — the far end would have moved to
-    /// a certificate this end never checked, and the media would keep
-    /// flowing as though it had.
+    /// start one: a re-offer from the far end that names one is answered 488
+    /// (RFC 8842 §5.3 has an answerer that will not start the association
+    /// refuse it), an answer that names one is not adopted, and either way
+    /// the session keeps running on keys both ends still agree on and the
+    /// call is told. Carrying on silently would be worse than either — the
+    /// far end would have moved to a certificate this end never checked, and
+    /// the media would keep flowing as though it had.
     #[cfg(feature = "dtls")]
     DtlsFingerprintChanged,
+    /// A re-negotiation would swap which end is the DTLS client and which the
+    /// server (RFC 8842 §3.1).
+    ///
+    /// The same new association a moved certificate asks for, and refused the
+    /// same way: a re-offer from the far end that asks for it is answered
+    /// 488, an answer that takes it is not adopted, and either way the session
+    /// keeps running on the association it has. An offer from this end hands
+    /// the choice back with `actpass` (§5.5), so a far end that keeps the
+    /// association answers with the roles already in force (§5.3) and never
+    /// reaches this.
+    #[cfg(feature = "dtls")]
+    DtlsRoleChanged,
     /// The ICE agent refused what it was given: an address RFC 8445 §5.1.1.1
     /// rules out of a candidate, credentials outside RFC 8839 §5.4's shape,
     /// or a peer that changed its credentials without restarting ICE.
@@ -380,6 +394,10 @@ impl MediaError {
             Self::DtlsFingerprintChanged => {
                 "the far end named a different certificate part-way through the call"
             }
+            #[cfg(feature = "dtls")]
+            Self::DtlsRoleChanged => {
+                "the far end asked to swap the DTLS client and server part-way through the call"
+            }
             #[cfg(feature = "ice")]
             Self::IceRequired => {
                 "this call requires ICE and the far end described none it could use"
@@ -536,6 +554,8 @@ mod tests {
             MediaError::DtlsNeedsRtcpMux,
             #[cfg(feature = "dtls")]
             MediaError::DtlsFingerprintChanged,
+            #[cfg(feature = "dtls")]
+            MediaError::DtlsRoleChanged,
             #[cfg(feature = "ice")]
             MediaError::Ice(sipral_nat::ice::IceError::NoUsableHost),
             #[cfg(feature = "ice")]

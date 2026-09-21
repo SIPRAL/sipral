@@ -58,7 +58,7 @@ use sipral_dtls::handshake::SrtpProtectionProfile;
 use sipral_dtls::keys::EcdsaKey;
 use sipral_dtls::setup::{Party, Setup, dtls_role};
 use sipral_dtls::x509::{Certificate, CertificateParams, Fingerprint};
-use sipral_dtls::{Config, Connection, Event, Random, Retransmission, SrtpKeying, State};
+use sipral_dtls::{Config, Connection, Event, Random, Retransmission, Role, SrtpKeying, State};
 use sipral_rtp::srtp::{Master, Policy, Security, Suite};
 
 use crate::error::MediaError;
@@ -401,6 +401,12 @@ impl Handshake {
         self.keyed.take()
     }
 
+    /// Which end of the association this one is, fixed when the handshake
+    /// was started and for as long as the association lasts.
+    pub(crate) const fn role(&self) -> Role {
+        self.connection.role()
+    }
+
     /// Whether this handshake is done with, either way — including having
     /// spent its budget, which the connection itself has no way of knowing.
     pub(crate) fn finished(&self) -> bool {
@@ -527,9 +533,94 @@ pub(crate) fn setup_to_write(party: Party, theirs: Option<&str>) -> Result<Setup
     }
 }
 
+/// Whether two lists of `a=fingerprint` values name the same certificate.
+///
+/// Compared as sets. RFC 8842 §3.1 asks for a new association when
+/// fingerprints are "modified, added, or removed", and a peer that writes its
+/// lines — one per hash function, RFC 8122 §5 — in another order, or repeats
+/// one, has done none of those. Without regard to case as well, because the
+/// hexadecimal is the same number however it is written.
+pub(crate) fn same_fingerprints(had: &[String], now: &[String]) -> bool {
+    let set = |values: &[String]| {
+        let mut normal: Vec<String> = values
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect();
+        normal.sort_unstable();
+        normal.dedup();
+        normal
+    };
+    set(had) == set(now)
+}
+
+/// What this end answers a re-offer with, on a call whose association has
+/// already given it `role` (RFC 8842 §5.3).
+///
+/// "The answerer MUST insert an SDP 'setup' attribute with an attribute value
+/// that does not change the previously negotiated DTLS roles." Against the
+/// `actpass` §5.5 asks every subsequent offer for, that is simply the role in
+/// force. Against the concrete value an older peer still writes (§5.3 asks
+/// that it be understood), RFC 4145 §4.1 leaves one answer, and when that
+/// answer is the other role the offer is asking for a new association.
+///
+/// # Errors
+/// [`MediaError::DtlsRoleChanged`] for an offer whose value leaves this end
+/// only the role it does not have — including one that wrote no value at
+/// all, which §4.1 reads as `active` — and [`MediaError::DtlsRole`] for a
+/// value that is not one of the four.
+pub(crate) fn setup_to_keep(role: Role, theirs: Option<&str>) -> Result<Setup, MediaError> {
+    let offered = match theirs {
+        Some(written) => Setup::parse(written).map_err(|_| MediaError::DtlsRole)?,
+        None => Setup::Active,
+    };
+    let ours = match role {
+        Role::Client => Setup::Active,
+        Role::Server => Setup::Passive,
+    };
+    match offered {
+        // "no connection for the time being": nothing to take a role in, and
+        // §4.1 has one answer to it
+        Setup::HoldConn => Ok(Setup::HoldConn),
+        Setup::ActPass => Ok(ours),
+        concrete if Setup::answer_to(concrete) == ours => Ok(ours),
+        _ => Err(MediaError::DtlsRoleChanged),
+    }
+}
+
+/// The role a re-negotiation gives this end, from the `a=setup` it wrote and
+/// the one the far end wrote, or `None` where it gives none to compare.
+///
+/// Read without asking which of the two was the offer, because this end's
+/// own writing already says so: it writes `actpass` only into an offer (RFC
+/// 8842 §5.5) and a concrete role only into an answer, or into an offer it is
+/// repeating unchanged. A concrete value here is the role, whichever side it
+/// was written on. `actpass` leaves the role to the answer — `active` there
+/// makes this end the server, `passive` or nothing at all (RFC 4145 §4.1's
+/// default for an answer) the client. `holdconn` on either side takes no
+/// role, and there is nothing to compare.
+///
+/// # Errors
+/// [`MediaError::DtlsRole`] for a pair §4.1 does not allow together: the
+/// same concrete role on both sides, or `actpass` answered with `actpass`.
+pub(crate) fn role_after(ours: Setup, theirs: Option<Setup>) -> Result<Option<Role>, MediaError> {
+    match (ours, theirs) {
+        (Setup::HoldConn, _) | (_, Some(Setup::HoldConn)) => Ok(None),
+        (Setup::Active, Some(Setup::Active))
+        | (Setup::Passive, Some(Setup::Passive))
+        | (Setup::ActPass, Some(Setup::ActPass)) => Err(MediaError::DtlsRole),
+        (Setup::Active, _) | (Setup::ActPass, Some(Setup::Passive) | None) => {
+            Ok(Some(Role::Client))
+        }
+        (Setup::Passive, _) | (Setup::ActPass, Some(Setup::Active)) => Ok(Some(Role::Server)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Handshake, Identity, MOST, Source, budget, setup_to_write, suite_of};
+    use super::{
+        Handshake, Identity, MOST, Source, budget, role_after, same_fingerprints, setup_to_keep,
+        setup_to_write, suite_of,
+    };
     use sipral_core::auth::KeySource;
     use sipral_core::sdp::Keying;
     use sipral_dtls::handshake::SrtpProtectionProfile;
@@ -625,6 +716,110 @@ mod tests {
             setup_to_write(Party::Answerer, Some("whenever")),
             Err(MediaError::DtlsRole)
         );
+        assert_eq!(
+            setup_to_keep(Role::Client, Some("whenever")),
+            Err(MediaError::DtlsRole)
+        );
+    }
+
+    #[test]
+    fn fingerprints_are_compared_as_the_set_of_certificates_they_name() {
+        let owned = |values: &[&str]| -> Vec<String> {
+            values.iter().map(|value| (*value).to_owned()).collect()
+        };
+        let had = owned(&["sha-256 AB:CD", "sha-1 01:02"]);
+        for same in [
+            owned(&["sha-1 01:02", "sha-256 AB:CD"]),
+            owned(&["SHA-256 ab:cd", "sha-1 01:02"]),
+            owned(&["sha-256 AB:CD", "sha-1 01:02", "sha-256 AB:CD"]),
+        ] {
+            assert!(same_fingerprints(&had, &same), "{same:?}");
+        }
+        for moved in [
+            owned(&["sha-256 AB:CE", "sha-1 01:02"]),
+            owned(&["sha-256 AB:CD"]),
+            owned(&["sha-256 AB:CD", "sha-1 01:02", "sha-512 FF"]),
+        ] {
+            assert!(!same_fingerprints(&had, &moved), "{moved:?}");
+        }
+    }
+
+    #[test]
+    fn a_re_offer_is_answered_with_the_role_the_association_already_has() {
+        // RFC 8842 §5.3, against the actpass §5.5 asks every re-offer for:
+        // the role in force, which a fresh answer to actpass would not be for
+        // a server — `setup_to_write` answers it `active` every time
+        for (role, kept) in [
+            (Role::Client, Setup::Active),
+            (Role::Server, Setup::Passive),
+        ] {
+            assert_eq!(setup_to_keep(role, Some("actpass")), Ok(kept), "{role:?}");
+        }
+        // an older peer's concrete value, where RFC 4145 §4.1 leaves exactly
+        // the role in force
+        assert_eq!(
+            setup_to_keep(Role::Client, Some("passive")),
+            Ok(Setup::Active)
+        );
+        assert_eq!(
+            setup_to_keep(Role::Server, Some("active")),
+            Ok(Setup::Passive)
+        );
+        // and no value at all, which §4.1 reads as active
+        assert_eq!(setup_to_keep(Role::Server, None), Ok(Setup::Passive));
+        assert_eq!(
+            setup_to_keep(Role::Client, Some("holdconn")),
+            Ok(Setup::HoldConn)
+        );
+    }
+
+    #[test]
+    fn a_re_offer_that_leaves_only_the_other_role_is_asking_for_a_new_association() {
+        assert_eq!(
+            setup_to_keep(Role::Client, Some("active")),
+            Err(MediaError::DtlsRoleChanged)
+        );
+        assert_eq!(
+            setup_to_keep(Role::Client, None),
+            Err(MediaError::DtlsRoleChanged)
+        );
+        assert_eq!(
+            setup_to_keep(Role::Server, Some("passive")),
+            Err(MediaError::DtlsRoleChanged)
+        );
+    }
+
+    #[test]
+    fn the_role_a_re_negotiation_gives_is_read_off_the_two_values() {
+        use Setup::{ActPass, Active, HoldConn, Passive};
+        for (ours, theirs, role) in [
+            // this end offered actpass: the answer decides
+            (ActPass, Some(Active), Some(Role::Server)),
+            (ActPass, Some(Passive), Some(Role::Client)),
+            // RFC 4145 §4.1: an answer that says nothing says passive
+            (ActPass, None, Some(Role::Client)),
+            // a concrete value is the role, whichever side it was written on
+            (Active, Some(ActPass), Some(Role::Client)),
+            (Active, Some(Passive), Some(Role::Client)),
+            (Active, None, Some(Role::Client)),
+            (Passive, Some(ActPass), Some(Role::Server)),
+            (Passive, Some(Active), Some(Role::Server)),
+            (HoldConn, Some(Active), None),
+            (ActPass, Some(HoldConn), None),
+        ] {
+            assert_eq!(
+                role_after(ours, theirs),
+                Ok(role),
+                "{ours:?} against {theirs:?}"
+            );
+        }
+        for (ours, theirs) in [(Active, Active), (Passive, Passive), (ActPass, ActPass)] {
+            assert_eq!(
+                role_after(ours, Some(theirs)),
+                Err(MediaError::DtlsRole),
+                "{ours:?} against {theirs:?}"
+            );
+        }
     }
 
     #[test]

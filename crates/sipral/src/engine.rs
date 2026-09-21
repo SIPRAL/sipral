@@ -115,6 +115,13 @@ struct Managed {
     remote: Option<SessionDescription>,
     /// Where this end receives media, which the application chose because it
     /// owns the socket.
+    ///
+    /// Also what tells a call this engine describes from one it only heard
+    /// about: it is set by the calls that write a description — placing,
+    /// ringing with media, answering — and by nothing else. An incoming call
+    /// the application answered with a description of its own keeps `None`
+    /// for its whole life, and its re-offers and session changes are the
+    /// application's; see [`MediaEngine::answer_reoffer`].
     address: Option<SocketAddr>,
     identity: StreamIdentity,
     session_id: u64,
@@ -328,22 +335,38 @@ impl MediaEngine {
     /// wrote: [`dtls_role`](sipral_dtls::setup::dtls_role) needs both halves
     /// of the exchange, and only one of them ever arrives from the far end.
     ///
+    /// `running` names the call an answer is for once it already has an
+    /// association, which is every re-offer on a keyed call. Its answer then
+    /// takes the role the association gives this end rather than the one a
+    /// fresh answer would (RFC 8842 §5.3): to the `actpass` every re-offer
+    /// carries (§5.5), a fresh answer says `active` every time, and a server
+    /// that said so would be asking to become the client.
+    ///
     /// # Errors
-    /// As [`MediaEngine::identity`], and [`MediaError::DtlsRole`] for an
-    /// offer whose `a=setup` cannot be read.
+    /// As [`MediaEngine::identity`]; [`MediaError::DtlsRole`] for an offer
+    /// whose `a=setup` cannot be read; and [`MediaError::DtlsRoleChanged`]
+    /// for a re-offer whose `a=setup` leaves this end only the role it does
+    /// not have.
     #[cfg(feature = "dtls")]
     fn dtls_lines(
         &mut self,
         catalog: &CodecCatalog,
         side: Side,
         offered: Option<&SessionDescription>,
+        running: Option<CallHandle>,
         now: Instant,
     ) -> Result<Option<(String, String)>, MediaError> {
         if !catalog.srtp().wants_dtls() {
             return Ok(None);
         }
-        let theirs = offered.and_then(peer_setup);
-        let setup = crate::dtls::setup_to_write(side.party(), theirs.as_deref())?;
+        let theirs = offered.and_then(setup_in);
+        let role = running
+            .and_then(|call| self.sessions.get(&call))
+            .and_then(|held| share::lock(held).session.dtls_role());
+        let setup = match (side, role) {
+            (Side::Answering, Some(role)) => crate::dtls::setup_to_keep(role, theirs.as_deref())?,
+            _ => crate::dtls::setup_to_write(side.party(), theirs.as_deref())?,
+        };
         let fingerprint = self.identity(now)?.fingerprint().to_owned();
         Ok(Some((fingerprint, setup.name().to_owned())))
     }
@@ -357,9 +380,46 @@ impl MediaEngine {
         _catalog: &CodecCatalog,
         _side: Side,
         _offered: Option<&SessionDescription>,
+        _running: Option<CallHandle>,
         _now: Instant,
     ) -> Result<Option<(String, String)>, MediaError> {
         Ok(None)
+    }
+
+    /// Whether a re-offer keeps the certificate the call's association was
+    /// checked against.
+    ///
+    /// RFC 8842 §3.1 has a fingerprint "modified, added, or removed" ask for a
+    /// new association, and §5.3 has an answerer that will not start one
+    /// refuse the offer. A re-offer that names no fingerprint at all is not
+    /// judged here: it has moved off DTLS-SRTP altogether, and whether that is
+    /// allowed is the call's policy, which `keying_allows` and `keying_holds`
+    /// already read.
+    ///
+    /// # Errors
+    /// [`MediaError::DtlsFingerprintChanged`] for one that names another.
+    #[cfg(feature = "dtls")]
+    fn keeps_certificate(
+        &self,
+        call: CallHandle,
+        offer: &SessionDescription,
+    ) -> Result<(), MediaError> {
+        let Some(held) = self.sessions.get(&call) else {
+            return Ok(());
+        };
+        let slot = share::lock(held);
+        let Some(Keying::Dtls {
+            fingerprints: had, ..
+        }) = slot.session.plan().keying.as_ref()
+        else {
+            return Ok(());
+        };
+        let offered = fingerprints_in(offer);
+        if offered.is_empty() || crate::dtls::same_fingerprints(had, &offered) {
+            Ok(())
+        } else {
+            Err(MediaError::DtlsFingerprintChanged)
+        }
     }
 
     /// What this call says about ICE in the description about to be written.
@@ -699,7 +759,7 @@ impl MediaEngine {
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
-        let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
+        let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.ice_lines(None, &catalog, local, true, now)?;
         let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
         describe_ice(&mut offer, ice.as_ref());
@@ -777,7 +837,7 @@ impl MediaEngine {
         let CallMedia { catalog, config } = media;
         let (identity, session_id) = draw(agent);
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
-        let dtls = self.dtls_lines(&catalog, Side::Offering, None, now)?;
+        let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
         let ice = self.ice_lines(None, &catalog, local, true, now)?;
         let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
         describe_ice(&mut offer, ice.as_ref());
@@ -895,7 +955,7 @@ impl MediaEngine {
             return Err(MediaError::SrtpRequired);
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
-        let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), now)?;
+        let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
         let ice = self.ice_lines(Some(call), &catalog, local, false, now)?;
         let mut description = write_answer(
             &catalog,
@@ -1008,7 +1068,7 @@ impl MediaEngine {
         } else {
             Side::Offering
         };
-        let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), now)?;
+        let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), None, now)?;
         let ice = self.ice_lines(Some(call), &catalog, local, offered.is_none(), now)?;
         let mut description = match offered {
             Some(offer) => write_answer(
@@ -1090,14 +1150,20 @@ impl MediaEngine {
     ///
     /// Only the codecs change. Everything else is the description this end
     /// last wrote for the call, carried across as it was: the media address,
-    /// the transport profile, the SRTP key or the DTLS fingerprint and
-    /// `a=setup`, the ICE credentials and candidates, multiplexing. So the
-    /// answer re-keys nothing, restarts no handshake and no connectivity
-    /// check, and moves nothing the call did not ask to move — a key drawn
-    /// afresh here would be a re-key nobody asked for, and a fingerprint
-    /// written afresh would be one RFC 8842 §3.1 reads as a new DTLS
-    /// association. It is also what a hold does, which is the other re-offer
-    /// this end sends.
+    /// the transport profile, the SRTP key or the DTLS fingerprint, the ICE
+    /// credentials and candidates, multiplexing. So the answer re-keys
+    /// nothing, restarts no handshake and no connectivity check, and moves
+    /// nothing the call did not ask to move — a key drawn afresh here would
+    /// be a re-key nobody asked for, and a fingerprint written afresh would
+    /// be one RFC 8842 §3.1 reads as a new DTLS association. It is also what
+    /// a hold does, which is the other re-offer this end sends.
+    ///
+    /// The one line that is rewritten is `a=setup`, which goes as `actpass`
+    /// whatever role the call has (RFC 8842 §5.5): the last description may
+    /// have been an answer. An answer that keeps the association comes back
+    /// with the roles already in force (§5.3), and one that takes the other
+    /// role is refused by name — [`MediaError::DtlsRoleChanged`] — with the
+    /// stream left on the association it has.
     ///
     /// Which way the call flows is the user agent's to write
     /// ([`UserAgent::change_formats`]): a call held here stays held through
@@ -1158,6 +1224,9 @@ impl MediaEngine {
         stream.attributes.splice(0..0, lines);
         stream.formats = written.formats;
         let formats = stream.formats.clone();
+        for stream in &mut offer.media {
+            stream.offer_roles_again();
+        }
         offer.origin.version = version;
 
         agent.change_formats(call, &offer.to_bytes(), now)?;
@@ -1428,6 +1497,12 @@ impl MediaEngine {
         let Some(managed) = self.calls.get_mut(&call) else {
             return;
         };
+        // a call the application describes runs its own audio: settling a
+        // plan for it here would open a second stream on it, with this
+        // engine's own numbers, beside the one the application is running
+        if managed.address.is_none() {
+            return;
+        }
         if let Some(described) = local.and_then(|bytes| parse(bytes).ok()) {
             managed.version = managed.version.max(described.origin.version);
             // the change this end offered, accepted: the list it named is
@@ -1449,9 +1524,20 @@ impl MediaEngine {
         self.settle(call, now);
     }
 
-    /// The far end offered something the user agent has no policy for, which
-    /// in practice means a codec change. It has one here: the same answer any
-    /// offer gets.
+    /// The far end offered something the user agent has no policy for: a
+    /// codec change, or anything at all on a secured stream — a hold and a
+    /// session refresh among them, since their answers need this end's key or
+    /// its certificate and role, which the user agent does not hold. It has
+    /// one here: the same answer any offer gets, keyed the way the call
+    /// already is.
+    ///
+    /// Only on a call this engine describes. One the application answered
+    /// with a description of its own is left alone: the event goes on to the
+    /// application untouched, which holds the only description there is and
+    /// answers with `UserAgent::accept_reoffer`. Refusing it here instead
+    /// would answer 488 to every hold the far end puts on such a call — every
+    /// re-offer on a secured one is handed up — and leave the application's
+    /// own answer failing for want of a request to answer.
     fn answer_reoffer(
         &mut self,
         call: CallHandle,
@@ -1463,12 +1549,15 @@ impl MediaEngine {
         let Some(managed) = self.calls.get_mut(&call) else {
             return;
         };
+        let Some(address) = managed.address else {
+            return;
+        };
         // §8.3.2 binds a number from the moment either end writes it, and an
         // offer about to be refused was still written
         if let Some(offer) = offered.as_ref() {
             managed.payloads.note(offer);
         }
-        let (Some(address), Some(offer)) = (managed.address, offered) else {
+        let Some(offer) = offered else {
             // an offer this engine cannot answer is refused rather than left
             // to be retransmitted until the call dies
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
@@ -1477,6 +1566,17 @@ impl MediaEngine {
         let version = managed.version.saturating_add(1);
         let session_id = managed.session_id;
         let catalog = managed.catalog.clone();
+        // RFC 4568 §7.1.4 lets an answerer change its master key and warns in
+        // the same breath that "the offerer will not be able to process
+        // packets secured via this master key until the answer is received".
+        // A hold, a resume or a session refresh is no reason to open that
+        // window, so the answer repeats the key this end already sends under,
+        // and one is drawn only where there is none to repeat
+        let in_force = managed
+            .local
+            .as_ref()
+            .and_then(live_stream)
+            .and_then(keying::key_in_force);
         // a live call that required SRTP and is re-offered a stream without
         // it is where a silent downgrade would happen, so it is where the
         // refusal has to be
@@ -1486,8 +1586,20 @@ impl MediaEngine {
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
-        let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
-        let dtls = match self.dtls_lines(&catalog, Side::Answering, Some(&offer), now) {
+        // RFC 8842 §5.3: an answerer that will not start the new association
+        // an offer asks for refuses the offer, and the session stands (RFC
+        // 3261 §14.2). Answering it and then declining to follow is the
+        // other thing a stack could do, and it leaves the far end on an
+        // association this end never joined
+        #[cfg(feature = "dtls")]
+        if let Err(error) = self.keeps_certificate(call, &offer) {
+            self.events.push_back((call, MediaEvent::Failed(error)));
+            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            return;
+        }
+        let keys = will_key(&catalog, Some(&offer))
+            .then(|| in_force.unwrap_or_else(|| draw_key(&mut self.keys)));
+        let dtls = match self.dtls_lines(&catalog, Side::Answering, Some(&offer), Some(call), now) {
             Ok(lines) => lines,
             Err(error) => {
                 self.events.push_back((call, MediaEvent::Failed(error)));
@@ -1642,9 +1754,21 @@ impl MediaEngine {
             .media
             .first()
             .map_or_else(Vec::new, |stream| managed.catalog.candidates(stream, codec));
+        #[cfg(feature = "dtls")]
+        let ours = setup_in(local);
         let running = self.sessions.get(&call).map(Arc::clone);
         if let Some(held) = running {
             let mut slot = share::lock(&held);
+            // an answer that took the other role asks for a new association
+            // this end does not start, the way a moved certificate does, and
+            // is refused the same way: by name, before anything is adopted,
+            // so the stream keeps running on the association it has
+            #[cfg(feature = "dtls")]
+            if let Err(error) = roles_hold(slot.session.dtls_role(), ours.as_deref(), &plan) {
+                drop(slot);
+                self.fail(call, error);
+                return;
+            }
             // the same codec on a session that is already running: a hold, a
             // resume, or a peer that moved its address — but settle is also
             // reached from events that carry no new information at all, an
@@ -1768,14 +1892,18 @@ impl MediaEngine {
     }
 }
 
-/// The formats of the stream this facade carries, as a description lists
-/// them.
-fn live_formats(description: &SessionDescription) -> Option<&Vec<String>> {
+/// The stream this facade carries, as a description has it.
+fn live_stream(description: &SessionDescription) -> Option<&MediaDescription> {
     description
         .media
         .iter()
         .find(|stream| stream.media == AUDIO && !stream.is_rejected())
-        .map(|stream| &stream.formats)
+}
+
+/// The formats of the stream this facade carries, as a description lists
+/// them.
+fn live_formats(description: &SessionDescription) -> Option<&Vec<String>> {
+    live_stream(description).map(|stream| &stream.formats)
 }
 
 /// The borrowed form the description writers take, from the owned pair the
@@ -1816,17 +1944,80 @@ impl Side {
     }
 }
 
-/// The `a=setup` an offer carried, at media level or, as RFC 4566 §5.13 lets
-/// a media-level attribute override, at session level.
+/// The `a=setup` a description carries, at media level or, as RFC 4566
+/// §5.13 lets a media-level attribute override, at session level.
+///
+/// The first stream's, because that is the one the negotiation plans
+/// (`media_plan(.., 0)`) — whichever end wrote the description.
 #[cfg(feature = "dtls")]
-fn peer_setup(offer: &SessionDescription) -> Option<String> {
-    offer
+fn setup_in(description: &SessionDescription) -> Option<String> {
+    description
         .media
         .first()
         .and_then(|stream| stream.attribute("setup"))
-        .or_else(|| offer.attribute("setup"))?
+        .or_else(|| description.attribute("setup"))?
         .value
         .clone()
+}
+
+/// Whether a re-negotiated plan leaves the DTLS roles where the running
+/// association has them (RFC 8842 §3.1).
+///
+/// `running` is the role the association gave this end, `ours` the `a=setup`
+/// this end wrote on its side of the exchange just settled, and the far end's
+/// is in the plan. Nothing to compare — no association, or a plan not keyed
+/// by a handshake — is nothing to refuse.
+///
+/// # Errors
+/// [`MediaError::DtlsRoleChanged`] for a plan that gives this end the other
+/// role, and [`MediaError::DtlsRole`] for a pair of values RFC 4145 §4.1 does
+/// not allow together.
+#[cfg(feature = "dtls")]
+fn roles_hold(
+    running: Option<sipral_dtls::Role>,
+    ours: Option<&str>,
+    plan: &MediaPlan,
+) -> Result<(), MediaError> {
+    let (Some(running), Some(ours), Some(Keying::Dtls { setup: theirs, .. })) =
+        (running, ours, plan.keying.as_ref())
+    else {
+        return Ok(());
+    };
+    let ours = Setup::parse(ours).map_err(|_| MediaError::DtlsRole)?;
+    let theirs = match theirs {
+        Some(written) => Some(Setup::parse(written).map_err(|_| MediaError::DtlsRole)?),
+        None => None,
+    };
+    match crate::dtls::role_after(ours, theirs)? {
+        Some(role) if role != running => Err(MediaError::DtlsRoleChanged),
+        _ => Ok(()),
+    }
+}
+
+/// The `a=fingerprint` values a description names for its first stream, read
+/// the way the negotiation reads them: the stream's own lines, or the
+/// session's where the stream has none, since a media-level attribute
+/// replaces the session-level ones rather than adding to them (RFC 4566
+/// §5.13).
+#[cfg(feature = "dtls")]
+fn fingerprints_in(description: &SessionDescription) -> Vec<String> {
+    let of = |attributes: &[Attribute]| -> Vec<String> {
+        attributes
+            .iter()
+            .filter(|attribute| attribute.name == "fingerprint")
+            .filter_map(|attribute| attribute.value.clone())
+            .collect()
+    };
+    let own = description
+        .media
+        .first()
+        .map(|stream| of(&stream.attributes))
+        .unwrap_or_default();
+    if own.is_empty() {
+        of(&description.attributes)
+    } else {
+        own
+    }
 }
 
 // -- writing descriptions -----------------------------------------------------

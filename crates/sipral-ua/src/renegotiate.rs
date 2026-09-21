@@ -192,33 +192,56 @@ impl UserAgent {
     /// `sdp` is the answer to the offer it carried, and is left out only for a
     /// request that carried none.
     ///
+    /// Two things the answer gets from this layer rather than from whoever
+    /// wrote it. A hold this end asked for is kept: a stream the answer has
+    /// listening again is narrowed back to what the hold allows, so that a
+    /// codec change or a session refresh from the far end does not quietly
+    /// take the call off hold (see `Session::keep_hold`). An answer with
+    /// nothing held here goes out byte for byte. And the `Session-Expires`
+    /// a refresh is owed (RFC 4028 §9) goes on the response, as it does on
+    /// every answer this layer writes itself.
+    ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing is
-    /// waiting to be answered, [`UaError::Sdp`], or [`UaError::Respond`].
+    /// waiting to be answered, [`UaError::Sdp`], or [`UaError::Respond`]. An
+    /// answer that cannot be read is refused before the request is touched,
+    /// so it can still be answered or refused afterwards.
     pub fn accept_reoffer(
         &mut self,
         call: CallHandle,
         sdp: Option<&[u8]>,
         now: Instant,
     ) -> Result<(), UaError> {
-        let answering = {
+        let mut written = match sdp {
+            Some(bytes) => {
+                Some(sdp::parse_with_limits(bytes, self.sdp_limits).map_err(UaError::Sdp)?)
+            }
+            None => None,
+        };
+        let (answering, rewritten) = {
             let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             let state = held.state;
-            held.answering.take().ok_or(UaError::WrongState(state))?
+            let answering = held.answering.take().ok_or(UaError::WrongState(state))?;
+            let rewritten = written
+                .as_mut()
+                .is_some_and(|answer| held.session.keep_hold(answer));
+            (answering, rewritten)
         };
         let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW);
-        let written = match sdp {
-            Some(bytes) => {
-                let parsed =
-                    sdp::parse_with_limits(bytes, self.sdp_limits).map_err(UaError::Sdp)?;
-                response = response.body(b"application/sdp", Arc::from(bytes.to_vec()));
-                Some(parsed)
-            }
-            None => None,
-        };
+        if let Some(value) = self.timer_echo(call) {
+            response = response.header(HeaderName::SessionExpires, &value);
+        }
+        if let (Some(bytes), Some(answer)) = (sdp, written.as_ref()) {
+            let body = if rewritten {
+                answer.to_bytes()
+            } else {
+                bytes.to_vec()
+            };
+            response = response.body(b"application/sdp", Arc::from(body));
+        }
         self.answer_with(call, answering.transaction, &response, now)?;
         if let Some(held) = self.calls.get_mut(&call) {
             if let Some(offer) = answering.offer {

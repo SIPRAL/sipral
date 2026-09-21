@@ -137,11 +137,22 @@ impl Session {
     }
 
     /// The description this end would offer, held or not (RFC 3264 §8.4).
+    ///
+    /// Every stream keyed by a DTLS handshake is offered with `actpass`
+    /// (RFC 8842 §5.5), whichever role it has had: the description this end
+    /// last had accepted may have been an answer, and a role carried out of
+    /// an answer into an offer is what §5.5 asks an offerer not to write.
+    /// The answer comes back with the roles already in force, because §5.3
+    /// asks that of an answerer that keeps the association, and the layer
+    /// holding the association refuses one that moves them.
     pub(crate) fn offer(&mut self, held: bool) -> Option<SessionDescription> {
         let mut offer = self.local.clone()?;
         self.version = self.version.saturating_add(1);
         offer.origin.version = self.version;
         self.direct(&mut offer, held);
+        for media in &mut offer.media {
+            media.offer_roles_again();
+        }
         Some(offer)
     }
 
@@ -223,9 +234,17 @@ impl Session {
     /// `RTP/SAVP` was agreed is the whole of a downgrade, and this is the only
     /// place that can tell it is happening. So it is handed up, and
     /// `crates/sipral` — which knows whether the account required encryption —
-    /// decides. Keeping it: the `a=crypto` value, deliberately. A peer is
-    /// entitled to re-key on a re-offer (RFC 4568 §7.1.4) and that reaches the
-    /// media session through its own path; only presence is a change of shape.
+    /// decides.
+    ///
+    /// And a stream on a secure profile is never answered here at all, not
+    /// even a hold. Its answer has to carry something only the holder of its
+    /// keys can write: under SDES a crypto line naming the tag it accepted
+    /// with this end's own key (RFC 4568 §5.1.2), under DTLS-SRTP this end's
+    /// fingerprint and the role the running association gives it (RFC 8842
+    /// §5.3). An answer written here carried neither, and the negotiation
+    /// that followed failed at the end that asked for the hold — a hold that
+    /// never reached its media, and on the wire an answer that had withdrawn
+    /// the key or the certificate.
     pub(crate) fn is_same_media(&self, offer: &SessionDescription) -> bool {
         let Some(previous) = self.remote.as_ref() else {
             return false;
@@ -243,9 +262,48 @@ impl Session {
                         // path for nothing; it still parts AVP from SAVP,
                         // which is the whole point
                         && before.proto.eq_ignore_ascii_case(&now.proto)
+                        && !now.is_secured()
                         && before.attribute("crypto").is_some()
                             == now.attribute("crypto").is_some()
                 })
+    }
+
+    /// Keep the hold this end asked for in an answer somebody else wrote.
+    ///
+    /// The application answers the re-offers handed to it, and it writes
+    /// what the call wants when nothing is held — the media facade answers
+    /// every one `sendrecv`. A call this end has on hold would then be taken
+    /// off it by the far end's codec change or session refresh: the answer
+    /// says this end is listening again, the far end starts sending, and the
+    /// stream here starts sending too, into a call its user believes is on
+    /// hold. So each stream is narrowed to what [`Session::wanted`] allows
+    /// while held, which is how [`Session::answer`] writes the ones this layer
+    /// answers itself.
+    ///
+    /// Only ever narrowed, so the answer still honours the offer (§6.1), and
+    /// only while held here: `false` means nothing was touched, and an answer
+    /// this end has no hold to keep in goes out byte for byte as written.
+    pub(crate) fn keep_hold(&self, answer: &mut SessionDescription) -> bool {
+        if !self.hold.local {
+            return false;
+        }
+        let written: Vec<Direction> = answer
+            .media
+            .iter()
+            .map(|media| answer.direction_of(media))
+            .collect();
+        let mut rewritten = false;
+        for (index, (media, now)) in answer.media.iter_mut().zip(written).enumerate() {
+            if media.is_rejected() {
+                continue;
+            }
+            let kept = narrowed(now, self.wanted(index, true));
+            if kept != now {
+                set_direction(media, kept);
+                rewritten = true;
+            }
+        }
+        rewritten
     }
 
     /// The bytes of what each end last described.
@@ -292,13 +350,13 @@ impl Session {
 /// offer still carries it; `ptime` and `maxptime` are this end's own statement
 /// about what it wants to receive and stand whatever the offer says.
 ///
-/// **`crypto` is deliberately not here.** RFC 4568 §5.1.2 wants an answer to
-/// name the tag it accepted and carry a key of this end's own, and §7.1.4
-/// makes a re-offer an opportunity to re-key; neither is a line that can be
-/// copied forward, and copying one would be answering a negotiation this layer
-/// had not read. A secured call re-offered to a user agent writing its own
-/// answers is the gap `docs/05-media.md` names, and it is a gap rather than a
-/// silence.
+/// **`crypto`, `fingerprint` and `setup` are deliberately not here**, and
+/// never need to be: a stream on a secure profile is not answered by this
+/// layer at all ([`Session::is_same_media`] hands it up). RFC 4568 §5.1.2
+/// wants an answer to name the tag it accepted and carry a key of this end's
+/// own, and RFC 8842 §5.3 wants the role the running association gives this
+/// end; neither is a line that can be copied forward, and copying one would
+/// be answering a negotiation this layer had not read.
 ///
 /// **ICE is here, and for exactly the reason the paragraph above gives about
 /// multiplexing.** RFC 8839 §4.4 wants the username fragment, the password
@@ -338,6 +396,25 @@ const fn holding(base: Direction) -> Direction {
         Direction::SendRecv | Direction::SendOnly => Direction::SendOnly,
         Direction::RecvOnly | Direction::Inactive => Direction::Inactive,
     }
+}
+
+/// What is left of `now` once `most` has had its say: a stream sends only
+/// where both let it, and receives only where both do.
+const fn narrowed(now: Direction, most: Direction) -> Direction {
+    match (sends(now) && sends(most), receives(now) && receives(most)) {
+        (true, true) => Direction::SendRecv,
+        (true, false) => Direction::SendOnly,
+        (false, true) => Direction::RecvOnly,
+        (false, false) => Direction::Inactive,
+    }
+}
+
+const fn sends(direction: Direction) -> bool {
+    matches!(direction, Direction::SendRecv | Direction::SendOnly)
+}
+
+const fn receives(direction: Direction) -> bool {
+    matches!(direction, Direction::SendRecv | Direction::RecvOnly)
 }
 
 /// Whether a description the far end wrote refuses what this end sends.
@@ -525,26 +602,92 @@ mod tests {
         assert!(!session.is_same_media(&secured(40_000, "RTP/SAVP", Vec::new())));
     }
 
-    /// And the one the rule must not catch. RFC 4568 §7.1.4 makes a re-offer
-    /// an opportunity to re-key; the key that arrives is a different key, and
-    /// a comparison on the value rather than the presence would push every
-    /// ordinary re-key off the fast path and up to an application that has
-    /// nothing to decide about it.
+    /// And a secured stream goes up even when nothing about it moved — the
+    /// hold that repeats every line it had, keys and certificate included.
+    /// The answer to it has to carry this end's own key or its fingerprint
+    /// and role, and those belong to the layer that holds them; an answer
+    /// written here, with neither, is the one that left the holder's
+    /// negotiation failing.
     #[test]
-    fn a_peer_that_re_keys_on_a_re_offer_is_still_the_same_media() {
+    fn a_re_offer_on_a_secure_profile_goes_up_even_when_nothing_moved() {
         let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
-        let fresh = vec![Attribute::with_value(
-            "crypto",
-            "1 AES_CM_128_HMAC_SHA1_80 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-        )];
-        assert!(session.is_same_media(&secured(40_000, "RTP/SAVP", fresh)));
+        assert!(!session.is_same_media(&secured(40_000, "RTP/SAVP", crypto())));
+
+        let dtls = || {
+            vec![
+                Attribute::with_value("fingerprint", "sha-256 AB:CD"),
+                Attribute::with_value("setup", "actpass"),
+            ]
+        };
+        let session = negotiated(secured(40_000, "UDP/TLS/RTP/SAVP", dtls()));
+        assert!(!session.is_same_media(&secured(40_000, "UDP/TLS/RTP/SAVP", dtls())));
     }
 
     /// A peer that writes the profile in lower case has not changed it.
     #[test]
     fn the_transport_profile_is_compared_without_regard_to_case() {
-        let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
-        assert!(session.is_same_media(&secured(40_000, "rtp/savp", crypto())));
+        let session = negotiated(secured(40_000, "RTP/AVP", Vec::new()));
+        assert!(session.is_same_media(&secured(40_000, "rtp/avp", Vec::new())));
+    }
+
+    /// RFC 8842 §5.5: a subsequent offer hands the DTLS roles back with
+    /// `actpass`, including one written from an answer that took a role.
+    #[test]
+    fn a_hold_written_from_an_answer_offers_the_dtls_roles_back() {
+        let mut session = Session::default();
+        session.set_local(secured(
+            40_000,
+            "UDP/TLS/RTP/SAVP",
+            vec![
+                Attribute::with_value("fingerprint", "sha-256 AB:CD"),
+                Attribute::with_value("setup", "active"),
+            ],
+        ));
+        let offer = session.offer(true).expect("an offer");
+        let media = offer.media.first().expect("the stream");
+        assert_eq!(
+            media.attribute("setup").and_then(|a| a.value.as_deref()),
+            Some("actpass")
+        );
+        assert_eq!(
+            media
+                .attribute("fingerprint")
+                .and_then(|a| a.value.as_deref()),
+            Some("sha-256 AB:CD"),
+            "the certificate moved"
+        );
+        assert_eq!(offer.direction_of(media), Direction::SendOnly);
+    }
+
+    /// An answer written elsewhere keeps a hold this end asked for, and one
+    /// written while nothing is held here is left exactly as it was.
+    #[test]
+    fn an_answer_written_elsewhere_keeps_the_hold_this_end_asked_for() {
+        let mut session = Session::default();
+        session.set_local(description(40_000, Vec::new()));
+
+        let mut answer = description(40_000, Vec::new());
+        let before = answer.clone();
+        assert!(!session.keep_hold(&mut answer), "nothing is held here");
+        assert_eq!(answer, before);
+
+        session.hold.local = true;
+        assert!(session.keep_hold(&mut answer));
+        let media = answer.media.first().expect("the stream");
+        assert_eq!(answer.direction_of(media), Direction::SendOnly);
+
+        // an answer that already stopped listening needs nothing more
+        assert!(!session.keep_hold(&mut answer));
+
+        // and one that only listens is left listening to nothing
+        let mut listening = description(40_000, Vec::new());
+        set_direction(
+            listening.media.first_mut().expect("the stream"),
+            Direction::RecvOnly,
+        );
+        assert!(session.keep_hold(&mut listening));
+        let media = listening.media.first().expect("the stream");
+        assert_eq!(listening.direction_of(media), Direction::Inactive);
     }
 
     /// The far end putting a call on hold re-offers the session it already

@@ -569,9 +569,10 @@ material is still text.
 opportunity to re-key, and the new keys reach the running stream: `adopt`
 compares each direction against the one it is running and hands `RtpSession`
 what moved, so the far end's answer to a hold, a resume or a session refresh
-is heard. A crypto-only re-offer arriving here is the other direction and does
-not get this far — see "One known gap" below. Three things about the answer
-direction are worth stating, because getting any of them wrong is silent.
+is heard, and so is a far end that re-keys in a re-offer of its own — which
+this facade answers, as "Re-offers on a secured call are answered here" below
+explains. Three things about the answer direction are worth stating, because
+getting any of them wrong is silent.
 
 *It is per direction.* Each end keys what it sends, so an answer that moves
 only the far end's key must leave our own sending context alone, and the other
@@ -637,35 +638,41 @@ context opens one key; and RFC 4568 §6.3's defaults, so `UNENCRYPTED_SRTP`,
 refused where they are read rather than ignored where they would matter. `WSH`
 is allowed through and ignored, which §6.3.6 permits in as many words.
 
-**One known gap.** When the far end puts a secured call on hold, `sipral-ua`
-answers that re-INVITE itself — the streams and the formats have not moved, so
-there is nothing for an application to decide — and the answer it writes keeps
-the `RTP/SAVP` profile without the `a=crypto` line §5.1.2 requires on it. The
-negotiation that follows reports `SdpError::CryptoMissing` rather than a hold,
-and the audio carries on under the keys already in use. It is a defect in the
-user agent's own answer writer, not in the facade, and it is not papered over
-here: carrying the key forward locally would make this end believe a
-negotiation the far end saw fail.
+**Re-offers on a secured call are answered here.** Whatever the far end
+re-offers on a secured call — a hold, a resume, a session refresh, a codec
+change — `sipral-ua` hands it up instead of answering it itself, because the
+answer has to carry something only the holder of the keys can write. Under
+SDES that is a crypto line naming the tag it accepted, with this end's own key
+(§5.1.2), and the key is the one this end is already sending under: §7.1.4
+lets an answerer change its key and warns in the same breath that the offerer
+cannot read it until the answer arrives, and a hold is no reason to open that
+window. Under DTLS-SRTP it is this end's fingerprint and the role the running
+association gives it (RFC 8842 §5.3; see "The DTLS roles" below). The user
+agent's own answer used to carry neither. The end that asked for the hold then
+read a secured stream with no key on it: the hold never reached its media, and
+on the wire the answer had withdrawn the key or the certificate.
 
-What the user agent no longer answers by itself is a re-offer whose transport
-profile moved, or one where the `a=crypto` line appeared or disappeared. Those
-are a change to the security of a call in progress, and they are handed up, so
-that an account under a *required* policy refuses them with 488 rather than
-finding out afterwards. Only the presence of the line counts, not its value: a
-peer is entitled to re-key on a re-offer, and a re-key reaches the media
-session by its own path.
+The direction stays the user agent's. It narrows whatever answer it is handed
+to a hold this end has asked for, so a codec change or a session refresh from
+the far end does not take a call off hold behind its user's back — the answer
+this facade writes is `sendrecv` narrowed by the offer (RFC 3264 §6.1), and
+without that second narrowing it would say this end was listening again, and
+the stream here would start sending into a call its user believed was on
+hold.
 
-Two consequences of that, both real and neither hidden. A re-offer that keeps
-`RTP/SAVP` and drops the crypto line is now refused at the stream — port zero
-in the answer — under *every* policy, not only *required*, where before the
-audio limped on under the keys already in use. Such an offer is malformed in
-any case (§5.1.2 requires the attribute on a secure profile), so refusing it is
-the honest answer, but a peer that used to get away with it will now hear
-silence. And the answer this facade writes for a re-offer it was handed is
-always `sendrecv`, so a peer that both holds a stream and moves its profile in
-one re-INVITE gets an answer RFC 3264 §6.1 would not have written. It cannot
-happen under *required*, where the offer is refused before an answer is
-composed; under the other two it is a shape nothing has been seen to send.
+Among the re-offers handed up are the ones that change the security of a call
+in progress: a transport profile that moved, an `a=crypto` line that appeared
+or disappeared. An account under a *required* policy refuses them with 488
+rather than finding out afterwards. Only the presence of the line counts, not
+its value: a peer is entitled to re-key on a re-offer, and a re-key reaches
+the media session by its own path.
+
+One consequence of that, real and not hidden. A re-offer that keeps `RTP/SAVP`
+and drops the crypto line is refused — 488, the session standing — under
+*every* policy, not only *required*, where once the audio limped on under the
+keys already in use. Such an offer is malformed in any case (§5.1.2 requires
+the attribute on a secure profile), so refusing it is the honest answer, but a
+peer that used to get away with it is now told no.
 
 ## Ringing with media (task 8.4.9)
 
@@ -860,28 +867,47 @@ on another codec list (RFC 3264 §8.3.2), and `sipral_call_change_codecs` is the
 same from C. Only the codecs move. The offer is the description this end last
 wrote for the call with its `m=` formats and its `a=rtpmap` and `a=fmtp` lines
 replaced, so everything else is carried as it stands: the address, the
-transport profile, the SDES key or the DTLS fingerprint and `a=setup`, the ICE
-credentials and candidates, multiplexing. A key drawn afresh would be a re-key
-nobody asked for, in the middle of a change about something else; a
-fingerprint written afresh is what RFC 8842 §3.1 reads as asking for a new
-DTLS association, which this stack does not start; new ICE credentials are a
+transport profile, the SDES key or the DTLS fingerprint, the ICE credentials
+and candidates, multiplexing. A key drawn afresh would be a re-key nobody
+asked for, in the middle of a change about something else; a fingerprint
+written afresh is what RFC 8842 §3.1 reads as asking for a new DTLS
+association, which this stack does not start; new ICE credentials are a
 restart. A hold carries all of them unchanged for the same reasons, and the
-codec change is the second re-offer this end writes, so it behaves the same.
-Which way the call flows is the user agent's to write
+codec change is the second re-offer this end writes, so it behaves the same —
+down to the one line both rewrite, `a=setup`, which the next paragraph is
+about. Which way the call flows is the user agent's to write
 (`UserAgent::change_formats`): a held call stays held through the change, and
 `resume` takes it off hold on the new list.
 
-**One deviation, and why.** RFC 8842 §5.5 asks every subsequent offer for
-`a=setup:actpass`. For a call this end placed, that is what it last wrote and
-what goes. For a call this end answered, the last description carries the role
-it answered with, `active` or `passive`, and that goes instead — as it already
-does in a hold. `actpass` would hand the far end the choice again, and a far
-end that chose the other role would be asking for a new association (§3.1),
-which this stack, running one per call, cannot follow; a concrete role leaves
-RFC 4145 one answer, the one already in force, and §5.3 has every answerer
-take it. The price is a MUST not met to the letter. Meeting it means writing
-`actpass` and refusing by name an answer that moves the roles, the way a
-moved fingerprint is refused, in the hold and the codec change alike.
+**The DTLS roles.** RFC 8842 §5.5 asks every subsequent offer for
+`a=setup:actpass`, and every re-offer this stack writes carries it — the hold,
+the resume and the codec change alike — including one made from a
+description that was last an answer and so said `active` or `passive`.
+`actpass` hands the far end the choice again, and §5.3 has an answerer that
+keeps the association answer with "an attribute value that does not change
+the previously negotiated DTLS roles". This stack answers the far end's
+re-offers the same way, which to `actpass` is simply the role it has; a fresh
+answer to `actpass` says `active`, and a server that said so would be asking
+to become the client.
+
+A far end that takes the other role is asking for a new association (§3.1),
+which this stack, running one per call, does not start, and it is refused by
+name as a moved certificate is. An answer that takes it is reported as
+`MediaError::DtlsRoleChanged` and not adopted, so the stream keeps running on
+the association it has. A re-offer that leaves this end only the other role —
+the concrete value an older peer still writes, which §5.3 asks an answerer to
+understand — is answered 488 and reported by the same name, and the session
+stands (RFC 3261 §14.2). A re-offer naming another certificate is refused the
+same way, as `MediaError::DtlsFingerprintChanged`; §5.3 has an answerer that
+will not start the association the offer asks for refuse it, and answering it
+and then declining to follow would leave the far end on an association this
+end never joined.
+
+The one description that goes out with a concrete role is a session refresh.
+RFC 4028 §7.4 has it repeat the last description byte for byte, `o=` version
+included, so a refresh made from an answer carries the role that answer took —
+and a concrete role in an offer leaves RFC 4145 §4.1 exactly one answer, the
+role already in force.
 
 **Payload types keep their codec.** §8.3.2: "the mapping from a particular
 dynamic payload type number to a particular codec within that media stream
