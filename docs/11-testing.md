@@ -108,7 +108,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Sixteen targets, one per door an attacker's bytes come through.
+Seventeen targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -124,14 +124,17 @@ through here is a bug even when nothing crashes — and then answers the offer,
 since an answer is derived from the offer and a strange offer is the shortest
 way to a strange answer.
 
-Nine more, added once it was clear how much of the receive path the first four
+Ten more, added once it was clear how much of the receive path the first four
 never reached. `crypto` takes an `a=crypto` line through the syntax parser and
 then through the policy reader that decodes its key material, which `sdp`
 never calls into. `replay` takes the recording format, which is a text file a
 person hand-edits and mails as an attachment. `dialoginfo` takes the
 `application/dialog-info+xml` body a SUBSCRIBE gets back, through a
 hand-rolled reader with bounds of its own on nesting, element count and value
-length. `headless` takes the control channel a voice agent connects on, frame
+length. `mwi` takes the `application/simple-message-summary` body a
+`message-summary` NOTIFY carries, through the same shape of reader, bounded on
+the document, the line, the class name and the message counts instead.
+`headless` takes the control channel a voice agent connects on, frame
 reassembly and JSON decode together, cut into arbitrary reads. `rtcp` takes a
 compound packet and every typed accessor the receive path calls on one.
 `rtp_dtmf` takes a stream of datagrams through the packet parser and the RFC
@@ -217,14 +220,14 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than seventeen runs beginning at
+targets with something to start from rather than eighteen runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Sixteen of the
-seventeen families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing. Seventeen of the
+eighteen families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -250,7 +253,7 @@ The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
 Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
 five minutes each by default — before a release and overnight, not before
 every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all seventeen, under the nightly that `fuzz/` pins, so
+do on every run is **build** all eighteen, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -339,12 +342,13 @@ change that would stop an integrator's program building fails at the moment it
 is made. **This is the phase-1 exit criterion and the precondition for
 freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
 
-It runs the same ten flows the Rust driver runs, against the same servers;
-only the opt-in narrowed-inbound one at the bottom of the table is the Rust
-driver's alone. The codec change was the one the C surface could not express
+It runs the same ten call-and-transfer flows the Rust driver runs, against the
+same servers. The codec change was the one the C surface could not express
 until `sipral_call_change_codecs` existed — and the Rust driver could not
 either, through the facade: it wrote that re-offer itself until
-`MediaEngine::change_codecs` did.
+`MediaEngine::change_codecs` did. MESSAGE and message waiting indication
+(8.6.5), and the opt-in narrowed-inbound flow at the bottom of the table, are
+the Rust driver's alone for now — `interop/harness-c` is not this task's.
 
 Run through Kamailio to FreeSWITCH and straight at Asterisk (`scripts/lab.sh
 kamailio` / `asterisk`), unless a column below says one server only:
@@ -361,6 +365,8 @@ kamailio` / `asterisk`), unless a column below says one server only:
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
 | DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | both |
 | hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`, the 8.2.1 case): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
+| MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
+| message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, `interop/asterisk/pjsip.conf`'s `mailboxes=9007@default`), read once before anything is left in it; a call into the lab's own voicemail extension (9007, `app_voicemail`) to leave one; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
 | inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |
 
 Every audible flow's result line carries the harness's own tally — sent, come
@@ -416,7 +422,7 @@ strict `-std` and the Apple SDK does not, so the compiler here alone passes a
 file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all seventeen fuzz targets under their own nightly — which nothing else
+over all eighteen fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

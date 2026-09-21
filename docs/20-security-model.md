@@ -101,15 +101,16 @@ panics and never does unbounded work on the field itself — but it is a real
 gap between what `validate` proves in a test and what the dispatcher does with
 a live message, and it is worth closing rather than assuming closed.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Sixteen
+**Fuzzing covers the doors an attacker's bytes come through.** Seventeen
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
-over SIP itself (`parse`, `framer`, `builder`, `sdp`), nine added once it was
+over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
-`replay`, `dialoginfo`, `headless`, `rtcp`, `rtp_dtmf`, `srtp_unprotect`,
-`stun`, `turn`), two for DTLS (`dtls_record`, `dtls_handshake`), one for
+`replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
+`srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
+`dtls_handshake`), one for
 DTMF over SIP INFO (`dtmf_info`), and one for the ICE agent (`ice`). The exit
 gate is 24 hours per target with no crash and no hang; `scripts/check.sh`
-builds all seventeen on every run so none of them rots uncompiled between
+builds all eighteen on every run so none of them rots uncompiled between
 releases.
 
 `ice` is the newest and covers the one seam that is open to anybody before a
@@ -458,7 +459,7 @@ concealment, comfort noise, voice-activity detection, and the in-tree G.722
 codec — `crates/sipral-media/src/resample.rs`, `drift.rs`, `plc.rs`,
 `comfort_noise.rs`, `vad.rs`, `g722/` — all run on audio derived from an RTP
 payload the far end chose, once a call is
-negotiated — and none of the seventeen fuzz targets under `fuzz/fuzz_targets/`
+negotiated — and none of the eighteen fuzz targets under `fuzz/fuzz_targets/`
 reaches them. The message parser, the SDP parser, the crypto-attribute reader
 and the RTP/RTCP/SRTP wire formats each have a target that feeds them
 adversarial bytes; the codec and DSP layer downstream of RTP does not yet, and

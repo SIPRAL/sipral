@@ -69,8 +69,8 @@ use sipral_rtp::{
     ReceiverReportBuilder, RtpHeader, RtpPacket, SdesItem, SenderInfo, SenderOrReceiver,
     SenderReportBuilder, SourceDescriptionBuilder,
 };
-use sipral_ua::DialogInfo;
 use sipral_ua::dtmf::parse_info;
+use sipral_ua::{DialogInfo, MessageSummary};
 
 /// Something this program will not write out, because it is not what it says
 /// it is.
@@ -629,6 +629,54 @@ fn dialoginfo_seeds() -> Result<Vec<Seed>, Wrong> {
     let mut out = Vec::new();
     for (name, document) in documents {
         DialogInfo::parse(document.as_bytes())
+            .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
+        out.push((name, document.as_bytes().to_vec()));
+    }
+    Ok(out)
+}
+
+// -------------------------------------------------------- message-summary (MWI)
+
+fn mwi_seeds() -> Result<Vec<Seed>, Wrong> {
+    let documents = [
+        // RFC 3842 §4.1's own sample notification (message A3), verbatim.
+        (
+            "rfc-sample",
+            concat!(
+                "Messages-Waiting: yes\r\n",
+                "Message-Account: sip:alice@vmail.example.com\r\n",
+                "Voice-Message: 2/8 (0/2)\r\n"
+            ),
+        ),
+        // §3.5's own boolean-only case: "the status line allows messaging
+        // systems ... to provide the traditional boolean message waiting
+        // notification".
+        ("boolean-only", "Messages-Waiting: no\r\n"),
+        // more than one message-context-class in one body (RFC 3458 §6.2).
+        (
+            "several-classes",
+            concat!(
+                "Messages-Waiting: yes\r\n",
+                "Voice-Message: 1/0\r\n",
+                "Fax-Message: 0/2\r\n"
+            ),
+        ),
+        // §5.2's `opt-msg-headers`: RFC 2822 style headers about individual
+        // new messages, after the blank line this reader stops at.
+        (
+            "with-trailing-headers",
+            concat!(
+                "Messages-Waiting: yes\r\n",
+                "Voice-Message: 4/8 (1/2)\r\n",
+                "\r\n",
+                "To: <alice@atlanta.example.com>\r\n",
+                "From: <bob@biloxi.example.com>\r\n"
+            ),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, document) in documents {
+        MessageSummary::parse(document.as_bytes())
             .map_err(|why| Wrong(format!("the {name} seed does not parse: {why:?}")))?;
         out.push((name, document.as_bytes().to_vec()));
     }
@@ -1439,6 +1487,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
         ("ice", ice_seeds()?),
+        ("mwi", mwi_seeds()?),
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),
         ("rtcp", rtcp_seeds()?),

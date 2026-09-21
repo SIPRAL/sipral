@@ -97,6 +97,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mwi"
+path = "fuzz_targets/mwi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "rtcp"
 path = "fuzz_targets/rtcp.rs"
 test = false
