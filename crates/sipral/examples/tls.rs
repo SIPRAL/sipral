@@ -327,13 +327,23 @@ impl TlsTransport {
 
     /// Read whatever ciphertext has arrived, hand every decrypted fragment to
     /// `on_data`, and let the handshake and any alert run themselves.
-    /// `true` when anything moved at all, on the wire or off it — the same
-    /// meaning `Endpoint::read_stream` gives its own caller.
-    fn poll(&mut self, mut on_data: impl FnMut(&[u8])) -> io::Result<bool> {
+    ///
+    /// `read_tls` returning `Ok(0)` is not "nothing arrived yet" — on a
+    /// non-blocking socket that is `Err(WouldBlock)`, already handled below —
+    /// it is the peer's FIN, the TCP connection ending for good (the same
+    /// meaning `Read::read` gives it). Conflating the two would leave a
+    /// closed connection looking merely idle: `flush_tls` would keep failing
+    /// silently underneath `send`, and nothing would ever tell
+    /// `sipral-core` the transport is gone.
+    fn poll(&mut self, mut on_data: impl FnMut(&[u8])) -> io::Result<PollOutcome> {
         let mut moved = false;
+        let mut closed = false;
         loop {
             match self.conn.read_tls(&mut self.tcp) {
-                Ok(0) => break,
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
                 Ok(_) => moved = true,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error),
@@ -357,8 +367,17 @@ impl TlsTransport {
             }
         }
         self.flush_tls()?;
-        Ok(moved)
+        Ok(PollOutcome { moved, closed })
     }
+}
+
+/// What one [`TlsTransport::poll`] found: whether anything moved, on the wire
+/// or off it, and whether the peer closed the connection — the two are
+/// independent, since a closing read can still have delivered a last decrypted
+/// fragment first.
+struct PollOutcome {
+    moved: bool,
+    closed: bool,
 }
 
 // -- the SIP and media endpoint on top of it ----------------------------------
@@ -424,6 +443,10 @@ impl Endpoint {
     /// Read whatever the TLS connection has, and feed it in as the byte
     /// stream it is (`Input::StreamData`) rather than as a whole datagram —
     /// the one difference this endpoint has from `common/udp_endpoint.rs`'s.
+    /// A connection the peer closed is reported as `Input::StreamClosed`, the
+    /// same way a real transport would, so `sipral-core` fails whatever was
+    /// waiting on it instead of a caller here quietly polling a dead socket
+    /// until its own ceiling gives up on it.
     fn read_stream(&mut self, now: Instant) -> bool {
         let Self {
             sip,
@@ -431,7 +454,7 @@ impl Endpoint {
             transport,
             ..
         } = self;
-        sip.poll(|chunk| {
+        let outcome = sip.poll(|chunk| {
             let _ = agent.receive(
                 Input::StreamData {
                     transport: *transport,
@@ -439,8 +462,21 @@ impl Endpoint {
                 },
                 now,
             );
-        })
-        .unwrap_or(false)
+        });
+        match outcome {
+            Ok(outcome) => {
+                if outcome.closed {
+                    let _ = agent.receive(
+                        Input::StreamClosed {
+                            transport: *transport,
+                        },
+                        now,
+                    );
+                }
+                outcome.moved
+            }
+            Err(_) => false,
+        }
     }
 
     fn run_media(
