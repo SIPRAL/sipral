@@ -68,6 +68,88 @@ afterwards netem's own drop counter has to show that it took at least four
 seconds of the call's packets. A run where it did not says so and proves
 nothing; it is never reported as a pass.
 
+`lossy`, `mobile` and `satellite` do apply on a 6.12 kernel — `tc`'s own
+distribution tables (`normal.dist` and the rest) ship at a multiarch path
+(`/usr/lib/x86_64-linux-gnu/tc/`, not `/usr/lib/tc/`) that a current
+`iproute2` finds without help, and a run's own qdisc read-back, `REQUIRE`,
+confirms it every time. What did not apply, on any kernel, was the
+impairment reaching the audio these three profiles measure — see below.
+
+## The audio quality gate
+
+Packet counts say a call connected and ended; they say nothing about whether
+what crossed it was still the tone. `interop/harness/src/quality.rs` does:
+segmental SNR on the frames that arrived, and a check for a discontinuity at
+either edge of a concealment gap, against the lab's own fixed 350 Hz + 440 Hz
+tone (`Playtones`/`tone_stream`, see the module's own doc for why that and not
+an echo of what this end sent). `scripts/lab.sh netem` turns it on
+(`SIPRAL_AUDIO_GATE`) for `Flow::Call`, and a profile whose audio does not
+hold up fails the same way a connection that never came up does — the result
+line names which: a click, or a segmental SNR under the floor.
+
+Building it surfaced the reason `lossy`, `mobile` and `satellite` had never
+actually exercised it. `tc netem` only ever shapes egress, and the comment
+above this section used to read that as enough on the strength of an echo
+that does not exist (`quality.rs`'s own module doc says why one was tried at
+the far end and abandoned). Shaping only this container's own egress never
+touched a single frame of the tone it received: every run of the three
+non-outage profiles passed with the same audio a clean run has, because the
+call it measured was, in every way that mattered, a clean one. `scripts/lab.sh`
+now redirects this container's own ingress through an `ifb` device
+(`interop/impairment/README.md`'s own "Both directions" section) and applies
+the same `NETEM` there, so the link is bad both ways, the way a real one is —
+and only once that redirect existed did any of the three ever produce a
+concealed frame, a lost packet the far end's own tone shows on this end's
+receive side, or a click.
+
+**Segmental SNR**, `MIN_SEGMENTAL_SNR_DB` in `quality.rs`: **10 dB.** Measured
+on the lab VM, several runs of each profile, `Flow::Call` alone: a clean run
+and `satellite` (0.5% loss) sit at 34.4 dB every time — the fitted tone's own
+residual, not measured degradation. `lossy` (4% bursty loss) stayed at
+32–34 dB across a dozen runs. `mobile` (2% bursty loss on a link whose delay
+moves) is the one that varies, 15–34 dB depending on how the loss bursts land
+against the spurts, with one run down to 14.8 dB the lowest of everything
+measured. The floor sits under that by four decibels, and clearly above what
+a run actually broken produces: a synthetic 60% loss profile, run only to see
+where the gate gives out, scored 9.4 dB and clicked besides.
+
+**Splice continuity**, `CLICK_FLOOR` and `CLICK_MARGIN_FRACTION`: **900 and
+0.6**, making the threshold at a splice `expected + 900 + 0.6 * expected`,
+`expected` the fitted tone's own step at that instant. Both are added to the
+step rather than used to shrink it — a jump smaller than the tone's own step
+at that point is not a discontinuity whatever fraction of the step it comes
+to, and a threshold that starts from the step and only adds can never read
+below it. An earlier version scaled the step directly
+(`CLICK_FLOOR + CLICK_MARGIN_FRACTION * expected`, with no `expected` term of
+its own) and read as a click any splice landing between that shrunk threshold
+and the true step — jumps *smaller* than the tone's own slope, which a
+`mobile` run reached in one edge out of ten roughly one run in five. Once the
+threshold could no longer fall under the step it was compared against, thirty
+further runs of `lossy` and `mobile` clicked exactly once, on a jump ten times
+the fitted step at that instant (2008 against an expected 199) — the shape an
+actual discontinuity has, not a close call. `lossy` and `mobile` at their
+current settings therefore still click on the rare run, genuinely: the
+concealer's own splice is not perfect under real bursty loss, and a gate
+calibrated to hide that would not be measuring anything. Running a profile
+several times, which is what calibrating it here meant, is also how a person
+reading its result should read an occasional `FAIL` on `lossy` or `mobile` —
+not as the gate being unreliable, but as the rare case it exists to catch.
+
+`blackout` is different in kind: the outage silences the far end's tone for
+whole seconds at once, which `MediaSession` reports as `Playback::Silence`
+rather than concealment, so no splice is checked either side of it and
+segmental SNR is unaffected on whatever does arrive — a long gap is not what
+this gate is for, `interop/impairment/blackout.sh` is. Redirecting ingress
+through `ifb` changed that profile too, in a different way: its own outage
+check used to cut and read `$link` alone, which — once `$link` also carried
+the ingress `handle ffff:` qdisc this section's own fix added beside the
+netem one — made `tc -s qdisc show dev "$link"` print two "Sent" lines where
+the check expected one, failing the arithmetic outright rather than the
+impairment. `blackout.sh` now cuts both `$link` and `$ifb` and reads the
+outage back from `$ifb` alone, the ingress side, which is what governs
+whether this end actually heard the silence rather than merely failed to
+send into it.
+
 ## Layers of testing
 
 **Unit, with a fake clock.** Every transaction and dialog state machine is

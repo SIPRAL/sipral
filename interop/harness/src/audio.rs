@@ -15,11 +15,21 @@
 //! line has always printed, and they still come from watching the session
 //! from outside it, the same way a real audio device would.
 
+use std::env;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use sipral::{Arrival, MediaSession, Playback};
+
+use crate::quality;
+
+/// The audio quality gate — segmental SNR and splice continuity, `quality`'s
+/// own — is extra bookkeeping on every played frame, worth paying for only
+/// where something is actually going to read it: `scripts/lab.sh`'s own
+/// netem step, which sets this. Every other step, and every flow but the
+/// one that dwells on the tone, never asks and never pays for it.
+const AUDIO_GATE_ENV: &str = "SIPRAL_AUDIO_GATE";
 
 /// The largest frame any codec in this build produces, in samples: G.722's,
 /// which hears twice as fast as it counts. Opus is not linked here — see
@@ -61,16 +71,27 @@ pub(crate) fn in_spurt(elapsed: Duration) -> bool {
     elapsed.as_millis() % cycle < SPURT.as_millis()
 }
 
+/// The tone's own period, in samples, at `rate`.
+fn tone_period(rate: u32) -> u32 {
+    (rate / TONE_HZ).max(2)
+}
+
+/// The tone's ideal value at `phase` samples into a period of `period`, with
+/// no side effect on the phase itself — what [`tone`] writes.
+fn tone_sample(phase: u32, period: u32) -> i16 {
+    if phase % period < period / 2 {
+        AMPLITUDE
+    } else {
+        -AMPLITUDE
+    }
+}
+
 /// What this end sends. Square rather than sine, so nothing about the signal
 /// itself can be blamed for what comes back.
 pub(crate) fn tone(samples: &mut [i16], phase: &mut u32, rate: u32) {
-    let period = (rate / TONE_HZ).max(2);
+    let period = tone_period(rate);
     for slot in samples.iter_mut() {
-        *slot = if *phase % period < period / 2 {
-            AMPLITUDE
-        } else {
-            -AMPLITUDE
-        };
+        *slot = tone_sample(*phase, period);
         *phase = phase.wrapping_add(1);
     }
 }
@@ -86,6 +107,14 @@ pub(crate) fn loudness(samples: &[i16]) -> i32 {
         .sum();
     let count = i64::try_from(samples.len()).unwrap_or(1).max(1);
     i32::try_from(total / count).unwrap_or(i32::MAX)
+}
+
+/// Whether a frame is loud enough to be the tone rather than silence between
+/// spurts — the same test [`Heard::audible`] is counted by, shared with
+/// `quality` so a frame it scores and a frame this file already calls
+/// audible are never two different ideas of loud.
+pub(crate) fn is_audible(samples: &[i16]) -> bool {
+    loudness(samples) >= AUDIBLE
 }
 
 /// What the far end sent back, counted the same way the harness has always
@@ -117,6 +146,8 @@ pub(crate) struct Media {
     phase: u32,
     heard: Heard,
     inbox: [u8; 2_048],
+    /// `Some` only when [`AUDIO_GATE_ENV`] is set — see its own doc comment.
+    quality: Option<quality::Gate>,
 }
 
 impl Media {
@@ -139,6 +170,9 @@ impl Media {
             phase: 0,
             heard: Heard::default(),
             inbox: [0; 2_048],
+            quality: env::var_os(AUDIO_GATE_ENV)
+                .is_some()
+                .then(quality::Gate::new),
         })
     }
 
@@ -267,6 +301,9 @@ impl Media {
             if matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE {
                 self.heard.audible = self.heard.audible.saturating_add(1);
             }
+            if let Some(gate) = self.quality.as_mut() {
+                gate.observe(outcome, room, rate);
+            }
             self.next_play += PACE;
         }
     }
@@ -274,6 +311,12 @@ impl Media {
     /// What came back.
     pub(crate) const fn heard(&self) -> Heard {
         self.heard
+    }
+
+    /// What the audio quality gate measured, when [`AUDIO_GATE_ENV`] asked
+    /// for one.
+    pub(crate) fn quality_report(&self) -> Option<quality::Report> {
+        self.quality.as_ref().map(quality::Gate::report)
     }
 }
 

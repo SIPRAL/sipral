@@ -346,10 +346,22 @@ flows_baresip_c() {
             exit \$status"
 }
 
-# The same call again, over a link deliberately made bad. netem shapes egress,
-# so it is our packets that are delayed, lost in bursts and reordered; the echo
-# means the return path suffers too, since a packet that never arrived is never
-# echoed.
+# The same call again, over a link deliberately made bad in both directions.
+#
+# netem only ever shapes egress. That used to be enough on the strength of a
+# comment here that no longer holds: extension 9000 does not echo. It plays a
+# fixed tone -- interop/asterisk/extensions.conf's own Playtones, FreeSWITCH's
+# tone_stream in interop/freeswitch/lab.xml -- regardless of what this end
+# sends or whether it arrives at all (see interop/harness/src/quality.rs for
+# why an echo was tried and abandoned). So impairing only what this container
+# sends out never touches the audio it receives, which is the one side the
+# audio quality gate below exists to judge, and every "audio survived it"
+# this step ever printed proved only that signalling survives a bad egress --
+# never that a single frame of the returned tone had been delayed, dropped or
+# concealed. `ifb` plus a `mirred` redirect is the standard way around
+# netem's own egress-only limit: it hands this container's own ingress to a
+# virtual device netem can shape as if it were egress, so `$NETEM` is applied
+# once each way and the link is bad symmetrically, the way a real one is.
 #
 # The shapes live in interop/impairment/ rather than here, because a threshold
 # is only meaningful against a profile somebody else can run.
@@ -357,8 +369,15 @@ flows_baresip_c() {
 # `tc` accepts what the kernel it is talking to does not necessarily apply, and
 # says nothing when it does not: on a 3.10 kernel the delay is dropped in
 # silence while the loss goes through. A run whose impairment never happened
-# reads exactly like a clean one, which is worse than no run at all -- so the
-# qdisc is read back against what the profile said it needed.
+# reads exactly like a clean one, which is worse than no run at all -- so both
+# qdiscs are read back against what the profile said it needed.
+#
+# SIPRAL_AUDIO_GATE=1 turns on the harness's own audio quality gate
+# (interop/harness/src/quality.rs): segmental SNR and splice continuity
+# against the lab's own 350+440 Hz tone, on every frame the primary call
+# played back. It runs only here -- the ordinary, unimpaired steps above
+# never set it -- because it is the netem profiles' own claim that is worth
+# a measured number rather than a pass/fail on packet counts alone.
 bad_network() {
     local profile="$1"
     # shellcheck disable=SC1090
@@ -368,6 +387,7 @@ bad_network() {
     docker run --rm --network sipral-interop_lab \
         --cap-add NET_ADMIN \
         -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=register,call \
+        -e SIPRAL_AUDIO_GATE=1 \
         -e "SIPRAL_DWELL_MS=${DWELL_MS:-2000}" \
         -e "SIPRAL_PATIENCE_MS=$(( ${DWELL_MS:-2000} + 20000 ))" \
         -e "NETEM=$NETEM" -e "REQUIRE=$REQUIRE" -e "DURING=$DURING" \
@@ -377,15 +397,27 @@ bad_network() {
             apt-get -qq update >/dev/null 2>&1
             apt-get -qq install -y iproute2 >/dev/null 2>&1
             link=$(ip route | awk "/^default/{print \$5}")
+            ifb=ifb0
             # shellcheck disable=SC2086
             tc qdisc add dev "$link" root netem $NETEM
-            applied=$(tc qdisc show dev "$link")
-            echo "  $applied"
+            ip link add "$ifb" type ifb
+            ip link set "$ifb" up
+            tc qdisc add dev "$link" handle ffff: ingress
+            tc filter add dev "$link" parent ffff: protocol ip u32 \
+                match u32 0 0 action mirred egress redirect dev "$ifb"
+            # shellcheck disable=SC2086
+            tc qdisc add dev "$ifb" root netem $NETEM
+            applied_out=$(tc qdisc show dev "$link")
+            applied_in=$(tc qdisc show dev "$ifb")
+            echo "  out: $applied_out"
+            echo "  in:  $applied_in"
+            impaired=1
             if [ -n "$REQUIRE" ]; then
-                case "$applied" in
-                  *"$REQUIRE"*) ;;
-                  *) echo "IMPAIRMENT-NOT-APPLIED"; exit 3 ;;
-                esac
+                case "$applied_out" in *"$REQUIRE"*) ;; *) impaired=0 ;; esac
+                case "$applied_in" in *"$REQUIRE"*) ;; *) impaired=0 ;; esac
+            fi
+            if [ "$impaired" -eq 0 ]; then
+                echo "IMPAIRMENT-NOT-APPLIED"; exit 3
             fi
             if [ -n "$DURING" ]; then
                 ( eval "$DURING" ) > /tmp/during 2>&1 &

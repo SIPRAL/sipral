@@ -27,15 +27,29 @@
 # the qdisc, and afterwards netem's own drop counter has to show that it took
 # the call's packets. A run where it did not is reported as proving nothing,
 # never as a pass.
+#
+# Cut on both `$link` and `$ifb` (scripts/lab.sh's own ingress redirect),
+# because extension 9000 plays its tone regardless of what this end sends: an
+# outage on `$link` alone stops this end talking and never touches what it
+# hears, which is what "the call froze" is actually about. Read back from
+# `$ifb`'s own drop counter for the same reason -- it is what this end would
+# have heard, not what it tried to send.
 
 WHY="the link disappears for eight seconds in the middle of the call"
 NETEM=""
 REQUIRE=""
 DWELL_MS=20000
 DURING='
-    # packets out through this qdisc, and packets it has thrown away
-    sent() { tc -s qdisc show dev "$link" | sed -n "s/.*Sent [0-9]* bytes \([0-9]*\) pkt.*/\1/p"; }
-    dropped() { tc -s qdisc show dev "$link" | sed -n "s/.*dropped \([0-9]*\).*/\1/p"; }
+    # packets out through the egress qdisc, and packets the ingress redirect
+    # has thrown away. `$link` carries the netem qdisc *and* the ingress
+    # handle scripts/lab.sh adds beside it, and `tc -s qdisc show` prints a
+    # "Sent" line for both -- so this reads only the block above the ingress
+    # one, the netem qdisc'"'"'s own. `$ifb` carries netem alone, no such split.
+    sent() {
+        tc -s qdisc show dev "$link" | sed "/^qdisc ingress/,\$d" \
+            | sed -n "s/.*Sent [0-9]* bytes \([0-9]*\) pkt.*/\1/p"
+    }
+    dropped() { tc -s qdisc show dev "$ifb" | sed -n "s/.*dropped \([0-9]*\).*/\1/p"; }
     missed() { echo "$1"; echo "IMPAIRMENT-NOT-APPLIED"; exit 0; }
 
     # A call that is up sends fifty packets a second; signalling is a handful.
@@ -53,19 +67,22 @@ DURING='
 
     before=$(dropped)
     tc qdisc change dev "$link" root netem loss 100%
-    case "$(tc qdisc show dev "$link")" in
+    tc qdisc change dev "$ifb" root netem loss 100%
+    case "$(tc qdisc show dev "$ifb")" in
       *loss*) ;;
-      *) missed "this kernel did not take loss 100%" ;;
+      *) missed "this kernel did not take loss 100% on the ingress redirect" ;;
     esac
     sleep 8
     after=$(dropped)
     tc qdisc change dev "$link" root netem
+    tc qdisc change dev "$ifb" root netem
 
     # eight seconds at fifty a second is four hundred; two hundred is four
-    # seconds of a call gone, which is an outage by any reading and leaves room
-    # for the pauses a cadenced sender takes
+    # seconds of the far end'"'"'s own tone gone from what this end actually
+    # received, which is an outage by any reading and leaves room for the
+    # pauses a cadenced sender takes
     [ -n "$before" ] && [ -n "$after" ] || missed "the drop counter could not be read"
     gone=$((after - before))
-    echo "the outage took $gone of the call packets"
-    [ "$gone" -ge 200 ] || missed "the outage took $gone packets, so it did not land in the call"
+    echo "the outage took $gone packets out of what this end actually received"
+    [ "$gone" -ge 200 ] || missed "the outage took $gone packets, so it did not land in what this end heard"
 '

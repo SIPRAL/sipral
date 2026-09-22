@@ -24,6 +24,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   same pair cannot deadlock against each other. A new interop flow places
   two calls to Asterisk, joins them and proves one call's tone crosses to
   the other's wire, on both drivers.
+- **An audio quality gate on the netem profiles, and a fix to what they had
+  actually been testing.** `interop/harness` gained a `quality` module that
+  fits the lab's own fixed 350+440 Hz tone (never an echo of what this end
+  sent — its own module doc says why one was tried and abandoned) against
+  every frame the primary call plays back, once per run of frames this end's
+  own ear calls audible, and checks two things a passing packet count never
+  could: segmental SNR on the frames that arrived, and no discontinuity at
+  either edge of a concealment gap. `scripts/lab.sh netem` now turns it on
+  (`SIPRAL_AUDIO_GATE`) and fails a profile whose audio does not hold up.
+  Building it surfaced a second, older bug: `tc netem` only ever shaped this
+  container's own egress, and with no echo at the far end that never touched
+  the audio anything here measured — `lossy`, `mobile` and `satellite` had
+  been passing on a link that was bad in name only. `scripts/lab.sh` now
+  redirects this container's own ingress through an `ifb` device so the same
+  impairment lands both ways, and `blackout.sh`'s own outage check reads the
+  ingress side's drop counter rather than the egress one.
 - **MESSAGE and message waiting indication, through the C ABI too.**
   `interop/harness-c` gained the two flows `interop/harness` already
   carried: an out-of-dialog MESSAGE sent to the lab's own echo extension

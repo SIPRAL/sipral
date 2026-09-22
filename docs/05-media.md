@@ -371,7 +371,11 @@ someone configured once. Design targets:
 Measured against the exit criterion in [10-roadmap.md](10-roadmap.md): mean
 opinion score under simulated loss and jitter, compared side by side with a
 reference stack on the same impaired network, using `tc netem` profiles that are
-committed with the tests.
+committed with the tests. `interop/harness`'s own audio quality gate
+(`docs/11-testing.md`) is the automated half of that measurement: segmental SNR
+on the frames that arrive and a check for a discontinuity at either edge of a
+concealed gap, on every netem profile the lab runs, rather than a score read
+once by ear.
 
 The algorithm is derived from the published literature on adaptive playout,
 including the NetEq design as described in its papers. No implementation is

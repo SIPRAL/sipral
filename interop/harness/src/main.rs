@@ -42,6 +42,7 @@ mod join;
 #[cfg(test)]
 mod local;
 mod pair;
+mod quality;
 
 use std::collections::HashMap;
 use std::env;
@@ -1402,6 +1403,15 @@ impl Script {
             .unwrap_or_default()
     }
 
+    /// What the audio quality gate measured on the primary call, when
+    /// `SIPRAL_AUDIO_GATE` asked for one — `None` on a flow it was never
+    /// engaged for, exactly as `Media::quality_report` is.
+    fn quality_report(&self, endpoint: &Endpoint) -> Option<quality::Report> {
+        self.call
+            .and_then(|call| endpoint.media.get(&call))
+            .and_then(Media::quality_report)
+    }
+
     fn hang_up(&mut self, endpoint: &mut Endpoint, now: Instant) {
         if self.step == Step::Ending || self.step == Step::Done {
             return;
@@ -1648,6 +1658,17 @@ fn run(
     drive(&mut endpoint, &mut script, now + patience());
     let heard = script.heard(&endpoint);
     script.verdict(heard, env::var("SIPRAL_REQUIRE_AUDIO").is_ok())?;
+    // the audio quality gate, when `SIPRAL_AUDIO_GATE` engaged one on the
+    // primary call's media: a call that connected, dwelled and ended can
+    // still be a failure the ordinary facts above never see, if what it
+    // carried clicked at a concealment splice or measured too noisy to
+    // trust. See `quality`'s own module doc.
+    let quality = script.quality_report(&endpoint);
+    if let Some(report) = quality
+        && let Err(why) = report.verdict()
+    {
+        return Err(format!("{why} ({})", report.summary()));
+    }
 
     if heard.sent == 0 {
         return Ok(String::new());
@@ -1656,6 +1677,10 @@ fn run(
         "   ({} sent, {} back, {} audible, {} refused",
         heard.sent, heard.received, heard.audible, heard.refused
     );
+    if let Some(report) = quality {
+        use std::fmt::Write as _;
+        let _ = write!(said, "; {}", report.summary());
+    }
     // the session's own account of the path, which is the only thing that
     // says anything under an impaired network: how much never arrived, how
     // late the rest was, and how much had to be invented
