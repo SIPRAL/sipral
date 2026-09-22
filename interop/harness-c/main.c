@@ -90,6 +90,13 @@
 #define TEST_DIGIT "5"
 #define DIGIT_MS 200u
 
+/* `FLOW_MESSAGE`'s own body. Not read back for a match -- the lab's own
+ * dialplan is free to prefix it on the way back (`interop/asterisk`'s own
+ * extension 9006 does) -- only that a MESSAGE came back at all. Copied from
+ * `interop/harness/src/main.rs`'s own `MESSAGE_BODY`, so a capture shows the
+ * same bytes from either driver. */
+#define MESSAGE_BODY "sipral interop lab"
+
 /* What the hold-with-a-codec-change flow moves the call onto: the other G.711
  * law, which every server in the lab takes and which the call cannot already
  * be on, since the catalogue offers PCMU first. */
@@ -296,6 +303,20 @@ struct seen {
     /* the codec the call came up on, and the one it is on now */
     uint32_t codec_started;
     uint32_t codec_now;
+    /* `FLOW_MESSAGE`: this end's own send was answered, and with what
+     * status; the lab's own echo dialplan sent a MESSAGE back */
+    int message_sent;
+    uint32_t message_sent_status;
+    int message_received;
+    /* `FLOW_MWI`: the message-summary subscription was granted, or it ended
+     * (refused, or given up on) before the flow had what it came for */
+    int subscribed;
+    int subscription_ended;
+    /* a message-summary NOTIFY arrived, and the mailbox's own `new` count on
+     * the latest one -- `flow_mwi` reads this once for its baseline and
+     * again, after the voicemail call, for the claim that it climbed */
+    int mailbox_notified;
+    uint32_t mailbox_new_count;
     int events;
     char fault[192];
 };
@@ -377,6 +398,29 @@ static void on_event(const sipral_event_t *event, void *user_data)
             seen->transfer_failed = 1;
         }
         break;
+    case SIPRAL_EVENT_KIND_MESSAGE_RECEIVED:
+        seen->message_received = 1;
+        break;
+    case SIPRAL_EVENT_KIND_MESSAGE_SENT:
+        seen->message_sent = 1;
+        seen->message_sent_status = event->payload.message.status_code;
+        break;
+    case SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED:
+        /* one kind carries both a subscription granted and one that is no
+         * longer live -- `state` says which, not the kind. Requesting is
+         * neither: nothing has answered the SUBSCRIBE yet */
+        if (event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_ACTIVE
+            || event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_PENDING) {
+            seen->subscribed = 1;
+        } else if (event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_RETRYING
+                   || event->payload.subscription.state == SIPRAL_SUBSCRIPTION_STATE_ENDED) {
+            seen->subscription_ended = 1;
+        }
+        break;
+    case SIPRAL_EVENT_KIND_MESSAGES_WAITING:
+        seen->mailbox_notified = 1;
+        seen->mailbox_new_count = event->payload.message.new_messages;
+        break;
     default:
         break;
     }
@@ -397,11 +441,19 @@ struct endpoint {
     sipral_handle_t call;
     sipral_handle_t consulted;
     sipral_handle_t media;
+    /* `flow_mwi`'s own subscription to `message-summary`. SIPRAL_HANDLE_NONE
+     * on every other flow, and `finish`'s own signal that there is one to
+     * give up. */
+    sipral_handle_t subscription;
 
     int sip_fd;
     int rtp_fd;
     char sip_address[SIPRAL_ADDRESS_BYTES];
     char rtp_address[SIPRAL_ADDRESS_BYTES];
+    /* this account's own AOR, as `open_endpoint` built it to add the
+     * account -- kept so `flow_mwi` can subscribe to the same address of
+     * record rather than build it again from parts it was never handed */
+    char aor[128];
     struct sockaddr_in server;
 
     uint64_t next_frame_ms;
@@ -412,6 +464,11 @@ struct endpoint {
     uint32_t phase;
     size_t frame_samples;
     uint32_t sample_rate;
+    /* `flow_mwi`'s own mailbox `new` count, read from the first
+     * notification -- before the voicemail call, whatever an earlier run
+     * already left behind. The claim is that a later one reads higher than
+     * this, not that it starts at zero. */
+    uint32_t mailbox_baseline;
 
     /* the same four numbers the Rust harness prints, counted the same way:
      * from outside the session, watching what each call returns */
@@ -741,6 +798,39 @@ static int change_settled(const struct endpoint *end)
            || end->seen.ended;
 }
 
+/* `FLOW_MESSAGE`'s own send reached a final answer, whatever it was. */
+static int message_accepted(const struct endpoint *end)
+{
+    return end->seen.message_sent;
+}
+
+/* The lab's own echo dialplan sent a MESSAGE back. */
+static int message_echoed(const struct endpoint *end)
+{
+    return end->seen.message_received;
+}
+
+/* `FLOW_MWI`'s own subscription reached a state worth reading: granted, or
+ * gone before it was. */
+static int subscribed_or_ended(const struct endpoint *end)
+{
+    return end->seen.subscribed || end->seen.subscription_ended;
+}
+
+/* A message-summary NOTIFY arrived -- the first one is the baseline, read
+ * before the voicemail call is placed. */
+static int mailbox_notified(const struct endpoint *end)
+{
+    return end->seen.mailbox_notified || end->seen.subscription_ended;
+}
+
+/* The mailbox's `new` count, on the latest notification, reads higher than
+ * `flow_mwi`'s own baseline. */
+static int mailbox_counted(const struct endpoint *end)
+{
+    return end->seen.mailbox_new_count > end->mailbox_baseline || end->seen.subscription_ended;
+}
+
 /* -- opening and closing an end ------------------------------------------- */
 
 /* The entropy a flow's stack is given.
@@ -797,7 +887,6 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     uint8_t signalling_seed[32];
     uint8_t media_seed[32];
     char routable[INET_ADDRSTRLEN];
-    char aor[128];
     char registrar[128];
     char contact[192];
     char registrar_address[SIPRAL_ADDRESS_BYTES];
@@ -852,7 +941,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         return -1;
     }
 
-    (void)snprintf(aor, sizeof aor, "sip:%s@%s", user, server);
+    (void)snprintf(end->aor, sizeof end->aor, "sip:%s@%s", user, server);
     (void)snprintf(registrar, sizeof registrar, "sip:%s", server);
     (void)snprintf(contact, sizeof contact, "sip:%s@%s", user, end->sip_address);
     if (address_text(remote, registrar_address, sizeof registrar_address) != 0) {
@@ -863,8 +952,8 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
 
     memset(&account, 0, sizeof account);
     account.size = sizeof account;
-    account.aor = aor;
-    account.aor_len = strlen(aor);
+    account.aor = end->aor;
+    account.aor_len = strlen(end->aor);
     account.registrar = registrar;
     account.registrar_len = strlen(registrar);
     account.contact = contact;
@@ -949,6 +1038,8 @@ enum flow {
     FLOW_DTMF_INFO,
     FLOW_SRTP,
     FLOW_HOLD_CODEC_CHANGE,
+    FLOW_MESSAGE,
+    FLOW_MWI,
     FLOW_DTLS,
     FLOW_COUNT
 };
@@ -974,6 +1065,10 @@ static const char *flow_name(enum flow which)
         return "SRTP";
     case FLOW_HOLD_CODEC_CHANGE:
         return "hold with a codec change";
+    case FLOW_MESSAGE:
+        return "MESSAGE, echoed";
+    case FLOW_MWI:
+        return "message waiting indication";
     case FLOW_DTLS:
         return "DTLS-SRTP, held and resumed";
     case FLOW_COUNT:
@@ -1005,6 +1100,10 @@ static const char *flow_key(enum flow which)
         return "srtp";
     case FLOW_HOLD_CODEC_CHANGE:
         return "holdcodec";
+    case FLOW_MESSAGE:
+        return "message";
+    case FLOW_MWI:
+        return "mwi";
     case FLOW_DTLS:
         return "dtls";
     case FLOW_COUNT:
@@ -1044,12 +1143,13 @@ static int selected(const char *wanted, const char *key)
 
 /* The account a flow places its call as.
  *
- * Three flows have one of their own on Asterisk, and for the reason the Rust
+ * Four flows have one of their own on Asterisk, and for the reason the Rust
  * harness gives: the SDES endpoint is `labuser-srtp`, so that the plain one
  * every other flow uses stays plain, INFO's own `dtmf_mode` is
- * `labuser-infodtmf`'s, and DTLS-SRTP is `labuser-dtls`'s. Same defaults, same
- * variables to override them. Only on Asterisk: the proxy knows one user, and
- * FreeSWITCH behind it decides per extension rather than per account. */
+ * `labuser-infodtmf`'s, DTLS-SRTP is `labuser-dtls`'s, and message waiting
+ * indication is `labuser-mwi`'s. Same defaults, same variables to override
+ * them. Only on Asterisk: the proxy knows one user, and FreeSWITCH behind it
+ * decides per extension rather than per account. */
 static void account_for(enum flow which, const char *server, const char **user,
                         const char **pass)
 {
@@ -1071,6 +1171,13 @@ static void account_for(enum flow which, const char *server, const char **user,
         named = getenv("SIPRAL_USER_DTLS");
         secret = getenv("SIPRAL_PASS_DTLS");
         fallback = "labuser-dtls";
+    } else if (which == FLOW_MWI) {
+        /* the one account whose AOR carries `mailboxes=9007@default`
+         * (interop/asterisk's own configuration); the plain one every other
+         * flow uses stays plain */
+        named = getenv("SIPRAL_USER_MWI");
+        secret = getenv("SIPRAL_PASS_MWI");
+        fallback = "labuser-mwi";
     } else {
         return;
     }
@@ -1142,9 +1249,16 @@ static int up_and_talking(struct endpoint *end, const char *server,
     return 0;
 }
 
-/* Hang up, and wait for the far end to agree that it is over. */
+/* Give up whatever is still open: `flow_mwi`'s own subscription, a call
+ * (mostly already hung up, since only `flow_mwi` needs one gone before it can
+ * finish), and the binding. */
 static void finish(struct endpoint *end)
 {
+    if (end->subscription != SIPRAL_HANDLE_NONE) {
+        (void)sipral_subscription_end(end->stack, end->subscription, now_ms());
+        (void)wait_until(end, NULL, 400u);
+        end->subscription = SIPRAL_HANDLE_NONE;
+    }
     if (end->call != SIPRAL_HANDLE_NONE && !end->seen.ended) {
         (void)sipral_call_hangup(end->stack, end->call, now_ms());
         (void)wait_until(end, hung_up, 5000u);
@@ -1167,14 +1281,15 @@ static void dwell(struct endpoint *end, unsigned millis)
 
 /* Whether a flow is run against this server at all.
  *
- * Four of them only against Asterisk, and the Rust harness does the same for
+ * Six of them only against Asterisk, and the Rust harness does the same for
  * the same reasons: `interop/asterisk/extensions.conf` is the only dialplan in
  * the lab with an extension that names a digit back, the one Asterisk names
- * never came back through the proxy from FreeSWITCH, and the SDES endpoint and
- * the INFO one exist only in Asterisk's own configuration. DTLS-SRTP runs on
- * both, since `interop/freeswitch/lab.xml` answers 9005 as well.
- * `docs/11-testing.md` carries the reasons. A flow is not run where it is
- * known not to pass until somebody has found out why.
+ * never came back through the proxy from FreeSWITCH, and the SDES endpoint,
+ * the INFO one, the echo extension MESSAGE is sent to and the mailbox message
+ * waiting indication watches all exist only in Asterisk's own configuration.
+ * DTLS-SRTP runs on both, since `interop/freeswitch/lab.xml` answers 9005 as
+ * well. `docs/11-testing.md` carries the reasons. A flow is not run where it
+ * is known not to pass until somebody has found out why.
  */
 static int runs_against(enum flow which, const char *server)
 {
@@ -1183,6 +1298,8 @@ static int runs_against(enum flow which, const char *server)
     case FLOW_DTMF_INFO:
     case FLOW_SRTP:
     case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_MESSAGE:
+    case FLOW_MWI:
         return strcmp(server, "asterisk") == 0;
     case FLOW_DTLS:
     case FLOW_REGISTER:
@@ -1203,8 +1320,11 @@ static int runs_against(enum flow which, const char *server)
  * `SendDTMF()`, which is what makes the round trip provable from this end,
  * and it goes back over INFO to an endpoint whose `dtmf_mode` is INFO. SRTP
  * has 9004, DTLS-SRTP 9005 — its own number so a capture shows which leg
- * keyed by handshake without reading the SDP. Every other flow calls the
- * extension the command line named, and a bridge answers it.
+ * keyed by handshake without reading the SDP — and `FLOW_MWI`'s own mailbox
+ * extension is 9007, whose hangup handler is what leaves the message this
+ * flow watches for. Every other flow calls the extension the command line
+ * named, and a bridge answers it; `FLOW_MESSAGE` places no call at all, and
+ * `flow_message` names its own extension (9006) directly.
  */
 static const char *extension_for(enum flow which, const char *named)
 {
@@ -1216,12 +1336,15 @@ static const char *extension_for(enum flow which, const char *named)
         return "9004";
     case FLOW_DTLS:
         return "9005";
+    case FLOW_MWI:
+        return "9007";
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
     case FLOW_BLIND:
     case FLOW_ATTENDED:
     case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_MESSAGE:
     case FLOW_COUNT:
     default:
         return named;
@@ -1274,10 +1397,152 @@ static uint32_t srtp_for(enum flow which)
     case FLOW_DTMF:
     case FLOW_DTMF_INFO:
     case FLOW_HOLD_CODEC_CHANGE:
+    case FLOW_MESSAGE:
+    case FLOW_MWI:
     case FLOW_COUNT:
     default:
         return 0u;
     }
+}
+
+/* Register, and send a MESSAGE out of any dialog to the lab's own echo
+ * extension (RFC 3428 §3). Both halves are waited for -- this end's own send
+ * answered with success, and the dialplan's own MESSAGE arriving back --
+ * whichever the callback saw first, since it remembers what happened
+ * regardless of when this end asks about it.
+ *
+ * Placed apart from `up_and_talking`, the way `flow_register` is: no call is
+ * placed at all.
+ */
+static int flow_message(struct endpoint *end, const char *server)
+{
+    char target[192];
+    sipral_status_t status;
+    sipral_handle_t sent = SIPRAL_HANDLE_NONE;
+
+    status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered, so there is nobody to send a MESSAGE as");
+        return -1;
+    }
+
+    (void)snprintf(target, sizeof target, "sip:9006@%s", server);
+    status = sipral_account_message(end->stack, end->account, target, strlen(target),
+                                    "text/plain", strlen("text/plain"),
+                                    (const uint8_t *)MESSAGE_BODY, strlen(MESSAGE_BODY),
+                                    &sent, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_message", status);
+        return -1;
+    }
+    if (!wait_until(end, message_accepted, FLOW_PATIENCE_MS)) {
+        wrong_text("the MESSAGE was never answered");
+        return -1;
+    }
+    if (end->seen.message_sent_status != 200u && end->seen.message_sent_status != 202u) {
+        (void)snprintf(trouble, sizeof trouble, "the MESSAGE was answered %u",
+                       (unsigned)end->seen.message_sent_status);
+        return -1;
+    }
+    if (!wait_until(end, message_echoed, FLOW_PATIENCE_MS)) {
+        wrong_text("no MESSAGE came back");
+        return -1;
+    }
+    return 0;
+}
+
+/* Subscribe to this account's own mailbox (RFC 3842), place a call into the
+ * lab's own voicemail extension, and watch the mailbox's `new` count climb
+ * once Asterisk's own MWI support reports the message the call left.
+ *
+ * Placed apart from `up_and_talking`, and unlike every flow that uses it:
+ * the subscription has to be granted and its first notification read -- the
+ * baseline, before anything is left in the mailbox -- before there is
+ * anything to place a call for, and the call has to be hung up from here
+ * rather than left for `finish` to close, since the hangup is what makes the
+ * dialplan announce the message and this flow still has a NOTIFY to wait for
+ * after it.
+ */
+static int flow_mwi(struct endpoint *end, const char *server)
+{
+    sipral_subscribe_config_t watch;
+    sipral_status_t status;
+
+    status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered, so there is no mailbox to watch as");
+        return -1;
+    }
+
+    memset(&watch, 0, sizeof watch);
+    watch.size = sizeof watch;
+    watch.target = end->aor;
+    watch.target_len = strlen(end->aor);
+    watch.package = "message-summary";
+    watch.package_len = strlen("message-summary");
+    status = sipral_account_subscribe(end->stack, end->account, &watch, &end->subscription,
+                                      now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_subscribe", status);
+        return -1;
+    }
+    if (!wait_until(end, subscribed_or_ended, FLOW_PATIENCE_MS) || end->seen.subscription_ended) {
+        wrong_text("the message-summary subscription was never granted");
+        return -1;
+    }
+
+    /* the mailbox's own count, read before anything is left in it: the claim
+     * below is that a later notification reads higher than this, not that it
+     * starts at zero -- an earlier run may have left mail behind */
+    if (!wait_until(end, mailbox_notified, FLOW_PATIENCE_MS) || end->seen.subscription_ended) {
+        wrong_text("no message-summary notification ever arrived");
+        return -1;
+    }
+    end->mailbox_baseline = end->seen.mailbox_new_count;
+
+    if (place(end, server, extension_for(FLOW_MWI, NULL), 0u, &end->call) != 0) {
+        return -1;
+    }
+    if (!wait_until(end, answered, FLOW_PATIENCE_MS)) {
+        wrong_text("the voicemail call was never answered");
+        return -1;
+    }
+    if (end->seen.ended) {
+        wrong_text("the voicemail call ended before it was answered");
+        return -1;
+    }
+    if (open_media(end, end->call) != 0) {
+        return -1;
+    }
+    /* a plain call carrying audio, the same as `FLOW_CALL`'s own dwell --
+     * long enough for the dialplan on the far end to have something to hang
+     * up on */
+    dwell(end, DWELL_MS);
+    status = sipral_call_hangup(end->stack, end->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_hangup", status);
+        return -1;
+    }
+    if (!wait_until(end, hung_up, FLOW_PATIENCE_MS)) {
+        wrong_text("the voicemail call never ended");
+        return -1;
+    }
+
+    if (!wait_until(end, mailbox_counted, FLOW_PATIENCE_MS) || end->seen.subscription_ended) {
+        wrong_text("the mailbox's new-message count never went up after the voicemail was left");
+        return -1;
+    }
+    return 0;
 }
 
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
@@ -1285,6 +1550,12 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
 {
     if (which == FLOW_REGISTER) {
         return flow_register(end);
+    }
+    if (which == FLOW_MESSAGE) {
+        return flow_message(end, server);
+    }
+    if (which == FLOW_MWI) {
+        return flow_mwi(end, server);
     }
     if (up_and_talking(end, server, extension_for(which, extension), srtp_for(which))
         != 0) {
@@ -1571,6 +1842,8 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     }
 
     case FLOW_REGISTER:
+    case FLOW_MESSAGE:
+    case FLOW_MWI:
     case FLOW_COUNT:
     default:
         break;

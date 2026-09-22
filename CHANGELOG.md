@@ -12,6 +12,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **MESSAGE and message waiting indication, through the C ABI too.**
+  `interop/harness-c` gained the two flows `interop/harness` already
+  carried: an out-of-dialog MESSAGE sent to the lab's own echo extension
+  and read back from `sipral_account_message`'s own events, and a
+  `message-summary` subscription (`sipral_account_subscribe`) whose mailbox
+  count is read higher after a call announces a message in it. Asterisk
+  only, on both drivers now, with the same pass conditions either way.
 - **DTLS-SRTP with a peer that certifies with RSA.** FreeSWITCH, left as it
   ships, holds an RSA-4096 certificate, and no call with it could be keyed:
   as a client it withheld its certificate from a request naming ECDSA alone,

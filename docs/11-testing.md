@@ -342,13 +342,16 @@ change that would stop an integrator's program building fails at the moment it
 is made. **This is the phase-1 exit criterion and the precondition for
 freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
 
-It runs the same ten call-and-transfer flows the Rust driver runs, against the
-same servers. The codec change was the one the C surface could not express
-until `sipral_call_change_codecs` existed — and the Rust driver could not
-either, through the facade: it wrote that re-offer itself until
+It runs the same twelve call-and-transfer flows the Rust driver runs, against
+the same servers. The codec change was the one the C surface could not
+express until `sipral_call_change_codecs` existed — and the Rust driver could
+not either, through the facade: it wrote that re-offer itself until
 `MediaEngine::change_codecs` did. MESSAGE and message waiting indication
-(8.6.5), and the opt-in narrowed-inbound flow at the bottom of the table, are
-the Rust driver's alone for now — `interop/harness-c` is not this task's.
+(8.6.5) run in C too, driven by `sipral_account_message` and
+`sipral_account_subscribe`; only the opt-in narrowed-inbound flow at the
+bottom of the table stays the Rust driver's alone, since it needs a second
+account registered at once and `interop/harness-c` drives one endpoint at a
+time.
 
 Run through Kamailio to FreeSWITCH and straight at Asterisk (`scripts/lab.sh
 kamailio` / `asterisk`), unless a column below says one server only:
