@@ -549,7 +549,18 @@ impl Gate {
                 mut rhs,
                 mut collected,
             } => {
-                accumulate(&mut gram, &mut rhs, collected, samples, w_low, w_high);
+                // only a real frame's samples belong in the fit -- a
+                // concealed one is the concealer's own guess, and folding it
+                // into the Gram matrix and right-hand side would drag the
+                // fitted reference toward whatever it guessed rather than
+                // the tone actually played, exactly the conflation the
+                // module doc says segmental SNR and the splice check both
+                // exist to avoid. `collected` still advances either way: it
+                // is the elapsed-sample clock `accumulate`'s `base_k` reads,
+                // and a concealed frame takes real time same as a real one.
+                if scorable {
+                    accumulate(&mut gram, &mut rhs, collected, samples, w_low, w_high);
+                }
                 frames.push((kind, samples.to_vec()));
                 collected += samples.len();
                 if collected >= self.window {
@@ -815,6 +826,45 @@ mod tests {
             "a jump onto the splice never clicked: {report:?}"
         );
         assert!(report.verdict().is_err());
+    }
+
+    /// A concealed frame landing inside the seed window -- before the run
+    /// has a fit yet -- must not be folded into that fit: the far end's own
+    /// tone continued underneath the gap even though nothing arrived to say
+    /// so, and the fit has to describe that tone, not whatever the concealer
+    /// guessed. A silent concealed frame here is a genuine discontinuity
+    /// against the tone either side of it -- both splices correctly click,
+    /// same as `a_splice_with_a_jump_clicks` -- but the eight clean, fully
+    /// unimpaired `Packet` frames that follow must still score close to the
+    /// ceiling: a fit that let the concealed silence into the Gram matrix
+    /// and right-hand side would instead chase a signal that never played,
+    /// depressing every frame scored against it for the rest of the run,
+    /// which is what this run measured before the fit excluded
+    /// `Kind::Concealed` samples from accumulation.
+    #[test]
+    fn a_concealed_frame_inside_the_seed_window_is_not_fitted() {
+        let mut gate = Gate::new();
+        gate.observe(
+            Playback::Packet,
+            &frame(0, 6_500.0, 4_200.0, 0.0, 0.0),
+            RATE,
+        );
+        gate.observe(Playback::Concealed, &vec![0_i16; FRAME], RATE);
+        let mut n = 2 * FRAME as u64;
+        for _ in 0..8 {
+            gate.observe(
+                Playback::Packet,
+                &frame(n, 6_500.0, 4_200.0, 0.0, 0.0),
+                RATE,
+            );
+            n += FRAME as u64;
+        }
+        let report = gate.report();
+        assert!(
+            report.mean_seg_snr_db > MIN_SEGMENTAL_SNR_DB + 15.0,
+            "a concealed frame inside the seed window pulled the fit toward \
+             it instead of the tone: {report:?}"
+        );
     }
 
     /// Frames the far end never sent loudly enough to be the tone — the
