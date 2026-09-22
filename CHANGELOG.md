@@ -335,6 +335,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   start on, playout started on that packet and concealed the second behind
   it; a packet stranded in front of a gap longer than the target is now
   dropped unplayed, and packets held together are still all played.
+- **The lab's mailbox count goes up once per call.** `MinivmMWI()` publishes
+  a count rather than adding to one, and the lab's hangup handler published
+  1 every time, so the first driver's flow left the count where the second
+  driver's flow needed to see it climb from; the handler now keeps a count of
+  its own.
 - **A request challenged with a nonce another request already answered is
   answered too.** A server that draws its nonce from the clock, as Asterisk
   does, challenges a SUBSCRIBE sent in the same second as a REGISTER with the
