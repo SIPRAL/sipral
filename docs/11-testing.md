@@ -316,6 +316,17 @@ Known peer behaviours worth writing down rather than rediscovering:
   `answermode` and answers a call on its own; naming `account.so` without
   `menu.so` in `interop/baresip/config/config` gets a registered peer that
   never picks up.
+- The official OpenSIPS 4.0 image leaves digest authentication out: `auth.so`
+  is in the `opensips-auth-modules` package, and it will not load without
+  `signaling.so`. `proto_udp` is built into the binary and still has to be
+  named with `loadmodule`, or the proxy has no transport and exits.
+- Asterisk renegotiates DTLS on every re-INVITE and drops its RTP until the
+  new handshake is done. With a hold and a resume a few milliseconds apart,
+  its ClientHello carrying the cookie comes a full retransmission timer later,
+  about a second of audio that never reaches the wire.
+- FreeSWITCH, at the start of a DTLS-SRTP call, sends two packets, pauses, and
+  resumes with a timestamp that has not moved, against RFC 3550 §5.1.
+- `MinivmMWI()` publishes a mailbox count rather than adding to one.
 
 ## Interoperability procedure
 
