@@ -672,6 +672,18 @@ public enum SipralEventKind: UInt32, Sendable {
     /// account named none raises nothing here, since nothing was ever
     /// attempted.
     case qualityReportSent = 37
+    /// The call this one was joined to has ended, taking the local
+    /// conference of two down with it.
+    ///
+    /// `sipral_call_join` paired the two calls and neither one ever
+    /// called `sipral_call_leave` — the partner's own call simply ended
+    /// first, the same way any call does, and this is the half of that
+    /// this call has to be told: the pairing does not outlive either
+    /// side of it. `call` is the survivor; its own session is untouched
+    /// and carries on exactly as an unjoined call always has, on
+    /// whatever `sipral_media_playback`/`sipral_media_capture` it is
+    /// next given directly rather than through `sipral_media_mix`.
+    case mediaUnjoined = 38
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -1363,7 +1375,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 21
+    public static let abiVersionMinor: UInt32 = 22
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3199,10 +3211,10 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// `mic` must be readable for `mic_count` `int16_t`; `local` must be
-    /// writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
-    /// each point at a `sipral_media_packet_t` as `sipral_media_capture`
-    /// describes.
+    /// `mic` must be readable for `mic_count` `int16_t` and `local` writable
+    /// for `local_count` `int16_t`, the two must not overlap, and
+    /// `packet_a` and `packet_b` must each point at a
+    /// `sipral_media_packet_t` as `sipral_media_capture` describes.
     public static func mediaMix(mediaA: SipralHandle, mediaB: SipralHandle, nowMs: UInt64, mic: [Int16], local: inout [Int16], packetA: inout sipral_media_packet_t, packetB: inout sipral_media_packet_t) throws {
         try ensureAbi()
         let status =

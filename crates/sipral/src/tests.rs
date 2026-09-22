@@ -6192,3 +6192,127 @@ fn a_call_that_hangs_up_while_joined_leaves_the_mix_cleanly() {
     );
     assert_eq!(refused.unwrap_err(), MediaError::NotJoined);
 }
+
+/// [`MediaEngine::join`] refuses a pair whose two sessions decode at
+/// different sample rates, proven against a real codec mismatch rather than
+/// only against the same-call and already-joined refusals above — so that a
+/// broken check in [`MediaEngine::join`] (the `&&` turned into an `||`, say,
+/// or the check dropped outright) fails a test rather than passing silently
+/// straight through to [`mix_two`] reading the shorter session's buffer past
+/// its own end.
+#[test]
+fn join_refuses_two_calls_that_do_not_share_a_sample_rate() {
+    let now = Instant::now();
+    let mut me = Stack::new(
+        51,
+        caller_sip(),
+        caller_media(),
+        CodecCatalog::with_order(&["PCMU", "G722"]).expect("an order"),
+        now,
+    );
+    let mut bob = Stack::new(
+        52,
+        callee_sip(),
+        callee_media(),
+        CodecCatalog::with_order(&["PCMU"]).expect("an order"),
+        now,
+    );
+    let mut carol = Stack::new(
+        53,
+        carol_sip(),
+        carol_media(),
+        CodecCatalog::with_order(&["G722"]).expect("an order"),
+        now,
+    );
+    // bob and carol each support only one of the two codecs `me` offers, so
+    // the codec each call settles on is forced by the intersection alone,
+    // whatever order `me`'s own catalogue prefers them in
+    let (call_a, _bob_call) = connect_two(&mut me, &mut bob, "bob", now);
+    let (call_b, _carol_call) = connect_two(&mut me, &mut carol, "carol", now);
+
+    assert_eq!(
+        me.engine
+            .session(call_a)
+            .expect("call a has media")
+            .sample_rate(),
+        8_000,
+        "bob's own leg did not settle on PCMU"
+    );
+    assert_eq!(
+        me.engine
+            .session(call_b)
+            .expect("call b has media")
+            .sample_rate(),
+        16_000,
+        "carol's own leg did not settle on G722"
+    );
+
+    assert_eq!(
+        me.engine.join(call_a, call_b).unwrap_err(),
+        MediaError::JoinIncompatible
+    );
+    assert_eq!(
+        me.engine.joined_with(call_a),
+        None,
+        "a refused join must not leave either call believing it is paired"
+    );
+}
+
+/// A5: a joined call's own recording keeps the conference it was actually
+/// in, not only the two legs it would have carried alone — proven by a far
+/// end this call never dialled (carol, joined onto call a through call b)
+/// showing up in call a's own file, while call a's direct far end (bob) and
+/// this end's own microphone both stay silent throughout.
+#[test]
+fn a_joined_calls_recording_keeps_a_far_end_it_never_dialled() {
+    let mut trio = Trio::connected().joined();
+    let frame = trio
+        .me
+        .engine
+        .session(trio.call_a)
+        .expect("call a has media")
+        .frame_samples();
+
+    // ten frames before the recording starts, so the de-jitter buffer is
+    // past its start-up delay before anything that follows is measured
+    for _ in 0..10 {
+        trio.frame(None, None);
+    }
+
+    let file = Buffer::new();
+    trio.me
+        .engine
+        .session(trio.call_a)
+        .expect("call a has media")
+        .start_recording(Box::new(file.clone()))
+        .expect("the recording starts");
+
+    let mut carol_phase = 0_u32;
+    for _ in 0..10 {
+        let mut carol_tone = vec![0_i16; frame];
+        tone(&mut carol_tone, 8_000, &mut carol_phase);
+        // bob stays silent (`None`) and so does this end's own microphone
+        // (`Trio::frame`'s own `mic`, always silent) — anything loud enough
+        // to find in call a's recording had to cross from carol by way of
+        // the pair `MediaEngine::mix` is driving
+        trio.frame(None, Some(&carol_tone));
+    }
+
+    let mut session = trio.me.engine.session(trio.call_a).expect("call a's media");
+    assert!(session.is_recording());
+    session.stop_recording().expect("the recording stops");
+    drop(session);
+
+    let wav = file.contents();
+    let audio: Vec<i16> = wav
+        .get(44..)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    assert!(
+        loudness(&audio) > 1_000,
+        "call a's own recording is not loud enough to hold carol's audio, \
+         which reaches it only by way of the joined pair: {audio:?}"
+    );
+}

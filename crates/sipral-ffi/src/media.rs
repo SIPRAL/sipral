@@ -1837,10 +1837,10 @@ entry! {
     ///
     /// # Safety
     ///
-    /// `mic` must be readable for `mic_count` `int16_t`; `local` must be
-    /// writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
-    /// each point at a `sipral_media_packet_t` as `sipral_media_capture`
-    /// describes.
+    /// `mic` must be readable for `mic_count` `int16_t` and `local` writable
+    /// for `local_count` `int16_t`, the two must not overlap, and
+    /// `packet_a` and `packet_b` must each point at a
+    /// `sipral_media_packet_t` as `sipral_media_capture` describes.
     fn sipral_media_mix(
         media_a: SipralHandle,
         media_b: SipralHandle,
@@ -3549,6 +3549,64 @@ a=sendrecv\r\n";
             unsafe { sipral_call_leave(stack, call_a) },
             SipralStatus::WrongState,
             "a call already left has nothing more to leave"
+        );
+
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A call that hangs up while joined tells its former partner over the C
+    /// ABI too — `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the call that is
+    /// still up — and that survivor keeps carrying its own audio directly,
+    /// exactly as an unjoined call always has.
+    /// `crates/sipral/src/tests.rs` already proves the facade's own half of
+    /// this (`MediaEvent::Unjoined`); this proves the translation across the
+    /// boundary does not silently drop it.
+    #[test]
+    fn a_call_that_hangs_up_while_joined_tells_the_survivor_over_the_abi() {
+        let mut observed = Observed::default();
+        let (stack, call_a, call_b) = media_call_pair(&mut observed);
+        let mut media_a = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call_a, &raw mut media_a) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_call_join(stack, call_a, call_b) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+
+        hangup(stack, call_b, 3_000);
+
+        assert!(
+            observed
+                .of(SipralEventKind::MediaUnjoined)
+                .iter()
+                .any(|heard| heard.call == call_a),
+            "call a was never told its partner was gone: {:?}",
+            observed.kinds()
+        );
+
+        let samples = [1_000_i16; FRAME];
+        let mut buffers = Buffers::new();
+        let mut packet = buffers.packet();
+        assert_eq!(
+            unsafe {
+                sipral_media_capture(
+                    media_a,
+                    3_100,
+                    samples.as_ptr(),
+                    samples.len(),
+                    &raw mut packet,
+                )
+            },
+            SipralStatus::Ok,
+            "call a's own media did not survive its partner: {}",
+            last_error_text()
         );
 
         assert_eq!(

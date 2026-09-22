@@ -218,8 +218,9 @@ Rules for the ABI:
   ordinary way a number is spent: at the end of the run, because no
   reservation named it. 34, 35 and 36 went the same way to
   `..._MESSAGE_RECEIVED`, `..._MESSAGE_SENT` and `..._MESSAGES_WAITING`
-  (RFC 3428, RFC 3842), and 37 is now held for the RTCP-XR quality reports a
-  later task adds. The next free number is 38.
+  (RFC 3428, RFC 3842), 37 to `..._QUALITY_REPORT_SENT` for the RTCP-XR
+  quality reports, and 38 to `..._MEDIA_UNJOINED` for the local conference's
+  own survivor notice. The next free number is 39.
 
   Where a number cannot be generated — `SipralStatus`, which C switches on and
   whose zero is load-bearing — the equivalent is a test that writes out every
@@ -590,7 +591,10 @@ own microphone, mixed — `docs/05-media.md` has the arithmetic and the reasons
 behind it. Nothing like a SIP conference server: neither far end's own
 signalling ever names the other. `sipral_call_leave(stack, call)` un-pairs
 both calls, whichever one `call` names, and a call that ends while it is
-still joined takes the pairing down with it the same way, unasked. Both
+still joined takes the pairing down with it the same way, unasked — the
+survivor is told with `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, its `call` naming
+that survivor, rather than being left to find out only when a later
+`sipral_media_mix` on the pair answers `SIPRAL_STATUS_WRONG_STATE`. Both
 `join` and `leave` take the
 stack's lock, like `sipral_call_change_codecs`, because pairing two calls is
 a fact about the stack, and both are `SIPRAL_STATUS_WRONG_STATE` for a call

@@ -272,6 +272,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   authenticator and reaches nothing behind it — the seeds alone reach more of
   the agent than several hundred thousand random runs did.
 
+### Fixed
+
+- **The local conference's `MediaEvent::Unjoined` now reaches the C ABI.** A
+  call ending while its partner is still joined told the facade, but the
+  translation to `sipral_event_t` dropped it silently; an application driving
+  the pair through `sipral_media_mix` alone learned only from a later
+  `SIPRAL_STATUS_WRONG_STATE`. It now arrives as
+  `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the surviving call.
+
 ### Changed
 
 - **Every re-offer hands the DTLS roles back, and a far end that moves them

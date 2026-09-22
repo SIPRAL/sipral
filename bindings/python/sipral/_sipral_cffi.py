@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 21
+#define SIPRAL_ABI_VERSION_MINOR 22
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -1227,6 +1227,20 @@ enum {
      * attempted.
      */
     SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT = 37,
+    /**
+     * The call this one was joined to has ended, taking the local
+     * conference of two down with it.
+     *
+     * `sipral_call_join` paired the two calls and neither one ever
+     * called `sipral_call_leave` — the partner's own call simply ended
+     * first, the same way any call does, and this is the half of that
+     * this call has to be told: the pairing does not outlive either
+     * side of it. `call` is the survivor; its own session is untouched
+     * and carries on exactly as an unjoined call always has, on
+     * whatever `sipral_media_playback`/`sipral_media_capture` it is
+     * next given directly rather than through `sipral_media_mix`.
+     */
+    SIPRAL_EVENT_KIND_MEDIA_UNJOINED = 38,
 };
 
 /**
@@ -5461,10 +5475,10 @@ sipral_status_t sipral_media_capture(sipral_handle_t media, uint64_t now_ms, con
  *
  * Safety
  *
- * `mic` must be readable for `mic_count` `int16_t`; `local` must be
- * writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
- * each point at a `sipral_media_packet_t` as `sipral_media_capture`
- * describes.
+ * `mic` must be readable for `mic_count` `int16_t` and `local` writable
+ * for `local_count` `int16_t`, the two must not overlap, and
+ * `packet_a` and `packet_b` must each point at a
+ * `sipral_media_packet_t` as `sipral_media_capture` describes.
  */
 sipral_status_t sipral_media_mix(sipral_handle_t media_a, sipral_handle_t media_b, uint64_t now_ms, const int16_t *mic, size_t mic_count, int16_t *local, size_t local_count, sipral_media_packet_t *packet_a, sipral_media_packet_t *packet_b);
 

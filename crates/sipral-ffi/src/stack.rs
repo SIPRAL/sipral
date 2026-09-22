@@ -1787,6 +1787,7 @@ pub(crate) mod tests {
                 | SipralEventKind::MediaStatistics
                 | SipralEventKind::RecordingStopped
                 | SipralEventKind::DigitReceived
+                | SipralEventKind::MediaUnjoined
         )
     }
 

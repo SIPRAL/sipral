@@ -437,6 +437,18 @@ event_kinds! {
         /// account named none raises nothing here, since nothing was ever
         /// attempted.
         37 = QualityReportSent, c"quality report sent";
+        /// The call this one was joined to has ended, taking the local
+        /// conference of two down with it.
+        ///
+        /// `sipral_call_join` paired the two calls and neither one ever
+        /// called `sipral_call_leave` — the partner's own call simply ended
+        /// first, the same way any call does, and this is the half of that
+        /// this call has to be told: the pairing does not outlive either
+        /// side of it. `call` is the survivor; its own session is untouched
+        /// and carries on exactly as an unjoined call always has, on
+        /// whatever `sipral_media_playback`/`sipral_media_capture` it is
+        /// next given directly rather than through `sipral_media_mix`.
+        38 = MediaUnjoined, c"media unjoined";
     }
 }
 
@@ -2005,6 +2017,7 @@ pub(crate) fn media(
             payload.quality_report_sent = u32::from(ok);
             SipralEventKind::QualityReportSent
         }
+        MediaEvent::Unjoined => SipralEventKind::MediaUnjoined,
         _ => return None,
     };
     if let Some(sentence) = reason {
@@ -2405,7 +2418,8 @@ mod tests {
         assert_eq!(SipralEventKind::MessageSent as u32, 35);
         assert_eq!(SipralEventKind::MessagesWaiting as u32, 36);
         assert_eq!(SipralEventKind::QualityReportSent as u32, 37);
-        assert_eq!(SipralEventKind::ALL.len(), 36, "and there are no others");
+        assert_eq!(SipralEventKind::MediaUnjoined as u32, 38);
+        assert_eq!(SipralEventKind::ALL.len(), 37, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2472,7 +2486,8 @@ mod tests {
             Some("quality report sent"),
             "37 is live"
         );
-        assert_eq!(name(38), None, "past the last kind");
+        assert_eq!(name(38).as_deref(), Some("media unjoined"), "38 is live");
+        assert_eq!(name(39), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

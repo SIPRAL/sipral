@@ -1534,3 +1534,9 @@ media entry point already does. The two sessions it does lock are locked in
 a fixed order, by handle value rather than by which one the caller named
 first, so that two threads mixing the same pair with the arguments swapped
 wait for each other instead of deadlocking.
+
+`MediaEvent::Unjoined` crosses too, as `SIPRAL_EVENT_KIND_MEDIA_UNJOINED` on
+the survivor's own `call`: an application driving the pair through
+`sipral_media_mix` alone, with no reason to touch the stack's own event
+queue otherwise, still gets told the moment it needs to stop calling
+`sipral_media_mix` on that pair and go back to driving the survivor directly.
