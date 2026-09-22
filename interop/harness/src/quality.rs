@@ -93,21 +93,18 @@
 //!
 //! At the first sample where a run's kind changes — real audio giving way to
 //! concealment, or concealment giving way to real audio again — this compares
-//! the jump actually played (this sample minus the last one) against the jump
-//! the fitted reference itself makes at the same instant, plus
-//! [`CLICK_FLOOR`] and [`CLICK_MARGIN_FRACTION`] of it again —
-//! [`CLICK_FLOOR`] for what a clean, unconcealed splice's own quantisation
-//! and fit residual already spend even where the reference is nearly flat,
-//! [`CLICK_MARGIN_FRACTION`] for a splice landing somewhat wide of the
-//! reference's own step, since the concealer's cross-fade is not
-//! phase-locked to either sinusoid. Both are added on top of the step
-//! itself rather than scaling it, which is the part worth stating plainly: a
-//! jump *smaller* than the tone's own step at that instant is not a
-//! discontinuity by any reading, whatever fraction of the step it comes to,
-//! and only a threshold that starts from the step and adds to it can never
-//! fall below it. What clears that threshold is not something two fixed
-//! sinusoids ever produce at that point, which is what "far above the
-//! signal's own slope" means in practice.
+//! the jump actually played (this sample minus the last one) against the
+//! steepest step the fitted tone takes anywhere in its cycle
+//! ([`steepest_step`]), plus [`CLICK_FLOOR`] and [`CLICK_MARGIN_FRACTION`] of
+//! it again. Not against the reference's own step at that instant: the
+//! concealer's extension and its cross-fade are not phase-locked to either
+//! sinusoid, so around a splice the audio played can be a quarter of a cycle
+//! from the reference, steep exactly where the reference is flat, and a
+//! smooth resume there read as a click on the first lab runs of this gate.
+//! A jump no larger than the tone's own slope is not a discontinuity by any
+//! reading, wherever in the cycle it falls; what clears the threshold is the
+//! played signal leaping by something of the order of its own amplitude,
+//! which is what "far above the signal's own slope" means in practice.
 
 use sipral::Playback;
 
@@ -139,25 +136,23 @@ const SEGMENT_DB_CEIL: f64 = 60.0;
 /// silent stretch cannot divide by zero or take the logarithm of it.
 const MIN_ENERGY: f64 = 1.0;
 
-/// The flat amount added on top of the reference's own step to make the
-/// click threshold — what a clean, unconcealed splice's own fit residual and
-/// quantisation noise already spend even where that step is near zero.
-/// Calibrated on the lab VM against clean splices — see `docs/11-testing.md`
-/// for the measured spread this was set above.
+/// The flat amount added on top of the tone's steepest step to make the
+/// click threshold — what a splice's fit residual, quantisation noise and
+/// the cross-fade's own ramp spend beyond the tone's slope. Calibrated on the
+/// lab VM — see `docs/11-testing.md` for the measured spread this was set
+/// above.
 const CLICK_FLOOR: f64 = 900.0;
 
-/// How far past the reference's own step at a splice a jump may land, as a
-/// fraction of that step, before it counts as a click. Kept separate from
-/// [`CLICK_FLOOR`] rather than folded into one constant because the two
-/// answer different questions: the floor is what a splice costs even at a
-/// flat part of the tone, the margin is how exact a splice at a steep part
-/// has to land. The threshold this builds, `expected + CLICK_FLOOR +
-/// CLICK_MARGIN_FRACTION * expected`, is never less than the reference's own
-/// step — a splice that jumps *less* than the tone itself does at that
-/// instant is not a click by any reading, and a margin applied the other way
-/// (multiplying the step directly, with nothing added to it first) let a
-/// jump smaller than the step itself still exceed a threshold shrunk below
-/// it, which is exactly backwards from "far above the signal's own slope".
+/// How far past the tone's steepest step ([`steepest_step`]) a jump may land,
+/// as a fraction of that step, before it counts as a click. Kept separate
+/// from [`CLICK_FLOOR`] because the two answer different questions: the floor
+/// is what a splice costs even on a quiet tone, the margin is how much steeper
+/// than any sample of the tone itself a splice may be on a loud one. The
+/// threshold, `steepest + CLICK_FLOOR + CLICK_MARGIN_FRACTION * steepest`, is
+/// never less than the steepest step the tone takes anywhere — a jump no
+/// larger than the tone's own slope is not a discontinuity by any reading —
+/// and a real click, the played signal leaping by something of the order of
+/// its own amplitude, clears it.
 const CLICK_MARGIN_FRACTION: f64 = 0.6;
 
 /// The least a call's segmental SNR may average and still pass. Calibrated on
@@ -216,11 +211,10 @@ struct Run {
     /// b2*sin(w2*n)`.
     coefficients: [f64; 4],
     last_sample: f64,
-    last_reference: f64,
     last_kind: Kind,
     /// Whether a frame has been scored yet. The run's first frame seeds
-    /// `last_sample`/`last_reference` rather than being compared against
-    /// them — there is nothing yet for it to have jumped from.
+    /// `last_sample` rather than being compared against it — there is
+    /// nothing yet for it to have jumped from.
     seeded: bool,
 }
 
@@ -230,7 +224,6 @@ impl Run {
             n: 0,
             coefficients,
             last_sample: 0.0,
-            last_reference: 0.0,
             last_kind: Kind::Packet,
             seeded: false,
         }
@@ -372,6 +365,26 @@ fn reference_at(coefficients: [f64; 4], n: u64, w_low: f64, w_high: f64) -> f64 
         + coefficients[2].mul_add((w_high * n).cos(), coefficients[3] * (w_high * n).sin())
 }
 
+/// The largest step, sample to sample, the fitted tone takes anywhere in its
+/// cycle: `2·A·sin(ω/2)` for each of its two sinusoids, summed. A single
+/// sinusoid of amplitude `A` never moves by more than that between two
+/// samples, and two of them together never by more than the sum.
+///
+/// This, and not the reference's own step at the splice, is the slope a
+/// splice is measured against. Concealment is not phase-locked to the tone,
+/// so by the time a gap ends the audio being played, the concealer's
+/// extension and then the cross-fade out of it, can be a quarter of a cycle
+/// away from the reference: steep where the reference happens to sit at a
+/// peak. Measured against the reference's step there, a perfectly smooth
+/// resume read as a click; the first lab runs of this gate failed four
+/// calls in ten on `mobile` that way, every one of them a continuation
+/// whose next few steps were as large as the one flagged.
+fn steepest_step(coefficients: [f64; 4], w_low: f64, w_high: f64) -> f64 {
+    let low = coefficients[0].hypot(coefficients[1]);
+    let high = coefficients[2].hypot(coefficients[3]);
+    2.0 * low * (w_low / 2.0).sin() + 2.0 * high * (w_high / 2.0).sin()
+}
+
 /// Segmental SNR is the mean of the base-ten logarithm of the reference's own
 /// energy over the squared error against it, clamped per frame — see the
 /// module doc for why the clamp exists.
@@ -398,11 +411,10 @@ fn score(
         && run.seeded
         && run.last_kind != kind
     {
-        let expected_first = reference_at(run.coefficients, run.n, w_low, w_high);
         let observed = (f64::from(first) - run.last_sample).abs();
-        let expected = (expected_first - run.last_reference).abs();
+        let steepest = steepest_step(run.coefficients, w_low, w_high);
         counters.edges_checked = counters.edges_checked.saturating_add(1);
-        let threshold = expected + CLICK_FLOOR + CLICK_MARGIN_FRACTION * expected;
+        let threshold = steepest + CLICK_FLOOR + CLICK_MARGIN_FRACTION * steepest;
         if observed > threshold {
             counters.clicks = counters.clicks.saturating_add(1);
         }
@@ -419,7 +431,6 @@ fn score(
             frame_noise += diff * diff;
         }
         run.last_sample = actual_value;
-        run.last_reference = reference;
         run.n += 1;
     }
     run.last_kind = kind;
@@ -799,6 +810,52 @@ mod tests {
             "a perfectly continued tone clicked: {report:?}"
         );
         assert_eq!(report.concealed_frames, 3);
+    }
+
+    /// The shape the first lab runs flagged, four calls in ten on `mobile`:
+    /// a concealment whose phase drifts off the tone's, and a resume that
+    /// cross-fades out of it, so the audio at the splice is a quarter of a
+    /// cycle from the reference, steep where the reference sits at a peak.
+    /// Every step across the splice is one the tone itself takes; judged
+    /// against the reference's own step there, the resume was a click.
+    #[test]
+    fn a_smooth_resume_away_from_the_tones_phase_does_not_click() {
+        let amplitude = 6_500.0;
+        // a cosine: every frame boundary, a multiple of 160 samples, is
+        // exactly one of its peaks, where its own step is at its smallest
+        let peak = core::f64::consts::FRAC_PI_2;
+        let w_low = angular(FREQ_LOW, RATE);
+        // a quarter of a cycle at 350 Hz, in samples
+        let drift = 6.0;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let at = |n: f64| (amplitude * (w_low * n + peak).sin()).round() as i16;
+
+        let mut gate = Gate::new();
+        let mut n = 0_u64;
+        for _ in 0..8 {
+            gate.observe(Playback::Packet, &frame(n, amplitude, 0.0, peak, 0.0), RATE);
+            n += FRAME as u64;
+        }
+        // the extension starts on the tone and drifts a quarter cycle off it
+        #[allow(clippy::cast_precision_loss)]
+        let concealed: Vec<i16> = (0..FRAME)
+            .map(|k| at(n as f64 + k as f64 + drift * k as f64 / FRAME as f64))
+            .collect();
+        gate.observe(Playback::Concealed, &concealed, RATE);
+        n += FRAME as u64;
+        // and the stream resumes from where the extension had got to
+        #[allow(clippy::cast_precision_loss)]
+        let resumed: Vec<i16> = (0..FRAME)
+            .map(|k| at((n + k as u64) as f64 + drift))
+            .collect();
+        gate.observe(Playback::Packet, &resumed, RATE);
+
+        let report = gate.report();
+        assert_eq!(report.edges_checked, 2, "both splices checked: {report:?}");
+        assert_eq!(
+            report.clicks, 0,
+            "a resume as smooth as the tone itself clicked: {report:?}"
+        );
     }
 
     /// A splice onto a signal with a jump in it — a sample yanked to the

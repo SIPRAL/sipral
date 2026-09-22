@@ -114,26 +114,22 @@ a run actually broken produces: a synthetic 60% loss profile, run only to see
 where the gate gives out, scored 9.4 dB and clicked besides.
 
 **Splice continuity**, `CLICK_FLOOR` and `CLICK_MARGIN_FRACTION`: **900 and
-0.6**, making the threshold at a splice `expected + 900 + 0.6 * expected`,
-`expected` the fitted tone's own step at that instant. Both are added to the
-step rather than used to shrink it — a jump smaller than the tone's own step
-at that point is not a discontinuity whatever fraction of the step it comes
-to, and a threshold that starts from the step and only adds can never read
-below it. An earlier version scaled the step directly
-(`CLICK_FLOOR + CLICK_MARGIN_FRACTION * expected`, with no `expected` term of
-its own) and read as a click any splice landing between that shrunk threshold
-and the true step — jumps *smaller* than the tone's own slope, which a
-`mobile` run reached in one edge out of ten roughly one run in five. Once the
-threshold could no longer fall under the step it was compared against, thirty
-further runs of `lossy` and `mobile` clicked exactly once, on a jump ten times
-the fitted step at that instant (2008 against an expected 199) — the shape an
-actual discontinuity has, not a close call. `lossy` and `mobile` at their
-current settings therefore still click on the rare run, genuinely: the
-concealer's own splice is not perfect under real bursty loss, and a gate
-calibrated to hide that would not be measuring anything. Running a profile
-several times, which is what calibrating it here meant, is also how a person
-reading its result should read an occasional `FAIL` on `lossy` or `mobile` —
-not as the gate being unreliable, but as the rare case it exists to catch.
+0.6**, making the threshold at a splice `steepest + 900 + 0.6 * steepest`,
+`steepest` the largest step the fitted tone takes anywhere in its cycle
+(`2·A·sin(ω/2)` per sinusoid, summed). The first version measured a splice
+against the reference's own step *at that instant*, and failed four `mobile`
+calls in ten. Every flagged splice, read sample by sample, was smooth: one
+played 1442 across the splice and then 1786, 1762 and 1721, another 2008 and
+then 1834 and 1416 — steps as large as the ones after them, against a
+reference step of 165 and 193 because the reference happened to sit at a
+peak there. Concealment is not phase-locked to the tone, so by the time a gap
+ends the audio played can be a quarter of a cycle from the reference, and a
+threshold built from the reference's slope at that point is measuring where
+the reference is in its cycle, not whether the audio jumped. A jump no larger
+than the tone's own slope is not a discontinuity wherever it falls; a real
+one, the played signal leaping by something of the order of its amplitude,
+clears the steepest-step threshold. `quality.rs` carries both shapes as
+tests, the smooth resume at a peak among them.
 
 `blackout` is different in kind: the outage silences the far end's tone for
 whole seconds at once, which `MediaSession` reports as `Playback::Silence`
