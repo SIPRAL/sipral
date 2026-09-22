@@ -39,7 +39,9 @@ the media pipeline is phase 5, and until then no audio reaches it.
 
 ## Try it in sixty seconds
 
-No account, no server to run, nothing to configure:
+No account, no server to run, nothing to configure. With Rust installed
+(from [rustup.rs](https://rustup.rs); the right toolchain is fetched on the
+first build), from the repository root:
 
 ```bash
 cargo run --example call
@@ -49,8 +51,21 @@ This dials `sip:thetestcall@sip2sip.info`, a public IVR that sip2sip.info
 publishes for exactly this — reachable by anyone, no registration needed. It
 waits for the greeting, presses `2` to ask for its digits read back, sends a
 short string, and plays what comes back through the default output device.
-On a machine with no audio device, or with `--wav out.wav` on any machine, it
-writes what it heard into a WAV file instead.
+On a machine with no audio device it writes what it heard to `call.wav` in the
+current directory instead, and `--wav out.wav` does the same on any machine.
+The first build compiles the dependencies and takes a minute or two. A call
+that worked prints:
+
+```text
+calling sip:thetestcall@sip2sip.info ...
+connected
+media started on PCMU
+sending 2
+sending 1234#
+```
+
+and, when it wrote a file, `wrote N samples (call.wav)` at the end: about
+twenty-five seconds of the IVR talking.
 
 That one example is also the shortest way to read what embedding this stack
 looks like: a [`sipral::UserAgent`](crates/sipral/examples/call.rs) and a
