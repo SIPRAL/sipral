@@ -2403,6 +2403,16 @@ static int run_join(const char *server, const struct sockaddr_in *remote, const 
         join_pump_signalling(stack, sip_fd, sip_address, now_ms());
         sleep_ms(5);
     }
+    /* the binding goes back too, as every other flow's does: left in place it
+     * names a port nobody listens on any more, and the next flow to register
+     * the same account shares the account with it -- the lab's MESSAGE echo,
+     * sent to every contact, then goes to this one */
+    (void)sipral_account_unregister(stack, account, now_ms());
+    deadline = now_ms() + 1000u;
+    while (now_ms() < deadline) {
+        join_pump_signalling(stack, sip_fd, sip_address, now_ms());
+        sleep_ms(5);
+    }
 
     if (mixed_frames == 0) {
         wrong_text("joined, but no frame was ever mixed");

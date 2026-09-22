@@ -62,6 +62,11 @@ use crate::{Endpoint, catalog, place_call, uri};
 /// How long the flow may take before it is a failure.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// How long the binding's removal is waited for once both calls are over.
+/// The registrar on this network answers in milliseconds; this only bounds a
+/// lab where it does not.
+const UNREGISTER_PATIENCE: Duration = Duration::from_secs(2);
+
 /// How long both calls run joined, driving the mix. Long enough for several
 /// turns of the tone extension's own cadence
 /// (`crate::audio::SPURT`/`crate::audio::PAUSE`, 1200 ms/600 ms) to have
@@ -97,6 +102,11 @@ struct Leg {
     call: Option<CallHandle>,
     confirmed_at: Option<Instant>,
     media_started: bool,
+    /// The call's own `UaEvent::CallEnded` has arrived. What the loop waits
+    /// for before it judges anything: a call with no session yet looks the
+    /// same as one whose session has gone, and the first is where every call
+    /// starts.
+    ended: bool,
 }
 
 /// Register one account, place both calls, join them, and drive the mix long
@@ -214,13 +224,10 @@ pub(crate) fn run(
         }
         endpoint.timers(now);
 
-        if tone_leg
-            .call
-            .is_some_and(|call| endpoint.engine.session(call).is_none())
-            && echo_leg
-                .call
-                .is_some_and(|call| endpoint.engine.session(call).is_none())
-        {
+        // both calls over, or one that could not even be placed: whichever
+        // it is, the verdict names it
+        let over = |leg: &Leg| leg.ended || (leg.attempted && leg.call.is_none());
+        if over(&tone_leg) && over(&echo_leg) {
             break;
         }
         if !endpoint.read_sip(Instant::now()) {
@@ -228,7 +235,34 @@ pub(crate) fn run(
         }
     }
 
+    give_back(&mut endpoint, account);
     verdict(&tone_leg, &echo_leg, joined, mixed_frames, crossed_frames)
+}
+
+/// Give the binding back, the way every other flow gives its own back, and
+/// wait a moment for the registrar to agree. Left in place, it names a port
+/// nobody listens on any more for the rest of its lifetime, and the next flow
+/// to register the same account shares the account with it: the lab's MESSAGE
+/// echo, sent to every contact, went to this one and not to the flow waiting
+/// for it.
+fn give_back(endpoint: &mut Endpoint, account: sipral::AccountId) {
+    let _ = endpoint.agent.unregister(account, Instant::now());
+    let until = Instant::now() + UNREGISTER_PATIENCE;
+    loop {
+        let now = Instant::now();
+        let agreed = endpoint
+            .pump(now)
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::Unregistered { .. })));
+        endpoint.timers(now);
+        if agreed || now > until {
+            endpoint.flush();
+            return;
+        }
+        if !endpoint.read_sip(Instant::now()) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 fn place(
@@ -263,6 +297,11 @@ fn on_event(event: &Event, tone_leg: &mut Leg, echo_leg: &mut Leg, now: Instant)
         Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
             if let Some(leg) = leg_of(call, tone_leg, echo_leg) {
                 leg.confirmed_at = Some(now);
+            }
+        }
+        Event::Signalling(UaEvent::CallEnded { call, .. }) => {
+            if let Some(leg) = leg_of(call, tone_leg, echo_leg) {
+                leg.ended = true;
             }
         }
         Event::Media {
