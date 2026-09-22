@@ -461,14 +461,18 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
         # bring up its media-encryption modules should not stop the plain
         # call and hold flows from running, and the flows below name their
         # own missing account if it never registered.
-        # bracketed exactly as interop/kamailio/kamailio.cfg's own xlog line
-        # is: "baresip" is a prefix of "baresip-srtp" and "baresip-dtls" too,
-        # and wait_for's own grep is an unanchored substring match, so the
-        # plain account's phrase would otherwise be satisfied by either of
-        # the other two registering first.
-        if wait_for kamailio "lab: baresip registered [baresip]"; then
-            wait_for kamailio "lab: baresip registered [baresip-srtp]" optional || true
-            wait_for kamailio "lab: baresip registered [baresip-dtls]" optional || true
+        #
+        # Read off baresip's own log, which prints each account's REGISTER
+        # answer in this form. A line of Kamailio's own was tried first and
+        # never appeared: the proxy logs nothing below a warning, and the lab
+        # is better off not raising that for every server's step to suit this
+        # one. The account names are followed by "@", so the plain one's
+        # phrase is not satisfied by baresip-srtp or baresip-dtls registering.
+        if wait_for baresip "baresip@kamailio: (prio 0) {0/UDP/v4} 200 OK" required baresip; then
+            wait_for baresip "baresip-srtp@kamailio: (prio 0) {0/UDP/v4} 200 OK" \
+                optional baresip || true
+            wait_for baresip "baresip-dtls@kamailio: (prio 0) {0/UDP/v4} 200 OK" \
+                optional baresip || true
             flows_baresip proxy-baresip && pass "sipral to baresip" \
                 || fail "sipral to baresip"
             if [ -n "$HARNESS_C" ]; then
