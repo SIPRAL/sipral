@@ -34,15 +34,14 @@ everything else in those two crates stay in phase 2. UDP, TCP and TLS. Digest
 with MD5 and SHA-256. REGISTER with refresh, INVITE and BYE, SDP offer/answer,
 session timers, PRACK, REFER for blind and attended transfer.
 
-**Status: written, and six of the eight exit criteria met.** Every line of the
+**Status: written, and seven of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
 `sipral-media` — and the lab's flows run against three servers whenever
 `scripts/lab.sh` is run, twice: once through `sipral::MediaEngine`, the join an
 application links, and once through `sipral.h` from a C driver. That was the
 criterion added after the tree was read end to end, because until then the lab
 drove the stack through a media join written for the lab, and what it proved
-was the harness. What is left is one paid carrier account and the 24-hour
-fuzzing run.
+was the harness. What is left is one paid carrier account.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -59,8 +58,10 @@ unit suite had ever asked.
 - the same against at least one real carrier, on a paid account;
 - **met** — the RFC 4475 torture corpus passes: valid messages parsed, invalid
   messages rejected without a panic;
-- the parser survives 24 hours on each fuzz target with no crash and no
-  timeout, which is the gate `11-testing.md` sets for this criterion;
+- **met** — the parser survives 24 hours on each fuzz target with no crash and
+  no timeout, which is the gate `11-testing.md` sets for this criterion: 24
+  CPU-hours on each of eighteen targets, about 37 billion executions, nothing
+  found;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
   Asterisk;
 - **met** — the same flows, plus DTMF in both forms, run through

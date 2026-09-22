@@ -12,6 +12,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **Twenty-four CPU-hours of fuzzing on every target.** All eighteen
+  `cargo-fuzz` targets, each 48 runs of 30 minutes on one machine, about 37
+  billion executions: no crash, no timeout, no run out of memory. That is the
+  last of phase 1's exit criteria but the carrier account.
 - **A local conference of two calls.** `MediaEngine::join`/`leave` pair two
   active calls on one facade and `MediaEngine::mix` drives a frame of the
   three-party mix — each far end hears the other far end and this end's own

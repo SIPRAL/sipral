@@ -188,7 +188,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Seventeen targets, one per door an attacker's bytes come through.
+Eighteen targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -329,10 +329,15 @@ second seed source worth pointing a long run at; it stays in
 Bounds: a memory limit and a time limit per run, so a hang is a failure rather
 than something to wait out.
 
-The phase 1 exit gate is 24 hours on each target with no crash and no timeout.
-Until then, `scripts/fuzz.sh` runs each target for as long as it is given,
-five minutes each by default — before a release and overnight, not before
-every commit, which would add an hour to buy very little. What the gate does
+The phase 1 exit gate is 24 hours on each target with no crash and no timeout,
+counted in CPU-hours. It was run on 21 and 22 September 2026 on a 32-core
+Linux machine: every target 48 runs of 30 minutes each, 24 CPU-hours a target
+and 432 in all, the eighteen sharing a corpus per target and queued
+round-robin so that each had the same share of the machine. About 37 billion
+executions, and no crash, no timeout and no run out of memory on any target.
+Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+given, five minutes each by default — before a release and overnight, not
+before every commit, which would add an hour to buy very little. What the gate does
 do on every run is **build** all eighteen, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing

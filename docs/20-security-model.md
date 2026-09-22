@@ -101,7 +101,7 @@ panics and never does unbounded work on the field itself — but it is a real
 gap between what `validate` proves in a test and what the dispatcher does with
 a live message, and it is worth closing rather than assuming closed.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Seventeen
+**Fuzzing covers the doors an attacker's bytes come through.** Eighteen
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
@@ -109,7 +109,9 @@ clear how much of the receive path the first four never reached (`crypto`,
 `srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
 `dtls_handshake`), one for
 DTMF over SIP INFO (`dtmf_info`), and one for the ICE agent (`ice`). The exit
-gate is 24 hours per target with no crash and no hang; `scripts/check.sh`
+gate is 24 hours per target with no crash and no hang, and it has been run:
+24 CPU-hours on every target in September 2026, about 37 billion executions,
+nothing found (`docs/11-testing.md`). `scripts/check.sh`
 builds all eighteen on every run so none of them rots uncompiled between
 releases.
 
