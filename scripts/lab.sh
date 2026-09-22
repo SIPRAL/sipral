@@ -117,12 +117,16 @@ wait_for() {
     # $4, when given, is a Compose profile name to pass on every call here:
     # opensips carries one so that `up` does not start it by accident, and
     # `logs` on an existing container needs no such flag but takes it without
-    # complaint, so the same probe serves both cases
+    # complaint, so the same probe serves both cases. The array is expanded
+    # as ${a[@]+"${a[@]}"} because the lab host's bash is 4.2, where an empty
+    # array expanded under `set -u` is an unbound variable and every probe in
+    # this file would fail on it
     local service="$1" phrase="$2" required="${3:-required}" profile="${4:-}" tries=0
     local -a compose_profile=()
     [ -n "$profile" ] && compose_profile=(--profile "$profile")
     while [ "$tries" -lt 45 ]; do
-        if ( cd interop && docker compose "${compose_profile[@]}" logs --no-color "$service" 2>/dev/null ) \
+        if ( cd interop && docker compose ${compose_profile[@]+"${compose_profile[@]}"} \
+                logs --no-color "$service" 2>/dev/null ) \
             | grep -qF "$phrase"; then
             pass "$service: $phrase"
             return 0
@@ -135,7 +139,8 @@ wait_for() {
         return 1
     fi
     fail "$service never said it was up"
-    ( cd interop && docker compose "${compose_profile[@]}" logs --no-color "$service" | tail -40 )
+    ( cd interop && docker compose ${compose_profile[@]+"${compose_profile[@]}"} \
+        logs --no-color "$service" | tail -40 )
     return 1
 }
 
