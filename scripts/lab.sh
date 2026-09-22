@@ -200,6 +200,80 @@ flows_c() {
             exit \$status"
 }
 
+# The Python binding's example agent, run exactly as its own docstring says to
+# run it, registered at Asterisk and called by it. What the loopback test in
+# bindings/python/tests cannot show is that what the agent advertises -- its
+# Contact, its answer's SDP -- is somewhere a real server can reach, and that
+# the tone the server plays comes back through `respond`. It needs the shared
+# library the C driver links, so it runs when that one does.
+#
+# The agent never exits on its own, it serves calls until stopped, so it runs
+# detached and the lab reads its output: registered, answered, heard audio,
+# and hung up on the "#" rather than being hung up on.
+AGENT_NAME=sipral-lab-agent
+python_agent() {
+    local beside log tries
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker rm -f "$AGENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$AGENT_NAME" --network sipral-interop_lab \
+        -e SIPRAL_LIBRARY=/lib-sipral \
+        -e PYTHONPATH=/python \
+        -e SIPRAL_AOR=sip:labuser-agent@asterisk \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER=labuser-agent -e SIPRAL_AUTH_PASSWORD=labpass \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
+                exec python3 -u /python/examples/agent.py' >/dev/null \
+        || { printf '  could not start the agent container\n'; return 1; }
+
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent; do
+        tries=$((tries + 1))
+        # an agent that died on start is not going to register however long
+        # it is given, and what it said as it died is the useful part
+        if [ "$(docker inspect -f '{{.State.Running}}' "$AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 60 ]; then
+            printf '  the agent never registered\n'
+            docker logs "$AGENT_NAME" 2>&1 | tail -20
+            docker rm -f "$AGENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-agent extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$AGENT_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    log=$(docker logs "$AGENT_NAME" 2>&1)
+    docker rm -f "$AGENT_NAME" >/dev/null 2>&1
+    printf '%s\n' "$log" | sed 's/^/    /'
+
+    printf '%s\n' "$log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq "'packets_received': [1-9]" \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq "'packets_sent': [1-9]" \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
 # The same call again, over a link deliberately made bad. netem shapes egress,
 # so it is our packets that are delayed, lost in bursts and reordered; the echo
 # means the return path suffers too, since a packet that never arrived is never
@@ -273,6 +347,9 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     if [ -n "$HARNESS_C" ]; then
         step "the same, through the C ABI -- straight at Asterisk"
         flows_c asterisk asterisk-c && pass "asterisk, in C" || fail "asterisk, in C"
+        step "the Python example agent, called by Asterisk"
+        python_agent && pass "agent.py answered, echoed and hung up" \
+            || fail "agent.py"
     fi
 fi
 

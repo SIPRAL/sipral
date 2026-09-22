@@ -87,6 +87,11 @@ Standard library `unittest` only, no `pytest`. `tests/test_abi.py` needs
 checkout; `tests/test_call.py` runs two stacks against each other on
 `127.0.0.1`, with no registrar and no network beyond loopback.
 
+`examples/agent.py` is also run by the interop lab (`scripts/lab.sh`), as
+its own docstring says to run it: registered at the lab's Asterisk, called
+by it, hearing a tone, echoing it back and hanging up on the `#` the
+dialplan sends.
+
 ## What is not here
 
 Wheels with the native library bundled in (a later task); `numpy` support

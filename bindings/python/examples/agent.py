@@ -12,7 +12,7 @@ else here changes; a large recorded reply crosses just as well as a frame
 at a time by queuing several calls to ``call.media.send_audio``.
 
     SIPRAL_AOR=sip:agent@example.invalid \\
-    SIPRAL_REGISTRAR=example.invalid \\
+    SIPRAL_REGISTRAR=sip:example.invalid \\
     SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \\
     SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \\
     python3 agent.py
@@ -22,9 +22,25 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 
 from sipral import Call, Stack
 from sipral.enums import EventKind
+
+
+def route_to(address: str) -> str:
+    """Which of this host's addresses a datagram to ``address`` leaves from.
+
+    That address goes in the ``Contact`` and in every answer's SDP, so it
+    has to be one the far end can send to: a stack bound to ``0.0.0.0``
+    advertises it, and a registrar or a phone handed ``0.0.0.0`` has
+    nowhere to send anything back. Connecting a datagram socket sends
+    nothing; it only asks the system which route it would take.
+    """
+    host, _, port = address.rpartition(":")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect((host, int(port)))
+        return probe.getsockname()[0]
 
 
 def respond(pcm: bytes) -> bytes:
@@ -77,11 +93,13 @@ async def run_call(call: Call) -> None:
 
 async def main() -> None:
     loop = asyncio.get_running_loop()
-    stack = Stack(loop=loop, bind_host="0.0.0.0")
+    registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
+    host = route_to(registrar_address)
+    stack = Stack(loop=loop, bind_host=host)
     account = stack.add_account(
         os.environ.get("SIPRAL_AOR", "sip:agent@example.invalid"),
         registrar=os.environ.get("SIPRAL_REGISTRAR"),
-        registrar_address=os.environ["SIPRAL_REGISTRAR_ADDRESS"],
+        registrar_address=registrar_address,
         auth_user=os.environ.get("SIPRAL_AUTH_USER"),
         auth_password=os.environ.get("SIPRAL_AUTH_PASSWORD"),
     )
@@ -94,7 +112,7 @@ async def main() -> None:
         while True:
             event = await stack.events.get()
             if event.kind == EventKind.INCOMING_CALL:
-                call = stack.answer_call(event)
+                call = stack.answer_call(event, media_host=host)
                 task = asyncio.create_task(run_call(call))
                 calls.add(task)
                 task.add_done_callback(calls.discard)

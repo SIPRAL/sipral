@@ -372,6 +372,17 @@ kamailio` / `asterisk`), unless a column below says one server only:
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler announces one new message with `MinivmMWI()` — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
 | inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |
 
+After the C driver on Asterisk, the lab runs the Python binding's example
+agent (`bindings/python/examples/agent.py`) exactly as its docstring says to
+run it, against the same shared library, with its own account
+(`labuser-agent` in `interop/asterisk/pjsip.conf`). Asterisk originates a call
+to it into `[agent-call]` in `interop/asterisk/extensions.conf`: a tone for
+three seconds, then `SendDTMF(12#)`. It passes when the agent registered,
+answered, received and sent audio (its own `sipral_media_statistics` line), and
+heard the `#` it hangs up on. What this proves that the loopback test in
+`bindings/python/tests` cannot is that what the agent advertises, its Contact
+and its answer's SDP, is somewhere a real server can reach.
+
 Every audible flow's result line carries the harness's own tally — sent, come
 back, audible, refused, and the session's own `Quality` (loss, jitter, delay
 against target, how much the buffer shrank or stretched) — read off what

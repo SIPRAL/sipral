@@ -63,6 +63,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   under a hundred lines, talking through one `respond(pcm) -> pcm` function
   a real model replaces. Packaging (wheels with the library bundled in) is a
   later task; this one installs from the checkout with `pip install -e .`.
+  The interop lab runs that agent as its docstring says to, registered at
+  Asterisk and called by it. For that the agent now binds to, and answers
+  media on, the address its route to the registrar leaves from: it bound
+  signalling to `0.0.0.0` and answered media on `127.0.0.1`, and neither is
+  an address a server can send to.
 - **SIP MESSAGE (RFC 3428) and message waiting indication (RFC 3842).**
   `UserAgent::message` sends an instant message out of any dialog and
   `UserAgent::message_in_call` sends one inside a call's dialog (§4's MAY);
