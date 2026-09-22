@@ -26,6 +26,7 @@ import socket
 
 from sipral import Call, Stack
 from sipral.enums import EventKind
+from sipral.errors import SipralError
 
 
 def route_to(address: str) -> str:
@@ -58,11 +59,20 @@ async def run_call(call: Call) -> None:
             heard = await call.media.frames.get()
             call.media.send_audio(respond(heard))
 
+    stats: dict[str, object] = {}
+
     async def listen_for_hangup() -> None:
+        nonlocal stats
         while True:
             digit = await call.dtmf.get()
             print("dtmf", digit)
             if digit == "#":
+                # Read while the call is still up. Once the BYE is answered
+                # the stack ends the call's media on its own poll thread, and
+                # a `sipral_media_statistics` call after that answers that the
+                # media has ended rather than with numbers -- which on a busy
+                # machine can happen before this coroutine runs again.
+                stats = call.media.statistics()
                 call.hangup()
                 return
 
@@ -83,12 +93,27 @@ async def run_call(call: Call) -> None:
         talking.cancel()
         hanging_up.cancel()
         ending.cancel()
-        # Read before closing: `call.close()` releases the media handle,
-        # and a `sipral_media_statistics` call against a released one is
-        # `SIPRAL_STATUS_STALE_HANDLE`, not a number.
-        stats = call.media.statistics() if call.media else {}
+        # A far end that hung up first has already ended the media, so
+        # there may be no numbers left to read; and `call.close()` releases
+        # the media handle, so whatever is read has to be read before it.
+        if not stats and call.media is not None:
+            try:
+                stats = call.media.statistics()
+            except SipralError:
+                pass
         call.close()
         print(f"ended {call.handle:x}: {stats}")
+
+
+def report_failure(task: asyncio.Task) -> None:
+    """Say why a call's task ended, if it ended by raising.
+
+    An exception in a task nobody awaits is otherwise only mentioned when
+    the task is garbage collected, which for a process that is stopped
+    rather than left to exit is never.
+    """
+    if not task.cancelled() and task.exception() is not None:
+        print(f"call failed: {task.exception()!r}")
 
 
 async def main() -> None:
@@ -116,6 +141,7 @@ async def main() -> None:
                 task = asyncio.create_task(run_call(call))
                 calls.add(task)
                 task.add_done_callback(calls.discard)
+                task.add_done_callback(report_failure)
     finally:
         for task in calls:
             task.cancel()

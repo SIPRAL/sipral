@@ -413,7 +413,7 @@ than planned:
   designed from the measurement rather than from a guess;
 - **Python**, because that is what voice agents are written in: a package over
   the C ABI (a fifth generated back end, not a second binding of the Rust API),
-  with an idiomatic asynchronous layer, PCM as bytes, and an eighty-line agent
+  with an idiomatic asynchronous layer, PCM as bytes, and a one-file agent
   as the example;
 - **a call in sixty seconds with no account**: `cargo run --example call`
   dials a public test IVR, plays the menu through the device crate or into a

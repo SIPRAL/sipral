@@ -108,7 +108,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   nothing more; `bindings/python/tests/test_abi.py` checks the generated
   `cdef` against the header's own numbers and against `bindings/c/abi-sizes.txt`.
   `bindings/python/examples/agent.py` is a complete headless voice agent in
-  under a hundred lines, talking through one `respond(pcm) -> pcm` function
+  one file, talking through one `respond(pcm) -> pcm` function
   a real model replaces. Packaging (wheels with the library bundled in) is a
   later task; this one installs from the checkout with `pip install -e .`.
   The interop lab runs that agent as its docstring says to, registered at
