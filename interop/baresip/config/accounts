@@ -1,0 +1,37 @@
+#
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The lab's phone-to-phone peer, registered at the lab's own Kamailio
+# (interop/kamailio/kamailio.cfg) as three accounts sharing one password --
+# the same shape Asterisk's own SRTP and DTLS-SRTP endpoints already take in
+# this lab (interop/asterisk/pjsip.conf), and for the same reason: a media
+# policy is set once per account, so a call each flow places is a call this
+# file's own capture can tell apart from the others without reading the SDP.
+#
+# answermode=auto: this stack places every call against this peer, so
+# nothing here ever dials out, and answermode is the account parameter
+# module_app menu.so reads to answer one on its own. answerdelay=0 so a
+# flow's own patience is spent waiting on the far end's real work, not on a
+# delay this file chose. audio_codecs=pcmu,pcma names the same two laws
+# every other server in this lab offers, in the order the harness's own
+# catalogue offers them (docs/11-testing.md). dtmfmode=rtpevent is RFC
+# 4733's named telephone event; baresip's other choice is SIP INFO, which
+# this peer is not asked to speak.
+#
+<sip:baresip@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=rtpevent
+
+# SDES (RFC 4568), required rather than offered: srtp-mand answers RTP/SAVP
+# alone and refuses a call that cannot be keyed by it, which is what this
+# lab's own SRTP flow asks of every peer it runs against.
+<sip:baresip-srtp@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=rtpevent;mediaenc=srtp-mand
+
+# DTLS-SRTP (RFC 5764). modules/dtls_srtp self-signs its own certificate at
+# startup and trusts whatever fingerprint the far end's SDP carries, the
+# same fingerprint-only check RFC 8122 section 5 and RFC 5763 section 5 ask
+# for and the same shape Asterisk's dtls_auto_generate_cert=yes takes in
+# this lab. rtcp_mux=yes: this stack's own DTLS association runs on the one
+# port its RTP and RTCP already share (RFC 5764 section 4.2) and refuses a
+# call the far end will not multiplex on it, and rtcp_mux is off unless an
+# account asks for it (src/config.c's own default).
+<sip:baresip-dtls@kamailio>;auth_pass=baresippass;answermode=auto;answerdelay=0;audio_codecs=pcmu,pcma;dtmfmode=rtpevent;mediaenc=dtls_srtp;rtcp_mux=yes

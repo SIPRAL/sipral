@@ -1041,6 +1041,11 @@ enum flow {
     FLOW_MESSAGE,
     FLOW_MWI,
     FLOW_DTLS,
+    /* The phone-to-phone peer: interop/harness/src/main.rs's own
+     * Flow::PeerSrtp and Flow::PeerDtls, run only when SIPRAL_PEER names
+     * baresip -- see runs_against() below. */
+    FLOW_PEER_SRTP,
+    FLOW_PEER_DTLS,
     FLOW_COUNT
 };
 
@@ -1071,6 +1076,10 @@ static const char *flow_name(enum flow which)
         return "message waiting indication";
     case FLOW_DTLS:
         return "DTLS-SRTP, held and resumed";
+    case FLOW_PEER_SRTP:
+        return "SRTP, phone to phone";
+    case FLOW_PEER_DTLS:
+        return "DTLS-SRTP, phone to phone";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1106,6 +1115,10 @@ static const char *flow_key(enum flow which)
         return "mwi";
     case FLOW_DTLS:
         return "dtls";
+    case FLOW_PEER_SRTP:
+        return "peersrtp";
+    case FLOW_PEER_DTLS:
+        return "peerdtls";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1290,8 +1303,14 @@ static void dwell(struct endpoint *end, unsigned millis)
  * DTLS-SRTP runs on both, since `interop/freeswitch/lab.xml` answers 9005 as
  * well. `docs/11-testing.md` carries the reasons. A flow is not run where it
  * is known not to pass until somebody has found out why.
+ *
+ * `for_baresip` gates the two phone-to-phone flows, the same way SIPRAL_PEER gates them
+ * in interop/harness/src/main.rs: `server` reads "kamailio" for this run and
+ * for the ordinary kamailio-to-freeswitch one alike, so the server name alone
+ * cannot tell them apart, and only a run that asked for the peer explicitly
+ * may dial an account interop/asterisk knows nothing about.
  */
-static int runs_against(enum flow which, const char *server)
+static int runs_against(enum flow which, const char *server, int for_baresip)
 {
     switch (which) {
     case FLOW_DTMF:
@@ -1301,6 +1320,9 @@ static int runs_against(enum flow which, const char *server)
     case FLOW_MESSAGE:
     case FLOW_MWI:
         return strcmp(server, "asterisk") == 0;
+    case FLOW_PEER_SRTP:
+    case FLOW_PEER_DTLS:
+        return for_baresip;
     case FLOW_DTLS:
     case FLOW_REGISTER:
     case FLOW_CALL:
@@ -1322,8 +1344,14 @@ static int runs_against(enum flow which, const char *server)
  * has 9004, DTLS-SRTP 9005 — its own number so a capture shows which leg
  * keyed by handshake without reading the SDP — and `FLOW_MWI`'s own mailbox
  * extension is 9007, whose hangup handler is what leaves the message this
- * flow watches for. Every other flow calls the extension the command line
- * named, and a bridge answers it; `FLOW_MESSAGE` places no call at all, and
+ * flow watches for. FLOW_PEER_SRTP and FLOW_PEER_DTLS are the same shape
+ * against the phone-to-phone peer: one AOR per media policy
+ * (interop/baresip/config/accounts) rather than one per extension number,
+ * since baresip is a single client and not a dialplan. Every other flow calls
+ * the extension the command line named, and a bridge answers it -- FLOW_CALL
+ * and FLOW_HOLD reused against that same peer take scripts/lab.sh's own
+ * baresip AOR this way, exactly as interop/harness/src/main.rs's
+ * `call_extension` does; `FLOW_MESSAGE` places no call at all, and
  * `flow_message` names its own extension (9006) directly.
  */
 static const char *extension_for(enum flow which, const char *named)
@@ -1338,6 +1366,10 @@ static const char *extension_for(enum flow which, const char *named)
         return "9005";
     case FLOW_MWI:
         return "9007";
+    case FLOW_PEER_SRTP:
+        return "baresip-srtp";
+    case FLOW_PEER_DTLS:
+        return "baresip-dtls";
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -1386,8 +1418,10 @@ static uint32_t srtp_for(enum flow which)
 {
     switch (which) {
     case FLOW_SRTP:
+    case FLOW_PEER_SRTP:
         return (uint32_t)SIPRAL_SRTP_REQUIRED;
     case FLOW_DTLS:
+    case FLOW_PEER_DTLS:
         return (uint32_t)SIPRAL_SRTP_DTLS_REQUIRED;
     case FLOW_REGISTER:
     case FLOW_CALL:
@@ -1568,9 +1602,14 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         break;
 
     case FLOW_SRTP:
+    case FLOW_PEER_SRTP:
         /* the same tone as the plain call, and judged the same way: a stream
          * that agreed a key and never decrypted a frame is the failure this
-         * flow exists to find, and it looks like silence */
+         * flow exists to find, and it looks like silence. FLOW_PEER_SRTP is
+         * this same case against the phone-to-phone peer instead of
+         * Asterisk -- extension_for() and srtp_for() already point it at
+         * that peer's own SRTP account, so nothing below needs to know
+         * which one it is running against */
         dwell(end, DWELL_MS);
         if (!secured(end)) {
             wrong_text("the call connected but never ran under SDES");
@@ -1771,7 +1810,14 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         break;
     }
 
-    case FLOW_DTLS: {
+    case FLOW_DTLS:
+    case FLOW_PEER_DTLS: {
+        /* FLOW_PEER_DTLS is this same case against the phone-to-phone
+         * peer's baresip-dtls account instead of Asterisk's
+         * or FreeSWITCH's -- extension_for() and srtp_for() already sent it
+         * there, and nothing below needs to know which one it is running
+         * against: a third independent DTLS-SRTP implementation on the far
+         * side of a call this stack placed rather than answered. */
         sipral_status_t status;
         const char *require_audio = getenv("SIPRAL_REQUIRE_AUDIO");
         unsigned audible_at_resume;
@@ -1890,6 +1936,12 @@ int main(int argc, char **argv)
     const char *user = getenv("SIPRAL_USER");
     const char *pass = getenv("SIPRAL_PASS");
     const char *wanted = getenv("SIPRAL_FLOWS");
+    /* The phone-to-phone peer: interop/harness/src/main.rs's own
+     * SIPRAL_PEER gate, read the same way here so FLOW_PEER_SRTP and
+     * FLOW_PEER_DTLS cannot start dialling baresip's accounts from a run
+     * that never asked for that peer. */
+    const char *peer = getenv("SIPRAL_PEER");
+    int for_baresip = peer != NULL && strcmp(peer, "baresip") == 0;
     struct sockaddr_in remote;
     char remote_text[SIPRAL_ADDRESS_BYTES];
     int failed = 0;
@@ -1932,7 +1984,7 @@ int main(int argc, char **argv)
         if (wanted != NULL && wanted[0] != '\0' && !selected(wanted, flow_key(flow))) {
             continue;
         }
-        if (!runs_against(flow, server)) {
+        if (!runs_against(flow, server, for_baresip)) {
             continue;
         }
         account_for(flow, server, &flow_user, &flow_pass);

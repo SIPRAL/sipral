@@ -70,6 +70,25 @@ services:
       - ./asterisk/voicemail.conf:/etc/asterisk/voicemail.conf:ro
     networks: [lab]
 
+  # The phone-to-phone peer: a second client stack, registered at
+  # Kamailio above as a second lab user, rather than another server. Built
+  # by compose (interop/baresip/Dockerfile) rather than pulled, since
+  # nobody publishes one pinned the way the other three images here are --
+  # so the host pays the build once and every run after it starts from the
+  # cached layer. A profile of its own, not a fourth container of the
+  # ordinary lab: it is the most expensive image here to build, this host
+  # already runs a live PBX beside the lab, and scripts/lab.sh starts it for
+  # its own step alone and removes it straight after, the way the harness's
+  # own tcpdump containers already do.
+  baresip:
+    build:
+      context: ./baresip
+    profiles: ["baresip"]
+    volumes:
+      - ./baresip/config/config:/etc/sipral-baresip/config:ro
+      - ./baresip/config/accounts:/etc/sipral-baresip/accounts:ro
+    networks: [lab]
+
 networks:
   lab:
     driver: bridge

@@ -27,6 +27,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and selectable alone as `scripts/lab.sh opensips`; it is started only for
   that step and removed right after, so the lab's steady footprint is
   unchanged.
+- **A phone-to-phone peer in the lab: baresip, through the proxy.** Every
+  flow the lab ran before this ended at a server; none reached another client
+  stack. baresip (built from source, pinned by release tag and checksum
+  alongside the matching libre release) now registers at the lab's own
+  Kamailio as a second user, three accounts for three media policies, and the
+  drivers place a call at its AOR the same way they place one at FreeSWITCH's
+  or Asterisk's — Kamailio relays the dialog and never joins it, so this is
+  the one place in the lab where the media is end to end against a stack this
+  repository did not write. Register and call, hold and resume, SRTP and
+  DTLS-SRTP all run against it on both drivers, `scripts/lab.sh` starts the
+  container for that step alone and removes it straight after, and a peer
+  hanging up on its own is left as a next step rather than claimed here.
 - **DTLS-SRTP with a peer that certifies with RSA.** FreeSWITCH, left as it
   ships, holds an RSA-4096 certificate, and no call with it could be keyed:
   as a client it withheld its certificate from a request naming ECDSA alone,

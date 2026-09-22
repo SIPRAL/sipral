@@ -1,0 +1,57 @@
+#
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# baresip's own configuration for the lab's phone-to-phone peer. Everything
+# below is either structural -- a module needs to be named before its
+# account can ask for it -- or a default named explicitly so a later baresip
+# release changing its own default cannot change what this container does.
+# Nothing here is read from interop/baresip/accounts, which is the other
+# file this image mounts at /etc/sipral-baresip.
+#
+
+# SIP. 4 forced on the command line (-4): the lab's bridge network is IPv4
+# only, and AF_UNSPEC left to guess costs a DNS round trip this network has
+# no server for.
+sip_listen		0.0.0.0:5060
+
+# Call. Left at their defaults -- a call this lab places dwells a few
+# seconds at most, nowhere near call_local_timeout's own 120, and nothing
+# here asks baresip to place a second one while the first is up.
+call_local_timeout	120
+call_max_calls		4
+call_accept		no
+
+# Audio. No device anywhere near this container: the source is a sine tone
+# loud enough to clear the harness's own audible threshold (350+440 Hz would
+# match the other two servers' own cadenced tone more closely, but ausine
+# generates one frequency and 440 alone is already well above it), and the
+# player writes whatever it decodes to a WAV file nobody reads -- the lab's
+# own harnesses judge what left this container, not what arrived at it.
+audio_source		ausine,440
+audio_player		aufile,/tmp/sipral-lab-rx.wav
+audio_telev_pt		101		# the default, named so it cannot drift
+
+#------------------------------------------------------------------------------
+# Modules
+#
+# Exactly what interop/baresip/Dockerfile's own -DMODULES built, in the two
+# groups baresip's own sample config uses: `module` for the media stack,
+# `module_app` for the two that read accounts and answer calls. No ICE, no
+# STUN or TURN -- every peer in this lab shares one bridge network with no
+# NAT between them -- and no video, GUI or hardware-audio module: none of
+# them was built, and naming one here would only be a load failure at
+# startup for a module this container carries.
+
+module_path		/usr/local/lib/baresip/modules
+
+module			g711.so
+module			auconv.so
+module			auresamp.so
+module			ausine.so
+module			aufile.so
+module			srtp.so
+module			dtls_srtp.so
+
+module_app		account.so
+module_app		menu.so

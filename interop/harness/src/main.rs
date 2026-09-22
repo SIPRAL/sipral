@@ -134,14 +134,15 @@ fn catalog() -> CodecCatalog {
 }
 
 /// What `flow` places its call with: [`catalog`] for every flow except
-/// [`Flow::Srtp`] and [`Flow::Dtls`], which are refused rather than answered
-/// plainly if the far end turns out not to key the call — the whole point of
-/// each is that the call runs under SDES, or under a DTLS-SRTP handshake, or
-/// does not run at all.
+/// [`Flow::Srtp`], [`Flow::Dtls`] and their own phone-to-phone counterparts
+/// [`Flow::PeerSrtp`]/[`Flow::PeerDtls`], which are refused rather than
+/// answered plainly if the far end turns out not to key the call — the whole
+/// point of each is that the call runs under SDES, or under a DTLS-SRTP
+/// handshake, or does not run at all.
 fn catalog_for(flow: Flow) -> CodecCatalog {
     match flow {
-        Flow::Srtp => catalog().with_srtp(SrtpPolicy::Required),
-        Flow::Dtls => catalog().with_srtp(SrtpPolicy::DtlsRequired),
+        Flow::Srtp | Flow::PeerSrtp => catalog().with_srtp(SrtpPolicy::Required),
+        Flow::Dtls | Flow::PeerDtls => catalog().with_srtp(SrtpPolicy::DtlsRequired),
         _ => catalog(),
     }
 }
@@ -211,6 +212,17 @@ fn main() -> ExitCode {
     }
     // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
     flows.push(Flow::Dtls);
+    // the phone-to-phone peer: gated on SIPRAL_PEER rather than on
+    // `server`, because this run and the plain kamailio one above both name
+    // "kamailio" as their server — that is the proxy's own address either
+    // way — and only this one may dial an account interop/asterisk and
+    // interop/freeswitch know nothing about. scripts/lab.sh sets it only for
+    // its own "baresip" step, so neither of the ordinary runs ever pushes
+    // these two.
+    if env::var("SIPRAL_PEER").as_deref() == Ok("baresip") {
+        flows.push(Flow::PeerSrtp);
+        flows.push(Flow::PeerDtls);
+    }
 
     let mut failures = 0;
     for flow in flows {
@@ -313,6 +325,16 @@ enum Flow {
     /// mailbox's `new` count read back higher once Asterisk's own MWI
     /// support reports it.
     Mwi,
+    /// [`Flow::Srtp`] again, against the lab's phone-to-phone peer
+    /// instead of a server: SDES required against baresip's own
+    /// `baresip-srtp` account (`interop/baresip/config/accounts`), refused
+    /// rather than answered plainly if that peer will not key it either.
+    PeerSrtp,
+    /// [`Flow::Dtls`] again, against the same peer's `baresip-dtls`
+    /// account: a third independent DTLS-SRTP implementation, after
+    /// Asterisk's and FreeSWITCH's, on the far side of a call this stack
+    /// placed rather than one it answered.
+    PeerDtls,
 }
 
 impl Flow {
@@ -330,6 +352,8 @@ impl Flow {
             Self::Dtls => "DTLS-SRTP, held and resumed",
             Self::Message => "MESSAGE, echoed",
             Self::Mwi => "message waiting indication",
+            Self::PeerSrtp => "SRTP, phone to phone",
+            Self::PeerDtls => "DTLS-SRTP, phone to phone",
         }
     }
 
@@ -348,6 +372,8 @@ impl Flow {
             Self::Dtls => "dtls",
             Self::Message => "message",
             Self::Mwi => "mwi",
+            Self::PeerSrtp => "peersrtp",
+            Self::PeerDtls => "peerdtls",
         }
     }
 }
@@ -948,7 +974,7 @@ impl Script {
         match *event {
             MediaEvent::Started { codec, .. } if Some(call) == self.call => {
                 self.original_codec.get_or_insert(codec);
-                if self.flow == Flow::Srtp
+                if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp)
                     && endpoint
                         .engine
                         .session(call)
@@ -978,12 +1004,16 @@ impl Script {
             // the handshake finished and its keys are in: the one event that
             // says a DTLS-SRTP call is encrypted, since at `Started` it is
             // still waiting for them
-            MediaEvent::Secured { .. } if Some(call) == self.call && self.flow == Flow::Dtls => {
+            MediaEvent::Secured { .. }
+                if Some(call) == self.call && matches!(self.flow, Flow::Dtls | Flow::PeerDtls) =>
+            {
                 self.seen.saw(Fact::Encrypted);
             }
             // a handshake that gave up, a role or a certificate the far end
             // moved: this flow's whole claim, and nothing to wait out
-            MediaEvent::Failed(ref error) if Some(call) == self.call && self.flow == Flow::Dtls => {
+            MediaEvent::Failed(ref error)
+                if Some(call) == self.call && matches!(self.flow, Flow::Dtls | Flow::PeerDtls) =>
+            {
                 self.seen.refused = Some(format!("media: {error}"));
                 self.hang_up(endpoint, now);
             }
@@ -1028,7 +1058,9 @@ impl Script {
 
     /// The next thing this flow does, once the last one has happened.
     fn advance(&mut self, endpoint: &mut Endpoint, now: Instant) {
-        if self.flow == Flow::Dtls && self.advance_keyed_hold(endpoint, now) {
+        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls)
+            && self.advance_keyed_hold(endpoint, now)
+        {
             return;
         }
         match self.step {
@@ -1049,7 +1081,7 @@ impl Script {
                     self.tried("hold", asked);
                 }
             }
-            Step::Holding if self.flow == Flow::Hold || self.flow == Flow::Dtls => {
+            Step::Holding if matches!(self.flow, Flow::Hold | Flow::Dtls | Flow::PeerDtls) => {
                 self.step = Step::Resuming;
                 if let Some(call) = self.call {
                     let asked = endpoint.agent.resume(call, now);
@@ -1099,8 +1131,15 @@ impl Script {
             }
             // a plain call is the one that carries the tone, so it waits.
             // `Flow::Mwi`'s mailbox leg is the same shape: dwell, then hang
-            // up, which is what makes 9007 announce the message
-            Step::Talking if matches!(self.flow, Flow::Call | Flow::Srtp | Flow::Mwi) => {
+            // up, which is what makes 9007 announce the message. `PeerSrtp`
+            // is `Flow::Srtp` again, against the phone-to-phone peer instead
+            // of a server
+            Step::Talking
+                if matches!(
+                    self.flow,
+                    Flow::Call | Flow::Srtp | Flow::Mwi | Flow::PeerSrtp
+                ) =>
+            {
                 self.listen_until = Some(now + dwell());
             }
             Step::Talking if self.flow == Flow::Dtmf4733 => {
@@ -1280,13 +1319,21 @@ impl Script {
     /// extension (9007), both Asterisk only — see
     /// `interop/asterisk/extensions.conf` — and `Flow::Dtls` (9005, on both).
     /// `Flow::Message` places no call at all; its own extension (9006) is
-    /// named directly in `advance`.
+    /// named directly in `advance`. `Flow::Call` and `Flow::Hold` reused
+    /// against the phone-to-phone peer are `self.extension` too —
+    /// scripts/lab.sh passes baresip's own AOR name for that step rather
+    /// than 9000 — but that peer's own SRTP and DTLS-SRTP accounts are
+    /// fixed names for the same reason 9004 and 9005 are: one AOR per media
+    /// policy (interop/baresip/config/accounts), not one per extension
+    /// number, since baresip is a single client rather than a dialplan.
     fn call_extension(&self) -> String {
         match self.flow {
             Flow::Dtmf4733 | Flow::DtmfInfo => "9003".to_owned(),
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),
             Flow::Mwi => "9007".to_owned(),
+            Flow::PeerSrtp => "baresip-srtp".to_owned(),
+            Flow::PeerDtls => "baresip-dtls".to_owned(),
             _ => self.extension.clone(),
         }
     }
@@ -1372,7 +1419,7 @@ impl Script {
                 return Err((*why).to_owned());
             }
         }
-        if self.flow == Flow::Srtp && !self.seen.has(Fact::Encrypted) {
+        if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp) && !self.seen.has(Fact::Encrypted) {
             return Err("the call connected but never ran under SDES".to_owned());
         }
         // Audio is asked for only when something is known to send it back, and
@@ -1380,7 +1427,7 @@ impl Script {
         // as what they came to prove has happened. The SRTP call dwells on the
         // same tone, and a stream that agreed a key and never decrypted a frame
         // is the failure that flow exists to find.
-        if (self.flow == Flow::Call || self.flow == Flow::Srtp)
+        if matches!(self.flow, Flow::Call | Flow::Srtp | Flow::PeerSrtp)
             && require_audio
             && heard.audible == 0
         {
@@ -1391,7 +1438,7 @@ impl Script {
         }
         // and the DTLS call's claim is about after the re-offers, not before:
         // audio before the hold only says the first handshake worked
-        if self.flow == Flow::Dtls
+        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls)
             && require_audio
             && heard.audible <= self.audible_at_resume.unwrap_or(heard.audible)
         {
@@ -1415,7 +1462,7 @@ impl Script {
             // Ours, and before Over: a far end that answers and hangs up half a
             // millisecond later satisfies "connected" and "ended" without the
             // call ever having been one
-            Flow::Call | Flow::Srtp => {
+            Flow::Call | Flow::Srtp | Flow::PeerSrtp => {
                 const CALL: &[(Fact, &str)] = &[
                     (Fact::Registered, "no binding was granted"),
                     (Fact::Up, "the call did not connect"),
@@ -1483,7 +1530,7 @@ impl Script {
                 (Fact::Ours, "the far end ended the call before we asked"),
                 (Fact::Over, "the call did not end"),
             ],
-            Flow::Dtls => &[
+            Flow::Dtls | Flow::PeerDtls => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
                 (
@@ -1707,6 +1754,8 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Dtls => [101; 32],
         Flow::Message => [109; 32],
         Flow::Mwi => [113; 32],
+        Flow::PeerSrtp => [131; 32],
+        Flow::PeerDtls => [137; 32],
     }
 }
 
@@ -1727,6 +1776,8 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Dtls => [201; 32],
         Flow::Message => [211; 32],
         Flow::Mwi => [223; 32],
+        Flow::PeerSrtp => [227; 32],
+        Flow::PeerDtls => [229; 32],
     }
 }
 

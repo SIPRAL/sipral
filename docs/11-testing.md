@@ -298,6 +298,7 @@ Run before each release, and recorded with the version of each peer.
 | OpenSIPS | lab, its own step only | a second opinion on the same: Kamailio and OpenSIPS share an ancestor but have diverged for fifteen years, so a rule both of them route the same way is not one implementation's private reading of it |
 | FreeSWITCH | lab, as deployed | full call features, transfer, hold |
 | Asterisk | `chan_pjsip`, container, defaults | the configuration most integrators actually have; transfer against a second implementation |
+| baresip | built from source (`interop/baresip/Dockerfile`), registered at Kamailio as a second lab user | phone to phone: a call whose dialog and media run end to end against a second client stack, not a server, since Kamailio is a proxy and never joins either |
 | Carrier A | Romanian, paid account | real trunking, real codecs |
 | Carrier B | international, paid account | a second opinion on everything carrier A does |
 | Commercial SBC | where access exists | the strict end of the spectrum |
@@ -311,6 +312,10 @@ Known peer behaviours worth writing down rather than rediscovering:
   for the lab.
 - Asterisk `res_pjsip` defaults `max_contacts=0`, which refuses every
   registration. Server misconfiguration, always blamed on the client.
+- baresip's `menu` application module, not its core, reads an account's
+  `answermode` and answers a call on its own; naming `account.so` without
+  `menu.so` in `interop/baresip/config/config` gets a registered peer that
+  never picks up.
 
 ## Interoperability procedure
 
@@ -343,10 +348,11 @@ change that would stop an integrator's program building fails at the moment it
 is made. **This is the phase-1 exit criterion and the precondition for
 freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
 
-It runs the same twelve call-and-transfer flows the Rust driver runs, against
-the same servers. The codec change was the one the C surface could not
-express until `sipral_call_change_codecs` existed — and the Rust driver could
-not either, through the facade: it wrote that re-offer itself until
+It runs the same fourteen flows the Rust driver runs, against the same
+servers, the two phone-to-phone ones against baresip among them. The codec
+change was the one the C surface could not express until
+`sipral_call_change_codecs` existed — and the Rust driver could not either,
+through the facade: it wrote that re-offer itself until
 `MediaEngine::change_codecs` did. MESSAGE and message waiting indication
 (8.6.5) run in C too, driven by `sipral_account_message` and
 `sipral_account_subscribe`; only the opt-in narrowed-inbound flow at the
@@ -359,7 +365,12 @@ and straight at Asterisk (`scripts/lab.sh kamailio` / `opensips` / `asterisk`),
 unless a column below says one server only. OpenSIPS is started for its own
 step alone and torn down right after — see the note in `interop/compose.yaml`
 — so its results are read off `scripts/lab.sh`'s own output, not off a
-container left running beside the other three.
+container left running beside the other three. "baresip only" is
+`scripts/lab.sh baresip`: the same proxy as the plain kamailio run,
+`kamailio`, but the call is placed at baresip's own AOR rather than at
+FreeSWITCH, and Kamailio relays the dialog without ever joining it — the one
+place in this table where the far end is a second client stack rather than a
+server:
 
 | Flow | Pass condition | Servers |
 |---|---|---|
@@ -372,6 +383,10 @@ container left running beside the other three.
 | DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` (8.3.11) instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
 | DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | all three |
+| call, phone to phone | `Flow::Call` again, dialled at baresip's own AOR instead of an extension — connected, hung up by this end, ended, audio required both ways exactly as the plain call above | baresip only |
+| hold and resume, phone to phone | `Flow::Hold` again, same peer: as the row above, plus the hold and the resume both agreed by baresip's own `menu` module | baresip only |
+| SRTP, phone to phone | connected under SDES against baresip's own `baresip-srtp` account (`interop/baresip/config/accounts`, `mediaenc=srtp-mand`) — refused rather than answered plainly if that peer will not key it either | baresip only |
+| DTLS-SRTP, phone to phone | connected against baresip's own `baresip-dtls` account, keyed by its own handshake exactly as the DTLS-SRTP row above asks of a server — baresip's `dtls_srtp` module self-signs its own certificate at startup and is checked by fingerprint alone, the same RFC 8122 §5 / RFC 5763 §5 check Asterisk's `dtls_auto_generate_cert=yes` stands in for — a third independent DTLS-SRTP implementation, on the far side of a call this stack placed rather than answered | baresip only |
 | hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`, the 8.2.1 case): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler raises the mailbox's new-message count by one with `MinivmMWI()`, keeping the count itself since `MinivmMWI()` publishes a count rather than adding to one, so each driver's flow in the same lab run sees its own call raise it — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
@@ -388,6 +403,16 @@ heard the `#` it hangs up on. What this proves that the loopback test in
 `bindings/python/tests` cannot is that what the agent advertises, its Contact
 and its answer's SDP, is somewhere a real server can reach.
 
+The four `baresip only` rows are all hung up by this end, the same shape
+every other flow in this table but the two transfers takes. A fifth worth
+having — the far end ending the call on its own, which every flow above
+proves the opposite of — is not run yet: baresip's own `call_local_timeout`
+(`interop/baresip/config/config`) would trigger it, but tuning that timer
+below the dwell every other flow against this peer takes, without also
+capping the phone-to-phone flows this file already runs on the same peer's
+same accounts, has not been done with confidence and is the next step
+rather than a flow claimed here.
+
 Every audible flow's result line carries the harness's own tally — sent, come
 back, audible, refused, and the session's own `Quality` (loss, jitter, delay
 against target, how much the buffer shrank or stretched) — read off what
@@ -397,10 +422,11 @@ read it. Since 8.6.9 the same line also carries the R factor and the two
 mean opinion scores `StreamStatistics::voip_metrics` reports — "n/a" for
 G.722 and Opus, which G.113 tabulates no `Ie`/`Bpl` for, rather than a
 guessed number — so every flow that negotiates PCMU or PCMA reads a MOS.
-`SIPRAL_REQUIRE_AUDIO=1` makes the plain call and the SRTP call —
-the two that dwell on the far end's tone — fail outright if nothing came back
-audible; `scripts/lab.sh` sets it, and every impairment profile's "audio
-survived it" rests on it.
+`SIPRAL_REQUIRE_AUDIO=1` makes the plain call and the SRTP call — and their
+own phone-to-phone counterparts against baresip — fail outright if nothing
+came back audible, the flows in this table that dwell on the far end's tone;
+`scripts/lab.sh` sets it, and every impairment profile's "audio survived it"
+rests on it.
 
 A flow passes only if every condition holds; a partial run is a failure with
 the failing condition named. The event log and the capture of each passing run

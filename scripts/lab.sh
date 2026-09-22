@@ -9,10 +9,12 @@
 #
 #   scripts/lab.sh              register, call, hold, resume, both transfers,
 #                               through each proxy and straight at Asterisk,
-#                               then the same call over a link made bad
+#                               then phone to phone through the proxy, then
+#                               the same call over a link made bad
 #   scripts/lab.sh kamailio     one server only
 #   scripts/lab.sh opensips     the second proxy only
 #   scripts/lab.sh asterisk
+#   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #
@@ -282,6 +284,63 @@ python_agent() {
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
+# The phone-to-phone peer. The same shape as flows() above -- server,
+# capture name, a tcpdump started first -- but the server is always
+# "kamailio" (baresip is dialed through the proxy, never straight), the
+# extension dialed is baresip's own AOR rather than 9000, and SIPRAL_PEER
+# and SIPRAL_FLOWS keep the register/blind/attended flows and Asterisk's own
+# hardcoded extensions out of a run that has neither: interop/harness's own
+# main.rs only adds the SRTP and DTLS-SRTP flows below to a run that asks
+# for SIPRAL_PEER=baresip, precisely so this step cannot silently start
+# dialling baresip's accounts from scripts/lab.sh kamailio or asterisk.
+flows_baresip() {
+    local capture="$1"
+    docker run --rm --network sipral-interop_lab \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
+        -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
+        -v "$HARNESS:/harness:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/$capture.pcap 2>/dev/null &
+            sleep 2
+            /harness kamailio 5060 baresip
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
+# The same, through the C ABI. See flows_c() above for why this is a
+# function of its own rather than an argument to flows_baresip().
+flows_baresip_c() {
+    local capture="$1" beside
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker run --rm --network sipral-interop_lab \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_PEER=baresip \
+        -e SIPRAL_FLOWS=call,hold,peersrtp,peerdtls \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/$capture.pcap 2>/dev/null &
+            sleep 2
+            /harness-c kamailio 5060 baresip
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
 # The same call again, over a link deliberately made bad. netem shapes egress,
 # so it is our packets that are delayed, lost in bursts and reordered; the echo
 # means the return path suffers too, since a packet that never arrived is never
@@ -378,6 +437,46 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
         python_agent && pass "agent.py answered, echoed and hung up" \
             || fail "agent.py"
     fi
+fi
+
+# The one step in this file where the far end is a client stack rather than
+# a server: baresip, started and registered for this step alone
+# (interop/compose.yaml's own "baresip" profile) and removed straight after
+# -- this host already carries a live PBX beside the lab, and the image is
+# the most expensive one here to build, so it must not add to the lab's
+# steady footprint the way the three servers that run for the whole script
+# do.
+if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
+    step "phone to phone -- baresip through the proxy"
+    if ( cd interop && docker compose --profile baresip up -d baresip ) >/dev/null 2>&1; then
+        pass "baresip: built and started"
+        # the plain account is required -- without it neither flow below has
+        # anyone to call -- and the SRTP and DTLS-SRTP ones are read the same
+        # optional way freeswitch's own profile is above: a peer slower to
+        # bring up its media-encryption modules should not stop the plain
+        # call and hold flows from running, and the flows below name their
+        # own missing account if it never registered.
+        # bracketed exactly as interop/kamailio/kamailio.cfg's own xlog line
+        # is: "baresip" is a prefix of "baresip-srtp" and "baresip-dtls" too,
+        # and wait_for's own grep is an unanchored substring match, so the
+        # plain account's phrase would otherwise be satisfied by either of
+        # the other two registering first.
+        if wait_for kamailio "lab: baresip registered [baresip]"; then
+            wait_for kamailio "lab: baresip registered [baresip-srtp]" optional || true
+            wait_for kamailio "lab: baresip registered [baresip-dtls]" optional || true
+            flows_baresip proxy-baresip && pass "sipral to baresip" \
+                || fail "sipral to baresip"
+            if [ -n "$HARNESS_C" ]; then
+                step "the same, through the C ABI -- baresip through the proxy"
+                flows_baresip_c proxy-baresip-c && pass "sipral to baresip, in C" \
+                    || fail "sipral to baresip, in C"
+            fi
+        fi
+    else
+        fail "docker compose up baresip"
+    fi
+    ( cd interop && docker compose stop baresip && docker compose rm -f baresip ) \
+        >/dev/null 2>&1
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
