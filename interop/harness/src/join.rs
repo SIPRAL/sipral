@@ -31,7 +31,8 @@
 //! This harness reaches `sipral` through the facade and nothing else
 //! (`docs/11-testing.md`'s "through the facade, not around it"), so it does
 //! not carry a second G.711 decoder to read the payload it is about to send —
-//! that is exactly the second codec pipeline 8.5.1 removed. What it *can*
+//! that is exactly the second codec pipeline the harness once carried and
+//! gave up. What it *can*
 //! read, because `sipral::MediaEngine::mix` already decodes it through the
 //! same facade, is `local_out`: the frame this end's own loudspeaker would be
 //! given, which is the tone extension's audio and the echo extension's audio
