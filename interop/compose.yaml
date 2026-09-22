@@ -22,7 +22,7 @@
 # changed digest six days before this was written, and a lab that moves under
 # you is not a lab. Refresh the pins deliberately. opensips/opensips ships no
 # tag more specific than the release branch (`4.0`, not `4.0.0`), so that one
-# is pinned by tag and digest together.
+# is pinned by tag and digest together, in interop/opensips/Dockerfile.
 
 name: sipral-interop
 
@@ -41,7 +41,10 @@ services:
   # than once. Not one of the three the lab keeps up throughout — see the
   # note above.
   opensips:
-    image: opensips/opensips:4.0@sha256:8cde1548466b3a9f7637c91ff299a8d959c6c6953a8cd68deb391753324f702b
+    # the pinned official image plus the digest-auth package it leaves out;
+    # see interop/opensips/Dockerfile
+    build:
+      context: ./opensips
     profiles: [opensips]
     # no command: the image's own entrypoint is already `opensips -F`, the
     # foreground flag that keeps this from being the same daemonize-and-exit
