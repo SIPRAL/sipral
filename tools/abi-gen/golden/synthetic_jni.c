@@ -566,6 +566,25 @@ Java_org_sipral_SipralNative_sipral_1call_1capture(JNIEnv *env, jobject self, jl
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1mix(JNIEnv *env, jobject self, jlong stack, jshortArray mic, jshortArray local)
+{
+    (void)env;
+    (void)self;
+    jshort *mic_data = mic ? (*env)->GetShortArrayElements(env, mic, NULL) : NULL;
+    jsize mic_size = mic ? (*env)->GetArrayLength(env, mic) : 0;
+    jshort *local_data = local ? (*env)->GetShortArrayElements(env, local, NULL) : NULL;
+    jsize local_size = local ? (*env)->GetArrayLength(env, local) : 0;
+    sipral_status_t status = sipral_call_mix((sipral_handle_t)stack, (const int16_t *)mic_data, (size_t)mic_size, (int16_t *)local_data, (size_t)local_size);
+    if (mic) {
+        (*env)->ReleaseShortArrayElements(env, mic, mic_data, JNI_ABORT);
+    }
+    if (local) {
+        (*env)->ReleaseShortArrayElements(env, local, local_data, 0);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1media_1receive(JNIEnv *env, jobject self, jlong stack, jbyteArray data, jlongArray arrival)
 {
     (void)env;

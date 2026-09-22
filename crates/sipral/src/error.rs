@@ -305,6 +305,31 @@ pub enum MediaError {
     CodecChanged,
     /// The user agent refused the request the media was for.
     Signalling(UaError),
+    /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to join a
+    /// call to itself.
+    SameCall,
+    /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to pair a
+    /// call that is already paired with another.
+    ///
+    /// A call leaves the pair it is in
+    /// ([`MediaEngine::leave`](crate::MediaEngine::leave)) before it joins
+    /// another: two pairs sharing a call is a mix of three far ends and this
+    /// end, which is not what this stack's own [`mix_two`](crate::mix_two)
+    /// does the arithmetic for.
+    AlreadyJoined,
+    /// [`MediaEngine::leave`](crate::MediaEngine::leave) or
+    /// [`MediaEngine::mix`](crate::MediaEngine::mix) was asked about a call
+    /// that is not currently joined to another.
+    NotJoined,
+    /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to pair two
+    /// calls whose sessions decode at different sample rates, or cut audio
+    /// into frames of different lengths.
+    ///
+    /// Nothing in [`mix_two`](crate::mix_two) resamples, so the samples it
+    /// decodes out of one session have to line up, index for index, with the
+    /// ones it decodes out of the other — which two codecs only agree on
+    /// when they cut a frame the same way.
+    JoinIncompatible,
 }
 
 impl MediaError {
@@ -516,6 +541,13 @@ impl fmt::Display for MediaError {
                 f.write_str("the recording stopped: the call moved to a codec at another rate")
             }
             Self::Signalling(error) => write!(f, "user agent: {error}"),
+            Self::SameCall => f.write_str("a call cannot be joined to itself"),
+            Self::AlreadyJoined => f.write_str("this call is already joined to another"),
+            Self::NotJoined => f.write_str("this call is not currently joined to another"),
+            Self::JoinIncompatible => f.write_str(
+                "the two calls decode at different sample rates, or cut audio into frames of \
+                 different lengths, so they cannot be mixed without resampling",
+            ),
             // every refusal about how a call is secured and how its path is
             // chosen, which `about_the_path` holds because the match here had
             // grown past what a reader holds at once
@@ -553,6 +585,10 @@ mod tests {
             MediaError::NotRecording,
             MediaError::AlreadyRecording,
             MediaError::CodecChanged,
+            MediaError::SameCall,
+            MediaError::AlreadyJoined,
+            MediaError::NotJoined,
+            MediaError::JoinIncompatible,
             #[cfg(feature = "dtls")]
             MediaError::DtlsIdentity,
             #[cfg(feature = "dtls")]

@@ -208,4 +208,18 @@ pub enum MediaEvent {
         /// How much audio reached the file before it did.
         written: Duration,
     },
+    /// The call this one was joined to has ended, taking the pair down with
+    /// it.
+    ///
+    /// [`MediaEngine::join`](crate::MediaEngine::join) paired the two calls
+    /// and neither one ever called
+    /// [`MediaEngine::leave`](crate::MediaEngine::leave) — the partner's own
+    /// call simply ended first, the same way any call does, and this is the
+    /// half of that this call has to be told: the pairing does not outlive
+    /// either side of it. This call's own session is untouched and carries
+    /// on exactly as an unjoined call always has, on whatever
+    /// [`MediaSession::playback`](crate::MediaSession::playback) and
+    /// [`MediaSession::capture`](crate::MediaSession::capture) it is next
+    /// given directly.
+    Unjoined,
 }

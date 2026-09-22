@@ -1925,6 +1925,521 @@ static int audio_holds(const struct endpoint *end, enum flow which)
     return 1;
 }
 
+/* -- a local conference of two calls, joined through this stack ----------- */
+
+/* interop/asterisk/extensions.conf's own cadenced tone, the same extension
+ * FLOW_CALL dials. */
+#define JOIN_TONE_EXTENSION "9000"
+
+/* interop/asterisk/extensions.conf's echo extension, added for this flow:
+ * Answer(); Echo(); -- silent on its own, and sends back only whatever it is
+ * sent. interop/harness/src/join.rs's own module documentation says why that
+ * is enough to prove one call's audio crossed to the other's wire without
+ * this harness carrying a second G.711 decoder of its own. */
+#define JOIN_ECHO_EXTENSION "9008"
+
+/* How long both calls run joined, driving the mix -- long enough for several
+ * turns of the tone extension's own cadence (SPURT_MS/PAUSE_MS, 1200 ms/600
+ * ms) to have crossed to the echo extension and come back at least once. */
+#define JOIN_DWELL_MS 6000u
+
+/* How many frames audible during the tone extension's own predicted silence
+ * have to be seen before the crossing counts as proven rather than a fluke --
+ * a hundred milliseconds' worth, which a single stray concealment frame or a
+ * moment of network jitter does not reach on its own. */
+#define JOIN_CROSSED_THRESHOLD 5u
+
+/* One call this flow placed, and its own RTP socket.
+ *
+ * `struct endpoint` above carries a single RTP socket because every other
+ * flow needs only one call; a join needs two, each with its own local media
+ * address, so this flow keeps its own pair rather than growing that struct
+ * for everybody else.
+ */
+struct join_leg {
+    sipral_handle_t call;
+    sipral_handle_t media;
+    int rtp_fd;
+    char rtp_address[SIPRAL_ADDRESS_BYTES];
+    uint64_t confirmed_at_ms;
+};
+
+/* What the callback saw, for the two calls this flow places. `struct seen`
+ * above is keyed to one call and cannot tell the tone leg's events from the
+ * echo leg's. */
+struct join_seen {
+    unsigned marker;
+    sipral_handle_t tone_call;
+    sipral_handle_t echo_call;
+    int tone_media_started;
+    int echo_media_started;
+    uint32_t registration;
+};
+
+#define JOIN_MARKER 0x501A10u
+
+static void join_on_event(const sipral_event_t *event, void *user_data)
+{
+    struct join_seen *seen = (struct join_seen *)user_data;
+    if (seen == NULL || seen->marker != JOIN_MARKER || event == NULL) {
+        return;
+    }
+    if (event->kind == SIPRAL_EVENT_KIND_REGISTRATION_CHANGED) {
+        seen->registration = event->payload.registration.state;
+        return;
+    }
+    if (event->kind != SIPRAL_EVENT_KIND_MEDIA_STARTED) {
+        return;
+    }
+    if (event->call == seen->tone_call) {
+        seen->tone_media_started = 1;
+    } else if (event->call == seen->echo_call) {
+        seen->echo_media_started = 1;
+    }
+}
+
+/* `flush_signalling`/`read_signalling` above, taking the stack and the
+ * socket as plain arguments rather than a `struct endpoint`: this flow's own
+ * stack has no such struct, since it carries two calls rather than one. */
+static void join_flush_signalling(sipral_handle_t stack, int sip_fd)
+{
+    static uint8_t out[DATAGRAM];
+    static char destination[SIPRAL_ADDRESS_BYTES];
+    for (;;) {
+        sipral_transmit_t message;
+        struct sockaddr_in to;
+        memset(&message, 0, sizeof message);
+        message.size = sizeof message;
+        message.data = out;
+        message.capacity = sizeof out;
+        message.destination = destination;
+        message.destination_capacity = sizeof destination;
+        if (sipral_stack_poll_transmit(stack, &message) != SIPRAL_STATUS_OK) {
+            return;
+        }
+        if (message.len == 0) {
+            return;
+        }
+        if (address_of(destination, &to) == 0) {
+            (void)sendto(sip_fd, out, message.len, 0, (const struct sockaddr *)&to,
+                        sizeof to);
+        }
+    }
+}
+
+static void join_read_signalling(sipral_handle_t stack, int sip_fd,
+                                 const char *sip_address, uint64_t now)
+{
+    static uint8_t in[DATAGRAM];
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t length = sizeof from;
+        char from_text[SIPRAL_ADDRESS_BYTES];
+        ssize_t got = recvfrom(sip_fd, in, sizeof in, 0, (struct sockaddr *)&from, &length);
+        if (got <= 0) {
+            return;
+        }
+        if (address_text(&from, from_text, sizeof from_text) != 0) {
+            continue;
+        }
+        (void)sipral_stack_receive_datagram(stack, SIPRAL_TRANSPORT_MAIN, in, (size_t)got,
+                                            from_text, strlen(from_text), sip_address,
+                                            strlen(sip_address), now);
+    }
+}
+
+/* One turn of signalling alone -- polling the stack, flushing what it wrote,
+ * and reading what arrived. Media is this flow's own, driven separately by
+ * `join_mix_one` once both calls are joined, and by nothing before that. */
+static void join_pump_signalling(sipral_handle_t stack, int sip_fd, const char *sip_address,
+                                 uint64_t now)
+{
+    sipral_poll_result_t result;
+    memset(&result, 0, sizeof result);
+    result.size = sizeof result;
+    (void)sipral_stack_poll(stack, now, &result);
+    join_flush_signalling(stack, sip_fd);
+    join_read_signalling(stack, sip_fd, sip_address, now);
+}
+
+/* `send_media` above, taking a raw socket rather than a `struct endpoint`. */
+static void join_send(int fd, const uint8_t *data, size_t len, const char *destination)
+{
+    struct sockaddr_in to;
+    if (len == 0 || address_of(destination, &to) != 0) {
+        return;
+    }
+    (void)sendto(fd, data, len, 0, (const struct sockaddr *)&to, sizeof to);
+}
+
+/* Bind a fresh RTP socket, place a call at `extension`, and give it that
+ * socket's own address -- interop/harness/src/join.rs's own `place`, in C. */
+static int join_place(sipral_handle_t stack, sipral_handle_t account, const char *server,
+                      const char *extension, const char *routable, struct join_leg *leg)
+{
+    struct sockaddr_in local;
+    sipral_call_config_t call;
+    char target[192];
+    sipral_status_t status;
+
+    memset(leg, 0, sizeof *leg);
+    leg->call = SIPRAL_HANDLE_NONE;
+    leg->media = SIPRAL_HANDLE_NONE;
+    leg->rtp_fd = bind_udp(&local);
+    if (leg->rtp_fd < 0) {
+        wrong_text("cannot bind an RTP socket for the join flow");
+        return -1;
+    }
+    (void)snprintf(leg->rtp_address, sizeof leg->rtp_address, "%s:%u", routable,
+                  (unsigned)ntohs(local.sin_port));
+    (void)snprintf(target, sizeof target, "sip:%s@%s", extension, server);
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = leg->rtp_address;
+    call.media_address_len = strlen(leg->rtp_address);
+    status = sipral_call_place(stack, account, &call, &leg->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_place", status);
+        return -1;
+    }
+    return 0;
+}
+
+/* One frame of the joined pair: read whatever arrived on either socket, mix
+ * through the facade, and send what each far end is owed. `*crossed` is set
+ * when the mixed frame handed to this end's own loudspeaker was audible
+ * while `cadence_ms` -- elapsed since the tone call confirmed -- says the
+ * tone extension's own cadence should currently be silent, which
+ * interop/harness/src/join.rs's own module documentation explains. Answers
+ * whether a frame was mixed at all. */
+static int join_mix_one(struct join_leg *tone, struct join_leg *echo, uint64_t cadence_ms,
+                        uint64_t now, int *crossed)
+{
+    static uint8_t in[DATAGRAM];
+    static uint8_t out_a[DATAGRAM];
+    static uint8_t out_b[DATAGRAM];
+    static char destination_a[SIPRAL_ADDRESS_BYTES];
+    static char destination_b[SIPRAL_ADDRESS_BYTES];
+    static int16_t mic[MAX_FRAME_SAMPLES];
+    static int16_t local_out[MAX_FRAME_SAMPLES];
+    sipral_media_info_t info;
+    sipral_media_packet_t packet_a;
+    sipral_media_packet_t packet_b;
+    struct join_leg *legs[2];
+    size_t frame;
+    sipral_status_t status;
+    int index;
+
+    *crossed = 0;
+    legs[0] = tone;
+    legs[1] = echo;
+    for (index = 0; index < 2; index++) {
+        for (;;) {
+            struct sockaddr_in from;
+            socklen_t length = sizeof from;
+            char from_text[SIPRAL_ADDRESS_BYTES];
+            uint32_t arrival = 0;
+            ssize_t got = recvfrom(legs[index]->rtp_fd, in, sizeof in, 0,
+                                   (struct sockaddr *)&from, &length);
+            if (got <= 0) {
+                break;
+            }
+            if (address_text(&from, from_text, sizeof from_text) != 0) {
+                continue;
+            }
+            (void)sipral_media_receive(legs[index]->media, in, (size_t)got, from_text,
+                                       strlen(from_text), now, &arrival);
+        }
+    }
+
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    if (sipral_media_info(tone->media, &info) != SIPRAL_STATUS_OK) {
+        return -1;
+    }
+    frame = info.frame_samples;
+    if (frame > MAX_FRAME_SAMPLES) {
+        frame = MAX_FRAME_SAMPLES;
+    }
+    memset(mic, 0, frame * sizeof mic[0]);
+    memset(local_out, 0, frame * sizeof local_out[0]);
+
+    memset(&packet_a, 0, sizeof packet_a);
+    packet_a.size = sizeof packet_a;
+    packet_a.data = out_a;
+    packet_a.capacity = sizeof out_a;
+    packet_a.destination = destination_a;
+    packet_a.destination_capacity = sizeof destination_a;
+    memset(&packet_b, 0, sizeof packet_b);
+    packet_b.size = sizeof packet_b;
+    packet_b.data = out_b;
+    packet_b.capacity = sizeof out_b;
+    packet_b.destination = destination_b;
+    packet_b.destination_capacity = sizeof destination_b;
+
+    status = sipral_media_mix(tone->media, echo->media, now, mic, frame, local_out, frame,
+                              &packet_a, &packet_b);
+    if (status != SIPRAL_STATUS_OK) {
+        return -1;
+    }
+    if (packet_a.len > 0) {
+        join_send(tone->rtp_fd, out_a, packet_a.len, destination_a);
+    }
+    if (packet_b.len > 0) {
+        join_send(echo->rtp_fd, out_b, packet_b.len, destination_b);
+    }
+
+    if (!in_spurt(cadence_ms) && loudness(local_out, frame) >= AUDIBLE) {
+        *crossed = 1;
+    }
+    return 0;
+}
+
+/* Register one account, place both calls, join them, and drive the mix long
+ * enough to see one call's tone come back by way of the other --
+ * interop/harness/src/join.rs's own `run`, in C. Prints its own result line
+ * and answers 0 on success, the same shape `run_flow` answers for every
+ * other flow.
+ */
+static int run_join(const char *server, const struct sockaddr_in *remote, const char *user,
+                    const char *pass)
+{
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    struct join_leg tone;
+    struct join_leg echo;
+    struct join_seen seen;
+    sipral_stack_config_t config;
+    sipral_account_config_t account_config;
+    uint8_t signalling_seed[32];
+    uint8_t media_seed[32];
+    int sip_fd = -1;
+    char routable[INET_ADDRSTRLEN];
+    char sip_address[SIPRAL_ADDRESS_BYTES];
+    char aor[128];
+    char registrar[128];
+    char contact[192];
+    char registrar_address[SIPRAL_ADDRESS_BYTES];
+    struct sockaddr_in sip_local;
+    sipral_status_t status;
+    uint64_t deadline;
+    uint64_t joined_at_ms = 0;
+    unsigned mixed_frames = 0;
+    unsigned crossed_frames = 0;
+    int outcome = -1;
+
+    /* reset here, the same as `main`'s own loop does before every other
+     * flow: `wrong`/`wrong_text` keep the first message and say nothing
+     * about a second one, and a flow that starts without resetting this
+     * would report whatever the flow before it failed with instead of its
+     * own reason, or nothing at all if the flow before it passed clean */
+    trouble[0] = '\0';
+
+    tone.call = SIPRAL_HANDLE_NONE;
+    tone.media = SIPRAL_HANDLE_NONE;
+    tone.rtp_fd = -1;
+    tone.confirmed_at_ms = 0;
+    echo.call = SIPRAL_HANDLE_NONE;
+    echo.media = SIPRAL_HANDLE_NONE;
+    echo.rtp_fd = -1;
+    echo.confirmed_at_ms = 0;
+    memset(&seen, 0, sizeof seen);
+    seen.marker = JOIN_MARKER;
+    seen.tone_call = SIPRAL_HANDLE_NONE;
+    seen.echo_call = SIPRAL_HANDLE_NONE;
+
+    /* distinct from `seeds_for`'s own range (0 .. FLOW_COUNT - 1), so this
+     * flow's own stack never mints the same branch as another flow's */
+    seeds_for(90u, signalling_seed, media_seed);
+
+    if (route_to(remote, routable, sizeof routable) != 0) {
+        wrong_text("no route to the lab network");
+        goto done;
+    }
+    sip_fd = bind_udp(&sip_local);
+    if (sip_fd < 0) {
+        wrong_text("cannot bind a socket");
+        goto done;
+    }
+    (void)snprintf(sip_address, sizeof sip_address, "%s:%u", routable,
+                  (unsigned)ntohs(sip_local.sin_port));
+
+    memset(&config, 0, sizeof config);
+    config.size = sizeof config;
+    config.event_callback = join_on_event;
+    config.event_user_data = &seen;
+    config.transport = SIPRAL_TRANSPORT_UDP;
+    config.bind_address = sip_address;
+    config.bind_address_len = strlen(sip_address);
+    config.entropy = signalling_seed;
+    config.entropy_len = sizeof signalling_seed;
+    config.media_seed = media_seed;
+    config.media_seed_len = sizeof media_seed;
+    config.codecs = "PCMU,PCMA";
+    config.codecs_len = strlen("PCMU,PCMA");
+    config.media_clock_unix_seconds = (uint64_t)time(NULL);
+    status = sipral_stack_create(&config, &stack);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_create", status);
+        goto done;
+    }
+
+    (void)snprintf(aor, sizeof aor, "sip:%s@%s", user, server);
+    (void)snprintf(registrar, sizeof registrar, "sip:%s", server);
+    (void)snprintf(contact, sizeof contact, "sip:%s@%s", user, sip_address);
+    if (address_text(remote, registrar_address, sizeof registrar_address) != 0) {
+        wrong_text("the registrar has no address");
+        goto done;
+    }
+    memset(&account_config, 0, sizeof account_config);
+    account_config.size = sizeof account_config;
+    account_config.aor = aor;
+    account_config.aor_len = strlen(aor);
+    account_config.registrar = registrar;
+    account_config.registrar_len = strlen(registrar);
+    account_config.contact = contact;
+    account_config.contact_len = strlen(contact);
+    account_config.registrar_address = registrar_address;
+    account_config.registrar_address_len = strlen(registrar_address);
+    account_config.auth_user = user;
+    account_config.auth_user_len = strlen(user);
+    account_config.auth_password = pass;
+    account_config.auth_password_len = strlen(pass);
+    account_config.expires_seconds = 300u;
+    status = sipral_account_add(stack, &account_config, &account);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_add", status);
+        goto done;
+    }
+
+    status = sipral_account_register(stack, account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        goto done;
+    }
+    deadline = now_ms() + FLOW_PATIENCE_MS;
+    for (;;) {
+        uint64_t now = now_ms();
+        join_pump_signalling(stack, sip_fd, sip_address, now);
+        if (seen.registration == SIPRAL_REGISTRATION_STATE_REGISTERED
+            || seen.registration == SIPRAL_REGISTRATION_STATE_FAILED) {
+            break;
+        }
+        if (now >= deadline) {
+            wrong_text("registration never finished");
+            goto done;
+        }
+        sleep_ms(5);
+    }
+    if (seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered, so there is nobody to place either call as");
+        goto done;
+    }
+
+    if (join_place(stack, account, server, JOIN_TONE_EXTENSION, routable, &tone) != 0) {
+        goto done;
+    }
+    seen.tone_call = tone.call;
+    if (join_place(stack, account, server, JOIN_ECHO_EXTENSION, routable, &echo) != 0) {
+        goto done;
+    }
+    seen.echo_call = echo.call;
+
+    deadline = now_ms() + FLOW_PATIENCE_MS;
+    for (;;) {
+        uint64_t now = now_ms();
+        join_pump_signalling(stack, sip_fd, sip_address, now);
+        if (seen.tone_media_started && seen.echo_media_started) {
+            break;
+        }
+        if (now >= deadline) {
+            wrong_text("one of the two calls never got media on it");
+            goto done;
+        }
+        sleep_ms(5);
+    }
+    /* near enough: Asterisk's own Playtones() started counting when the tone
+     * call was answered, a moment before MEDIA_STARTED reached this end */
+    tone.confirmed_at_ms = now_ms();
+
+    status = sipral_call_media(stack, tone.call, &tone.media);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_media", status);
+        goto done;
+    }
+    status = sipral_call_media(stack, echo.call, &echo.media);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_media", status);
+        goto done;
+    }
+    status = sipral_call_join(stack, tone.call, echo.call);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_join", status);
+        goto done;
+    }
+    joined_at_ms = now_ms();
+
+    deadline = joined_at_ms + JOIN_DWELL_MS;
+    while (now_ms() < deadline) {
+        uint64_t now = now_ms();
+        int crossed = 0;
+        join_pump_signalling(stack, sip_fd, sip_address, now);
+        if (join_mix_one(&tone, &echo, now - tone.confirmed_at_ms, now, &crossed) == 0) {
+            mixed_frames++;
+            if (crossed) {
+                crossed_frames++;
+            }
+        }
+        sleep_ms(20);
+    }
+
+    (void)sipral_call_leave(stack, tone.call);
+    (void)sipral_call_hangup(stack, tone.call, now_ms());
+    (void)sipral_call_hangup(stack, echo.call, now_ms());
+    deadline = now_ms() + 5000u;
+    while (now_ms() < deadline) {
+        join_pump_signalling(stack, sip_fd, sip_address, now_ms());
+        sleep_ms(5);
+    }
+
+    if (mixed_frames == 0) {
+        wrong_text("joined, but no frame was ever mixed");
+        goto done;
+    }
+    if (crossed_frames < JOIN_CROSSED_THRESHOLD) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "joined and mixed %u frame(s), but only %u were audible while the "
+                       "tone extension's own cadence said it should be silent",
+                       mixed_frames, crossed_frames);
+        goto done;
+    }
+    outcome = 0;
+
+done:
+    if (outcome == 0) {
+        printf("  pass  local conference   (%u frame(s) mixed, %u crossed)\n", mixed_frames,
+               crossed_frames);
+    } else {
+        printf("  FAIL  local conference — %s\n",
+               trouble[0] != '\0' ? trouble : "no reason was recorded");
+    }
+    if (stack != SIPRAL_HANDLE_NONE) {
+        (void)sipral_stack_destroy(stack);
+    }
+    if (tone.rtp_fd >= 0) {
+        (void)close(tone.rtp_fd);
+    }
+    if (echo.rtp_fd >= 0) {
+        (void)close(echo.rtp_fd);
+    }
+    if (sip_fd >= 0) {
+        (void)close(sip_fd);
+    }
+    return outcome;
+}
+
 int main(int argc, char **argv)
 {
     const char *server = argc > 1 ? argv[1] : "kamailio";
@@ -2016,6 +2531,19 @@ int main(int argc, char **argv)
             failed++;
         }
         close_endpoint(&end);
+    }
+
+    /* this lab's own echo extension (interop/asterisk's 9008) exists only on
+     * Asterisk, the same reason the SDES and codec-change flows above are
+     * gated to it. Two calls placed on one account, which `enum flow` and
+     * `run_flow` have no shape for -- see `run_join`'s own documentation --
+     * so this is driven outside that dispatch entirely, the way
+     * interop/harness/src/main.rs's own `join::run` is. */
+    if (strcmp(server, "asterisk") == 0
+        && (wanted == NULL || wanted[0] == '\0' || selected(wanted, "join"))) {
+        if (run_join(server, &remote, user, pass) != 0) {
+            failed++;
+        }
     }
 
     if (failed == 0) {

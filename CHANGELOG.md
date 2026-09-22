@@ -12,6 +12,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A local conference of two calls.** `MediaEngine::join`/`leave` pair two
+  active calls on one facade and `MediaEngine::mix` drives a frame of the
+  three-party mix — each far end hears the other far end and this end's own
+  microphone, halved and summed the way a call recording already avoids
+  clipping, never resampled, so the two calls have to share a sample rate
+  and a frame length. A call that ends while joined un-pairs cleanly and
+  tells its former partner (`MediaEvent::Unjoined`). Across the C ABI:
+  `sipral_call_join`, `sipral_call_leave` and `sipral_media_mix`, the last
+  locking its two media handles in a fixed order so two threads mixing the
+  same pair cannot deadlock against each other. A new interop flow places
+  two calls to Asterisk, joins them and proves one call's tone crosses to
+  the other's wire, on both drivers.
 - **MESSAGE and message waiting indication, through the C ABI too.**
   `interop/harness-c` gained the two flows `interop/harness` already
   carried: an out-of-dialog MESSAGE sent to the lab's own echo extension

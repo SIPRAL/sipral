@@ -4349,6 +4349,12 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_change_codecs(ulong stack, ulong call, sbyte[] codecs, nuint codecsLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_join(ulong stack, ulong callA, ulong callB);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_leave(ulong stack, ulong call);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_accept_session(ulong stack, ulong call, byte[] sdp, nuint sdpLen, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -4416,6 +4422,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_capture(ulong media, ulong nowMs, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_mix(ulong mediaA, ulong mediaB, ulong nowMs, short[] mic, nuint micCount, short[] local, nuint localCount, ref SipralMediaPacket packetA, ref SipralMediaPacket packetB);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_poll_rtcp(ulong media, ulong nowMs, ref SipralMediaPacket packet);
@@ -4567,7 +4576,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 20;
+    public const uint AbiVersionMinor = 21;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -5799,6 +5808,52 @@ public static class Sipral
     }
 
     /// <summary>
+    /// Join two active calls into a local conference of three: from here on,
+    /// each call's far end hears the other's far end and this end's own
+    /// microphone, mixed. sipral_media_mix
+    /// drives one frame of it at a time, on the two calls' own media
+    /// handles; this only records the pairing.
+    ///
+    /// Nothing like a SIP conference server: neither far end's own signalling
+    /// ever names the other, and this stack sends no `Refer-To`. Both calls
+    /// must already have media running — placed or answered with
+    /// `media_address` set, and negotiated — and must agree on a sample rate
+    /// and a frame length, since nothing here resamples.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no running session, a call
+    /// already joined to another, or two calls whose sessions would decode
+    /// at different rates or cut audio into frames of different lengths.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void CallJoin(ulong stack, ulong callA, ulong callB)
+    {
+        Check(NativeMethods.sipral_call_join(stack, callA, callB));
+    }
+
+    /// <summary>
+    /// Take `call` back out of the pair it is in.
+    ///
+    /// Neither call's session is touched: each one goes back to carrying its
+    /// own audio directly, through `sipral_media_playback` and
+    /// `sipral_media_capture`, exactly as an unjoined call always has.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not currently joined to
+    /// another.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    /// </summary>
+    public static void CallLeave(ulong stack, ulong call)
+    {
+        Check(NativeMethods.sipral_call_leave(stack, call));
+    }
+
+    /// <summary>
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
@@ -6320,6 +6375,48 @@ public static class Sipral
     public static void MediaCapture(ulong media, ulong nowMs, short[] samples, ref SipralMediaPacket packet)
     {
         Check(NativeMethods.sipral_media_capture(media, nowMs, samples, (nuint)samples.Length, ref packet));
+    }
+
+    /// <summary>
+    /// One frame of a local conference of two calls: decode what `media_a`'s
+    /// and `media_b`'s far ends each sent, mix what each of the three
+    /// parties — the two far ends and this end — is owed, and send the two
+    /// frames the far ends are owed.
+    ///
+    /// `sipral_call_join` must already have paired the two calls these two
+    /// handles belong to. Nothing here checks that itself: checking it would
+    /// mean taking the stack's lock on every frame, which is exactly what a
+    /// media handle exists to avoid, so this mixes whatever two handles it is
+    /// given — the same trust every other `sipral_media_` entry point places
+    /// in the caller having minted the handle from a call worth acting on.
+    ///
+    /// `mic` is this end's own frame, `mic_count` long; `local` is filled
+    /// with what this end's own loudspeaker is owed, `local_count` long. Both
+    /// are `sipral_media_info_t::frame_samples` on a call this pair actually
+    /// agreed on — `sipral_call_join` already made that the same on both.
+    /// `packet_a` and `packet_b` are filled the way `sipral_media_capture`
+    /// fills one, each with what its own call's far end is now owed: `mic`
+    /// mixed with the *other* far end's frame rather than `mic` alone, which
+    /// is also what each call's own recording keeps if one is running.
+    ///
+    /// Drive a joined pair from one thread, one frame at a time. The two
+    /// sessions are locked together for the length of the call, in a fixed
+    /// order that does not depend on which handle is named first, so a
+    /// second `sipral_media_mix` on the same pair waits for this one rather
+    /// than deadlocking against it — but a thread still calling
+    /// `sipral_media_playback`/`sipral_media_capture` on either call alone at
+    /// the same time is a second driver this mix does not know about.
+    ///
+    /// Safety
+    ///
+    /// `mic` must be readable for `mic_count` `int16_t`; `local` must be
+    /// writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
+    /// each point at a `sipral_media_packet_t` as `sipral_media_capture`
+    /// describes.
+    /// </summary>
+    public static void MediaMix(ulong mediaA, ulong mediaB, ulong nowMs, short[] mic, short[] local, ref SipralMediaPacket packetA, ref SipralMediaPacket packetB)
+    {
+        Check(NativeMethods.sipral_media_mix(mediaA, mediaB, nowMs, mic, (nuint)mic.Length, local, (nuint)local.Length, ref packetA, ref packetB));
     }
 
     /// <summary>

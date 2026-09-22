@@ -381,6 +381,20 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Hand it one buffer of samples and fill another, in the same call,
+    /// neither one named `capacity` — two buffers going in, one of them
+    /// writable, which is not the same shape as one being filled.
+    public static func callMix(stack: SipralHandle, mic: [Int16], local: inout [Int16]) throws {
+        try ensureAbi()
+        let status =
+            mic.withUnsafeBufferPointer { p1 in
+                local.withUnsafeMutableBufferPointer { p2 in
+                    sipral_call_mix(stack, p1.baseAddress, p1.count, p2.baseAddress, p2.count)
+                }
+            }
+        try check(status)
+    }
+
     /// Hand it a datagram that arrived, in a buffer it may rewrite in
     /// place, and hear what became of it.
     public static func callMediaReceive(stack: SipralHandle, data: inout [UInt8]) throws -> UInt32 {

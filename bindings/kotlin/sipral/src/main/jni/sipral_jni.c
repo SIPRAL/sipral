@@ -1272,6 +1272,24 @@ Java_org_sipral_SipralNative_sipral_1call_1change_1codecs(JNIEnv *env, jobject s
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1join(JNIEnv *env, jobject self, jlong stack, jlong callA, jlong callB)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_call_join((sipral_handle_t)stack, (sipral_handle_t)callA, (sipral_handle_t)callB);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1leave(JNIEnv *env, jobject self, jlong stack, jlong call)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_call_leave((sipral_handle_t)stack, (sipral_handle_t)call);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1accept_1session(JNIEnv *env, jobject self, jlong stack, jlong call, jbyteArray sdp, jlong nowMs)
 {
     (void)env;
@@ -1792,6 +1810,25 @@ Java_org_sipral_SipralNative_sipral_1media_1capture(JNIEnv *env, jobject self, j
     sipral_status_t status = sipral_media_capture((sipral_handle_t)media, (uint64_t)nowMs, (const int16_t *)samples_data, (size_t)samples_size, (sipral_media_packet_t *)(intptr_t)packet);
     if (samples) {
         (*env)->ReleaseShortArrayElements(env, samples, samples_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1media_1mix(JNIEnv *env, jobject self, jlong mediaA, jlong mediaB, jlong nowMs, jshortArray mic, jshortArray local, jlong packetA, jlong packetB)
+{
+    (void)env;
+    (void)self;
+    jshort *mic_data = mic ? (*env)->GetShortArrayElements(env, mic, NULL) : NULL;
+    jsize mic_size = mic ? (*env)->GetArrayLength(env, mic) : 0;
+    jshort *local_data = local ? (*env)->GetShortArrayElements(env, local, NULL) : NULL;
+    jsize local_size = local ? (*env)->GetArrayLength(env, local) : 0;
+    sipral_status_t status = sipral_media_mix((sipral_handle_t)mediaA, (sipral_handle_t)mediaB, (uint64_t)nowMs, (const int16_t *)mic_data, (size_t)mic_size, (int16_t *)local_data, (size_t)local_size, (sipral_media_packet_t *)(intptr_t)packetA, (sipral_media_packet_t *)(intptr_t)packetB);
+    if (mic) {
+        (*env)->ReleaseShortArrayElements(env, mic, mic_data, JNI_ABORT);
+    }
+    if (local) {
+        (*env)->ReleaseShortArrayElements(env, local, local_data, 0);
     }
     return (jint)status;
 }

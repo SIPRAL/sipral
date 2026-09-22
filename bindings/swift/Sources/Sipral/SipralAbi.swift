@@ -1363,7 +1363,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 20
+    public static let abiVersionMinor: UInt32 = 21
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2585,6 +2585,50 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Join two active calls into a local conference of three: from here on,
+    /// each call's far end hears the other's far end and this end's own
+    /// microphone, mixed. sipral_media_mix
+    /// drives one frame of it at a time, on the two calls' own media
+    /// handles; this only records the pairing.
+    ///
+    /// Nothing like a SIP conference server: neither far end's own signalling
+    /// ever names the other, and this stack sends no `Refer-To`. Both calls
+    /// must already have media running — placed or answered with
+    /// `media_address` set, and negotiated — and must agree on a sample rate
+    /// and a frame length, since nothing here resamples.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no running session, a call
+    /// already joined to another, or two calls whose sessions would decode
+    /// at different rates or cut audio into frames of different lengths.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func callJoin(stack: SipralHandle, callA: SipralHandle, callB: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_call_join(stack, callA, callB)
+        try check(status)
+    }
+
+    /// Take `call` back out of the pair it is in.
+    ///
+    /// Neither call's session is touched: each one goes back to carrying its
+    /// own audio directly, through `sipral_media_playback` and
+    /// `sipral_media_capture`, exactly as an unjoined call always has.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not currently joined to
+    /// another.
+    ///
+    /// Safety
+    ///
+    /// Safe to call with any handle values.
+    public static func callLeave(stack: SipralHandle, call: SipralHandle) throws {
+        try ensureAbi()
+        let status = sipral_call_leave(stack, call)
+        try check(status)
+    }
+
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
@@ -3120,6 +3164,52 @@ public enum Sipral {
         let status =
             samples.withUnsafeBufferPointer { p2 in
                 sipral_media_capture(media, nowMs, p2.baseAddress, p2.count, &packet)
+            }
+        try check(status)
+    }
+
+    /// One frame of a local conference of two calls: decode what `media_a`'s
+    /// and `media_b`'s far ends each sent, mix what each of the three
+    /// parties — the two far ends and this end — is owed, and send the two
+    /// frames the far ends are owed.
+    ///
+    /// `sipral_call_join` must already have paired the two calls these two
+    /// handles belong to. Nothing here checks that itself: checking it would
+    /// mean taking the stack's lock on every frame, which is exactly what a
+    /// media handle exists to avoid, so this mixes whatever two handles it is
+    /// given — the same trust every other `sipral_media_` entry point places
+    /// in the caller having minted the handle from a call worth acting on.
+    ///
+    /// `mic` is this end's own frame, `mic_count` long; `local` is filled
+    /// with what this end's own loudspeaker is owed, `local_count` long. Both
+    /// are `sipral_media_info_t::frame_samples` on a call this pair actually
+    /// agreed on — `sipral_call_join` already made that the same on both.
+    /// `packet_a` and `packet_b` are filled the way `sipral_media_capture`
+    /// fills one, each with what its own call's far end is now owed: `mic`
+    /// mixed with the *other* far end's frame rather than `mic` alone, which
+    /// is also what each call's own recording keeps if one is running.
+    ///
+    /// Drive a joined pair from one thread, one frame at a time. The two
+    /// sessions are locked together for the length of the call, in a fixed
+    /// order that does not depend on which handle is named first, so a
+    /// second `sipral_media_mix` on the same pair waits for this one rather
+    /// than deadlocking against it — but a thread still calling
+    /// `sipral_media_playback`/`sipral_media_capture` on either call alone at
+    /// the same time is a second driver this mix does not know about.
+    ///
+    /// Safety
+    ///
+    /// `mic` must be readable for `mic_count` `int16_t`; `local` must be
+    /// writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
+    /// each point at a `sipral_media_packet_t` as `sipral_media_capture`
+    /// describes.
+    public static func mediaMix(mediaA: SipralHandle, mediaB: SipralHandle, nowMs: UInt64, mic: [Int16], local: inout [Int16], packetA: inout sipral_media_packet_t, packetB: inout sipral_media_packet_t) throws {
+        try ensureAbi()
+        let status =
+            mic.withUnsafeBufferPointer { p3 in
+                local.withUnsafeMutableBufferPointer { p4 in
+                    sipral_media_mix(mediaA, mediaB, nowMs, p3.baseAddress, p3.count, p4.baseAddress, p4.count, &packetA, &packetB)
+                }
             }
         try check(status)
     }

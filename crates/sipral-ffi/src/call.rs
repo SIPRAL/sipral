@@ -917,6 +917,58 @@ entry! {
 }
 
 entry! {
+    /// Join two active calls into a local conference of three: from here on,
+    /// each call's far end hears the other's far end and this end's own
+    /// microphone, mixed. [`sipral_media_mix`](crate::media::sipral_media_mix)
+    /// drives one frame of it at a time, on the two calls' own media
+    /// handles; this only records the pairing.
+    ///
+    /// Nothing like a SIP conference server: neither far end's own signalling
+    /// ever names the other, and this stack sends no `Refer-To`. Both calls
+    /// must already have media running — placed or answered with
+    /// `media_address` set, and negotiated — and must agree on a sample rate
+    /// and a frame length, since nothing here resamples.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for `call_a == call_b`;
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call with no running session, a call
+    /// already joined to another, or two calls whose sessions would decode
+    /// at different rates or cut audio into frames of different lengths.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle values.
+    fn sipral_call_join(stack: SipralHandle, call_a: SipralHandle, call_b: SipralHandle) {
+        with_stack(stack, |state| {
+            let a = state.calls.get(call_a).map_err(handle_failed)?;
+            let b = state.calls.get(call_b).map_err(handle_failed)?;
+            state.engine.join(a, b).map_err(|error| media_failed(&error))
+        })
+    }
+}
+
+entry! {
+    /// Take `call` back out of the pair it is in.
+    ///
+    /// Neither call's session is touched: each one goes back to carrying its
+    /// own audio directly, through `sipral_media_playback` and
+    /// `sipral_media_capture`, exactly as an unjoined call always has.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call that is not currently joined to
+    /// another.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle values.
+    fn sipral_call_leave(stack: SipralHandle, call: SipralHandle) {
+        with_stack(stack, |state| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            state.engine.leave(id).map_err(|error| media_failed(&error))?;
+            Ok(())
+        })
+    }
+}
+
+entry! {
     /// Accept a change the far end offered, reported as
     /// `SIPRAL_EVENT_KIND_SESSION_OFFERED`.
     ///
@@ -2009,6 +2061,66 @@ a=recvonly\r\n";
             config.codecs_len = len;
         });
         up(observed, handle, account, answer)
+    }
+
+    /// What the far end answers a second call on the same line with: the
+    /// same codec, on a port of its own, so the second call's media is never
+    /// mistaken for the first's.
+    pub(crate) const SECOND_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 1 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 42000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+
+    /// Where the far end of [`SECOND_ANSWER`] receives its own media.
+    pub(crate) const SECOND_PEER_MEDIA: &str = "203.0.113.5:42000";
+
+    /// A second call, placed and answered on the same stack and the same
+    /// account as `media_call`'s — a call this ABI can be asked to join to
+    /// another. `media_call` places the first, and this places the second on
+    /// its line rather than minting a stack of its own, since a join is a
+    /// fact about two calls that share a stack.
+    ///
+    /// Not `up` again: `up` places and answers at fixed timestamps, which is
+    /// exactly right for the one call every other fixture here places and
+    /// wrong for a second one on a stack whose clock has already moved past
+    /// them.
+    pub(crate) fn second_media_call(
+        observed: &Observed,
+        handle: SipralHandle,
+        account: SipralHandle,
+    ) -> SipralHandle {
+        let (status, call) = place(handle, account, &managed_config(), 2_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, SECOND_ANSWER, true), 2_100);
+        poll(handle, 2_100);
+        assert_eq!(
+            state_of(handle, call),
+            SipralCallState::Confirmed as u32,
+            "the second call did not come up"
+        );
+        assert!(
+            observed.kinds().contains(&SipralEventKind::MediaStarted),
+            "the second call came up without audio: {:?}",
+            observed.kinds()
+        );
+        let _ = sent(handle);
+        call
+    }
+
+    /// Two calls on one stack, both with media running — what a join test
+    /// starts from.
+    pub(crate) fn media_call_pair(
+        observed: &mut Observed,
+    ) -> (SipralHandle, SipralHandle, SipralHandle) {
+        let (handle, account) = media_line(observed, |_| {});
+        let (_, call_a) = up(observed, handle, account, ANSWER);
+        let call_b = second_media_call(observed, handle, account);
+        (handle, call_a, call_b)
     }
 
     /// One call placed on a line that is ready, answered with `answer`, and

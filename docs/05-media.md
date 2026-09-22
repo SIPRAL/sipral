@@ -1115,7 +1115,10 @@ The pipeline between the codec and whatever produces or consumes samples.
 - **Clock drift correction.** The capture device and the far end do not agree
   on what a second is. Left uncorrected, the buffer drifts to an underrun over
   a long call.
-- **Mixing** for conferencing and for local tones.
+- **Mixing** for conferencing and for local tones — the arithmetic lives here
+  (`sipral_media::mix`), and the facade's own use of it, joining two calls
+  into a local conference of three, is below ("A local conference of two
+  calls").
 - **Codecs.** G.711 A-law and µ-law written in-tree, a couple of hundred lines
   and public domain as an algorithm. G.722 written in-tree as well: this used
   to say "linked from an unrestricted implementation", and there is not one.
@@ -1460,3 +1463,74 @@ crate's help. Which port carries RTCP, muxed or its own, is already on
 `sipral-nat` exists as a crate but nothing in `sipral` or `sipral-core` calls
 into it, so there is no NAT strategy decision anywhere in this tree to
 explain.
+
+## A local conference of two calls
+
+Nothing like a SIP conference server, and nothing that reaches `sipral-ua`:
+`MediaEngine::join(a, b)` pairs two calls this engine already placed or
+answered, and from the next frame each one's own driving loop pumps through
+`MediaEngine::mix` instead of `MediaSession::playback`/`MediaSession::capture`
+directly, each far end hears the other's far end and this end's own
+microphone, mixed. Neither far end's own signalling ever names the other —
+from either one's dialog, this still looks like an ordinary two-party call —
+and this stack sends no `Refer-To` and opens no third dialog. `MediaEngine`'s
+own module doc calls itself "the join" for a different reason entirely (the
+seam between signalling and media); this is a second, unrelated use of the
+word, and `crate::join`'s own doc comment says so before anything else.
+
+`MediaEngine::join` refuses a pair whose two sessions do not share a sample
+rate and a frame length (`MediaError::JoinIncompatible`). Nothing in the
+mixer resamples: the samples it decodes out of one session have to line up,
+index for index, with the ones it decodes out of the other, and two codecs
+only agree on that when they cut a frame the same way. The check runs once,
+when the pair is made — the same moment a call's catalogue and configuration
+are otherwise fixed for its whole life (D6, above) — not on every frame.
+
+### Levels
+
+Every sum the mixer forms is two sources at half scale apiece, which is the
+reasoning `crate::record::Recorder` (this crate's own call recorder) already
+carries for the same problem: two full-scale sources summed at unity is a
+sum that does not fit in the sixteen bits a sample has, and a mixer that let
+it clip could never undo the clip afterwards. Halved first, the loudest two
+sources can ever sum to is full scale, never past it, at the cost of six
+decibels nobody notices on a phone call — and, unlike a limiter that eases a
+gain toward the level that would have fit over some tens of milliseconds,
+with no state that has to be carried from one frame to the next to get
+there. `sipral_media::mix::sum_scaled_into` is the primitive this reduces
+to, the same one that had been sitting in `sipral-media` unused until this.
+
+### Recording
+
+A joined call's own recording, if one is running
+(`MediaSession::start_recording`), keeps a recording of the conference it
+was actually in rather than of the two legs it would have carried alone: the
+mixer sends each far end `mic` mixed with the *other* far end's decoded
+frame, through the same `MediaSession::capture` a recording's `captured`
+half is always fed from, so what the file keeps is what actually went out
+rather than the raw microphone.
+
+### Ending
+
+A call that ends while it is still joined takes the pairing down with it —
+`MediaEngine::release` un-pairs both calls before anything else, the moment
+`UaEvent::CallEnded` arrives, and tells the surviving call with
+`MediaEvent::Unjoined` — rather than leaving `MediaEngine::mix` to discover
+later that half a pair is gone. `MediaEngine::leave` does the same thing on
+request, for a pairing that is still ending on purpose rather than because a
+call did.
+
+### Across the C ABI
+
+`sipral_call_join`/`sipral_call_leave` record the pairing, on the stack's own
+call handles, the same shape as `sipral_call_change_codecs` and every other
+entry point that reaches `MediaEngine` through the stack's lock. Driving a
+frame does not: `sipral_media_mix` takes two *media* handles, the same kind
+`sipral_media_playback`/`sipral_media_capture` do, and never touches the
+stack — checking that the pair named was actually joined would mean taking
+the stack's lock on every frame, which is exactly what a media handle exists
+to avoid (`docs/08-ffi.md`), so it trusts the caller the same way every other
+media entry point already does. The two sessions it does lock are locked in
+a fixed order, by handle value rather than by which one the caller named
+first, so that two threads mixing the same pair with the arguments swapped
+wait for each other instead of deadlocking.

@@ -377,6 +377,7 @@ internal object SipralNative {
     external fun sipral_stack_freeze(stack: Long, buffer: ByteArray, len: LongArray): Int
     external fun sipral_call_playback(stack: Long, samples: ShortArray, written: LongArray): Int
     external fun sipral_call_capture(stack: Long, samples: ShortArray, packet: Long): Int
+    external fun sipral_call_mix(stack: Long, mic: ShortArray, local: ShortArray): Int
     external fun sipral_call_media_receive(stack: Long, data: ByteArray, arrival: LongArray): Int
     external fun sipral_stack_screen(stack: Long, callback: Long): Int
     external fun sipral_stack_destroy(stack: Long): Int
@@ -540,6 +541,15 @@ object Sipral {
      */
     fun callCapture(stack: Long, samples: ShortArray, packet: Long) {
         check(SipralNative.sipral_call_capture(stack, samples, packet))
+    }
+
+    /**
+     * Hand it one buffer of samples and fill another, in the same call,
+     * neither one named `capacity` — two buffers going in, one of them
+     * writable, which is not the same shape as one being filled.
+     */
+    fun callMix(stack: Long, mic: ShortArray, local: ShortArray) {
+        check(SipralNative.sipral_call_mix(stack, mic, local))
     }
 
     /**

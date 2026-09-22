@@ -366,10 +366,13 @@ change was the one the C surface could not express until
 through the facade: it wrote that re-offer itself until
 `MediaEngine::change_codecs` did. MESSAGE and message waiting indication
 (8.6.5) run in C too, driven by `sipral_account_message` and
-`sipral_account_subscribe`; only the opt-in narrowed-inbound flow at the
-bottom of the table stays the Rust driver's alone, since it needs a second
-account registered at once and `interop/harness-c` drives one endpoint at a
-time.
+`sipral_account_subscribe`. The local-conference flow (below) runs in C as
+well, driven by `sipral_call_join`, `sipral_call_leave` and
+`sipral_media_mix` — it needs two calls on one account rather than a second
+account, which is the shape `interop/harness-c`'s one-endpoint-at-a-time
+design already has, unlike the opt-in narrowed-inbound flow at the bottom of
+the table, which stays the Rust driver's alone since it needs a second
+account registered at once.
 
 Run through Kamailio to FreeSWITCH, through OpenSIPS to the same FreeSWITCH,
 and straight at Asterisk (`scripts/lab.sh kamailio` / `opensips` / `asterisk`),
@@ -399,6 +402,7 @@ server:
 | SRTP, phone to phone | connected under SDES against baresip's own `baresip-srtp` account (`interop/baresip/config/accounts`, `mediaenc=srtp-mand`) — refused rather than answered plainly if that peer will not key it either | baresip only |
 | DTLS-SRTP, phone to phone | connected against baresip's own `baresip-dtls` account, keyed by its own handshake exactly as the DTLS-SRTP row above asks of a server — baresip's `dtls_srtp` module self-signs its own certificate at startup and is checked by fingerprint alone, the same RFC 8122 §5 / RFC 5763 §5 check Asterisk's `dtls_auto_generate_cert=yes` stands in for — a third independent DTLS-SRTP implementation, on the far side of a call this stack placed rather than answered | baresip only |
 | hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`, the 8.2.1 case): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
+| local conference | two calls placed on one account — one to the lab's own tone extension (9000), one to its echo extension (9008, `Answer(); Echo();`) — joined with `MediaEngine::join` and driven a frame at a time with `MediaEngine::mix`; passes once several frames are audible while the tone extension's own cadence says it should be silent, which only the echo extension playing back what this end had just relayed to it can produce (`interop/harness/src/join.rs`'s own module documentation has the reasoning) | Asterisk only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler raises the mailbox's new-message count by one with `MinivmMWI()`, keeping the count itself since `MinivmMWI()` publishes a count rather than adding to one, so each driver's flow in the same lab run sees its own call raise it — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
 | inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |

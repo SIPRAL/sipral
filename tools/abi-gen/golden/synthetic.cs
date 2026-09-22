@@ -452,6 +452,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_capture(ulong stack, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_mix(ulong stack, short[] mic, nuint micCount, short[] local, nuint localCount);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_media_receive(ulong stack, byte[] data, nuint len, out uint arrival);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -654,6 +657,16 @@ public static class Sipral
     public static void CallCapture(ulong stack, short[] samples, ref SipralMediaPacket packet)
     {
         Check(NativeMethods.sipral_call_capture(stack, samples, (nuint)samples.Length, ref packet));
+    }
+
+    /// <summary>
+    /// Hand it one buffer of samples and fill another, in the same call,
+    /// neither one named `capacity` — two buffers going in, one of them
+    /// writable, which is not the same shape as one being filled.
+    /// </summary>
+    public static void CallMix(ulong stack, short[] mic, short[] local)
+    {
+        Check(NativeMethods.sipral_call_mix(stack, mic, (nuint)mic.Length, local, (nuint)local.Length));
     }
 
     /// <summary>

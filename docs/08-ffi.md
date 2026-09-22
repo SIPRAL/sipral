@@ -96,8 +96,8 @@ Rules for the ABI:
   and minting from inside that event's callback is allowed — and every entry
   point that works on one call's media takes it in place of the stack and the
   call: `sipral_media_receive`, `sipral_media_playback`,
-  `sipral_media_capture`, `sipral_media_poll_rtcp`, `sipral_media_info`,
-  `sipral_media_statistics`, `sipral_media_dialling`,
+  `sipral_media_capture`, `sipral_media_mix`, `sipral_media_poll_rtcp`,
+  `sipral_media_info`, `sipral_media_statistics`, `sipral_media_dialling`,
   `sipral_media_stop_dialling`, `sipral_media_record_start`,
   `sipral_media_record_stop` and `sipral_media_record_state`. A handle costs
   the stack's lock once, when it is minted, and never on the path that runs
@@ -109,14 +109,18 @@ Rules for the ABI:
   other for the length of one frame's work, and that work waits for nothing
   else; a recording adds its write to the frame of the call being recorded and
   to no other. No call waits on another call's media, and none waits on
-  signalling or on the callback. So `SIPRAL_STATUS_BUSY` from a media entry
-  point means one thing: the thread is already inside that same call's media
-  further down its own stack — which only code run during a frame, such as a
-  processor, can arrange — and answering it is how re-entry stays a status
-  rather than a deadlock. The same code calling into the call's stack instead
-  — hanging up, polling, destroying it — is answered `SIPRAL_STATUS_BUSY` by
-  that entry point too, even with no other thread inside: the stack's work can
-  need the very session the frame is holding.
+  signalling or on the callback — with one exception, named because it is
+  one: `sipral_media_mix` takes two media handles and holds both sessions'
+  locks for the length of one mixed frame, in a fixed order (by handle value,
+  never by which one was named first) so that two threads mixing the same
+  pair cannot deadlock against each other. So `SIPRAL_STATUS_BUSY` from a
+  media entry point means one thing: the thread is already inside that same
+  call's media further down its own stack — which only code run during a
+  frame, such as a processor, can arrange — and answering it is how re-entry
+  stays a status rather than a deadlock. The same code calling into the
+  call's stack instead — hanging up, polling, destroying it — is answered
+  `SIPRAL_STATUS_BUSY` by that entry point too, even with no other thread
+  inside: the stack's work can need the very session the frame is holding.
 
   A media handle outlives its call, and says so. Once the call has ended, or
   its stack has been destroyed, every media entry point answers
@@ -578,6 +582,36 @@ is `SIPRAL_EVENT_KIND_MEDIA_CHANGED` naming the codec the answer settled on,
 or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` with the call left on the list it
 had. A call placed or answered with `sdp` is the application's to re-offer,
 and is `SIPRAL_STATUS_WRONG_STATE` here.
+
+**Two calls can be joined into a local conference of three.**
+`sipral_call_join(stack, call_a, call_b)` pairs two calls this stack already
+has media on, so that each far end hears the other's far end and this end's
+own microphone, mixed — `docs/05-media.md` has the arithmetic and the reasons
+behind it. Nothing like a SIP conference server: neither far end's own
+signalling ever names the other. `sipral_call_leave(stack, call)` un-pairs
+both calls, whichever one `call` names, and a call that ends while it is
+still joined takes the pairing down with it the same way, unasked. Both
+`join` and `leave` take the
+stack's lock, like `sipral_call_change_codecs`, because pairing two calls is
+a fact about the stack, and both are `SIPRAL_STATUS_WRONG_STATE` for a call
+this stack writes no description for, one with no session yet, or — `join`
+only — one already in a pair, or two calls whose sessions would decode at
+different rates or cut audio into frames of different lengths (nothing here
+resamples).
+
+Driving a frame of the pair is a different entry point, and does not take
+the stack: `sipral_media_mix(media_a, media_b, ...)` takes two *media*
+handles, the same kind `sipral_media_playback`/`sipral_media_capture` do,
+decodes both, mixes what each of the three parties is owed, and sends the
+two frames the far ends are owed. It does not check that `sipral_call_join`
+was ever called on the pair it is handed — that would mean taking the
+stack's lock on every frame, which is exactly what a media handle exists to
+avoid — so it trusts the caller the same way every other media entry point
+already does. What it does check, because two sessions have to be locked
+together rather than one, is the order it locks them in: by handle value,
+never by which one the caller named first, so that two threads mixing the
+same pair with the arguments swapped wait for each other instead of
+deadlocking.
 
 **SRTP is a policy, chosen from C, for a call this stack describes.**
 `sipral_stack_config_t::srtp` is the stack's default and `sipral_call_config_t::srtp`

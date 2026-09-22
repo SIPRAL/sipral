@@ -48,10 +48,15 @@ const PAUSE: Duration = Duration::from_millis(600);
 /// Mean absolute sample value above which a frame counts as sound rather than
 /// silence. G.711 and G.722 silence sit within a handful of units of zero; a
 /// tone at a quarter of full scale is thousands.
-const AUDIBLE: i32 = 500;
+pub(crate) const AUDIBLE: i32 = 500;
 
 /// Whether the tone is sounding at this point in the call.
-fn in_spurt(elapsed: Duration) -> bool {
+///
+/// `crate::join` reads this too, against the lab's own 9000 — the tone
+/// extension every flow in this table dials — to tell a frame that could
+/// only have come from this end's own call apart from one that could only
+/// have come from the far end of a joined pair.
+pub(crate) fn in_spurt(elapsed: Duration) -> bool {
     let cycle = SPURT.saturating_add(PAUSE).as_millis().max(1);
     elapsed.as_millis() % cycle < SPURT.as_millis()
 }
@@ -152,6 +157,35 @@ impl Media {
     /// goodbye — from this call's own socket.
     pub(crate) fn send(&self, destination: SocketAddr, payload: &[u8]) {
         let _ = self.socket.send_to(payload, destination);
+    }
+
+    /// The receiving half of [`Media::turn`] alone, for a caller that drives
+    /// the sending half itself.
+    ///
+    /// `crate::join` is the one caller: a joined pair's own frame comes from
+    /// `sipral::MediaEngine::mix`, which decodes both sessions together, so
+    /// nothing here may call `MediaSession::capture`/`playback` on either one
+    /// on its own — that is exactly the double consumption `turn` on its own
+    /// would cause.
+    pub(crate) fn receive_into(&mut self, session: &mut MediaSession, now: Instant) {
+        loop {
+            match self.socket.recv_from(&mut self.inbox) {
+                Ok((length, from)) => {
+                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
+                    match session.receive(datagram, from, now) {
+                        Arrival::Queued => {
+                            self.heard.received = self.heard.received.saturating_add(1);
+                        }
+                        Arrival::Dropped(_) => {
+                            self.heard.refused = self.heard.refused.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
     }
 
     /// Drive this call's session for one tick: send what is due, take in

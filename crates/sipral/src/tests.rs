@@ -5867,3 +5867,328 @@ fn a_new_association_that_is_never_finished_leaves_the_call_on_the_one_it_had() 
     let after = tone_after(&mut pair, call, remote);
     assert!(after > 4_000, "the call did not stay on its keys: {after}");
 }
+
+// -- a local conference of two calls -----------------------------------------
+
+fn carol_sip() -> SocketAddr {
+    "192.0.2.3:5060".parse().expect("an address")
+}
+
+fn carol_media() -> SocketAddr {
+    "192.0.2.3:40004".parse().expect("an address")
+}
+
+/// Move everything one stack wants to write to the other, drain both, and
+/// keep going until nothing more happens — [`Pair::settle`], generalised to
+/// whichever two stacks a local-conference test needs settled: a call joined
+/// to another still has to be placed against, and torn down against, a third
+/// stack `Pair` itself never carries.
+fn settle_two(a: &mut Stack, b: &mut Stack, answer_b: bool, now: Instant) {
+    for _ in 0..12 {
+        let from_a = a.outbound();
+        let from_b = b.outbound();
+        if from_a.is_empty() && from_b.is_empty() {
+            break;
+        }
+        for datagram in from_a {
+            b.deliver(&datagram, a.local, now);
+        }
+        for datagram in from_b {
+            a.deliver(&datagram, b.local, now);
+        }
+        a.drain(now, false);
+        b.drain(now, answer_b);
+    }
+}
+
+/// Place a call from `caller` to `callee` and take it all the way to
+/// confirmed — [`Pair::connect`], generalised the same way [`settle_two`] is:
+/// a local conference joins two calls this end placed to two different
+/// stacks, and `Pair` only ever knows about one.
+fn connect_two(
+    from: &mut Stack,
+    to: &mut Stack,
+    to_user: &str,
+    now: Instant,
+) -> (CallHandle, CallHandle) {
+    let account = from.account("alice", to.local);
+    let _ = to.account(to_user, from.local);
+    let near = from
+        .engine
+        .place(
+            &mut from.agent,
+            account,
+            OutgoingCall::new(uri(&format!("sip:{to_user}@example.com"))).to_address(UDP, to.local),
+            from.media,
+            now,
+        )
+        .expect("the INVITE goes");
+    from.drain(now, false);
+    settle_two(from, to, true, now);
+    let far = to.call().expect("the far end heard the INVITE");
+    (near, far)
+}
+
+/// This end, with two active calls to two other stacks — what
+/// [`MediaEngine::join`] needs something to join.
+struct Trio {
+    me: Stack,
+    call_a: CallHandle,
+    bob: Stack,
+    bob_call: CallHandle,
+    carol: Stack,
+    call_b: CallHandle,
+    carol_call: CallHandle,
+    now: Instant,
+}
+
+impl Trio {
+    /// Two calls placed and confirmed, on PCMU so that every session in this
+    /// trio shares a sample rate and a frame length without asking for it —
+    /// [`MediaEngine::join`] would refuse the pair otherwise.
+    fn connected() -> Self {
+        let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+        let now = Instant::now();
+        let mut me = Stack::new(11, caller_sip(), caller_media(), catalog.clone(), now);
+        let mut bob = Stack::new(22, callee_sip(), callee_media(), catalog.clone(), now);
+        let mut carol = Stack::new(33, carol_sip(), carol_media(), catalog, now);
+        let (call_a, bob_call) = connect_two(&mut me, &mut bob, "bob", now);
+        let (call_b, carol_call) = connect_two(&mut me, &mut carol, "carol", now);
+        Self {
+            me,
+            call_a,
+            bob,
+            bob_call,
+            carol,
+            call_b,
+            carol_call,
+            now,
+        }
+    }
+
+    /// The same, already joined.
+    fn joined(mut self) -> Self {
+        self.me
+            .engine
+            .join(self.call_a, self.call_b)
+            .expect("two calls on the same catalogue join");
+        self
+    }
+
+    /// One frame each way: `bob_tone`/`carol_tone` into their own legs
+    /// (silence where `None`), mixed through the pair with this end's
+    /// microphone silent, delivered back to whichever far end
+    /// [`MediaEngine::mix`] said was owed one, and what each of them played
+    /// once it arrived.
+    fn frame(
+        &mut self,
+        bob_tone: Option<&[i16]>,
+        carol_tone: Option<&[i16]>,
+    ) -> (Vec<i16>, Vec<i16>) {
+        let frame = self
+            .me
+            .engine
+            .session(self.call_a)
+            .expect("call a has media")
+            .frame_samples();
+        let silence = vec![0_i16; frame];
+        let bob_samples = bob_tone.unwrap_or(&silence);
+        let carol_samples = carol_tone.unwrap_or(&silence);
+
+        if let Some(mut datagram) = self
+            .bob
+            .engine
+            .session(self.bob_call)
+            .expect("bob's media")
+            .capture(bob_samples, self.now)
+            .expect("bob's frame encodes")
+            .map(|datagram| datagram.payload.to_vec())
+        {
+            self.me
+                .engine
+                .session(self.call_a)
+                .expect("call a's media")
+                .receive(&mut datagram, callee_media(), self.now);
+        }
+        if let Some(mut datagram) = self
+            .carol
+            .engine
+            .session(self.carol_call)
+            .expect("carol's media")
+            .capture(carol_samples, self.now)
+            .expect("carol's frame encodes")
+            .map(|datagram| datagram.payload.to_vec())
+        {
+            self.me
+                .engine
+                .session(self.call_b)
+                .expect("call b's media")
+                .receive(&mut datagram, carol_media(), self.now);
+        }
+
+        let mut local_out = vec![0_i16; frame];
+        let outcome = self
+            .me
+            .engine
+            .mix(self.call_a, &silence, &mut local_out, self.now)
+            .expect("the pair mixes");
+
+        let mut heard_by_bob = vec![0_i16; frame];
+        if let Some((_, mut payload)) = outcome.to_a {
+            let mut session = self.bob.engine.session(self.bob_call).expect("bob's media");
+            session.receive(&mut payload, caller_media(), self.now);
+            session.playback(&mut heard_by_bob);
+        }
+        let mut heard_by_carol = vec![0_i16; frame];
+        if let Some((_, mut payload)) = outcome.to_b {
+            let mut session = self
+                .carol
+                .engine
+                .session(self.carol_call)
+                .expect("carol's media");
+            session.receive(&mut payload, caller_media(), self.now);
+            session.playback(&mut heard_by_carol);
+        }
+        self.now += TICK;
+        (heard_by_bob, heard_by_carol)
+    }
+}
+
+/// The whole point of [`crate::join`]: a tone put into one leg of a joined
+/// pair comes out of the other's wire, and the reverse holds at the same
+/// time — two different tones, out of step with each other, so a mix that
+/// silently swapped the two legs would still be caught.
+#[test]
+fn a_tone_into_one_leg_of_a_joined_pair_comes_out_the_other_and_the_reverse_too() {
+    let mut trio = Trio::connected().joined();
+    let frame = trio
+        .me
+        .engine
+        .session(trio.call_a)
+        .expect("call a has media")
+        .frame_samples();
+    let mut bob_phase = 0_u32;
+    let mut carol_phase = 500_u32;
+    let (mut heard_by_bob, mut heard_by_carol) = (Vec::new(), Vec::new());
+    for _ in 0..6 {
+        let mut bob_tone = vec![0_i16; frame];
+        tone(&mut bob_tone, 8_000, &mut bob_phase);
+        let mut carol_tone = vec![0_i16; frame];
+        tone(&mut carol_tone, 8_000, &mut carol_phase);
+        (heard_by_bob, heard_by_carol) = trio.frame(Some(&bob_tone), Some(&carol_tone));
+    }
+
+    assert!(
+        loudness(&heard_by_carol) > 1_000,
+        "the tone sent into call a did not come out of call b's wire: {heard_by_carol:?}"
+    );
+    assert!(
+        loudness(&heard_by_bob) > 1_000,
+        "the tone sent into call b did not come out of call a's wire: {heard_by_bob:?}"
+    );
+}
+
+/// [`MediaEngine::leave`] un-pairs both calls, whichever one it was asked
+/// about, and [`MediaEngine::mix`] refuses a pair that no longer exists
+/// rather than mixing one leg against itself.
+#[test]
+fn leave_un_pairs_both_calls_and_mix_then_refuses_them() {
+    let mut trio = Trio::connected().joined();
+    assert_eq!(trio.me.engine.joined_with(trio.call_a), Some(trio.call_b));
+    assert_eq!(trio.me.engine.joined_with(trio.call_b), Some(trio.call_a));
+
+    let partner = trio
+        .me
+        .engine
+        .leave(trio.call_a)
+        .expect("call a was joined");
+    assert_eq!(partner, trio.call_b);
+    assert_eq!(trio.me.engine.joined_with(trio.call_a), None);
+    assert_eq!(
+        trio.me.engine.joined_with(trio.call_b),
+        None,
+        "leave un-pairs both calls, not only the one it was asked about"
+    );
+    assert_eq!(
+        trio.me.engine.leave(trio.call_a).unwrap_err(),
+        MediaError::NotJoined,
+        "a call already left has nothing more to leave"
+    );
+
+    let frame = trio
+        .me
+        .engine
+        .session(trio.call_a)
+        .expect("call a kept its media")
+        .frame_samples();
+    let mut local_out = vec![0_i16; frame];
+    let refused = trio
+        .me
+        .engine
+        .mix(trio.call_a, &vec![0_i16; frame], &mut local_out, trio.now);
+    assert_eq!(refused.unwrap_err(), MediaError::NotJoined);
+
+    // each call still carries its own audio directly, exactly as an unjoined
+    // call always has
+    let mut played = vec![0_i16; frame];
+    trio.me
+        .engine
+        .session(trio.call_a)
+        .expect("call a's media")
+        .playback(&mut played);
+}
+
+/// A call that hangs up while it is joined takes the pairing down with it —
+/// not the partner's own call, and not the partner's own media, which keeps
+/// running exactly as an unjoined call's always has.
+#[test]
+fn a_call_that_hangs_up_while_joined_leaves_the_mix_cleanly() {
+    let mut trio = Trio::connected().joined();
+
+    trio.carol
+        .agent
+        .hangup(trio.carol_call, trio.now)
+        .expect("the BYE");
+    trio.carol.drain(trio.now, false);
+    settle_two(&mut trio.carol, &mut trio.me, false, trio.now);
+
+    assert!(
+        trio.me.engine.session(trio.call_b).is_none(),
+        "call b's media outlived the call it belonged to"
+    );
+    assert_eq!(
+        trio.me.engine.joined_with(trio.call_a),
+        None,
+        "a hung-up partner leaves the pair, not only its own call"
+    );
+    assert!(
+        trio.me
+            .media_events()
+            .into_iter()
+            .any(|event| matches!(event, MediaEvent::Unjoined)),
+        "call a was never told its partner was gone"
+    );
+
+    // call a's own session outlived its partner and still carries audio
+    // directly, exactly as an unjoined call always has
+    let frame = trio
+        .me
+        .engine
+        .session(trio.call_a)
+        .expect("call a's media outlived its partner")
+        .frame_samples();
+    let mut played = vec![0_i16; frame];
+    trio.me
+        .engine
+        .session(trio.call_a)
+        .expect("call a's media")
+        .playback(&mut played);
+
+    let refused = trio.me.engine.mix(
+        trio.call_a,
+        &vec![0_i16; frame],
+        &mut vec![0_i16; frame],
+        trio.now,
+    );
+    assert_eq!(refused.unwrap_err(), MediaError::NotJoined);
+}

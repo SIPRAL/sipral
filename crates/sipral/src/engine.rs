@@ -258,6 +258,14 @@ pub struct MediaEngine {
     /// Owned bytes rather than a borrow of a session's scratch buffer,
     /// because the session they came from is gone by the time anyone asks.
     farewells: VecDeque<(CallHandle, SocketAddr, Vec<u8>)>,
+    /// Every call currently in a local conference of two, both directions:
+    /// `a` maps to `b` and `b` maps to `a`, so [`MediaEngine::joined_with`]
+    /// answers either call without knowing which one
+    /// [`MediaEngine::join`] was given first. Nothing outside `crate::join`
+    /// reads a value out of this beyond the partner it names — the mixing
+    /// itself is [`crate::join::mix_two`], which touches sessions and not
+    /// this map.
+    joins: BTreeMap<CallHandle, CallHandle>,
     /// D3's health counters, fed from the same drain that hands events to
     /// the application — see `crate::counters`.
     counters: Counters,
@@ -312,6 +320,7 @@ impl MediaEngine {
             calls: BTreeMap::new(),
             events: VecDeque::new(),
             farewells: VecDeque::new(),
+            joins: BTreeMap::new(),
             counters: Counters::default(),
             keys: KeySource::new(media_seed),
             #[cfg(feature = "dtls")]
@@ -1768,6 +1777,14 @@ impl MediaEngine {
     /// it cost, and publish the RFC 6035 report the account may have asked
     /// for.
     fn release(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
+        // a call that ends while joined takes the pair down with it: the
+        // partner is told with `MediaEvent::Unjoined` because nothing else
+        // ever will be, and it is told before anything else about this call
+        // so it never reaches `MediaEngine::mix` with a partner already gone
+        if let Some(partner) = self.joins.remove(&call) {
+            self.joins.remove(&partner);
+            self.events.push_back((partner, MediaEvent::Unjoined));
+        }
         self.calls.remove(&call);
         let Some(held) = self.sessions.remove(&call) else {
             return;
@@ -2009,6 +2026,117 @@ impl MediaEngine {
     /// over it is a decision with a person on the other end.
     fn fail(&mut self, call: CallHandle, error: MediaError) {
         self.events.push_back((call, MediaEvent::Failed(error)));
+    }
+}
+
+// -- a local conference of two calls -----------------------------------------
+
+impl MediaEngine {
+    /// The call `call` is currently joined with, if any.
+    #[must_use]
+    pub fn joined_with(&self, call: CallHandle) -> Option<CallHandle> {
+        self.joins.get(&call).copied()
+    }
+
+    /// Join two active calls into a local conference of three: from here on,
+    /// each call's far end hears the other's far end and this end's own
+    /// microphone, mixed — [`MediaEngine::mix`] is what drives one frame of
+    /// it, a call at a time, and [`mix_two`](crate::mix_two) says what
+    /// "joined" means and why the two calls have to match.
+    /// [`MediaEngine::leave`] ends the pairing, and a call that ends while
+    /// it is still in one takes the pairing down with it.
+    ///
+    /// # Errors
+    /// [`MediaError::SameCall`] for `a == b`; [`MediaError::NoSuchCall`] for
+    /// a call with no running session — placed or answered and negotiated,
+    /// the same requirement [`MediaEngine::session`] has;
+    /// [`MediaError::AlreadyJoined`] for a call already paired with another;
+    /// and [`MediaError::JoinIncompatible`] for two calls whose sessions do
+    /// not share a sample rate and a frame length.
+    pub fn join(&mut self, a: CallHandle, b: CallHandle) -> Result<(), MediaError> {
+        if a == b {
+            return Err(MediaError::SameCall);
+        }
+        if self.joins.contains_key(&a) || self.joins.contains_key(&b) {
+            return Err(MediaError::AlreadyJoined);
+        }
+        let held_a = self.sessions.get(&a).ok_or(MediaError::NoSuchCall)?;
+        let held_b = self.sessions.get(&b).ok_or(MediaError::NoSuchCall)?;
+        let matches = {
+            let slot_a = share::lock(held_a);
+            let slot_b = share::lock(held_b);
+            slot_a.session.sample_rate() == slot_b.session.sample_rate()
+                && slot_a.session.frame_samples() == slot_b.session.frame_samples()
+        };
+        if !matches {
+            return Err(MediaError::JoinIncompatible);
+        }
+        self.joins.insert(a, b);
+        self.joins.insert(b, a);
+        Ok(())
+    }
+
+    /// Take `call` back out of the pair it is in, and hand back which call
+    /// it was paired with.
+    ///
+    /// Nothing has to be told to either session: [`MediaEngine::mix`] read
+    /// and wrote both of them from the outside, on every frame it was asked
+    /// to, and stopping is only a matter of not calling it again — each call
+    /// carries on with whatever [`MediaSession::playback`] and
+    /// [`MediaSession::capture`] it is next given directly, exactly as an
+    /// unjoined call always has.
+    ///
+    /// # Errors
+    /// [`MediaError::NotJoined`] for a call that is not currently joined to
+    /// another.
+    pub fn leave(&mut self, call: CallHandle) -> Result<CallHandle, MediaError> {
+        let partner = self.joins.remove(&call).ok_or(MediaError::NotJoined)?;
+        self.joins.remove(&partner);
+        Ok(partner)
+    }
+
+    /// One frame of the pair `call` is in: decode both far ends, mix what
+    /// each of the three parties is owed, and send the two frames the far
+    /// ends are owed. `mic` is this end's own frame and `local_out` is
+    /// filled with what this end's own loudspeaker is owed —
+    /// [`crate::join::mix_two`] has the arithmetic and the reasoning behind
+    /// it.
+    ///
+    /// # Errors
+    /// [`MediaError::NotJoined`] for a call not currently paired;
+    /// [`MediaError::NoSuchCall`] should either session have gone, which
+    /// this engine's own call-ended handling already unjoins the moment it
+    /// happens, so this is reached only by a caller that kept driving a pair
+    /// past the [`MediaEvent::Unjoined`] that said so; and whatever
+    /// [`MediaSession::capture`] refuses on either leg.
+    pub fn mix(
+        &mut self,
+        call: CallHandle,
+        mic: &[i16],
+        local_out: &mut [i16],
+        now: Instant,
+    ) -> Result<crate::join::MixOutcome, MediaError> {
+        let partner = self
+            .joins
+            .get(&call)
+            .copied()
+            .ok_or(MediaError::NotJoined)?;
+        let held_call = self.sessions.get(&call).ok_or(MediaError::NoSuchCall)?;
+        let held_partner = self.sessions.get(&partner).ok_or(MediaError::NoSuchCall)?;
+        // two distinct sessions, each behind its own lock: this cannot
+        // deadlock against another call into this engine, since `&mut self`
+        // already rules out a second one running at the same time, and
+        // nothing reached through a `SessionShare` in another thread ever
+        // holds more than one session's lock at once
+        let mut slot_call = share::lock(held_call);
+        let mut slot_partner = share::lock(held_partner);
+        crate::join::mix_two(
+            &mut slot_call.session,
+            &mut slot_partner.session,
+            mic,
+            local_out,
+            now,
+        )
     }
 }
 

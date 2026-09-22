@@ -342,6 +342,13 @@ sipral_status_t sipral_call_playback(sipral_handle_t stack, int16_t *samples, si
 sipral_status_t sipral_call_capture(sipral_handle_t stack, const int16_t *samples, size_t sample_count, sipral_media_packet_t *packet);
 
 /**
+ * Hand it one buffer of samples and fill another, in the same call,
+ * neither one named `capacity` — two buffers going in, one of them
+ * writable, which is not the same shape as one being filled.
+ */
+sipral_status_t sipral_call_mix(sipral_handle_t stack, const int16_t *mic, size_t mic_count, int16_t *local, size_t local_count);
+
+/**
  * Hand it a datagram that arrived, in a buffer it may rewrite in
  * place, and hear what became of it.
  */

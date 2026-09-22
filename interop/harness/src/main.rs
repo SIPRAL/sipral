@@ -38,6 +38,7 @@
 )]
 
 mod audio;
+mod join;
 #[cfg(test)]
 mod local;
 mod pair;
@@ -258,6 +259,22 @@ fn main() -> ExitCode {
             Ok(said) => println!("  pass  inbound, narrowed{said}"),
             Err(why) => {
                 println!("  FAIL  inbound, narrowed — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // this lab's own echo extension (interop/asterisk's 9008) exists only on
+    // Asterisk, the same reason the SDES and codec-change flows are gated
+    // above — two calls placed on one account, which `run` above has no shape
+    // for, so this is driven the same way `pair::run` is rather than through
+    // `Flow`
+    if server == "asterisk"
+        && (wanted.is_empty() || wanted.split(',').any(|name| name.trim() == "join"))
+    {
+        match join::run(&server, remote, &user, &pass) {
+            Ok(said) => println!("  pass  local conference{said}"),
+            Err(why) => {
+                println!("  FAIL  local conference — {why}");
                 failures += 1;
             }
         }

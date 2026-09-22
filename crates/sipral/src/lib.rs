@@ -26,7 +26,11 @@
 //!   end goes quiet.
 //! - [`MediaEngine`] — the join. It writes the offers, reads the answers,
 //!   attaches a session to a call that is answered and lets it go when the
-//!   call ends.
+//!   call ends. It is also, unrelatedly, where a *local* join lives:
+//!   [`MediaEngine::join`] pairs two of its own calls into a conference of
+//!   three with this end, [`MediaEngine::mix`] drives a frame of it, and
+//!   [`mix_two`] is the arithmetic either one or `sipral-ffi`'s own media
+//!   handles can call it through.
 //! - [`SessionShare`] — one call's media, for a thread that carries its audio
 //!   while another runs signalling. Each session has its own lock, so neither
 //!   thread waits on the other for longer than a frame.
@@ -138,6 +142,7 @@ mod engine;
 mod error;
 mod event;
 mod ice;
+mod join;
 mod keying;
 mod payloads;
 mod pipeline;
@@ -160,6 +165,7 @@ pub use engine::{CallMedia, MediaEngine};
 pub use error::MediaError;
 pub use event::{DigitSource, Event, MediaEvent};
 pub use ice::IcePolicy;
+pub use join::{MixOutcome, mix_two};
 pub use keying::SrtpPolicy;
 pub use record::RecordingSink;
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};

@@ -145,8 +145,11 @@ and each is cheaper before the ABI carries it than after:
 - **SIP MESSAGE** (RFC 3428) in both directions and **message waiting**
   (RFC 3842) parsed to a count, because a softphone has chat and voicemail
   whether or not the requirements document remembered them;
-- **a local three-way conference**: two calls mixed in `sipral-media`'s mixer,
-  which is written and reached by nothing;
+- **a local three-way conference**: two calls mixed in `sipral-media`'s mixer.
+  *Built*: `MediaEngine::join`/`leave`/`mix` pair two calls and drive the
+  mix a frame at a time, `sipral_call_join`/`sipral_call_leave`/
+  `sipral_media_mix` carry it across the C ABI, and the interop lab proves
+  one call's audio crosses to the other's wire on Asterisk;
 - **STUN reached from a call** — the softphone profile behind a NAT learns its
   public address from `sipral-nat`, which is written, tested and linked by
   nothing; ICE-lite stays where `06-nat.md` puts it, on a public server;

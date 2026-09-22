@@ -507,6 +507,22 @@ const FUNCTIONS: &[Function] = &[
         returns: "SipralStatus",
     },
     Function {
+        name: "sipral_call_mix",
+        doc: &[
+            " Hand it one buffer of samples and fill another, in the same call,",
+            " neither one named `capacity` — two buffers going in, one of them",
+            " writable, which is not the same shape as one being filled.",
+        ],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("mic", "*const i16"),
+            member("mic_count", "usize"),
+            member("local", "*mut i16"),
+            member("local_count", "usize"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
         name: "sipral_call_media_receive",
         doc: &[
             " Hand it a datagram that arrived, in a buffer it may rewrite in",

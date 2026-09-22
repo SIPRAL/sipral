@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 use sipral::{
     Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, IcePolicy, MediaError,
     MediaSession, Playback, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
-    StreamStatistics, UNAVAILABLE,
+    StreamStatistics, UNAVAILABLE, mix_two,
 };
 use sipral_core::sdp::SdpError;
 
@@ -832,7 +832,8 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::DigitTooShort { .. }
         | MediaError::DigitTooLong { .. }
         | MediaError::UnknownDigit { .. }
-        | MediaError::RenderDelayTooLong { .. } => SipralStatus::InvalidArgument,
+        | MediaError::RenderDelayTooLong { .. }
+        | MediaError::SameCall => SipralStatus::InvalidArgument,
         // the numbers a session can bind ran out, which a corrected value
         // does not fix and a different build does not either
         MediaError::TooManyDigits | MediaError::NoPayloadType => SipralStatus::Exhausted,
@@ -842,7 +843,10 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::AlreadyRecording
         | MediaError::CodecChanged
         | MediaError::NoCommonCodec
-        | MediaError::StreamRefused => SipralStatus::WrongState,
+        | MediaError::StreamRefused
+        | MediaError::AlreadyJoined
+        | MediaError::NotJoined
+        | MediaError::JoinIncompatible => SipralStatus::WrongState,
         MediaError::PacketTooLong { .. } => SipralStatus::BufferTooSmall,
         MediaError::Signalling(ref refused) => return crate::call::ua_failed(refused),
         _ => SipralStatus::NotSent,
@@ -1143,6 +1147,67 @@ pub(crate) fn with_media<R>(
             "this call's media has ended: the call is over or its stack was destroyed, and all \
              that is left to do with the handle is release it",
         )),
+    }
+}
+
+/// Do something with two calls' media at once, for [`sipral_media_mix`]
+/// alone: every other entry point here touches one call's session, and this
+/// is the one place two must be held together, because a mixed frame cannot
+/// be built from either alone.
+///
+/// Locked in a fixed order — whichever handle is numerically smaller,
+/// regardless of which one `media_a`/`media_b` names first — so that two
+/// threads mixing the same pair with the arguments swapped wait for each
+/// other rather than deadlocking against each other, which two independent
+/// per-session locks taken in whatever order the caller happened to name
+/// them would otherwise invite.
+fn with_media_pair<R>(
+    media_a: SipralHandle,
+    media_b: SipralHandle,
+    act: impl FnOnce(&mut MediaSession, &mut MediaSession) -> Result<R, Fail>,
+) -> Result<R, Fail> {
+    let entry_a = MEDIA.get(media_a).map_err(handle_failed)?;
+    let entry_b = MEDIA.get(media_b).map_err(handle_failed)?;
+    let _inside_a = Inside::enter(entry_a.stack);
+    let _inside_b = Inside::enter(entry_b.stack);
+    if media_a <= media_b {
+        entry_a
+            .share
+            .with(|session_a| -> Result<R, Fail> {
+                entry_b
+                    .share
+                    .with(|session_b| act(session_a, session_b))
+                    .map_err(media_unavailable)?
+            })
+            .map_err(media_unavailable)?
+    } else {
+        entry_b
+            .share
+            .with(|session_b| -> Result<R, Fail> {
+                entry_a
+                    .share
+                    .with(|session_a| act(session_a, session_b))
+                    .map_err(media_unavailable)?
+            })
+            .map_err(media_unavailable)?
+    }
+}
+
+/// Why a [`SessionShare`] did not reach its session, as the same [`Fail`]
+/// [`with_media`] itself turns it into.
+fn media_unavailable(error: SessionUnavailable) -> Fail {
+    match error {
+        SessionUnavailable::Reentered => fail(
+            SipralStatus::Busy,
+            "this thread is already inside this call's media, further down its own call stack",
+        ),
+        // ended, and whatever the layer below one day adds beside it: either
+        // way there is no session here to act on
+        _ => fail(
+            SipralStatus::WrongState,
+            "this call's media has ended: the call is over or its stack was destroyed, and all \
+             that is left to do with the handle is release it",
+        ),
     }
 }
 
@@ -1741,6 +1806,91 @@ entry! {
 }
 
 entry! {
+    /// One frame of a local conference of two calls: decode what `media_a`'s
+    /// and `media_b`'s far ends each sent, mix what each of the three
+    /// parties — the two far ends and this end — is owed, and send the two
+    /// frames the far ends are owed.
+    ///
+    /// `sipral_call_join` must already have paired the two calls these two
+    /// handles belong to. Nothing here checks that itself: checking it would
+    /// mean taking the stack's lock on every frame, which is exactly what a
+    /// media handle exists to avoid, so this mixes whatever two handles it is
+    /// given — the same trust every other `sipral_media_` entry point places
+    /// in the caller having minted the handle from a call worth acting on.
+    ///
+    /// `mic` is this end's own frame, `mic_count` long; `local` is filled
+    /// with what this end's own loudspeaker is owed, `local_count` long. Both
+    /// are `sipral_media_info_t::frame_samples` on a call this pair actually
+    /// agreed on — `sipral_call_join` already made that the same on both.
+    /// `packet_a` and `packet_b` are filled the way `sipral_media_capture`
+    /// fills one, each with what its own call's far end is now owed: `mic`
+    /// mixed with the *other* far end's frame rather than `mic` alone, which
+    /// is also what each call's own recording keeps if one is running.
+    ///
+    /// Drive a joined pair from one thread, one frame at a time. The two
+    /// sessions are locked together for the length of the call, in a fixed
+    /// order that does not depend on which handle is named first, so a
+    /// second `sipral_media_mix` on the same pair waits for this one rather
+    /// than deadlocking against it — but a thread still calling
+    /// `sipral_media_playback`/`sipral_media_capture` on either call alone at
+    /// the same time is a second driver this mix does not know about.
+    ///
+    /// # Safety
+    ///
+    /// `mic` must be readable for `mic_count` `int16_t`; `local` must be
+    /// writable for `local_count` `int16_t`; `packet_a` and `packet_b` must
+    /// each point at a `sipral_media_packet_t` as `sipral_media_capture`
+    /// describes.
+    fn sipral_media_mix(
+        media_a: SipralHandle,
+        media_b: SipralHandle,
+        now_ms: u64,
+        mic: *const i16,
+        mic_count: usize,
+        local: *mut i16,
+        local_count: usize,
+        packet_a: *mut SipralMediaPacket,
+        packet_b: *mut SipralMediaPacket,
+    ) {
+        let mut out_a = unsafe { read_versioned(packet_a) }?;
+        let mut out_b = unsafe { read_versioned(packet_b) }?;
+        prepare(&mut out_a)?;
+        prepare(&mut out_b)?;
+        if mic.is_null() && mic_count != 0 {
+            return Err(fail(SipralStatus::InvalidArgument, "mic is null"));
+        }
+        if local.is_null() && local_count != 0 {
+            return Err(fail(SipralStatus::InvalidArgument, "local is null"));
+        }
+        let origin = MEDIA.get(media_a).map_err(handle_failed)?.origin;
+        let now = instant_at(origin, now_ms)?;
+        let taken = unsafe { slice::from_raw_parts(mic, mic_count) };
+        let room = unsafe { slice::from_raw_parts_mut(local, local_count) };
+        let outcome = with_media_pair(media_a, media_b, |session_a, session_b| {
+            let frame = session_a.frame_samples();
+            if session_b.frame_samples() != frame || mic_count != frame || local_count != frame {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!(
+                        "a frame of this pair is {frame} samples, mic was {mic_count} and local \
+                         {local_count}, or the two calls no longer agree on a frame length"
+                    ),
+                ));
+            }
+            mix_two(session_a, session_b, taken, room, now).map_err(|error| media_failed(&error))
+        })?;
+        if let Some((destination, payload)) = outcome.to_a {
+            unsafe { put(&mut out_a, destination, &payload) }?;
+        }
+        if let Some((destination, payload)) = outcome.to_b {
+            unsafe { put(&mut out_b, destination, &payload) }?;
+        }
+        unsafe { write_versioned(packet_a, out_a) }?;
+        unsafe { write_versioned(packet_b, out_b) }
+    }
+}
+
+entry! {
     /// The control traffic this call has due.
     ///
     /// A `len` of zero in the packet means nothing is due yet. RFC 3550 §6.3
@@ -2050,16 +2200,17 @@ pub(crate) mod tests {
         SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, media_failed, named_codec,
         ordered, sipral_call_media, sipral_codec_at, sipral_codec_count, sipral_codec_name,
         sipral_media_capture, sipral_media_codec_candidate_at, sipral_media_codec_candidate_count,
-        sipral_media_dialling, sipral_media_info, sipral_media_playback, sipral_media_poll_rtcp,
-        sipral_media_receive, sipral_media_release, sipral_media_statistics,
-        sipral_media_stop_dialling, sipral_stack_codec_order, sipral_stack_poll_farewell,
-        srtp_policy,
+        sipral_media_dialling, sipral_media_info, sipral_media_mix, sipral_media_playback,
+        sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
+        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
+        sipral_stack_poll_farewell, srtp_policy,
     };
     use crate::call::tests::{
-        ANSWER, PEER_MEDIA, accepted, account_on, connected, deliver, hangup, managed_config,
-        media_call, media_call_offering, media_call_refused, media_call_tuned, media_line, one,
-        place, sent,
+        ANSWER, PEER_MEDIA, SECOND_PEER_MEDIA, accepted, account_on, connected, deliver, hangup,
+        managed_config, media_call, media_call_offering, media_call_pair, media_call_refused,
+        media_call_tuned, media_line, one, place, sent,
     };
+    use crate::call::{sipral_call_join, sipral_call_leave};
     use crate::error::last_error_text;
     use crate::event::{SipralEvent, SipralEventKind};
     use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
@@ -3321,6 +3472,85 @@ a=sendrecv\r\n";
         assert_eq!(payload.get(1).copied(), Some(0x00), "payload type zero");
         assert_eq!(destination, PEER_MEDIA);
         assert_eq!(packet.destination_len, destination.len());
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// `sipral_call_join` refuses a call joined to itself and a second
+    /// pairing of a call already in one; `sipral_media_mix` then moves one
+    /// frame between the two calls' own far ends; and `sipral_call_leave`
+    /// refuses a call that has already left.
+    #[test]
+    fn join_leave_and_mix_move_a_frame_between_two_calls_on_one_stack() {
+        let mut observed = Observed::default();
+        let (stack, call_a, call_b) = media_call_pair(&mut observed);
+        let mut media_a = SIPRAL_HANDLE_NONE;
+        let mut media_b = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call_a, &raw mut media_a) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call_b, &raw mut media_b) },
+            SipralStatus::Ok
+        );
+
+        assert_eq!(
+            unsafe { sipral_call_join(stack, call_a, call_a) },
+            SipralStatus::InvalidArgument,
+            "a call cannot be joined to itself"
+        );
+        assert_eq!(
+            unsafe { sipral_call_join(stack, call_a, call_b) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { sipral_call_join(stack, call_a, call_b) },
+            SipralStatus::WrongState,
+            "a call already joined refuses a second pairing"
+        );
+
+        let samples = [1_000_i16; FRAME];
+        let mut local = [0_i16; FRAME];
+        let mut buffers_a = Buffers::new();
+        let mut buffers_b = Buffers::new();
+        let mut packet_a = buffers_a.packet();
+        let mut packet_b = buffers_b.packet();
+        let status = unsafe {
+            sipral_media_mix(
+                media_a,
+                media_b,
+                0,
+                samples.as_ptr(),
+                samples.len(),
+                local.as_mut_ptr(),
+                local.len(),
+                &raw mut packet_a,
+                &raw mut packet_b,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (payload_a, destination_a) = buffers_a.taken(&packet_a);
+        let (payload_b, destination_b) = buffers_b.taken(&packet_b);
+        assert_eq!(payload_a.len(), FRAME + 12, "twelve octets of RTP header");
+        assert_eq!(payload_b.len(), FRAME + 12, "twelve octets of RTP header");
+        assert_eq!(destination_a, PEER_MEDIA, "call a's own far end");
+        assert_eq!(destination_b, SECOND_PEER_MEDIA, "call b's own far end");
+
+        assert_eq!(
+            unsafe { sipral_call_leave(stack, call_a) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_call_leave(stack, call_a) },
+            SipralStatus::WrongState,
+            "a call already left has nothing more to leave"
+        );
+
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
