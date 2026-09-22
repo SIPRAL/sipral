@@ -352,9 +352,11 @@ impl Timing {
         }
     }
 
-    /// Take one arrival: what the packet said it was sampled at, and when it
-    /// turned up.
-    fn note(&mut self, sequence: u16, timestamp: u32, arrival: u32) {
+    /// Take one arrival: what the packet said it was sampled at, when it
+    /// turned up, and, for the first packet of a talk spurt, how many ticks
+    /// late it may be before its lateness is put down to the sender's clock
+    /// rather than to the path.
+    fn note(&mut self, sequence: u16, timestamp: u32, arrival: u32, spurt: Option<u32>) {
         self.since_decay = self.since_decay.saturating_add(1);
         self.since_shrink = self.since_shrink.saturating_add(1);
         self.learn_span(sequence, timestamp);
@@ -363,6 +365,20 @@ impl Timing {
         // The offset is unknown and constant, so it cancels in everything
         // below and only the path delay is left.
         let transit = arrival.wrapping_sub(timestamp);
+        // Constant, that is, while the sender's clock runs. One that stops it
+        // through a pause (RFC 3550 §5.1 has the timestamp increase "regardless
+        // of whether the block is transmitted in a packet or dropped as
+        // silent", and some senders do not) comes back with an offset larger
+        // by the whole pause, and every packet after reads as that much late:
+        // the target climbs to its ceiling and stays there until the fastest
+        // arrival has aged out of both windows. The first packet of a spurt is
+        // the one place that is safe to take as a new start, since its own
+        // lateness only ever lengthens a pause the sender chose to leave.
+        if let Some(allowed) = spurt
+            && self.lateness(transit).is_some_and(|late| late > allowed)
+        {
+            self.rebase();
+        }
         if let Some(previous) = self.transit {
             let d = transit.wrapping_sub(previous).cast_signed().unsigned_abs();
             let round_off = self.jitter_scaled.saturating_add(8) >> 4;
@@ -395,6 +411,25 @@ impl Timing {
             _ => current,
         };
         transit.wrapping_sub(base)
+    }
+
+    /// How much later than the fastest arrival still remembered `transit` is,
+    /// without remembering it: `None` when nothing is remembered yet or it is
+    /// faster still.
+    fn lateness(&self, transit: u32) -> Option<u32> {
+        let fastest = match (self.base_current, self.base_previous) {
+            (Some(current), Some(older)) if at_or_before(older, current) => older,
+            (Some(current), _) => current,
+            (None, older) => older?,
+        };
+        at_or_before(fastest, transit).then_some(transit.wrapping_sub(fastest))
+    }
+
+    /// Forget the fastest arrivals, so the next one is measured from itself.
+    const fn rebase(&mut self) {
+        self.base_current = None;
+        self.base_previous = None;
+        self.base_age = 0;
     }
 
     /// Put one arrival delay in the distribution, and forget older ones.
@@ -469,9 +504,7 @@ impl Timing {
     /// the path rather than the stream, and the path has not changed.
     fn restart(&mut self) {
         self.transit = None;
-        self.base_current = None;
-        self.base_previous = None;
-        self.base_age = 0;
+        self.rebase();
         self.seen = false;
         self.streak = 0;
         self.candidate = 0;
@@ -622,8 +655,9 @@ impl JitterBuffer {
         let ahead = sequence.wrapping_sub(self.next);
         if ahead >= BEHIND {
             // it is unplayable, but it is also the clearest evidence there is
-            // that the buffer is too short, so its arrival still counts
-            self.note_arrival(sequence, header.timestamp, arrival);
+            // that the buffer is too short, so its arrival still counts, and
+            // counts in full whatever its marker says
+            self.note_arrival(sequence, header.timestamp, arrival, false);
             self.counts.discarded_late = self.counts.discarded_late.saturating_add(1);
             return Insert::Late;
         }
@@ -662,12 +696,21 @@ impl JitterBuffer {
         self.held = self.held.saturating_add(1);
         self.arrived = self.arrived.saturating_add(1);
         self.counts.received = self.counts.received.saturating_add(1);
-        if sequence.wrapping_sub(self.highest) >= BEHIND {
+        // a spurt opens with the newest packet there is; a marker that turns
+        // up behind packets already held arrived after its own spurt had
+        // started, which is lateness the path is responsible for
+        let reordered = sequence.wrapping_sub(self.highest) >= BEHIND;
+        if reordered {
             self.counts.reordered = self.counts.reordered.saturating_add(1);
         } else {
             self.highest = sequence;
         }
-        self.note_arrival(sequence, header.timestamp, arrival);
+        self.note_arrival(
+            sequence,
+            header.timestamp,
+            arrival,
+            header.marker && !reordered,
+        );
 
         if displaced > 0 {
             Insert::Displaced(displaced)
@@ -690,14 +733,11 @@ impl JitterBuffer {
             return Pull::Empty;
         }
 
-        let queued = self.queued();
-        if !self.playing {
-            if queued == 0 || queued < self.target {
-                return Pull::Empty;
-            }
-            self.playing = true;
+        if !self.playing && !self.start() {
+            return Pull::Empty;
         }
 
+        let queued = self.queued();
         if activity == Activity::Silence {
             if queued > self.target.saturating_add(1) {
                 self.shorten();
@@ -888,9 +928,13 @@ impl JitterBuffer {
     }
 
     /// Fold one arrival into the estimate and move the target if it has to.
-    fn note_arrival(&mut self, sequence: u16, timestamp: u32, arrival: Duration) {
+    fn note_arrival(&mut self, sequence: u16, timestamp: u32, arrival: Duration, opens: bool) {
         let ticks = clock_ticks(self.clock_rate, arrival);
-        self.timing.note(sequence, timestamp, ticks);
+        // up to the target is lateness the buffer already allows for, so a
+        // spurt that starts inside it says nothing worth starting again for
+        let allowed = u32::from(self.target).saturating_mul(self.timing.span);
+        self.timing
+            .note(sequence, timestamp, ticks, opens.then_some(allowed));
 
         let wanted = self
             .timing
@@ -906,6 +950,50 @@ impl JitterBuffer {
             self.target = self.target.saturating_sub(1).max(self.min_delay);
             self.timing.since_shrink = 0;
         }
+    }
+
+    /// Start playing, if what is held has reached the target.
+    ///
+    /// What is held counts from the first packet actually there, not from the
+    /// playout point. A stream that stopped can come back further on than it
+    /// left off, with the sequence numbers it spent while it was quiet never
+    /// sent at all; counted from the playout point, that gap would start
+    /// playout at once, conceal every frame of it, and then keep the whole gap
+    /// as delay for as long as nobody paused. Waiting until the packets after
+    /// the first one reach the target also gives a spurt whose first packets
+    /// arrive out of order the time to fill in.
+    fn start(&mut self) -> bool {
+        if self.held == 0 {
+            return false;
+        }
+        let gap = self.leading_gap();
+        if self.queued().saturating_sub(gap) < self.target {
+            return false;
+        }
+        // nobody was listening while these came due, so they are loss the
+        // counters record and not frames anyone has to hear concealed
+        self.counts.lost = self.counts.lost.saturating_add(u64::from(gap));
+        for _ in 0..gap {
+            self.gmin.observe(PacketOutcome::Lost);
+        }
+        self.advance_base(gap);
+        self.playing = true;
+        true
+    }
+
+    /// How many empty slots stand between the playout point and the first
+    /// packet held.
+    fn leading_gap(&self) -> u16 {
+        let mut gap = 0;
+        while gap < self.depth
+            && !self
+                .slots
+                .get(self.index_of(self.next.wrapping_add(gap)))
+                .is_some_and(|slot| slot.filled)
+        {
+            gap += 1;
+        }
+        gap
     }
 
     /// Give up the oldest frame to bring the delay down by one. A slot that is
@@ -1253,11 +1341,9 @@ mod tests {
         );
         // the window moved from 10 to 37, and what it passed over is loss
         assert_eq!(buffer.quality().lost, 25);
-        // 37, 38 and 39 are still inside the window, so they are only lost
-        // once their turn comes and nothing is there
-        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
-        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
-        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
+        // 37, 38 and 39 are still inside the window, but nothing has been
+        // played yet, so playout starts at the first packet there rather than
+        // concealing three frames to reach it
         assert_eq!(pull(&mut buffer), Some(40));
         let quality = buffer.quality();
         assert_eq!(
@@ -1515,6 +1601,153 @@ mod tests {
             Duration::from_millis(180),
             "six packets of thirty milliseconds"
         );
+    }
+
+    /// One packet with every field the header carries chosen by the test.
+    fn insert_raw(
+        buffer: &mut JitterBuffer,
+        sequence: u16,
+        timestamp: u32,
+        marker: bool,
+        arrival: Duration,
+    ) -> Insert {
+        let header = RtpHeader {
+            marker,
+            payload_type: 0,
+            sequence,
+            timestamp,
+            ssrc: 0x1234_5678,
+        };
+        let payload = sequence.to_be_bytes();
+        let mut bytes = vec![0; 32];
+        let n = PacketBuilder::new(header, &payload)
+            .write(&mut bytes)
+            .expect("room");
+        bytes.truncate(n);
+        let packet = RtpPacket::parse(&bytes).expect("a packet");
+        buffer.insert(&packet, arrival)
+    }
+
+    #[test]
+    fn a_sender_that_stops_its_clock_through_a_pause_does_not_cost_half_a_second() {
+        // the pattern FreeSWITCH sent on a DTLS-SRTP call: two packets, 542
+        // milliseconds of nothing, then a talk spurt whose timestamp carries on
+        // from the last packet as though no time had passed. Measured against
+        // the packets before the pause, every packet after it is half a second
+        // late, and the target used to go to its ceiling and stay there for
+        // over a minute.
+        let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
+        let ms = Duration::from_millis;
+        insert_raw(&mut buffer, 36_099, 160, true, ms(0));
+        insert_raw(&mut buffer, 36_100, 320, false, ms(22));
+        let mut now = ms(22);
+        while now < ms(560) {
+            buffer.pull(Activity::Speech);
+            now += FRAME;
+        }
+
+        let mut arrival = ms(564);
+        for step in 0..250_u16 {
+            let timestamp = 480 + u32::from(step) * SPAN;
+            insert_raw(&mut buffer, 36_101 + step, timestamp, step == 0, arrival);
+            buffer.pull(Activity::Speech);
+            arrival += FRAME;
+        }
+        let quality = buffer.quality();
+        assert!(
+            buffer.target() <= 2,
+            "the pause is not path delay, got a target of {}",
+            buffer.target()
+        );
+        assert!(
+            quality.delay <= ms(60),
+            "the far end is heard at the delay the path needs, got {:?}",
+            quality.delay
+        );
+        assert_eq!(quality.lost, 0);
+    }
+
+    #[test]
+    fn a_spurt_that_starts_late_on_a_steady_clock_is_measured_like_any_packet() {
+        // the same marker, but from a sender whose clock ran through the pause
+        // and a path that delayed the spurt's first packet by a frame: inside
+        // what the target already allows for, so the fastest arrivals are
+        // kept, and the packets later still after it are measured against them
+        let mut buffer = buffer(100, 2);
+        steady(&mut buffer, 0, 60);
+        insert_raw(&mut buffer, 60, 60 * SPAN, true, FRAME * 61);
+        buffer.pull(Activity::Speech);
+        // two frames later than the path's best, which the target now has to
+        // cover; had the spurt been taken as a new start they would read as
+        // one frame, measured from a packet that was itself a frame late, and
+        // the target would have stayed where it was
+        for sequence in [61_u16, 62] {
+            insert_raw(
+                &mut buffer,
+                sequence,
+                u32::from(sequence) * SPAN,
+                false,
+                FRAME * (u32::from(sequence) + 2),
+            );
+            buffer.pull(Activity::Speech);
+        }
+        assert_eq!(
+            buffer.target(),
+            3,
+            "two frames late, plus the one that has to be there"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_comes_back_further_on_starts_where_it_came_back() {
+        // the pattern Asterisk sent on a DTLS-SRTP call: two packets, a second
+        // of nothing, then the stream again fifty-one sequence numbers and a
+        // second of timestamps further on. Playout used to start on the gap,
+        // conceal fifty frames and keep a second of delay for as long as the
+        // far end kept talking.
+        let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
+        let ms = Duration::from_millis;
+        insert_raw(&mut buffer, 19_035, 160, false, ms(0));
+        insert_raw(&mut buffer, 19_036, 320, false, ms(20));
+        let mut now = ms(20);
+        while now < ms(1_020) {
+            buffer.pull(Activity::Speech);
+            now += FRAME;
+        }
+        let lost_before = buffer.quality().lost;
+
+        insert_raw(&mut buffer, 19_087, 8_480, false, ms(1_040));
+        assert!(
+            matches!(buffer.pull(Activity::Speech), Pull::Empty),
+            "one packet is not yet the target"
+        );
+        insert_raw(&mut buffer, 19_088, 8_640, false, ms(1_060));
+        assert!(matches!(
+            buffer.pull(Activity::Speech),
+            Pull::Packet(frame) if frame.sequence == 19_087
+        ));
+        let quality = buffer.quality();
+        assert_eq!(quality.lost - lost_before, 50, "the gap is still loss");
+        assert_eq!(quality.delay, ms(20), "and not delay");
+        assert!(quality.loss_rate < 0.001, "nothing was concealed");
+    }
+
+    #[test]
+    fn a_spurt_whose_first_packets_cross_on_the_way_is_not_concealed_for_it() {
+        let mut buffer = buffer(20, 2);
+        insert(&mut buffer, 0);
+        insert(&mut buffer, 1);
+        assert_eq!(pull(&mut buffer), Some(0));
+        assert_eq!(pull(&mut buffer), Some(1));
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
+
+        // the pause ends with 3 overtaking 2
+        insert(&mut buffer, 3);
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Empty));
+        insert(&mut buffer, 2);
+        assert_eq!(pull(&mut buffer), Some(2));
+        assert_eq!(pull(&mut buffer), Some(3));
+        assert_eq!(buffer.quality().lost, 0);
     }
 
     #[test]

@@ -348,6 +348,17 @@ someone configured once. Design targets:
 - **Adjustment happens in silence.** Time scaling during talk spurts is audible;
   stretching or dropping a pause is not. Silence detection drives the
   adjustment schedule.
+- **A pause is not path delay.** Some senders stop their RTP clock while they
+  are quiet, against RFC 3550 §5.1, so every packet after the pause looks late
+  by all of it. The first packet of a talk spurt (the marker bit, RFC 3551
+  §4.1) that looks later than the target allows for is taken as a new start
+  for the delay measurement: its own lateness can only lengthen a pause the
+  sender chose. Seen from FreeSWITCH at the start of a DTLS-SRTP call.
+- **A stream that comes back further on starts there.** When playout has run
+  dry and the next packet is some sequence numbers ahead, those numbers are
+  counted lost and playout starts at the packet, rather than concealing the
+  gap and keeping it as delay. Seen from Asterisk at the start of a DTLS-SRTP
+  call.
 - **Reordering is normal**, not an error. Late packets that still fit the window
   are inserted.
 - **Duplicates are dropped** on sequence number, cheaply.

@@ -310,6 +310,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A pause at the start of a DTLS-SRTP call no longer costs half a second of
+  delay.** FreeSWITCH sent two packets, paused while it keyed, and resumed
+  with a timestamp that had not moved, so the jitter buffer read the pause as
+  path delay and sat at its 500 ms ceiling for over a minute; the first packet
+  of a talk spurt that looks later than the target allows for now starts the
+  delay measurement again. Asterisk resumed fifty-one sequence numbers further
+  on, and playout started on the gap, concealed a second of nothing and kept
+  it as delay; a buffer that has run dry now starts at the first packet it
+  holds and counts the gap as loss.
 - **A request challenged with a nonce another request already answered is
   answered too.** A server that draws its nonce from the clock, as Asterisk
   does, challenges a SUBSCRIBE sent in the same second as a REGISTER with the
