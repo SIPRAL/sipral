@@ -357,8 +357,11 @@ someone configured once. Design targets:
 - **A stream that comes back further on starts there.** When playout has run
   dry and the next packet is some sequence numbers ahead, those numbers are
   counted lost and playout starts at the packet, rather than concealing the
-  gap and keeping it as delay. Seen from Asterisk at the start of a DTLS-SRTP
-  call.
+  gap and keeping it as delay. A packet stranded in front of such a gap, one
+  that came too early to start on and is then older than anything after it
+  by more than the target, is dropped unplayed for the same reason. Packets
+  held together with no such gap are all played, however many. Seen from
+  Asterisk on a DTLS-SRTP call, at the start and again after a resume.
 - **Reordering is normal**, not an error. Late packets that still fit the window
   are inserted.
 - **Duplicates are dropped** on sequence number, cheaply.

@@ -330,7 +330,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   delay measurement again. Asterisk resumed fifty-one sequence numbers further
   on, and playout started on the gap, concealed a second of nothing and kept
   it as delay; a buffer that has run dry now starts at the first packet it
-  holds and counts the gap as loss.
+  holds and counts the gap as loss. After a resume, when Asterisk's first
+  packet under its new keys was refused and its second sat alone, too few to
+  start on, playout started on that packet and concealed the second behind
+  it; a packet stranded in front of a gap longer than the target is now
+  dropped unplayed, and packets held together are still all played.
 - **A request challenged with a nonce another request already answered is
   answered too.** A server that draws its nonce from the clock, as Asterisk
   does, challenges a SUBSCRIBE sent in the same second as a REGISTER with the

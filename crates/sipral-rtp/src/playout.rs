@@ -233,8 +233,9 @@ pub struct Quality {
     /// Packets that arrived behind the playout point.
     pub discarded_late: u64,
     /// Packets thrown out of the window before they could be played: pushed
-    /// out by newer audio because the consumer stopped pulling, or belonging
-    /// to a stream that restarted underneath them.
+    /// out by newer audio because the consumer stopped pulling, belonging to
+    /// a stream that restarted underneath them, or left further back than the
+    /// target when playout started.
     pub discarded_overflow: u64,
     /// Packets whose sequence number was already held.
     pub duplicates: u64,
@@ -962,6 +963,16 @@ impl JitterBuffer {
     /// as delay for as long as nobody paused. Waiting until the packets after
     /// the first one reach the target also gives a spurt whose first packets
     /// arrive out of order the time to fill in.
+    ///
+    /// And playout does not start on packets stranded in front of a gap
+    /// longer than the target. One left on its own there, too few to start on
+    /// and then a second older than anything after it, would otherwise be
+    /// played first and the gap concealed after it, which is the same second
+    /// of delay by another route, bought with concealment and nothing the far
+    /// end said. Nobody has heard what is dropped. Packets that are held
+    /// together, with no such gap between them, are all played, however many
+    /// there are: that is the far end talking, and a delay that is longer than
+    /// it has to be is given back in its next pause.
     fn start(&mut self) -> bool {
         if self.held == 0 {
             return false;
@@ -970,15 +981,62 @@ impl JitterBuffer {
         if self.queued().saturating_sub(gap) < self.target {
             return false;
         }
-        // nobody was listening while these came due, so they are loss the
-        // counters record and not frames anyone has to hear concealed
-        self.counts.lost = self.counts.lost.saturating_add(u64::from(gap));
-        for _ in 0..gap {
-            self.gmin.observe(PacketOutcome::Lost);
+        self.pass_over(gap);
+        let stranded = self.stranded();
+        if stranded > 0 {
+            self.pass_over(stranded);
+            if self.queued() < self.target {
+                return false;
+            }
         }
-        self.advance_base(gap);
         self.playing = true;
         true
+    }
+
+    /// How far on from the playout point the packet after the last gap longer
+    /// than the target is, or zero when there is no such gap. Everything
+    /// before that packet is stranded behind it.
+    fn stranded(&self) -> u16 {
+        let span = self.queued();
+        let mut cut = 0;
+        let mut empty = 0_u16;
+        for offset in 0..span {
+            let filled = self
+                .slots
+                .get(self.index_of(self.next.wrapping_add(offset)))
+                .is_some_and(|slot| slot.filled);
+            if filled {
+                if empty > self.target {
+                    cut = offset;
+                }
+                empty = 0;
+            } else {
+                empty += 1;
+            }
+        }
+        cut
+    }
+
+    /// Move the playout point `count` frames on before playout has started.
+    /// Nobody was listening while these came due, so what was never there is
+    /// loss the counters record rather than frames anyone hears concealed, and
+    /// what was held is thrown out of the window unplayed.
+    fn pass_over(&mut self, count: u16) {
+        for _ in 0..count {
+            let index = self.index_of(self.next);
+            if let Some(slot) = self.slots.get_mut(index)
+                && slot.filled
+            {
+                slot.filled = false;
+                self.held = self.held.saturating_sub(1);
+                self.counts.discarded_overflow = self.counts.discarded_overflow.saturating_add(1);
+                self.gmin.observe(PacketOutcome::Discarded);
+            } else {
+                self.counts.lost = self.counts.lost.saturating_add(1);
+                self.gmin.observe(PacketOutcome::Lost);
+            }
+            self.advance_base(1);
+        }
     }
 
     /// How many empty slots stand between the playout point and the first
@@ -1730,6 +1788,68 @@ mod tests {
         assert_eq!(quality.lost - lost_before, 50, "the gap is still loss");
         assert_eq!(quality.delay, ms(20), "and not delay");
         assert!(quality.loss_rate < 0.001, "nothing was concealed");
+    }
+
+    #[test]
+    fn a_packet_left_alone_in_front_of_a_gap_is_not_played_a_second_late() {
+        // the pattern Asterisk sent on the resumed DTLS-SRTP call once its
+        // first packet under the new keys had been refused: one packet, too
+        // few to start on, a second of nothing, and the stream again fifty
+        // sequence numbers on. Playout used to start on the one packet,
+        // conceal the fifty behind it, and hold the second of delay until
+        // the far end paused.
+        let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
+        let ms = Duration::from_millis;
+        insert_raw(&mut buffer, 42_497, 320, false, ms(70));
+        let mut now = ms(70);
+        while now < ms(1_100) {
+            assert!(matches!(buffer.pull(Activity::Silence), Pull::Empty));
+            now += FRAME;
+        }
+
+        let mut arrival = ms(1_108);
+        let mut concealed = 0;
+        for step in 0..50_u16 {
+            let sequence = 42_548 + step;
+            let timestamp = 8_480 + u32::from(step) * SPAN;
+            insert_raw(&mut buffer, sequence, timestamp, false, arrival);
+            if matches!(buffer.pull(Activity::Speech), Pull::Conceal) {
+                concealed += 1;
+            }
+            arrival += FRAME;
+        }
+        let quality = buffer.quality();
+        assert_eq!(concealed, 0, "nothing was missing from what is played");
+        assert!(
+            quality.delay <= ms(40),
+            "the far end is heard at the target, got {:?}",
+            quality.delay
+        );
+        assert_eq!(quality.lost, 50, "the fifty never sent are still loss");
+        assert_eq!(
+            quality.discarded_overflow, 1,
+            "and the one left behind is thrown out unplayed"
+        );
+    }
+
+    #[test]
+    fn a_burst_that_raised_the_target_is_played_whole() {
+        // twenty packets held up on the way and delivered together: every
+        // one of them arrived late, so the target has grown to cover them by
+        // the time the last is in, and none is dropped to start
+        let mut buffer = buffer(100, 2);
+        steady(&mut buffer, 0, 200);
+        while !matches!(buffer.pull(Activity::Speech), Pull::Empty) {}
+        let delivered = FRAME * 220;
+        for sequence in 200..220_u16 {
+            insert_at(&mut buffer, sequence, delivered);
+        }
+        let mut played = 0;
+        while let Pull::Packet(_) = buffer.pull(Activity::Speech) {
+            played += 1;
+        }
+        assert_eq!(played, 20, "the whole burst is heard");
+        assert_eq!(buffer.quality().discarded_overflow, 0);
     }
 
     #[test]
