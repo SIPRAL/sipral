@@ -19,6 +19,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `message-summary` subscription (`sipral_account_subscribe`) whose mailbox
   count is read higher after a call announces a message in it. Asterisk
   only, on both drivers now, with the same pass conditions either way.
+- **OpenSIPS as a second proxy in the lab.** Kamailio and OpenSIPS share an
+  ancestor but have diverged for fifteen years, so a routing rule both of them
+  read the same way is a second opinion rather than one implementation's
+  private reading of it. Register, call, hold, resume and both transfers now
+  run through OpenSIPS too, on both drivers, in `scripts/lab.sh`'s default run
+  and selectable alone as `scripts/lab.sh opensips`; it is started only for
+  that step and removed right after, so the lab's steady footprint is
+  unchanged.
 - **DTLS-SRTP with a peer that certifies with RSA.** FreeSWITCH, left as it
   ships, holds an RSA-4096 certificate, and no call with it could be keyed:
   as a client it withheld its certificate from a request naming ECDSA alone,

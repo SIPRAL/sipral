@@ -10,8 +10,8 @@
 //! `Endpoint`'s own SIP loop, and `audio::Media`'s own RTP one — binding a
 //! real `UdpSocket`, reading it non-blockingly, pacing a tone against a real
 //! clock. This is that other half, run locally because the real lab is not
-//! reachable from every machine this builds on. How Kamailio, FreeSWITCH and
-//! Asterisk take each flow is still `scripts/lab.sh`'s to say.
+//! reachable from every machine this builds on. How Kamailio, OpenSIPS,
+//! FreeSWITCH and Asterisk take each flow is still `scripts/lab.sh`'s to say.
 //!
 //! Named `dialling`/`answering` throughout rather than `caller`/`callee`: the
 //! two read too much alike for `clippy::similar_names`, which this workspace

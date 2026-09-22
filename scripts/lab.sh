@@ -3,13 +3,15 @@
 # Copyright (c) 2026 Tiberiu Balasea
 #
 # The interop lab: three real servers on default settings, and the flows run
-# against them. Every other test in this workspace runs the stack against a
-# peer we wrote; this is the one that does not.
+# against them, plus a fourth proxy brought up only for its own step. Every
+# other test in this workspace runs the stack against a peer we wrote; this
+# is the one that does not.
 #
 #   scripts/lab.sh              register, call, hold, resume, both transfers,
-#                               through the proxy and straight at Asterisk,
+#                               through each proxy and straight at Asterisk,
 #                               then the same call over a link made bad
 #   scripts/lab.sh kamailio     one server only
+#   scripts/lab.sh opensips     the second proxy only
 #   scripts/lab.sh asterisk
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
@@ -110,9 +112,15 @@ trap teardown EXIT
 # probe that needs the image's contents is a probe that breaks when the image
 # is rebuilt.
 wait_for() {
-    local service="$1" phrase="$2" required="${3:-required}" tries=0
+    # $4, when given, is a Compose profile name to pass on every call here:
+    # opensips carries one so that `up` does not start it by accident, and
+    # `logs` on an existing container needs no such flag but takes it without
+    # complaint, so the same probe serves both cases
+    local service="$1" phrase="$2" required="${3:-required}" profile="${4:-}" tries=0
+    local -a compose_profile=()
+    [ -n "$profile" ] && compose_profile=(--profile "$profile")
     while [ "$tries" -lt 45 ]; do
-        if ( cd interop && docker compose logs --no-color "$service" 2>/dev/null ) \
+        if ( cd interop && docker compose "${compose_profile[@]}" logs --no-color "$service" 2>/dev/null ) \
             | grep -qF "$phrase"; then
             pass "$service: $phrase"
             return 0
@@ -125,7 +133,7 @@ wait_for() {
         return 1
     fi
     fail "$service never said it was up"
-    ( cd interop && docker compose logs --no-color "$service" | tail -40 )
+    ( cd interop && docker compose "${compose_profile[@]}" logs --no-color "$service" | tail -40 )
     return 1
 }
 
@@ -336,6 +344,25 @@ if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
         flows_c kamailio proxy-c && pass "kamailio to freeswitch, in C" \
             || fail "kamailio to freeswitch, in C"
     fi
+fi
+
+# OpenSIPS carries the `opensips` Compose profile, so it never came up with
+# the three servers above; it is started here, for this step alone, and
+# removed the moment the step's flows are done -- the host next to this lab
+# is small, and a second proxy sitting idle through the Asterisk and netem
+# steps below would raise the footprint for no run that needs it.
+if [ "$WANT" = all ] || [ "$WANT" = opensips ]; then
+    step "register, call, hold, resume, transfer -- through OpenSIPS"
+    ( cd interop && docker compose --profile opensips up -d opensips ) >/dev/null 2>&1 \
+        && pass "opensips container up" || { fail "docker compose up opensips"; exit 1; }
+    wait_for opensips "Listening on" required opensips || exit 1
+    flows opensips opensips && pass "opensips to freeswitch" || fail "opensips to freeswitch"
+    if [ -n "$HARNESS_C" ]; then
+        step "the same, through the C ABI -- through OpenSIPS"
+        flows_c opensips opensips-c && pass "opensips to freeswitch, in C" \
+            || fail "opensips to freeswitch, in C"
+    fi
+    ( cd interop && docker compose --profile opensips rm -sf opensips ) >/dev/null 2>&1
 fi
 
 # No proxy in front of this one, and a different stack behind it. The point of

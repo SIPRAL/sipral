@@ -295,6 +295,7 @@ Run before each release, and recorded with the version of each peer.
 | Peer | Configuration | What it proves |
 |---|---|---|
 | Kamailio | lab, as deployed | registration and routing through a proxy |
+| OpenSIPS | lab, its own step only | a second opinion on the same: Kamailio and OpenSIPS share an ancestor but have diverged for fifteen years, so a rule both of them route the same way is not one implementation's private reading of it |
 | FreeSWITCH | lab, as deployed | full call features, transfer, hold |
 | Asterisk | `chan_pjsip`, container, defaults | the configuration most integrators actually have; transfer against a second implementation |
 | Carrier A | Romanian, paid account | real trunking, real codecs |
@@ -337,7 +338,7 @@ what meets them first. It is C99 with warnings fatal and nothing linked but
 libc and the library, it learns what happened from `sipral_event_t` and from
 nothing else, and it prints and exits exactly as the Rust driver does so that
 `scripts/lab.sh` reads both with one parser. `scripts/check.sh` compiles it on
-every run without running it — what it needs is three servers — so an ABI
+every run without running it — what it needs is four servers — so an ABI
 change that would stop an integrator's program building fails at the moment it
 is made. **This is the phase-1 exit criterion and the precondition for
 freezing the ABI** (`10-roadmap.md`, `08-ffi.md`).
@@ -353,20 +354,24 @@ bottom of the table stays the Rust driver's alone, since it needs a second
 account registered at once and `interop/harness-c` drives one endpoint at a
 time.
 
-Run through Kamailio to FreeSWITCH and straight at Asterisk (`scripts/lab.sh
-kamailio` / `asterisk`), unless a column below says one server only:
+Run through Kamailio to FreeSWITCH, through OpenSIPS to the same FreeSWITCH,
+and straight at Asterisk (`scripts/lab.sh kamailio` / `opensips` / `asterisk`),
+unless a column below says one server only. OpenSIPS is started for its own
+step alone and torn down right after — see the note in `interop/compose.yaml`
+— so its results are read off `scripts/lab.sh`'s own output, not off a
+container left running beside the other three.
 
 | Flow | Pass condition | Servers |
 |---|---|---|
-| register | bound, one binding round trip observed, then given back | both |
-| call | connected, hung up by this end, ended | both |
-| hold and resume | as call, plus the hold and the resume both agreed | both |
-| blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | both |
-| attended transfer | as blind, plus the consultation leg itself connected first | both |
+| register | bound, one binding round trip observed, then given back | all three |
+| call | connected, hung up by this end, ended | all three |
+| hold and resume | as call, plus the hold and the resume both agreed | all three |
+| blind transfer | connected, the transfer completed (its own status read from the `NOTIFY` sipfrag), the far end ended it | all three |
+| attended transfer | as blind, plus the consultation leg itself connected first | all three |
 | DTMF, RFC 4733 | connected, a digit sent as a named telephone event named back the same way by the lab's own dialplan (`interop/asterisk/extensions.conf`'s 9003), hung up, ended. Not run through the proxy to FreeSWITCH yet: its 9003 in `interop/freeswitch/lab.xml` never named the digit back, dialled at once or after a pause, and a flow is not run where it is known not to pass until the reason is found | Asterisk only |
 | DTMF, SIP INFO | connected, the same digit sent by `UserAgent::send_dtmf_info` (8.3.11) instead, answered with success (`UaEvent::DtmfSent`) and named back the same way by extension 9003 — against the lab's own `labuser-infodtmf` endpoint (`interop/asterisk/pjsip.conf`, `dtmf_mode=info`), so `SendDTMF()`'s own echo goes back over INFO too and this end's receiving half is exercised against a real peer as well as its sending one — hung up, ended | Asterisk only |
 | SRTP | connected under SDES against the lab's own SDES endpoint (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004) — refused rather than answered plainly if the far end will not key it | Asterisk only |
-| DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | both |
+| DTLS-SRTP, held and resumed | connected against the lab's own DTLS endpoint — on Asterisk `interop/asterisk/pjsip.conf`'s `labuser-dtls`, on FreeSWITCH extension 9005 of `interop/freeswitch/lab.xml`, which makes secure media mandatory for that call alone and certifies with the RSA-4096 key FreeSWITCH generates for itself, so the flow is also the proof that a peer's RSA certificate keys a call in either role — keyed by its own handshake — `SIPRAL_EVENT_KIND_MEDIA_SECURED` for that call, not `MEDIA_STARTED`: a DTLS call is still waiting for its keys there — then held and resumed, both agreed, hung up by this end, ended. A handshake that fails is named from `MEDIA_FAILED`'s own reason and ends the flow at once. Audio is required only *after* the resume, not merely after the call connects: the hold and the resume are both re-offers that hand the DTLS roles back with `a=setup:actpass` (RFC 8842 §5.5), so audio heard once they are agreed says the far end answered with the roles already in force (§5.3) and the association that keyed the call still carries it | all three |
 | hold with a codec change | as hold, but between the hold and the resume the call is moved onto a narrower codec list while it stays held (`MediaEngine::change_codecs`, the 8.2.1 case): the far end's answer names a different codec than the one the call held on, the hold survives the change, and the resume keeps the new codec | Asterisk only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler raises the mailbox's new-message count by one with `MinivmMWI()`, keeping the count itself since `MinivmMWI()` publishes a count rather than adding to one, so each driver's flow in the same lab run sees its own call raise it — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
@@ -454,7 +459,7 @@ step says `skip` and names what is missing, because the alternative is a gate
 nobody outside this machine can run at all. It must exit zero before a commit
 exists. `--hygiene-only` skips the build for a fast pass.
 
-`scripts/lab.sh` runs the container lab: the three servers, the flows against
+`scripts/lab.sh` runs the container lab: the four servers, the flows against
 each, and the same call again over a link made bad with `tc netem`. It needs
 Docker and nothing else, so it runs on any machine of ours that has a Linux
 kernel under it.

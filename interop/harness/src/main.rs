@@ -6,9 +6,9 @@
 //! Every other test in this workspace runs the stack against a peer written in
 //! the same file, or against a second copy of itself. Both prove it is
 //! consistent; neither proves it is interoperable, because our idea of what a
-//! registrar sends is our idea. This one talks to Kamailio, FreeSWITCH and
-//! Asterisk as they ship, and the failures it finds are the ones that would
-//! otherwise be found by a customer.
+//! registrar sends is our idea. This one talks to Kamailio, OpenSIPS,
+//! FreeSWITCH and Asterisk as they ship, and the failures it finds are the
+//! ones that would otherwise be found by a customer.
 //!
 //! Pass and fail are decided before the run, not looked at afterwards. Each
 //! flow states what has to be true; a flow that is partly right is a failure

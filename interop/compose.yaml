@@ -7,6 +7,12 @@
 # port, and the RTP ranges these servers ship with would be tens of thousands
 # of them.
 #
+# A fourth, opensips, is not one of the three: it carries the `opensips`
+# profile, so `docker compose up -d` — no profile named — never starts it.
+# It exists only for its own step in `scripts/lab.sh`, brought up with
+# `--profile opensips up -d opensips` and torn down with `rm -sf opensips`
+# right after, so the lab's steady footprint stays three containers.
+#
 # The capture is not a service here: it has to join the proxy's network
 # namespace, and asking Compose for that makes it restart the proxy first and
 # then find the namespace it just invalidated. It is started with a plain
@@ -14,7 +20,9 @@
 #
 # Images are pinned by version tag rather than latest: `andrius/asterisk:22`
 # changed digest six days before this was written, and a lab that moves under
-# you is not a lab. Refresh the pins deliberately.
+# you is not a lab. Refresh the pins deliberately. opensips/opensips ships no
+# tag more specific than the release branch (`4.0`, not `4.0.0`), so that one
+# is pinned by tag and digest together.
 
 name: sipral-interop
 
@@ -25,6 +33,21 @@ services:
     # replacing that is how it ends up running and then quietly exiting
     volumes:
       - ./kamailio/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
+    networks: [lab]
+
+  # A second opinion on registration and routing through a proxy: Kamailio
+  # and OpenSIPS share an ancestor but have diverged for fifteen years, so a
+  # rule the two of them agree on is a rule read the same way twice rather
+  # than once. Not one of the three the lab keeps up throughout — see the
+  # note above.
+  opensips:
+    image: opensips/opensips:4.0@sha256:8cde1548466b3a9f7637c91ff299a8d959c6c6953a8cd68deb391753324f702b
+    profiles: [opensips]
+    # no command: the image's own entrypoint is already `opensips -F`, the
+    # foreground flag that keeps this from being the same daemonize-and-exit
+    # trap kamailio.cfg's own fork=no comment describes
+    volumes:
+      - ./opensips/opensips.cfg:/etc/opensips/opensips.cfg:ro
     networks: [lab]
 
   freeswitch:
