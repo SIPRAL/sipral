@@ -2435,16 +2435,16 @@ entry! {
 pub(crate) mod tests {
     use super::toggled;
     use super::{
-        Codec, SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralArrival, SipralCodec,
-        SipralCodecCandidate, SipralCodecInfo, SipralCodecOutcome, SipralDirection,
-        SipralMediaFault, SipralMediaInfo, SipralMediaPacket, SipralPlayback, SipralRtcp,
-        SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, media_failed, named_codec,
-        ordered, sipral_call_media, sipral_codec_at, sipral_codec_count, sipral_codec_name,
-        sipral_media_capture, sipral_media_codec_candidate_at, sipral_media_codec_candidate_count,
-        sipral_media_dialling, sipral_media_info, sipral_media_mix, sipral_media_playback,
-        sipral_media_poll_rtcp, sipral_media_receive, sipral_media_release,
-        sipral_media_statistics, sipral_media_stop_dialling, sipral_stack_codec_order,
-        sipral_stack_poll_farewell, srtp_policy,
+        CProcessor, Codec, SIPRAL_ADDRESS_BYTES, SIPRAL_MEDIA_PACKET_BYTES, SipralArrival,
+        SipralCodec, SipralCodecCandidate, SipralCodecInfo, SipralCodecOutcome, SipralDirection,
+        SipralMediaFault, SipralMediaInfo, SipralMediaPacket, SipralPlayback, SipralProcessorFrame,
+        SipralRtcp, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, media_failed,
+        named_codec, ordered, sipral_call_media, sipral_codec_at, sipral_codec_count,
+        sipral_codec_name, sipral_media_capture, sipral_media_codec_candidate_at,
+        sipral_media_codec_candidate_count, sipral_media_dialling, sipral_media_info,
+        sipral_media_mix, sipral_media_playback, sipral_media_poll_rtcp, sipral_media_receive,
+        sipral_media_release, sipral_media_statistics, sipral_media_stop_dialling,
+        sipral_stack_codec_order, sipral_stack_poll_farewell, srtp_policy,
     };
     use crate::call::tests::{
         ANSWER, PEER_MEDIA, SECOND_PEER_MEDIA, accepted, account_on, connected, deliver, hangup,
@@ -4371,6 +4371,50 @@ a=sendrecv\r\n";
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok,
             "and the stack is still there, and still usable"
+        );
+    }
+
+    /// The callback for [`the_c_callback_s_frame_replaces_what_was_captured`]:
+    /// writes a value derived from, but distinguishable from, `near_end` into
+    /// `out` — a real callback's whole reason to exist, and exactly what
+    /// [`CProcessor::process`] has to carry back into the caller's own frame
+    /// once this returns.
+    unsafe extern "C" fn doubles_into_out(
+        frame: *const SipralProcessorFrame,
+        _user_data: *mut c_void,
+    ) {
+        // Safety: the caller of this test-only callback (`CProcessor::process`,
+        // below) upholds the same contract `SipralProcessorCallback` documents.
+        let frame = unsafe { &*frame };
+        let near = unsafe { std::slice::from_raw_parts(frame.near_end, frame.near_end_len) };
+        let out = unsafe { std::slice::from_raw_parts_mut(frame.out, frame.out_len) };
+        for (slot, &sample) in out.iter_mut().zip(near) {
+            *slot = sample.wrapping_mul(2);
+        }
+    }
+
+    /// [`CProcessor`] hands the C callback a frame to fill and has to carry
+    /// what it wrote back into the caller's own buffer once the callback
+    /// returns — the one step `bindings/c/smoke.c`'s own processor test never
+    /// actually checks, since it only asserts on what the callback was
+    /// *handed*, not on what a caller sees afterwards. Breaking the copy-back
+    /// in `CProcessor::process` (commenting out
+    /// `near_end.copy_from_slice(&self.out)`) leaves this test the only one
+    /// in the workspace that fails.
+    #[test]
+    fn the_c_callback_s_frame_replaces_what_was_captured() {
+        let mut processor = CProcessor {
+            callback: doubles_into_out,
+            user_data: ptr::null_mut(),
+            out: Vec::new(),
+        };
+        let mut near_end = [10_i16, -20, 32_767];
+        let reference = [0_i16; 3];
+        processor.process(&mut near_end, &reference);
+        assert_eq!(
+            near_end,
+            [20, -40, -2], // 32_767_i16.wrapping_mul(2)
+            "the callback's own frame never reached the caller's buffer"
         );
     }
 
