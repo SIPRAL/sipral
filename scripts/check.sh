@@ -1357,6 +1357,45 @@ else
     rm -rf "$work"
 fi
 
+step "package --dry-run"
+# The four scripts under scripts/package/ each need at least one machine this
+# gate does not have: win-x64, win-arm64 and linux-x64 natives, and the
+# Android .so's, come from another machine's toolchain, not from a Mac. What
+# this step proves is everything short of that: the scripts run to
+# completion, the parts buildable on a Mac are built for real (macOS and iOS
+# via xcodebuild and cargo, the Python and .NET packages carrying real macOS
+# natives, the Kotlin classes compiled by kotlinc), and every RID or ABI this
+# machine cannot reach gets its layout checked and is reported as exactly
+# that -- never silently skipped, and never a fabricated native standing in
+# for one nothing here built.
+PKG_WORK=$(mktemp -d)
+
+pkg_run() {
+    local label="$1"; shift
+    if "$@" >"$PKG_WORK/log-$label" 2>&1; then
+        pass "$label"
+    else
+        fail "$label:"
+        tail -40 "$PKG_WORK/log-$label" | sed 's/^/        /'
+    fi
+}
+
+pkg_run "xcframework.sh --dry-run" \
+    scripts/package/xcframework.sh --out "$PKG_WORK/xcframework" --dry-run
+
+pkg_run "wheels.sh --dry-run" \
+    scripts/package/wheels.sh --out "$PKG_WORK/wheels" --dry-run
+
+pkg_run "nuget.sh collect (osx-arm64, osx-x64)" \
+    scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid osx-arm64 --rid osx-x64
+pkg_run "nuget.sh pack --dry-run" \
+    scripts/package/nuget.sh pack --out "$PKG_WORK/nuget" --staging "$PKG_WORK/nuget-natives" --dry-run
+
+pkg_run "aar.sh assemble --dry-run" \
+    scripts/package/aar.sh assemble --out "$PKG_WORK/aar" --natives "$PKG_WORK/no-natives" --dry-run
+
+rm -rf "$PKG_WORK"
+
 step "dependency licences"
 if command -v cargo-deny >/dev/null 2>&1; then
     cargo deny check >/dev/null 2>&1 \

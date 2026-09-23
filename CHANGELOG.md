@@ -46,6 +46,26 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   as it would have been without STUN. `SIPRAL_EVENT_KIND_NAT_MAPPING` says
   what each socket learned, and `SIPRAL_FEATURE_STUN` whether the build has
   it. Proven in the lab from behind a NAT, against coturn and Asterisk.
+- **Platform packages: an XCFramework, an AAR, a NuGet package and Python
+  wheels, each built by its own script under `scripts/package/`.**
+  `xcframework.sh` builds and `lipo`s macOS, iOS device and iOS Simulator
+  natives into one `CSipral.xcframework`, with a distribution `Package.swift`
+  over it. `nuget.sh` assembles `runtimes/<rid>/native/` for `win-x64`,
+  `osx-arm64`, `osx-x64` and `linux-x64` from natives collected on whichever
+  machine builds each one, over the existing `Sipral.csproj` unchanged.
+  `wheels.sh` bundles the native library into the ordinary wheel
+  `pyproject.toml`'s own backend builds and retags it for the platform that
+  native was built for, closing what `docs/08-ffi.md`'s Python section used
+  to list as missing. `aar.sh` builds `arm64-v8a`, `armeabi-v7a` and
+  `x86_64` with `cargo-ndk` in a container carrying its own Android NDK, and
+  assembles `sipral.aar` by hand, straight to Android's own archive format,
+  rather than pulling in Gradle and the Android Gradle Plugin for one
+  packaging script. Every script stops before publishing anything, and
+  `scripts/check.sh` gained a `package --dry-run` step that runs all four:
+  the macOS and iOS natives, the bundled wheel and the `osx-*`/`linux-x64`
+  slice of the NuGet package for real on whatever machine runs the gate, and
+  the rest structure-checked without a fabricated native standing in for one
+  nothing there built.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

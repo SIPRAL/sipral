@@ -1381,13 +1381,20 @@ definition of it. `bindings/python/tests/test_call.py` is what
 loopback, with no registrar, placing a call, answering it, exchanging
 audio and DTMF, and reading back what it cost.
 
-What is not here: wheels with the native library bundled in, a real
-resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, and the decoded payload
-for every event kind this ABI declares — `sipral.events._decode_payload`
-reads the ones `sipral.stack.Stack`, `sipral.call.Call` and
-`sipral.media.Media` need, and a kind it has not grown a case for yet is
-still a whole `Event`, with `kind`, `kind_name` and `message`, and an empty
-`fields`, never an exception.
+What is not here: a real resolver for `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, and
+the decoded payload for every event kind this ABI declares —
+`sipral.events._decode_payload` reads the ones `sipral.stack.Stack`,
+`sipral.call.Call` and `sipral.media.Media` need, and a kind it has not grown
+a case for yet is still a whole `Event`, with `kind`, `kind_name` and
+`message`, and an empty `fields`, never an exception.
+
+A platform wheel with the native library bundled in — the one thing this
+list used to name as missing — is `scripts/package/wheels.sh`: it builds
+`sipral-ffi`, places the shared library beside this package the same way
+`_candidates` already looks for one there, and retags the ordinary wheel
+`pyproject.toml`'s own `hatchling` backend built. Nothing above changes to
+make that true; a wheel built this way loads exactly the `cdef` and the
+load-and-check boilerplate this section describes.
 
 ## Versioning
 
