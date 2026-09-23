@@ -997,4 +997,75 @@ mod tests {
         assert!(rendered.contains("phases: 80"), "{rendered}");
         assert!(!rendered.contains("bank"), "{rendered}");
     }
+
+    /// A small, seeded xorshift so this test drives many inputs without a new
+    /// dependency: the same generator [`crate::comfort_noise`] uses, reseeded
+    /// here so a failure is reproducible from the printed seed alone.
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Every rate pair, every frame length worth distrusting, and every
+    /// amplitude worth distrusting, driven through the same resampler across
+    /// several frames so a rate change or a length change mid-stream is
+    /// exercised too. Nothing here checks the audio is good — the other tests
+    /// in this module already measure that — only that nothing panics and
+    /// that `process` never reports more samples than fit the slice it was
+    /// given, which is the property [`Resampler::output_capacity`] promises.
+    #[test]
+    fn no_input_makes_process_panic_or_overrun_its_output() {
+        let mut seed = 0xC0FF_EE00_1234_5678_u64;
+        let lengths = [0_usize, 1, 2, 3, 17, 511, 512, 513, 4_001];
+        for _ in 0..300 {
+            let input_rate = RATES[usize::try_from(xorshift64(&mut seed) % 6).unwrap()];
+            let output_rate = RATES[usize::try_from(xorshift64(&mut seed) % 6).unwrap()];
+            let Ok(mut resampler) = Resampler::new(input_rate, output_rate) else {
+                continue;
+            };
+            for _ in 0..4 {
+                let length = lengths[usize::try_from(xorshift64(&mut seed) % 9).unwrap()];
+                let pattern = xorshift64(&mut seed) % 5;
+                let input: Vec<i16> = (0..length)
+                    .map(|index| match pattern {
+                        0 => 0,
+                        1 => i16::MAX,
+                        2 => i16::MIN,
+                        3 => {
+                            if index % 2 == 0 {
+                                i16::MAX
+                            } else {
+                                i16::MIN
+                            }
+                        }
+                        _ => {
+                            let top = xorshift64(&mut seed) >> 48;
+                            let unsigned = u16::try_from(top).unwrap_or(0);
+                            i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
+                        }
+                    })
+                    .collect();
+                let needed = resampler.output_capacity(input.len());
+                let mut output = vec![0_i16; needed];
+                let produced = resampler
+                    .process(&input, &mut output)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{input_rate} to {output_rate}, {length} samples, pattern {pattern}: {error}"
+                        )
+                    });
+                assert!(
+                    produced <= output.len(),
+                    "{input_rate} to {output_rate}: {produced} overran a slice of {needed}"
+                );
+                if xorshift64(&mut seed).is_multiple_of(7) {
+                    resampler.reset();
+                }
+            }
+        }
+    }
 }

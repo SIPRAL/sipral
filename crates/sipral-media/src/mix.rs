@@ -409,4 +409,80 @@ mod tests {
         assert_eq!(Gain::ratio(1, 2).to_string(), "0.500");
         assert_eq!(Gain::ratio(1, 4).to_string(), "0.250");
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn random_sample(seed: &mut u64) -> i16 {
+        let top = xorshift64(seed) >> 48;
+        let unsigned = u16::try_from(top).unwrap_or(0);
+        i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
+    }
+
+    /// `sum_into`'s whole reason to exist over folding one source at a time is
+    /// that it clips once, against the real total, rather than once per
+    /// source against a running one. This checks that promise directly:
+    /// recompute the same sum independently in an accumulator wide enough
+    /// that it cannot itself overflow, and require `sum_into` to agree with
+    /// it sample for sample, for an arbitrary number of arbitrary sources —
+    /// including sources shorter than the mix, which contribute silence past
+    /// their own end.
+    #[test]
+    fn sum_into_agrees_with_an_independent_wide_accumulator() {
+        let mut seed = 0x5111_C0DE_A55E_55ED_u64;
+        for _ in 0..150 {
+            let mix_len = usize::try_from(xorshift64(&mut seed) % 40).unwrap_or(0);
+            let source_count = usize::try_from(xorshift64(&mut seed) % 6).unwrap_or(0);
+            let span = u64::try_from(mix_len).unwrap_or(u64::MAX) + 5;
+            let sources: Vec<Vec<i16>> = (0..source_count)
+                .map(|_| {
+                    let len = usize::try_from(xorshift64(&mut seed) % span).unwrap_or(0);
+                    (0..len).map(|_| random_sample(&mut seed)).collect()
+                })
+                .collect();
+            let refs: Vec<&[i16]> = sources.iter().map(Vec::as_slice).collect();
+
+            let mut mix = vec![0_i16; mix_len];
+            let report = sum_into(&mut mix, &refs);
+
+            for (index, slot) in mix.iter().enumerate() {
+                let total: i64 = refs
+                    .iter()
+                    .map(|source| i64::from(source.get(index).copied().unwrap_or(0)))
+                    .sum();
+                let expected = total.clamp(i64::from(i16::MIN), i64::from(i16::MAX));
+                assert_eq!(
+                    i64::from(*slot),
+                    expected,
+                    "slot {index}: sum_into disagreed with the independent total {total}"
+                );
+                let clipped = total != expected;
+                if clipped {
+                    assert!(
+                        report.occurred(),
+                        "slot {index} clipped but nothing was reported"
+                    );
+                }
+            }
+
+            // the gain the report names is, by its own definition, exactly
+            // what brings the peak it recorded back to the edge of the
+            // range, never past it
+            if report.occurred() {
+                let fitted = report.gain_to_fit();
+                let scaled = (i64::from(report.peak) * i64::from(fitted.to_q15())) >> 15;
+                assert!(
+                    scaled <= i64::from(i16::MAX) + 1,
+                    "peak {} at gain {fitted} scales to {scaled}, past the range",
+                    report.peak
+                );
+            }
+        }
+    }
 }

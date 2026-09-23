@@ -912,6 +912,7 @@ dependencies = [
  "sipral-core",
  "sipral-dtls",
  "sipral-headless",
+ "sipral-media",
  "sipral-nat",
  "sipral-rtp",
  "sipral-ua",

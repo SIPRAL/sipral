@@ -871,4 +871,79 @@ mod tests {
         assert_eq!(concealer.conceal(&mut patch), Concealment::Cold);
         assert!(patch.iter().all(|sample| *sample == 0));
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Arbitrary interleavings of real frames and gaps, of arbitrary length
+    /// and content, never panic and never leave the reported state outside
+    /// what the module promises: a pitch period inside the search range
+    /// whenever there is enough history to have searched, and a gap counter
+    /// that never runs backwards while a gap is open. This is the property
+    /// the individual scenario tests above each check once; here the sizes,
+    /// the content, and the order of `received` against `conceal` are all
+    /// driven by the seed, including empty frames and frames far longer than
+    /// [`HISTORY`].
+    #[test]
+    fn arbitrary_traffic_never_panics_and_never_breaks_its_own_invariants() {
+        let mut seed = 0x5EED_F00D_1357_9BDF_u64;
+        for _ in 0..200 {
+            let mut concealer = Concealer::new();
+            let mut last_gap_samples = 0_usize;
+            let mut was_conceal = false;
+            for _ in 0..40 {
+                let receiving = !xorshift64(&mut seed).is_multiple_of(3);
+                let bound = u64::try_from(3 * HISTORY).unwrap_or(u64::MAX);
+                let length = usize::try_from(xorshift64(&mut seed) % bound).unwrap_or(0);
+                let pattern = xorshift64(&mut seed) % 4;
+                let mut frame: Vec<i16> = (0..length)
+                    .map(|index| match pattern {
+                        0 => 0,
+                        1 if index % 2 == 0 => i16::MAX,
+                        1 | 2 => i16::MIN,
+                        _ => {
+                            let top = xorshift64(&mut seed) >> 48;
+                            let unsigned = u16::try_from(top).unwrap_or(0);
+                            i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
+                        }
+                    })
+                    .collect();
+
+                if receiving {
+                    concealer.received(&mut frame);
+                    was_conceal = false;
+                } else {
+                    let outcome = concealer.conceal(&mut frame);
+                    let samples = concealer.gap_samples();
+                    if was_conceal {
+                        assert!(
+                            samples >= last_gap_samples,
+                            "gap_samples went from {last_gap_samples} to {samples}"
+                        );
+                    }
+                    last_gap_samples = samples;
+                    was_conceal = true;
+                    if let Some(period) = concealer.pitch_period() {
+                        // the search itself only ever returns a lag in
+                        // MIN_PERIOD..=MAX_PERIOD, but `estimate_period`'s own
+                        // documented fallback for history too short to
+                        // correlate anything against anything returns
+                        // whatever little history there is instead, which can
+                        // be shorter -- so the bound every caller can rely on
+                        // is 1..=MAX_PERIOD, not the search range itself
+                        assert!(
+                            (1..=MAX_PERIOD).contains(&period),
+                            "pitch period {period} outside 1..={MAX_PERIOD} after {outcome:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

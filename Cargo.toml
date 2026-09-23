@@ -36,7 +36,7 @@ duration_suboptimal_units = "allow"
 panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
-indexing_slicing = "warn"
+indexing_slicing = "deny"
 
 [profile.release]
 lto = "thin"

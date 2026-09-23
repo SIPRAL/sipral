@@ -300,14 +300,14 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than eighteen runs beginning at
+targets with something to start from rather than twenty-six runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Seventeen of the
-eighteen families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing. Twenty-five of
+the twenty-six families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -338,7 +338,7 @@ executions, and no crash, no timeout and no run out of memory on any target.
 Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all eighteen, under the nightly that `fuzz/` pins, so
+do on every run is **build** all twenty-six, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -688,7 +688,7 @@ strict `-std` and the Apple SDK does not, so the compiler here alone passes a
 file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all eighteen fuzz targets under their own nightly — which nothing else
+over all twenty-six fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

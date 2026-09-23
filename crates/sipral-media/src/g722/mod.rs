@@ -464,4 +464,86 @@ mod tests {
             "a full-scale tone came back {ratio:.1} dB above the error, so something wrapped"
         );
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Octets nobody encoded: every bit pattern is a legal codeword, so
+    /// `decode_into` has no invalid input to refuse, only bytes it has to
+    /// turn into something. It must never panic, and §5.1's range is a
+    /// property of every band's `decode`, not just of what this codec's own
+    /// encoder happens to produce — so it has to hold for these octets too.
+    #[test]
+    fn arbitrary_octets_decode_without_panicking_and_stay_inside_the_range() {
+        let mut seed = 0x0DEC_0DED_BAD5_EED5_u64;
+        for _ in 0..150 {
+            let mode = match xorshift64(&mut seed) % 3 {
+                0 => Mode::Rate64,
+                1 => Mode::Rate56,
+                _ => Mode::Rate48,
+            };
+            let mut decoder = Decoder::new(mode);
+            for _ in 0..8 {
+                let length = usize::try_from(xorshift64(&mut seed) % 400).unwrap_or(0);
+                let octets: Vec<u8> = (0..length)
+                    .map(|_| u8::try_from(xorshift64(&mut seed) % 256).unwrap_or(0))
+                    .collect();
+                let mut samples = vec![0_i16; octets.len() * 2];
+                let written = decoder.decode_into(&octets, &mut samples);
+                assert_eq!(written, octets.len() * 2);
+                for sample in &samples[..written] {
+                    assert!(
+                        (-16_384..=16_383).contains(sample),
+                        "{mode:?}: sample {sample} left the range S5.1 fixes"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Samples nobody's microphone produced — full-scale runs, alternating
+    /// full scale, and plain noise — go into the encoder across several
+    /// frames of arbitrary, including odd, length. Encoding must never panic
+    /// and, fed straight back through a fresh decoder, must never leave the
+    /// range either.
+    #[test]
+    fn arbitrary_samples_encode_and_round_trip_without_panicking() {
+        let mut seed = 0x51DE_BA0D_600D_F00D_u64;
+        for _ in 0..150 {
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::default();
+            for _ in 0..8 {
+                let length = usize::try_from(xorshift64(&mut seed) % 400).unwrap_or(0);
+                let pattern = xorshift64(&mut seed) % 3;
+                let samples: Vec<i16> = (0..length)
+                    .map(|index| match pattern {
+                        0 if index % 2 == 0 => i16::MAX,
+                        0 => i16::MIN,
+                        1 => i16::MAX,
+                        _ => {
+                            let top = xorshift64(&mut seed) >> 48;
+                            let unsigned = u16::try_from(top).unwrap_or(0);
+                            i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
+                        }
+                    })
+                    .collect();
+                let mut octets = vec![0_u8; samples.len() / 2];
+                let written = encoder.encode_into(&samples, &mut octets);
+                assert_eq!(written, samples.len() / 2);
+
+                let mut back = vec![0_i16; written * 2];
+                let produced = decoder.decode_into(&octets[..written], &mut back);
+                assert_eq!(produced, written * 2);
+                for sample in &back[..produced] {
+                    assert!((-16_384..=16_383).contains(sample));
+                }
+            }
+        }
+    }
 }

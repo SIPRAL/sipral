@@ -991,6 +991,407 @@ fn datagrams(run: &[u8]) -> Vec<&[u8]> {
     out
 }
 
+// ---------------------------------------------------------------- media
+
+/// One sample out of a byte pair, the same native-endian reading every
+/// `media_*` target does. `.get` rather than indexing: the pair a
+/// `chunks_exact(2)` iterator hands over is always two bytes, but nothing
+/// here needs to lean on that to stay panic-free.
+fn sample_from_pair(pair: &[u8]) -> i16 {
+    let bytes = [
+        pair.first().copied().unwrap_or(0),
+        pair.get(1).copied().unwrap_or(0),
+    ];
+    i16::from_ne_bytes(bytes)
+}
+
+/// Appends one length-prefixed chunk of samples the way every `media_*`
+/// target but `media_comfort_noise`, `media_g722`, `media_mix` and
+/// `media_opus` cuts its input: one octet holding the sample count, then that
+/// many samples in native-endian pairs. `control` is the byte in front of the
+/// length for the two targets — `media_plc`, whose control bit chooses
+/// `received` or `conceal`, and every other target, which reads nothing there
+/// at all and so gets `None`.
+fn push_media_chunk(out: &mut Vec<u8>, control: Option<u8>, samples: &[i16]) -> Result<(), Wrong> {
+    if let Some(control) = control {
+        out.push(control);
+    }
+    let len = u8::try_from(samples.len()).map_err(|_| {
+        Wrong(format!(
+            "{} samples do not fit one length octet",
+            samples.len()
+        ))
+    })?;
+    out.push(len);
+    for sample in samples {
+        out.extend_from_slice(&sample.to_ne_bytes());
+    }
+    Ok(())
+}
+
+/// A triangle wave, the same shape `sipral-media`'s own tests build tones
+/// from, but written by hand here rather than pulled in from a target's test
+/// module: cheap to reason about, and periodic enough to prime a pitch
+/// estimate or a resampler's history with something a real voice looks like.
+fn triangle(count: usize, period: usize, peak: i16) -> Vec<i16> {
+    (0..count)
+        .map(|index| {
+            let phase = index % period.max(1);
+            let half = period / 2;
+            let value = if phase < half {
+                i32::from(peak) * 2 * i32::try_from(phase).unwrap_or(0)
+                    / i32::try_from(half).unwrap_or(1)
+                    - i32::from(peak)
+            } else {
+                i32::from(peak)
+                    - i32::from(peak) * 2 * i32::try_from(phase - half).unwrap_or(0)
+                        / i32::try_from(period - half).unwrap_or(1)
+            };
+            i16::try_from(value.clamp(-32_768, 32_767)).unwrap_or(0)
+        })
+        .collect()
+}
+
+fn media_resample_seeds() -> Result<Vec<Seed>, Wrong> {
+    // RATES = [8_000, 16_000, 24_000, 32_000, 44_100, 48_000]; index 0 is
+    // 8 kHz, index 5 is 48 kHz -- the direction a device's capture crosses
+    // most often.
+    let mut up = vec![0, 5];
+    push_media_chunk(&mut up, None, &triangle(64, 20, 12_000))?;
+    push_media_chunk(&mut up, None, &[i16::MAX; 8])?;
+
+    let mut down = vec![5, 0];
+    push_media_chunk(&mut down, None, &triangle(200, 37, 20_000))?;
+
+    let mut passthrough = vec![2, 2];
+    push_media_chunk(&mut passthrough, None, &triangle(32, 11, 9_000))?;
+
+    let out = vec![
+        ("48k-to-8k-with-a-tone", down),
+        ("8k-to-48k-then-full-scale", up),
+        ("same-rate-is-a-copy", passthrough),
+    ];
+    for (name, bytes) in &out {
+        through_media_resample(name, bytes)?;
+    }
+    Ok(out)
+}
+
+/// Walks a seed the way `fuzz_targets/media_resample.rs` does, so a seed that
+/// panics the resampler fails here instead of sitting in the corpus unread.
+fn through_media_resample(name: &str, data: &[u8]) -> Result<(), Wrong> {
+    const RATES: [u32; 6] = [8_000, 16_000, 24_000, 32_000, 44_100, 48_000];
+    let Some((&first, rest)) = data.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no rate byte")));
+    };
+    let Some((&second, mut cursor)) = rest.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no second rate byte")));
+    };
+    let input_rate = *RATES
+        .get(usize::from(first) % RATES.len())
+        .unwrap_or(&8_000);
+    let output_rate = *RATES
+        .get(usize::from(second) % RATES.len())
+        .unwrap_or(&8_000);
+    let mut resampler = sipral_media::resample::Resampler::new(input_rate, output_rate)
+        .map_err(|why| Wrong(format!("the {name} seed's rates do not build: {why}")))?;
+    let mut produced_anything = false;
+    while let Some((&len, tail)) = cursor.split_first() {
+        let take = (usize::from(len) * 2).min(tail.len());
+        let (bytes, tail) = tail.split_at(take);
+        cursor = tail;
+        let samples: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let mut output = vec![0_i16; resampler.output_capacity(samples.len())];
+        let produced = resampler
+            .process(&samples, &mut output)
+            .map_err(|why| Wrong(format!("the {name} seed does not resample: {why}")))?;
+        produced_anything |= produced > 0;
+    }
+    if produced_anything {
+        return Ok(());
+    }
+    Err(Wrong(format!("the {name} seed never produced a sample")))
+}
+
+fn media_plc_seeds() -> Result<Vec<Seed>, Wrong> {
+    // op & 1: 0 is `received`, 1 is `conceal`. A primed stream, then a gap
+    // long enough to run past MAX_GAP_MS and a real frame that closes it.
+    let mut primed_then_gap = Vec::new();
+    push_media_chunk(&mut primed_then_gap, Some(0), &triangle(160, 40, 8_000))?;
+    push_media_chunk(&mut primed_then_gap, Some(0), &triangle(160, 40, 8_000))?;
+    for _ in 0..4 {
+        push_media_chunk(&mut primed_then_gap, Some(1), &vec![0_i16; 160])?;
+    }
+    push_media_chunk(&mut primed_then_gap, Some(0), &vec![20_000_i16; 160])?;
+
+    // no history at all: the cold-start path
+    let mut cold = Vec::new();
+    push_media_chunk(&mut cold, Some(1), &vec![0_i16; 160])?;
+
+    let out = vec![
+        ("cold-conceal", cold),
+        ("primed-then-a-gap-that-resumes", primed_then_gap),
+    ];
+    for (name, bytes) in &out {
+        through_media_plc(name, bytes);
+    }
+    Ok(out)
+}
+
+/// Walks a seed the way `fuzz_targets/media_plc.rs` does. The concealer never
+/// returns an `Err`, so there is nothing to check here but that it runs.
+fn through_media_plc(_name: &str, data: &[u8]) {
+    let mut concealer = sipral_media::plc::Concealer::new();
+    let mut cursor = data;
+    while let Some((&op, tail)) = cursor.split_first() {
+        let Some((&len, tail)) = tail.split_first() else {
+            break;
+        };
+        let take = (usize::from(len) * 2).min(tail.len());
+        let (bytes, tail) = tail.split_at(take);
+        cursor = tail;
+        let mut frame: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        if op & 1 == 0 {
+            concealer.received(&mut frame);
+        } else {
+            let _ = concealer.conceal(&mut frame);
+        }
+    }
+}
+
+fn media_drift_seeds() -> Result<Vec<Seed>, Wrong> {
+    // rate byte 18 -> 1_000 + 18*400 = 8_200 Hz, close to the 8 kHz a call
+    // actually runs at
+    let mut loud_then_quiet = vec![18];
+    let mut frame = triangle(160, 23, 20_000);
+    frame.truncate(80);
+    frame.resize(160, 0);
+    push_media_chunk(&mut loud_then_quiet, None, &frame)?;
+    push_media_chunk(&mut loud_then_quiet, None, &frame)?;
+
+    let out = vec![("loud-half-then-quiet-half", loud_then_quiet)];
+    for (name, bytes) in &out {
+        through_media_drift(name, bytes);
+    }
+    Ok(out)
+}
+
+fn through_media_drift(_name: &str, data: &[u8]) {
+    let Some((&rate_byte, rest)) = data.split_first() else {
+        return;
+    };
+    let sample_rate = 1_000_u32.saturating_add(u32::from(rate_byte) * 400);
+    let mut drift = sipral_media::drift::Drift::new(sample_rate);
+    let mut cursor = rest;
+    while let Some((&len, tail)) = cursor.split_first() {
+        let take = (usize::from(len) * 2).min(tail.len());
+        let (bytes, tail) = tail.split_at(take);
+        cursor = tail;
+        let samples: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let mut output = vec![0_i16; samples.len() + 1];
+        let _ = drift.process(&samples, &mut output);
+        drift.consumed(samples.len());
+    }
+}
+
+fn media_comfort_noise_seeds() -> Result<Vec<Seed>, Wrong> {
+    let zeroth_order = vec![0_u8];
+    let mut with_coefficients = vec![30_u8];
+    with_coefficients.extend_from_slice(&[0, 64, 127, 200, 255]); // 255 is the reserved index
+    let out = vec![
+        ("with-coefficients-and-a-reserved-index", with_coefficients),
+        ("zeroth-order-full-scale", zeroth_order),
+    ];
+    for (name, bytes) in &out {
+        let noise = sipral_media::comfort_noise::ComfortNoise::decode(bytes)
+            .map_err(|why| Wrong(format!("the {name} seed does not decode: {why}")))?;
+        let mut wire = vec![0_u8; 1 + noise.order()];
+        noise
+            .encode_into(&mut wire)
+            .map_err(|why| Wrong(format!("the {name} seed does not re-encode: {why}")))?;
+    }
+    Ok(out)
+}
+
+fn media_vad_seeds() -> Result<Vec<Seed>, Wrong> {
+    let mut silence_then_burst = vec![15]; // 1_000 + 15*400 = 7_000 Hz
+    push_media_chunk(&mut silence_then_burst, None, &vec![0_i16; 160])?;
+    push_media_chunk(&mut silence_then_burst, None, &vec![0_i16; 160])?;
+    push_media_chunk(&mut silence_then_burst, None, &triangle(160, 25, 18_000))?;
+
+    let out = vec![("silence_then_a_burst", silence_then_burst)];
+    for (name, bytes) in &out {
+        through_media_vad(name, bytes);
+    }
+    Ok(out)
+}
+
+fn through_media_vad(_name: &str, data: &[u8]) {
+    let Some((&rate_byte, rest)) = data.split_first() else {
+        return;
+    };
+    let sample_rate = 1_000_u32.saturating_add(u32::from(rate_byte) * 400);
+    let mut vad = sipral_media::vad::Vad::new(sample_rate);
+    let mut cursor = rest;
+    while let Some((&len, tail)) = cursor.split_first() {
+        let take = (usize::from(len) * 2).min(tail.len());
+        let (bytes, tail) = tail.split_at(take);
+        cursor = tail;
+        let frame: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let _ = vad.process(&frame);
+    }
+}
+
+fn media_g722_seeds() -> Result<Vec<Seed>, Wrong> {
+    let mut encoder = sipral_media::g722::Encoder::new();
+    let samples = triangle(320, 24, 9_000);
+    let mut rate64 = vec![0_u8]; // Mode::Rate64
+    let mut octets = vec![0_u8; samples.len() / 2];
+    encoder.encode_into(&samples, &mut octets);
+    rate64.extend_from_slice(&octets);
+
+    let mut rate48 = vec![2_u8]; // Mode::Rate48
+    rate48.extend_from_slice(&octets);
+
+    let out = vec![
+        ("an-encoded-tone-at-rate64", rate64),
+        ("the-same-octets-read-as-rate48", rate48),
+    ];
+    for (name, bytes) in &out {
+        through_media_g722(name, bytes)?;
+    }
+    Ok(out)
+}
+
+fn through_media_g722(name: &str, data: &[u8]) -> Result<(), Wrong> {
+    let Some((&mode_byte, rest)) = data.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no mode byte")));
+    };
+    let mode = match mode_byte % 3 {
+        0 => sipral_media::g722::Mode::Rate64,
+        1 => sipral_media::g722::Mode::Rate56,
+        _ => sipral_media::g722::Mode::Rate48,
+    };
+    let mut decoder = sipral_media::g722::Decoder::new(mode);
+    let mut samples = vec![0_i16; rest.len() * 2];
+    let written = decoder.decode_into(rest, &mut samples);
+    if written == rest.len() * 2 {
+        return Ok(());
+    }
+    Err(Wrong(format!(
+        "the {name} seed decoded to {written} samples, not {}",
+        rest.len() * 2
+    )))
+}
+
+fn media_mix_seeds() -> Result<Vec<Seed>, Wrong> {
+    let mut unity = vec![64_u8]; // Gain::from_q15(64 * 512) is unity
+    let a = triangle(40, 17, 12_000);
+    let b = triangle(40, 23, 9_000);
+    for sample in a.iter().chain(b.iter()) {
+        unity.extend_from_slice(&sample.to_ne_bytes());
+    }
+
+    let mut loud = vec![255_u8]; // the loudest gain byte can name
+    for sample in a.iter().chain(b.iter()) {
+        loud.extend_from_slice(&sample.to_ne_bytes());
+    }
+
+    let out = vec![
+        ("a-loud-gain-that-clips", loud),
+        ("two-tones-at-unity", unity),
+    ];
+    for (name, bytes) in &out {
+        through_media_mix(name, bytes)?;
+    }
+    Ok(out)
+}
+
+fn through_media_mix(name: &str, data: &[u8]) -> Result<(), Wrong> {
+    let Some((&gain_byte, rest)) = data.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no gain byte")));
+    };
+    let gain = sipral_media::mix::Gain::from_q15(i32::from(gain_byte) * 512);
+    let samples: Vec<i16> = rest.chunks_exact(2).map(sample_from_pair).collect();
+    if samples.is_empty() {
+        return Err(Wrong(format!("the {name} seed has no samples")));
+    }
+    let mid = samples.len() / 2;
+    let (a, b) = samples.split_at(mid);
+    let mut mix = a.to_vec();
+    sipral_media::mix::add_scaled_into(&mut mix, b, gain);
+    Ok(())
+}
+
+fn media_opus_seeds() -> Result<Vec<Seed>, Wrong> {
+    // SampleRate::Wideband is index 2, FrameDuration::Micros20000 is index 3
+    let rate = sipral_media::opus::SampleRate::Wideband;
+    let frame = sipral_media::opus::FrameDuration::Micros20000;
+    let mut encoder = sipral_media::opus::Encoder::new(rate, frame)
+        .map_err(|why| Wrong(format!("the opus encoder does not build: {why}")))?;
+    encoder
+        .set_bitrate(24_000)
+        .map_err(|why| Wrong(format!("the opus bitrate does not set: {why}")))?;
+    let samples = triangle(frame.samples(rate), 71, 8_000);
+    let mut packet = vec![0_u8; frame.max_packet_bytes()];
+    let written = encoder
+        .encode(&samples, &mut packet)
+        .map_err(|why| Wrong(format!("the opus seed does not encode: {why}")))?;
+    packet.truncate(written);
+
+    let mut seed = vec![2, 3]; // Wideband, Micros20000
+    seed.extend_from_slice(&packet);
+
+    let out = vec![("an-encoded-wideband-frame", seed)];
+    for (name, bytes) in &out {
+        through_media_opus(name, bytes)?;
+    }
+    Ok(out)
+}
+
+fn through_media_opus(name: &str, data: &[u8]) -> Result<(), Wrong> {
+    const RATES: [sipral_media::opus::SampleRate; 5] = [
+        sipral_media::opus::SampleRate::Narrowband,
+        sipral_media::opus::SampleRate::Mediumband,
+        sipral_media::opus::SampleRate::Wideband,
+        sipral_media::opus::SampleRate::SuperWideband,
+        sipral_media::opus::SampleRate::Fullband,
+    ];
+    const DURATIONS: [sipral_media::opus::FrameDuration; 6] = [
+        sipral_media::opus::FrameDuration::Micros2500,
+        sipral_media::opus::FrameDuration::Micros5000,
+        sipral_media::opus::FrameDuration::Micros10000,
+        sipral_media::opus::FrameDuration::Micros20000,
+        sipral_media::opus::FrameDuration::Micros40000,
+        sipral_media::opus::FrameDuration::Micros60000,
+    ];
+    let Some((&rate_byte, rest)) = data.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no rate byte")));
+    };
+    let Some((&duration_byte, rest)) = rest.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no duration byte")));
+    };
+    let rate = *RATES
+        .get(usize::from(rate_byte) % RATES.len())
+        .unwrap_or(&sipral_media::opus::SampleRate::Narrowband);
+    let frame = *DURATIONS
+        .get(usize::from(duration_byte) % DURATIONS.len())
+        .unwrap_or(&sipral_media::opus::FrameDuration::Micros20000);
+    let mut decoder = sipral_media::opus::Decoder::new(rate, frame)
+        .map_err(|why| Wrong(format!("the {name} seed's decoder does not build: {why}")))?;
+    let mut samples = vec![0_i16; frame.samples(rate)];
+    let sample_count = decoder
+        .decode(rest, &mut samples)
+        .map_err(|why| Wrong(format!("the {name} seed does not decode: {why}")))?;
+    if sample_count == frame.samples(rate) {
+        return Ok(());
+    }
+    Err(Wrong(format!(
+        "the {name} seed decoded to {sample_count} samples, not {}",
+        frame.samples(rate)
+    )))
+}
+
 // ---------------------------------------------------------------- STUN, TURN
 
 fn stun_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -1534,6 +1935,14 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
         ("ice", ice_seeds()?),
+        ("media_comfort_noise", media_comfort_noise_seeds()?),
+        ("media_drift", media_drift_seeds()?),
+        ("media_g722", media_g722_seeds()?),
+        ("media_mix", media_mix_seeds()?),
+        ("media_opus", media_opus_seeds()?),
+        ("media_plc", media_plc_seeds()?),
+        ("media_resample", media_resample_seeds()?),
+        ("media_vad", media_vad_seeds()?),
         ("mwi", mwi_seeds()?),
         ("parse", sip_seeds()?),
         ("replay", replay_seeds()?),

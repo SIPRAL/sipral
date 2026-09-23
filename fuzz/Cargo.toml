@@ -35,6 +35,9 @@ path = "../crates/sipral-nat"
 [dependencies.sipral-dtls]
 path = "../crates/sipral-dtls"
 
+[dependencies.sipral-media]
+path = "../crates/sipral-media"
+
 [workspace]
 
 [profile.release]
@@ -162,6 +165,62 @@ bench = false
 [[bin]]
 name = "ice"
 path = "fuzz_targets/ice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_resample"
+path = "fuzz_targets/media_resample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_plc"
+path = "fuzz_targets/media_plc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_drift"
+path = "fuzz_targets/media_drift.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_comfort_noise"
+path = "fuzz_targets/media_comfort_noise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_vad"
+path = "fuzz_targets/media_vad.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_g722"
+path = "fuzz_targets/media_g722.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_mix"
+path = "fuzz_targets/media_mix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_opus"
+path = "fuzz_targets/media_opus.rs"
 test = false
 doc = false
 bench = false

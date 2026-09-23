@@ -12,6 +12,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **`sipral-media`'s DSP stages get their own fuzz targets and property
+  tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
+  correction, packet-loss concealment, comfort noise, voice-activity
+  detection, G.722 and the mixer each gained a seeded-PRNG property test —
+  empty and odd-length frames, `i16::MIN`/`MAX` runs, silence into a burst,
+  a sample rate or a mode changed mid-stream — run against the current code
+  rather than assumed correct, and eight new `cargo-fuzz` targets
+  (`media_resample`, `media_plc`, `media_drift`, `media_comfort_noise`,
+  `media_vad`, `media_g722`, `media_mix`, `media_opus`) feed the same
+  modules bytes no encoder produced. `indexing_slicing` moves from a warning
+  to a workspace-wide denial, in every crate that already set it locally, so
+  a slice index that could panic fails the build rather than the call.
 - **Twenty-four CPU-hours of fuzzing on every target.** All eighteen
   `cargo-fuzz` targets, each 48 runs of 30 minutes on one machine, about 37
   billion executions: no crash, no timeout, no run out of memory. That is the

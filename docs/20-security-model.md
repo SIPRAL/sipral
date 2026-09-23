@@ -101,19 +101,25 @@ panics and never does unbounded work on the field itself — but it is a real
 gap between what `validate` proves in a test and what the dispatcher does with
 a live message, and it is worth closing rather than assuming closed.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Eighteen
+**Fuzzing covers the doors an attacker's bytes come through.** Twenty-six
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
 `srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
 `dtls_handshake`), one for
-DTMF over SIP INFO (`dtmf_info`), and one for the ICE agent (`ice`). The exit
-gate is 24 hours per target with no crash and no hang, and it has been run:
-24 CPU-hours on every target in September 2026, about 37 billion executions,
-nothing found (`docs/11-testing.md`). `scripts/check.sh`
-builds all eighteen on every run so none of them rots uncompiled between
-releases.
+DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), and eight
+over `sipral-media`'s DSP once it was the turn of the codec and audio layer
+downstream of RTP (`media_resample`, `media_plc`, `media_drift`,
+`media_comfort_noise`, `media_vad`, `media_g722`, `media_mix`,
+`media_opus`). The exit gate is 24 hours per target with no crash and no
+hang, and the eighteen targets that existed before the media ones have had
+it run: 24 CPU-hours on every one of them in September 2026, about 37
+billion executions, nothing found (`docs/11-testing.md`). The eight media
+targets have not had that gate yet — they are new — but each ran a short,
+manual pass with no crash before the corpus and the targets themselves were
+committed, and `scripts/check.sh` builds all twenty-six on every run so none
+of them rots uncompiled between releases.
 
 `ice` is the newest and covers the one seam that is open to anybody before a
 key exists at all: an ICE agent binds the media port and answers connectivity
@@ -456,17 +462,26 @@ happened to follow it in memory.
 
 ## What is not covered yet
 
-**`sipral-media`'s DSP stages.** Resampling, drift correction, packet-loss
-concealment, comfort noise, voice-activity detection, and the in-tree G.722
-codec — `crates/sipral-media/src/resample.rs`, `drift.rs`, `plc.rs`,
-`comfort_noise.rs`, `vad.rs`, `g722/` — all run on audio derived from an RTP
-payload the far end chose, once a call is
-negotiated — and none of the eighteen fuzz targets under `fuzz/fuzz_targets/`
-reaches them. The message parser, the SDP parser, the crypto-attribute reader
-and the RTP/RTCP/SRTP wire formats each have a target that feeds them
-adversarial bytes; the codec and DSP layer downstream of RTP does not yet, and
-has not had the same kind of dedicated adversarial reading the parser and the
-transaction and dialog stores already went through.
+**`sipral-media`'s DSP stages are now fuzzed, but only against garbage
+input, not against a live call.** Resampling, drift correction, packet-loss
+concealment, comfort noise, voice-activity detection, the in-tree G.722
+codec, and the mixer — `crates/sipral-media/src/resample.rs`, `drift.rs`,
+`plc.rs`, `comfort_noise.rs`, `vad.rs`, `g722/`, `mix.rs`, and the `opus.rs`
+wrapper over libopus — all run on audio derived from an RTP payload the far
+end chose, once a call is negotiated, and each now has its own target under
+`fuzz/fuzz_targets/` (`media_resample`, `media_plc`, `media_drift`,
+`media_comfort_noise`, `media_vad`, `media_g722`, `media_mix`, `media_opus`)
+feeding it samples, octets and wire payloads no encoder produced. What that
+buys is the same property the SIP and RTP targets buy for their own layers:
+no panic, and every documented bound — a reconstructed G.722 sample inside
+ITU-T G.722 §5.1's range, a resampled frame no longer than
+`output_capacity` promised — held under adversarial input rather than only
+under a tone a test built by hand. What it does not buy is a target that
+walks a whole call: the eight targets each exercise one stage in isolation,
+seeded from its own history and its own state, not from a jitter buffer
+handing it packets an attacker actually sent over a negotiated codec: that
+seam — RTP payload straight through the jitter buffer into the codec and
+DSP chain in one target — is still open.
 
 **`sipral-nat`.** The wire formats are fuzzed — `stun`, `turn` and `ice`
 targets exist and exercise the message parsers, their accessors and the

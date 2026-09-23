@@ -564,4 +564,69 @@ mod tests {
         assert_eq!(Vad::with_hangover_ms(8_000, 100).hangover_span, 800);
         assert_eq!(Vad::with_hangover_ms(8_000, 0).hangover_span, 0);
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Arbitrary sample rates, arbitrary frame lengths and content — silence,
+    /// full-scale runs, a burst after a long silence, and plain noise —
+    /// driven through the same detector across many frames. `process` must
+    /// never panic, the floor it reports must never fall under [`MIN_FLOOR`]
+    /// once it has seen a frame, and it must never move while a hangover is
+    /// running, all of which the scenario tests above check once apiece.
+    #[test]
+    fn arbitrary_frames_never_panic_and_never_break_the_floors_own_rules() {
+        let mut seed = 0xACE5_5EED_0BAD_F00D_u64;
+        for _ in 0..150 {
+            let rate = 1 + u32::try_from(xorshift64(&mut seed) % 96_000).unwrap_or(8_000);
+            let mut vad = Vad::new(rate);
+            let mut primed_floor: Option<i64> = None;
+            for _ in 0..60 {
+                let length = usize::try_from(xorshift64(&mut seed) % 400).unwrap_or(0);
+                let pattern = xorshift64(&mut seed) % 4;
+                let frame: Vec<i16> = (0..length)
+                    .map(|index| match pattern {
+                        0 => 0,
+                        1 if index % 2 == 0 => i16::MAX,
+                        1 => i16::MIN,
+                        2 => i16::MAX,
+                        _ => {
+                            let top = xorshift64(&mut seed) >> 48;
+                            let unsigned = u16::try_from(top).unwrap_or(0);
+                            i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
+                        }
+                    })
+                    .collect();
+
+                let before = vad.noise_floor();
+                let _ = vad.process(&frame);
+                let after = vad.noise_floor();
+                // a hangover still running once this frame's own decrement has
+                // been applied is exactly the condition `process` itself
+                // gates adaptation on, so this is the one point a test from
+                // outside the module can observe it
+                let still_in_hangover = vad.in_hangover();
+
+                if frame.len() >= 2 {
+                    if primed_floor.is_none() {
+                        primed_floor = Some(after);
+                    } else {
+                        assert!(after >= MIN_FLOOR, "the floor fell under its own minimum");
+                        if still_in_hangover {
+                            assert_eq!(
+                                before, after,
+                                "the floor moved while a hangover was still running"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

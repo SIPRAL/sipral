@@ -823,4 +823,54 @@ mod tests {
         assert_eq!(Correction::Remove.to_string(), "remove one");
         assert_eq!(Correction::Insert.to_string(), "insert one");
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// Arbitrary rates, arbitrary frame lengths (including the wrap of the
+    /// `u64` counts `produced` and `consumed` accumulate over a very long
+    /// call), and an output slice sized however the caller happened to size
+    /// it: `process` must never panic, and it must keep the one promise its
+    /// own doc comment makes, that a frame comes back the length it went in
+    /// at, or one more, or one fewer.
+    #[test]
+    fn arbitrary_traffic_never_panics_and_the_length_never_drifts_by_more_than_one() {
+        let mut seed = 0xB16B_00B5_C0DE_1234_u64;
+        for _ in 0..200 {
+            let rate = 1 + u32::try_from(xorshift64(&mut seed) % 96_000).unwrap_or(8_000);
+            let mut drift = Drift::new(rate);
+            // occasionally start the two counters near the wrap, so a run of
+            // ordinary frames has to cross it
+            if xorshift64(&mut seed).is_multiple_of(5) {
+                let near_wrap = u64::MAX - (xorshift64(&mut seed) % 1_000);
+                drift.produced = near_wrap;
+                drift.consumed = near_wrap;
+            }
+            for _ in 0..40 {
+                let input_len = usize::try_from(xorshift64(&mut seed) % 800).unwrap_or(0);
+                let slack = xorshift64(&mut seed) % 4; // 0..=3 extra room
+                let output_len = input_len + usize::try_from(slack).unwrap_or(0);
+                let input = vec![0_i16; input_len];
+                let mut output = vec![0_i16; output_len];
+                let written = drift.process(&input, &mut output);
+                if slack == 0 {
+                    assert_eq!(written, 0, "no room offered but {written} was written");
+                } else {
+                    let delta =
+                        i64::try_from(written).unwrap_or(0) - i64::try_from(input_len).unwrap_or(0);
+                    assert!(
+                        (-1..=1).contains(&delta),
+                        "a frame of {input_len} came back as {written}"
+                    );
+                }
+                drift.consumed(input_len);
+            }
+        }
+    }
 }

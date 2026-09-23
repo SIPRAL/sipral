@@ -678,4 +678,56 @@ mod tests {
         let noise = ComfortNoise::new(10, &[1, -1]).unwrap();
         let _ = format!("{noise:?}");
     }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// A payload §3.3 never promised was well formed: any length, any bytes.
+    /// `decode` must either refuse it or hand back a value whose own
+    /// invariants hold — order within [`MAX_MODEL_ORDER`], level within
+    /// [`MAX_LEVEL`] — and that value must round-trip through `encode_into`
+    /// into a buffer sized by what it says it needs, byte for byte back
+    /// through `decode` again.
+    #[test]
+    fn arbitrary_bytes_either_are_refused_or_decode_to_something_that_encodes_back() {
+        let mut seed = 0xFEED_FACE_C0FF_EE00_u64;
+        for _ in 0..500 {
+            let length = usize::try_from(xorshift64(&mut seed) % 40).unwrap_or(0);
+            let payload: Vec<u8> = (0..length)
+                .map(|_| u8::try_from(xorshift64(&mut seed) % 256).unwrap_or(0))
+                .collect();
+
+            let Ok(noise) = ComfortNoise::decode(&payload) else {
+                assert!(payload.is_empty(), "only an empty payload is refused");
+                continue;
+            };
+            assert!(noise.level() <= MAX_LEVEL);
+            assert!(noise.order() <= MAX_MODEL_ORDER);
+            assert_eq!(noise.coefficients().len(), noise.order());
+
+            let mut wire = vec![0_u8; 1 + noise.order()];
+            let written = noise
+                .encode_into(&mut wire)
+                .expect("the buffer was sized for exactly what encode_into needs");
+            assert_eq!(written, 1 + noise.order());
+            let back = ComfortNoise::decode(&wire).expect("what was just encoded decodes");
+            assert_eq!(
+                back, noise,
+                "payload {payload:?} round-tripped to something else"
+            );
+
+            // whatever it decoded to, generating noise from it never panics
+            // and never produces a sample the frame's own type could not hold
+            let mut generator = Generator::with_seed(seed);
+            generator.received(noise);
+            let mut frame = [0_i16; 32];
+            generator.fill(&mut frame);
+        }
+    }
 }
