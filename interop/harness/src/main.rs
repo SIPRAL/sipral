@@ -45,6 +45,8 @@ mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
 mod quality;
+#[cfg(all(feature = "wasapi", target_os = "windows"))]
+mod wasapi;
 
 use std::collections::HashMap;
 use std::env;
@@ -151,7 +153,33 @@ fn catalog_for(flow: Flow) -> CodecCatalog {
     }
 }
 
+/// Not a flow: interop/wasapi/run.ps1's own first step, to find the exact
+/// endpoint a VB-CABLE installs under before pointing wasapi.rs's own
+/// `SIPRAL_WASAPI_EARPIECE_ID` / `SIPRAL_WASAPI_MIC_ID` at it. Enumerates
+/// whatever `sipral_io_wasapi::devices` says the machine has and nothing
+/// else.
+#[cfg(all(feature = "wasapi", target_os = "windows"))]
+fn list_audio_devices() -> ExitCode {
+    match sipral_io_wasapi::devices() {
+        Ok(mut found) => {
+            found.sort_by(|a, b| (a.direction, &a.name).cmp(&(b.direction, &b.name)));
+            for device in &found {
+                println!("{device}  [{}]", device.id);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("cannot list audio endpoints: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    #[cfg(all(feature = "wasapi", target_os = "windows"))]
+    if env::args().nth(1).as_deref() == Some("--list-audio-devices") {
+        return list_audio_devices();
+    }
     let server = env::args().nth(1).unwrap_or_else(|| "kamailio".to_owned());
     let port: u16 = env::args()
         .nth(2)
@@ -252,13 +280,33 @@ fn main() -> ExitCode {
             }
         }
     }
+    failures += extra_flows(&server, remote, &user, &pass, &wanted);
+
+    if failures == 0 {
+        println!("every flow passed");
+        return ExitCode::SUCCESS;
+    }
+    println!("{failures} flow(s) failed");
+    ExitCode::FAILURE
+}
+
+/// Everything `main` runs beyond the `Flow` table: two calls on one account,
+/// which `run` has no shape for, and the flows whose audio is a real
+/// device's, each gated on its own platform and feature. Split out of
+/// `main` itself only to keep that function's own length sane — every one
+/// of these keeps the gating and the pass/fail printing `main` used to do
+/// inline.
+///
+/// Returns how many of them failed.
+fn extra_flows(server: &str, remote: SocketAddr, user: &str, pass: &str, wanted: &str) -> u32 {
+    let mut failures = 0;
     // only when a second account is named: it needs two registrations on the
     // same server, and one of them has to have been left with a wide codec list
     if let (Ok(wide_user), Ok(wide_pass)) =
         (env::var("SIPRAL_USER_WIDE"), env::var("SIPRAL_PASS_WIDE"))
         && (wanted.is_empty() || wanted.split(',').any(|name| name.trim() == "inbound"))
     {
-        match pair::run(&server, remote, &wide_user, &wide_pass, &user, &pass) {
+        match pair::run(server, remote, &wide_user, &wide_pass, user, pass) {
             Ok(said) => println!("  pass  inbound, narrowed{said}"),
             Err(why) => {
                 println!("  FAIL  inbound, narrowed — {why}");
@@ -274,7 +322,7 @@ fn main() -> ExitCode {
     if server == "asterisk"
         && (wanted.is_empty() || wanted.split(',').any(|name| name.trim() == "join"))
     {
-        match join::run(&server, remote, &user, &pass) {
+        match join::run(server, remote, user, pass) {
             Ok(said) => println!("  pass  local conference{said}"),
             Err(why) => {
                 println!("  FAIL  local conference — {why}");
@@ -284,16 +332,15 @@ fn main() -> ExitCode {
     }
     // PipeWire's devices, and only when named: see `pipewire::flow`
     #[cfg(all(feature = "pipewire", target_os = "linux"))]
-    if !pipewire::flow(&server, remote, &user, &pass, &wanted) {
+    if !pipewire::flow(server, remote, user, pass, wanted) {
         failures += 1;
     }
-
-    if failures == 0 {
-        println!("every flow passed");
-        return ExitCode::SUCCESS;
+    // WASAPI's devices, and only when named: see `wasapi::flow`
+    #[cfg(all(feature = "wasapi", target_os = "windows"))]
+    if !wasapi::flow(server, remote, user, pass, wanted) {
+        failures += 1;
     }
-    println!("{failures} flow(s) failed");
-    ExitCode::FAILURE
+    failures
 }
 
 /// One scripted exchange, with what has to be true for it to have passed.

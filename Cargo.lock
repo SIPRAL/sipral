@@ -931,6 +931,8 @@ dependencies = [
  "sipral",
  "sipral-core",
  "sipral-io-pipewire",
+ "sipral-io-wasapi",
+ "sipral-media",
 ]
 
 [[package]]

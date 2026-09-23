@@ -66,6 +66,12 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   slice of the NuGet package for real on whatever machine runs the gate, and
   the rest structure-checked without a fabricated native standing in for one
   nothing there built.
+- **The interop lab can carry a call on a Windows machine's real audio
+  devices.** `scripts/lab.sh wasapi up` makes the lab reachable from the
+  LAN, and `interop/wasapi/run.ps1` drives a call to the echo extension
+  whose microphone and earpiece are VB-CABLE's two WASAPI endpoints, proving
+  audio crosses `sipral-io-wasapi` in both directions in a real call — the
+  Windows counterpart to the PipeWire flow already in the lab.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

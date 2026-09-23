@@ -42,6 +42,10 @@ bindings/python/.venv/
 # captures from the interop lab; the anonymised subset lives in fixtures/
 interop/pcap/
 
+# scripts/lab.sh wasapi up's own generated NAT config, written fresh each
+# run with the machine's own LAN address — see interop/wasapi/compose.override.yaml
+interop/wasapi/pjsip_local.generated.conf
+
 # Nothing runs on a machine that is not ours. Build, test, sign and publish
 # happen here or on our own servers, so no CI configuration is carried:
 # scripts/check.sh is the gate and scripts/lab.sh is the interop lab.

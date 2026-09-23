@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Makes the lab's Asterisk reachable from another machine on the LAN, for a
+# call carried on real devices (interop/harness/src/wasapi.rs,
+# docs/11-testing.md). Applied with `-f`, on top of ../compose.yaml, never in
+# place of it: that file publishes no ports by default because one of the
+# machines it also runs on has a production PBX already using 5060 on the
+# host, and a compose file that published it would fight that PBX for it.
+# `scripts/lab.sh wasapi up` is what applies this one, and only while its own
+# run needs it.
+#
+# rtp.conf narrows Asterisk's RTP range from the image's default (10000-20000,
+# twenty thousand ports) to twenty, because a Docker port mapping is one
+# iptables rule per port and twenty thousand of them is not a mapping, it is
+# a denial of service against the host's own netfilter. Twenty is more than
+# one echo call ever opens at once.
+#
+# pjsip_local.conf here is `scripts/lab.sh wasapi up`'s own, generated fresh
+# each time it runs (gitignored: see this directory's own comment in
+# .gitignore) with the address this machine is reachable at on the LAN,
+# which nothing checked into the repository can know in advance.
+services:
+  asterisk:
+    ports:
+      - "5062:5060/udp"
+      - "10000-10020:10000-10020/udp"
+    volumes:
+      - ./wasapi/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./wasapi/pjsip_local.generated.conf:/etc/asterisk/pjsip_local.conf:ro

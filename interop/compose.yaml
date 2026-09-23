@@ -71,6 +71,10 @@ services:
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
       # 8.6.5's mailbox, for the message waiting indication flow
       - ./asterisk/voicemail.conf:/etc/asterisk/voicemail.conf:ro
+      # pjsip.conf's own #include; empty here, so every flow but
+      # interop/wasapi's sees the transport unchanged — see that file's
+      # comment and interop/wasapi/compose.override.yaml
+      - ./asterisk/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro
     networks: [lab]
 
   # The phone-to-phone peer: a second client stack, registered at
