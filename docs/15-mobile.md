@@ -316,6 +316,32 @@ timer would trade reachability for battery on the strength of a SHOULD, and
 nothing in this crate can tell whether the wake-ups are actually arriving. The
 timer keeps running; an application that knows better takes the account down.
 
+### Who sends the push
+
+Not this stack, and not the application on the device. RFC 8599 gives the push
+request to a SIP proxy on the path to the device (§1, §5.6.2): it keeps the
+`pn-*` parameters from the REGISTER, and when an INVITE or a MESSAGE arrives for
+that binding it asks the notification service to wake the device, holds the
+request in its "SIP Request Push Bucket" (§5.2), and forwards it once the
+woken device's refresh REGISTER has been accepted. How it talks to APNs or FCM,
+and the credentials it needs to, belong to the notification service and are
+outside the RFC (§5.1).
+
+So a deployment that wants a sleeping device to ring needs, on the server side,
+one of two things:
+
+- **a proxy or PBX that implements the proxy half of RFC 8599** and holds the
+  push credentials for the application — for APNs, a key or certificate tied to
+  the team and topic that `pn-param` names; for FCM, the project's server
+  credentials; or
+- **a push gateway in front of a PBX that does not**: a proxy that plays that
+  role and passes everything else through.
+
+This stack ships neither, and the credentials never belong on the device.
+Whether the registrar a device talks to is one of the two is exactly what
+`push_echo` reports: `+sip.pns` naming the service asked for is the network
+saying it will send the pushes, and anything else means nobody has.
+
 ## What is still owed to phase 4, and is not signalling
 
 **The platform audio session is not here, deliberately.** `C4` — the device
