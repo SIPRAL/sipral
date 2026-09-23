@@ -100,8 +100,6 @@ OUT="$(cd "$OUT" && pwd)"
 if [ "$CMD" = "collect" ]; then
     step "collecting on $(uname -sm)"
     HOST_OS="$(uname -s)"
-    JOBS_ARGS=()
-    [ -n "${CARGO_BUILD_JOBS:-}" ] && JOBS_ARGS=(--jobs "$CARGO_BUILD_JOBS")
 
     for rid in "${RIDS[@]}"; do
         triple="$(triple_of "$rid")"
@@ -114,7 +112,7 @@ if [ "$CMD" = "collect" ]; then
                 if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
                     fail "$rid: $triple not installed (rustup target add $triple)"; continue
                 fi
-                if cargo build --release -p sipral-ffi --target "$triple" "${JOBS_ARGS[@]}" \
+                if cargo build --release -p sipral-ffi --target "$triple" \
                     >"$OUT/.build-$rid.log" 2>&1; then
                     mkdir -p "$OUT/$rid"
                     cp "$ROOT/target/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"

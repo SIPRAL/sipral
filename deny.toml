@@ -85,6 +85,11 @@ allow = ["AGPL-3.0-only"]
 name = "sipral-fuzz-seeds"
 allow = ["AGPL-3.0-only"]
 [[licenses.exceptions]]
+# the third tool under tools/: it writes THIRD-PARTY-LICENSES.txt out of the
+# dependency graph, and is never shipped
+name = "sipral-license-gen"
+allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
 # crates/sipral-aec-webrtc, outside the workspace and checked with its own
 # `cargo deny`, not the one this file otherwise gates -- kept here anyway so
 # the same allow-list covers webrtc-audio-processing's BSD-3-Clause too,

@@ -118,9 +118,7 @@ mkdir -p "$STAGE"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 step "building sipral-ffi, release"
-JOBS_ARGS=()
-[ -n "${CARGO_BUILD_JOBS:-}" ] && JOBS_ARGS=(--jobs "$CARGO_BUILD_JOBS")
-if cargo build --release -p sipral-ffi --target "$RUST_TRIPLE" "${JOBS_ARGS[@]}" >"$STAGE/build.log" 2>&1; then
+if cargo build --release -p sipral-ffi --target "$RUST_TRIPLE" >"$STAGE/build.log" 2>&1; then
     pass "cargo build --release -p sipral-ffi --target $RUST_TRIPLE"
 else
     fail "cargo build --release -p sipral-ffi --target $RUST_TRIPLE:"

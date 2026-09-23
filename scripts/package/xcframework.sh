@@ -90,8 +90,6 @@ if [ "$FAIL" -ne 0 ]; then
 fi
 
 step "building $CRATE, release, per target"
-JOBS_ARGS=()
-[ -n "${CARGO_BUILD_JOBS:-}" ] && JOBS_ARGS=(--jobs "$CARGO_BUILD_JOBS")
 # libopus's C sources compile, for arm64 Apple targets, with calls to
 # ___chkstk_darwin -- part of the arm64 Darwin ABI for a frame over a page,
 # not a bug in the C -- which lives in Apple's own compiler-rt and links
@@ -109,7 +107,7 @@ rustflags_for() {
 for t in "${all_triples[@]}"; do
     extra_rustflags="$(rustflags_for "$t")"
     if env RUSTFLAGS="${RUSTFLAGS:-} $extra_rustflags" \
-        cargo build --release -p "$CRATE" --target "$t" "${JOBS_ARGS[@]}" >"$STAGE/build-$t.log" 2>&1; then
+        cargo build --release -p "$CRATE" --target "$t" >"$STAGE/build-$t.log" 2>&1; then
         pass "cargo build --release -p $CRATE --target $t"
     else
         fail "cargo build --release -p $CRATE --target $t:"
