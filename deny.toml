@@ -84,6 +84,13 @@ allow = ["AGPL-3.0-only"]
 # library's own encoders, and is never shipped
 name = "sipral-fuzz-seeds"
 allow = ["AGPL-3.0-only"]
+[[licenses.exceptions]]
+# crates/sipral-aec-webrtc, outside the workspace and checked with its own
+# `cargo deny`, not the one this file otherwise gates -- kept here anyway so
+# the same allow-list covers webrtc-audio-processing's BSD-3-Clause too,
+# rather than a second copy of it living beside that crate's Cargo.toml
+name = "sipral-aec-webrtc"
+allow = ["AGPL-3.0-only"]
 
 [bans]
 multiple-versions = "warn"

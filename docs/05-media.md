@@ -1295,6 +1295,54 @@ boundary" has the threading contract in full — in particular, the one rule
 that is not obvious from C: the callback runs with this call's media locked
 and must never call back into the handle it was attached through.
 
+### A reference implementation: webrtc-audio-processing
+
+`crates/sipral-aec-webrtc` is a `Processor` over `webrtc-audio-processing`
+(BSD-3-Clause), PulseAudio's repackaging of the AEC3 echo canceller, gain
+controller and noise suppressor out of Google's WebRTC — the "any build
+wanting its own" row of the table above, written rather than left as an
+exercise. `THIRD-PARTY-NOTICES.md` has the full chain of what it links and
+under what licence; the short version is that the whole chain is
+BSD-3-Clause or Apache-2.0, and none of it enters `sipral`/`sipral-ffi`
+unless an application depends on this crate itself.
+
+**Outside this workspace's default build.** `webrtc-audio-processing-sys`'s
+`bundled` feature vendors and compiles PulseAudio's C++ library with meson
+and ninja, which nothing else in this tree asks a machine for; building it
+alongside every other crate on every machine that runs `cargo build
+--workspace` would put a C++ toolchain and two more build tools on a list
+that has stayed short on purpose. `crates/sipral-aec-webrtc/Cargo.toml`
+explains the exclusion and `scripts/check.sh` builds, tests, lints and
+licence-checks it as its own step regardless — not skipped when the tools
+are missing, failed, the same as every other build prerequisite this tree
+already assumes.
+
+**Two conversions on every frame.** `sipral_media::Processor` works in
+`i16`, the width an RTP payload is decoded to; `webrtc-audio-processing`
+works in `f32` normalised to `[-1.0, 1.0]`. And the two libraries cut a
+frame at different lengths: this one fixes its own at ten milliseconds,
+fixed by the library itself and not configurable, while a call's frame is
+whatever its codec cuts — twenty milliseconds for every codec this stack
+negotiates today, which divides evenly into two. `WebrtcAec::process`
+documents both conversions and what it does with a frame that is not a
+whole multiple of ten milliseconds, which no codec here produces but which
+nothing stops an application's own `Processor` implementation from being
+asked to.
+
+**Measured**, with `crates/sipral-aec-webrtc/examples/erle.rs`: a broadband
+synthetic far end (three tones summed under a slow amplitude envelope, not
+a single sine, which an adaptive filter converges on for reasons special to
+a pure tone) fed back as the near end at a quarter its own level — about
+-12 dB, a plausible direct acoustic coupling from a laptop's own
+loudspeaker into its own microphone — with no delay, since the delay a real
+device adds is exactly what `sipral::Echo`'s own alignment already removes
+before a processor is ever reached. Run at 16 kHz, 20 ms frames, over the
+last six of eight seconds once AEC3 has had time to adapt: **36.1 dB of
+echo return loss enhancement** — the echo's energy falls by a factor of
+about 4,000. The figure is this synthetic signal's, not a room's or a
+device's, and moves with both; `docs/11-testing.md` is where a real-device
+or real-room figure belongs once one is measured.
+
 On Linux the canceller is a module of the PipeWire session, not something a
 stream asks for. A stream's `media.role` of `Communication`, which
 `sipral-io-pipewire` sets on every stream, lets a session manager's rules tell

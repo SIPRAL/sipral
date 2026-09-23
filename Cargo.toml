@@ -2,8 +2,13 @@
 resolver = "3"
 members = ["crates/*", "interop/harness", "tools/abi-gen", "tools/fuzz-seeds", "tools/license-gen"]
 # fuzz/ needs a nightly compiler, so it keeps its own toolchain pin and its
-# own lockfile rather than dragging one into the workspace
-exclude = ["fuzz"]
+# own lockfile rather than dragging one into the workspace.
+# crates/sipral-aec-webrtc needs meson, ninja and a C++ toolchain to build
+# its one dependency's bundled C++ library, which `cargo build --workspace`
+# and `--all-features` do not ask this tree for anywhere else; it keeps its
+# own lockfile too, and scripts/check.sh builds it as its own step. See the
+# comment at the top of its Cargo.toml.
+exclude = ["fuzz", "crates/sipral-aec-webrtc"]
 
 [workspace.dependencies]
 sipral-core = { path = "crates/sipral-core", version = "0.0.1" }

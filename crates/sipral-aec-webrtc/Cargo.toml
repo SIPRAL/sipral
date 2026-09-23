@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Outside the workspace on purpose: webrtc-audio-processing-sys needs meson,
+# ninja and a C++ toolchain to build its bundled copy of libwebrtc-audio-
+# processing, which the rest of this tree does not ask a machine for. Kept
+# out of `cargo build --workspace`/`--all-features` the way fuzz/ is, with
+# its own Cargo.lock beside this file; scripts/check.sh has its own step for
+# it, gated on those tools being present rather than silently skipped when
+# they are not. See docs/05-media.md, "Where the canceller itself comes
+# from".
+
+[package]
+name = "sipral-aec-webrtc"
+description = "A Processor over webrtc-audio-processing, attachable from an application, not linked by the facade."
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+authors = ["Tiberiu Balasea"]
+repository = "https://github.com/SIPRAL/sipral"
+homepage = "https://sipral.org"
+keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
+categories = ["network-programming", "multimedia::audio"]
+publish = false
+
+[dependencies]
+sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+webrtc-audio-processing = { version = "2.1.0", default-features = false, features = ["bundled"] }
+
+# An empty table of its own, not just the root Cargo.toml's `exclude`: this
+# manifest lives under a git worktree nested inside the main checkout on
+# disk, and without this cargo's workspace search walks straight past the
+# worktree boundary and finds the main checkout's Cargo.toml instead,
+# putting this crate in a workspace it was never meant to join. fuzz/Cargo.toml
+# carries the same line for the same reason.
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "deny"

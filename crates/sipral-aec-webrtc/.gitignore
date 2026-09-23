@@ -1,0 +1,4 @@
+# Outside the main workspace (Cargo.toml beside this file says why), so the
+# root .gitignore's /target/ never reaches this crate's own build output.
+# Cargo.lock is committed, the same as fuzz/Cargo.lock beside it is.
+target/

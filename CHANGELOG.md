@@ -378,6 +378,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   generated into every binding, including a Kotlin/JNI back end taught to
   marshal a struct with a buffer the listener fills as well as one it only
   reads.
+- **A reference echo canceller, `crates/sipral-aec-webrtc`.** A `Processor`
+  over `webrtc-audio-processing` (BSD-3-Clause), for an application that
+  wants AEC3, gain control and noise suppression attached rather than
+  written from scratch. Outside this workspace's default build — the
+  bundled C++ library it links needs meson and ninja, which nothing else
+  here asks a machine for — with its own build, test, lint and licence
+  step in `scripts/check.sh`. Measured against a synthetic echo
+  (`crates/sipral-aec-webrtc/examples/erle.rs`): 36.1 dB of echo return
+  loss enhancement once AEC3 has adapted, in `docs/05-media.md`.
 
 ### Fixed
 

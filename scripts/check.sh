@@ -817,6 +817,45 @@ else
     fail "aarch64-apple-ios is not installed: rustup target add aarch64-apple-ios"
 fi
 
+# crates/sipral-aec-webrtc is outside the workspace (Cargo.toml at its root
+# says why: webrtc-audio-processing-sys's bundled feature needs meson, ninja
+# and a C++ toolchain nothing else here asks a machine for), so
+# --workspace/--all-features above never touch it and this is its one real
+# build, run against its own Cargo.lock. Missing tools fail rather than skip:
+# `scripts/check.sh`'s own "gata" bar is zero of either, and a step that
+# quietly skipped whenever meson is absent would let the crate rot exactly
+# the way the module doc for `the_synthetic_surface_reaches_every_shape`
+# warns an unmeasured "wide enough" does.
+step "sipral-aec-webrtc, outside the workspace"
+if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
+    manifest=crates/sipral-aec-webrtc/Cargo.toml
+    cargo fmt --manifest-path "$manifest" --check >/dev/null 2>&1 \
+        && pass "cargo fmt --manifest-path $manifest --check" \
+        || fail "cargo fmt --manifest-path $manifest --check"
+    if cargo build --manifest-path "$manifest" >/dev/null 2>&1; then
+        pass "cargo build --manifest-path $manifest"
+    else
+        fail "cargo build --manifest-path $manifest"
+    fi
+    cargo test --manifest-path "$manifest" >/dev/null 2>&1 \
+        && pass "cargo test --manifest-path $manifest" \
+        || fail "cargo test --manifest-path $manifest"
+    cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy --manifest-path $manifest --all-targets" \
+        || fail "cargo clippy --manifest-path $manifest --all-targets -- -D warnings"
+    if command -v cargo-deny >/dev/null 2>&1; then
+        cargo deny --manifest-path "$manifest" check >/dev/null 2>&1 \
+            && pass "cargo deny --manifest-path $manifest check" \
+            || fail "cargo deny --manifest-path $manifest check"
+    else
+        fail "cargo-deny is not installed: cargo install cargo-deny"
+    fi
+else
+    fail "meson and/or ninja are not installed: crates/sipral-aec-webrtc cannot build \
+webrtc-audio-processing-sys's bundled library without them (brew install meson ninja, or \
+apt install meson ninja-build)"
+fi
+
 # The mirror of --all-features. Opus is behind a feature because libopus is
 # licensed rather than written (`docs/05-media.md`), and the customer who
 # needs it out is the one shipping hardware -- so the build without it has to

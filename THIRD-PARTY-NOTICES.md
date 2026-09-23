@@ -270,6 +270,40 @@ and are not linked, and nothing here reaches either through PipeWire:
 Debian's `libpipewire-0.3.so.0` itself depends on the C library and nothing
 else, and talks to the daemon over its own socket.
 
+## A component an application attaches, not linked by Sipral itself
+
+### webrtc-audio-processing
+
+`crates/sipral-aec-webrtc` is a `Processor` — `docs/05-media.md`'s echo
+cancellation, gain control and noise suppression seam — over this library.
+Nothing else in this workspace names that crate: it is excluded from the
+workspace `cargo build --workspace` and `--all-features` build (its
+`Cargo.toml` says why), and reaches an application's binary only when that
+application chooses to depend on it. A binary built from `sipral`/
+`sipral-ffi` alone, which is every default build, carries none of it.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `webrtc-audio-processing` 2.1.0 | the safe Rust wrapper | BSD-3-Clause |
+| `webrtc-audio-processing-sys` 2.1.0 | the raw declarations and the build that vendors and compiles the C++ library below | BSD-3-Clause |
+| `webrtc-audio-processing-config` 2.1.0 | the configuration structs, split out so a WASM caller need not pull in the FFI crate | BSD-3-Clause |
+| libwebrtc-audio-processing | PulseAudio's repackaging of Google's WebRTC audio processing module, vendored by `webrtc-audio-processing-sys`'s `bundled` feature and built with meson and ninja | BSD-3-Clause |
+| abseil-cpp | one meson subproject of the above, fetched by its own `subprojects/abseil-cpp.wrap` when no system copy is found by `pkg-config` | Apache-2.0 |
+
+All four crates carry the same `COPYING`, a single BSD-3-Clause block
+copyright the WebRTC project authors — one reproduction of it and the three
+conditions discharges the obligation for all of them, the same shape
+libopus's notice above takes. The vendored library's own `webrtc/LICENSE` is
+the identical text under Google's copyright, and its `webrtc/PATENTS` is a
+separate, perpetual patent grant over the implementation it ships with —
+read before this component reaches a commercial build, the same as Opus's
+patent position above, though not reproduced in full here since it is not a
+licence this file exists to discharge.
+
+Building it needs `meson`, `ninja` and a C++ compiler on the machine, which
+the rest of this tree does not ask for; `scripts/check.sh` has its own step
+for it, and does not skip that step when those tools are missing.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`
@@ -289,7 +323,6 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 
 | Component | Use | Licence |
 |---|---|---|
-| webrtc-audio-processing | AEC3, AGC, noise suppression, as an optional crate attached at the processor seam | BSD-3-Clause |
 | libvpx, libaom | video codecs, phase 6, after 1.0 | BSD-3-Clause / BSD-2-Clause |
 | rustls | the TLS example only; the transport, and its TLS, belong to the application | Apache-2.0 OR ISC OR MIT |
 
