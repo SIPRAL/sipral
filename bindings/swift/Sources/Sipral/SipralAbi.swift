@@ -232,6 +232,11 @@ public enum SipralCodec: UInt32, Sendable {
     /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
     /// `sipral_codec_at` enumerates, never the presence of this name.
     case opus = 4
+    /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
+    /// speech. In every build and in no default offer: a call offers it
+    /// only when a codec order names `G729`, and it states `annexb=no`
+    /// wherever it is offered or answered.
+    case g729 = 5
 }
 
 /// What became of one codec this call's catalogue could have used. Names
@@ -3003,7 +3008,8 @@ public enum Sipral {
     /// One of them, by index, from zero to what `sipral_codec_count` said.
     ///
     /// The order is this build's own preference, quality first, which is what
-    /// is offered when nobody has said otherwise.
+    /// is offered when nobody has said otherwise — all of it but G.729, which
+    /// is listed last and offered only where a codec order names it.
     ///
     /// Safety
     ///

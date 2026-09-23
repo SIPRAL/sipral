@@ -101,25 +101,27 @@ panics and never does unbounded work on the field itself — but it is a real
 gap between what `validate` proves in a test and what the dispatcher does with
 a live message, and it is worth closing rather than assuming closed.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Twenty-seven
+**Fuzzing covers the doors an attacker's bytes come through.** Twenty-eight
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
 `srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
 `dtls_handshake`), one for
-DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), eight
+DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), nine
 over `sipral-media`'s DSP once it was the turn of the codec and audio layer
 downstream of RTP (`media_resample`, `media_plc`, `media_drift`,
-`media_comfort_noise`, `media_vad`, `media_g722`, `media_mix`,
+`media_comfort_noise`, `media_vad`, `media_g722`, `media_g729`, `media_mix`,
 `media_opus`), and one for what the headless socket's messages do to a
 bridged session (`headless_media`). The exit gate is 24 hours per target
-with no crash and no hang, and every target but `headless_media` has had
-it run: the first eighteen on 21 and 22 September 2026, about 37 billion
-executions, and the eight media ones on 23 September, about 24 billion,
-nothing found on any (`docs/11-testing.md`). `headless_media` is the newest
-and has not had that gate yet, and `scripts/check.sh` builds all
-twenty-seven on every run so none of them rots uncompiled between releases.
+with no crash and no hang, and every target but `headless_media` and
+`media_g729` has had it run: the first eighteen on 21 and 22 September 2026,
+about 37 billion executions, and the eight media ones before `media_g729`
+on 23 September, about 24 billion, nothing found on any
+(`docs/11-testing.md`). `media_g729` is the newest, over the G.729 decoder,
+the SID reader and the encoder; it and `headless_media` have not had that
+gate yet, and `scripts/check.sh` builds all twenty-eight on every run so
+none of them rots uncompiled between releases.
 
 `ice` covers the one seam that is open to anybody before a
 key exists at all: an ICE agent binds the media port and answers connectivity
@@ -465,19 +467,20 @@ happened to follow it in memory.
 **`sipral-media`'s DSP stages are now fuzzed, but only against garbage
 input, not against a live call.** Resampling, drift correction, packet-loss
 concealment, comfort noise, voice-activity detection, the in-tree G.722
-codec, and the mixer — `crates/sipral-media/src/resample.rs`, `drift.rs`,
-`plc.rs`, `comfort_noise.rs`, `vad.rs`, `g722/`, `mix.rs`, and the `opus.rs`
-wrapper over libopus — all run on audio derived from an RTP payload the far
-end chose, once a call is negotiated, and each now has its own target under
-`fuzz/fuzz_targets/` (`media_resample`, `media_plc`, `media_drift`,
-`media_comfort_noise`, `media_vad`, `media_g722`, `media_mix`, `media_opus`)
-feeding it samples, octets and wire payloads no encoder produced. What that
+and G.729 codecs, and the mixer — `crates/sipral-media/src/resample.rs`,
+`drift.rs`, `plc.rs`, `comfort_noise.rs`, `vad.rs`, `g722/`, `g729/`,
+`mix.rs`, and the `opus.rs` wrapper over libopus — all run on audio derived
+from an RTP payload the far end chose, once a call is negotiated, and each
+now has its own target under `fuzz/fuzz_targets/` (`media_resample`,
+`media_plc`, `media_drift`, `media_comfort_noise`, `media_vad`,
+`media_g722`, `media_g729`, `media_mix`, `media_opus`) feeding it samples,
+octets and wire payloads no encoder produced. What that
 buys is the same property the SIP and RTP targets buy for their own layers:
 no panic, and every documented bound — a reconstructed G.722 sample inside
 ITU-T G.722 §5.1's range, a resampled frame no longer than
 `output_capacity` promised — held under adversarial input rather than only
 under a tone a test built by hand. What it does not buy is a target that
-walks a whole call: the eight targets each exercise one stage in isolation,
+walks a whole call: the nine targets each exercise one stage in isolation,
 seeded from its own history and its own state, not from a jitter buffer
 handing it packets an attacker actually sent over a negotiated codec: that
 seam — RTP payload straight through the jitter buffer into the codec and

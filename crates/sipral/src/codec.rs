@@ -29,7 +29,17 @@
 //! historical reasons" — and Opus's are 960, whatever the encoder produced,
 //! and 960. Anything written against the G.711 shape encodes half a frame and
 //! calls it a packet, which is why [`Codec::sample_rate`] and
-//! [`Codec::clock_rate`] are two functions and not one.
+//! [`Codec::clock_rate`] are two functions and not one. G.729 is the fourth
+//! shape: 160 samples, 160 ticks and twenty octets, eight samples to the
+//! octet.
+//!
+//! # In the build is not in the offer
+//!
+//! G.729 is in [`Codec::ALL`] and not in what [`CodecCatalog::new`] offers.
+//! It is narrowband and eight kilobits, worse than G.711 to the ear and far
+//! worse than G.722 or Opus, and a peer offered it beside them may still pick
+//! it first; it is here for the carrier that insists on it, and a site that
+//! wants it names it ([`CodecCatalog::with_order`]).
 
 use sipral_core::sdp::{
     KeySalt, MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, SrtpSupport,
@@ -37,7 +47,7 @@ use sipral_core::sdp::{
 };
 #[cfg(feature = "opus")]
 use sipral_media::opus;
-use sipral_media::{g711, g722};
+use sipral_media::{g711, g722, g729};
 
 use crate::error::MediaError;
 use crate::ice::IcePolicy;
@@ -59,6 +69,12 @@ pub const DEFAULT_FRAME_MS: u32 = 20;
 /// halves.
 const FIRST_DYNAMIC: u8 = 96;
 
+/// G.729's `a=fmtp` parameters, in an offer and in an answer alike: no Annex
+/// B. This build sends no SID frame and decodes one only as far as the level
+/// it states (`sipral_media::g729::Sid`), so it says so rather than leave
+/// RFC 3555's default of `yes` standing.
+const G729_WITHOUT_ANNEX_B: &str = "annexb=no";
+
 /// One codec this build contains.
 ///
 /// Not a list of everything with an IANA name: a variant here means there is
@@ -76,6 +92,12 @@ pub enum Codec {
     /// G.722: wideband at the price of a narrowband stream, and accepted by
     /// almost every PBX in service.
     G722,
+    /// G.729 with Annex A: eight kilobits of narrowband speech, for the
+    /// carrier that insists on it. Always in the build and never in the
+    /// default offer — see [`Codec::offered_by_default`]. It sends and
+    /// accepts no Annex B comfort noise of its own, and says so in every
+    /// description it writes (`annexb=no`, RFC 3555 §4.1.9).
+    G729,
     /// Opus: the best of them, and the only one here that is linked rather
     /// than written, which is why it is the one behind a feature. A build
     /// with the `opus` feature off has no variant for it at all — see
@@ -91,16 +113,32 @@ impl Codec {
     /// nobody has said otherwise; [`CodecCatalog::with_order`] is how a site
     /// says otherwise.
     ///
-    /// Its length is the build's own and not a number to be relied on: four
-    /// here, three where the `opus` feature is off. Anything that needs the
+    /// Its length is the build's own and not a number to be relied on: five
+    /// here, four where the `opus` feature is off. Anything that needs the
     /// count reads it from this array.
+    ///
+    /// G.729 is last, and it is the one member [`CodecCatalog::new`] leaves
+    /// out: see [`Codec::offered_by_default`].
     #[cfg(feature = "opus")]
-    pub const ALL: [Self; 4] = [Self::Opus, Self::G722, Self::Pcmu, Self::Pcma];
-    /// Every codec this build contains, which is the three written ones: the
+    pub const ALL: [Self; 5] = [Self::Opus, Self::G722, Self::Pcmu, Self::Pcma, Self::G729];
+    /// Every codec this build contains, which is the four written ones: the
     /// `opus` feature is off, so there is no encoder for Opus to offer. See
     /// the other declaration of this constant for the rest.
     #[cfg(not(feature = "opus"))]
-    pub const ALL: [Self; 3] = [Self::G722, Self::Pcmu, Self::Pcma];
+    pub const ALL: [Self; 4] = [Self::G722, Self::Pcmu, Self::Pcma, Self::G729];
+
+    /// Whether [`CodecCatalog::new`] offers it: every codec but G.729.
+    ///
+    /// G.729 is offered only where an order names it. A peer's own
+    /// preference decides among what both ends list (RFC 3264 §6.1), so a
+    /// narrowband codec in every offer is a narrowband call with every peer
+    /// that happens to prefer it — and the one reason to carry it at all is
+    /// a carrier that accepts nothing else, which is a site's configuration
+    /// and not a default.
+    #[must_use]
+    pub const fn offered_by_default(self) -> bool {
+        !matches!(self, Self::G729)
+    }
 
     /// The name that goes on an `a=rtpmap` line, spelled as IANA registered
     /// it.
@@ -110,6 +148,7 @@ impl Codec {
             Self::Pcmu => "PCMU",
             Self::Pcma => "PCMA",
             Self::G722 => g722::ENCODING_NAME,
+            Self::G729 => g729::ENCODING_NAME,
             #[cfg(feature = "opus")]
             Self::Opus => opus::ENCODING_NAME,
         }
@@ -128,13 +167,13 @@ impl Codec {
     #[must_use]
     pub const fn is_opus(self) -> bool {
         match self {
-            Self::Pcmu | Self::Pcma | Self::G722 => false,
+            Self::Pcmu | Self::Pcma | Self::G722 | Self::G729 => false,
             #[cfg(feature = "opus")]
             Self::Opus => true,
         }
     }
 
-    /// The payload type RFC 3551 table 4 assigns it, for the three that have
+    /// The payload type RFC 3551 table 4 assigns it, for the four that have
     /// one. Opus does not: it is newer than the static table and always
     /// travels as a dynamic type.
     #[must_use]
@@ -143,6 +182,7 @@ impl Codec {
             Self::Pcmu => Some(0),
             Self::Pcma => Some(8),
             Self::G722 => Some(g722::PAYLOAD_TYPE),
+            Self::G729 => Some(g729::PAYLOAD_TYPE),
             #[cfg(feature = "opus")]
             Self::Opus => None,
         }
@@ -161,13 +201,18 @@ impl Codec {
     /// list. RFC 3611 §4.7.5's own answer for a metric this stack cannot
     /// honestly compute is the sentinel, not a guess — see
     /// `sipral_rtp::RtpSession::voip_metrics`.
+    ///
+    /// G.729 gets `None` too, for a narrower reason. Table I.4 does rate it,
+    /// but only as "G.729 Annex A with Annex B (VAD)", and this build carries
+    /// no Annex B; Table I.1 rates Annex A alone for `Ie` and gives no `Bpl`
+    /// to go with it. Half a pair is not a model.
     #[must_use]
     pub const fn quality_model(self) -> Option<sipral_rtp::CodecQualityModel> {
         match self {
             Self::Pcmu | Self::Pcma => Some(sipral_rtp::codec_quality_model(
                 sipral_rtp::CodecFamily::G711,
             )),
-            Self::G722 => None,
+            Self::G722 | Self::G729 => None,
             #[cfg(feature = "opus")]
             Self::Opus => None,
         }
@@ -182,6 +227,7 @@ impl Codec {
     pub const fn clock_rate(self) -> u32 {
         match self {
             Self::Pcmu | Self::Pcma | Self::G722 => g711::CLOCK_RATE,
+            Self::G729 => g729::CLOCK_RATE,
             #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
         }
@@ -194,6 +240,7 @@ impl Codec {
         match self {
             Self::Pcmu | Self::Pcma => g711::CLOCK_RATE,
             Self::G722 => g722::SAMPLE_RATE,
+            Self::G729 => g729::SAMPLE_RATE,
             #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
         }
@@ -219,14 +266,15 @@ impl Codec {
     /// The largest payload one frame can turn into, which is what a send
     /// buffer has to hold.
     ///
-    /// Fixed for the three written here — one octet a sample, or one per two
-    /// for G.722 — and a bound rather than a size for Opus, whose whole point
-    /// is that the size depends on what was said.
+    /// Fixed for the four written here — one octet a sample, one per two for
+    /// G.722, ten per eighty for G.729 — and a bound rather than a size for
+    /// Opus, whose whole point is that the size depends on what was said.
     #[must_use]
     pub fn max_payload(self, millis: u32) -> usize {
         match self {
             Self::Pcmu | Self::Pcma => self.frame_samples(millis),
             Self::G722 => self.frame_samples(millis) / 2,
+            Self::G729 => self.frame_samples(millis) / g729::FRAME_SAMPLES * g729::FRAME_OCTETS,
             #[cfg(feature = "opus")]
             Self::Opus => opus::MAX_FRAME_BYTES,
         }
@@ -247,7 +295,7 @@ impl Codec {
             parameters: match self {
                 #[cfg(feature = "opus")]
                 Self::Opus => Some(opus::RTPMAP_CHANNELS.to_string()),
-                Self::Pcmu | Self::Pcma | Self::G722 => None,
+                Self::Pcmu | Self::Pcma | Self::G722 | Self::G729 => None,
             },
         }
     }
@@ -259,12 +307,37 @@ impl Codec {
     /// being prepared to use the redundancy the far end may put in its
     /// packets. It costs nothing when the peer does not send it and it is the
     /// difference between a lost packet and a heard one when it does.
+    ///
+    /// G.729 gets `annexb=no`: see [`Codec::answer_fmtp`], which is the same
+    /// statement made in an answer.
     #[must_use]
     pub const fn fmtp(self) -> Option<&'static str> {
         match self {
             #[cfg(feature = "opus")]
             Self::Opus => Some("useinbandfec=1"),
+            Self::G729 => Some(G729_WITHOUT_ANNEX_B),
             Self::Pcmu | Self::Pcma | Self::G722 => None,
+        }
+    }
+
+    /// The `a=fmtp` parameters this end writes for the format in an answer,
+    /// whatever the offer said, where there are any.
+    ///
+    /// Only G.729 has one: `annexb=no`. RFC 3555 §4.1.9 (and RFC 4856
+    /// §2.1.9 after it) reads an absent `annexb` as yes, and RFC 3551
+    /// §4.5.6 has a receiver accept Annex B comfort-noise frames "if
+    /// restriction of their use has not been signaled" — so an answer that
+    /// echoed an offer with no parameter would be this end agreeing to a
+    /// format it does not write and decodes only as far as its level. Every
+    /// other codec's parameters are the offer's own, echoed, the way
+    /// `sipral_core`'s answer writes them.
+    #[must_use]
+    pub const fn answer_fmtp(self) -> Option<&'static str> {
+        match self {
+            Self::G729 => Some(G729_WITHOUT_ANNEX_B),
+            Self::Pcmu | Self::Pcma | Self::G722 => None,
+            #[cfg(feature = "opus")]
+            Self::Opus => None,
         }
     }
 
@@ -367,7 +440,8 @@ pub struct CodecCatalog {
 }
 
 impl CodecCatalog {
-    /// Every codec this build contains, quality first, twenty-millisecond
+    /// Every codec this build offers by default — all it contains but G.729
+    /// ([`Codec::offered_by_default`]) — quality first, twenty-millisecond
     /// frames, named events offered, RTCP on its own port and no SRTP
     /// offered.
     ///
@@ -380,7 +454,10 @@ impl CodecCatalog {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            order: Codec::ALL.to_vec(),
+            order: Codec::ALL
+                .into_iter()
+                .filter(|codec| codec.offered_by_default())
+                .collect(),
             frame_ms: DEFAULT_FRAME_MS,
             dtmf: true,
             rtcp_mux: false,
@@ -440,20 +517,27 @@ impl CodecCatalog {
     /// Cut frames at `millis` milliseconds instead of twenty.
     ///
     /// # Errors
-    /// [`MediaError::BadFrameLength`] for zero, and for an interval Opus has
-    /// no frame size for when Opus is in this build and is one of the codecs
-    /// offered. The three written codecs cut a whole number of samples at any
-    /// whole millisecond, because every rate here is a multiple of a thousand;
-    /// Opus has a fixed set of frame durations and encodes nothing else, so a
-    /// build without it takes any interval at all.
+    /// [`MediaError::BadFrameLength`] for zero, for an interval Opus has no
+    /// frame size for when Opus is in this build and is one of the codecs
+    /// offered, and for one that is not a whole number of ten-millisecond
+    /// frames when G.729 is offered. G.711 and G.722 cut a whole number of
+    /// samples at any whole millisecond, because every rate here is a
+    /// multiple of a thousand; Opus has a fixed set of frame durations and
+    /// encodes nothing else, and G.729 codes ten milliseconds at a time and
+    /// nothing shorter (RFC 3551 §4.5.6), so a packet of fifteen would carry
+    /// a frame and a half.
     pub fn with_frame_length(mut self, millis: u32) -> Result<Self, MediaError> {
         #[cfg(feature = "opus")]
         let opus_refuses = self.order.contains(&Codec::Opus)
             && opus::FrameDuration::from_micros(millis.saturating_mul(1_000)).is_err();
-        // nothing left in the catalogue has an opinion about frame length
+        // the one opinion about frame length left is G.729's, below
         #[cfg(not(feature = "opus"))]
         let opus_refuses = false;
-        if millis == 0 || opus_refuses {
+        let g729_refuses = self.order.contains(&Codec::G729)
+            && !Codec::G729
+                .frame_samples(millis)
+                .is_multiple_of(g729::FRAME_SAMPLES);
+        if millis == 0 || opus_refuses || g729_refuses {
             return Err(MediaError::BadFrameLength { millis });
         }
         self.frame_ms = millis;
@@ -707,6 +791,12 @@ pub(crate) mod tests {
         assert_eq!(Codec::G722.max_payload(DEFAULT_FRAME_MS), 160);
         assert_eq!(Codec::G722.frame_ticks(DEFAULT_FRAME_MS), 160);
 
+        // two ten-octet frames: RFC 3551 §4.5.6's default packet
+        assert_eq!(Codec::G729.frame_samples(DEFAULT_FRAME_MS), 160);
+        assert_eq!(Codec::G729.max_payload(DEFAULT_FRAME_MS), 20);
+        assert_eq!(Codec::G729.frame_ticks(DEFAULT_FRAME_MS), 160);
+        assert_eq!(Codec::G729.max_payload(10), 10);
+
         #[cfg(feature = "opus")]
         {
             assert_eq!(Codec::Opus.frame_samples(DEFAULT_FRAME_MS), 960);
@@ -734,8 +824,67 @@ pub(crate) mod tests {
         assert_eq!(Codec::Pcmu.static_payload(), Some(0));
         assert_eq!(Codec::Pcma.static_payload(), Some(8));
         assert_eq!(Codec::G722.static_payload(), Some(9));
+        assert_eq!(Codec::G729.static_payload(), Some(18));
         #[cfg(feature = "opus")]
         assert_eq!(Codec::Opus.static_payload(), None);
+    }
+
+    /// G.729 is in the build and out of the default offer, and an order
+    /// that names it offers it, on 18, saying it takes no Annex B.
+    #[test]
+    fn g729_is_offered_only_when_an_order_names_it() {
+        assert!(Codec::ALL.contains(&Codec::G729));
+        assert!(!CodecCatalog::new().codecs().contains(&Codec::G729));
+        assert!(
+            Codec::ALL
+                .into_iter()
+                .filter(|codec| *codec != Codec::G729)
+                .all(|codec| CodecCatalog::new().codecs().contains(&codec)),
+            "every other codec is still offered"
+        );
+
+        let offer = CodecCatalog::with_order(&["g729", "PCMA"])
+            .unwrap()
+            .capabilities()
+            .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(offer.formats, ["18", "8", "96"]);
+        assert_eq!(
+            offer.rtpmap(18).map(|map| map.to_value()).as_deref(),
+            Some("18 G729/8000")
+        );
+        assert_eq!(offer.fmtp(18), Some("annexb=no"));
+        assert_eq!(Codec::G729.answer_fmtp(), Some("annexb=no"));
+        assert_eq!(Codec::Pcma.answer_fmtp(), None);
+    }
+
+    /// G.729 codes ten milliseconds at a time, so an order naming it takes a
+    /// frame length only in whole tens — and the same length without it is
+    /// still taken.
+    #[test]
+    fn g729_takes_only_whole_ten_millisecond_frames() {
+        let g729 = CodecCatalog::with_order(&["G729"]).unwrap();
+        for millis in [10, 20, 30, 40, 60] {
+            assert_eq!(
+                g729.clone()
+                    .with_frame_length(millis)
+                    .map(|catalog| catalog.frame_length()),
+                Ok(millis)
+            );
+        }
+        for millis in [5, 15, 25] {
+            assert_eq!(
+                g729.clone().with_frame_length(millis).unwrap_err(),
+                MediaError::BadFrameLength { millis }
+            );
+        }
+        let narrowband = CodecCatalog::with_order(&["PCMU"])
+            .unwrap()
+            .with_frame_length(25)
+            .unwrap();
+        assert_eq!(
+            narrowband.with_codecs(&["G729"]).unwrap_err(),
+            MediaError::BadFrameLength { millis: 25 }
+        );
     }
 
     #[test]
@@ -1004,11 +1153,11 @@ pub(crate) mod tests {
 
         // named events and comfort noise are not codecs, whatever number they
         // land on
-        let with_events =
-            CodecCatalog::new()
-                .capabilities()
-                .offer("audio", 40_000, Direction::SendRecv);
-        assert_eq!(Codec::named_in(&with_events), Codec::ALL);
+        let catalog = CodecCatalog::new();
+        let with_events = catalog
+            .capabilities()
+            .offer("audio", 40_000, Direction::SendRecv);
+        assert_eq!(Codec::named_in(&with_events), catalog.codecs());
     }
 
     /// D5: the codec chosen and why each other candidate was not — a lost

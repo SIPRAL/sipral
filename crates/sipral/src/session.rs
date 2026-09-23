@@ -62,7 +62,7 @@ use crate::echo::{Echo, MAX_RENDER_DELAY};
 use crate::error::MediaError;
 use crate::event::MediaEvent;
 use crate::keying::{self, Opening, Shape};
-use crate::pipeline::Coder;
+use crate::pipeline::{Coder, Decoded};
 use crate::record::{Recorder, RecordingSink};
 use crate::stats::StreamStatistics;
 
@@ -164,7 +164,8 @@ pub enum Playback {
     /// One it sent and this end did not get, filled in by the concealment.
     Concealed,
     /// Comfort noise, from an RFC 3389 payload the far end sent instead of
-    /// audio.
+    /// audio, or from a G.729 payload that held nothing but an Annex B SID
+    /// frame.
     ComfortNoise,
     /// Nothing was due: the buffer is still filling, or the far end has
     /// stopped. Silence was written, or comfort noise where the far end has
@@ -1250,10 +1251,22 @@ impl MediaSession {
             }
             Pull::Packet(frame) if frame.payload_type == payload_type => {
                 match coder.decode(frame.payload, room) {
+                    Ok(Decoded::Audio(_)) => Playback::Packet,
+                    // G.729's SID frame: whatever speech came before it, then
+                    // the noise it starts, which the same generator a CN
+                    // payload feeds goes on playing through the pause
+                    Ok(Decoded::Silenced(written, described)) => {
+                        noise.received(described);
+                        noise.fill(room.get_mut(written..).unwrap_or_default());
+                        if written == 0 {
+                            Playback::ComfortNoise
+                        } else {
+                            Playback::Packet
+                        }
+                    }
                     // a payload the codec refuses is a corrupt one, and the
                     // right thing to play for it is the frame it displaced
-                    Ok(_) => Playback::Packet,
-                    Err(_) => conceal(coder, room),
+                    Ok(Decoded::Unreadable) | Err(_) => conceal(coder, room),
                 }
             }
             Pull::Packet(frame)
@@ -2427,13 +2440,13 @@ fn accepted(plan: &MediaPlan) -> PayloadTypes {
 }
 
 /// The other G.711 law's static payload type and the law itself, for a codec
-/// that has one. `None` for G.722 and Opus, whose frame shape a G.711 payload
-/// does not fit.
+/// that has one. `None` for G.722, G.729 and Opus, whose frame shape a G.711
+/// payload does not fit.
 const fn sibling_law(codec: Codec) -> Option<(u8, Law)> {
     match codec {
         Codec::Pcmu => Some((Law::A.payload_type(), Law::A)),
         Codec::Pcma => Some((Law::Mu.payload_type(), Law::Mu)),
-        Codec::G722 => None,
+        Codec::G722 | Codec::G729 => None,
         #[cfg(feature = "opus")]
         Codec::Opus => None,
     }

@@ -425,14 +425,15 @@ Audio device I/O is written in-tree per platform rather than taken from a
 portable library, because the render-to-capture delay and the device-loss
 behaviour the design needs are per platform.
 
-G.711 and G.722 are written in-tree. G.711 is a couple hundred lines and is
-public domain as an algorithm; G.722 is written from the ITU Recommendation,
-because the C implementation everyone links is one the clean-room rules forbid
-and the Rust crate that looks free of it is that implementation with the
-comments intact. G.729 is phase 2, written in-tree the same way: its base
-patents are reported expired since January 2017, which is confirmed in
-writing before the codec ships under the commercial licence; the common
-implementation, bcg729, is GPL-3 and is never opened.
+G.711, G.722 and G.729 are written in-tree. G.711 is a couple hundred lines
+and is public domain as an algorithm; G.722 is written from the ITU
+Recommendation, because the C implementation everyone links is one the
+clean-room rules forbid and the Rust crate that looks free of it is that
+implementation with the comments intact. G.729 is written the same way, from
+the Recommendation and its Implementers' Guide; the common implementation is
+GPL-3 and is never opened, and what the ITU's own software attachment
+contributed — the numbers of its trained tables and nothing else — is in
+`CLEANROOM_AUDIT.md`.
 
 **What is implemented of G.722 is the 1988 base and nothing else**, and that
 boundary is deliberate rather than incidental. The base is clean on primary
@@ -449,6 +450,39 @@ and 48 kbit/s, all of which are in the original Recommendation. The loss
 concealment in `sipral-media` is written for linear PCM from G.711 and derives
 from no ITU appendix. Anyone extending this codec should know they would be
 crossing out of the clean part.
+
+#### G.729's patent position
+
+G.729 was a pooled codec for most of its life, and a licensee's lawyer will
+ask about it before any other codec here, so the position is written down
+rather than assumed.
+
+The essential patents on G.729 and on its Annexes A and B were licensed
+through a pool administered by Sipro Lab Telecom, and they are reported
+expired: the administrator announced the end of its G.729 licensing
+programme as of 1 January 2017, on the ground that the patents in it had
+expired. That is the administrator's statement about the patents it
+licensed, as reported. It has not been checked here patent by patent or
+country by country, and it is confirmed in writing before the codec ships
+under the commercial licence.
+
+What that statement is about, and what it is not about, matters more than
+the date. **What is implemented here is G.729 with Annex A**: Annex A's
+encoder, and a decoder of the bitstream the main body and Annex A share,
+with Annex A's postfilter. Of Annex B the tree reads a SID frame's length
+and its energy level and nothing more — no voice activity detector, no
+discontinuous transmission, no comfort-noise generator of Annex B's own.
+**Not here, and not covered by anything above**: G.729.1, the embedded
+wideband codec, whose patent declarations are far later; the later annexes
+of G.729 — the 6.4 and 11.8 kbit/s extensions (Annexes D and E) and every
+annex after them; and G.729's own appendices. Anyone extending this codec
+into any of those is outside the position this section describes.
+
+Nothing in this file, and nothing in either licence, is a representation
+that Sipral, or G.729 as it is implemented here, infringes no patent; see
+`LICENSE-COMMERCIAL.md`. G.729 is also never in the default offer
+(`docs/05-media.md`): a call carries it only where the application names
+it.
 
 ## Test tooling
 

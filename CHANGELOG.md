@@ -27,6 +27,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   defined" promise does not cover. `org.sipral.idiomatic` reads
   `payload.media.digit` and `payload.registration.state` directly instead
   of the workarounds this replaces.
+- **G.729 in a call, offered only when it is named.** `Codec::G729` is in
+  every build and out of the default offer: a codec order that names
+  `G729` puts it on payload type 18 (`SIPRAL_CODEC_G729` in the C ABI),
+  ten-millisecond frames, two to a packet by default, lost frames concealed
+  by the codec's own concealment. Annex B is not built, so every offer and
+  every answer says `annexb=no` whatever the offer said, and a SID frame
+  from a peer that sends one anyway plays as flat comfort noise at the level
+  it states rather than as noise or a gap. A `media_g729` fuzz target
+  covers the decoder, the payload reader and the encoder, and the lab runs
+  a G.729-only call through Asterisk's echo extension, untranscoded, and
+  hears its own tone come back.
 - **A G.729 encoder, bit-exact against every Annex A conformance input.**
   `sipral_media::g729::Encoder` encodes eighty samples into a ten-octet
   frame, or a buffer of several frames into an RTP payload, in Annex A's
@@ -46,7 +57,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   settled against the ITU's conformance streams, which are used where they
   were obtained and never committed. All ten streams decode sample for
   sample; `docs/05-media.md` has the table and the places where the streams
-  and the text disagree. Not yet offered in a call.
+  and the text disagree.
 - **A `THIRD-PARTY-LICENSES.txt` that actually carries the licence texts a
   binary has to ship.** `THIRD-PARTY-NOTICES.md` named the dependencies and
   their licences but reproduced no licence text and no MIT copyright line, so

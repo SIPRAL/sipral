@@ -179,7 +179,12 @@ and each is cheaper before the ABI carries it than after:
   confirmed in writing before the codec ships under the commercial licence,
   and G.729.1 and the later annexes stay out. Not in the default offer:
   narrower and worse than Opus or G.722, it is there for the carrier that
-  insists.
+  insists. *Built* (task 8.6.15), Annex A: the encoder and the decoder
+  bit-exact against every ITU Annex A conformance stream, in a call on
+  payload type 18 when an order names it, and heard through the lab's
+  Asterisk. Annex B is not: every description says `annexb=no`, and a SID
+  frame from a peer that sends one anyway plays as flat comfort noise at
+  its level (`docs/05-media.md`).
 - **DTLS-SRTP** (RFC 5764), decided on 10 September 2026: written in-tree.
   `rustls` carries no DTLS and no permissively licensed DTLS crate is mature,
   so the DTLS 1.2 state machine — both roles, retransmission, fragmentation,

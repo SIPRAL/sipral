@@ -25,7 +25,9 @@
 //! searches and the adaptive codebook), `acelp` (the fixed codebook and its
 //! search), `gain` (the gain quantizer both ways), `taming` (the encoder's
 //! control of pitch-gain instability), `lpc` (the filters), `postfilter`,
-//! `bits`, `tables`, and `encoder` for the encoder's frame loop. Where the
+//! `bits`, `tables`, `encoder` for the encoder's frame loop, and `payload`
+//! for what an RTP payload of the codec holds ([`Payload`]: speech frames,
+//! and perhaps an Annex B SID frame, [`Sid`], at the end). Where the
 //! text does not pin the arithmetic down to the bit, the ITU's conformance
 //! streams decided, and the constant or the step says so where it is
 //! written.
@@ -66,6 +68,7 @@ mod encoder;
 mod gain;
 mod lpc;
 mod lsp;
+mod payload;
 mod pitch;
 mod postfilter;
 mod tables;
@@ -75,6 +78,7 @@ mod taming;
 mod conformance;
 
 pub use encoder::Encoder;
+pub use payload::{Payload, SID_OCTETS, Sid};
 
 use arith::{long_mult, long_shift_left, mac, round, shift_right};
 use bits::{Frame, Subframe};
@@ -202,7 +206,8 @@ impl Decoder {
     /// Decode as many whole frames as `octets` holds and `samples` has room
     /// for, the way an RTP payload of several frames arrives (RFC 3551
     /// §4.5.6), and return the samples written. Octets left over after the
-    /// last whole frame are not decoded.
+    /// last whole frame are not decoded: a SID frame is not speech, and
+    /// [`Payload`] is how a caller finds one.
     pub fn decode_into(&mut self, octets: &[u8], samples: &mut [i16]) -> usize {
         let frames = (octets.len() / FRAME_OCTETS).min(samples.len() / FRAME_SAMPLES);
         for (frame, out) in octets

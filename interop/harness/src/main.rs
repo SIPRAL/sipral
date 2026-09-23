@@ -107,6 +107,10 @@ fn seconds_from(name: &str, fallback: u64) -> Duration {
 /// outcome rather than a timeout.
 const SETTLE: Duration = Duration::from_secs(1);
 
+/// Audible frames `Flow::G729` has to hear back from the echo: half a second
+/// of twenty-millisecond frames.
+const G729_ECHOED: u32 = 25;
+
 /// The digit `Flow::Dtmf4733` sends and expects back.
 const TEST_DIGIT: Digit = Digit::Number(5);
 
@@ -145,10 +149,19 @@ fn catalog() -> CodecCatalog {
 /// answered plainly if the far end turns out not to key the call — the whole
 /// point of each is that the call runs under SDES, or under a DTLS-SRTP
 /// handshake, or does not run at all.
+///
+/// [`Flow::G729`] offers G.729 alone: an offer with G.711 beside it would let
+/// the far end pick the codec the other flows already prove, and the flow
+/// would pass having proved nothing about this one.
 fn catalog_for(flow: Flow) -> CodecCatalog {
     match flow {
         Flow::Srtp | Flow::PeerSrtp => catalog().with_srtp(SrtpPolicy::Required),
         Flow::Dtls | Flow::PeerDtls => catalog().with_srtp(SrtpPolicy::DtlsRequired),
+        // this build always has G.729, so the fallback is never taken; it
+        // keeps this a catalogue rather than a panic, like `catalog`'s own
+        Flow::G729 => catalog()
+            .with_codecs(&["G729"])
+            .unwrap_or_else(|_| catalog()),
         _ => catalog(),
     }
 }
@@ -213,6 +226,11 @@ fn main() -> ExitCode {
     // account whose AOR has `mailboxes=9007@default`
     let mwi_user = env::var("SIPRAL_USER_MWI").unwrap_or_else(|_| "labuser-mwi".to_owned());
     let mwi_pass = env::var("SIPRAL_PASS_MWI").unwrap_or_else(|_| pass.clone());
+    // the G.729 endpoint (interop/asterisk's `labuser-g729`), the only one
+    // that allows the codec, so every other flow's offer is answered as it
+    // always was
+    let g729_user = env::var("SIPRAL_USER_G729").unwrap_or_else(|_| "labuser-g729".to_owned());
+    let g729_pass = env::var("SIPRAL_PASS_G729").unwrap_or_else(|_| pass.clone());
     let wanted = env::var("SIPRAL_FLOWS").unwrap_or_default();
 
     let Some(remote) = resolve(&server, port) else {
@@ -241,6 +259,7 @@ fn main() -> ExitCode {
         flows.push(Flow::HoldCodecChange);
         flows.push(Flow::Message);
         flows.push(Flow::Mwi);
+        flows.push(Flow::G729);
     }
     // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
     flows.push(Flow::Dtls);
@@ -268,6 +287,7 @@ fn main() -> ExitCode {
             // and FreeSWITCH behind it decides per extension, not per account
             Flow::Dtls if server == "asterisk" => (dtls_user.as_str(), dtls_pass.as_str()),
             Flow::Mwi => (mwi_user.as_str(), mwi_pass.as_str()),
+            Flow::G729 => (g729_user.as_str(), g729_pass.as_str()),
             _ => (user.as_str(), pass.as_str()),
         };
         match run(
@@ -407,6 +427,15 @@ enum Flow {
     /// Asterisk's and FreeSWITCH's, on the far side of a call this stack
     /// placed rather than one it answered.
     PeerDtls,
+    /// A call offering G.729 and nothing else, as Asterisk's own
+    /// `labuser-g729` (the one endpoint that allows it), to the lab's echo
+    /// extension (9008): the tone this end's G.729 encoder writes goes to
+    /// Asterisk and comes back, and this end's decoder has to hear it. The
+    /// lab's Asterisk carries no G.729 translator, so it cannot have decoded
+    /// and re-encoded the frames on the way — what comes back is what this
+    /// end sent, handed back by `Echo()` on a channel that is G.729 at both
+    /// ends.
+    G729,
 }
 
 impl Flow {
@@ -426,6 +455,7 @@ impl Flow {
             Self::Mwi => "message waiting indication",
             Self::PeerSrtp => "SRTP, phone to phone",
             Self::PeerDtls => "DTLS-SRTP, phone to phone",
+            Self::G729 => "G.729, echoed",
         }
     }
 
@@ -446,6 +476,7 @@ impl Flow {
             Self::Mwi => "mwi",
             Self::PeerSrtp => "peersrtp",
             Self::PeerDtls => "peerdtls",
+            Self::G729 => "g729",
         }
     }
 }
@@ -1209,7 +1240,7 @@ impl Script {
             Step::Talking
                 if matches!(
                     self.flow,
-                    Flow::Call | Flow::Srtp | Flow::Mwi | Flow::PeerSrtp
+                    Flow::Call | Flow::Srtp | Flow::Mwi | Flow::PeerSrtp | Flow::G729
                 ) =>
             {
                 self.listen_until = Some(now + dwell());
@@ -1387,8 +1418,8 @@ impl Script {
     /// a dialplan entry of their own: `Flow::Dtmf4733` and `Flow::DtmfInfo`
     /// (interop/asterisk and interop/freeswitch both add 9003 for the first;
     /// only Asterisk runs the second, over its own `labuser-infodtmf`
-    /// endpoint), `Flow::Srtp` (9004) and `Flow::Mwi`'s own voicemail
-    /// extension (9007), both Asterisk only — see
+    /// endpoint), `Flow::Srtp` (9004), `Flow::Mwi`'s own voicemail
+    /// extension (9007) and `Flow::G729`'s echo (9008), all Asterisk only — see
     /// `interop/asterisk/extensions.conf` — and `Flow::Dtls` (9005, on both).
     /// `Flow::Message` places no call at all; its own extension (9006) is
     /// named directly in `advance`. `Flow::Call` and `Flow::Hold` reused
@@ -1404,6 +1435,7 @@ impl Script {
             Flow::Srtp => "9004".to_owned(),
             Flow::Dtls => "9005".to_owned(),
             Flow::Mwi => "9007".to_owned(),
+            Flow::G729 => "9008".to_owned(),
             Flow::PeerSrtp => "baresip-srtp".to_owned(),
             Flow::PeerDtls => "baresip-dtls".to_owned(),
             _ => self.extension.clone(),
@@ -1517,6 +1549,23 @@ impl Script {
                 heard.sent, heard.received, heard.refused
             ));
         }
+        // the G.729 call's claim is the codec and the echo together: a call
+        // that settled on anything else proved nothing about G.729, and the
+        // echo of a tone that went out as G.729 has to come back as more
+        // than a stray frame — half a second of it, of the two seconds the
+        // call dwells, a third of which is the tone's own pauses
+        if self.flow == Flow::G729 {
+            if let Some(codec) = self.original_codec.filter(|codec| *codec != Codec::G729) {
+                return Err(format!("the call settled on {codec}, not G.729"));
+            }
+            if require_audio && heard.audible < G729_ECHOED {
+                return Err(format!(
+                    "the echo came back as {} audible frames of {G729_ECHOED} wanted: {} sent, \
+                     {} received, {} refused",
+                    heard.audible, heard.sent, heard.received, heard.refused
+                ));
+            }
+        }
         // and the DTLS call's claim is about after the re-offers, not before:
         // audio before the hold only says the first handshake worked
         if matches!(self.flow, Flow::Dtls | Flow::PeerDtls)
@@ -1543,7 +1592,7 @@ impl Script {
             // Ours, and before Over: a far end that answers and hangs up half a
             // millisecond later satisfies "connected" and "ended" without the
             // call ever having been one
-            Flow::Call | Flow::Srtp | Flow::PeerSrtp => {
+            Flow::Call | Flow::Srtp | Flow::PeerSrtp | Flow::G729 => {
                 const CALL: &[(Fact, &str)] = &[
                     (Fact::Registered, "no binding was granted"),
                     (Fact::Up, "the call did not connect"),
@@ -1852,6 +1901,7 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::Mwi => [113; 32],
         Flow::PeerSrtp => [131; 32],
         Flow::PeerDtls => [137; 32],
+        Flow::G729 => [139; 32],
     }
 }
 
@@ -1874,6 +1924,7 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::Mwi => [223; 32],
         Flow::PeerSrtp => [227; 32],
         Flow::PeerDtls => [229; 32],
+        Flow::G729 => [233; 32],
     }
 }
 

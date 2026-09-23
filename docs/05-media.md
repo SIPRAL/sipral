@@ -1135,8 +1135,8 @@ The pipeline between the codec and whatever produces or consumes samples.
   is on, for the reason below. G.729 for the carrier that insists, written
   in-tree the same way, because the common implementation is GPL and the base
   patents are reported expired: the encoder and the decoder are here
-  (`sipral_media::g729`, below), not yet offered in a call, and never in the
-  default offer.
+  (`sipral_media::g729`, below), offered in a call where the application's
+  codec order names `G729`, and never in the default offer.
 
   G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
@@ -1193,8 +1193,10 @@ Two behaviours no stream reaches are chosen from the text rather than
 checked: the LSF stability check's floor and ceiling are the nearest values
 to 0.005 and 3.135, and a stream that loses its very first frame conceals it
 with the shortest delay the codebook has, because §4.3's zero is not a delay.
-Annex B's comfort noise is not decoded yet: a two-octet SID frame at the end
-of a payload is left undecoded by `decode_into`.
+Annex B's comfort noise is not decoded: `decode_into` decodes the speech
+frames of a payload and leaves a two-octet SID frame at its end alone, and
+`g729::Payload` is how a caller finds one — what a call does with it is
+under "G.729 in a call", below.
 
 ### G.729: the encoder, bit-exact against Annex A
 
@@ -1244,6 +1246,61 @@ evaluation's floor, the impulse response's halving before the codebook
 search, or the exact value of the preselection's inverse slope. None of
 them is confirmed by a stream, and the modules say so where each is
 written.
+
+### G.729 in a call
+
+`Codec::G729` is in every build and in no default offer.
+`CodecCatalog::new` offers everything else the build has; a site or a call
+that wants G.729 names it (`CodecCatalog::with_order(&["G729", ...])`, or
+`G729` in the C ABI's codec list), and only then does it go on the `m=`
+line. It is narrowband and eight kilobits, worse to the ear than G.711 and
+far worse than G.722 or Opus, and RFC 3264 §6.1 lets the far end's own order
+pick among what both sides list — so a G.729 in every offer is a G.729 call
+with every peer that happens to prefer it, which is not a default anyone
+should get without asking.
+
+On the wire it is RFC 3551 §4.5.6's format: payload type 18, `G729/8000`,
+ten octets a ten-millisecond frame, as many frames to a packet as the frame
+length cuts — two at the default twenty milliseconds, twenty octets behind
+the header. A catalogue that names G.729 takes a frame length only in whole
+tens of milliseconds, and refuses any other where it is set. Payloads that
+arrive are read by their length: whole frames, and then at most one
+two-octet Annex B SID frame; any other length is not a G.729 payload and the
+frame it displaced is concealed. A lost frame is concealed by the codec's
+own §4.4 concealment, inside the decoder's state, rather than by the
+waveform concealer G.711 and G.722 use.
+
+**Annex B is not implemented, and every description says so.** RFC 3555
+§4.1.9 (RFC 4856 §2.1.9 after it) reads a `G729` line with no `annexb`
+parameter as `annexb=yes`, and RFC 3551 has a receiver accept comfort-noise
+frames unless their use was restricted. So this stack writes `a=fmtp:18
+annexb=no` in its offers and in its answers, whatever the offer said —
+`Codec::answer_fmtp` is the one parameter the facade states rather than
+echoes. It never sends a SID frame. A peer that sends one anyway is not
+played as garbage or as a gap: the SID starts a pause at the level of the
+last frame decoded before it, each later SID of the same pause moves that
+level by the change in energy it carries (B.4.2.1's decibels, the one part
+of the frame read), and the facade's own RFC 3389 generator plays it, on
+through the silence the far end then keeps, exactly as a CN payload would.
+The noise is flat: Annex B's comfort noise is shaped by the SID's spectrum,
+and that part of the frame, like the rest of Annex B, is not decoded. One
+gap in the statement: a re-offer inside a call that the user agent answers
+by itself (a hold, say) echoes the offer's `annexb`, since that layer does
+not know codecs; the call then still sends no SID, and plays any it gets
+the same way.
+
+What is established about it, in three tiers:
+
+| | What | How |
+|---|---|---|
+| Bit-exact | Annex A's decoder and encoder | every ITU Annex A conformance stream and input, bit for bit (above) |
+| Interoperable | a call offered G.729 alone, through the lab's Asterisk to its echo extension and back | `interop/harness`'s own `g729` flow: this end's encoder, Asterisk passing the frames through untranscoded, this end's decoder hearing the tone |
+| Not implemented | Annex B: the voice activity detector, discontinuous transmission, the SID's spectrum and Annex B's comfort-noise generator | a SID frame received is played as level-matched flat noise; none is sent |
+
+G.113 rates G.729 in Table I.4 only with Annex B, so `Codec::quality_model`
+answers `None` for it, the way it does for G.722: an XR VoIP Metrics report
+on a G.729 call carries the R factor and MOS "unavailable" sentinel rather
+than numbers for a codec this build does not carry.
 - **Echo cancellation, gain control, noise suppression** are attached at a seam,
   not implemented here. This is signal processing research, it exists under a
   permissive licence, and rewriting it would buy nothing that a customer pays
@@ -1275,15 +1332,16 @@ there is off, or two variants labelled clearly enough that nobody ships the
 wrong one without noticing. It is written down where the packaging is — the
 artefact bullet of phase 3 in `docs/10-roadmap.md` — and not decided here.
 
-A build without it offers G.722 and the two G.711 laws, and it needs no cmake
+A build without it offers G.722 and the two G.711 laws — and G.729 where an
+order names it, as every build does — and it needs no cmake
 and no C++ toolchain, because nothing compiles libopus from source: on a bare
 machine that build is a Rust compiler and nothing else. Nothing else about it
 is a special case. There is no `sipral_media::opus` and nothing links
-libopus; `Codec::ALL` is three long; a codec order naming `opus` is refused
-where it is set, by name, exactly as one naming G.729 is; and an offer that
+libopus; `Codec::ALL` is four long; a codec order naming `opus` is refused
+where it is set, by name, exactly as one naming G.723 is; and an offer that
 names Opus and nothing else ends as no common codec, on the ordinary path.
 Across the C ABI the `SIPRAL_FEATURE_OPUS` bit is clear and
-`sipral_codec_count` answers three, while `SIPRAL_CODEC_OPUS` is still 4: a
+`sipral_codec_count` answers four, while `SIPRAL_CODEC_OPUS` is still 4: a
 number that has left the header is spent for good, whatever the build behind
 it can encode. The bit, the name `sipral_codec_name` gives 4 and the number a
 stream reports are all read from the codec catalogue and never from

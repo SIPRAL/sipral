@@ -300,14 +300,14 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than twenty-seven runs beginning at
+targets with something to start from rather than twenty-eight runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Twenty-six of
-the twenty-seven families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing. Twenty-seven of
+the twenty-eight families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -341,7 +341,7 @@ about 24 billion executions, and nothing found on any of them.
 `headless_media`, the newest, has not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all twenty-seven, under the nightly that `fuzz/` pins, so
+do on every run is **build** all twenty-eight, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -610,6 +610,7 @@ server:
 | local conference | two calls placed on one account — one to the lab's own tone extension (9000), one to its echo extension (9008, `Answer(); Echo();`) — joined with `MediaEngine::join` and driven a frame at a time with `MediaEngine::mix`; passes once several frames are audible while the tone extension's own cadence says it should be silent, which only the echo extension playing back what this end had just relayed to it can produce (`interop/harness/src/join.rs`'s own module documentation has the reasoning) | Asterisk only |
 | MESSAGE, echoed | an out-of-dialog MESSAGE (`UserAgent::message`) sent to the lab's own echo extension (`interop/asterisk/extensions.conf`'s 9006, `MessageSend()`), answered with success (`UaEvent::MessageSent`), and a MESSAGE of the dialplan's own arriving back (`UaEvent::MessageReceived`) — proving both directions, not only that this end's own send was accepted | Asterisk only |
 | message waiting indication | a subscription to `message-summary` for this account's own mailbox (`labuser-mwi`, whose AOR in `interop/asterisk/pjsip.conf` has `mailboxes=9007@default` — on the AOR, since that is what a SUBSCRIBE is matched against; on the endpoint it means unsolicited NOTIFYs and every SUBSCRIBE is answered 404), read once before anything is left in it; a call into the lab's own mailbox extension (9007), whose hangup handler raises the mailbox's new-message count by one with `MinivmMWI()`, keeping the count itself since `MinivmMWI()` publishes a count rather than adding to one, so each driver's flow in the same lab run sees its own call raise it — not `VoiceMail()`, which cannot record in this image because it ships no sound files and the greeting fails; and the mailbox's `new` count (`UaEvent::MessagesWaiting`) read higher once Asterisk's own `res_pjsip_mwi` reports it — not that it starts at zero, since an earlier run may have left mail behind | Asterisk only |
+| G.729, echoed | a call offering G.729 and nothing else (`CodecCatalog::with_codecs(&["G729"])`, so `a=fmtp:18 annexb=no` in the offer), as the lab's own `labuser-g729` — the one endpoint in `interop/asterisk/pjsip.conf` that allows the codec, and it allows nothing else — to the echo extension (9008); connected on G.729 (a call that settled on anything else fails the flow by name), hung up by this end, ended, and at least half a second of this end's own cadenced tone heard back. The image carries `format_g729` and `res_format_attr_g729` and no G.729 translator, so Asterisk cannot have decoded and re-encoded the frames: what comes back is what this end's encoder wrote, handed back by `Echo()`, decoded by this end's decoder | Asterisk only |
 | behind a NAT, through STUN (C ABI only; `scripts/lab.sh nat`) | the C harness on a network of its own (`inside`, `interop/compose.yaml`) whose only way out is `interop/nat`'s masquerading NAT, with `SIPRAL_NAT_STUN` against coturn on the lab network: both sockets' answers have to differ from the addresses they are bound to, in the host and in the port — the NAT moves the harness's two fixed ports to others, so a `Contact` or an `m=` that kept the socket's own port reaches nothing; otherwise the run fails as proving nothing — Asterisk's own 200 to the REGISTER has to list the public address among its bindings and not the private one, the tone has to come back (Asterisk sends RTP only where `c=` says, and the private address is on a network it has no route to), and a hold's re-offer, read back from `SIPRAL_EVENT_KIND_SESSION_CHANGED`, has to name the public address in `c=` and `m=` | Asterisk only |
 | inbound, narrowed (opt-in: `SIPRAL_USER_WIDE`/`SIPRAL_PASS_WIDE`) | a wide offer from the server narrowed to G.711 by `MediaEngine::answer`, read back through `MediaSession::codec_candidates` rather than the offer's own list | as configured |
 | a call on PipeWire's devices (opt-in: `scripts/lab.sh pipewire`) | a call to the echo extension (9008) whose microphone and earpiece are `sipral-io-pipewire` streams on a real PipeWire graph, paced by the graph rather than by a timer: the lab's cadenced tone is played into one virtual cable, the call's microphone reads the other end of it, the call's earpiece plays into a second cable, and the tone has to come back out of that second cable — at least half a second of it, at its own pitch — which it can only do by crossing the whole path. `interop/harness/src/pipewire.rs` has the reasoning; `interop/pipewire/run.sh` builds the graph, in `interop/pipewire/Dockerfile`'s image, and runs the crate's own tests against it first | Asterisk only |
@@ -707,7 +708,7 @@ strict `-std` and the Apple SDK does not, so the compiler here alone passes a
 file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all twenty-seven fuzz targets under their own nightly — which nothing else
+over all twenty-eight fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

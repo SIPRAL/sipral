@@ -615,6 +615,13 @@ enum {
      * `sipral_codec_at` enumerates, never the presence of this name.
      */
     SIPRAL_CODEC_OPUS = 4,
+    /**
+     * G.729 with Annex A, payload type 18: eight kilobits of narrowband
+     * speech. In every build and in no default offer: a call offers it
+     * only when a codec order names `G729`, and it states `annexb=no`
+     * wherever it is offered or answered.
+     */
+    SIPRAL_CODEC_G729 = 5,
 };
 
 /**
@@ -5499,7 +5506,8 @@ sipral_status_t sipral_codec_count(size_t *out_count);
  * One of them, by index, from zero to what `sipral_codec_count` said.
  *
  * The order is this build's own preference, quality first, which is what
- * is offered when nobody has said otherwise.
+ * is offered when nobody has said otherwise — all of it but G.729, which
+ * is listed last and offered only where a codec order names it.
  *
  * Safety
  *

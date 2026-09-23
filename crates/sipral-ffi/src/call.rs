@@ -4094,7 +4094,7 @@ a=sendrecv\r\n";
             ("", SipralStatus::InvalidArgument),
             ("PCMU,,PCMA", SipralStatus::InvalidArgument),
             ("PCMU,pcmu", SipralStatus::InvalidArgument),
-            ("G729", SipralStatus::NotSupported),
+            ("G723", SipralStatus::NotSupported),
         ] {
             assert_eq!(
                 change_codecs(handle, call, list, 1_200),

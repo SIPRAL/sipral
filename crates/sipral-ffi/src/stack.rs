@@ -2413,8 +2413,12 @@ pub(crate) mod tests {
         let read = read_settings(handle);
         assert_eq!(
             read.codec_count,
-            Codec::ALL.len(),
-            "everything this build contains"
+            Codec::ALL
+                .iter()
+                .filter(|codec| codec.offered_by_default())
+                .count(),
+            "everything this build offers when nothing was named: all it \
+             contains but G.729"
         );
         assert_eq!(read.frame_ms, 20, "the default, not the zero given");
         assert_eq!(read.offer_dtmf, SipralToggle::On as u32);
@@ -2455,7 +2459,7 @@ pub(crate) mod tests {
     fn a_codec_this_build_cannot_encode_stops_the_stack_from_being_made() {
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
-        let absent = "PCMU,G729";
+        let absent = "PCMU,G723";
         config.codecs = absent.as_ptr().cast::<c_char>();
         config.codecs_len = absent.len();
         let (status, handle) = create(&config);
@@ -2463,7 +2467,7 @@ pub(crate) mod tests {
         assert_eq!(handle, SIPRAL_HANDLE_NONE);
         let message = last_error_text();
         assert!(
-            message.contains("G729") && message.contains("PCMA"),
+            message.contains("G723") && message.contains("PCMA"),
             "the message names neither what was asked for nor what there is: {message}"
         );
     }

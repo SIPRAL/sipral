@@ -1126,8 +1126,8 @@ fn sample_from_pair(pair: &[u8]) -> i16 {
 }
 
 /// Appends one length-prefixed chunk of samples the way every `media_*`
-/// target but `media_comfort_noise`, `media_g722`, `media_mix` and
-/// `media_opus` cuts its input: one octet holding the sample count, then that
+/// target but `media_comfort_noise`, `media_g722`, `media_g729`, `media_mix`
+/// and `media_opus` cuts its input: one octet holding the sample count, then that
 /// many samples in native-endian pairs. `control` is the byte in front of the
 /// length for the two targets — `media_plc`, whose control bit chooses
 /// `received` or `conceal`, and every other target, which reads nothing there
@@ -1402,6 +1402,84 @@ fn through_media_g722(name: &str, data: &[u8]) -> Result<(), Wrong> {
         "the {name} seed decoded to {written} samples, not {}",
         rest.len() * 2
     )))
+}
+
+/// `media_g729` reads its input twice: as one RTP payload, and as a stream
+/// in which a tag octet names what follows — `0` a ten-octet frame, `1` a
+/// two-octet SID frame, `2` a lost frame with nothing after it. The seeds
+/// are this repository's own encoder's frames, one of them in each shape.
+fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
+    use sipral_media::g729::{Encoder, FRAME_OCTETS};
+
+    let mut encoder = Encoder::new();
+    let samples = triangle(240, 20, 9_000);
+    let mut payload = vec![0_u8; samples.len() / 8];
+    encoder.encode_into(&samples, &mut payload);
+
+    // two frames and a SID at the end: RFC 3551 §4.5.6's whole shape
+    let mut with_sid = payload
+        .get(..2 * FRAME_OCTETS)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    with_sid.extend_from_slice(&[0x00, 0x14]);
+
+    // each frame behind its tag, a SID frame, a loss, and one frame more
+    let mut stream = Vec::new();
+    for frame in payload.chunks_exact(FRAME_OCTETS) {
+        stream.push(0);
+        stream.extend_from_slice(frame);
+    }
+    stream.extend_from_slice(&[1, 0x00, 0x14, 2]);
+    stream.push(0);
+    stream.extend_from_slice(payload.get(..FRAME_OCTETS).unwrap_or_default());
+
+    let out = vec![
+        ("three-encoded-frames", payload),
+        ("two-frames-and-a-sid", with_sid),
+        ("frames-a-sid-and-a-loss", stream),
+    ];
+    for (name, bytes) in &out {
+        through_media_g729(name, bytes)?;
+    }
+    Ok(out)
+}
+
+/// The two readings `media_g729` gives its input, and the one each seed was
+/// written for has to hold: a payload of whole frames and at most one SID,
+/// or a stream whose every tag is followed by all of what it names.
+fn through_media_g729(name: &str, data: &[u8]) -> Result<(), Wrong> {
+    use sipral_media::g729::{Decoder, FRAME_OCTETS, FRAME_SAMPLES, Payload, SID_OCTETS};
+
+    if let Some(payload) = Payload::parse(data) {
+        let mut samples = vec![0_i16; payload.frame_count() * FRAME_SAMPLES];
+        let written = Decoder::new().decode_into(payload.speech(), &mut samples);
+        if written == samples.len() {
+            return Ok(());
+        }
+        return Err(Wrong(format!(
+            "the {name} seed decoded to {written} samples, not {}",
+            samples.len()
+        )));
+    }
+    let mut rest = data;
+    while let Some((&tag, after)) = rest.split_first() {
+        let needed = match tag {
+            0 => FRAME_OCTETS,
+            1 => SID_OCTETS,
+            2 => 0,
+            other => {
+                return Err(Wrong(format!(
+                    "the {name} seed has a tag of {other}, which names nothing"
+                )));
+            }
+        };
+        rest = after.get(needed..).ok_or_else(|| {
+            Wrong(format!(
+                "the {name} seed ends inside what its last tag names"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn media_mix_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -2059,6 +2137,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("media_comfort_noise", media_comfort_noise_seeds()?),
         ("media_drift", media_drift_seeds()?),
         ("media_g722", media_g722_seeds()?),
+        ("media_g729", media_g729_seeds()?),
         ("media_mix", media_mix_seeds()?),
         ("media_opus", media_opus_seeds()?),
         ("media_plc", media_plc_seeds()?),

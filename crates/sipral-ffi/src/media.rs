@@ -236,6 +236,11 @@ codes! {
         /// codec is here is `SIPRAL_FEATURE_OPUS` and the list
         /// `sipral_codec_at` enumerates, never the presence of this name.
         Opus = 4,
+        /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
+        /// speech. In every build and in no default offer: a call offers it
+        /// only when a codec order names `G729`, and it states `annexb=no`
+        /// wherever it is offered or answered.
+        G729 = 5,
     }
 }
 
@@ -746,6 +751,7 @@ pub(crate) const fn named_codec(codec: Codec) -> SipralCodec {
         Codec::Pcmu => SipralCodec::Pcmu,
         Codec::Pcma => SipralCodec::Pcma,
         Codec::G722 => SipralCodec::G722,
+        Codec::G729 => SipralCodec::G729,
         // the layer below has grown a codec this ABI has no number for, and
         // saying so beats picking one that is wrong
         _ => SipralCodec::Unknown,
@@ -1344,6 +1350,7 @@ entry! {
             // linked the codec; the name is what the build has, which the
             // catalogue says and no feature of this crate's does
             4 if linked(SipralCodec::Opus) => c"opus".as_ptr(),
+            5 => c"G729".as_ptr(),
             _ => std::ptr::null(),
         }
     }
@@ -1371,7 +1378,8 @@ entry! {
     /// One of them, by index, from zero to what `sipral_codec_count` said.
     ///
     /// The order is this build's own preference, quality first, which is what
-    /// is offered when nobody has said otherwise.
+    /// is offered when nobody has said otherwise — all of it but G.729, which
+    /// is listed last and offered only where a codec order names it.
     ///
     /// # Safety
     ///
@@ -2755,8 +2763,14 @@ a=sendrecv\r\n";
             "the number is published in every build and the name is the \
              catalogue's: null where this build linked no Opus"
         );
+        assert_eq!(SipralCodec::G729 as u32, 5);
+        assert_eq!(
+            name(SipralCodec::G729 as u32).as_deref(),
+            Some("G729"),
+            "written in-tree, so in every build"
+        );
         assert_eq!(name(0), None, "no codec is zero");
-        assert_eq!(name(5), None);
+        assert_eq!(name(6), None);
         assert_eq!(name(u32::MAX), None);
     }
 
@@ -2846,7 +2860,7 @@ a=sendrecv\r\n";
     /// value" rather than the one that means "try a different value".
     #[test]
     fn a_codec_this_build_has_no_encoder_for_is_refused_where_it_is_set() {
-        let refused = ordered("PCMA,G729").expect_err("G.729 is not in this build");
+        let refused = ordered("PCMA,G723").expect_err("G.723.1 is not in this build");
         assert_eq!(refused.status, SipralStatus::NotSupported);
 
         let refused = ordered("speex").expect_err("nor is Speex");
@@ -3045,7 +3059,7 @@ a=sendrecv\r\n";
     fn every_media_failure_has_a_code_a_machine_can_switch_on() {
         let cases = [
             (
-                MediaError::unsupported("G729"),
+                MediaError::unsupported("G723"),
                 SipralStatus::NotSupported,
                 SipralMediaFault::UnsupportedCodec,
             ),

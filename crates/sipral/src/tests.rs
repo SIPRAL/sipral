@@ -990,6 +990,118 @@ fn a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard() {
     );
 }
 
+/// G.729 end to end: offered only because the order names it, on its static
+/// type with `annexb=no` both ways, twenty octets a packet, and the tone
+/// through this stack's own encoder and decoder.
+#[test]
+fn a_call_on_g729_carries_the_tone_and_takes_no_annex_b() {
+    let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let offer = one_stream(&pair.callee.offer_received().expect("an offer"));
+    let answer = one_stream(&pair.caller.answer_received().expect("an answer"));
+    for (stream, which) in [(&offer, "offer"), (&answer, "answer")] {
+        assert_eq!(
+            stream.formats.first().map(String::as_str),
+            Some("18"),
+            "{which}"
+        );
+        assert_eq!(stream.fmtp(18), Some("annexb=no"), "{which}");
+    }
+    let session = pair.caller.engine.session(call).expect("media");
+    assert_eq!(session.codec(), Codec::G729);
+    assert_eq!(session.frame_samples(), 160);
+    drop(session);
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut heard = Vec::new();
+    for _ in 0..25 {
+        tone(&mut samples, 8_000, &mut phase);
+        heard = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert_eq!(heard.len(), 160);
+    assert!(
+        loudness(&heard) > 2_000,
+        "the tone came back at {} rather than crossing the call",
+        loudness(&heard)
+    );
+
+    tone(&mut samples, 8_000, &mut phase);
+    let (sent, _) = pair.speak(call, remote, &samples);
+    assert_eq!(
+        sent.len(),
+        12 + 20,
+        "two ten-octet frames behind the header"
+    );
+}
+
+/// A peer that sends Annex B anyway: a payload of nothing but a SID frame
+/// starts comfort noise, and the silence the far end then keeps is filled
+/// with the same noise rather than with nothing.
+#[test]
+fn a_g729_sid_frame_from_the_far_end_is_played_as_comfort_noise() {
+    let catalog = CodecCatalog::with_order(&["G729"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    for _ in 0..25 {
+        tone(&mut samples, 8_000, &mut phase);
+        let _ = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+
+    // the next packet, cut down to its header and two octets of SID
+    tone(&mut samples, 8_000, &mut phase);
+    let mut datagram = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media")
+        .capture(&samples, pair.now)
+        .expect("the frame encodes")
+        .map(|datagram| datagram.payload.to_vec())
+        .expect("a frame goes out");
+    datagram.truncate(12);
+    datagram.extend_from_slice(&[0x00, 0x14]);
+
+    let mut session = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media");
+    assert_eq!(
+        session.receive(&mut datagram, caller_media(), pair.now),
+        Arrival::Queued
+    );
+    // the buffer still holds the speech ahead of the SID for a frame or
+    // two; after it, nothing more arrives, since the far end is in its pause
+    let mut played = vec![0_i16; 160];
+    let mut outcomes = Vec::new();
+    for _ in 0..6 {
+        let outcome = session.playback(&mut played);
+        outcomes.push((outcome, loudness(&played)));
+    }
+    let paused = outcomes
+        .iter()
+        .position(|(outcome, _)| *outcome != Playback::Packet)
+        .expect("something other than a packet was played");
+    let pause = &outcomes[paused..];
+    assert!(pause.len() >= 3, "{outcomes:?}");
+    assert!(
+        pause
+            .iter()
+            .all(|(outcome, loud)| *outcome == Playback::ComfortNoise && *loud > 100),
+        "the pause was not filled with noise: {outcomes:?}"
+    );
+}
+
 /// The other lesson: offering only mu-law is not what a client does, because
 /// the first real PBX the interop harness met allows A-law only. The default
 /// catalogue offers both, so a peer that keeps only A-law still gets a call
@@ -5030,7 +5142,7 @@ fn a_codec_change_names_a_codec_this_build_has_or_goes_nowhere() {
     let refused =
         pair.caller
             .engine
-            .change_codecs(&mut pair.caller.agent, call, &["G729"], pair.now);
+            .change_codecs(&mut pair.caller.agent, call, &["G723"], pair.now);
     assert!(
         matches!(refused, Err(MediaError::UnsupportedCodec { .. })),
         "{refused:?}"

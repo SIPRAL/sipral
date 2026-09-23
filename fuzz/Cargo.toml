@@ -227,6 +227,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "media_g729"
+path = "fuzz_targets/media_g729.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "media_mix"
 path = "fuzz_targets/media_mix.rs"
 test = false

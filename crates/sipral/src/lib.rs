@@ -65,10 +65,10 @@
 //!
 //! With the feature off there is no `Codec::Opus` variant at all and no
 //! `MediaError::Codec` for it to refuse anything with, so [`Codec::ALL`] is
-//! G.722 and the two G.711 laws, [`Capabilities::opus`] reads false, and
-//! nothing links libopus. Nothing else is a special case: a codec order
+//! G.722, the two G.711 laws and G.729, [`Capabilities::opus`] reads false,
+//! and nothing links libopus. Nothing else is a special case: a codec order
 //! naming `opus` is refused where it is set, by name, exactly as one naming
-//! G.729 is, and a peer that offers nothing else ends as no common codec on
+//! G.723 is, and a peer that offers nothing else ends as no common codec on
 //! the ordinary path. The published documentation is built with every
 //! feature on, so what is written here is the whole surface.
 //!
