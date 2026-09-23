@@ -27,6 +27,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   defined" promise does not cover. `org.sipral.idiomatic` reads
   `payload.media.digit` and `payload.registration.state` directly instead
   of the workarounds this replaces.
+- **A G.729 decoder, bit-exact against every Annex A conformance stream.**
+  `sipral_media::g729::Decoder` decodes a ten-octet frame into eighty
+  samples, conceals a lost one, and decodes a payload of several; written
+  from the Recommendation's text with Annex A's postfilter, the trained
+  tables the text does not print copied mechanically from the software
+  annex's table file, and every open point of the fixed-point arithmetic
+  settled against the ITU's conformance streams, which are used where they
+  were obtained and never committed. All ten streams decode sample for
+  sample; `docs/05-media.md` has the table and the places where the streams
+  and the text disagree. Not yet offered in a call, and no encoder yet.
 - **A `THIRD-PARTY-LICENSES.txt` that actually carries the licence texts a
   binary has to ship.** `THIRD-PARTY-NOTICES.md` named the dependencies and
   their licences but reproduced no licence text and no MIT copyright line, so

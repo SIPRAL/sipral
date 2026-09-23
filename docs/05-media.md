@@ -1132,15 +1132,66 @@ The pipeline between the codec and whatever produces or consumes samples.
   Recommendation, which is what a specification is for — a filter pair, two
   ADPCM sub-bands and about a dozen tables. Opus linked, and the codec worth
   defaulting to where the far end has it — behind a compile-time feature that
-  is on, for the reason below. G.729 follows in phase 2 for the carrier that
-  insists, written in-tree the same way, because the common implementation is
-  GPL and the base patents are reported expired; it is never in the default
-  offer.
+  is on, for the reason below. G.729 for the carrier that insists, written
+  in-tree the same way, because the common implementation is GPL and the base
+  patents are reported expired: the decoder is here (`sipral_media::g729`,
+  below), the encoder follows, and it is never in the default offer.
 
   G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
   ticks. Any code that keeps one constant for "samples in a frame" and "ticks
   in a frame" is correct for G.711 and wrong here.
+
+### G.729: the decoder, bit-exact against Annex A
+
+`sipral_media::g729::Decoder` turns a ten-octet frame into eighty samples
+(`decode`), a frame that never arrived into eighty concealed ones
+(`conceal`), and an RTP payload of several frames into all of them
+(`decode_into`). It is written from the Recommendation's text (06/2012)
+with Annex A's reduced-complexity postfilter; the bitstream is the same for
+the main body and Annex A (A.1), so it decodes either encoder's streams.
+
+G.729 is defined bit-exactly in sixteen-bit fixed point, and its text does
+not print the software that defines it (§2.4), so two kinds of thing came
+from elsewhere, and `docs/02-clean-room.md` is why the line between them is
+drawn where it is. The trained tables the text does not print — the LSP
+codebooks and MA predictor, the gain codebooks and their maps, the
+interpolation filter — were copied mechanically from the software annex's
+table file and nothing else in it was read; `g729/tables.rs` names each one
+and says where it came from. Everything the text leaves open in the
+arithmetic — how a product rounds, which signal the postfilter's pitch
+search correlates, what a constant printed to three decimals is to the bit —
+was settled against the ITU's conformance streams, which are data. Where the
+streams and the text disagree, the streams win, since §2.4 makes the
+software they came from normative, and the code says so at each place:
+`β`'s bounds and starting value, the decoder's starting LSPs, the missing
+bound on a concealed pitch gain, the octaves-per-decibel constant of the
+gain predictor, and the rounding of a handful of others.
+
+The conformance streams and their reference outputs are not in the tree —
+the publication reserves them — and the tests that read them are ignored
+unless asked for; the module documentation says how to point them at a copy.
+Against Release 3's Annex A set, every sample of every stream matches:
+
+| Stream | Frames | What it exercises | Result |
+|---|---|---|---|
+| `ALGTHM` | 35 | conditional parts of the algorithm | identical, 2800 of 2800 samples |
+| `ERASURE` | 300 | frame erasures, 60 of them | identical, 24000 of 24000 |
+| `FIXED` | 120 | the fixed codebook | identical, 9600 of 9600 |
+| `LSP` | 2232 | the LSP quantizer | identical, 178560 of 178560 |
+| `OVERFLOW` | 384 | overflow in the synthesis filter | identical, 30720 of 30720 |
+| `PARITY` | 300 | the pitch parity check, 60 failures | identical, 24000 of 24000 |
+| `PITCH` | 1835 | the pitch search | identical, 146800 of 146800 |
+| `SPEECH` | 3750 | generic speech | identical, 300000 of 300000 |
+| `TAME` | 128 | the taming procedure | identical, 10240 of 10240 |
+| `TEST` | 176 | a mixture | identical, 14080 of 14080 |
+
+Two behaviours no stream reaches are chosen from the text rather than
+checked: the LSF stability check's floor and ceiling are the nearest values
+to 0.005 and 3.135, and a stream that loses its very first frame conceals it
+with the shortest delay the codebook has, because §4.3's zero is not a delay.
+Annex B's comfort noise is not decoded yet: a two-octet SID frame at the end
+of a payload is left undecoded by `decode_into`.
 - **Echo cancellation, gain control, noise suppression** are attached at a seam,
   not implemented here. This is signal processing research, it exists under a
   permissive licence, and rewriting it would buy nothing that a customer pays

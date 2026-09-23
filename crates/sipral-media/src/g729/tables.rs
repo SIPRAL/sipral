@@ -1,0 +1,935 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+//! The constants of ITU-T G.729 Annex A.
+//!
+//! # Where each table came from
+//!
+//! Three kinds of constant live here, and they came from three places.
+//!
+//! **Constants the text prints or defines by a formula** were written from
+//! the Recommendation and are checked against it by the tests at the end:
+//! the gain predictor's four coefficients (§3.9.1, equation 69), the output
+//! high-pass filter (§4.2.5, equation 91), the starting point of the LSF
+//! predictor's memory (§4.3, Table 9: `iπ/11`), and the lookup tables behind
+//! the arithmetic that Table 12 names without printing — the cosine and its
+//! slope, `2^x` and the inverse square root are their closed forms entry for
+//! entry, and `log2` is its closed form to within one unit, the test saying
+//! which way each entry was rounded.
+//!
+//! **Tables the text neither prints nor defines** are the ones a training
+//! procedure produced: the two stages of the LSP quantizer, the MA
+//! predictor, the two gain codebooks and the maps between their rows and
+//! the codewords on the wire, and the interpolation filter `b30`. §2.4 makes
+//! the software annex normative for these, and they exist nowhere else. Their
+//! numbers were copied mechanically, by a script that read nothing but the
+//! initialised numeric arrays of the Annex A table file, into a list of
+//! values and dimensions; the arrays below were written from that list and
+//! named here from what the Recommendation calls each table. No other part of
+//! the software annex was read. The mapping, ours on the left, and for the
+//! tables with a closed form, which of the two the values here were taken
+//! from:
+//!
+//! | Here | The Recommendation's name | Key in the extracted list |
+//! |---|---|---|
+//! | [`FIRST_STAGE`] | `L1`, §3.2.4 | `annex_a.lspcb1` |
+//! | [`SECOND_STAGE_LOW`] | `L2`, §3.2.4 | `annex_a.lspcb2`, columns 0–4 |
+//! | [`SECOND_STAGE_HIGH`] | `L3`, §3.2.4 | `annex_a.lspcb2`, columns 5–9 |
+//! | [`MA_PREDICTOR`] | `p̂(i,k)`, equation 20 | `annex_a.fg` |
+//! | [`MA_CURRENT_WEIGHT`] | `1 − Σ p̂(i,k)`, equation 20 | `annex_a.fg_sum` |
+//! | [`MA_CURRENT_WEIGHT_INVERSE`] | its reciprocal, equation 92 | `annex_a.fg_sum_inv` |
+//! | [`INTERPOLATION_B30`] | `b30`, §3.7.1 | `annex_a.inter_3l` |
+//! | [`GA`] | `GA`, §3.9.2 | `annex_a.gbk1` |
+//! | [`GB`] | `GB`, §3.9.2 | `annex_a.gbk2` |
+//! | [`GA_ROW`] | the index mapping of §3.9.3, decoding side | `annex_a.imap1` |
+//! | [`GB_ROW`] | the same for `GB` | `annex_a.imap2` |
+//! | [`COSINE`] | Table 12, "LSF to LSP conversion" | `annex_a.table2`; equals `cos(iπ/64)` rounded |
+//! | [`COSINE_SLOPE`] | its slopes | `annex_a.slope_cos`; equals the rounded difference of cosines |
+//! | [`POWER_OF_TWO`] | Table 12, "2^x computation" | `annex_a.tabpow`; equals `2^(i/32)` rounded |
+//! | [`LOG2`] | Table 12, "base 2 logarithm" | `annex_a.tablog`; `log2(1 + i/32)` to within one |
+//! | [`INVERSE_SQRT`] | Table 12, "inverse square root" | `annex_a.tabsqr`; equals `1/√(1 + i/16)` rounded |
+//! | [`INITIAL_LSF`] | `l̂ = iπ/11`, Table 9 | computed, truncated; equals `annex_ba_ld8a.freq_prev_reset` |
+//! | [`GAIN_PREDICTOR`] | `b1..b4`, equation 69 | computed; equals `annex_a.pred` |
+//! | [`OUTPUT_HIGH_PASS_ZEROS`] | equation 91, numerator | computed; equals `annex_a.b100` |
+//! | [`OUTPUT_HIGH_PASS_POLES`] | equation 91, denominator | computed; equals `annex_a.a100` |
+//!
+//! `b30` is described in the text — a Hamming-windowed sinc truncated at ±29,
+//! cut off at 3600 Hz in the three-times oversampled domain — but not closely
+//! enough to reproduce: the window's exact length and the normalisation are
+//! not stated. The test at the end checks that the table is that filter to
+//! within a few units in the last place and has its zeros where the sinc
+//! does, which is the most the description supports, and the table's own
+//! values are the ones used.
+//!
+//! **One constant is neither**: [`INITIAL_LSP`], the cosines the decoder
+//! interpolates its first subframe from. Table 9 gives them as the cosines of
+//! `iπ/11`, and the conformance streams do not decode from that state — the
+//! first subframe of eight of the ten Annex A streams comes out different.
+//! The values here are the state the streams do decode from, confirmed on
+//! the first subframe of all ten. The other places where the streams and the
+//! text disagree are constants of the arithmetic, and each is written down
+//! where it is used.
+//!
+//! Formats are given as Qn, a signed word whose value is its integer divided
+//! by 2^n.
+
+/// `L1`: the first stage of the LSF quantizer, 128 ten-dimensional entries,
+/// Q13 radians.
+pub(super) const FIRST_STAGE: [[i16; 10]; 128] = [
+    [
+        1486, 2168, 3751, 9074, 12134, 13944, 17983, 19173, 21190, 21820,
+    ],
+    [
+        1730, 2640, 3450, 4870, 6126, 7876, 15644, 17817, 20294, 21902,
+    ],
+    [
+        1568, 2256, 3088, 4874, 11063, 13393, 18307, 19293, 21109, 21741,
+    ],
+    [
+        1733, 2512, 3357, 4708, 6977, 10296, 17024, 17956, 19145, 20350,
+    ],
+    [
+        1744, 2436, 3308, 8731, 10432, 12007, 15614, 16639, 21359, 21913,
+    ],
+    [
+        1786, 2369, 3372, 4521, 6795, 12963, 17674, 18988, 20855, 21640,
+    ],
+    [
+        1631, 2433, 3361, 6328, 10709, 12013, 13277, 13904, 19441, 21088,
+    ],
+    [
+        1489, 2364, 3291, 6250, 9227, 10403, 13843, 15278, 17721, 21451,
+    ],
+    [
+        1869, 2533, 3475, 4365, 9152, 14513, 15908, 17022, 20611, 21411,
+    ],
+    [
+        2070, 3025, 4333, 5854, 7805, 9231, 10597, 16047, 20109, 21834,
+    ],
+    [
+        1910, 2673, 3419, 4261, 11168, 15111, 16577, 17591, 19310, 20265,
+    ],
+    [
+        1141, 1815, 2624, 4623, 6495, 9588, 13968, 16428, 19351, 21286,
+    ],
+    [
+        2192, 3171, 4707, 5808, 10904, 12500, 14162, 15664, 21124, 21789,
+    ],
+    [
+        1286, 1907, 2548, 3453, 9574, 11964, 15978, 17344, 19691, 22495,
+    ],
+    [
+        1921, 2720, 4604, 6684, 11503, 12992, 14350, 15262, 16997, 20791,
+    ],
+    [
+        2052, 2759, 3897, 5246, 6638, 10267, 15834, 16814, 18149, 21675,
+    ],
+    [
+        1798, 2497, 5617, 11449, 13189, 14711, 17050, 18195, 20307, 21182,
+    ],
+    [
+        1009, 1647, 2889, 5709, 9541, 12354, 15231, 18494, 20966, 22033,
+    ],
+    [
+        3016, 3794, 5406, 7469, 12488, 13984, 15328, 16334, 19952, 20791,
+    ],
+    [
+        2203, 3040, 3796, 5442, 11987, 13512, 14931, 16370, 17856, 18803,
+    ],
+    [
+        2912, 4292, 7988, 9572, 11562, 13244, 14556, 16529, 20004, 21073,
+    ],
+    [
+        2861, 3607, 5923, 7034, 9234, 12054, 13729, 18056, 20262, 20974,
+    ],
+    [
+        3069, 4311, 5967, 7367, 11482, 12699, 14309, 16233, 18333, 19172,
+    ],
+    [
+        2434, 3661, 4866, 5798, 10383, 11722, 13049, 15668, 18862, 19831,
+    ],
+    [
+        2020, 2605, 3860, 9241, 13275, 14644, 16010, 17099, 19268, 20251,
+    ],
+    [
+        1877, 2809, 3590, 4707, 11056, 12441, 15622, 17168, 18761, 19907,
+    ],
+    [
+        2107, 2873, 3673, 5799, 13579, 14687, 15938, 17077, 18890, 19831,
+    ],
+    [
+        1612, 2284, 2944, 3572, 8219, 13959, 15924, 17239, 18592, 20117,
+    ],
+    [
+        2420, 3156, 6542, 10215, 12061, 13534, 15305, 16452, 18717, 19880,
+    ],
+    [
+        1667, 2612, 3534, 5237, 10513, 11696, 12940, 16798, 18058, 19378,
+    ],
+    [
+        2388, 3017, 4839, 9333, 11413, 12730, 15024, 16248, 17449, 18677,
+    ],
+    [
+        1875, 2786, 4231, 6320, 8694, 10149, 11785, 17013, 18608, 19960,
+    ],
+    [
+        679, 1411, 4654, 8006, 11446, 13249, 15763, 18127, 20361, 21567,
+    ],
+    [
+        1838, 2596, 3578, 4608, 5650, 11274, 14355, 15886, 20579, 21754,
+    ],
+    [
+        1303, 1955, 2395, 3322, 12023, 13764, 15883, 18077, 20180, 21232,
+    ],
+    [
+        1438, 2102, 2663, 3462, 8328, 10362, 13763, 17248, 19732, 22344,
+    ],
+    [
+        860, 1904, 6098, 7775, 9815, 12007, 14821, 16709, 19787, 21132,
+    ],
+    [
+        1673, 2723, 3704, 6125, 7668, 9447, 13683, 14443, 20538, 21731,
+    ],
+    [
+        1246, 1849, 2902, 4508, 7221, 12710, 14835, 16314, 19335, 22720,
+    ],
+    [
+        1525, 2260, 3862, 5659, 7342, 11748, 13370, 14442, 18044, 21334,
+    ],
+    [
+        1196, 1846, 3104, 7063, 10972, 12905, 14814, 17037, 19922, 22636,
+    ],
+    [
+        2147, 3106, 4475, 6511, 8227, 9765, 10984, 12161, 18971, 21300,
+    ],
+    [
+        1585, 2405, 2994, 4036, 11481, 13177, 14519, 15431, 19967, 21275,
+    ],
+    [
+        1778, 2688, 3614, 4680, 9465, 11064, 12473, 16320, 19742, 20800,
+    ],
+    [
+        1862, 2586, 3492, 6719, 11708, 13012, 14364, 16128, 19610, 20425,
+    ],
+    [
+        1395, 2156, 2669, 3386, 10607, 12125, 13614, 16705, 18976, 21367,
+    ],
+    [
+        1444, 2117, 3286, 6233, 9423, 12981, 14998, 15853, 17188, 21857,
+    ],
+    [
+        2004, 2895, 3783, 4897, 6168, 7297, 12609, 16445, 19297, 21465,
+    ],
+    [
+        1495, 2863, 6360, 8100, 11399, 14271, 15902, 17711, 20479, 22061,
+    ],
+    [
+        2484, 3114, 5718, 7097, 8400, 12616, 14073, 14847, 20535, 21396,
+    ],
+    [
+        2424, 3277, 5296, 6284, 11290, 12903, 16022, 17508, 19333, 20283,
+    ],
+    [
+        2565, 3778, 5360, 6989, 8782, 10428, 14390, 15742, 17770, 21734,
+    ],
+    [
+        2727, 3384, 6613, 9254, 10542, 12236, 14651, 15687, 20074, 21102,
+    ],
+    [
+        1916, 2953, 6274, 8088, 9710, 10925, 12392, 16434, 20010, 21183,
+    ],
+    [
+        3384, 4366, 5349, 7667, 11180, 12605, 13921, 15324, 19901, 20754,
+    ],
+    [
+        3075, 4283, 5951, 7619, 9604, 11010, 12384, 14006, 20658, 21497,
+    ],
+    [
+        1751, 2455, 5147, 9966, 11621, 13176, 14739, 16470, 20788, 21756,
+    ],
+    [
+        1442, 2188, 3330, 6813, 8929, 12135, 14476, 15306, 19635, 20544,
+    ],
+    [
+        2294, 2895, 4070, 8035, 12233, 13416, 14762, 17367, 18952, 19688,
+    ],
+    [
+        1937, 2659, 4602, 6697, 9071, 12863, 14197, 15230, 16047, 18877,
+    ],
+    [
+        2071, 2663, 4216, 9445, 10887, 12292, 13949, 14909, 19236, 20341,
+    ],
+    [
+        1740, 2491, 3488, 8138, 9656, 11153, 13206, 14688, 20896, 21907,
+    ],
+    [
+        2199, 2881, 4675, 8527, 10051, 11408, 14435, 15463, 17190, 20597,
+    ],
+    [
+        1943, 2988, 4177, 6039, 7478, 8536, 14181, 15551, 17622, 21579,
+    ],
+    [
+        1825, 3175, 7062, 9818, 12824, 15450, 18330, 19856, 21830, 22412,
+    ],
+    [
+        2464, 3046, 4822, 5977, 7696, 15398, 16730, 17646, 20588, 21320,
+    ],
+    [
+        2550, 3393, 5305, 6920, 10235, 14083, 18143, 19195, 20681, 21336,
+    ],
+    [
+        3003, 3799, 5321, 6437, 7919, 11643, 15810, 16846, 18119, 18980,
+    ],
+    [
+        3455, 4157, 6838, 8199, 9877, 12314, 15905, 16826, 19949, 20892,
+    ],
+    [
+        3052, 3769, 4891, 5810, 6977, 10126, 14788, 15990, 19773, 20904,
+    ],
+    [
+        3671, 4356, 5827, 6997, 8460, 12084, 14154, 14939, 19247, 20423,
+    ],
+    [
+        2716, 3684, 5246, 6686, 8463, 10001, 12394, 14131, 16150, 19776,
+    ],
+    [
+        1945, 2638, 4130, 7995, 14338, 15576, 17057, 18206, 20225, 20997,
+    ],
+    [
+        2304, 2928, 4122, 4824, 5640, 13139, 15825, 16938, 20108, 21054,
+    ],
+    [
+        1800, 2516, 3350, 5219, 13406, 15948, 17618, 18540, 20531, 21252,
+    ],
+    [
+        1436, 2224, 2753, 4546, 9657, 11245, 15177, 16317, 17489, 19135,
+    ],
+    [
+        2319, 2899, 4980, 6936, 8404, 13489, 15554, 16281, 20270, 20911,
+    ],
+    [
+        2187, 2919, 4610, 5875, 7390, 12556, 14033, 16794, 20998, 21769,
+    ],
+    [
+        2235, 2923, 5121, 6259, 8099, 13589, 15340, 16340, 17927, 20159,
+    ],
+    [
+        1765, 2638, 3751, 5730, 7883, 10108, 13633, 15419, 16808, 18574,
+    ],
+    [
+        3460, 5741, 9596, 11742, 14413, 16080, 18173, 19090, 20845, 21601,
+    ],
+    [
+        3735, 4426, 6199, 7363, 9250, 14489, 16035, 17026, 19873, 20876,
+    ],
+    [
+        3521, 4778, 6887, 8680, 12717, 14322, 15950, 18050, 20166, 21145,
+    ],
+    [
+        2141, 2968, 6865, 8051, 10010, 13159, 14813, 15861, 17528, 18655,
+    ],
+    [
+        4148, 6128, 9028, 10871, 12686, 14005, 15976, 17208, 19587, 20595,
+    ],
+    [
+        4403, 5367, 6634, 8371, 10163, 11599, 14963, 16331, 17982, 18768,
+    ],
+    [
+        4091, 5386, 6852, 8770, 11563, 13290, 15728, 16930, 19056, 20102,
+    ],
+    [
+        2746, 3625, 5299, 7504, 10262, 11432, 13172, 15490, 16875, 17514,
+    ],
+    [
+        2248, 3556, 8539, 10590, 12665, 14696, 16515, 17824, 20268, 21247,
+    ],
+    [
+        1279, 1960, 3920, 7793, 10153, 14753, 16646, 18139, 20679, 21466,
+    ],
+    [
+        2440, 3475, 6737, 8654, 12190, 14588, 17119, 17925, 19110, 19979,
+    ],
+    [
+        1879, 2514, 4497, 7572, 10017, 14948, 16141, 16897, 18397, 19376,
+    ],
+    [
+        2804, 3688, 7490, 10086, 11218, 12711, 16307, 17470, 20077, 21126,
+    ],
+    [
+        2023, 2682, 3873, 8268, 10255, 11645, 15187, 17102, 18965, 19788,
+    ],
+    [
+        2823, 3605, 5815, 8595, 10085, 11469, 16568, 17462, 18754, 19876,
+    ],
+    [
+        2851, 3681, 5280, 7648, 9173, 10338, 14961, 16148, 17559, 18474,
+    ],
+    [
+        1348, 2645, 5826, 8785, 10620, 12831, 16255, 18319, 21133, 22586,
+    ],
+    [
+        2141, 3036, 4293, 6082, 7593, 10629, 17158, 18033, 21466, 22084,
+    ],
+    [
+        1608, 2375, 3384, 6878, 9970, 11227, 16928, 17650, 20185, 21120,
+    ],
+    [
+        2774, 3616, 5014, 6557, 7788, 8959, 17068, 18302, 19537, 20542,
+    ],
+    [
+        1934, 4813, 6204, 7212, 8979, 11665, 15989, 17811, 20426, 21703,
+    ],
+    [
+        2288, 3507, 5037, 6841, 8278, 9638, 15066, 16481, 21653, 22214,
+    ],
+    [
+        2951, 3771, 4878, 7578, 9016, 10298, 14490, 15242, 20223, 20990,
+    ],
+    [
+        3256, 4791, 6601, 7521, 8644, 9707, 13398, 16078, 19102, 20249,
+    ],
+    [
+        1827, 2614, 3486, 6039, 12149, 13823, 16191, 17282, 21423, 22041,
+    ],
+    [
+        1000, 1704, 3002, 6335, 8471, 10500, 14878, 16979, 20026, 22427,
+    ],
+    [
+        1646, 2286, 3109, 7245, 11493, 12791, 16824, 17667, 18981, 20222,
+    ],
+    [
+        1708, 2501, 3315, 6737, 8729, 9924, 16089, 17097, 18374, 19917,
+    ],
+    [
+        2623, 3510, 4478, 5645, 9862, 11115, 15219, 18067, 19583, 20382,
+    ],
+    [
+        2518, 3434, 4728, 6388, 8082, 9285, 13162, 18383, 19819, 20552,
+    ],
+    [
+        1726, 2383, 4090, 6303, 7805, 12845, 14612, 17608, 19269, 20181,
+    ],
+    [
+        2860, 3735, 4838, 6044, 7254, 8402, 14031, 16381, 18037, 19410,
+    ],
+    [
+        4247, 5993, 7952, 9792, 12342, 14653, 17527, 18774, 20831, 21699,
+    ],
+    [
+        3502, 4051, 5680, 6805, 8146, 11945, 16649, 17444, 20390, 21564,
+    ],
+    [
+        3151, 4893, 5899, 7198, 11418, 13073, 15124, 17673, 20520, 21861,
+    ],
+    [
+        3960, 4848, 5926, 7259, 8811, 10529, 15661, 16560, 18196, 20183,
+    ],
+    [
+        4499, 6604, 8036, 9251, 10804, 12627, 15880, 17512, 20020, 21046,
+    ],
+    [
+        4251, 5541, 6654, 8318, 9900, 11686, 15100, 17093, 20572, 21687,
+    ],
+    [
+        3769, 5327, 7865, 9360, 10684, 11818, 13660, 15366, 18733, 19882,
+    ],
+    [
+        3083, 3969, 6248, 8121, 9798, 10994, 12393, 13686, 17888, 19105,
+    ],
+    [
+        2731, 4670, 7063, 9201, 11346, 13735, 16875, 18797, 20787, 22360,
+    ],
+    [
+        1187, 2227, 4737, 7214, 9622, 12633, 15404, 17968, 20262, 23533,
+    ],
+    [
+        1911, 2477, 3915, 10098, 11616, 12955, 16223, 17138, 19270, 20729,
+    ],
+    [
+        1764, 2519, 3887, 6944, 9150, 12590, 16258, 16984, 17924, 18435,
+    ],
+    [
+        1400, 3674, 7131, 8718, 10688, 12508, 15708, 17711, 19720, 21068,
+    ],
+    [
+        2322, 3073, 4287, 8108, 9407, 10628, 15862, 16693, 19714, 21474,
+    ],
+    [
+        2630, 3339, 4758, 8360, 10274, 11333, 12880, 17374, 19221, 19936,
+    ],
+    [
+        1721, 2577, 5553, 7195, 8651, 10686, 15069, 16953, 18703, 19929,
+    ],
+];
+
+/// `L2`: the second stage for the lower five coefficients, 32 entries, Q13.
+pub(super) const SECOND_STAGE_LOW: [[i16; 5]; 32] = [
+    [-435, -815, -742, 1033, -518],
+    [-833, -891, 463, -8, -1251],
+    [-1021, 231, -306, 321, -220],
+    [57, -198, -339, -33, -1468],
+    [171, -350, 294, 1660, 453],
+    [-701, -842, -58, 950, 892],
+    [584, 31, -289, 356, -333],
+    [-109, -808, 231, 77, -87],
+    [-859, 1236, 550, 854, 714],
+    [-877, -954, -1248, -299, 212],
+    [-77, 344, -620, 763, 413],
+    [-314, -307, -256, -1260, -429],
+    [711, 693, 521, 650, 1305],
+    [-112, -271, -500, 946, 1733],
+    [575, -10, -468, -199, 1101],
+    [145, -285, -1280, -398, 36],
+    [-1133, -835, 1350, 1284, -95],
+    [-1459, -1237, 416, -213, 466],
+    [-15, 66, 468, 1019, -748],
+    [-338, 148, 1445, 75, -760],
+    [389, 239, 1568, 981, 113],
+    [-312, -98, 949, 31, 1104],
+    [1127, 584, 835, 277, -1159],
+    [539, -114, 856, -493, 223],
+    [2197, 2337, 1268, 670, 304],
+    [-1596, 550, 801, -456, -56],
+    [1154, 593, -77, 1237, -31],
+    [397, 558, 203, -797, -919],
+    [334, 1475, 632, -80, 48],
+    [-545, -330, -429, -680, 1133],
+    [1320, 827, -398, -576, 341],
+    [-163, 674, -11, -886, 531],
+];
+
+/// `L3`: the second stage for the upper five coefficients, 32 entries, Q13.
+pub(super) const SECOND_STAGE_HIGH: [[i16; 5]; 32] = [
+    [582, -1201, 829, 86, 385],
+    [1450, 72, -231, 864, 661],
+    [-163, -526, -754, -1633, 267],
+    [573, 796, -169, -631, 816],
+    [519, 291, 159, -640, -1296],
+    [1549, 715, 527, -714, -193],
+    [-457, 612, -283, -1381, -741],
+    [-344, 1341, 1087, -654, -569],
+    [-543, -1752, -195, -98, -276],
+    [-235, -728, 949, 1517, 895],
+    [502, -362, -960, -483, 1386],
+    [450, -466, -108, 1010, 2223],
+    [-28, -378, 744, -1005, 240],
+    [271, -15, 909, -259, 1688],
+    [-1011, 581, -53, -747, 878],
+    [-498, -1377, 18, -444, 1483],
+    [1015, -222, 443, 372, -354],
+    [669, 659, 1640, 932, 534],
+    [1385, -182, -907, -721, -262],
+    [569, 1247, 337, 416, -121],
+    [369, -1003, -507, -587, -904],
+    [72, -141, 1465, 63, -785],
+    [208, 301, -882, 117, -404],
+    [-912, 623, -76, 276, -440],
+    [-267, -525, 140, 882, -139],
+    [-697, 865, 1060, 413, 446],
+    [581, -1037, -895, 669, 297],
+    [3, 692, -292, 1050, 782],
+    [-1061, -484, 362, -597, -852],
+    [-1182, -744, 1340, 262, 63],
+    [-774, -483, -1247, -70, 98],
+    [-1125, -265, -242, 724, 934],
+];
+
+/// `p̂(i,k)`: the two switched fourth-order MA predictors of equation 20,
+/// selected by `L0`; for each, four frames back by ten coefficients, Q15.
+pub(super) const MA_PREDICTOR: [[[i16; 10]; 4]; 2] = [
+    [
+        [8421, 9109, 9175, 8965, 9034, 9057, 8765, 8775, 9106, 8673],
+        [7018, 7189, 7638, 7307, 7444, 7379, 7038, 6956, 6930, 6868],
+        [5472, 4990, 5134, 5177, 5246, 5141, 5206, 5095, 4830, 5147],
+        [4056, 3031, 2614, 3024, 2916, 2713, 3309, 3237, 2857, 3473],
+    ],
+    [
+        [7733, 7880, 8188, 8175, 8247, 8490, 8637, 8601, 8359, 7569],
+        [4210, 3031, 2552, 3473, 3876, 3853, 4184, 4154, 3909, 3968],
+        [3214, 1930, 1313, 2143, 2493, 2385, 2755, 2706, 2542, 2919],
+        [3024, 1592, 940, 1631, 1723, 1579, 2034, 2084, 1913, 2601],
+    ],
+];
+
+/// `1 − Σ p̂(i,k)`: the weight equation 20 gives the current frame's
+/// quantizer output, per predictor and coefficient, Q15.
+pub(super) const MA_CURRENT_WEIGHT: [[i16; 10]; 2] = [
+    [7798, 8447, 8205, 8293, 8126, 8477, 8447, 8703, 9043, 8604],
+    [
+        14585, 18333, 19772, 17344, 16426, 16459, 15155, 15220, 16043, 15708,
+    ],
+];
+
+/// Its reciprocal, which equation 92 divides by, Q12.
+pub(super) const MA_CURRENT_WEIGHT_INVERSE: [[i16; 10]; 2] = [
+    [
+        17210, 15888, 16357, 16183, 16516, 15833, 15888, 15421, 14840, 15597,
+    ],
+    [9202, 7320, 6788, 7738, 8170, 8154, 8856, 8818, 8366, 8544],
+];
+
+/// `l̂` before the first frame: `iπ/11` for `i = 1..10` (Table 9), Q13,
+/// truncated.
+pub(super) const INITIAL_LSF: [i16; 10] = [
+    2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396,
+];
+
+/// `q̂` before the first frame, the cosines the first subframe is
+/// interpolated from, Q15. Not Table 9's `cos(iπ/11)`: see the module
+/// documentation.
+pub(super) const INITIAL_LSP: [i16; 10] = [
+    30_000, 26_000, 21_000, 15_000, 8_000, 0, -8_000, -15_000, -21_000, -26_000,
+];
+
+/// `b30`: the filter that interpolates the past excitation at a third of a
+/// sample (§3.7.1), `b30(0)` to `b30(30)`, Q15.
+pub(super) const INTERPOLATION_B30: [i16; 31] = [
+    29443, 25207, 14701, 3143, -4402, -5850, -2783, 1211, 3130, 2259, 0, -1652, -1666, -464, 756,
+    1099, 550, -245, -634, -451, 0, 308, 296, 78, -120, -165, -79, 34, 91, 70, 0,
+];
+
+/// `[b1 b2 b3 b4] = [0.68 0.58 0.34 0.19]`, equation 69, Q13.
+pub(super) const GAIN_PREDICTOR: [i16; 4] = [5571, 4751, 2785, 1556];
+
+/// `GA`: the first stage of the gain quantizer. Each row is the pitch gain
+/// (Q14) and the fixed-codebook gain correction (Q13).
+pub(super) const GA: [[i16; 2]; 8] = [
+    [1, 1516],
+    [1551, 2425],
+    [1831, 5022],
+    [57, 5404],
+    [1921, 9291],
+    [3242, 9949],
+    [356, 14756],
+    [2678, 27162],
+];
+
+/// `GB`: the second stage, in the same formats.
+pub(super) const GB: [[i16; 2]; 16] = [
+    [826, 2005],
+    [1994, 0],
+    [5142, 592],
+    [6160, 2395],
+    [8091, 4861],
+    [9120, 525],
+    [10573, 2966],
+    [11569, 1196],
+    [13260, 3256],
+    [14194, 1630],
+    [15132, 4914],
+    [15161, 14276],
+    [15434, 237],
+    [16112, 3392],
+    [17299, 1861],
+    [18973, 5935],
+];
+
+/// The row of `GA` a received `GA` codeword names (§3.9.3: "the codebook
+/// indices are mapped").
+pub(super) const GA_ROW: [u8; 8] = [5, 1, 7, 4, 2, 0, 6, 3];
+
+/// The row of `GB` a received `GB` codeword names.
+pub(super) const GB_ROW: [u8; 16] = [2, 14, 3, 13, 0, 15, 1, 12, 6, 10, 7, 9, 4, 11, 5, 8];
+
+/// `cos(iπ/64)` for `i = 0..63`, Q15, the first entry held one below the
+/// top of the word.
+pub(super) const COSINE: [i16; 64] = [
+    32767, 32729, 32610, 32413, 32138, 31786, 31357, 30853, 30274, 29622, 28899, 28106, 27246,
+    26320, 25330, 24279, 23170, 22006, 20788, 19520, 18205, 16846, 15447, 14010, 12540, 11039,
+    9512, 7962, 6393, 4808, 3212, 1608, 0, -1608, -3212, -4808, -6393, -7962, -9512, -11039,
+    -12540, -14010, -15447, -16846, -18205, -19520, -20788, -22006, -23170, -24279, -25330, -26320,
+    -27246, -28106, -28899, -29622, -30274, -30853, -31357, -31786, -32138, -32413, -32610, -32729,
+];
+
+/// The step from each entry of [`COSINE`] to the next, sixteen times over,
+/// so that a Q8 position inside the segment scales it with a shift by twelve.
+pub(super) const COSINE_SLOPE: [i16; 64] = [
+    -632, -1893, -3150, -4399, -5638, -6863, -8072, -9261, -10428, -11570, -12684, -13767, -14817,
+    -15832, -16808, -17744, -18637, -19486, -20287, -21039, -21741, -22390, -22986, -23526, -24009,
+    -24435, -24801, -25108, -25354, -25540, -25664, -25726, -25726, -25664, -25540, -25354, -25108,
+    -24801, -24435, -24009, -23526, -22986, -22390, -21741, -21039, -20287, -19486, -18637, -17744,
+    -16808, -15832, -14817, -13767, -12684, -11570, -10428, -9261, -8072, -6863, -5638, -4399,
+    -3150, -1893, -632,
+];
+
+/// `2^(i/32)` for `i = 0..32`, Q14, the last entry held one below the top.
+pub(super) const POWER_OF_TWO: [i16; 33] = [
+    16384, 16743, 17109, 17484, 17867, 18258, 18658, 19066, 19484, 19911, 20347, 20792, 21247,
+    21713, 22188, 22674, 23170, 23678, 24196, 24726, 25268, 25821, 26386, 26964, 27554, 28158,
+    28774, 29405, 30048, 30706, 31379, 32066, 32767,
+];
+
+/// `log2(1 + i/32)` for `i = 0..32`, Q15.
+pub(super) const LOG2: [i16; 33] = [
+    0, 1455, 2866, 4236, 5568, 6863, 8124, 9352, 10549, 11716, 12855, 13967, 15054, 16117, 17156,
+    18172, 19167, 20142, 21097, 22033, 22951, 23852, 24735, 25603, 26455, 27291, 28113, 28922,
+    29716, 30497, 31266, 32023, 32767,
+];
+
+/// `1/√(1 + i/16)` for `i = 0..48`, Q15: the inverse square root of a
+/// mantissa between one and four.
+pub(super) const INVERSE_SQRT: [i16; 49] = [
+    32767, 31790, 30894, 30070, 29309, 28602, 27945, 27330, 26755, 26214, 25705, 25225, 24770,
+    24339, 23930, 23541, 23170, 22817, 22479, 22155, 21845, 21548, 21263, 20988, 20724, 20470,
+    20225, 19988, 19760, 19539, 19326, 19119, 18919, 18725, 18536, 18354, 18176, 18004, 17837,
+    17674, 17515, 17361, 17211, 17064, 16921, 16782, 16646, 16514, 16384,
+];
+
+/// Equation 91's numerator, `0.93980581 − 1.8795834 z⁻¹ + 0.93980581 z⁻²`,
+/// Q13.
+pub(super) const OUTPUT_HIGH_PASS_ZEROS: [i16; 3] = [7699, -15398, 7699];
+
+/// Equation 91's denominator with the signs a recursion adds it with:
+/// `y(n) += 1.9330735 y(n−1) − 0.93589199 y(n−2)`, Q13. The leading one is
+/// carried for completeness and not used.
+pub(super) const OUTPUT_HIGH_PASS_POLES: [i16; 3] = [8192, 15836, -7667];
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        COSINE, COSINE_SLOPE, FIRST_STAGE, GA, GA_ROW, GAIN_PREDICTOR, GB, GB_ROW, INITIAL_LSF,
+        INITIAL_LSP, INTERPOLATION_B30, INVERSE_SQRT, LOG2, MA_CURRENT_WEIGHT,
+        MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, OUTPUT_HIGH_PASS_POLES, OUTPUT_HIGH_PASS_ZEROS,
+        POWER_OF_TWO, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+    };
+    use core::f64::consts::PI;
+
+    fn nearest(value: f64) -> i32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "every value rounded here is a table entry inside i16"
+        )]
+        let rounded = value.round() as i32;
+        rounded
+    }
+
+    #[test]
+    fn the_codebooks_have_the_sizes_table_1_gives_their_indices() {
+        // seven bits, five and five (Table 8)
+        assert_eq!(FIRST_STAGE.len(), 1 << 7);
+        assert_eq!(SECOND_STAGE_LOW.len(), 1 << 5);
+        assert_eq!(SECOND_STAGE_HIGH.len(), 1 << 5);
+        // three bits and four
+        assert_eq!(GA.len(), 1 << 3);
+        assert_eq!(GB.len(), 1 << 4);
+        assert_eq!(GA_ROW.len(), GA.len());
+        assert_eq!(GB_ROW.len(), GB.len());
+        assert_eq!(MA_PREDICTOR.len(), 2, "one bit, L0, selects between them");
+        assert_eq!(INTERPOLATION_B30.len(), 31, "b30(0) to b30(30)");
+    }
+
+    /// Every first-stage entry is an LSF vector, and §3.2.3 orders LSFs:
+    /// `0 < ω1 < ω2 < ... < ω10 < π`.
+    #[test]
+    fn every_first_stage_entry_is_an_ordered_set_of_frequencies() {
+        let pi_q13 = nearest(PI * 8192.0);
+        for (row, entry) in FIRST_STAGE.iter().enumerate() {
+            assert!(entry.first().is_some_and(|first| *first > 0), "row {row}");
+            assert!(
+                entry.last().is_some_and(|last| i32::from(*last) < pi_q13),
+                "row {row}"
+            );
+            for pair in entry.windows(2) {
+                assert!(pair[0] < pair[1], "row {row} is not in increasing order");
+            }
+        }
+    }
+
+    /// The second stage is a correction, not a spectrum: it is small against
+    /// the first and it goes both ways.
+    #[test]
+    fn the_second_stage_is_a_small_signed_correction() {
+        for entry in SECOND_STAGE_LOW.iter().chain(SECOND_STAGE_HIGH.iter()) {
+            for value in entry {
+                assert!(value.unsigned_abs() < 2_500, "{value}");
+            }
+        }
+        let negatives = SECOND_STAGE_LOW
+            .iter()
+            .flatten()
+            .filter(|value| **value < 0)
+            .count();
+        assert!(negatives > 40 && negatives < 120, "{negatives}");
+    }
+
+    /// The row maps are permutations: every codeword names one row and every
+    /// row is named once, or some pair of gains could never be sent.
+    #[test]
+    fn the_gain_maps_are_permutations() {
+        let mut seen = [false; 16];
+        for row in GB_ROW {
+            let slot = seen.get_mut(usize::from(row)).unwrap();
+            assert!(!*slot, "row {row} named twice");
+            *slot = true;
+        }
+        assert!(seen.iter().all(|named| *named));
+        let mut seen = [false; 8];
+        for row in GA_ROW {
+            let slot = seen.get_mut(usize::from(row)).unwrap();
+            assert!(!*slot, "row {row} named twice");
+            *slot = true;
+        }
+        assert!(seen.iter().all(|named| *named));
+    }
+
+    /// §3.9.2: "The codebook GA contains eight entries in which the second
+    /// element ... has, in general, larger values than the first element",
+    /// and "the codebook GB contains 16 entries in which each has a bias
+    /// towards the first element". The pre-selection depends on both.
+    #[test]
+    fn the_gain_codebooks_lean_the_way_the_text_says() {
+        let ga_second = GA.iter().filter(|row| row[1] > row[0]).count();
+        assert!(
+            ga_second >= 7,
+            "{ga_second} of GA's rows lean to the second"
+        );
+        let gb_first = GB.iter().filter(|row| row[0] > row[1]).count();
+        assert!(gb_first >= 14, "{gb_first} of GB's rows lean to the first");
+        // and the first elements of GB are ordered, which the pre-selection
+        // by closeness to the pitch gain relies on
+        for pair in GB.windows(2) {
+            assert!(pair[0][0] <= pair[1][0]);
+        }
+    }
+
+    /// Each predictor's taps fall off with age, and `1 − Σ p̂` is the weight
+    /// the table next to it says, to within the rounding of four products.
+    #[test]
+    fn the_ma_predictor_and_its_weights_agree() {
+        for (predictor, weights) in MA_PREDICTOR.iter().zip(MA_CURRENT_WEIGHT) {
+            for coefficient in 0..10 {
+                let taps: Vec<i32> = predictor
+                    .iter()
+                    .map(|row| i32::from(row[coefficient]))
+                    .collect();
+                for pair in taps.windows(2) {
+                    assert!(pair[0] >= pair[1], "an older frame weighs more");
+                }
+                let rest = 32_768 - taps.iter().sum::<i32>();
+                let weight = i32::from(weights[coefficient]);
+                assert!((rest - weight).abs() <= 3, "{rest} against {weight}");
+            }
+        }
+        for (weights, inverses) in MA_CURRENT_WEIGHT.iter().zip(MA_CURRENT_WEIGHT_INVERSE) {
+            for (weight, inverse) in weights.iter().zip(inverses) {
+                let exact = 4096.0 * 32768.0 / f64::from(*weight);
+                assert!(
+                    (exact - f64::from(inverse)).abs() <= 2.5,
+                    "1/{weight} is {exact}, the table says {inverse}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_initial_lsfs_are_i_pi_over_eleven() {
+        for (index, value) in INITIAL_LSF.iter().enumerate() {
+            let i = f64::from(u8::try_from(index + 1).unwrap());
+            #[expect(clippy::cast_possible_truncation, reason = "the value is below 32768")]
+            let truncated = (i * PI / 11.0 * 8192.0).floor() as i16;
+            assert_eq!(*value, truncated, "i = {}", index + 1);
+        }
+    }
+
+    /// Whatever the starting cosines are, they must describe a set of
+    /// frequencies the codec could have decoded: ordered, so their cosines
+    /// fall, and strictly inside `(0, π)`.
+    #[test]
+    fn the_initial_lsps_are_the_cosines_of_ordered_frequencies() {
+        for pair in INITIAL_LSP.windows(2) {
+            assert!(pair[0] > pair[1], "{INITIAL_LSP:?}");
+        }
+        assert!(INITIAL_LSP.iter().all(|q| *q > -32_768 && *q < 32_767));
+    }
+
+    #[test]
+    fn the_gain_predictor_is_equation_69() {
+        let printed = [0.68, 0.58, 0.34, 0.19];
+        for (value, coefficient) in GAIN_PREDICTOR.iter().zip(printed) {
+            assert_eq!(i32::from(*value), nearest(coefficient * 8192.0));
+        }
+    }
+
+    #[test]
+    fn the_output_filter_is_equation_91() {
+        let zeros = [0.939_805_81, -1.879_583_4, 0.939_805_81];
+        for (value, coefficient) in OUTPUT_HIGH_PASS_ZEROS.iter().zip(zeros) {
+            assert_eq!(i32::from(*value), nearest(coefficient * 8192.0));
+        }
+        let poles = [1.0, 1.933_073_5, -0.935_891_99];
+        for (value, coefficient) in OUTPUT_HIGH_PASS_POLES.iter().zip(poles) {
+            assert_eq!(i32::from(*value), nearest(coefficient * 8192.0));
+        }
+    }
+
+    #[test]
+    fn the_cosine_table_is_the_cosine() {
+        for (index, value) in COSINE.iter().enumerate() {
+            let i = f64::from(u8::try_from(index).unwrap());
+            let exact = nearest((i * PI / 64.0).cos() * 32768.0).min(32_767);
+            assert_eq!(i32::from(*value), exact, "entry {index}");
+        }
+        for (index, slope) in COSINE_SLOPE.iter().enumerate() {
+            let i = f64::from(u8::try_from(index).unwrap());
+            let step = ((i + 1.0) * PI / 64.0).cos() - (i * PI / 64.0).cos();
+            assert_eq!(
+                i32::from(*slope),
+                nearest(step * 32768.0 * 16.0),
+                "entry {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arithmetic_tables_are_their_functions() {
+        for (index, value) in POWER_OF_TWO.iter().enumerate() {
+            let i = f64::from(u8::try_from(index).unwrap());
+            let exact = nearest(2_f64.powf(i / 32.0) * 16384.0).min(32_767);
+            assert_eq!(i32::from(*value), exact, "2^({index}/32)");
+        }
+        // the logarithm table was rounded from a less precise evaluation and
+        // sits a unit low in half its entries, so it is checked to within one
+        for (index, value) in LOG2.iter().enumerate() {
+            let i = f64::from(u8::try_from(index).unwrap());
+            let exact = nearest((1.0 + i / 32.0).log2() * 32768.0).min(32_767);
+            assert!(
+                (i32::from(*value) - exact).abs() <= 1,
+                "log2(1 + {index}/32): {value} against {exact}"
+            );
+        }
+        for (index, value) in INVERSE_SQRT.iter().enumerate() {
+            let i = f64::from(u8::try_from(index).unwrap());
+            let exact = nearest(32768.0 / (1.0 + i / 16.0).sqrt()).min(32_767);
+            assert_eq!(i32::from(*value), exact, "1/sqrt(1 + {index}/16)");
+        }
+    }
+
+    /// §3.7.1 describes `b30` as a Hamming-windowed sinc, truncated at ±29
+    /// and zero at ±30, with its cut-off at 3600 Hz in the oversampled
+    /// domain. The window below spans ±29.5 samples; with it, and the gain
+    /// that makes the centre tap agree, every coefficient lands within two
+    /// units of the table, and the zeros of the sinc fall where the table has
+    /// its zeros.
+    #[test]
+    fn b30_is_the_windowed_sinc_the_text_describes() {
+        let centre = f64::from(INTERPOLATION_B30[0]);
+        for (index, value) in INTERPOLATION_B30.iter().enumerate() {
+            let n = f64::from(u8::try_from(index).unwrap());
+            let x = 2.0 * 3600.0 / 24_000.0 * n;
+            let sinc = if index == 0 {
+                1.0
+            } else {
+                (PI * x).sin() / (PI * x)
+            };
+            let window = 0.54 + 0.46 * (PI * n / 29.5).cos();
+            let expected = nearest(centre * sinc * window);
+            assert!(
+                (i32::from(*value) - expected).abs() <= 2,
+                "b30({index}) is {value}, the formula gives {expected}"
+            );
+            if index % 10 == 0 && index > 0 {
+                assert_eq!(*value, 0, "b30({index}) sits on a zero of the sinc");
+            }
+        }
+    }
+}
