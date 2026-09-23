@@ -245,7 +245,9 @@ pub(crate) fn run(
 /// to register the same account shares the account with it: the lab's MESSAGE
 /// echo, sent to every contact, went to this one and not to the flow waiting
 /// for it.
-fn give_back(endpoint: &mut Endpoint, account: sipral::AccountId) {
+///
+/// `crate::pipewire` gives its own binding back the same way.
+pub(crate) fn give_back(endpoint: &mut Endpoint, account: sipral::AccountId) {
     let _ = endpoint.agent.unregister(account, Instant::now());
     let until = Instant::now() + UNREGISTER_PATIENCE;
     loop {

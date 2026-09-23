@@ -754,14 +754,16 @@ else
     fail "zig is not installed, and nothing else here can read C the way glibc does (brew install zig)"
 fi
 
-# Everything behind cfg(target_os = "windows") in sipral-io-wasapi, and the
-# three iOS bodies in sipral-io-coreaudio, are read by no compiler on this
-# machine, and a crate whose platform half only compiles on the platform is a
-# crate that stops compiling there quietly. Both targets are rustup
-# components rather than machines, so this type-checks and lints without
-# running anything -- which is what rots. Rustdoc goes with clippy for
-# Windows, because the links into the Windows-only types are the ones that
-# resolve on no other target.
+# Everything behind cfg(target_os = "windows") in sipral-io-wasapi, everything
+# behind cfg(target_os = "linux") in sipral-io-pipewire and the harness's own
+# PipeWire flow, and the three iOS bodies in sipral-io-coreaudio, are read by
+# no compiler on this machine, and a crate whose platform half only compiles
+# on the platform is a crate that stops compiling there quietly. The targets
+# are rustup components rather than machines, so this type-checks and lints
+# without linking anything -- which is what rots. Rustdoc goes with clippy for
+# Windows and Linux, because the links into the platform-only types are the
+# ones that resolve on no other target. What this cannot do is run them:
+# interop/pipewire/run.sh is where the Linux half meets a real PipeWire.
 step "the code this machine does not compile"
 if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc; then
     cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc --all-targets \
@@ -774,6 +776,24 @@ if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc;
         || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-wasapi --no-deps --target x86_64-pc-windows-msvc"
 else
     fail "x86_64-pc-windows-msvc is not installed: rustup target add x86_64-pc-windows-msvc"
+fi
+if [ "$(uname -s)" = Linux ]; then
+    pass "sipral-io-pipewire compiles natively here, with the rest of the workspace"
+elif rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
+    cargo clippy -p sipral-io-pipewire --target x86_64-unknown-linux-gnu --all-targets \
+        -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-io-pipewire for Linux" \
+        || fail "cargo clippy -p sipral-io-pipewire --target x86_64-unknown-linux-gnu --all-targets"
+    RUSTDOCFLAGS="-D warnings" cargo doc -p sipral-io-pipewire --no-deps \
+        --target x86_64-unknown-linux-gnu >/dev/null 2>&1 \
+        && pass "cargo doc -p sipral-io-pipewire for Linux" \
+        || fail "RUSTDOCFLAGS=-D warnings cargo doc -p sipral-io-pipewire --no-deps --target x86_64-unknown-linux-gnu"
+    cargo clippy -p sipral-interop --features pipewire --target x86_64-unknown-linux-gnu \
+        --all-targets -- -D warnings >/dev/null 2>&1 \
+        && pass "cargo clippy -p sipral-interop --features pipewire for Linux" \
+        || fail "cargo clippy -p sipral-interop --features pipewire --target x86_64-unknown-linux-gnu --all-targets"
+else
+    fail "x86_64-unknown-linux-gnu is not installed: rustup target add x86_64-unknown-linux-gnu"
 fi
 if rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-ios; then
     cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets \

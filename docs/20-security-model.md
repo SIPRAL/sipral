@@ -419,9 +419,9 @@ this end directly rather than through the line's own proxy.
 ## The unsafe surface
 
 `unsafe_code = "deny"` at the workspace root (`Cargo.toml:25`) is overridden
-in exactly three crates, each in its own manifest: `sipral-ffi`,
-`sipral-io-coreaudio`, `sipral-io-wasapi` (`unsafe_code = "allow"` in each
-crate's `[lints.rust]`). Everything else in the workspace is denied `unsafe`
+in exactly four crates, each in its own manifest: `sipral-ffi`,
+`sipral-io-coreaudio`, `sipral-io-wasapi`, `sipral-io-pipewire`
+(`unsafe_code = "allow"` in each crate's `[lints.rust]`). Everything else in the workspace is denied `unsafe`
 outright, including the two crates that write cryptographic primitives
 in-tree, SRTP and DTLS.
 

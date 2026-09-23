@@ -34,5 +34,16 @@ sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = f
 # `sipral-rtp` for goes through `sipral` instead.
 sipral-core.workspace = true
 
+# The one flow whose audio is a real device's: a call whose microphone and
+# earpiece are PipeWire nodes (src/pipewire.rs). Off unless asked for, and
+# Linux only, because it links libpipewire, and the image every other flow
+# runs in has none — interop/pipewire/run.sh builds it with the feature, in
+# the image that has.
+[features]
+pipewire = ["dep:sipral-io-pipewire"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sipral-io-pipewire = { path = "../../crates/sipral-io-pipewire", version = "0.0.1", optional = true }
+
 [lints]
 workspace = true

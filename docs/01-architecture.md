@@ -172,8 +172,8 @@ Detail in [05-media.md](05-media.md).
 ### sipral-io-*, sipral-headless
 
 Two ways to get audio in and out, and they are mutually exclusive by design. A
-device build links `sipral-io-coreaudio` or `sipral-io-wasapi` (AAudio
-follows). An agent build links `sipral-headless` and touches no audio API at
+device build links `sipral-io-coreaudio`, `sipral-io-wasapi` or
+`sipral-io-pipewire` (AAudio follows). An agent build links `sipral-headless` and touches no audio API at
 all.
 
 That second build is not a stripped-down first build. It is why the audio device

@@ -1236,10 +1236,12 @@ project has to do whoever writes the canceller:
 So `MediaSession` keeps the recent past of the loudspeaker and hands back the
 slice that lines up, at a distance the application sets with
 `set_render_delay`. That number is the device's render-to-capture delay, which
-only the platform knows, and neither of them reports it the same way: WASAPI
-answers it per stream in one call, while CoreAudio has four properties per
-direction spread over two kinds of object and a rate to convert them by.
-`sipral-io-coreaudio` assembles it; `sipral-io-wasapi` reads it.
+only the platform knows, and no two of them report it the same way: WASAPI
+answers it per stream in one call, CoreAudio has four properties per
+direction spread over two kinds of object and a rate to convert them by, and
+PipeWire hands each stream a `pw_time` whose three parts are in two different
+rates. `sipral-io-coreaudio` assembles it; `sipral-io-wasapi` reads it;
+`sipral-io-pipewire` reads it every quantum and adds it up.
 There is no portable guess worth making, so the stack does not make one — the
 default is zero, which pairs a capture with the frame played immediately
 before it, and a delay above half a second is refused rather than believed,
@@ -1270,13 +1272,51 @@ dependency either:
 |---|---|
 | macOS, iOS | The voice-processing audio unit `sipral-io-coreaudio` is built on. It is the unit or it is nothing, so it is there whenever a stream is, and nothing reaches the seam |
 | Windows | The endpoint's own capture-side processing, which applies to a stream declared `AudioCategory_Communications` and to no other kind. `sipral-io-wasapi` declares it on every stream it opens, in both directions, and reports whether Windows accepted the declaration — but no further, because no further is reportable |
-| Linux, and any build wanting its own | The seam. A permissively licensed component is attached by the application, and `THIRD-PARTY-NOTICES.md` grows a row for it |
+| Linux | PipeWire's `libpipewire-module-echo-cancel`, when the session has loaded it — which is the desktop's decision, not the stream's. It adds a source and a sink to the graph, and a call is cancelled when `sipral-io-pipewire`'s two streams are routed through that pair. Where the session has not loaded it, the seam |
+| Any build wanting its own | The seam. A permissively licensed component is attached by the application, and `THIRD-PARTY-NOTICES.md` grows a row for it |
 
-The seam exists for the third row and for anyone who wants a different one
+The seam exists for the last two rows and for anyone who wants a different one
 from what the platform provides. It is not a placeholder for work this project
 owes on the first two.
 
-The first two rows are not the same kind of certainty, and an application that
+On Linux the canceller is a module of the PipeWire session, not something a
+stream asks for. A stream's `media.role` of `Communication`, which
+`sipral-io-pipewire` sets on every stream, lets a session manager's rules tell
+a call from music and does nothing else; there is no per-stream switch. The
+module is loaded by a fragment in `pipewire.conf.d` (per user,
+`~/.config/pipewire/pipewire.conf.d/`, or for the machine,
+`/etc/pipewire/pipewire.conf.d/`):
+
+```
+context.modules = [
+    {   name = libpipewire-module-echo-cancel
+        args = {
+            capture.props  = { node.name = "echo-cancel-capture" }
+            source.props   = { node.name = "echo-cancel-source" }
+            sink.props     = { node.name = "echo-cancel-sink" }
+            playback.props = { node.name = "echo-cancel-playback" }
+        }
+    }
+]
+```
+
+or, on a desktop running `pipewire-pulse`, by `pactl load-module
+module-echo-cancel`. Either way the graph gains an `Audio/Source` and an
+`Audio/Sink` — `echo-cancel-source` and `echo-cancel-sink` with the names
+above, which is what that fragment produced on Debian 13's PipeWire 1.4 —
+and the module's own two streams sit between them and the real microphone and
+speaker. A call is cancelled when its capture stream reads `echo-cancel-source`
+and its playback stream plays into `echo-cancel-sink`: made the session's
+defaults, so `DeviceChoice::System` finds them, or named with
+`StreamConfig::on`. The module's `library.name` argument picks the canceller;
+Debian's `libspa-0.2-modules` ships `aec/libspa-aec-webrtc` and a pass-through,
+`aec/libspa-aec-null`. `sipral-io-pipewire` does not report whether the node a
+stream landed on is one of these, so an application that needs to know checks
+the names it configured.
+
+The first two rows are not the same kind of certainty — and the third is a
+third kind, the session's rather than the stream's or the endpoint's — and an
+application that
 treats them as one will ship an echo it cannot explain. On Apple's platforms
 the canceller is the unit the device crate opens. On Windows the processing
 belongs to the endpoint and its driver: the category is set with
@@ -1289,8 +1329,21 @@ says what was asked and what Windows said to the asking, and stops there;
 anything but `Category::Communications` means there is no system processing at
 all, and the application's own is the only kind there will be.
 
-The delay the seam needs comes from the same two crates and is not assembled
-the same way. WASAPI keeps it in one property per stream,
+The delay the seam needs comes from the device crates and is not assembled
+the same way by any two of them. PipeWire's is in `pw_time`, which
+`pw_stream_get_time_n` fills and which `pipewire/stream.h` documents part by
+part: `delay`, from the stream to the edge of the graph — every filter and
+resampler on the way and the device's own latency — counted at the graph's
+rate, and `queued` and `buffered`, what waits in the stream and in its
+resampler, counted at the stream's. `sipral-io-pipewire` reads it on the
+realtime thread after every quantum, where the call is RT safe, and
+`CaptureStream::render_delay` adds the playback stream's and the capture
+stream's into one `RenderDelay`, because a PipeWire node is one direction
+and a call has two streams. Through a virtual cable on Debian 13's PipeWire
+1.4, a 48 kHz stream reported 21.3 ms on the way out — 1,024 frames queued,
+one quantum — and nothing on the way in: a cable has no device latency, and
+the figure on real hardware is the one worth measuring. WASAPI keeps it in
+one property per stream,
 `IAudioClient::GetStreamLatency`, and a call wants both directions added.
 CoreAudio has no such property at all: the figure is the device's own latency,
 its safety offset, the frames in its IO buffer, and the latency of the stream
@@ -1377,7 +1430,14 @@ finds it gone, not only by a buffer pass that never comes. On macOS the stream
 asks the hardware layer whether each of the two device objects under it is
 still alive — the speaker's and the microphone's, which on a Mac are usually
 not the same object — and losing either is losing the stream. That is a
-property read rather than an inference from silence. On iOS it reports nothing,
+property read rather than an inference from silence. On Linux the stream is
+connected with `PW_STREAM_FLAG_DONT_RECONNECT`, and a stream that names its
+node also carries `node.dont-fallback`: together they tell the session manager
+to take the stream down when its node goes rather than move it, and the
+stream reports the state change it did not ask for. Both are needed —
+WirePlumber 0.5, given only the first, left a stream whose node had been
+removed without a word — and `interop/pipewire/run.sh` checks it by pulling a
+virtual cable out from under two open streams. On iOS it reports nothing,
 because there
 the route belongs to `AVAudioSession` and its changes are delivered to the
 application; anything else would be a guess dressed as a fact.
@@ -1398,8 +1458,14 @@ A device is chosen one of three ways, and what separates them is what happens
 when it is not there. The system's route is whatever the operating system is
 routing calls to. A named device is that device or nothing. A *preference* is a
 saved identity — `Device::uid` on macOS, the endpoint identifier on Windows,
-both of which survive a replug and a reboot where a device number does not — and
-falls back to the system's route when the machine does not have it. On Windows
+the node's `node.name` on Linux, all of which survive a replug and a reboot
+where a device number does not — and
+falls back to the system's route when the machine does not have it. On Linux
+the graph's own numeric ids are reused the moment a node goes, so
+`sipral-io-pipewire` never hands one out, and it looks a named node up in the
+registry before opening on it: the session manager's answer to a
+`target.object` it cannot find is the default node, which is right for a
+preference and wrong for a named device. On Windows
 that includes an endpoint the machine still knows but cannot play through:
 unplugged, disabled and absent endpoints keep their identifiers in the registry,
 so the preference asks the endpoint's state rather than only whether the
@@ -1410,9 +1476,12 @@ headset land somewhere instead of failing.
 What the crate does not promise: it cannot stop the operating system changing
 the default device behind the application's back, and it cannot move a running
 stream onto another device. CoreAudio accepts a device only on an uninitialised
-unit, and a WASAPI client is bound to the endpoint it was activated on. Both are
-answered the same way — the default-changed event says the machine moved, and
-reopening is what re-applies the selection.
+unit, and a WASAPI client is bound to the endpoint it was activated on. PipeWire
+could move a stream, and `sipral-io-pipewire` tells it not to, for the reason
+above. All three are answered the same way — the default-changed event says
+the machine moved, and reopening is what re-applies the selection. On Linux
+the default is the `default.audio.sink` and `default.audio.source` keys of the
+session's `"default"` metadata object, which is what `DeviceMonitor` watches.
 
 ## Per call, not per process (D6)
 

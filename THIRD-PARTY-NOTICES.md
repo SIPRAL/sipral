@@ -238,6 +238,32 @@ binary to reproduce its notice. Its `LICENSE` reads:
 followed by the three BSD conditions and the disclaimer, which a binary
 containing Sipral must carry once this crate is linked into it.
 
+### PipeWire
+
+`sipral-io-pipewire`, the Linux device crate, links `libpipewire-0.3`
+dynamically: the machine's own copy, the one its desktop already runs, found
+at load time. Nothing of PipeWire is vendored, built or shipped by this
+repository.
+
+| Component | What it is | Licence |
+|---|---|---|
+| libpipewire-0.3 | the PipeWire client library: the connection, the registry, streams and thread loops. Tested against 1.4.2, Debian 13's | MIT |
+| SPA headers (`spa-0.2`) | the plugin API's structures and constants — pods, buffers, hooks, dictionaries — which are all `static inline` or plain declarations, so there is no SPA library to link | MIT |
+
+Every header this crate was written from carries `SPDX-License-Identifier:
+MIT`. The declarations in `crates/sipral-io-pipewire/src/sys.rs` and
+`abi.rs` are written by hand from them, prototype by prototype and field by
+field, rather than generated — `docs/02-clean-room.md` has the rule — so no
+PipeWire source is copied into this tree, and a binary that links the
+system's library carries no PipeWire code of its own to give notice of. A
+distributor that ships `libpipewire` alongside an application ships its MIT
+notice with it, as with any MIT library.
+
+The ALSA and PulseAudio client libraries, `alsa-lib` and `libpulse`, are LGPL
+and are not linked, and nothing here reaches either through PipeWire:
+Debian's `libpipewire-0.3.so.0` itself depends on the C library and nothing
+else, and talks to the daemon over its own socket.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`
@@ -258,7 +284,6 @@ yet. Each is listed with the licence verified from its own LICENSE file.
 | Component | Use | Licence |
 |---|---|---|
 | webrtc-audio-processing | AEC3, AGC, noise suppression, as an optional crate attached at the processor seam | BSD-3-Clause |
-| libpipewire | Linux audio device I/O, through hand-written bindings; the ALSA and PulseAudio client libraries are LGPL and stay out | MIT |
 | libvpx, libaom | video codecs, phase 6, after 1.0 | BSD-3-Clause / BSD-2-Clause |
 | rustls | the TLS example only; the transport, and its TLS, belong to the application | Apache-2.0 OR ISC OR MIT |
 

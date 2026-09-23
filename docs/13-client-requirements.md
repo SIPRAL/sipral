@@ -498,19 +498,21 @@ The Rust surface for each of these already exists somewhere below
 
 | Requirement | Where it lives |
 |---|---|
-| **C4** — audio that survives the platform's own interruptions | Device-state detection (`IMMDevice::GetState`) lives in `sipral-io-wasapi`, but that crate and `sipral-io-coreaudio` are depended on by nothing else in the workspace — not `sipral`, not `sipral-ua` — so this is reachable only by taking a dependency on the platform crate directly, not through the facade. |
+| **C4** — audio that survives the platform's own interruptions | Device-state detection (`IMMDevice::GetState`) lives in `sipral-io-wasapi`, and the equivalent for Linux — a stream taken down and reported when its PipeWire node goes — in `sipral-io-pipewire`, but those crates and `sipral-io-coreaudio` are depended on by nothing else in the workspace — not `sipral`, not `sipral-ua` — so this is reachable only by taking a dependency on the platform crate directly, not through the facade. |
 
 ### Not built anywhere yet
 
 - **A2** — audio devices on desktop. By design, first: the core deliberately
   has no device in it, and this is the application's and the operating
   system's. What exists besides that design boundary is not the feature
-  either — `sipral-io-wasapi` and `sipral-io-coreaudio` exist, but neither is
-  depended on by anything, and neither implements the enumeration with an
-  identity that survives unplug and replug that A2 asks for.
+  either — `sipral-io-wasapi`, `sipral-io-coreaudio` and `sipral-io-pipewire`
+  exist, and each lists devices under an identity that survives unplug and
+  replug (the endpoint identifier, the device UID, the node's `node.name`),
+  but none of them is depended on by anything, so none of it reaches the
+  facade or the C ABI.
 - **A3** — volume, mute, level metering. The same design boundary as A2. The
-  same two crates each have a `level.rs`, unreferenced by anything else, and
-  nothing there is a gain or mute control.
+  same three crates apply `sipral-io-common`'s gain, mute and meter to their
+  own frames, and nothing above them references any of it.
 - **D5**'s transport and NAT half — why one transport or one NAT strategy was
   chosen over another. Nothing here chooses between them per call at all, so
   there is no decision to explain yet.

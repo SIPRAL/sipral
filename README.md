@@ -109,7 +109,8 @@ you pick, or replace, or leave out entirely.
 | `sipral-media` | audio pipeline: mixing, resampling, clock drift correction, comfort noise, echo cancellation as an external module. Codecs: G.711 A-law and µ-law and G.722 in-tree, written from the Recommendations; Opus linked (libopus), behind a compile-time feature that is on by default and that a build meant for hardware turns off; G.729 follows in phase 2, written the same way, for the carrier that insists |
 | `sipral-io-common` | the parts of a device backend that are not about any device: the lock-free ring between the audio thread and an ordinary one, the gate that says when that thread is out of our memory, and volume, mute and the meter |
 | `sipral-io-coreaudio` | macOS and iOS device I/O |
-| `sipral-io-wasapi` | Windows device I/O. AAudio for Android follows |
+| `sipral-io-wasapi` | Windows device I/O |
+| `sipral-io-pipewire` | Linux desktop device I/O, over `libpipewire`. AAudio for Android follows |
 | `sipral-headless` | the PCM-over-a-socket framing and control protocol for AI agents, with no audio device. Not yet joined to the media pipeline |
 | `sipral-ffi` | the C ABI, printed from one declaration into the header and the Swift, .NET and Kotlin bindings. Not frozen yet |
 | `sipral` | the facade: signalling from `sipral-ua` joined to the media pipeline, with the codec catalogue, SRTP keying, DTMF, call recording and statistics per call. The one crate an application depends on, and what `sipral-ffi` exposes |

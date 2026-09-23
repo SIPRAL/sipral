@@ -928,6 +928,7 @@ version = "0.0.1"
 dependencies = [
  "sipral",
  "sipral-core",
+ "sipral-io-pipewire",
 ]
 
 [[package]]
@@ -936,6 +937,13 @@ version = "0.0.1"
 
 [[package]]
 name = "sipral-io-coreaudio"
+version = "0.0.1"
+dependencies = [
+ "sipral-io-common",
+]
+
+[[package]]
+name = "sipral-io-pipewire"
 version = "0.0.1"
 dependencies = [
  "sipral-io-common",

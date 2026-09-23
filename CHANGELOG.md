@@ -24,6 +24,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   modules bytes no encoder produced. `indexing_slicing` moves from a warning
   to a workspace-wide denial, in every crate that already set it locally, so
   a slice index that could panic fails the build rather than the call.
+- **Linux desktop audio, over PipeWire.** `sipral-io-pipewire` is the third
+  device crate, beside CoreAudio and WASAPI and with the same surface:
+  `CaptureStream` and `PlaybackStream` over `pw_stream`, mono sixteen-bit at
+  the rate asked for with PipeWire's adapter doing the converting, devices
+  listed by their stable `node.name` with the session's defaults, hotplug and
+  default changes from `DeviceMonitor`, a node that goes reported once as
+  `StreamEvent::DeviceLost` rather than silently rerouted, volume, mute and
+  the meter, and the render delay an echo canceller needs, read from
+  `pw_time`. It links `libpipewire` (MIT) through hand-written bindings;
+  ALSA's and PulseAudio's client libraries, both LGPL, stay out. PipeWire's
+  own echo canceller is a session module, and `docs/05-media.md` says how it
+  is loaded and routed to. `scripts/lab.sh pipewire` checks it against a real
+  graph — samples played into a virtual cable come back out identical, and a
+  cable pulled from under two streams is reported by both — and then carries
+  a call to the lab's Asterisk on PipeWire's devices and hears its tone come
+  back.
 - **Twenty-four CPU-hours of fuzzing on every target.** All eighteen
   `cargo-fuzz` targets, each 48 runs of 30 minutes on one machine, about 37
   billion executions: no crash, no timeout, no run out of memory. That is the

@@ -42,6 +42,8 @@ mod join;
 #[cfg(test)]
 mod local;
 mod pair;
+#[cfg(all(feature = "pipewire", target_os = "linux"))]
+mod pipewire;
 mod quality;
 
 use std::collections::HashMap;
@@ -279,6 +281,11 @@ fn main() -> ExitCode {
                 failures += 1;
             }
         }
+    }
+    // PipeWire's devices, and only when named: see `pipewire::flow`
+    #[cfg(all(feature = "pipewire", target_os = "linux"))]
+    if !pipewire::flow(&server, remote, &user, &pass, &wanted) {
+        failures += 1;
     }
 
     if failures == 0 {

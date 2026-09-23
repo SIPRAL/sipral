@@ -17,6 +17,12 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
+#   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
+#                               then a call to Asterisk whose microphone and
+#                               earpiece are PipeWire nodes -- built and run
+#                               in interop/pipewire's own image, and not part
+#                               of a run that names nothing, because it
+#                               compiles the facade inside a container
 #   scripts/lab.sh --matrix     the above, then regenerate docs/11-testing.md's
 #                               own generated section from this run
 #                               (scripts/interop-matrix.py); any of the words
@@ -80,8 +86,14 @@ command -v docker >/dev/null 2>&1 || {
 # will not compile on it, while the containers it runs are current. Build it
 # wherever there is a toolchain and point SIPRAL_HARNESS at the result; it has
 # to be a Linux binary, since that is what the container will run it as.
+#
+# The PipeWire step builds its own, inside the image that has libpipewire to
+# link it against, so neither build below is its to wait for.
 step "the harness"
-if [ -n "${SIPRAL_HARNESS:-}" ]; then
+if [ "$WANT" = pipewire ]; then
+    HARNESS=""
+    printf '  note  built inside interop/pipewire'"'"'s image by its own step\n'
+elif [ -n "${SIPRAL_HARNESS:-}" ]; then
     [ -x "$SIPRAL_HARNESS" ] || { fail "SIPRAL_HARNESS is not an executable file"; exit 1; }
     HARNESS="$SIPRAL_HARNESS"
     pass "taken as given: $HARNESS"
@@ -102,7 +114,10 @@ fi
 # links the shared library, and a machine that built the Rust harness for a
 # different target has one and not the other. A skip says so.
 step "the harness, in C"
-if [ -n "${SIPRAL_HARNESS_C:-}" ]; then
+if [ "$WANT" = pipewire ]; then
+    HARNESS_C=""
+    printf '  note  not used by the PipeWire step\n'
+elif [ -n "${SIPRAL_HARNESS_C:-}" ]; then
     [ -x "$SIPRAL_HARNESS_C" ] || { fail "SIPRAL_HARNESS_C is not an executable file"; exit 1; }
     HARNESS_C="$SIPRAL_HARNESS_C"
     pass "taken as given: $HARNESS_C"
@@ -569,6 +584,27 @@ if [ "$WANT" = all ] || [ "$WANT" = netem ]; then
             *) fail "$profile" ;;
         esac
     done
+fi
+
+# The one step where the audio is a device's rather than the harness's own:
+# sipral-io-pipewire's tests against a real graph, then the facade carrying a
+# call to Asterisk's echo extension with PipeWire nodes for a microphone and
+# an earpiece (interop/harness/src/pipewire.rs says what is played where and
+# why the tone coming back proves the whole path). interop/pipewire/run.sh
+# is the recipe, and interop/pipewire/Dockerfile the machine it runs on: a
+# daemon, a session manager and two virtual cables, since a container has no
+# sound card. The checkout is mounted read-only and compiled inside, into a
+# volume of its own so a second run starts from the first one's build.
+if [ "$WANT" = pipewire ]; then
+    step "a call on a Linux desktop's devices -- PipeWire, straight at Asterisk"
+    docker build -q -t sipral-pipewire interop/pipewire >/dev/null 2>&1 \
+        && pass "the PipeWire image" || { fail "docker build interop/pipewire"; exit 1; }
+    docker run --rm --network sipral-interop_lab \
+        -v "$ROOT:/src:ro" -v sipral-pipewire-target:/target \
+        -e CARGO_TARGET_DIR=/target -w /src \
+        sipral-pipewire bash interop/pipewire/run.sh call \
+        && pass "sipral-io-pipewire, and a call carried on it" \
+        || fail "interop/pipewire/run.sh call"
 fi
 
 step "the capture"

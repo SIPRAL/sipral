@@ -346,7 +346,12 @@ property through before it reaches C.
   libopus into a product quietly (`05-media.md`);
 - `sipral-io-pipewire` for Linux desktops over `libpipewire` (MIT; ALSA and
   PulseAudio client libraries are LGPL and stay out), on a `sipral-io-common`
-  crate holding what the two device crates currently duplicate;
+  crate holding what the two device crates currently duplicate. *Built*:
+  enumeration and hotplug from the registry and the `"default"` metadata,
+  capture and playback over `pw_stream`, the render delay from `pw_time`, a
+  lost node reported rather than rerouted, and PipeWire's own echo canceller
+  documented as the session module it is (`05-media.md`); tested against a
+  real graph and through a lab call by `scripts/lab.sh pipewire`;
 - the platform echo canceller reached on Windows and Linux through the
   processor seam, with a reference module attachable as an optional crate.
 
