@@ -631,6 +631,9 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
         python_agent && pass "agent.py answered, echoed and hung up" \
             || fail "agent.py"
     fi
+    step "the socket-framed agent, called by Asterisk"
+    headless_socket_agent && pass "headless-socket-agent answered, echoed and carried DTMF" \
+        || fail "headless-socket-agent"
 fi
 
 # The one step in this file where the far end is a client stack rather than
