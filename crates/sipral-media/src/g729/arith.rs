@@ -83,10 +83,59 @@ pub(super) const fn shift_right(a: i16, count: u32) -> i16 {
     }
 }
 
+/// "Short shift right" by a signed count: a negative count shifts left, held
+/// at the end of the word.
+pub(super) const fn shift_right_signed(a: i16, count: i16) -> i16 {
+    if count < 0 {
+        shift_left(a, count.unsigned_abs() as u32)
+    } else {
+        shift_right(a, count.unsigned_abs() as u32)
+    }
+}
+
 /// "Short multiplication": two Q15 fractions to a Q15 fraction, truncated
 /// toward minus infinity. Only −1 × −1 leaves the word.
 pub(super) const fn mult(a: i16, b: i16) -> i16 {
     saturate((a as i32 * b as i32) >> 15)
+}
+
+/// "Multiplication with rounding": the same product, half a unit added
+/// before the fifteen bits are dropped.
+pub(super) const fn mult_round(a: i16, b: i16) -> i16 {
+    saturate((a as i32 * b as i32 + 0x4000) >> 15)
+}
+
+/// "Short absolute value", held: the magnitude of −32768 is 32767.
+pub(super) const fn abs(a: i16) -> i16 {
+    if a == i16::MIN { i16::MAX } else { a.abs() }
+}
+
+/// "Short negate", held the same way.
+pub(super) const fn negate(a: i16) -> i16 {
+    if a == i16::MIN { i16::MAX } else { -a }
+}
+
+/// "Long absolute value", held.
+pub(super) const fn long_abs(a: i32) -> i32 {
+    if a == i32::MIN { i32::MAX } else { a.abs() }
+}
+
+/// "Long negate", held.
+pub(super) const fn long_negate(a: i32) -> i32 {
+    if a == i32::MIN { i32::MAX } else { -a }
+}
+
+/// "Short norm": how far a sixteen-bit word can move left before its two
+/// top bits differ. Zero for zero, fifteen for −1.
+pub(super) const fn norm(a: i16) -> u32 {
+    if a == 0 {
+        0
+    } else if a == -1 {
+        15
+    } else {
+        let positive = if a < 0 { !a } else { a };
+        positive.leading_zeros() - 1
+    }
 }
 
 /// "Long multiplication": the product doubled, two Q15 fractions to a Q31
@@ -114,6 +163,37 @@ pub(super) const fn mac(acc: i32, a: i16, b: i16) -> i32 {
 /// "Multiply and subtract".
 pub(super) const fn msu(acc: i32, a: i16, b: i16) -> i32 {
     long_sub(acc, long_mult(a, b))
+}
+
+/// "Multiply and accumulate", saying whether either step reached the end of
+/// the word. The encoder rescales a signal whose energy does.
+pub(super) const fn mac_checked(acc: i32, a: i16, b: i16) -> (i32, bool) {
+    let (product, held) = saturate_long((a as i64 * b as i64) << 1);
+    let (result, clipped) = saturate_long(acc as i64 + product as i64);
+    (result, held || clipped)
+}
+
+/// A sum of products `Σ a·b`, each doubled and every step held, from a
+/// starting value, and whether any step had to be held.
+pub(super) fn dot_checked(start: i32, a: &[i16], b: &[i16]) -> (i32, bool) {
+    a.iter()
+        .zip(b)
+        .fold((start, false), |(sum, overflowed), (x, y)| {
+            let (next, held) = mac_checked(sum, *x, *y);
+            (next, overflowed || held)
+        })
+}
+
+/// The same sum, held where it has to be, without the flag.
+pub(super) fn dot(start: i32, a: &[i16], b: &[i16]) -> i32 {
+    dot_checked(start, a, b).0
+}
+
+/// The element at `index`, or zero outside the slice. Every index the codec
+/// computes is inside the buffer it reads; this keeps a mistake from being a
+/// panic in a codec that runs on audio from the network.
+pub(super) fn at(values: &[i16], index: usize) -> i16 {
+    values.get(index).copied().unwrap_or(0)
 }
 
 /// "Multiply and subtract", saying whether either step reached the end of the
@@ -281,6 +361,32 @@ impl Split {
     pub(super) const fn times(self, factor: i16) -> i32 {
         mac(long_mult(self.high, factor), mult(self.low, factor), 1)
     }
+
+    /// Two split values multiplied: the product of the upper halves and
+    /// the two cross products, the product of the lower halves left out
+    /// because it is below the last bit kept.
+    pub(super) const fn times_split(self, other: Self) -> i32 {
+        let product = long_mult(self.high, other.high);
+        let product = mac(product, mult(self.high, other.low), 1);
+        mac(product, mult(self.low, other.high), 1)
+    }
+}
+
+/// `numerator / denominator` for two thirty-two-bit values with
+/// `0 <= numerator < denominator` and the denominator normalised into
+/// `[2^30, 2^31)`, as a Q31 fraction.
+///
+/// A sixteen-bit division gives the reciprocal of the denominator's upper
+/// half to about fourteen bits; one Newton step, `x (2 − d x)`, carries it to
+/// the whole denominator; and the numerator is multiplied by it.
+pub(super) const fn divide_long(numerator: i32, denominator: Split) -> i32 {
+    // 1/d in Q14, from 0.5 in Q15 over the upper half
+    let approximation = divide(0x3fff, denominator.high);
+    // 2 − d x, in Q30
+    let correction = long_sub(i32::MAX, denominator.times(approximation));
+    // x (2 − d x): 1/d in Q29
+    let reciprocal = Split::of(Split::of(correction).times(approximation));
+    long_shift_left(Split::of(numerator).times_split(reciprocal), 2)
 }
 
 /// `log2(value)` for a positive value, as a whole part and a Q15 fraction,
@@ -367,10 +473,11 @@ pub(super) const fn to_word(shift: u32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Split, add, deposit_high, divide, high, inverse_sqrt, log2, long_add, long_mult, long_norm,
-        long_shift_left, long_shift_left_checked, long_shift_right, long_shift_right_round,
-        long_sub, low, mac, msu, msu_checked, mult, pow2, round, round_checked, saturate,
-        shift_left, shift_right, sub,
+        Split, abs, add, at, deposit_high, divide, divide_long, dot_checked, high, inverse_sqrt,
+        log2, long_abs, long_add, long_mult, long_negate, long_norm, long_shift_left,
+        long_shift_left_checked, long_shift_right, long_shift_right_round, long_sub, low, mac,
+        mac_checked, msu, msu_checked, mult, mult_round, negate, norm, pow2, round, round_checked,
+        saturate, shift_left, shift_right, shift_right_signed, sub,
     };
 
     #[test]
@@ -462,6 +569,59 @@ mod tests {
         assert_eq!(low(0x1234_5678), 0x5678);
         assert_eq!(low(0x0000_8000), -32_768);
         assert_eq!(deposit_high(-2), -0x2_0000);
+    }
+
+    #[test]
+    fn the_encoders_operators_behave_at_their_edges() {
+        assert_eq!(mult_round(16_384, 3), 2, "1.5 rounds up");
+        assert_eq!(mult_round(-32_768, -32_768), 32_767);
+        assert_eq!(abs(-32_768), 32_767);
+        assert_eq!(negate(-32_768), 32_767);
+        assert_eq!(negate(5), -5);
+        assert_eq!(long_abs(i32::MIN), i32::MAX);
+        assert_eq!(long_negate(i32::MIN), i32::MAX);
+        assert_eq!(norm(0), 0);
+        assert_eq!(norm(-1), 15);
+        assert_eq!(norm(1), 14);
+        assert_eq!(norm(0x4000), 0);
+        assert_eq!(norm(-0x4000), 1);
+        assert_eq!(shift_right_signed(3, -2), 12);
+        assert_eq!(shift_right_signed(12, 2), 3);
+        assert_eq!(mac_checked(i32::MAX - 1, 1, 1), (i32::MAX, true));
+        assert_eq!(mac_checked(10, 3, 4), (34, false));
+        assert_eq!(dot_checked(1, &[3, 4], &[5, 6]), (1 + 2 * (15 + 24), false));
+        assert_eq!(at(&[7, 8], 1), 8);
+        assert_eq!(at(&[7, 8], 2), 0);
+    }
+
+    /// A product of two split values is the product of the wholes, to within
+    /// the lower halves' product that is left out.
+    #[test]
+    fn split_values_multiply_to_their_product() {
+        let a = Split::of(0x4000_0000); // one half, Q31
+        let b = Split::of(0x2000_0000); // one quarter
+        assert_eq!(a.times_split(b), 0x1000_0000);
+        let x = Split::of(1_234_567_890);
+        let y = Split::of(987_654_321);
+        let exact = (i64::from(x.join()) * i64::from(y.join())) >> 31;
+        assert!((i64::from(x.times_split(y)) - exact).abs() < 4);
+    }
+
+    /// The long division is the quotient to within a few units in 2^31.
+    #[test]
+    fn long_division_is_the_quotient() {
+        for (numerator, denominator) in [
+            (1_i32 << 29, 1_i32 << 30),
+            (123_456_789, 1_500_000_000),
+            (2_000_000_000, 2_100_000_000),
+        ] {
+            let exact = (i64::from(numerator) << 31) / i64::from(denominator);
+            let ours = divide_long(numerator, Split::of(denominator));
+            assert!(
+                (i64::from(ours) - exact).abs() < 64,
+                "{numerator}/{denominator}: {ours} against {exact}"
+            );
+        }
     }
 
     #[test]

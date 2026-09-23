@@ -95,13 +95,6 @@ impl Frame {
     }
 
     /// Write the indices into ten octets, each field masked to its width.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the tests pack a frame until there is an encoder"
-        )
-    )]
     pub(super) fn pack(&self) -> [u8; 10] {
         let [a, b] = self.subframes;
         let fields = [
@@ -148,8 +141,15 @@ impl Frame {
     /// when `P0` and the six bits together hold an odd number of ones.
     pub(super) fn parity_holds(&self) -> bool {
         let [first, _] = self.subframes;
-        let ones = (first.delay >> 2).count_ones() + u32::from(self.parity & 1);
+        let ones = ((first.delay >> 2) & 0x3f).count_ones() + u32::from(self.parity & 1);
         ones % 2 == 1
+    }
+
+    /// `P0` for a first subframe's delay codeword `P1`: the bit that makes
+    /// the ones among it and `P1`'s six most significant bits odd, as
+    /// [`Frame::parity_holds`] checks.
+    pub(super) fn parity_of(delay: u16) -> u16 {
+        u16::from(((delay >> 2) & 0x3f).count_ones().is_multiple_of(2))
     }
 }
 

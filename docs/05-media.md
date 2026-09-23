@@ -1134,8 +1134,9 @@ The pipeline between the codec and whatever produces or consumes samples.
   defaulting to where the far end has it — behind a compile-time feature that
   is on, for the reason below. G.729 for the carrier that insists, written
   in-tree the same way, because the common implementation is GPL and the base
-  patents are reported expired: the decoder is here (`sipral_media::g729`,
-  below), the encoder follows, and it is never in the default offer.
+  patents are reported expired: the encoder and the decoder are here
+  (`sipral_media::g729`, below), not yet offered in a call, and never in the
+  default offer.
 
   G.722's RTP clock rate is 8000 while it samples at 16000 (RFC 3551 §4.5.2),
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
@@ -1143,6 +1144,8 @@ The pipeline between the codec and whatever produces or consumes samples.
   in a frame" is correct for G.711 and wrong here.
 
 ### G.729: the decoder, bit-exact against Annex A
+
+Both halves are there; this section is the decoder, the next the encoder.
 
 `sipral_media::g729::Decoder` turns a ten-octet frame into eighty samples
 (`decode`), a frame that never arrived into eighty concealed ones
@@ -1192,6 +1195,55 @@ to 0.005 and 3.135, and a stream that loses its very first frame conceals it
 with the shortest delay the codebook has, because §4.3's zero is not a delay.
 Annex B's comfort noise is not decoded yet: a two-octet SID frame at the end
 of a payload is left undecoded by `decode_into`.
+
+### G.729: the encoder, bit-exact against Annex A
+
+`sipral_media::g729::Encoder` turns eighty samples into a ten-octet frame
+(`encode`), or a buffer of several frames into an RTP payload
+(`encode_into`). It is Annex A's reduced-complexity encoder (A.3): the
+input's 140 Hz high-pass, the LP analysis over a 30 ms window reaching 5 ms
+ahead, the LSP quantizer with its two MA predictors, the weighting filter
+fixed at `γ = 0.75`, the open-loop pitch search on decimated weighted speech,
+the closed-loop search by correlation alone, the depth-first search of the
+fixed codebook, and the gain quantizer with its preselection. It allocates
+nothing per frame.
+
+Annex A describes its encoder in a few sentences and leaves nearly all of
+the fixed point to the software it makes normative — how the open-loop
+search favours a lower delay, which pulse pairs the depth-first search
+tries, how the gain preselection draws its clusters. The procedure here is
+the one the Annex A conformance inputs are encoded with: every one of the
+seven encodes to its reference stream bit for bit, and the code says at
+each step where the streams and the text part ways — the second stage of
+the LSP quantizer is searched against the quantizer's output rather than
+rearranged candidate by candidate, the filtered adaptive-codebook vector is
+the weighted synthesis filter run from rest rather than the convolution of
+equation 44, the open-loop search's thresholds are five and seven and its
+weights a quarter and a fifth. The trained tables it needs beyond the
+decoder's — the preselection's slopes, offsets and thresholds — came the
+same mechanical way as the others, and the window, the lag window, the
+grid and the maps are checked against the formulas the text gives.
+
+| Input | Frames | Result |
+|---|---|---|
+| `ALGTHM.IN` | 35 | identical to `ALGTHM.BIT`, every bit |
+| `FIXED.IN` | 120 | identical to `FIXED.BIT` |
+| `LSP.IN` | 2232 | identical to `LSP.BIT` |
+| `PITCH.IN` | 1835 | identical to `PITCH.BIT` |
+| `SPEECH.IN` | 3750 | identical to `SPEECH.BIT`, and decoded, identical to `SPEECH.PST` |
+| `TAME.IN` | 128 | identical to `TAME.BIT` |
+| `TEST.IN` | 176 | identical to `TEST.BIT` |
+
+What the streams do not reach is not checked, and is listed so that nobody
+takes it for checked. The taming procedure — the encoder holding its pitch
+gain below one while an error in its past excitation could be growing — is
+never engaged by any input, `TAME.IN` included: its bound peaks near 8900
+against a limit of 60000, and every stream encodes the same without it. Nor
+do the streams reach the LP recursion's instability test, the Chebyshev
+evaluation's floor, the impulse response's halving before the codebook
+search, or the exact value of the preselection's inverse slope. None of
+them is confirmed by a stream, and the modules say so where each is
+written.
 - **Echo cancellation, gain control, noise suppression** are attached at a seam,
   not implemented here. This is signal processing research, it exists under a
   permissive licence, and rewriting it would buy nothing that a customer pays

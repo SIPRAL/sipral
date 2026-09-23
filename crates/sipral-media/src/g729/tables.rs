@@ -43,6 +43,18 @@
 //! | [`GB`] | `GB`, §3.9.2 | `annex_a.gbk2` |
 //! | [`GA_ROW`] | the index mapping of §3.9.3, decoding side | `annex_a.imap1` |
 //! | [`GB_ROW`] | the same for `GB` | `annex_a.imap2` |
+//! | [`GA_CODEWORD`] | the index mapping of §3.9.3, encoding side | `annex_a.map1`; equals the inverse of [`GA_ROW`] |
+//! | [`GB_CODEWORD`] | the same for `GB` | `annex_a.map2`; equals the inverse of [`GB_ROW`] |
+//! | [`PRESELECTION_SLOPES`] | the preselection of §3.9.2 | `annex_a.coef`, column 0 |
+//! | [`PRESELECTION_OFFSETS`] | the same | `annex_a.L_coef`, column 1 |
+//! | [`GA_THRESHOLDS`] | the same, for `GA` | `annex_a.thr1` |
+//! | [`GB_THRESHOLDS`] | the same, for `GB` | `annex_a.thr2` |
+//! | [`LP_WINDOW`] | `wlp(n)`, equation 3 | `annex_a.hamwindow`; equals the formula times 32767, rounded |
+//! | [`LAG_WINDOW`] | `wlag(k)`, equation 6, over 1.0001 | `annex_a.lag_h` and `annex_a.lag_l`; the formula to within 60 units in 2^31 |
+//! | [`GRID`] | the grid of A.3.2.3 | `annex_a.grid`; equals `cos(jπ/50)` truncated, but for its two ends |
+//! | [`ARCCOS_SLOPE`] | the inverse slopes of Table 12's cosine | `annex_a.slope_acos`; equals `2^20` over each segment's fall in [`COSINE`], its ends taken as ±32768, rounded |
+//! | [`INPUT_HIGH_PASS_ZEROS`] | equation 1, numerator | computed; equals `annex_a.b140` |
+//! | [`INPUT_HIGH_PASS_POLES`] | equation 1, denominator | computed; equals `annex_a.a140` |
 //! | [`COSINE`] | Table 12, "LSF to LSP conversion" | `annex_a.table2`; equals `cos(iπ/64)` rounded |
 //! | [`COSINE_SLOPE`] | its slopes | `annex_a.slope_cos`; equals the rounded difference of cosines |
 //! | [`POWER_OF_TWO`] | Table 12, "2^x computation" | `annex_a.tabpow`; equals `2^(i/32)` rounded |
@@ -684,13 +696,109 @@ pub(super) const OUTPUT_HIGH_PASS_ZEROS: [i16; 3] = [7699, -15398, 7699];
 /// carried for completeness and not used.
 pub(super) const OUTPUT_HIGH_PASS_POLES: [i16; 3] = [8192, 15836, -7667];
 
+/// Equation 1's numerator, `0.46363718 − 0.92724705 z⁻¹ + 0.46363718 z⁻²`:
+/// the 140 Hz high-pass with the input's halving folded in, Q12.
+pub(super) const INPUT_HIGH_PASS_ZEROS: [i16; 3] = [1899, -3798, 1899];
+
+/// Equation 1's denominator, signed for the recursion:
+/// `y(n) += 1.9059465 y(n−1) − 0.9114024 y(n−2)`, Q12. The leading one is
+/// not used.
+pub(super) const INPUT_HIGH_PASS_POLES: [i16; 3] = [4096, 7807, -3733];
+
+/// `wlp(n)` of equation 3, the LP analysis window, `n = 0..239`: half a
+/// Hamming window over 200 samples, then a quarter cosine over 40, Q15.
+pub(super) const LP_WINDOW: [i16; 240] = [
+    2621, 2623, 2629, 2638, 2651, 2668, 2689, 2713, 2741, 2772, 2808, 2847, 2890, 2936, 2986, 3040,
+    3097, 3158, 3223, 3291, 3363, 3438, 3517, 3599, 3685, 3774, 3867, 3963, 4063, 4166, 4272, 4382,
+    4495, 4611, 4731, 4853, 4979, 5108, 5240, 5376, 5514, 5655, 5800, 5947, 6097, 6250, 6406, 6565,
+    6726, 6890, 7057, 7227, 7399, 7573, 7750, 7930, 8112, 8296, 8483, 8672, 8863, 9057, 9252, 9450,
+    9650, 9852, 10055, 10261, 10468, 10677, 10888, 11101, 11315, 11531, 11748, 11967, 12187, 12409,
+    12632, 12856, 13082, 13308, 13536, 13764, 13994, 14225, 14456, 14688, 14921, 15155, 15389,
+    15624, 15859, 16095, 16331, 16568, 16805, 17042, 17279, 17516, 17754, 17991, 18228, 18465,
+    18702, 18939, 19175, 19411, 19647, 19882, 20117, 20350, 20584, 20816, 21048, 21279, 21509,
+    21738, 21967, 22194, 22420, 22644, 22868, 23090, 23311, 23531, 23749, 23965, 24181, 24394,
+    24606, 24816, 25024, 25231, 25435, 25638, 25839, 26037, 26234, 26428, 26621, 26811, 26999,
+    27184, 27368, 27548, 27727, 27903, 28076, 28247, 28415, 28581, 28743, 28903, 29061, 29215,
+    29367, 29515, 29661, 29804, 29944, 30081, 30214, 30345, 30472, 30597, 30718, 30836, 30950,
+    31062, 31170, 31274, 31376, 31474, 31568, 31659, 31747, 31831, 31911, 31988, 32062, 32132,
+    32198, 32261, 32320, 32376, 32428, 32476, 32521, 32561, 32599, 32632, 32662, 32688, 32711,
+    32729, 32744, 32755, 32763, 32767, 32767, 32741, 32665, 32537, 32359, 32129, 31850, 31521,
+    31143, 30716, 30242, 29720, 29151, 28538, 27879, 27177, 26433, 25647, 24821, 23957, 23055,
+    22117, 21145, 20139, 19102, 18036, 16941, 15820, 14674, 13505, 12315, 11106, 9879, 8637, 7381,
+    6114, 4838, 3554, 2264, 971,
+];
+
+/// `wlag(k)` of equation 6 for `k = 1..10`, divided by the white-noise
+/// correction 1.0001 of equation 7: multiplying `r(k)` by this and leaving
+/// `r(0)` alone is the same filter as the text's, scaled by a constant the
+/// Levinson-Durbin recursion does not see. A Q31 value split into its upper
+/// sixteen bits and the fifteen below them, as `arith::Split` holds it.
+pub(super) const LAG_WINDOW: [(i16, i16); 10] = [
+    (32728, 11904),
+    (32619, 17280),
+    (32438, 30720),
+    (32187, 25856),
+    (31867, 24192),
+    (31480, 28992),
+    (31029, 24384),
+    (30517, 7360),
+    (29946, 19520),
+    (29321, 14784),
+];
+
+/// The points the LP → LSP conversion looks for sign changes between
+/// (A.3.2.3): `cos(jπ/50)` for `j = 0..50`, Q15, truncated toward zero, with
+/// the two ends held at ±32760 rather than ±1.
+pub(super) const GRID: [i16; 51] = [
+    32760, 32703, 32509, 32187, 31738, 31164, 30466, 29649, 28714, 27666, 26509, 25248, 23886,
+    22431, 20887, 19260, 17557, 15786, 13951, 12062, 10125, 8149, 6140, 4106, 2057, 0, -2057,
+    -4106, -6140, -8149, -10125, -12062, -13951, -15786, -17557, -19260, -20887, -22431, -23886,
+    -25248, -26509, -27666, -28714, -29649, -30466, -31164, -31738, -32187, -32509, -32703, -32760,
+];
+
+/// The inverse of each segment's slope in [`COSINE`], for reading the table
+/// backwards: an LSP's distance below an entry, times this, is its distance
+/// along the segment in the units of the LSF's table position.
+pub(super) const ARCCOS_SLOPE: [i16; 64] = [
+    -26887, -8812, -5323, -3813, -2979, -2444, -2081, -1811, -1608, -1450, -1322, -1219, -1132,
+    -1059, -998, -946, -901, -861, -827, -797, -772, -750, -730, -713, -699, -687, -677, -668,
+    -662, -657, -654, -652, -652, -654, -657, -662, -668, -677, -687, -699, -713, -730, -750, -772,
+    -797, -827, -861, -901, -946, -998, -1059, -1132, -1219, -1322, -1450, -1608, -1811, -2081,
+    -2444, -2979, -3813, -5323, -8812, -26887,
+];
+
+/// The `GA` codeword sent for each row of [`GA`]: the inverse of [`GA_ROW`].
+pub(super) const GA_CODEWORD: [u8; 8] = [5, 1, 4, 7, 3, 0, 6, 2];
+
+/// The `GB` codeword sent for each row of [`GB`]: the inverse of [`GB_ROW`].
+pub(super) const GB_CODEWORD: [u8; 16] = [4, 6, 0, 2, 12, 14, 8, 10, 15, 11, 9, 13, 7, 3, 1, 5];
+
+/// The gain preselection's two slopes (§3.9.2), which carry the optimum
+/// gains into coordinates along the two codebooks: `31.134575` in Q10 and
+/// `0.481389` in Q16.
+pub(super) const PRESELECTION_SLOPES: [i16; 2] = [31881, 31548];
+
+/// Its two offsets, in thirty-two bits: `1.612322` in Q30 and `0.053056` in
+/// Q35.
+pub(super) const PRESELECTION_OFFSETS: [i32; 2] = [1_731_217_536, 1_822_990_272];
+
+/// Where along the first line the four clusters of four neighbouring `GA`
+/// rows begin, Q14.
+pub(super) const GA_THRESHOLDS: [i16; 4] = [10808, 12374, 19778, 32567];
+
+/// Where along the second the eight clusters of eight neighbouring `GB`
+/// rows begin, Q15.
+pub(super) const GB_THRESHOLDS: [i16; 8] = [14087, 16188, 20274, 21321, 23525, 25232, 27873, 30542];
+
 #[cfg(test)]
 mod tests {
     use super::{
-        COSINE, COSINE_SLOPE, FIRST_STAGE, GA, GA_ROW, GAIN_PREDICTOR, GB, GB_ROW, INITIAL_LSF,
-        INITIAL_LSP, INTERPOLATION_B30, INVERSE_SQRT, LOG2, MA_CURRENT_WEIGHT,
-        MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, OUTPUT_HIGH_PASS_POLES, OUTPUT_HIGH_PASS_ZEROS,
-        POWER_OF_TWO, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+        ARCCOS_SLOPE, COSINE, COSINE_SLOPE, FIRST_STAGE, GA, GA_CODEWORD, GA_ROW, GA_THRESHOLDS,
+        GAIN_PREDICTOR, GB, GB_CODEWORD, GB_ROW, GB_THRESHOLDS, GRID, INITIAL_LSF, INITIAL_LSP,
+        INPUT_HIGH_PASS_POLES, INPUT_HIGH_PASS_ZEROS, INTERPOLATION_B30, INVERSE_SQRT, LAG_WINDOW,
+        LOG2, LP_WINDOW, MA_CURRENT_WEIGHT, MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR,
+        OUTPUT_HIGH_PASS_POLES, OUTPUT_HIGH_PASS_ZEROS, POWER_OF_TWO, PRESELECTION_OFFSETS,
+        PRESELECTION_SLOPES, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
     };
     use core::f64::consts::PI;
 
@@ -902,6 +1010,101 @@ mod tests {
             let exact = nearest(32768.0 / (1.0 + i / 16.0).sqrt()).min(32_767);
             assert_eq!(i32::from(*value), exact, "1/sqrt(1 + {index}/16)");
         }
+    }
+
+    #[test]
+    fn the_input_filter_is_equation_1() {
+        let zeros = [0.463_637_18, -0.927_247_05, 0.463_637_18];
+        for (value, coefficient) in INPUT_HIGH_PASS_ZEROS.iter().zip(zeros) {
+            assert_eq!(i32::from(*value), nearest(coefficient * 4096.0));
+        }
+        let poles = [1.0, 1.905_946_5, -0.911_402_4];
+        for (value, coefficient) in INPUT_HIGH_PASS_POLES.iter().zip(poles) {
+            assert_eq!(i32::from(*value), nearest(coefficient * 4096.0));
+        }
+    }
+
+    /// Equation 3, entry for entry: the formula times 32767, rounded.
+    #[test]
+    fn the_analysis_window_is_equation_3() {
+        for (index, value) in LP_WINDOW.iter().enumerate() {
+            let n = f64::from(u8::try_from(index).unwrap());
+            let window = if index < 200 {
+                0.54 - 0.46 * (2.0 * PI * n / 399.0).cos()
+            } else {
+                (2.0 * PI * (n - 200.0) / 159.0).cos()
+            };
+            assert_eq!(i32::from(*value), nearest(window * 32767.0), "wlp({index})");
+        }
+    }
+
+    /// Equations 6 and 7: `wlag(k)/1.0001` as a Q31 value, to within the
+    /// precision it was evidently computed at, a few parts in `10^8`.
+    #[test]
+    fn the_lag_window_is_equation_6_over_the_noise_correction() {
+        for (index, (high, low)) in LAG_WINDOW.iter().enumerate() {
+            let k = f64::from(u8::try_from(index + 1).unwrap());
+            let lag = (-0.5 * (2.0 * PI * 60.0 * k / 8000.0).powi(2)).exp() / 1.0001;
+            let value = f64::from(*high) * 65536.0 + f64::from(*low) * 2.0;
+            assert!(
+                (value - lag * 2_147_483_648.0).abs() < 60.0,
+                "wlag({k}): {value} against {}",
+                lag * 2_147_483_648.0
+            );
+            assert!(*low >= 0);
+        }
+    }
+
+    /// The grid of A.3.2.3: fifty intervals from `cos 0` to `cos π`.
+    #[test]
+    fn the_grid_is_fifty_steps_of_the_cosine() {
+        for (index, value) in GRID.iter().enumerate() {
+            let j = f64::from(u8::try_from(index).unwrap());
+            #[expect(clippy::cast_possible_truncation, reason = "a cosine in Q15")]
+            let truncated = ((j * PI / 50.0).cos() * 32768.0) as i32;
+            let expected = truncated.clamp(-32_760, 32_760);
+            assert_eq!(i32::from(*value), expected, "grid({index})");
+        }
+    }
+
+    #[test]
+    fn the_arccos_slopes_invert_the_cosine_table() {
+        for (index, slope) in ARCCOS_SLOPE.iter().enumerate() {
+            let start = if index == 0 {
+                32_768
+            } else {
+                i32::from(COSINE[index])
+            };
+            let end = COSINE
+                .get(index + 1)
+                .map_or(-32_768, |value| i32::from(*value));
+            let expected = nearest(1_048_576.0 / f64::from(end - start));
+            assert_eq!(i32::from(*slope), expected, "segment {index}");
+        }
+    }
+
+    #[test]
+    fn the_codeword_maps_invert_the_row_maps() {
+        for (row, codeword) in GA_CODEWORD.iter().enumerate() {
+            assert_eq!(usize::from(GA_ROW[usize::from(*codeword)]), row);
+        }
+        for (row, codeword) in GB_CODEWORD.iter().enumerate() {
+            assert_eq!(usize::from(GB_ROW[usize::from(*codeword)]), row);
+        }
+    }
+
+    /// The preselection's thresholds each rise along their line, so that
+    /// the search for the first one not passed can stop there.
+    #[test]
+    fn the_preselection_thresholds_rise() {
+        for pair in GA_THRESHOLDS.windows(2) {
+            assert!(pair[0] < pair[1]);
+        }
+        for pair in GB_THRESHOLDS.windows(2) {
+            assert!(pair[0] < pair[1]);
+        }
+        assert!(PRESELECTION_SLOPES.iter().all(|slope| *slope > 0));
+        assert!(PRESELECTION_OFFSETS.iter().all(|offset| *offset > 0));
     }
 
     /// §3.7.1 describes `b30` as a Hamming-windowed sinc, truncated at ±29

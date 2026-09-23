@@ -16,12 +16,12 @@
 //! `F2` are Q24 in thirty-two bits.
 
 use super::arith::{
-    Split, add, high, long_add, long_mult, long_shift_left, long_shift_right,
-    long_shift_right_round, long_sub, low, mac, msu, mult, shift_right, sub,
+    Split, add, at, high, long_add, long_mult, long_shift_left, long_shift_right,
+    long_shift_right_round, long_sub, low, mac, msu, mult, norm, shift_left, shift_right, sub,
 };
 use super::tables::{
-    COSINE, COSINE_SLOPE, FIRST_STAGE, INITIAL_LSF, MA_CURRENT_WEIGHT, MA_CURRENT_WEIGHT_INVERSE,
-    MA_PREDICTOR, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+    ARCCOS_SLOPE, COSINE, COSINE_SLOPE, FIRST_STAGE, INITIAL_LSF, MA_CURRENT_WEIGHT,
+    MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
 };
 
 /// Ten LSFs, or ten LSPs.
@@ -119,17 +119,91 @@ impl Quantizer {
     /// output that would have produced them under the last good frame's
     /// predictor (equation 92) takes the lost one's place in the memory.
     pub(super) fn conceal(&mut self) -> Vector {
-        let taps = MA_PREDICTOR
-            .get(self.predictor)
-            .copied()
-            .unwrap_or_default();
+        let output = self.unpredict(&self.last, self.predictor);
+        self.remember(output);
+        self.last
+    }
+
+    /// §3.2.4: the four indices that quantize `lsf`. The memory is not
+    /// touched; decoding the indices sent brings it up to date.
+    ///
+    /// For each MA predictor, the vector to quantize is `lsf` with the
+    /// prediction taken out (equation 23). The first stage is the entry of
+    /// `L1` nearest it, unweighted; the lower half of the second stage is the
+    /// entry of `L2` nearest what is left, weighted by equation 22, and the
+    /// upper half the entry of `L3`. The candidate is spaced out as the
+    /// decoder would space it, and the predictor whose candidate is nearest
+    /// `lsf` in the weighted error of equation 21 is sent.
+    ///
+    /// Where the text rearranges each second-stage candidate before its
+    /// error is measured, the conformance streams are encoded with the
+    /// second stage searched against the target directly, in the domain of
+    /// the quantizer output rather than of `ω̂`, and the rearrangement and
+    /// the predictor's weight entering only the comparison of the two
+    /// predictors.
+    pub(super) fn encode(&self, lsf: &Vector) -> Indices {
+        let weights = weights(lsf);
+        let mut choices = [Indices::default(); 2];
+        let mut distances = [i32::MAX; 2];
+        for (predictor, (choice, distance)) in
+            choices.iter_mut().zip(distances.iter_mut()).enumerate()
+        {
+            let target = self.unpredict(lsf, predictor);
+            let first = nearest_first(&target);
+            let base = FIRST_STAGE.get(first).copied().unwrap_or_default();
+            let mut residue: Vector = [0; 10];
+            for ((slot, value), stage) in residue.iter_mut().zip(target).zip(base) {
+                *slot = sub(value, stage);
+            }
+            let lower = nearest_second(&residue, &weights, &SECOND_STAGE_LOW, 0);
+            let upper = nearest_second(&residue, &weights, &SECOND_STAGE_HIGH, 5);
+
+            let mut candidate = base;
+            let corrections = SECOND_STAGE_LOW
+                .get(lower)
+                .copied()
+                .unwrap_or_default()
+                .into_iter()
+                .chain(SECOND_STAGE_HIGH.get(upper).copied().unwrap_or_default());
+            for (slot, correction) in candidate.iter_mut().zip(corrections) {
+                *slot = add(*slot, correction);
+            }
+            space(&mut candidate, FIRST_GAP);
+            space(&mut candidate, SECOND_GAP);
+
+            let current = MA_CURRENT_WEIGHT
+                .get(predictor)
+                .copied()
+                .unwrap_or_default();
+            *distance = weighted_distance(&candidate, &target, &weights, &current);
+            *choice = Indices {
+                predictor: u16::try_from(predictor).unwrap_or(0),
+                first: u16::try_from(first).unwrap_or(0),
+                second_low: u16::try_from(lower).unwrap_or(0),
+                second_high: u16::try_from(upper).unwrap_or(0),
+            };
+        }
+        let [first_distance, second_distance] = distances;
+        let [first_choice, second_choice] = choices;
+        if second_distance < first_distance {
+            second_choice
+        } else {
+            first_choice
+        }
+    }
+
+    /// Equations 23 and 92, the same arithmetic: `(ω − Σ p̂ l̂(m−k)) / (1 −
+    /// Σ p̂)`, the quantizer output that `ω` would be under `predictor`. The
+    /// division is a multiplication by the stored reciprocal.
+    fn unpredict(&self, lsf: &Vector, predictor: usize) -> Vector {
+        let taps = MA_PREDICTOR.get(predictor).copied().unwrap_or_default();
         let inverse = MA_CURRENT_WEIGHT_INVERSE
-            .get(self.predictor)
+            .get(predictor)
             .copied()
             .unwrap_or_default();
         let mut output: Vector = [0; 10];
         for (index, slot) in output.iter_mut().enumerate() {
-            let mut sum = i32::from(self.last.get(index).copied().unwrap_or(0)) << 16;
+            let mut sum = i32::from(lsf.get(index).copied().unwrap_or(0)) << 16;
             for (past, row) in self.history.iter().zip(taps) {
                 sum = msu(
                     sum,
@@ -143,8 +217,7 @@ impl Quantizer {
             let scaled = long_mult(remainder, inverse.get(index).copied().unwrap_or(0));
             *slot = high(long_shift_left(scaled, 3));
         }
-        self.remember(output);
-        self.last
+        output
     }
 
     /// Equation 20: `(1 − Σ p̂) l̂(m) + Σ p̂ l̂(m−k)`, a Q13 vector times Q15
@@ -180,6 +253,152 @@ impl Quantizer {
             *newest = output;
         }
     }
+}
+
+/// The four LSP indices of a frame (Table 8's `L0` to `L3`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Indices {
+    pub(super) predictor: u16,
+    pub(super) first: u16,
+    pub(super) second_low: u16,
+    pub(super) second_high: u16,
+}
+
+/// The row of `L1` nearest `target`, in plain squared error; the first of
+/// equal ones.
+fn nearest_first(target: &Vector) -> usize {
+    let mut best = 0;
+    let mut least = i32::MAX;
+    for (row, entry) in FIRST_STAGE.iter().enumerate() {
+        let distance = target.iter().zip(entry).fold(0_i32, |sum, (t, e)| {
+            let difference = sub(*t, *e);
+            mac(sum, difference, difference)
+        });
+        if distance < least {
+            least = distance;
+            best = row;
+        }
+    }
+    best
+}
+
+/// The row of a half of the second stage nearest the five values of
+/// `residue` from `offset`, in squared error weighted by `weights`: each
+/// difference is weighed once, as a Q15 product, before it is squared into
+/// the sum.
+fn nearest_second(
+    residue: &Vector,
+    weights: &Vector,
+    codebook: &[[i16; 5]; 32],
+    offset: usize,
+) -> usize {
+    let part = residue.get(offset..).unwrap_or_default();
+    let part_weights = weights.get(offset..).unwrap_or_default();
+    let mut best = 0;
+    let mut least = i32::MAX;
+    for (row, entry) in codebook.iter().enumerate() {
+        let distance = part.iter().zip(part_weights).zip(entry).fold(
+            0_i32,
+            |sum, ((value, weight), stage)| {
+                let difference = sub(*value, *stage);
+                mac(sum, mult(*weight, difference), difference)
+            },
+        );
+        if distance < least {
+            least = distance;
+            best = row;
+        }
+    }
+    best
+}
+
+/// Equation 21 for a candidate quantizer output against the target, both in
+/// the domain of the quantizer output: the difference scaled by the
+/// predictor's `1 − Σ p̂` is the difference in `ω̂`, and it is weighed and
+/// squared.
+fn weighted_distance(
+    candidate: &Vector,
+    target: &Vector,
+    weights: &Vector,
+    current: &Vector,
+) -> i32 {
+    let mut sum = 0_i32;
+    for (((value, goal), weight), share) in candidate.iter().zip(target).zip(weights).zip(current) {
+        let difference = mult(sub(*value, *goal), *share);
+        let weighed = high(long_shift_left(long_mult(*weight, difference), 4));
+        sum = mac(sum, weighed, difference);
+    }
+    sum
+}
+
+/// Equation 22: the weight of each LSF by how close its neighbours are, the
+/// fifth and sixth made 1.2 times heavier, and all ten scaled up together as
+/// far as the largest allows.
+///
+/// Formats: the distances are Q13 radians, as the LSFs are; each weight is
+/// formed in Q11, where one is 2048.
+fn weights(lsf: &Vector) -> Vector {
+    // 1 + 0.04π and 0.92π − 1, Q13
+    const LOWER_EDGE: i16 = 8192 + 1029;
+    const UPPER_EDGE: i16 = 23_677 - 8192;
+    // ten, Q11, and 1.2, Q14
+    const TEN: i16 = 20_480;
+    const ONE_AND_A_FIFTH: i16 = 19_661;
+
+    let mut spread: Vector = [0; 10];
+    for (index, slot) in spread.iter_mut().enumerate() {
+        *slot = match index {
+            0 => sub(at(lsf, 1), LOWER_EDGE),
+            9 => sub(UPPER_EDGE, at(lsf, 8)),
+            _ => sub(sub(at(lsf, index + 1), at(lsf, index - 1)), 8192),
+        };
+    }
+    let mut weights: Vector = [0; 10];
+    for (slot, distance) in weights.iter_mut().zip(spread) {
+        *slot = if distance > 0 {
+            2048
+        } else {
+            let square = high(long_shift_left(long_mult(distance, distance), 2));
+            add(high(long_shift_left(long_mult(square, TEN), 2)), 2048)
+        };
+    }
+    for index in [4, 5] {
+        if let Some(slot) = weights.get_mut(index) {
+            *slot = high(long_shift_left(long_mult(*slot, ONE_AND_A_FIFTH), 1));
+        }
+    }
+    let largest = weights.iter().copied().fold(0, i16::max);
+    let shift = norm(largest);
+    for slot in &mut weights {
+        *slot = shift_left(*slot, shift);
+    }
+    weights
+}
+
+/// Equation 18: `ω = arccos(q)` for each LSP, by the cosine table read
+/// backwards. The LSPs fall as the LSFs rise, so the search runs from the
+/// last LSP down the table's segments and never back up. Each LSF is the
+/// segment's start, 512 units a segment, plus the LSP's distance into it
+/// times the segment's inverse slope, and the 64 segments of `[0, π]` are
+/// converted to Q13 radians by a factor of `π/4`.
+pub(super) fn to_frequencies(lsp: &Vector) -> Vector {
+    const QUARTER_PI: i16 = 25_736;
+    let mut lsf: Vector = [0; 10];
+    let mut segment = COSINE.len() - 1;
+    for (slot, value) in lsf.iter_mut().zip(lsp).rev() {
+        while COSINE.get(segment).copied().unwrap_or(0) < *value {
+            segment -= 1;
+            if segment == 0 {
+                break;
+            }
+        }
+        let offset = sub(*value, COSINE.get(segment).copied().unwrap_or(0));
+        let slope = ARCCOS_SLOPE.get(segment).copied().unwrap_or(0);
+        let start = shift_left(i16::try_from(segment).unwrap_or(0), 9);
+        let within = low(long_shift_right(long_mult(slope, offset), 12));
+        *slot = mult(add(start, within), QUARTER_PI);
+    }
+    lsf
 }
 
 /// §3.2.4's rearrangement: wherever a coefficient comes within `gap` of the
@@ -337,9 +556,72 @@ fn polynomial(lsp: &[i16; 5]) -> [i32; 6] {
 mod tests {
     use super::{
         HIGHEST, LOWEST, MINIMUM_DISTANCE, Quantizer, midpoint, space, stabilise, to_coefficients,
-        to_cosines,
+        to_cosines, to_frequencies, weights,
     };
     use crate::g729::tables::INITIAL_LSF;
+
+    /// Reading the cosine table backwards undoes reading it forwards, to
+    /// within the table's resolution.
+    #[test]
+    fn frequencies_and_cosines_are_inverses() {
+        let lsf = [
+            800, 1500, 3000, 5000, 7000, 9000, 12_000, 15_000, 19_000, 23_000,
+        ];
+        let back = to_frequencies(&to_cosines(&lsf));
+        for (original, found) in lsf.iter().zip(back) {
+            assert!((original - found).abs() <= 8, "{lsf:?} against {back:?}");
+        }
+    }
+
+    /// Crowded neighbours weigh more than spread-out ones, and the heaviest
+    /// weight fills the word's top bit.
+    #[test]
+    fn crowded_frequencies_weigh_more() {
+        let spread = [
+            2000, 4400, 6800, 9200, 11_600, 14_000, 16_400, 18_800, 21_200, 23_600,
+        ];
+        let mut crowded = spread;
+        crowded[3] = 6900;
+        crowded[4] = 7000;
+        let even = weights(&spread);
+        let uneven = weights(&crowded);
+        assert!(uneven[3] > uneven[1], "{uneven:?}");
+        assert!(even.iter().chain(uneven.iter()).all(|w| *w > 0));
+        assert!(uneven.iter().any(|w| *w >= 16_384), "{uneven:?}");
+    }
+
+    /// Once the predictor's memory has caught up with a steady spectrum, the
+    /// indices the encoder chooses decode to LSFs close to it; and a decoder
+    /// that saw the same indices holds the same LSFs throughout.
+    #[test]
+    fn the_quantizer_finds_indices_that_decode_nearby() {
+        let lsf = [
+            1200, 2300, 4100, 6300, 8200, 10_700, 13_300, 16_800, 19_900, 22_700,
+        ];
+        let mut encoder = Quantizer::new();
+        let mut decoder = Quantizer::new();
+        let mut quantized = [0; 10];
+        for _ in 0..12 {
+            let indices = encoder.encode(&lsf);
+            quantized = encoder.decode(
+                indices.predictor,
+                indices.first,
+                indices.second_low,
+                indices.second_high,
+            );
+            let again = decoder.decode(
+                indices.predictor,
+                indices.first,
+                indices.second_low,
+                indices.second_high,
+            );
+            assert_eq!(quantized, again);
+        }
+        for (wanted, got) in lsf.iter().zip(quantized) {
+            // 0.05 of a radian: eighteen bits of codebook, not an identity
+            assert!((wanted - got).abs() < 400, "{lsf:?} against {quantized:?}");
+        }
+    }
 
     #[test]
     fn spacing_pushes_close_neighbours_apart() {

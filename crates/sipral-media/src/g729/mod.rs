@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 //! G.729: eight kilobits of narrowband speech, CS-ACELP, written from the
-//! Recommendation — the decoder, with the reduced-complexity postfilter of
-//! Annex A.
+//! Recommendation — the encoder and the decoder of Annex A, its
+//! reduced-complexity form.
 //!
 //! A frame is ten milliseconds, eighty samples at eight kilohertz, carried
 //! in eighty bits: ten octets. Each frame names a tenth-order LP filter by
@@ -11,23 +11,32 @@
 //! frequencies, and each of its two five-millisecond subframes names an
 //! excitation — a stretch of the past excitation at a delay in thirds of a
 //! sample, plus four signed pulses — and the two gains that mix them. The
-//! decoder rebuilds the excitation, runs it through the filter, and
-//! postfilters what comes out.
+//! encoder ([`Encoder`]) analyses the speech and searches the codebooks for
+//! those indices; the decoder ([`Decoder`]) rebuilds the excitation, runs it
+//! through the filter, and postfilters what comes out.
 //!
 //! Everything is sixteen- and thirty-two-bit fixed point, because the
-//! Recommendation is defined that way (§2.4) and a decoder that rounds
-//! anywhere else produces a different signal. The operators are in `arith`;
-//! each module after that is one part of §3 and §4, named for what it does.
-//! Where the text does not pin the arithmetic down to the bit, the ITU's
-//! conformance streams decided, and the constant or the step says so where
-//! it is written.
+//! Recommendation is defined that way (§2.4) and a codec that rounds
+//! anywhere else produces a different stream or a different signal. The
+//! operators are in `arith`; each module after that is one part of §3 and
+//! §4, named for what it does: `analysis` (the input filter, the LP analysis
+//! and the LP → LSP conversion), `lsp` (the LSP quantizer both ways, and the
+//! LSP → LP conversion), `pitch` (the open-loop and closed-loop pitch
+//! searches and the adaptive codebook), `acelp` (the fixed codebook and its
+//! search), `gain` (the gain quantizer both ways), `taming` (the encoder's
+//! control of pitch-gain instability), `lpc` (the filters), `postfilter`,
+//! `bits`, `tables`, and `encoder` for the encoder's frame loop. Where the
+//! text does not pin the arithmetic down to the bit, the ITU's conformance
+//! streams decided, and the constant or the step says so where it is
+//! written.
 //!
 //! **Annex A and the main body decode each other's streams** (A.1): the
 //! bitstream is the same, and only the encoder's searches and the decoder's
 //! postfilter differ. This decoder carries the Annex A postfilter, so its
 //! output matches the Annex A conformance streams to the bit; a stream from
 //! a main-body encoder decodes to the same speech, postfiltered the Annex A
-//! way.
+//! way. The encoder is Annex A's, and its streams are what the Annex A
+//! reference encoder produces from the same input, to the bit.
 //!
 //! # Conformance
 //!
@@ -45,21 +54,27 @@
 //!     cargo test -p sipral-media --lib g729::conformance -- --ignored
 //! ```
 //!
-//! All ten Annex A streams decode to their reference output sample for
+//! All seven Annex A inputs encode to their reference streams bit for bit,
+//! and all ten Annex A streams decode to their reference output sample for
 //! sample; `docs/05-media.md` records the result.
 
 mod acelp;
+mod analysis;
 mod arith;
 mod bits;
+mod encoder;
 mod gain;
 mod lpc;
 mod lsp;
 mod pitch;
 mod postfilter;
 mod tables;
+mod taming;
 
 #[cfg(test)]
 mod conformance;
+
+pub use encoder::Encoder;
 
 use arith::{long_mult, long_shift_left, mac, round, shift_right};
 use bits::{Frame, Subframe};

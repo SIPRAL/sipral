@@ -6,7 +6,8 @@
 //! `1/A(z)` (equations 2, 77, 79 and A.12).
 
 use super::arith::{
-    long_mult, long_shift_left, long_shift_left_checked, mac, msu_checked, round, round_checked,
+    long_abs, long_mult, long_norm, long_shift_left, long_shift_left_checked, long_shift_right,
+    low, mac, msu_checked, round, round_checked,
 };
 use super::lsp::Coefficients;
 
@@ -83,6 +84,32 @@ pub(super) fn synthesise(
         }
     }
     overflowed
+}
+
+/// `xb(n)` of A.3.7 and `d(n)` of equation 52: the target filtered
+/// backwards through the impulse response, `Σ x(i) h(i−n)`.
+///
+/// The forty sums are scaled together so that the largest has thirteen
+/// significant bits and a sign, and at most sixteen bits are gained doing
+/// it: the searches compare these sums with each other and square them, so
+/// what matters is that they share a scale and have room.
+pub(super) fn backward(response: &[i16; 40], target: &[i16; 40]) -> [i16; 40] {
+    let mut sums = [0_i32; 40];
+    let mut largest = 0_i32;
+    for (n, slot) in sums.iter_mut().enumerate() {
+        let later = target.get(n..).unwrap_or_default();
+        *slot = later
+            .iter()
+            .zip(response)
+            .fold(0_i32, |sum, (x, h)| mac(sum, *x, *h));
+        largest = largest.max(long_abs(*slot));
+    }
+    let shift = 18 - i32::try_from(long_norm(largest).min(16)).unwrap_or(16);
+    let mut out = [0_i16; 40];
+    for (slot, sum) in out.iter_mut().zip(sums) {
+        *slot = low(long_shift_right(sum, shift));
+    }
+    out
 }
 
 #[cfg(test)]
