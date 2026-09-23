@@ -6,8 +6,10 @@
 //!
 //! Two stacks on loopback, the same shape as
 //! `crates/sipral/examples/headless-agent.rs`'s own test: a plain facade
-//! caller places the call, plays a tone once it is up and dials a digit, and
-//! the other end answers it with a `HeadlessSession` driven directly against
+//! caller places the call, plays a tone once it is up, dials a digit, then
+//! holds the call and resumes it — two re-INVITEs, which must reach the
+//! agent as two changes and never as a second `answered` — and the other
+//! end answers it with a `HeadlessSession` driven directly against
 //! `sipral::MediaSession` — no socket, no `sipral-headless` wire framing, the
 //! in-process path `docs/07-headless.md#real-media` describes. What a socket
 //! path would frame as bytes is read here as plain Rust values instead:
@@ -91,7 +93,8 @@ fn handle_agent_event(
     agent_up: &mut bool,
     heard_digit: &mut Option<DtmfReceived>,
     saw_ringing: &mut bool,
-    saw_answered: &mut bool,
+    answered: &mut u32,
+    changes: &mut u32,
 ) {
     if let Event::Signalling(sig) = event
         && let Some((call, state)) = sipral::call_state_of(sig)
@@ -100,11 +103,25 @@ fn handle_agent_event(
         match state {
             CallStateKind::Ringing => *saw_ringing = true,
             CallStateKind::Answered => {
-                *saw_answered = true;
+                *answered += 1;
                 *agent_up = true;
             }
             CallStateKind::Ended { .. } => {}
         }
+    }
+    // a hold or a resume from the caller: handed to the session the way
+    // `docs/07-headless.md` says to hand every `Changed`, same rate or not
+    if let Event::Media {
+        call,
+        event: MediaEvent::Changed { codec, .. },
+    } = event
+        && agent_call.is_some_and(|known| known == *call)
+        && let Some(session) = headless.as_mut()
+    {
+        *changes += 1;
+        session
+            .set_codec_rate(codec.sample_rate())
+            .expect("G.711 again, at the rate it had");
     }
     match event {
         Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
@@ -295,18 +312,33 @@ fn one_call() -> Result<(), String> {
     let mut agent_up = false;
     let mut heard_digit: Option<DtmfReceived> = None;
     let mut saw_ringing = false;
-    let mut saw_answered = false;
+    let mut answered = 0_u32;
+    let mut changes = 0_u32;
 
     let mut dtmf_sent = false;
     let mut frames_sent = 0_u32;
     let mut heard: Vec<i16> = Vec::new();
     let mut up = false;
+    let (mut held, mut resumed) = (false, false);
 
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline
-        && !(up && heard.iter().any(|sample| sample.abs() > 1_000) && heard_digit.is_some())
-    {
+    while Instant::now() < deadline && !(resumed && changes >= 2) {
         let turn = Instant::now();
+        // the tone and the digit through, the caller holds and then resumes:
+        // two re-INVITEs, each a `Changed` at the agent and neither a second
+        // `answered` on its wire
+        let echoed = heard.iter().any(|sample| sample.abs() > 1_000);
+        if up && echoed && heard_digit.is_some() && !held {
+            caller_endpoint.agent.hold(call, turn).expect("the hold");
+            held = true;
+        }
+        if held && changes >= 1 && !resumed {
+            caller_endpoint
+                .agent
+                .resume(call, turn)
+                .expect("the resume");
+            resumed = true;
+        }
 
         for event in agent_endpoint.pump(turn) {
             handle_agent_event(
@@ -319,7 +351,8 @@ fn one_call() -> Result<(), String> {
                 &mut agent_up,
                 &mut heard_digit,
                 &mut saw_ringing,
-                &mut saw_answered,
+                &mut answered,
+                &mut changes,
             );
         }
 
@@ -355,12 +388,51 @@ fn one_call() -> Result<(), String> {
         }
     }
 
+    verdict(&Seen {
+        up,
+        saw_ringing,
+        answered,
+        changes,
+        heard,
+        digit: heard_digit,
+    })
+}
+
+/// What one run of [`one_call`] saw, on both sides, for [`verdict`].
+struct Seen {
+    up: bool,
+    saw_ringing: bool,
+    answered: u32,
+    changes: u32,
+    heard: Vec<i16>,
+    digit: Option<DtmfReceived>,
+}
+
+fn verdict(seen: &Seen) -> Result<(), String> {
+    let Seen {
+        up,
+        saw_ringing,
+        answered,
+        changes,
+        heard,
+        digit,
+    } = seen;
     if !up {
         return Err("the call never reached CallConfirmed on the caller side".to_owned());
     }
-    if !saw_ringing || !saw_answered {
+    if !saw_ringing || *answered == 0 {
         return Err(format!(
-            "call_state_of did not see both transitions on real UaEvents: ringing={saw_ringing} answered={saw_answered}"
+            "call_state_of did not see both transitions on real UaEvents: ringing={saw_ringing} answered={answered}"
+        ));
+    }
+    if *changes < 2 {
+        return Err(format!(
+            "the hold and the resume reached the agent as {changes} Changed events, not two"
+        ));
+    }
+    if *answered != 1 {
+        return Err(format!(
+            "call_state_of reported the call answered {answered} times across a hold and a resume"
         ));
     }
     if !heard.iter().any(|sample| sample.abs() > 1_000) {
@@ -370,7 +442,7 @@ fn one_call() -> Result<(), String> {
             heard.len()
         ));
     }
-    let Some(digit) = heard_digit else {
+    let Some(digit) = digit else {
         return Err(
             "dtmf_received_of never produced a digit from a real DigitReceived event".to_owned(),
         );

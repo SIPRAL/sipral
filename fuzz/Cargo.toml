@@ -38,6 +38,14 @@ path = "../crates/sipral-dtls"
 [dependencies.sipral-media]
 path = "../crates/sipral-media"
 
+# the facade, for `headless_media` alone: `HeadlessSession` is where the
+# socket's frames meet a codec's, and it lives nowhere below this crate.
+# Without libopus, DTLS or ICE, none of which that target reaches.
+[dependencies.sipral]
+path = "../crates/sipral"
+default-features = false
+features = ["headless"]
+
 [workspace]
 
 [profile.release]
@@ -88,6 +96,13 @@ bench = false
 [[bin]]
 name = "headless"
 path = "fuzz_targets/headless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "headless_media"
+path = "fuzz_targets/headless_media.rs"
 test = false
 doc = false
 bench = false

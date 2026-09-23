@@ -590,6 +590,126 @@ fn through_decoder(name: &str, seed: &[u8], expected: usize) -> Result<(), Wrong
     )))
 }
 
+// ---------------------------------------------------------------- headless_media
+
+/// `fuzz_targets/headless_media.rs`'s session byte: socket rate, codec rate
+/// and frame duration as indices into its own tables, then the capacity.
+fn headless_media_setup(socket: u8, codec: u8, duration: u8, capacity: u8) -> u8 {
+    (socket & 3) | (codec & 3) << 2 | (duration & 3) << 4 | (capacity & 3) << 6
+}
+
+/// One of that target's operations: opcode, length octet, then the samples.
+fn push_headless_op(out: &mut Vec<u8>, op: u8, samples: &[i16]) -> Result<(), Wrong> {
+    out.push(op);
+    push_media_chunk(out, None, samples)
+}
+
+/// A call as an agent sees one, and a codec-rate change in the middle of
+/// another.
+fn headless_media_seeds() -> Result<Vec<Seed>, Wrong> {
+    let tone = triangle(160, 20, 12_000);
+
+    // 16 kHz socket, 8 kHz codec, 20 ms frames, three frames a queue: the
+    // caller heard for a frame and a half of the filter's own start, two
+    // frames of the agent queued, one codec frame out,
+    // then a barge-in and a codec frame that has to be silence
+    let mut barge = vec![headless_media_setup(1, 0, 1, 3)];
+    push_headless_op(&mut barge, 0, &tone)?;
+    push_headless_op(&mut barge, 0, &tone)?;
+    push_headless_op(&mut barge, 1, &tone)?;
+    push_headless_op(&mut barge, 1, &tone)?;
+    push_headless_op(&mut barge, 2, &[0; 40])?;
+    push_headless_op(&mut barge, 3, &[])?;
+    push_headless_op(&mut barge, 2, &[0; 40])?;
+    push_headless_op(&mut barge, 5, &[])?;
+
+    // 8 kHz socket in 30 ms frames, a codec that starts at 8 kHz and moves
+    // to 48 kHz part-way through a frame the agent has not had yet
+    let mut change = vec![headless_media_setup(0, 0, 2, 2)];
+    push_headless_op(&mut change, 0, &tone)?;
+    push_headless_op(&mut change, 4, &[0; 3])?;
+    for _ in 0..4 {
+        push_headless_op(&mut change, 0, &triangle(240, 120, 12_000))?;
+    }
+    push_headless_op(&mut change, 5, &[])?;
+
+    let out = vec![
+        ("a-call-with-a-barge-in", barge),
+        ("a-codec-change-mid-call", change),
+    ];
+    // what each seed is for has to be what it does: the first plays a
+    // frame and then, after the barge-in, none; the second hands the agent
+    // a frame that straddles the change
+    for ((name, bytes), (fills, captured)) in out.iter().zip([(vec![true, false], 1), (vec![], 1)])
+    {
+        let (got_fills, got_captured) = through_headless_media(name, bytes)?;
+        if got_fills != fills || got_captured != captured {
+            return Err(Wrong(format!(
+                "the {name} seed filled {got_fills:?} and read {got_captured} frames"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// A `headless_media` seed, walked the way the target walks it: what each
+/// fill returned, and how many frames were read for the agent.
+fn through_headless_media(name: &str, seed: &[u8]) -> Result<(Vec<bool>, usize), Wrong> {
+    const RATES: [u32; 4] = [8_000, 16_000, 24_000, 48_000];
+    const DURATIONS_MS: [u32; 4] = [10, 20, 30, 60];
+    let wrong = |what: &str| Wrong(format!("the {name} seed {what}"));
+    let (&setup, rest) = seed.split_first().ok_or_else(|| wrong("is empty"))?;
+    let pick = |shift: u8| usize::from((setup >> shift) & 3);
+    let socket = RATES.get(pick(0)).copied().unwrap_or(8_000);
+    let codec = RATES.get(pick(2)).copied().unwrap_or(8_000);
+    let duration = DURATIONS_MS.get(pick(4)).copied().unwrap_or(20);
+    let rate = sipral_headless::SampleRate::try_from(socket).map_err(|_| wrong("names no rate"))?;
+    let audio = sipral_headless::AudioConfig::with_frame_duration_ms(rate, duration)
+        .map_err(|_| wrong("names a frame that does not fit"))?;
+    let frame_bytes = usize::from(audio.frame_bytes().map_err(|_| wrong("has no frame"))?);
+    let mut session =
+        sipral::HeadlessSession::open(name.to_owned(), audio, codec, pick(6), pick(6))
+            .map_err(|why| wrong(&format!("opens no session: {why}")))?;
+    let (mut fills, mut captured) = (Vec::new(), 0);
+    let mut cursor = rest;
+    while let Some((&[op, len], tail)) = cursor.split_first_chunk::<2>() {
+        let take = (usize::from(len) * 2).min(tail.len());
+        let (payload, tail) = tail.split_at(take);
+        cursor = tail;
+        let samples: Vec<i16> = payload.chunks_exact(2).map(sample_from_pair).collect();
+        match op % 6 {
+            0 => {
+                let _ = session.hear(&samples);
+            }
+            1 => {
+                let filled: Vec<i16> = samples
+                    .into_iter()
+                    .chain(core::iter::repeat(0))
+                    .take(frame_bytes / 2)
+                    .collect();
+                let mut frame = Vec::new();
+                sipral_headless::write_samples(&filled, &mut frame);
+                session
+                    .protocol_mut()
+                    .push_playback(frame)
+                    .map_err(|why| wrong(&format!("queues no frame: {}", why.message)))?;
+            }
+            2 => fills.push(session.fill_outbound(&mut vec![0; usize::from(len) * 4])),
+            3 => {
+                session.protocol_mut().barge_in();
+            }
+            4 => {
+                let rate = RATES.get(usize::from(len & 3)).copied().unwrap_or(8_000);
+                session
+                    .set_codec_rate(rate)
+                    .map_err(|why| wrong(&format!("changes to no rate: {why}")))?;
+            }
+            _ => captured += usize::from(session.protocol_mut().pop_capture().is_some()),
+        }
+    }
+    Ok((fills, captured))
+}
+
 // ---------------------------------------------------------------- dialog-info
 
 fn dialoginfo_seeds() -> Result<Vec<Seed>, Wrong> {
@@ -1934,6 +2054,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("dtmf_info", dtmf_info_seeds()?),
         ("framer", framer_seeds()?),
         ("headless", headless_seeds()?),
+        ("headless_media", headless_media_seeds()?),
         ("ice", ice_seeds()?),
         ("media_comfort_noise", media_comfort_noise_seeds()?),
         ("media_drift", media_drift_seeds()?),

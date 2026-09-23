@@ -15,6 +15,9 @@ name = "fuzz-seeds"
 path = "src/main.rs"
 
 [dependencies]
+# the facade without libopus, DTLS or ICE: `HeadlessSession`, for the
+# `headless_media` seeds, is the one thing read from it
+sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false, features = ["headless"] }
 sipral-core = { path = "../../crates/sipral-core", version = "0.0.1" }
 sipral-dtls = { path = "../../crates/sipral-dtls", version = "0.0.1" }
 sipral-headless = { path = "../../crates/sipral-headless", version = "0.0.1" }

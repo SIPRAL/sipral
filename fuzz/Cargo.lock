@@ -570,6 +570,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral"
+version = "0.0.1"
+dependencies = [
+ "sipral-core",
+ "sipral-headless",
+ "sipral-media",
+ "sipral-rtp",
+ "sipral-ua",
+ "zeroize",
+]
+
+[[package]]
 name = "sipral-core"
 version = "0.0.1"
 
@@ -590,6 +602,7 @@ name = "sipral-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "sipral",
  "sipral-core",
  "sipral-dtls",
  "sipral-headless",

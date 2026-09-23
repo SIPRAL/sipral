@@ -910,6 +910,7 @@ dependencies = [
 name = "sipral-fuzz-seeds"
 version = "0.0.1"
 dependencies = [
+ "sipral",
  "sipral-core",
  "sipral-dtls",
  "sipral-headless",

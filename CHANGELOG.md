@@ -21,6 +21,18 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   carries each component's name, version, licence expression and full
   licence text as that component's own source ships it; `scripts/check.sh`
   regenerates and compares it so it cannot go stale.
+- **A fuzz target for what the headless socket's messages do once decoded.**
+  `headless_media` drives one `HeadlessSession` through any order of heard
+  audio, queued frames, codec frames filled, barge-ins and codec-rate
+  changes, checking that neither queue outgrows its capacity, that every
+  frame read for the agent is exactly one frame, and that nothing plays
+  after a barge-in until the agent queues something new. Beside it, tests
+  run a 440 Hz tone both ways through every pair of the four socket rates
+  and the codec rates, at frame sizes that do not divide one another, and
+  across a codec change mid-call: real time to the sample, at the right
+  pitch. The in-process call test now holds and resumes its call, and
+  requires both re-INVITEs to reach the agent as changes and neither as a
+  second `answered`.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity
