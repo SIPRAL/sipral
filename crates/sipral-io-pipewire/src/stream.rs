@@ -97,9 +97,9 @@ pub struct StreamConfig {
     /// Rate and frame length wanted, which is what is delivered: PipeWire's
     /// adapter converts to and from whatever the graph runs.
     pub format: StreamFormat,
-    /// Which node, and what to do when it is not there. The default is
-    /// whatever the session manager routes a stream to, which is what a
-    /// softphone usually wants.
+    /// Which node, and what to do when it is not there. The default is the
+    /// session's default node as the stream opens, which is what a softphone
+    /// usually wants.
     pub device: DeviceChoice,
     /// Frames of buffering between the node and the caller.
     ///
@@ -110,7 +110,8 @@ pub struct StreamConfig {
 }
 
 impl StreamConfig {
-    /// The session's route, at the given format.
+    /// The session's route — its default node as the stream opens — at the
+    /// given format.
     #[must_use]
     pub const fn new(format: StreamFormat) -> Self {
         Self {
@@ -531,6 +532,27 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     }
 }
 
+/// The flags a stream is connected with.
+///
+/// `PW_STREAM_FLAG_DONT_RECONNECT` only on a stream pinned to a node: that
+/// is the stream whose node going is reported rather than papered over. On
+/// one left to follow the session — which happens only when the session
+/// named no default to pin it to — the flag does harm: WirePlumber 0.5.8
+/// answers a default change for such a stream by linking the new default
+/// and keeping the old link, so the stream would end up on two nodes at
+/// once.
+const fn connect_flags(pinned: bool) -> u32 {
+    let flags = abi::PW_STREAM_FLAG_AUTOCONNECT
+        | abi::PW_STREAM_FLAG_INACTIVE
+        | abi::PW_STREAM_FLAG_MAP_BUFFERS
+        | abi::PW_STREAM_FLAG_RT_PROCESS;
+    if pinned {
+        flags | abi::PW_STREAM_FLAG_DONT_RECONNECT
+    } else {
+        flags
+    }
+}
+
 /// The half of a stream that is the same in both directions.
 struct Session {
     shared: Arc<Shared>,
@@ -546,7 +568,8 @@ struct Session {
     /// Kept so that a recover can ask for the same thing again and have the
     /// choice resolved against the graph as it is then.
     config: StreamConfig,
-    /// The node the choice resolved to, or `None` for the session's route.
+    /// The node the choice resolved to, or `None` when it fell back to a
+    /// session that had named no default.
     target: Option<DeviceId>,
     /// Held here as well as in `shared` so that a recover carries the volume
     /// and the mute across.
@@ -721,11 +744,7 @@ impl Session {
             Direction::Input => abi::PW_DIRECTION_INPUT,
             Direction::Output => abi::PW_DIRECTION_OUTPUT,
         };
-        let flags = abi::PW_STREAM_FLAG_AUTOCONNECT
-            | abi::PW_STREAM_FLAG_INACTIVE
-            | abi::PW_STREAM_FLAG_MAP_BUFFERS
-            | abi::PW_STREAM_FLAG_RT_PROCESS
-            | abi::PW_STREAM_FLAG_DONT_RECONNECT;
+        let flags = connect_flags(self.target.is_some());
         let params = [self.offer.as_ptr()];
         // SAFETY: a live stream, under the loop's lock; one param, the format
         // this session keeps alive for as long as the stream.
@@ -924,9 +943,11 @@ macro_rules! session_methods {
             self.session.config.format
         }
 
-        /// The node the stream was aimed at, or `None` when it follows the
-        /// session's route — including a [`StreamConfig::preferring`] whose
-        /// node was not there when the stream opened.
+        /// The node the stream is on: the one named, or — for the session's
+        /// route, and for a [`StreamConfig::preferring`] whose node was not
+        /// there — the session's default as the stream opened. `None` only
+        /// when the session had named no default, in which case the session
+        /// manager places the stream wherever it routes one.
         #[must_use]
         pub const fn device(&self) -> Option<&DeviceId> {
             self.session.target.as_ref()
@@ -965,10 +986,12 @@ macro_rules! session_methods {
         /// Ask whether the node under the stream has gone, and say so once.
         ///
         /// A few atomic loads and no call into PipeWire, so it can be polled
-        /// beside the meter. The stream is connected with
-        /// `PW_STREAM_FLAG_DONT_RECONNECT`, so when its node goes the session
-        /// manager destroys the stream's own node rather than moving it, and
-        /// what this reports is that state change arriving unasked. A stream
+        /// beside the meter. The stream is pinned to its node — see
+        /// [`Self::device`] — and connected with
+        /// `PW_STREAM_FLAG_DONT_RECONNECT`, so when that node goes the
+        /// session manager destroys the stream's own node rather than moving
+        /// it, and what this reports is that state change arriving unasked.
+        /// A stream
         /// that has said [`StreamEvent::DeviceLost`] has stopped: what it had
         /// already captured can still be read out, nothing further arrives,
         /// and the speaker ring fills and takes no more.
@@ -1129,7 +1152,7 @@ impl PlaybackStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Meters, StreamConfig, Timing};
+    use super::{Meters, StreamConfig, Timing, connect_flags};
     use crate::abi::{PwTime, SpaFraction};
     use crate::device::{DeviceChoice, DeviceId};
     use crate::format::StreamFormat;
@@ -1149,6 +1172,18 @@ mod tests {
         assert_eq!(
             StreamConfig::preferring(id.clone(), StreamFormat::narrowband()).device,
             DeviceChoice::Preferred(id)
+        );
+    }
+
+    #[test]
+    fn only_a_pinned_stream_asks_not_to_be_reconnected() {
+        use crate::abi::PW_STREAM_FLAG_DONT_RECONNECT;
+        assert_ne!(connect_flags(true) & PW_STREAM_FLAG_DONT_RECONNECT, 0);
+        assert_eq!(connect_flags(false) & PW_STREAM_FLAG_DONT_RECONNECT, 0);
+        // everything else is the same either way
+        assert_eq!(
+            connect_flags(true) & !PW_STREAM_FLAG_DONT_RECONNECT,
+            connect_flags(false)
         );
     }
 

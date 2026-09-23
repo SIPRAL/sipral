@@ -458,13 +458,22 @@ unsafe extern "C" fn on_global_remove(data: *mut c_void, id: u32) {
 }
 
 /// `pw_metadata_events.property`.
+///
+/// Only subject `PW_ID_CORE` is the session's own. The `"default"` object
+/// also keeps keys under other nodes' ids — `target.object`, where a stream
+/// was moved to — and PipeWire 1.4 clears those, with a null key, when the
+/// node goes. Read as the session's, every moved stream that ended would
+/// have wiped both defaults.
 unsafe extern "C" fn on_metadata_property(
     data: *mut c_void,
-    _subject: u32,
+    subject: u32,
     key: *const c_char,
     _value_type: *const c_char,
     value: *const c_char,
 ) -> i32 {
+    if subject != abi::PW_ID_CORE {
+        return 0;
+    }
     // SAFETY: registered with a `State`, per `state`'s contract.
     let state = unsafe { state(data) };
     if key.is_null() {
@@ -819,15 +828,16 @@ pub fn default_device(direction: Direction) -> Result<Option<DeviceId>, Error> {
 }
 
 /// Resolve a [`DeviceChoice`] against the graph as it is now: the node a
-/// stream should name as its `target.object`, or `None` for the session's
-/// own route.
+/// stream should name as its `target.object`, or `None` when the choice
+/// falls back to a session that has named no default.
 ///
-/// `System` asks the graph nothing: `PW_ID_ANY` and no `target.object` is
-/// already what "the session's route" means to `pw_stream_connect`. The
-/// other two look the node up among this direction's, because the session
-/// manager's answer to a `target.object` it cannot find is to link the
-/// stream to the default instead — right for a preference and wrong for a
-/// named device, which is "that node and nothing else".
+/// Every choice is looked up, the session's route included —
+/// [`DeviceChoice::resolve`] says why a stream is never left for the session
+/// manager to follow. A named node is looked up among this direction's
+/// rather than handed over as it is, because the session manager's answer
+/// to a `target.object` it cannot find is to link the stream to the default
+/// instead — right for a preference and wrong for a named device, which is
+/// "that node and nothing else".
 ///
 /// # Errors
 /// [`Error::NoDevice`] for a named device the graph does not have in this
@@ -836,24 +846,88 @@ pub(crate) fn resolve(
     choice: &DeviceChoice,
     direction: Direction,
 ) -> Result<Option<DeviceId>, Error> {
-    let (id, required) = match choice {
-        DeviceChoice::System => return Ok(None),
-        DeviceChoice::Device(id) => (id, true),
-        DeviceChoice::Preferred(id) => (id, false),
-    };
-    let present = devices()?
-        .iter()
-        .any(|device| device.direction == direction && &device.id == id);
-    match (present, required) {
-        (true, _) => Ok(Some(id.clone())),
-        (false, true) => Err(Error::NoDevice),
-        (false, false) => Ok(None),
-    }
+    choice.resolve(direction, &devices()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::json_string_field;
+    use super::{State, json_string_field, on_metadata_property};
+    use crate::abi::PW_ID_CORE;
+    use crate::device::{DeviceEvent, DeviceId, Direction, Pending};
+    use core::ffi::{CStr, c_void};
+    use core::ptr;
+    use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A listener's state with no connection behind it: the metadata
+    /// listener signals no loop, so this is all it touches.
+    fn detached() -> State {
+        State {
+            thread_loop: ptr::null_mut(),
+            registry: AtomicPtr::new(ptr::null_mut()),
+            awaited: AtomicI32::new(0),
+            synced: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            nodes: Mutex::new(HashMap::new()),
+            default_sink: Mutex::new(None),
+            default_source: Mutex::new(None),
+            metadata: Mutex::new(None),
+            pending: Pending::new(),
+        }
+    }
+
+    /// One `property` event, the way the metadata proxy delivers it.
+    fn property(state: &State, subject: u32, key: Option<&CStr>, value: Option<&CStr>) {
+        let data = ptr::from_ref(state).cast_mut().cast::<c_void>();
+        let key = key.map_or(ptr::null(), CStr::as_ptr);
+        let value = value.map_or(ptr::null(), CStr::as_ptr);
+        // SAFETY: `data` is a live `State`, and the strings are
+        // NUL-terminated for the length of the call.
+        unsafe { on_metadata_property(data, subject, key, ptr::null(), value) };
+    }
+
+    #[test]
+    fn only_the_sessions_own_subject_names_the_defaults() {
+        let state = detached();
+        property(
+            &state,
+            PW_ID_CORE,
+            Some(c"default.audio.source"),
+            Some(c"{\"name\":\"sipral-mic\"}"),
+        );
+        assert_eq!(
+            state.default_id(Direction::Input),
+            Some(DeviceId::new("sipral-mic"))
+        );
+        assert_eq!(
+            state.pending.take(),
+            Some(DeviceEvent::DefaultChanged(Direction::Input))
+        );
+
+        // a stream that was moved, and has gone: its own keys cleared
+        property(&state, 57, None, None);
+        // and a key of the same name on some other node is that node's
+        property(
+            &state,
+            57,
+            Some(c"default.audio.source"),
+            Some(c"{\"name\":\"elsewhere\"}"),
+        );
+        assert_eq!(
+            state.default_id(Direction::Input),
+            Some(DeviceId::new("sipral-mic"))
+        );
+        assert_eq!(state.pending.take(), None);
+
+        // the session's own keys cleared is the default gone
+        property(&state, PW_ID_CORE, None, None);
+        assert_eq!(state.default_id(Direction::Input), None);
+        assert_eq!(
+            state.pending.take(),
+            Some(DeviceEvent::DefaultChanged(Direction::Input))
+        );
+    }
 
     #[test]
     fn a_plain_default_nodes_value_gives_up_its_name() {

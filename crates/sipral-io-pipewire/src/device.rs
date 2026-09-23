@@ -141,13 +141,57 @@ impl fmt::Display for DeviceEvent {
 /// at start-up means.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum DeviceChoice {
-    /// Whatever the session is routing to at the moment the stream opens.
+    /// Whatever the session is routing to at the moment the stream opens:
+    /// its default node for the direction, which the stream then stays on.
     #[default]
     System,
     /// This node, and no other.
     Device(DeviceId),
     /// This node if the machine has it, and the session's route otherwise.
     Preferred(DeviceId),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl DeviceChoice {
+    /// The node a stream should be pinned to, given the graph's nodes as
+    /// they are now: `None` only when the choice falls back to a session that
+    /// has named no default for this direction.
+    ///
+    /// The session's route is resolved here too, to the default node of the
+    /// moment, rather than left for the session manager to follow. A stream
+    /// the session manager follows is one it moves when the default changes,
+    /// and WirePlumber 0.5.8 does that to a stream that also asked not to be
+    /// reconnected by linking the new default *beside* the old one: a
+    /// microphone that hears two rooms at once. Pinned, a stream on the
+    /// session's route behaves like one on a named node — it stays where it
+    /// opened, says so when that node goes, and a recover lands on whatever
+    /// the default is by then.
+    ///
+    /// # Errors
+    /// [`Error::NoDevice`](crate::Error::NoDevice) for a named node the graph
+    /// does not have in this direction.
+    pub(crate) fn resolve(
+        &self,
+        direction: Direction,
+        listed: &[Device],
+    ) -> Result<Option<DeviceId>, crate::Error> {
+        let present = |id: &DeviceId| {
+            listed
+                .iter()
+                .any(|device| device.direction == direction && &device.id == id)
+        };
+        let default = || {
+            listed
+                .iter()
+                .find(|device| device.direction == direction && device.is_default)
+                .map(|device| device.id.clone())
+        };
+        match self {
+            Self::Device(id) | Self::Preferred(id) if present(id) => Ok(Some(id.clone())),
+            Self::Device(_) => Err(crate::Error::NoDevice),
+            Self::System | Self::Preferred(_) => Ok(default()),
+        }
+    }
 }
 
 impl fmt::Display for DeviceChoice {
@@ -313,6 +357,63 @@ mod tests {
         assert_eq!(
             DeviceChoice::Preferred(id.clone()).to_string(),
             format!("{id}, or the session route")
+        );
+    }
+
+    /// Two sources and a sink, the first source the session's default.
+    fn graph() -> Vec<Device> {
+        let node = |name: &str, direction, is_default| Device {
+            id: DeviceId::new(name),
+            name: name.to_owned(),
+            direction,
+            is_default,
+        };
+        vec![
+            node("alsa_input.usb-headset", Direction::Input, true),
+            node("alsa_input.pci-builtin", Direction::Input, false),
+            node("alsa_output.usb-headset", Direction::Output, false),
+        ]
+    }
+
+    #[test]
+    fn the_session_route_is_the_default_node_of_the_moment() {
+        assert_eq!(
+            DeviceChoice::System.resolve(Direction::Input, &graph()),
+            Ok(Some(DeviceId::new("alsa_input.usb-headset")))
+        );
+        // a direction the session has named no default for is left to it
+        assert_eq!(
+            DeviceChoice::System.resolve(Direction::Output, &graph()),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_named_node_is_that_node_or_nothing() {
+        let builtin = DeviceId::new("alsa_input.pci-builtin");
+        assert_eq!(
+            DeviceChoice::Device(builtin.clone()).resolve(Direction::Input, &graph()),
+            Ok(Some(builtin))
+        );
+        // a sink is not a source, whatever it is called
+        assert_eq!(
+            DeviceChoice::Device(DeviceId::new("alsa_output.usb-headset"))
+                .resolve(Direction::Input, &graph()),
+            Err(crate::Error::NoDevice)
+        );
+    }
+
+    #[test]
+    fn a_preference_that_is_missing_lands_on_the_default() {
+        let builtin = DeviceId::new("alsa_input.pci-builtin");
+        assert_eq!(
+            DeviceChoice::Preferred(builtin.clone()).resolve(Direction::Input, &graph()),
+            Ok(Some(builtin))
+        );
+        assert_eq!(
+            DeviceChoice::Preferred(DeviceId::new("bluez_input.gone"))
+                .resolve(Direction::Input, &graph()),
+            Ok(Some(DeviceId::new("alsa_input.usb-headset")))
         );
     }
 

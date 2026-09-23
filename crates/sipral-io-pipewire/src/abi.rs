@@ -114,6 +114,8 @@ pub(crate) const PW_STREAM_FLAG_RT_PROCESS: u32 = 1 << 4;
 /// says what the session manager does instead for the property this flag
 /// sets, `node.dont-reconnect`: "if the target is removed, the node is
 /// destroyed" — which reaches the stream as a state change it did not ask for.
+/// Set only on a stream pinned to a node; `stream.rs`'s `connect_flags` says
+/// what it does to one that is not.
 pub(crate) const PW_STREAM_FLAG_DONT_RECONNECT: u32 = 1 << 7;
 
 /// `enum pw_stream_state`: `PW_STREAM_STATE_ERROR`.
@@ -180,7 +182,8 @@ pub(crate) const PW_KEY_NODE_LATENCY: &core::ffi::CStr = c"node.latency";
 /// property the session manager reads to decide whether a stream whose
 /// `target.object` is missing may be linked to the default node instead.
 ///
-/// Set on every stream that names a target. Without it, the session manager
+/// Set on every stream that names a target — which is every stream opened
+/// while the session has a default. Without it, the session manager
 /// this was tested against (WirePlumber 0.5) did not take a stream down when
 /// the node it named went away, `node.dont-reconnect` notwithstanding, and
 /// the loss was never reported; with it, the stream is taken down and says

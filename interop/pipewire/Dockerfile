@@ -5,8 +5,9 @@
 # PipeWire, its session manager, and a session bus for the two of them, next
 # to the toolchain that builds sipral-io-pipewire against them. There is no
 # ALSA device inside a container, so the only sinks and sources this graph
-# ever has are the null sinks interop/pipewire/run.sh makes, which is what
-# lets it play into one and read the same samples back out of its monitor.
+# ever has are the virtual cables interop/pipewire/run.sh makes, which is
+# what lets it play into a cable's sink and read the same samples back out of
+# its source.
 #
 # The pinned toolchain image the rest of the workspace builds with, plus
 # Debian's own packages. libpipewire is MIT; nothing here pulls in libpulse

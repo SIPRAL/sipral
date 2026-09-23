@@ -1430,14 +1430,18 @@ finds it gone, not only by a buffer pass that never comes. On macOS the stream
 asks the hardware layer whether each of the two device objects under it is
 still alive — the speaker's and the microphone's, which on a Mac are usually
 not the same object — and losing either is losing the stream. That is a
-property read rather than an inference from silence. On Linux the stream is
-connected with `PW_STREAM_FLAG_DONT_RECONNECT`, and a stream that names its
-node also carries `node.dont-fallback`: together they tell the session manager
-to take the stream down when its node goes rather than move it, and the
-stream reports the state change it did not ask for. Both are needed —
-WirePlumber 0.5, given only the first, left a stream whose node had been
-removed without a word — and `interop/pipewire/run.sh` checks it by pulling a
-virtual cable out from under two open streams. On iOS it reports nothing,
+property read rather than an inference from silence. On Linux every stream
+names its node — the system's route is resolved to the session's default node
+as the stream opens — and is connected with `PW_STREAM_FLAG_DONT_RECONNECT`
+and `node.dont-fallback`: together they tell the session manager to take the
+stream down when its node goes rather than move it, and the stream reports the
+state change it did not ask for. Both are needed — WirePlumber 0.5, given only
+the first, left a stream whose node had been removed without a word — and so
+is the naming: a stream left to follow the default, asked not to be
+reconnected, was linked to the new default beside the old one when the default
+changed, a microphone hearing two rooms. `interop/pipewire/run.sh` checks all
+three, by pulling a virtual cable out from under open streams and by moving
+the default under one. On iOS it reports nothing,
 because there
 the route belongs to `AVAudioSession` and its changes are delivered to the
 application; anything else would be a guess dressed as a fact.

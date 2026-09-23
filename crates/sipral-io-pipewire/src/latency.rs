@@ -23,16 +23,16 @@
 //!   resampler, converting between this stream's rate and the graph's.
 //!
 //! `pw_time` also carries `now` and `ticks`, meant for extrapolating `delay`
-//! forward to the instant of a later read; this crate reads a fresh
-//! `pw_time` on demand instead; the value is at most one graph cycle old, a
-//! few milliseconds, so extrapolating it would spend more code than the
-//! error it removes.
+//! forward to the instant of a later read. This crate does not: the
+//! realtime thread reads `pw_time` at the end of every quantum and keeps the
+//! last one, so what a caller reads is at most one graph cycle old, a few
+//! milliseconds, and extrapolating it would spend more code than the error
+//! it removes.
 //!
-//! A stream that is not yet `PW_STREAM_STATE_STREAMING` has no `pw_time` to
-//! read at all — `pw_stream_get_time_n` refuses — so unlike CoreAudio's
-//! `Latency`, which reports what a device answered and leaves the rest
-//! `None`, this one is only ever built from a value PipeWire actually
-//! returned.
+//! Until a stream has run its first quantum there is nothing kept, and every
+//! field reads zero. Unlike CoreAudio's `Latency`, which reports what a
+//! device answered and leaves the rest `None`, this one holds either what
+//! PipeWire returned or nothing at all.
 
 use core::fmt;
 use core::time::Duration;

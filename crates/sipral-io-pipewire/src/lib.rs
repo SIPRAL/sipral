@@ -52,8 +52,11 @@
 //! window, because that is where a slider and a meter live.
 //!
 //! A lost node is reported once, as [`StreamEvent::DeviceLost`], and never
-//! silently rerouted underneath a call — `PW_STREAM_FLAG_DONT_RECONNECT` is
-//! what buys that, and `crate::abi` says so where the flag is declared. What
+//! silently rerouted underneath a call. Every stream is pinned to a node as
+//! it opens — the session's route to the session's default node of that
+//! moment — and `PW_STREAM_FLAG_DONT_RECONNECT` is what keeps it there;
+//! `crate::abi` says so where the flag is declared. A default that changes
+//! later is a [`DeviceEvent::DefaultChanged`], not a stream that moved. What
 //! puts a node back under a stream is [`CaptureStream::recover`] and
 //! [`PlaybackStream::recover`].
 //!

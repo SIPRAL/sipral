@@ -5,12 +5,15 @@
 //! layouts and arithmetic, checked on a running graph.
 //!
 //! Every test here is ignored by default, because it needs a daemon, a
-//! session manager and the two nodes `interop/pipewire/run.sh` makes — a
-//! virtual cable whose sink is `sipral-mouth` and whose source is
-//! `sipral-mic`, mono, so that what is played into the one comes straight
-//! out of the other. That script starts all of it inside
+//! session manager and the cables `interop/pipewire/run.sh` makes — mono
+//! virtual cables whose sink's samples come straight out of a source,
+//! `sipral-mouth` into `sipral-mic` and `sipral-ear` into
+//! `sipral-ear-monitor` — and PipeWire's own `pw-loopback`, `pw-metadata`
+//! and `pw-cli`. That script starts all of it inside
 //! `interop/pipewire/Dockerfile`'s image and runs these with `--ignored`; on
-//! a desktop with the same cable loaded they run the same way.
+//! a desktop with the same cables loaded they run the same way, except that
+//! two of them move the session's defaults while they run and then hand the
+//! choice back to the session manager.
 //!
 //! What is measured is printed as well as asserted, because the numbers —
 //! how many frames crossed, how loud, how late — are the part worth reading
@@ -38,6 +41,8 @@ use sipral_io_pipewire::{
 const MOUTH: &str = "sipral-mouth";
 /// The cable's source, which the tests read back from.
 const MIC: &str = "sipral-mic";
+/// The other cable's sink, which only the default-changing test uses.
+const EAR: &str = "sipral-ear";
 
 /// How long anything waits for the graph before the test is a failure.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -277,11 +282,302 @@ fn a_node_that_goes_is_reported_once_and_recovered_from() {
     }
     // a preference falls back to the session's route, and is running again
     let recovered = lenient.recover().expect("a preference recovers");
-    assert_eq!(recovered.device(), None);
+    let fallback = monitor
+        .default_device(Direction::Input)
+        .expect("the session names a default source");
+    assert_eq!(recovered.device(), Some(&fallback));
     until("the recovered stream running", || recovered.is_running());
     println!(
         "  recovered onto the session's route, a {} config",
         DeviceChoice::Preferred(DeviceId::new(SOURCE))
     );
     recovered.close().expect("closes");
+}
+
+/// `pw-metadata` on the `"default"` object, which is how a desktop's mixer
+/// changes the session's choices.
+fn pw_metadata(arguments: &[&str]) {
+    let status = Command::new("pw-metadata")
+        .args(arguments)
+        .output()
+        .expect("pw-metadata runs")
+        .status;
+    assert!(status.success(), "pw-metadata {arguments:?} said {status}");
+}
+
+/// The key a person's choice of default is kept under, which the session
+/// manager turns into the `default.audio.*` keys the crate reads.
+fn configured_key(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Output => "default.configured.audio.sink",
+        Direction::Input => "default.configured.audio.source",
+    }
+}
+
+/// Choose a direction's default node the way a mixer does.
+fn configure(direction: Direction, node: &str) {
+    let value = format!("{{ \"name\": \"{node}\" }}");
+    pw_metadata(&["0", configured_key(direction), &value, "Spa:String:JSON"]);
+}
+
+/// Leaves the session's own choice of default in place once a test that
+/// made one ends, however it ends.
+struct Configured(Direction);
+
+impl Drop for Configured {
+    fn drop(&mut self) {
+        let _ = Command::new("pw-metadata")
+            .args(["-d", "0", configured_key(self.0)])
+            .output();
+    }
+}
+
+/// A node's registry id, which `pw-metadata` names a subject by and this
+/// crate never hands out.
+fn node_id(name: &str) -> String {
+    let listing = Command::new("pw-cli")
+        .args(["ls", "Node"])
+        .output()
+        .expect("pw-cli runs");
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    let mut id = None;
+    for line in listing.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("id ") {
+            id = rest.split(',').next().map(str::to_owned);
+        } else if line.contains(&format!("node.name = \"{name}\"")) {
+            return id.expect("an id before the properties");
+        }
+    }
+    panic!("no node is called {name}");
+}
+
+#[test]
+#[ignore = "needs a running PipeWire with the cables interop/pipewire/run.sh makes"]
+fn a_default_that_changes_is_reported_and_nothing_else_passes_for_one() {
+    let monitor = DeviceMonitor::new().expect("the registry answers");
+    let _restore = Configured(Direction::Output);
+    let source = monitor
+        .default_device(Direction::Input)
+        .expect("the session names a default source");
+
+    while monitor.poll().is_some() {}
+    configure(Direction::Output, EAR);
+    until("the default sink moving to the ear", || {
+        monitor.default_device(Direction::Output) == Some(DeviceId::new(EAR))
+    });
+    let heard: Vec<_> = std::iter::from_fn(|| monitor.poll()).collect();
+    assert!(
+        heard.contains(&DeviceEvent::DefaultChanged(Direction::Output)),
+        "the change was never reported: {heard:?}"
+    );
+
+    // The same metadata object keeps keys under other nodes' ids, and clears
+    // them all when the node goes: what happens to any stream a mixer moved,
+    // done here to a node that stays.
+    let ear = node_id(EAR);
+    pw_metadata(&[&ear, "sipral.test", "yes"]);
+    pw_metadata(&["-d", &ear]);
+    // A change of the session's own after it, so that once it has arrived
+    // everything before it has too.
+    configure(Direction::Output, MOUTH);
+    until("the default sink moving back", || {
+        monitor.default_device(Direction::Output) == Some(DeviceId::new(MOUTH))
+    });
+    let heard: Vec<_> = std::iter::from_fn(|| monitor.poll()).collect();
+    println!("  after another node's keys were cleared: {heard:?}");
+    assert_eq!(monitor.default_device(Direction::Input), Some(source));
+    assert!(!heard.contains(&DeviceEvent::DefaultChanged(Direction::Input)));
+}
+
+/// Play `signal` into `mouth` for as long as `window` lasts, a frame at a
+/// time whenever there is room, while reading `phone`; say the loudest
+/// sample heard.
+fn loudest_heard(
+    mouth: &mut PlaybackStream,
+    phone: &mut CaptureStream,
+    signal: &[i16],
+    window: Duration,
+) -> u16 {
+    let mut buffer = vec![0_i16; signal.len()];
+    let mut loudest = 0_u16;
+    let started = Instant::now();
+    while started.elapsed() < window {
+        while mouth.room() >= signal.len() {
+            assert!(mouth.write(signal));
+        }
+        while phone.read(&mut buffer) {
+            let peak = buffer.iter().map(|sample| sample.unsigned_abs()).max();
+            loudest = loudest.max(peak.unwrap_or(0));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    loudest
+}
+
+#[test]
+#[ignore = "needs a running PipeWire with the cables interop/pipewire/run.sh makes"]
+fn a_stream_on_the_session_route_stays_on_the_node_it_opened_on() {
+    const SINK: &str = "sipral-route-sink";
+    const SOURCE: &str = "sipral-route-source";
+
+    let monitor = DeviceMonitor::new().expect("the registry answers");
+    let mut cable = Cable::plug(SINK, SOURCE);
+    until("the new source appearing", || {
+        monitor
+            .devices()
+            .iter()
+            .any(|device| device.id.as_str() == SOURCE)
+    });
+    let _restore = Configured(Direction::Input);
+    configure(Direction::Input, SOURCE);
+    until("the new source becoming the default", || {
+        monitor.default_device(Direction::Input) == Some(DeviceId::new(SOURCE))
+    });
+
+    // The room talks into the cable the old default is not: whatever the
+    // phone hears, it hears from a node it was never opened on.
+    let format = graph_rate();
+    let spoken = signal(format.frame_samples());
+    let mut mouth = PlaybackStream::open(&StreamConfig::on(DeviceId::new(MOUTH), format))
+        .expect("the room's stream opens");
+    mouth.start().expect("starts");
+    let mut phone =
+        CaptureStream::open(&StreamConfig::new(format)).expect("the session's route opens");
+    phone.start().expect("starts");
+    until("the phone running", || phone.is_running());
+    let before = loudest_heard(&mut mouth, &mut phone, &spoken, Duration::from_millis(500));
+    assert_eq!(before, 0, "the silent cable was not silent");
+
+    configure(Direction::Input, MIC);
+    until("the default moving to the room's cable", || {
+        monitor.default_device(Direction::Input) == Some(DeviceId::new(MIC))
+    });
+    let after = loudest_heard(&mut mouth, &mut phone, &spoken, Duration::from_secs(2));
+    println!("  loudest heard after the default moved: {after}");
+    assert_eq!(
+        after, 0,
+        "a stream on the session's route was linked to the new default"
+    );
+    assert_eq!(phone.device().map(DeviceId::as_str), Some(SOURCE));
+    assert_eq!(phone.poll(), None);
+
+    // pinned, so losing the node is said rather than papered over, and a
+    // recover lands on the default of the moment
+    cable.unplug();
+    until("the loss being reported", || {
+        phone.poll() == Some(StreamEvent::DeviceLost)
+    });
+    let mut phone = phone.recover().expect("the session's route recovers");
+    assert_eq!(phone.device().map(DeviceId::as_str), Some(MIC));
+    let recovered = loudest_heard(&mut mouth, &mut phone, &spoken, Duration::from_secs(1));
+    println!("  loudest heard after recovering: {recovered}");
+    assert!(recovered > 8_000, "the recovered stream heard {recovered}");
+    phone.close().expect("closes");
+    mouth.close().expect("closes");
+}
+
+#[test]
+#[ignore = "needs a running PipeWire with the cable interop/pipewire/run.sh makes"]
+fn a_rate_the_graph_does_not_run_is_converted_both_ways() {
+    let format = StreamFormat::with_frame_millis(16_000, 20).expect("16 kHz, 20 ms");
+    let rate = format.sample_rate_hz();
+    // a 500 Hz triangle at 16 kHz, 32 samples a period and ten to a frame: a
+    // thousand zero crossings a second, which a resampler that got either
+    // rate wrong would move
+    let tone: Vec<i16> = (0..format.frame_samples())
+        .map(|n| {
+            let step = i16::try_from(n % 32).unwrap();
+            let rise = if step < 16 { step } else { 32 - step };
+            (rise - 8) * 1_000
+        })
+        .collect();
+
+    let mut speaker = PlaybackStream::open(&StreamConfig::on(DeviceId::new(MOUTH), format))
+        .expect("the playback stream opens");
+    let mut microphone = CaptureStream::open(&StreamConfig::on(DeviceId::new(MIC), format))
+        .expect("the capture stream opens");
+    speaker.start().expect("starts");
+    microphone.start().expect("starts");
+
+    let mut heard: Vec<i16> = Vec::new();
+    let mut buffer = vec![0_i16; format.frame_samples()];
+    let mut first_read = None;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        while speaker.room() >= tone.len() {
+            assert!(speaker.write(&tone));
+        }
+        while microphone.read(&mut buffer) {
+            first_read.get_or_insert_with(Instant::now);
+            heard.extend_from_slice(&buffer);
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    let elapsed = first_read.expect("something was read").elapsed();
+    let latency = microphone.latency();
+    microphone.close().expect("closes");
+    speaker.close().expect("closes");
+
+    let count = |length: usize| f64::from(u32::try_from(length).unwrap());
+    let delivered = count(heard.len()) / elapsed.as_secs_f64();
+    let loud: Vec<i16> = heard
+        .iter()
+        .copied()
+        .skip_while(|sample| sample.unsigned_abs() < 4_000)
+        .collect();
+    let crossings = loud
+        .windows(2)
+        .filter(|pair| (pair[0] >= 0) != (pair[1] >= 0))
+        .count();
+    let per_second = count(crossings) * f64::from(rate) / count(loud.len());
+    println!(
+        "  {delivered:.0} samples a second delivered, {per_second:.0} zero crossings a second, \
+         graph clock 1/{}",
+        latency.rate.denom
+    );
+    assert!(
+        (15_200.0..=16_800.0).contains(&delivered),
+        "{delivered:.0} samples a second at 16 kHz"
+    );
+    assert!(
+        (950.0..=1_050.0).contains(&per_second),
+        "the tone came back at {per_second:.0} crossings a second"
+    );
+    // the graph ran at its own rate, and the stream at the one asked for
+    assert_ne!(latency.rate.denom, rate);
+    assert_eq!(latency.stream_rate_hz, rate);
+}
+
+/// PipeWire's own threads and this crate's, in this process.
+fn pipewire_threads() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .expect("procfs")
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|name| name.starts_with("data-loop") || name.starts_with("sipral-pw"))
+        .count()
+}
+
+#[test]
+#[ignore = "needs a running PipeWire with the cable interop/pipewire/run.sh makes"]
+fn closing_a_stream_leaves_no_thread_behind() {
+    let before = pipewire_threads();
+    let format = StreamFormat::narrowband();
+    let mut speaker = PlaybackStream::open(&StreamConfig::on(DeviceId::new(MOUTH), format))
+        .expect("the playback stream opens");
+    let mut microphone = CaptureStream::open(&StreamConfig::on(DeviceId::new(MIC), format))
+        .expect("the capture stream opens");
+    speaker.start().expect("starts");
+    microphone.start().expect("starts");
+    until("both running", || {
+        speaker.is_running() && microphone.is_running()
+    });
+    // a loop thread and a realtime data thread for each
+    let open = pipewire_threads();
+    println!("  PipeWire threads: {before} before, {open} open");
+    assert!(open >= before + 4);
+    speaker.close().expect("closes");
+    microphone.close().expect("closes");
+    // the data thread belongs to the context `pw_stream_new_simple` made,
+    // and goes with the stream: nothing is left to call into freed memory
+    assert_eq!(pipewire_threads(), before);
 }
