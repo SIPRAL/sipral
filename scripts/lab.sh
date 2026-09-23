@@ -140,6 +140,30 @@ else
     [ -n "$HARNESS_C" ] || printf '  note  no libsipral_ffi to link against; the C flows are skipped\n'
 fi
 
+# 8.5.4's own flow: the application that carries the call and speaks
+# `sipral-headless`'s wire protocol on a socket, and the reference agent that
+# answers over it — two binaries, `headless_socket_agent` below runs both.
+# Skipped rather than fatal, on the same reasoning as the C harness above: a
+# machine that cannot build one still runs the rest of the lab.
+step "the socket-framed agent"
+if [ -n "${SIPRAL_HEADLESS_APP:-}" ] && [ -n "${SIPRAL_HEADLESS_CLIENT:-}" ]; then
+    HEADLESS_APP="$SIPRAL_HEADLESS_APP"
+    HEADLESS_CLIENT="$SIPRAL_HEADLESS_CLIENT"
+    pass "taken as given: $HEADLESS_APP, $HEADLESS_CLIENT"
+else
+    if cargo build --release -p sipral --features headless \
+        --example headless-socket-agent >/dev/null 2>&1 \
+        && cargo build --release -p sipral-headless --example agent >/dev/null 2>&1; then
+        HEADLESS_APP="$ROOT/target/release/examples/headless-socket-agent"
+        HEADLESS_CLIENT="$ROOT/target/release/examples/agent"
+        pass "built"
+    else
+        HEADLESS_APP=""
+        HEADLESS_CLIENT=""
+        printf '  note  could not build the socket-framed agent; that step is skipped\n'
+    fi
+fi
+
 step "the lab"
 mkdir -p interop/pcap
 ( cd interop && docker compose up -d ) >/dev/null 2>&1 \
@@ -331,6 +355,94 @@ python_agent() {
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
         | grep '^ended ' | grep -Eq "'packets_sent': [1-9]" \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
+# 8.5.4's own flow: `crates/sipral/examples/headless-socket-agent.rs` carries
+# the call over SIP and RTP exactly as `labuser-agent` above does, and speaks
+# `sipral-headless`'s wire protocol on a TCP port instead of holding the audio
+# itself; `crates/sipral-headless/examples/agent.rs` is the reference agent
+# on the other end of it, depending on nothing but that crate.
+#
+# Two containers rather than one: the application listens for the agent
+# before it can be dialled, so it starts first and the log line it prints
+# once a connection lands is the gate the agent's own container waits behind.
+# Both are removed at the end either way, the same as `python_agent` above.
+HEADLESS_APP_NAME=sipral-lab-headless-app
+HEADLESS_CLIENT_NAME=sipral-lab-headless-agent
+headless_socket_agent() {
+    local app_log tries
+    [ -n "$HEADLESS_APP" ] && [ -n "$HEADLESS_CLIENT" ] || return 0
+    local app_beside client_beside
+    app_beside=$(cd "$(dirname "$HEADLESS_APP")" && pwd)
+    client_beside=$(cd "$(dirname "$HEADLESS_CLIENT")" && pwd)
+    docker rm -f "$HEADLESS_APP_NAME" "$HEADLESS_CLIENT_NAME" >/dev/null 2>&1
+
+    docker run -d --name "$HEADLESS_APP_NAME" --network sipral-interop_lab \
+        -v "$app_beside:/bin:ro" \
+        debian:trixie-slim sh -c '
+            own=$(hostname -i)
+            exec /bin/headless-socket-agent \
+                --host "$own" --port 5060 --socket 0.0.0.0:7001' >/dev/null \
+        || { printf '  could not start the application container\n'; return 1; }
+
+    tries=0
+    until docker logs "$HEADLESS_APP_NAME" 2>&1 | grep -q '^waiting for the agent'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$HEADLESS_APP_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the application never came up\n'
+            docker logs "$HEADLESS_APP_NAME" 2>&1 | tail -20
+            docker rm -f "$HEADLESS_APP_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 1
+    done
+
+    docker run -d --name "$HEADLESS_CLIENT_NAME" --network sipral-interop_lab \
+        -v "$client_beside:/bin:ro" \
+        debian:trixie-slim /bin/agent --addr "$HEADLESS_APP_NAME:7001" >/dev/null \
+        || {
+            printf '  could not start the agent container\n'
+            docker rm -f "$HEADLESS_APP_NAME" >/dev/null 2>&1
+            return 1
+        }
+
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-headless; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$HEADLESS_APP_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 60 ]; then
+            printf '  the application never registered\n'
+            docker logs "$HEADLESS_APP_NAME" 2>&1 | tail -20
+            docker rm -f "$HEADLESS_APP_NAME" "$HEADLESS_CLIENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-agent-headless extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$HEADLESS_APP_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    app_log=$(docker logs "$HEADLESS_APP_NAME" 2>&1)
+    printf '%s\n' "$(docker logs "$HEADLESS_CLIENT_NAME" 2>&1)" | sed 's/^/    agent  /'
+    printf '%s\n' "$app_log" | sed 's/^/    app    /'
+    docker rm -f "$HEADLESS_APP_NAME" "$HEADLESS_CLIENT_NAME" >/dev/null 2>&1
+
+    printf '%s\n' "$app_log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 

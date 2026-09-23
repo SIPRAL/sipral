@@ -12,6 +12,21 @@
 //! back to [`crate::codec::encode_audio`] itself. This module only owns the
 //! queueing, the state, and the arithmetic of dropping instead of
 //! backlogging.
+//!
+//! # Drop policy
+//!
+//! A queue at capacity drops its **oldest** frame to make room for the one
+//! that just arrived, not the new one. Recency is what a live conversation
+//! actually needs: on the capture side, the agent reading a frame that is a
+//! second stale is worse than the agent never hearing the second that
+//! displaced it, and on the playback side the same is true of the caller's
+//! ear. [`Session::capture_dropped`] and [`Session::playback_dropped`] count
+//! every frame a queue has had to make room for this way, so an application
+//! that wants to know its agent is falling behind can watch the number
+//! rather than parse an error off every frame it sends. A queue built with
+//! zero capacity — legal, if useless — drops every frame offered to it the
+//! same way: there is no older frame to evict, so the one just offered is
+//! the one that goes, and the counter still moves.
 
 use core::fmt;
 use std::collections::VecDeque;
@@ -60,9 +75,9 @@ impl QueueKind {
 
 /// `code` as [`ErrorCode::Other`], falling back to [`ErrorCode::Internal`]
 /// on the unreachable case that it collides with one of the six reserved
-/// strings — every caller here builds `code` from a literal or a queue
-/// name, never from anything a peer sent, so the fallback is defensive
-/// rather than expected to fire.
+/// strings — every caller here builds `code` from a literal, never from
+/// anything a peer sent, so the fallback is defensive rather than expected
+/// to fire.
 fn other_error_code(code: impl Into<String>) -> ErrorCode {
     OtherErrorCode::new(code.into()).map_or(ErrorCode::Internal, ErrorCode::Other)
 }
@@ -71,11 +86,13 @@ fn other_error_code(code: impl Into<String>) -> ErrorCode {
 ///
 /// Bounded rather than growable on purpose: the document rules out queuing
 /// forever for a stalled agent, so a frame that arrives once the queue is
-/// already full is dropped instead of the queue growing to hold it.
+/// already full displaces the oldest one held instead of the queue growing
+/// to hold both — see the module's own "Drop policy" section.
 #[derive(Debug)]
 struct FrameQueue {
     frames: VecDeque<Vec<u8>>,
     capacity: usize,
+    dropped: u64,
 }
 
 impl FrameQueue {
@@ -83,18 +100,24 @@ impl FrameQueue {
         Self {
             frames: VecDeque::new(),
             capacity,
+            dropped: 0,
         }
     }
 
-    /// `true` if `frame` was queued, `false` if the queue was already at
-    /// capacity and `frame` was dropped instead. A capacity of zero drops
-    /// every frame offered to it, which is a legal, if useless, session.
-    fn push(&mut self, frame: Vec<u8>) -> bool {
+    /// Queue `frame`, evicting the oldest frame already held first if the
+    /// queue is already at capacity, or `frame` itself if the capacity is
+    /// zero and there is no older frame to evict. Either way `dropped`
+    /// counts by one when something had to give.
+    fn push(&mut self, frame: Vec<u8>) {
+        if self.capacity == 0 {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
         if self.frames.len() >= self.capacity {
-            return false;
+            self.frames.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
         }
         self.frames.push_back(frame);
-        true
     }
 
     fn pop(&mut self) -> Option<Vec<u8>> {
@@ -105,7 +128,18 @@ impl FrameQueue {
         self.frames.len()
     }
 
+    /// How many frames this queue has evicted to make room for a newer one,
+    /// since the queue was built.
+    fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
     /// Empty the queue immediately and say how many frames that discarded.
+    ///
+    /// Deliberate discarding — barge-in — rather than the queue falling
+    /// behind, so this does not move [`FrameQueue::dropped`]: the two count
+    /// different things, and an application asking "is my agent keeping up"
+    /// does not want a barge-in it asked for to read as the agent stalling.
     fn clear(&mut self) -> usize {
         let discarded = self.frames.len();
         self.frames.clear();
@@ -265,13 +299,17 @@ impl Session {
 
     /// Queue one frame of the caller's audio for the agent to read.
     ///
+    /// Never blocks and never grows the queue past what the session was
+    /// opened with: a queue already at capacity drops its oldest frame to
+    /// make room, counted in [`Session::capture_dropped`] — the module's own
+    /// "Drop policy" section says why the oldest rather than this one.
+    ///
     /// # Errors
     /// An [`ErrorMessage`] ready for the error channel, and `frame` is gone
     /// either way rather than held for a retry: [`ErrorCode::InvalidAudioFrame`]
     /// if it is not exactly one frame at the session's rate and duration, or
-    /// a queue-full drop if the agent is not reading fast enough to keep up
-    /// — a queue that waited for it would be exactly the unbounded backlog
-    /// the document rules out.
+    /// `call_ended` once the call is over and nothing more is coming from
+    /// either side of it.
     pub fn push_capture(&mut self, frame: Vec<u8>) -> Result<(), ErrorMessage> {
         self.push(QueueKind::Capture, frame)
     }
@@ -279,8 +317,8 @@ impl Session {
     /// Queue one frame of the agent's audio for playback toward the caller.
     ///
     /// # Errors
-    /// See [`Session::push_capture`]; the same three outcomes apply in this
-    /// direction.
+    /// See [`Session::push_capture`]; the same applies in this direction,
+    /// counted in [`Session::playback_dropped`] instead.
     pub fn push_playback(&mut self, frame: Vec<u8>) -> Result<(), ErrorMessage> {
         self.push(QueueKind::Playback, frame)
     }
@@ -296,18 +334,26 @@ impl Session {
                 format!("{name} frame dropped: call already ended"),
             ));
         }
-        let queued = match kind {
+        match kind {
             QueueKind::Capture => self.capture.push(frame),
             QueueKind::Playback => self.playback.push(frame),
-        };
-        if queued {
-            Ok(())
-        } else {
-            Err(self.drop_message(
-                other_error_code(format!("{name}_queue_full")),
-                format!("{name} queue full, frame dropped"),
-            ))
         }
+        Ok(())
+    }
+
+    /// Frames [`Session::push_capture`] has had to evict the oldest queued
+    /// frame for, since the session opened — see the module's own "Drop
+    /// policy" section.
+    #[must_use]
+    pub fn capture_dropped(&self) -> u64 {
+        self.capture.dropped()
+    }
+
+    /// The same count as [`Session::capture_dropped`], for
+    /// [`Session::push_playback`].
+    #[must_use]
+    pub fn playback_dropped(&self) -> u64 {
+        self.playback.dropped()
     }
 
     fn drop_message(&self, code: ErrorCode, message: String) -> ErrorMessage {
@@ -506,32 +552,39 @@ mod tests {
         assert_eq!(error.call_id.as_deref(), Some("call-1"));
     }
 
-    #[test]
-    fn pushing_past_capacity_drops_the_new_frame_and_reports_the_queue_full() {
-        let mut session = session(2, 2);
-        session.push_capture(frame()).expect("first fits");
-        session.push_capture(frame()).expect("second fits");
-        let error = session.push_capture(frame()).expect_err("queue is full");
-        assert_eq!(
-            error.code,
-            ErrorCode::Other(
-                OtherErrorCode::new("capture_queue_full".to_owned()).expect("not a reserved code")
-            )
-        );
-        assert_eq!(session.capture_depth(), 2);
+    // A tagged frame, distinguishable from another tagged one by its first
+    // byte, for tests that need to tell which frames survived a drop.
+    fn tagged(n: u8) -> Vec<u8> {
+        let mut f = frame();
+        if let Some(first) = f.first_mut() {
+            *first = n;
+        }
+        f
     }
 
     #[test]
-    fn a_zero_capacity_queue_drops_every_frame_from_the_first() {
+    fn pushing_past_capacity_evicts_the_oldest_frame_and_counts_it() {
+        let mut session = session(2, 2);
+        session.push_capture(tagged(1)).expect("first fits");
+        session.push_capture(tagged(2)).expect("second fits");
+        assert_eq!(session.capture_dropped(), 0);
+        // the queue is full: frame 1, the oldest, is the one that goes
+        session.push_capture(tagged(3)).expect("third displaces the oldest");
+        assert_eq!(session.capture_depth(), 2);
+        assert_eq!(session.capture_dropped(), 1);
+        assert_eq!(session.pop_capture(), Some(tagged(2)));
+        assert_eq!(session.pop_capture(), Some(tagged(3)));
+        assert_eq!(session.pop_capture(), None);
+    }
+
+    #[test]
+    fn a_zero_capacity_queue_drops_every_frame_from_the_first_and_counts_each_one() {
         let mut session = session(0, 0);
-        let error = session.push_playback(frame()).expect_err("no headroom");
-        assert_eq!(
-            error.code,
-            ErrorCode::Other(
-                OtherErrorCode::new("playback_queue_full".to_owned()).expect("not a reserved code")
-            )
-        );
+        session.push_playback(frame()).expect("accepted, then dropped");
         assert_eq!(session.playback_depth(), 0);
+        assert_eq!(session.playback_dropped(), 1);
+        session.push_playback(frame()).expect("accepted, then dropped");
+        assert_eq!(session.playback_dropped(), 2);
     }
 
     #[test]
@@ -549,16 +602,18 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_agent_does_not_lose_frames_pushed_before_it_stalled() {
-        // dropping only ever applies to the frame that could not fit; what
-        // was already queued stays exactly as it was
+    fn a_stalled_agent_keeps_hearing_the_freshest_frames_not_the_first_ones() {
+        // a queue this far behind is exactly what the drop policy is for:
+        // the depth never exceeds capacity, and what survives is always the
+        // most recent run of frames rather than whatever arrived first
         let mut session = session(2, 2);
-        session.push_capture(frame()).expect("first fits");
-        assert!(session.push_capture(frame()).is_ok());
-        assert!(session.push_capture(frame()).is_err());
+        for n in 0..5_u8 {
+            session.push_capture(tagged(n)).expect("accepted either way");
+        }
         assert_eq!(session.capture_depth(), 2);
-        assert!(session.pop_capture().is_some());
-        assert!(session.pop_capture().is_some());
+        assert_eq!(session.capture_dropped(), 3);
+        assert_eq!(session.pop_capture(), Some(tagged(3)));
+        assert_eq!(session.pop_capture(), Some(tagged(4)));
         assert_eq!(session.pop_capture(), None);
     }
 
@@ -566,6 +621,19 @@ mod tests {
     fn barge_in_on_an_empty_queue_discards_nothing() {
         let mut session = session(4, 4);
         assert_eq!(session.barge_in(), 0);
+    }
+
+    #[test]
+    fn barge_in_does_not_count_toward_the_drop_counter() {
+        // deliberate discarding and a queue falling behind are different
+        // facts, and an application asking whether its agent is keeping up
+        // must not read a barge-in it asked for as the agent stalling
+        let mut session = session(4, 4);
+        session.answer().expect("ringing to active");
+        session.push_playback(frame()).expect("within capacity");
+        session.push_playback(frame()).expect("within capacity");
+        assert_eq!(session.barge_in(), 2);
+        assert_eq!(session.playback_dropped(), 0);
     }
 
     #[test]

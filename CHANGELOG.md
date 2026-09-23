@@ -40,6 +40,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   cable pulled from under two streams is reported by both — and then carries
   a call to the lab's Asterisk on PipeWire's devices and hears its tone come
   back.
+- **`sipral-headless` linked to real media, behind the facade's own `headless`
+  feature.** `sipral::HeadlessSession` pairs one call's `MediaSession` with
+  one of that crate's own sans-I/O sessions: PCM frames resampled against
+  whatever the negotiation actually settled on rather than a rate picked
+  ahead of it, a voice-activity detector run over the caller's own decoded
+  audio and reported as a new `VoiceActivity` control message for barge-in,
+  DTMF carried both ways, and call state mapped from real signalling events.
+  `sipral-headless` itself still names no other crate in this workspace —
+  only the facade's manifest grows the edge — and its queues now drop the
+  *oldest* frame first when an agent falls behind, each direction counted,
+  documented in full in `docs/07-headless.md`'s new "Real media" section.
+  `crates/sipral/examples/headless-socket-agent.rs` and
+  `crates/sipral-headless/examples/agent.rs` carry a call over that socket
+  end to end, and the interop lab gained a second agent account to exercise
+  it the same way the Python one already is.
 - **Twenty-four CPU-hours of fuzzing on every target.** All eighteen
   `cargo-fuzz` targets, each 48 runs of 30 minutes on one machine, about 37
   billion executions: no crash, no timeout, no run out of memory. That is the

@@ -47,6 +47,8 @@ pub enum FrameKind {
     BargeIn = 10,
     /// [`ErrorMessage`].
     Error = 11,
+    /// [`VoiceActivity`].
+    VoiceActivity = 12,
 }
 
 impl FrameKind {
@@ -74,6 +76,7 @@ impl TryFrom<u8> for FrameKind {
             9 => Self::Transfer,
             10 => Self::BargeIn,
             11 => Self::Error,
+            12 => Self::VoiceActivity,
             other => return Err(ControlError::UnknownKind(other)),
         })
     }
@@ -428,6 +431,43 @@ impl BargeIn {
     }
 }
 
+/// The caller started or stopped talking, as this call's voice-activity
+/// detector reads the audio decoded from it — not from anything the agent
+/// sent. The signal an agent watches for barge-in: on `speaking: true` it
+/// knows the caller has begun over whatever it is playing, and can answer
+/// with [`BargeIn`] itself rather than waiting to be interrupted by silence
+/// on its own microphone.
+///
+/// One message per transition, not one per frame: a caller that talks for
+/// three seconds sends `speaking: true` once, at its first frame, and
+/// `speaking: false` once, when the detector's hangover runs out — never a
+/// message for every twenty milliseconds in between, which would turn one
+/// sentence into a hundred and fifty of these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceActivity {
+    /// Which call.
+    pub call_id: String,
+    /// `true` from the frame the detector first read speech to the frame it
+    /// reads a pause, `false` for the run in between.
+    pub speaking: bool,
+}
+
+impl VoiceActivity {
+    fn to_value(&self) -> Value {
+        Value::Object(vec![
+            ("call_id".to_owned(), Value::from(self.call_id.as_str())),
+            ("speaking".to_owned(), Value::Bool(self.speaking)),
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self, ControlError> {
+        Ok(Self {
+            call_id: string_field(value, "call_id")?,
+            speaking: bool_field(value, "speaking")?,
+        })
+    }
+}
+
 /// A code for [`ErrorMessage`] narrower than its free-text `message`.
 ///
 /// Not from the document, which only says there is an error channel: this is
@@ -576,6 +616,8 @@ pub enum ControlMessage {
     BargeIn(BargeIn),
     /// [`ErrorMessage`].
     Error(ErrorMessage),
+    /// [`VoiceActivity`].
+    VoiceActivity(VoiceActivity),
 }
 
 impl ControlMessage {
@@ -594,6 +636,7 @@ impl ControlMessage {
             Self::Transfer(_) => FrameKind::Transfer,
             Self::BargeIn(_) => FrameKind::BargeIn,
             Self::Error(_) => FrameKind::Error,
+            Self::VoiceActivity(_) => FrameKind::VoiceActivity,
         }
     }
 
@@ -610,6 +653,7 @@ impl ControlMessage {
             Self::Transfer(m) => m.to_value(),
             Self::BargeIn(m) => m.to_value(),
             Self::Error(m) => m.to_value(),
+            Self::VoiceActivity(m) => m.to_value(),
         }
     }
 
@@ -656,6 +700,7 @@ impl ControlMessage {
             FrameKind::Transfer => Self::Transfer(Transfer::from_value(value)?),
             FrameKind::BargeIn => Self::BargeIn(BargeIn::from_value(value)?),
             FrameKind::Error => Self::Error(ErrorMessage::from_value(value)?),
+            FrameKind::VoiceActivity => Self::VoiceActivity(VoiceActivity::from_value(value)?),
         })
     }
 }
@@ -703,6 +748,14 @@ fn optional_u32_field(value: &Value, name: &'static str) -> Result<Option<u32>, 
                 .ok_or(ControlError::InvalidField(name))
         }
     }
+}
+
+fn bool_field(value: &Value, name: &'static str) -> Result<bool, ControlError> {
+    value
+        .get(name)
+        .ok_or(ControlError::MissingField(name))?
+        .as_bool()
+        .ok_or(ControlError::InvalidField(name))
 }
 
 fn dtmf_field(value: &Value, name: &'static str) -> Result<DtmfDigit, ControlError> {
@@ -774,7 +827,7 @@ mod tests {
     use super::{
         Answer, BargeIn, CallState, CallStateKind, ControlError, ControlMessage, DtmfDigit,
         DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall,
-        OtherErrorCode, Reject, SessionOpen, Transfer,
+        OtherErrorCode, Reject, SessionOpen, Transfer, VoiceActivity,
     };
     use crate::audio::SampleRate;
 
@@ -842,6 +895,14 @@ mod tests {
         round_trips(&ControlMessage::BargeIn(BargeIn {
             call_id: "call-1".to_owned(),
         }));
+        round_trips(&ControlMessage::VoiceActivity(VoiceActivity {
+            call_id: "call-1".to_owned(),
+            speaking: true,
+        }));
+        round_trips(&ControlMessage::VoiceActivity(VoiceActivity {
+            call_id: "call-1".to_owned(),
+            speaking: false,
+        }));
         round_trips(&ControlMessage::Error(ErrorMessage {
             call_id: Some("call-1".to_owned()),
             code: ErrorCode::UnknownCall,
@@ -899,6 +960,17 @@ mod tests {
                 br#"{"call_id":"c","state":"paused"}"#
             ),
             Err(ControlError::InvalidField("state"))
+        );
+    }
+
+    #[test]
+    fn a_speaking_field_that_is_not_a_boolean_is_refused() {
+        assert_eq!(
+            ControlMessage::decode(
+                FrameKind::VoiceActivity.to_u8(),
+                br#"{"call_id":"c","speaking":"yes"}"#
+            ),
+            Err(ControlError::InvalidField("speaking"))
         );
     }
 
@@ -1015,6 +1087,7 @@ mod tests {
             FrameKind::Transfer,
             FrameKind::BargeIn,
             FrameKind::Error,
+            FrameKind::VoiceActivity,
         ];
         for kind in kinds {
             assert_eq!(FrameKind::try_from(kind.to_u8()), Ok(kind));

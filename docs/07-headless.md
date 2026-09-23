@@ -51,7 +51,7 @@ for no benefit. Sipral does the codec work once, at the RTP edge.
 **Control messages** on the same socket, as JSON, distinguished by `kind`:
 session open and its parameters, incoming call with the caller identity,
 answer, reject, hangup, DTMF received, DTMF send, call state changes, transfer,
-and an error channel.
+voice activity, and an error channel.
 
 Control and audio share a socket so ordering between "the caller stopped
 speaking" and the frames around it is preserved. A separate control channel
@@ -70,12 +70,101 @@ immediately, without waiting for what is buffered to drain. Target under 100 ms
 from the request to silence on the wire. This is the number the whole component
 exists to hit, and it is measured in the test suite rather than asserted here.
 
+An agent does not have to wait for its own microphone to notice the caller
+started talking before it can act: **voice activity** is a control message
+this crate sends on its own, `speaking: true` the frame this call's own
+voice-activity detector first reads the caller's decoded audio as speech and
+`speaking: false` the frame its hangover runs out, one message per transition
+rather than one per frame. An agent that wants to interrupt itself the moment
+the caller starts talking watches for `speaking: true` and answers with its
+own `BargeIn`; the two are separate messages because deciding to barge in is
+a policy this crate does not have an opinion about, and reporting activity is
+a fact it can state on its own.
+
 ## Concurrency
 
 One process holds many independent sessions. No global state, no shared buffer
 pool that couples them, and no thread per call. A stalled agent on one session
-does not affect another; its frames are dropped with an event, not queued
-forever.
+does not affect another; its frames are dropped, not queued forever, and the
+drop always takes the **oldest** frame a queue is holding rather than refusing
+the one that just arrived — a stale frame is worse to deliver than a recent
+one to have skipped, in both directions. Each queue counts how many frames it
+has had to evict this way, on its own session, so an application that wants to
+know its agent is falling behind reads the number rather than parsing an error
+off every frame it sends. A queue opened with zero capacity — legal, if
+useless — drops every frame offered to it the same way, since there is no
+older frame in it to make room by.
+
+## Real media
+
+This crate still opens nothing and still names no other Sipral crate — that
+has not changed, and will not: it is what lets the same protocol front a
+completely different stack later, and what keeps its own tests running in a
+millisecond with no call anywhere near them. What changed is that there is
+now somewhere the frames on this socket actually go.
+
+The join is [`sipral`](01-architecture.md#the-facade)'s, the same way the join
+between signalling and media already is. `sipral` is the one crate that
+depends on both `sipral-ua` and a media pipeline, so it is the one crate that
+can depend on this one too without pulling either into a build that does not
+want it — `sipral-headless` remains a leaf with nothing under it, so this is
+one more edge pointing down, not a cycle. It sits behind its own `headless`
+Cargo feature, off by default like `dtls` and `ice`: a softphone build that
+never answers a call from an agent framework links none of this.
+
+`sipral::HeadlessSession` (`crates/sipral/src/headless.rs`) is what a call
+looks like once this protocol's session is paired with one: it owns a
+[`Session`](crate::Session) exactly as before, plus what pairing it with a
+live [`MediaSession`](../crates/sipral/src/session.rs) needs and this crate
+has no way to supply on its own —
+
+- **Rate matching.** The socket's own rate is whatever `SessionOpen` agreed
+  with the application — 8, 16, 24 or 48 kHz — and it does not have to be the
+  codec's. `HeadlessSession` builds a resampling filter each way from
+  `sipral_media::resample::Resampler`, against `MediaSession::sample_rate()`
+  as the negotiation actually settled it, not a rate the agent guessed at or
+  the application hard-coded. A re-negotiation that lands the call on a
+  different codec — [`MediaEvent::Changed`](../crates/sipral/src/event.rs) —
+  rebuilds both filters against the new rate; the socket session's own state
+  and queues are untouched by it.
+- **Voice activity.** `HeadlessSession` runs its own
+  `sipral_media::vad::Vad` over the caller's decoded audio — the same signal
+  [`MediaSession::playback`](../crates/sipral/src/session.rs) already
+  produces for the earpiece, read again rather than reached into, because
+  `sipral-media` and this crate still do not know about each other — and
+  turns a transition into the [`VoiceActivity`](crate::VoiceActivity) message
+  above.
+- **DTMF.** A digit `sipral::MediaEvent::DigitReceived` reports becomes
+  [`DtmfReceived`](crate::DtmfReceived) for the sixteen keys this protocol's
+  own [`DtmfDigit`](crate::DtmfDigit) names; a `DtmfSend` off the socket
+  becomes a call to `MediaSession::send_dtmf`.
+- **Call state.** `sipral_ua::UaEvent::IncomingCall`, `CallConfirmed` and
+  `CallEnded` become this protocol's own three-state
+  [`CallState`](crate::CallState) — session-local `Held` still has no wire
+  counterpart, for the reason [`SessionState`](crate::SessionState)'s own
+  documentation gives.
+
+What crosses the seam is PCM, in `i16`, and the handful of facts above —
+never a `MediaSession`, an `RtpSession` or a socket of any kind, which is
+what keeps this crate honest about naming no Sipral crate of its own. An
+application driving both ends on a real socket paces the two exactly as
+`crates/sipral/examples/common/media_socket.rs`'s own `MediaSocket::turn`
+paces `MediaSession` against a UDP one: on the media tick, decode this call's
+audio, hand it to `HeadlessSession::hear`, and write whatever whole frames
+that produced onto the socket as this crate's own audio frames (kind 0); read
+what the socket offers back with [`Decoder`](crate::Decoder), push it onto
+[`Session::push_playback`](crate::Session::push_playback), and let
+`HeadlessSession::speak` turn it into the next frame `MediaSession::capture`
+sends as RTP.
+
+`HeadlessSession` has no socket of its own either way — the paragraph above
+is the wiring an application writes, not something this type does for it —
+so an embedder with no socket at all, driving a call from Rust directly
+against `MediaEngine`, uses exactly the same object: it calls `hear` and
+`speak` itself, in place of what a socket loop would have decoded and framed,
+and reads or writes DTMF and call state as plain Rust values instead of JSON.
+That is the in-process path the socket path is built the same way as, not a
+second implementation of it.
 
 ## What it does not do
 

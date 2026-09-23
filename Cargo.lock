@@ -865,6 +865,7 @@ dependencies = [
  "rustls-pki-types",
  "sipral-core",
  "sipral-dtls",
+ "sipral-headless",
  "sipral-io-coreaudio",
  "sipral-media",
  "sipral-nat",

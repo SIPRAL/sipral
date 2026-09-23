@@ -47,7 +47,7 @@ pub use codec::{
 pub use control::{
     Answer, BargeIn, CallState, CallStateKind, ControlError, ControlMessage, DtmfDigit,
     DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall,
-    OtherErrorCode, Reject, SessionOpen, Transfer,
+    OtherErrorCode, Reject, SessionOpen, Transfer, VoiceActivity,
 };
 pub use frame::{Frame, FrameDecoder, FrameError, HEADER_LEN, write_frame};
 pub use json::{JsonError, Value, parse as parse_json};

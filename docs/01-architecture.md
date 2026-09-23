@@ -64,7 +64,7 @@ still ahead.
                             sipral-core     parser, transactions,
                                             dialogs, SDP, auth
 
-   sipral-headless   PCM on a socket, no audio device
+   sipral-headless   PCM on a socket, no audio device — sipral ⇠ ⎯ ⎯ (`headless`)
    sipral-io-*       CoreAudio, WASAPI, the device itself
         │
    sipral-io-common  the ring, the gate, volume — no device at all
@@ -73,9 +73,23 @@ still ahead.
 Dependencies point down only, and most of these crates have none. `sipral-core`
 depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`
 and `sipral-headless` name no Sipral crate at all, and the two `sipral-io-*`
-name exactly one, `sipral-io-common`, which names none. The device crates and
-`sipral-headless` stand outside the picture because nothing in it depends on
-them: an application links one of them, or neither, and never both.
+name exactly one, `sipral-io-common`, which names none. The device crates
+stand outside the picture because nothing in it depends on them: an
+application links one of `sipral-io-coreaudio`/`sipral-io-wasapi`, or neither,
+and never both.
+
+`sipral-headless` stands outside the picture the same way, and names no
+Sipral crate itself — it stays the leaf the picture above draws it as, sans-I/O
+and free of every other layer's state. The dashed edge is the one exception to
+"nothing in the picture depends on them": `sipral`'s own optional `headless`
+feature (off by default, the same pattern as `dtls` and `ice`) depends on it,
+to carry PCM between this protocol's queues and a live `MediaSession` — the
+[facade's own section](#the-facade) below and
+[07-headless.md](07-headless.md#real-media) say what that join does and does
+not do. It is still one edge pointing down and not a cycle:
+`sipral-headless` depends on nothing above it in return, so an application
+that links only `sipral-headless` — the agent build described above — still
+names no Sipral crate but this one, exactly as before.
 
 One edge the picture allows and the design forbids: **`sipral-ua` does not
 depend on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
@@ -179,6 +193,15 @@ all.
 That second build is not a stripped-down first build. It is why the audio device
 layer was kept out of the core in the first place.
 
+Neither device backend depends on `sipral` either — the same rule that keeps
+`sipral-media` and `sipral-rtp` from naming `sipral-ua` keeps a device backend
+from naming the facade, and an application wires a device's ring buffer to a
+live `MediaSession` itself, the way `crates/sipral/examples/` does. `sipral`'s
+own optional `headless` feature is the one exception to that pattern, and it
+is one only because the facade is the seam already, not because
+`sipral-headless` moved: see the note on the diagram above and
+[07-headless.md](07-headless.md#real-media).
+
 Three things in a device backend are not about the device, and they are the
 three that are hard to get right: the lock-free ring where the thread the
 system will not wait for meets an ordinary one, the gate that says when that
@@ -235,6 +258,15 @@ takes a `&mut UserAgent` on the three operations that genuinely need both
 halves — placing a call, answering one, and draining the events — rather than
 wrapping the user agent, whose sixty-odd methods would each be a place to get
 registration or transfer subtly wrong on the way through.
+
+The same pattern joins a third thing, behind its own `headless` feature:
+`sipral::HeadlessSession` pairs one call's `MediaSession` with one session of
+`sipral-headless`'s own sans-I/O socket protocol — PCM resampled against
+whatever the negotiation actually settled on, voice activity, DTMF and call
+state carried across, described in full in
+[07-headless.md](07-headless.md#real-media). `sipral-headless` still names no
+Sipral crate of its own, the same way `sipral-ua` and the media crates still
+do not name each other; only the facade's manifest grows an edge.
 
 What is still not joined is the rest of `sipral-nat`. One octet of it is —
 the RFC 7983 rule that tells a DTLS record from the RTP beside it — and

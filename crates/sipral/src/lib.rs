@@ -141,6 +141,8 @@ mod echo;
 mod engine;
 mod error;
 mod event;
+#[cfg(feature = "headless")]
+mod headless;
 mod ice;
 mod join;
 mod keying;
@@ -164,6 +166,10 @@ pub use echo::MAX_RENDER_DELAY;
 pub use engine::{CallMedia, MediaEngine};
 pub use error::MediaError;
 pub use event::{DigitSource, Event, MediaEvent};
+#[cfg(feature = "headless")]
+pub use headless::{
+    HeadlessMediaError, HeadlessSession, call_state_of, dtmf_received_of, send_digit,
+};
 pub use ice::IcePolicy;
 pub use join::{MixOutcome, mix_two};
 pub use keying::SrtpPolicy;

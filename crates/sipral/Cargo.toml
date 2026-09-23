@@ -59,6 +59,13 @@ ice = ["dep:sipral-nat"]
 # (`docs/01-architecture.md`, "who owns the sockets, the resolver and TLS") —
 # proof of the seam, not a dependency an application inherits.
 example-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
+# `sipral-headless`'s own sans-I/O socket protocol, paired here with a live
+# `MediaSession` — `crates/sipral/src/headless.rs`, `docs/07-headless.md`'s
+# own "Real media" section. Off by default on the `dtls`/`ice` pattern: a
+# softphone build that never answers a call from an agent framework links
+# none of it, and `sipral-headless` itself still names no Sipral crate —
+# only this feature's edge exists, and only in this manifest.
+headless = ["dep:sipral-headless"]
 
 # with `opus` off there is no `Codec::Opus` and the enumeration is three long,
 # so docs.rs is told to build the whole surface rather than whichever half a
@@ -80,6 +87,10 @@ sipral-media = { path = "../sipral-media", version = "0.0.1", default-features =
 # where ICE will need it too, so it is read from there rather than copied.
 sipral-dtls = { path = "../sipral-dtls", version = "0.0.1", optional = true }
 sipral-nat = { path = "../sipral-nat", version = "0.0.1", optional = true }
+# behind `headless` alone: the one edge `docs/01-architecture.md`'s diagram
+# marks as an exception, and only in this manifest — see the feature's own
+# comment above.
+sipral-headless = { path = "../sipral-headless", version = "0.0.1", optional = true }
 # already a dependency of `sipral-rtp` and `sipral-dtls`, pinned to the same
 # version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
 # needs a write the optimiser is not allowed to remove, and that needs
@@ -137,6 +148,22 @@ sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "0.0.1" }
 [[example]]
 name = "tls"
 required-features = ["example-tls"]
+
+# `tests/headless_bridge.rs` names `sipral-headless` directly, so it only
+# builds where that dependency does — the same shape as `tls` above, and for
+# the same reason: `cargo test --workspace` must not fail on a build that
+# left `headless` out.
+[[test]]
+name = "headless_bridge"
+required-features = ["headless"]
+
+# `examples/headless-socket-agent.rs` names `sipral-headless` and this
+# crate's own `HeadlessSession`, both behind `headless`; without this,
+# `cargo build --examples` fails on every build that left the feature out,
+# `cargo test --workspace` among them.
+[[example]]
+name = "headless-socket-agent"
+required-features = ["headless"]
 
 [lints]
 workspace = true

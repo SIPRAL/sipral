@@ -171,8 +171,14 @@ mod tests {
 
         let stalled = registry.get_mut("stalled").expect("just opened");
         stalled.push_capture(frame()).expect("first frame fits");
-        let dropped = stalled.push_capture(frame());
-        assert!(dropped.is_err(), "the stalled session's own queue is full");
+        stalled
+            .push_capture(frame())
+            .expect("accepted, evicting the oldest frame");
+        assert_eq!(
+            stalled.capture_dropped(),
+            1,
+            "the stalled session's own queue is full and evicting"
+        );
 
         let healthy = registry.get_mut("healthy").expect("just opened");
         assert!(
