@@ -70,6 +70,11 @@ pub mod event;
 pub mod handle;
 pub mod header;
 pub mod lifecycle;
+/// Two hundred calls on one stack, driven from four threads: the shape of
+/// the locking, measured rather than asserted. Tests only — nothing here
+/// crosses the ABI.
+#[cfg(test)]
+mod load;
 pub mod media;
 pub mod message;
 mod names;

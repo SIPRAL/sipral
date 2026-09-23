@@ -149,6 +149,16 @@ here treats them as exceptional.
   SHA-256 per file, and a test asserts on the outcome the RFC specifies for each
   one rather than on "it did not crash".
 
+## Numbers
+
+Measured on an Apple M-series machine with `scripts/bench.sh`, which anybody
+can rerun: the shared library is **2.79 MB**; one frame of audio in and out —
+`sipral_media_receive` and `sipral_media_playback`, G.711 through the jitter
+buffer — costs **under 3 µs** of thread time with **two hundred calls running
+on four threads**, and no call ever waited on another. What each number is, what
+it is not, and what it would take to make it worse:
+[`docs/19-numbers.md`](docs/19-numbers.md).
+
 ## Build
 
 ```bash
