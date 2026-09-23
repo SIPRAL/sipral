@@ -346,6 +346,34 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **`sipral_headless::encode_control` no longer writes a control frame the
+  far end will refuse.** It wrote up to the sixteen bits of the length
+  field, while every `Decoder` refuses a control frame past
+  `MAX_CONTROL_PAYLOAD` (8192 bytes) as final and drops the connection.
+  `IncomingCall` carries the caller's address and display name straight off
+  an INVITE, so a stranger could make one that long. The encoder now
+  refuses what no decoder would read, with nothing written.
+- **`DecodeError::is_final` says which decode errors end a connection.**
+  Only a length past the bound does; an audio frame of the wrong size or a
+  control message that does not decode was still a whole frame, and the
+  decoder reads on past it, which nothing said before.
+- **`HeadlessSession::speak` puts a frame out on every tick, silence
+  included.** It skipped `MediaSession::capture` whenever the agent had
+  nothing queued, so the RTP timestamp stopped while the call went on, a
+  digit asked for with `DtmfSend` by an agent that was not talking never left,
+  and a listening agent's far end got no RTP at all.
+- **A barge-in drops the agent's audio already resampled for the codec.**
+  Up to a frame of the interrupted sentence played ahead of whatever the
+  agent said next; `Session::barge_ins` now counts every barge-in and
+  `HeadlessSession` discards its own share the next time it fills a frame.
+- **A codec change mid-call no longer ends speech early or drops the
+  caller's audio.** `HeadlessSession::set_codec_rate` rebuilt everything on
+  every call — a hold or a resume with the same codec included — restarting
+  the voice-activity detector, whose lost hangover reported the next quiet
+  frame of a word as `speaking: false`, and discarding caller audio already
+  at the socket's rate. It is now a no-op at the same rate, the detector
+  reads the socket's fixed rate, and only what is at the old codec rate
+  goes. An empty frame no longer reports `speaking: true`.
 - **The local conference's `MediaEvent::Unjoined` now reaches the C ABI.** A
   call ending while its partner is still joined told the facade, but the
   translation to `sipral_event_t` dropped it silently; an application driving

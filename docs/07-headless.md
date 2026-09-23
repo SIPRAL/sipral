@@ -58,6 +58,18 @@ speaking" and the frames around it is preserved. A separate control channel
 makes that ordering ambiguous, and barge-in is exactly where the ambiguity
 hurts.
 
+A control message's JSON is at most `MAX_CONTROL_PAYLOAD` (8192) bytes, and
+that bound holds on the way out as well as on the way in: `encode_control`
+refuses a longer one rather than write a frame the far end's decoder would
+refuse as final. The caller's address and display name come off an INVITE
+anybody can send, so the application cuts them to fit before they go.
+
+Only a length past the bound ends a connection — there is no knowing where
+the frame it announced ends. An audio frame of the wrong size or a control
+message that does not decode was still a whole frame; the decoder reads on
+past it (`DecodeError::is_final` says which is which), and the refusal
+belongs on the error channel, not in a closed socket.
+
 ## Latency
 
 The budget is what the design is for. From the last RTP packet of the caller's
@@ -69,6 +81,10 @@ encode plus one frame.
 immediately, without waiting for what is buffered to drain. Target under 100 ms
 from the request to silence on the wire. This is the number the whole component
 exists to hit, and it is measured in the test suite rather than asserted here.
+What is discarded includes audio already taken off the queue and resampled for
+the codec's next frame: the session counts every barge-in
+(`Session::barge_ins`), and the layer holding that audio drops it the next time
+it looks, so no tail of the interrupted sentence plays ahead of the next one.
 
 An agent does not have to wait for its own microphone to notice the caller
 started talking before it can act: **voice activity** is a control message
@@ -124,16 +140,21 @@ has no way to supply on its own —
   `sipral_media::resample::Resampler`, against `MediaSession::sample_rate()`
   as the negotiation actually settled it, not a rate the agent guessed at or
   the application hard-coded. A re-negotiation that lands the call on a
-  different codec — [`MediaEvent::Changed`](../crates/sipral/src/event.rs) —
-  rebuilds both filters against the new rate; the socket session's own state
-  and queues are untouched by it.
+  codec at a different rate — [`MediaEvent::Changed`](../crates/sipral/src/event.rs)
+  — rebuilds both filters against the new rate, and drops only what was
+  already at the old codec rate; the caller's audio already at the socket's
+  rate, and the socket session's own state and queues, are untouched by it.
+  A `Changed` that keeps the rate — a hold, a resume, a moved address —
+  changes nothing at all, so an application can hand every one of them over.
 - **Voice activity.** `HeadlessSession` runs its own
   `sipral_media::vad::Vad` over the caller's decoded audio — the same signal
   [`MediaSession::playback`](../crates/sipral/src/session.rs) already
   produces for the earpiece, read again rather than reached into, because
-  `sipral-media` and this crate still do not know about each other — and
-  turns a transition into the [`VoiceActivity`](crate::VoiceActivity) message
-  above.
+  `sipral-media` and this crate still do not know about each other — once it
+  is resampled to the socket's rate, which is fixed for the session: a codec
+  change never restarts the detector, whose hangover would otherwise be lost
+  and the next quiet frame of a word read as its end. A transition becomes
+  the [`VoiceActivity`](crate::VoiceActivity) message above.
 - **DTMF.** A digit `sipral::MediaEvent::DigitReceived` reports becomes
   [`DtmfReceived`](crate::DtmfReceived) for the sixteen keys this protocol's
   own [`DtmfDigit`](crate::DtmfDigit) names; a `DtmfSend` off the socket

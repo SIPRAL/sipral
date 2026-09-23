@@ -93,6 +93,14 @@ pub struct HeadlessSession {
     inbound: Vec<i16>,
     /// Resampled audio waiting to fill the codec's next frame.
     outbound: Vec<i16>,
+    /// [`sipral_headless::Session::barge_ins`] as of the last time
+    /// `outbound` was filled: a different number now means what `outbound`
+    /// holds is the tail of speech the agent abandoned.
+    barge_ins: u64,
+    /// Run over the caller's audio at the socket's own rate, which is fixed
+    /// for the session, rather than at the codec's, which a re-negotiation
+    /// can move: a detector rebuilt mid-call starts with no hangover and no
+    /// noise floor, and reads the next quiet frame of a word as its end.
     voice: Vad,
     speaking: bool,
 }
@@ -126,7 +134,8 @@ impl HeadlessSession {
             to_codec: Resampler::new(headless_rate, codec_rate)?,
             inbound: Vec::new(),
             outbound: Vec::new(),
-            voice: Vad::new(codec_rate),
+            barge_ins: 0,
+            voice: Vad::new(headless_rate),
             speaking: false,
         })
     }
@@ -146,42 +155,63 @@ impl HeadlessSession {
         &mut self.protocol
     }
 
-    /// Rebuilds the resampling filters and this call's voice-activity
-    /// detector for a call that re-negotiated onto a different codec
-    /// mid-call (`sipral::MediaEvent::Changed`'s own `codec`). The socket
-    /// session's own state and queues are untouched — only the filters
-    /// between them and the codec move.
+    /// Rebuilds the resampling filters for a call that re-negotiated onto a
+    /// codec at a different rate mid-call (`sipral::MediaEvent::Changed`'s
+    /// own `codec`). Safe to call on every `Changed`: a hold, a resume or a
+    /// moved address arrives as one too, with the rate the call already had,
+    /// and that changes nothing here — not the filters' history, not a
+    /// sample already resampled.
+    ///
+    /// On a real change only what is at the codec's rate goes: the two
+    /// filters, and whatever of the agent's audio was already resampled to
+    /// the old rate and waiting for the next frame. The caller's audio
+    /// already at the socket's own rate stays, and so do the socket
+    /// session's state and queues and the voice-activity detector, which
+    /// reads the socket's rate and so never has a reason to start over.
     ///
     /// # Errors
-    /// See [`HeadlessSession::open`].
+    /// See [`HeadlessSession::open`]; nothing is changed when the new rate
+    /// is refused.
     pub fn set_codec_rate(&mut self, codec_rate: u32) -> Result<(), HeadlessMediaError> {
+        if codec_rate == self.to_headless.input_rate() {
+            return Ok(());
+        }
         let headless_rate = self.protocol.audio().sample_rate().hz();
-        self.to_headless = Resampler::new(codec_rate, headless_rate)?;
-        self.to_codec = Resampler::new(headless_rate, codec_rate)?;
-        self.inbound.clear();
+        let to_headless = Resampler::new(codec_rate, headless_rate)?;
+        let to_codec = Resampler::new(headless_rate, codec_rate)?;
+        self.to_headless = to_headless;
+        self.to_codec = to_codec;
         self.outbound.clear();
-        self.voice = Vad::new(codec_rate);
         Ok(())
     }
 
     /// One [`MediaSession::playback`]-sized frame of the caller's decoded
     /// audio in — read again rather than reached into, since `sipral-media`
-    /// and `sipral-headless` still do not know about each other. Run past
-    /// this call's voice-activity detector, resampled to the socket's own
-    /// rate and queued as whole frames onto
+    /// and `sipral-headless` still do not know about each other. Resampled
+    /// to the socket's own rate, run past this call's voice-activity
+    /// detector there, and queued as whole frames onto
     /// [`sipral_headless::Session::push_capture`] — the oldest queued frame
     /// evicted first if the agent has not kept up, per that crate's own drop
     /// policy.
     ///
     /// `Some(speaking)` the frame this call's voice activity changed, ready
     /// to become a [`sipral_headless::VoiceActivity`] control message;
-    /// `None` on every frame that agrees with what the last one reported.
+    /// `None` on every frame that agrees with what the last one reported,
+    /// and on one too short to judge — fewer than two samples at the
+    /// socket's rate, which says nothing about speech either way.
     pub fn hear(&mut self, decoded: &[i16]) -> Option<bool> {
-        let now_speaking = matches!(self.voice.process(decoded), Activity::Speech);
-        let changed = (now_speaking != self.speaking).then_some(now_speaking);
-        self.speaking = now_speaking;
-
+        let fresh = self.inbound.len();
         accumulate(&mut self.to_headless, decoded, &mut self.inbound);
+
+        let heard = self.inbound.get(fresh..).unwrap_or_default();
+        let changed = if heard.len() < 2 {
+            None
+        } else {
+            let now_speaking = matches!(self.voice.process(heard), Activity::Speech);
+            let changed = (now_speaking != self.speaking).then_some(now_speaking);
+            self.speaking = now_speaking;
+            changed
+        };
 
         let frame = self.session_frame_samples;
         let mut offset = 0;
@@ -215,12 +245,21 @@ impl HeadlessSession {
     /// as `crates/sipral/examples/common/media_socket.rs`'s own
     /// `MediaSocket::turn`'s `source` closure. Nothing queued is lost on a
     /// silent frame: what had not reached a whole frame yet is kept for the
-    /// next call to finish.
+    /// next call to finish — unless the agent barged in since
+    /// ([`sipral_headless::Session::barge_in`]), in which case what was kept
+    /// is the tail of the speech it abandoned and goes with the queue,
+    /// rather than playing ahead of whatever it says next.
     ///
     /// `true` once real audio filled the whole of `room`; `false` on a frame
     /// of silence — ordinary while the queue has not caught up yet, and
     /// otherwise a stalled agent's own signal that nothing is coming.
     pub fn fill_outbound(&mut self, room: &mut [i16]) -> bool {
+        let barge_ins = self.protocol.barge_ins();
+        if barge_ins != self.barge_ins {
+            self.barge_ins = barge_ins;
+            self.outbound.clear();
+            self.to_codec.reset();
+        }
         while self.outbound.len() < room.len() {
             let Some(bytes) = self.protocol.pop_playback() else {
                 break;
@@ -238,11 +277,21 @@ impl HeadlessSession {
     }
 
     /// [`HeadlessSession::fill_outbound`], sent straight on as one of
-    /// `media`'s own frames — [`MediaSession::capture`]'s own contract,
-    /// `Ok(None)` when nothing was due to go out yet, which is ordinary while
-    /// a whole frame has not accumulated. The pair a caller driving `media`
-    /// by hand uses instead of `fill_outbound` and `media.capture` apart —
-    /// see `docs/07-headless.md#real-media`'s own description of that shape.
+    /// `media`'s own frames, once per media tick whether the agent had
+    /// anything to say or not: a frame of silence is still a frame to
+    /// [`MediaSession::capture`], which is where the RTP clock moves on
+    /// (RFC 3550 §5.1), where a digit queued by [`send_digit`] goes out, and
+    /// where silence suppression — the session's to configure, not this
+    /// type's — decides whether the frame is sent at all. Skipping the call
+    /// on an agent's silence would do all three wrong: the timestamp would
+    /// stop while the call went on, a digit sent by an agent that is not
+    /// talking would never leave, and a listening agent's far end would hear
+    /// no RTP at all and could take the call for dead.
+    ///
+    /// [`MediaSession::capture`]'s own contract otherwise: `Ok(None)` for a
+    /// frame deliberately not sent. The pair a caller driving `media` by hand
+    /// uses instead of `fill_outbound` and `media.capture` apart — see
+    /// `docs/07-headless.md#real-media`'s own description of that shape.
     ///
     /// # Errors
     /// Whatever [`MediaSession::capture`] itself refuses. Resampling here
@@ -256,9 +305,7 @@ impl HeadlessSession {
     ) -> Result<Option<Datagram<'m>>, MediaError> {
         let frame = media.frame_samples();
         let mut room = vec![0_i16; frame];
-        if !self.fill_outbound(&mut room) {
-            return Ok(None);
-        }
+        self.fill_outbound(&mut room);
         media.capture(&room, now)
     }
 }
@@ -354,11 +401,15 @@ pub fn send_digit(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use sipral_headless::{AudioConfig, DtmfDigit, SampleRate};
+    use sipral_core::sdp::{Direction, MediaPlan, NegotiatedCodec, RtcpPlan, RtpMap};
+    use sipral_headless::{AudioConfig, DtmfDigit, SampleRate, write_samples};
 
-    use super::{HeadlessMediaError, HeadlessSession, dtmf_received_of};
+    use super::{HeadlessMediaError, HeadlessSession, dtmf_received_of, send_digit};
+    use crate::MediaSession;
+    use crate::clock::WallClock;
+    use crate::session::{MediaConfig, Start, StreamIdentity};
 
     fn audio() -> AudioConfig {
         AudioConfig::new(SampleRate::Hz8000)
@@ -459,7 +510,372 @@ mod tests {
         assert!(session.protocol().is_up());
     }
 
-    // `HeadlessSession::speak` needs a live `MediaSession`, which is built
-    // only by a negotiated call (`MediaSession::open` is `pub(crate)`); it is
-    // exercised end to end by `crates/sipral/tests/headless_bridge.rs`.
+    /// A PCMU stream with telephone-events on 101, opened the way the engine
+    /// opens one but with no user agent: enough for `speak` to put real
+    /// datagrams out of, which is all the tests below read.
+    fn media() -> MediaSession {
+        let now = Instant::now();
+        let plan = MediaPlan {
+            local: "192.0.2.1:40000".parse().expect("an address"),
+            remote: "192.0.2.2:40002".parse().expect("an address"),
+            codec: NegotiatedCodec::new(RtpMap {
+                payload: 0,
+                encoding: "PCMU".to_owned(),
+                clock_rate: 8_000,
+                parameters: None,
+            }),
+            direction: Direction::SendRecv,
+            dtmf: Some(101),
+            rtcp: RtcpPlan::Off,
+            keying: None,
+            voip_metrics_xr: false,
+        };
+        MediaSession::open(
+            &plan,
+            20,
+            &MediaConfig::default(),
+            Vec::new(),
+            Start {
+                identity: StreamIdentity {
+                    ssrc: 1,
+                    sequence: 0,
+                    timestamp: 0,
+                    seed: 1,
+                },
+                clock: WallClock::from_unix(now, 1_700_000_000, 0),
+                #[cfg(feature = "dtls")]
+                handshake: None,
+                #[cfg(feature = "ice")]
+                ice: None,
+                now,
+            },
+        )
+        .expect("PCMU is always in this build's catalogue")
+    }
+
+    fn payload_type(datagram: &[u8]) -> u8 {
+        datagram[1] & 0x7F
+    }
+
+    fn timestamp(datagram: &[u8]) -> u32 {
+        u32::from_be_bytes([datagram[4], datagram[5], datagram[6], datagram[7]])
+    }
+
+    fn tone(len: usize, amplitude: i16) -> Vec<i16> {
+        (0..len)
+            .map(|n| if n % 2 == 0 { amplitude } else { -amplitude })
+            .collect()
+    }
+
+    fn frame_of(samples: &[i16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_samples(samples, &mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn a_digit_the_agent_sends_goes_out_while_the_agent_itself_is_silent() {
+        // an IVR is navigated by an agent that is not talking: the digit is
+        // the whole of what it has to say, and nothing is on its playback
+        // queue while it says it
+        let mut media = media();
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
+        send_digit(
+            &mut media,
+            DtmfDigit::new('5').expect("a key"),
+            Duration::from_millis(100),
+        )
+        .expect("telephone-events were negotiated");
+        let sent = session
+            .speak(&mut media, Instant::now())
+            .expect("a frame")
+            .map(|datagram| payload_type(datagram.payload));
+        assert_eq!(sent, Some(101), "the digit's first packet");
+    }
+
+    #[test]
+    fn the_rtp_clock_keeps_running_while_the_agent_is_silent() {
+        // RFC 3550 §5.1: the timestamp measures time, not packets. Three
+        // ticks of an agent with nothing to say, then one frame of speech:
+        // that frame is sixty milliseconds after the stream began, 480
+        // ticks at 8 kHz, not the first frame of the stream
+        let mut media = media();
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
+        let now = Instant::now();
+        for _ in 0..3 {
+            let _ = session.speak(&mut media, now).expect("no error");
+        }
+        session
+            .protocol_mut()
+            .push_playback(frame_of(&tone(160, 8_000)))
+            .expect("one frame");
+        let stamp = session
+            .speak(&mut media, now)
+            .expect("no error")
+            .map(|datagram| timestamp(datagram.payload));
+        assert_eq!(stamp, Some(480));
+    }
+
+    #[test]
+    fn a_barge_in_leaves_nothing_of_the_interrupted_audio_to_play() {
+        // thirty-millisecond socket frames against a twenty-millisecond
+        // codec frame: every frame the agent sent leaves ten milliseconds
+        // already resampled and waiting, which is exactly what a barge-in
+        // has to throw away along with the queue
+        let socket = AudioConfig::with_frame_duration_ms(SampleRate::Hz8000, 30).expect("fits");
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), socket, 8_000, 4, 4).expect("same rate");
+        session
+            .protocol_mut()
+            .push_playback(frame_of(&[1_000; 240]))
+            .expect("one frame");
+        let mut room = [0_i16; 160];
+        assert!(session.fill_outbound(&mut room));
+
+        session.protocol_mut().barge_in();
+        session
+            .protocol_mut()
+            .push_playback(frame_of(&[-1_000; 240]))
+            .expect("one frame");
+        assert!(session.fill_outbound(&mut room));
+        assert!(
+            room.iter().all(|&sample| sample == -1_000),
+            "interrupted audio played after the barge-in: {:?}",
+            room.iter().filter(|&&sample| sample == 1_000).count()
+        );
+    }
+
+    #[test]
+    fn a_renegotiation_onto_the_same_rate_does_not_end_speech_early() {
+        // a hold, a resume or a moved address is `MediaEvent::Changed` with
+        // the codec it already had; the caller who was talking a frame ago
+        // is still inside the detector's hangover, and one quiet frame is a
+        // closure in a word, not the end of it
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
+        assert_eq!(session.hear(&[0; 160]), None);
+        assert_eq!(session.hear(&tone(160, 20_000)), Some(true));
+        session.set_codec_rate(8_000).expect("same rate");
+        assert_eq!(session.hear(&[0; 160]), None);
+    }
+
+    #[test]
+    fn a_codec_change_mid_word_does_not_end_speech_early() {
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
+        assert_eq!(session.hear(&[0; 160]), None);
+        assert_eq!(session.hear(&tone(160, 20_000)), Some(true));
+        session.set_codec_rate(16_000).expect("two to one");
+        assert_eq!(session.hear(&[0; 320]), None);
+    }
+
+    #[test]
+    fn a_codec_change_keeps_the_callers_audio_already_at_the_socket_rate() {
+        // 160 samples already resampled to the socket's own 8 kHz wait for
+        // the rest of a thirty-millisecond frame; the codec moving to 16 kHz
+        // changes nothing about them
+        let socket = AudioConfig::with_frame_duration_ms(SampleRate::Hz8000, 30).expect("fits");
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), socket, 8_000, 4, 4).expect("same rate");
+        let _ = session.hear(&[0; 160]);
+        assert_eq!(session.protocol().capture_depth(), 0);
+        session.set_codec_rate(16_000).expect("two to one");
+        let _ = session.hear(&[0; 320]);
+        assert_eq!(session.protocol().capture_depth(), 1);
+    }
+
+    /// `len` samples of a 440 Hz sine at `rate`, starting `start` samples
+    /// into it, at half of full scale.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn sine(rate: u32, start: usize, len: usize) -> Vec<i16> {
+        (start..start + len)
+            .map(|n| {
+                let phase = 2.0 * std::f64::consts::PI * 440.0 * n as f64 / f64::from(rate);
+                (phase.sin() * 16_000.0).round() as i16
+            })
+            .collect()
+    }
+
+    /// That `samples` at `rate` are still [`sine`]'s 440 Hz, past a quarter
+    /// of them left for the filter's own start: 880 zero crossings a second,
+    /// within three.
+    fn assert_in_tune(samples: &[i16], rate: u32, case: &str) {
+        let settled = samples.get(samples.len() / 4..).unwrap();
+        let got = settled
+            .windows(2)
+            .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
+            .count();
+        let want = 880 * settled.len() / usize::try_from(rate).unwrap();
+        assert!(
+            got.abs_diff(want) <= 3,
+            "{case}: {got} zero crossings for {want}"
+        );
+    }
+
+    /// Every sample the caller's side has produced at the socket's rate:
+    /// whole frames on the capture queue plus what waits to become one.
+    fn heard_so_far(session: &HeadlessSession) -> usize {
+        session.protocol().capture_depth() * session.session_frame_samples + session.inbound.len()
+    }
+
+    fn rate(hz: u32) -> SampleRate {
+        SampleRate::try_from(hz).expect("one of the four")
+    }
+
+    /// Socket and codec frame durations in milliseconds: equal, and each
+    /// way around a pair where neither divides the other's sample count.
+    const DURATIONS: [(u32, u32); 4] = [(20, 20), (30, 20), (20, 30), (10, 30)];
+    const RATES: [u32; 4] = [8_000, 16_000, 24_000, 48_000];
+
+    #[test]
+    fn every_rate_pair_hears_the_caller_in_real_time_and_at_the_right_pitch() {
+        for socket_hz in RATES {
+            for codec_hz in RATES {
+                for (socket_ms, codec_ms) in DURATIONS {
+                    let socket =
+                        AudioConfig::with_frame_duration_ms(rate(socket_hz), socket_ms).unwrap();
+                    let mut session =
+                        HeadlessSession::open("c".to_owned(), socket, codec_hz, 1_000, 1_000)
+                            .unwrap();
+                    let codec_frame = usize::try_from(codec_hz * codec_ms / 1_000).unwrap();
+                    let frames = usize::try_from(300 / codec_ms).unwrap();
+                    let case = format!("{socket_hz}/{socket_ms} ms <- {codec_hz}/{codec_ms} ms");
+                    for n in 0..frames {
+                        session.hear(&sine(codec_hz, n * codec_frame, codec_frame));
+                    }
+                    let first = heard_so_far(&session);
+                    for n in frames..2 * frames {
+                        session.hear(&sine(codec_hz, n * codec_frame, codec_frame));
+                    }
+                    // the second run carries exactly its own length in time,
+                    // to the sample: no drift, whatever the frame sizes
+                    let expected = frames * codec_frame * usize::try_from(socket_hz).unwrap()
+                        / usize::try_from(codec_hz).unwrap();
+                    let second = heard_so_far(&session) - first;
+                    assert!(
+                        second.abs_diff(expected) <= 1,
+                        "{case}: {second} samples for {expected}"
+                    );
+                    assert_eq!(session.protocol().capture_dropped(), 0, "{case}");
+
+                    let mut delivered = Vec::new();
+                    while let Some(bytes) = session.protocol_mut().pop_capture() {
+                        delivered.extend(sipral_headless::read_samples(&bytes));
+                    }
+                    assert_in_tune(&delivered, socket_hz, &case);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_rate_pair_speaks_the_agent_in_real_time_and_at_the_right_pitch() {
+        for socket_hz in RATES {
+            for codec_hz in RATES {
+                for (socket_ms, codec_ms) in DURATIONS {
+                    let socket =
+                        AudioConfig::with_frame_duration_ms(rate(socket_hz), socket_ms).unwrap();
+                    let mut session =
+                        HeadlessSession::open("c".to_owned(), socket, codec_hz, 1_000, 1_000)
+                            .unwrap();
+                    let socket_frame = usize::try_from(socket_hz * socket_ms / 1_000).unwrap();
+                    let codec_frame = usize::try_from(codec_hz * codec_ms / 1_000).unwrap();
+                    let case = format!("{socket_hz}/{socket_ms} ms -> {codec_hz}/{codec_ms} ms");
+                    let pushed = usize::try_from(600 / socket_ms).unwrap();
+                    for n in 0..pushed {
+                        session
+                            .protocol_mut()
+                            .push_playback(frame_of(&sine(
+                                socket_hz,
+                                n * socket_frame,
+                                socket_frame,
+                            )))
+                            .unwrap();
+                    }
+                    let mut sent = Vec::new();
+                    let mut room = vec![0_i16; codec_frame];
+                    while session.fill_outbound(&mut room) {
+                        sent.extend_from_slice(&room);
+                    }
+                    // every sample pushed came out, less what the filter
+                    // still holds — at most a kernel's worth of input, at
+                    // the codec's rate once it comes out — and the part of
+                    // one frame left over
+                    let (socket_rate, codec_rate) = (
+                        usize::try_from(socket_hz).unwrap(),
+                        usize::try_from(codec_hz).unwrap(),
+                    );
+                    let expected = pushed * socket_frame * codec_rate / socket_rate;
+                    let produced = sent.len() + session.outbound.len();
+                    let slack = session.to_codec.taps() * codec_rate / socket_rate + 1;
+                    assert!(
+                        produced <= expected + 1 && expected - produced <= slack,
+                        "{case}: {produced} samples for {expected}"
+                    );
+                    assert_in_tune(&sent, codec_hz, &case);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_codec_rate_change_mid_call_keeps_the_caller_in_real_time_and_in_tune() {
+        // G.711 at 8 kHz re-negotiated onto Opus at 48 kHz, into a 16 kHz
+        // socket, and back
+        let mut session = HeadlessSession::open(
+            "c".to_owned(),
+            AudioConfig::new(rate(16_000)),
+            8_000,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+        let mut at = 0;
+        for codec_hz in [8_000_u32, 48_000, 8_000] {
+            session.set_codec_rate(codec_hz).unwrap();
+            let frame = usize::try_from(codec_hz / 50).unwrap();
+            let start = heard_so_far(&session);
+            for _ in 0..25 {
+                session.hear(&sine(codec_hz, at * frame, frame));
+                at += 1;
+            }
+            let middle = heard_so_far(&session);
+            for _ in 0..25 {
+                session.hear(&sine(codec_hz, at * frame, frame));
+                at += 1;
+            }
+            // half a second at 16 kHz once the new filter is running, to the
+            // sample, and the first half within the filter's own start
+            assert!(
+                (heard_so_far(&session) - middle).abs_diff(8_000) <= 1,
+                "{codec_hz}: {}",
+                heard_so_far(&session) - middle
+            );
+            assert!(
+                (middle - start).abs_diff(8_000) <= 200,
+                "{codec_hz}: {}",
+                middle - start
+            );
+        }
+        let mut delivered = Vec::new();
+        while let Some(bytes) = session.protocol_mut().pop_capture() {
+            delivered.extend(sipral_headless::read_samples(&bytes));
+        }
+        for (codec_hz, third) in [8_000, 48_000, 8_000]
+            .into_iter()
+            .zip(delivered.chunks(delivered.len() / 3))
+        {
+            assert_in_tune(third, 16_000, &format!("while the codec ran at {codec_hz}"));
+        }
+    }
+
+    #[test]
+    fn hearing_nothing_reports_no_change_in_voice_activity() {
+        let mut session =
+            HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
+        assert_eq!(session.hear(&[0; 160]), None);
+        assert_eq!(session.hear(&[]), None);
+    }
 }

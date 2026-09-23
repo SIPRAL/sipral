@@ -156,6 +156,7 @@ pub struct Session {
     capture: FrameQueue,
     playback: FrameQueue,
     latency: LatencyBudget,
+    barge_ins: u64,
 }
 
 impl Session {
@@ -176,6 +177,7 @@ impl Session {
             capture: FrameQueue::new(capture_capacity),
             playback: FrameQueue::new(playback_capacity),
             latency: LatencyBudget::new(audio),
+            barge_ins: 0,
         }
     }
 
@@ -382,8 +384,25 @@ impl Session {
     /// by [`LatencyBudget::playback_latency_ms`] alone, never by how many
     /// frames happened to be queued a moment before: that is the entire
     /// point of discarding instead of draining.
+    ///
+    /// Whatever sits between this queue and the wire — audio already taken
+    /// off it and resampled, waiting to fill the codec's next frame — is not
+    /// this crate's to reach, so [`Session::barge_ins`] moves too, and that
+    /// layer discards its own share the next time it looks.
     pub fn barge_in(&mut self) -> usize {
+        self.barge_ins = self.barge_ins.saturating_add(1);
         self.playback.clear()
+    }
+
+    /// How many times [`Session::barge_in`] has been asked for since the
+    /// session opened, whether or not anything was queued at the time.
+    ///
+    /// For a layer that holds playback audio of its own past
+    /// [`Session::pop_playback`]: a number that moved since it last looked
+    /// means everything it holds belongs to speech the agent has abandoned.
+    #[must_use]
+    pub const fn barge_ins(&self) -> u64 {
+        self.barge_ins
     }
 }
 
@@ -642,6 +661,18 @@ mod tests {
         session.push_playback(frame()).expect("within capacity");
         assert_eq!(session.barge_in(), 2);
         assert_eq!(session.playback_dropped(), 0);
+    }
+
+    #[test]
+    fn every_barge_in_is_counted_even_on_an_empty_queue() {
+        // what a layer past the queue discards is not what the queue held:
+        // it has audio of its own to drop even when the queue was empty
+        let mut session = session(4, 4);
+        assert_eq!(session.barge_ins(), 0);
+        session.barge_in();
+        session.push_playback(frame()).expect("within capacity");
+        session.barge_in();
+        assert_eq!(session.barge_ins(), 2);
     }
 
     #[test]

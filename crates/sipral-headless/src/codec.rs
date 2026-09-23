@@ -79,7 +79,8 @@ impl Decoder {
     /// # Errors
     /// [`DecodeError`], for a frame whose length exceeds the session's bound,
     /// an audio frame of the wrong size, or a control message that failed to
-    /// decode.
+    /// decode. Only the first is final — [`DecodeError::is_final`] — and the
+    /// other two consumed their frame, so the next call reads on.
     pub fn next_message(&mut self) -> Result<Option<Decoded<'_>>, DecodeError> {
         let Self { frames, audio } = self;
         let Some(frame) = frames.next_frame()? else {
@@ -120,10 +121,25 @@ pub fn encode_audio(
 
 /// Write one control message.
 ///
+/// Held to [`MAX_CONTROL_PAYLOAD`], the bound every [`Decoder`] reads control
+/// frames up to, rather than to the sixteen bits the length field could
+/// carry: a frame longer than that is one the far end's decoder refuses as
+/// final, which ends the connection over one message. Some fields come from
+/// outside — [`crate::IncomingCall::caller`] and its display name are read
+/// off a SIP request a stranger wrote — so the application shortens them
+/// when this refuses, rather than this refusal being unreachable.
+///
 /// # Errors
-/// See [`EncodeError`].
+/// See [`EncodeError`]; [`FrameError::PayloadTooLarge`] for a message whose
+/// JSON is longer than [`MAX_CONTROL_PAYLOAD`], with nothing written.
 pub fn encode_control(message: &ControlMessage, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     let payload = message.to_json_bytes()?;
+    if payload.len() > MAX_CONTROL_PAYLOAD {
+        return Err(EncodeError::Frame(FrameError::PayloadTooLarge {
+            declared: payload.len(),
+            max: MAX_CONTROL_PAYLOAD,
+        }));
+    }
     frame::write_frame(message.kind().to_u8(), &payload, out)?;
     Ok(())
 }
@@ -137,6 +153,23 @@ pub enum DecodeError {
     Audio(AudioError),
     /// A control message that did not decode.
     Control(ControlError),
+}
+
+impl DecodeError {
+    /// Whether the stream can be read past this error at all.
+    ///
+    /// Only a [`DecodeError::Frame`] is final: a length that exceeds the
+    /// bound leaves no way to know where the frame it announced ends, so
+    /// nothing after it can be read and the connection has to go. An audio
+    /// frame of the wrong size or a control message that did not decode was
+    /// still a whole frame, already consumed, and the next call to
+    /// [`Decoder::next_message`] reads the frame after it — the error belongs
+    /// on the error channel ([`crate::ErrorMessage`]), not in a closed
+    /// socket.
+    #[must_use]
+    pub const fn is_final(&self) -> bool {
+        matches!(self, Self::Frame(_))
+    }
 }
 
 impl From<FrameError> for DecodeError {
@@ -212,10 +245,11 @@ impl core::error::Error for EncodeError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoded, Decoder, EncodeError, encode_audio, encode_control};
+    use super::{Decoded, Decoder, EncodeError, MAX_CONTROL_PAYLOAD, encode_audio, encode_control};
     use crate::audio::AudioConfig;
     use crate::audio::SampleRate;
-    use crate::control::{Answer, ControlMessage, SessionOpen};
+    use crate::control::{Answer, ControlMessage, FrameKind, IncomingCall, SessionOpen};
+    use crate::frame::{FrameError, write_frame};
 
     #[test]
     fn an_audio_frame_written_and_pushed_back_comes_out_as_audio() {
@@ -289,12 +323,90 @@ mod tests {
     }
 
     #[test]
+    fn a_control_message_longer_than_any_decoder_accepts_is_refused_when_written() {
+        // the caller's identity comes off a SIP INVITE, whose From a peer
+        // can make as long as a datagram allows; written anyway, the frame
+        // is one every Decoder refuses as final, and the connection ends
+        let message = ControlMessage::IncomingCall(IncomingCall {
+            call_id: "call-1".to_owned(),
+            caller: "sip:caller@example.com".to_owned(),
+            display_name: Some("x".repeat(MAX_CONTROL_PAYLOAD)),
+        });
+        let mut wire = Vec::new();
+        assert_eq!(
+            encode_control(&message, &mut wire),
+            Err(EncodeError::Frame(FrameError::PayloadTooLarge {
+                declared: message.to_json_bytes().expect("finite").len(),
+                max: MAX_CONTROL_PAYLOAD,
+            }))
+        );
+        assert!(wire.is_empty(), "nothing half-written");
+    }
+
+    #[test]
+    fn a_control_message_at_exactly_the_bound_is_written_and_read_back() {
+        let bare = ControlMessage::IncomingCall(IncomingCall {
+            call_id: "call-1".to_owned(),
+            caller: "sip:caller@example.com".to_owned(),
+            display_name: Some(String::new()),
+        });
+        let room = MAX_CONTROL_PAYLOAD - bare.to_json_bytes().expect("finite").len();
+        let message = ControlMessage::IncomingCall(IncomingCall {
+            call_id: "call-1".to_owned(),
+            caller: "sip:caller@example.com".to_owned(),
+            display_name: Some("x".repeat(room)),
+        });
+        assert_eq!(
+            message.to_json_bytes().expect("finite").len(),
+            MAX_CONTROL_PAYLOAD
+        );
+        let mut wire = Vec::new();
+        encode_control(&message, &mut wire).expect("exactly at the bound");
+
+        // the smallest decoder there is: 8 kHz, one millisecond a frame
+        let config = AudioConfig::with_frame_duration_ms(SampleRate::Hz8000, 1).expect("fits");
+        let mut decoder = Decoder::new(config).expect("valid config");
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_message().expect("no error"),
+            Some(Decoded::Control(message))
+        );
+    }
+
+    #[test]
+    fn a_refused_audio_or_control_frame_does_not_desynchronise_what_follows() {
+        let config = AudioConfig::new(SampleRate::Hz8000);
+        let mut wire = Vec::new();
+        write_frame(FrameKind::Audio.to_u8(), &[0_u8; 3], &mut wire).expect("written");
+        write_frame(FrameKind::Answer.to_u8(), b"{not json", &mut wire).expect("written");
+        write_frame(200, b"{}", &mut wire).expect("written");
+        let answer = ControlMessage::Answer(Answer {
+            call_id: "call-1".to_owned(),
+        });
+        encode_control(&answer, &mut wire).expect("valid message");
+
+        let mut decoder = Decoder::new(config).expect("valid config");
+        decoder.push(&wire);
+        for _ in 0..3 {
+            let error = decoder.next_message().expect_err("a refused frame");
+            assert!(!error.is_final(), "{error} left the stream readable");
+        }
+        assert_eq!(
+            decoder.next_message().expect("no error"),
+            Some(Decoded::Control(answer))
+        );
+    }
+
+    #[test]
     fn a_frame_declaring_more_than_the_session_bound_is_refused() {
         let config = AudioConfig::new(SampleRate::Hz8000);
         let mut decoder = Decoder::new(config).expect("valid config");
         // kind 1, length 0xFFFF: far past both the audio frame size and
         // MAX_CONTROL_PAYLOAD for an 8 kHz twenty-millisecond session
         decoder.push(&[1, 0xFF, 0xFF]);
+        let error = decoder.next_message().expect_err("past the bound");
+        assert!(error.is_final());
+        // and it stays refused: nothing after a length that lied is readable
         assert!(decoder.next_message().is_err());
     }
 }
