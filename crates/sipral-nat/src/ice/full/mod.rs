@@ -425,6 +425,13 @@ pub enum IceError {
     /// unspecified, site-local and the deprecated IPv6 forms are refused
     /// (RFC 8445 §5.1.1.1).
     NoUsableHost,
+    /// A server-reflexive address named a base that is not a host candidate
+    /// of that stream and component — or gathering has not started, so there
+    /// is no host candidate yet for it to be the base of.
+    UnknownBase,
+    /// A candidate arrived for a stream whose candidates have already been
+    /// paired with the peer's, where it would be advertised and never checked.
+    AlreadyPaired,
 }
 
 impl fmt::Display for IceError {
@@ -437,6 +444,8 @@ impl fmt::Display for IceError {
             Self::AlreadyStarted => "gathering has already started",
             Self::TooMany => "more streams, addresses or servers than the agent handles",
             Self::NoUsableHost => "no host address the agent may use",
+            Self::UnknownBase => "not a host candidate of that stream and component",
+            Self::AlreadyPaired => "the stream's candidates have already been paired",
         })
     }
 }

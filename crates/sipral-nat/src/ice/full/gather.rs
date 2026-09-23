@@ -16,9 +16,12 @@ use std::time::{Duration, Instant};
 
 use super::checks::Paced;
 use super::{
-    Allocation, Gatherer, IceAgent, IceError, IceEvent, LocalCandidate, Phase, Progress, Transmit,
+    Allocation, Gatherer, IceAgent, IceError, IceEvent, LocalCandidate, Phase, Progress, StreamId,
+    Transmit,
 };
-use crate::ice::candidate::{Candidate, CandidateType, Foundation, candidate_priority};
+use crate::ice::candidate::{
+    Candidate, CandidateType, ComponentId, Foundation, candidate_priority,
+};
 use crate::ice::checklist::PairState;
 use crate::stun::{
     BindingClient, BindingConfig, Class, MessageBuilder, Method, Progress as BindingProgress,
@@ -228,7 +231,7 @@ impl IceAgent {
             }
             BindingProgress::Mapped(mapped) => {
                 if first {
-                    self.add_reflexive(base, mapped, server.ip(), preference);
+                    self.add_reflexive(base, mapped, Some(server.ip()), preference);
                 }
                 if let Some(entry) = self.gatherers.get_mut(index) {
                     if first {
@@ -256,6 +259,70 @@ impl IceAgent {
         self.check_gathering_complete(now);
     }
 
+    /// A server-reflexive candidate the application learned itself, from a
+    /// Binding request it sent from `base` to `server` (RFC 8489 §5) — or
+    /// with `server` `None`, from somewhere that is not a server at all: a
+    /// one-to-one NAT whose public address is configured rather than asked.
+    ///
+    /// What RFC 8445 §5.1.1.2 describes is a Binding transaction from the
+    /// base to a STUN server, and nothing in it depends on which component
+    /// ran that transaction. An application that already maps its sockets —
+    /// because the same address goes into `c=` and `m=` for a peer that does
+    /// not do ICE at all — would otherwise have the agent ask the same server
+    /// the same question a second time, and wait for the answer before an
+    /// offer could be written. This is how the answer it already has becomes
+    /// a candidate instead, and how an offer stays a single pass of work.
+    ///
+    /// The candidate is built exactly as one this agent gathered itself:
+    /// the priority from RFC 8445 §5.1.2 with a local preference below every
+    /// server the configuration names, the foundation from the type, the
+    /// base's address and the server's (§5.1.1.3), and nothing at all when it
+    /// is redundant with a candidate already held (§5.1.3) — which is what a
+    /// host with no NAT in front of it gets back from every server it asks.
+    /// Keeping the mapping alive until ICE concludes is the application's,
+    /// since it owns the transaction that made it.
+    ///
+    /// # Errors
+    ///
+    /// [`IceError::UnknownStream`] for a stream this agent does not have,
+    /// [`IceError::UnknownBase`] for a `base` that is not a host candidate of
+    /// that stream and component — and before [`IceAgent::gather`], when no
+    /// host candidate exists yet — and [`IceError::AlreadyPaired`] once the
+    /// peer's candidates have arrived for the stream, since a candidate
+    /// advertised after its checklist was formed is one nothing checks.
+    pub fn add_server_reflexive(
+        &mut self,
+        stream: StreamId,
+        component: ComponentId,
+        base: SocketAddr,
+        mapped: SocketAddr,
+        server: Option<SocketAddr>,
+    ) -> Result<(), IceError> {
+        let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
+        if entry.remote.is_some() {
+            return Err(IceError::AlreadyPaired);
+        }
+        if self.phase == Phase::New {
+            return Err(IceError::UnknownBase);
+        }
+        let index = self
+            .bases
+            .iter()
+            .position(|held| {
+                held.stream == stream.0 && held.component == component && held.address == base
+            })
+            .ok_or(IceError::UnknownBase)?;
+        let top = self.bases.get(index).map_or(0, |held| held.top);
+        let servers = 1 + self.config.stun_servers.len() + 2 * self.config.turn_servers.len();
+        self.add_reflexive(
+            index,
+            mapped,
+            server.map(|server| server.ip()),
+            below(top, servers),
+        );
+        Ok(())
+    }
+
     /// A server-reflexive candidate, unless it is redundant with one already
     /// held: "A candidate is redundant if and only if its transport address
     /// and base equal those of another candidate. The agent SHOULD eliminate
@@ -266,7 +333,7 @@ impl IceAgent {
         &mut self,
         base: usize,
         mapped: SocketAddr,
-        server: IpAddr,
+        server: Option<IpAddr>,
         local_preference: u16,
     ) {
         let Some(entry) = self.bases.get(base) else {
@@ -275,7 +342,7 @@ impl IceAgent {
         let (stream, component, address) = (entry.stream, entry.component, entry.address);
         let kind = CandidateType::ServerReflexive;
         let priority = candidate_priority(kind, local_preference, component);
-        let foundation = self.foundation(kind, address.ip(), Some(server));
+        let foundation = self.foundation(kind, address.ip(), server);
         if let Some(existing) = self.locals.iter_mut().find(|local| {
             local.stream == stream
                 && local.candidate.component == component
@@ -421,7 +488,7 @@ impl IceAgent {
             }
         }
         if let Some(mapped) = mapped {
-            self.add_reflexive(base, mapped, server.ip(), reflexive_preference);
+            self.add_reflexive(base, mapped, Some(server.ip()), reflexive_preference);
         }
     }
 

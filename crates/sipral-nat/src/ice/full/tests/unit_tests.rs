@@ -1112,6 +1112,119 @@ fn a_server_reflexive_candidate_is_advertised_but_checked_from_its_base() {
 }
 
 #[test]
+fn a_reflexive_address_the_application_learned_is_the_candidate_the_agent_would_have_gathered() {
+    // the agent asking the server itself
+    let now = Instant::now();
+    let (mut asked, asked_stream) = agent(
+        config(true, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(LOCAL),
+    );
+    let mut ids = Ids(0);
+    ids.feed(&mut asked);
+    asked.gather(now).expect("gathering starts");
+    asked.handle_timeout(now);
+    let (server, id) = requests(&drain(&mut asked))[0];
+    let mut builder = MessageBuilder::new(Class::Success, Method::BINDING, id);
+    builder
+        .add_xor_address(
+            AttributeType::XOR_MAPPED_ADDRESS,
+            address("192.0.2.1:40000"),
+        )
+        .expect("mapped");
+    asked.handle_datagram(address(LOCAL), server, &builder.finish(), now);
+
+    // and one told the same answer by an application that asked for it
+    let (mut told, told_stream, _, _) = gathered(Role::Controlling, config(false, false));
+    told.add_server_reflexive(
+        told_stream,
+        ComponentId::RTP,
+        address(LOCAL),
+        address("192.0.2.1:40000"),
+        Some(address(STUN_SERVER)),
+    )
+    .expect("a base this stream has");
+
+    let told_candidates = told.local_candidates(told_stream);
+    assert_eq!(told_candidates, asked.local_candidates(asked_stream));
+    assert_eq!(told_candidates[1].kind, CandidateType::ServerReflexive);
+    assert_eq!(told_candidates[1].related, Some(address(LOCAL)));
+    assert_eq!(
+        told.default_candidate(told_stream, ComponentId::RTP)
+            .map(|candidate| candidate.address),
+        Some(address("192.0.2.1:40000")),
+        "RFC 8839 §4.2.1.2 prefers the reflexive address for c= and m="
+    );
+}
+
+#[test]
+fn a_reflexive_address_equal_to_its_base_adds_nothing() {
+    // RFC 8445 §5.1.3: the same transport address on the same base is
+    // redundant, and a host with no NAT in front of it gets exactly that
+    let (mut agent, stream, _, _) = gathered(Role::Controlling, config(false, false));
+    agent
+        .add_server_reflexive(
+            stream,
+            ComponentId::RTP,
+            address(LOCAL),
+            address(LOCAL),
+            None,
+        )
+        .expect("a base this stream has");
+    assert_eq!(agent.local_candidates(stream).len(), 1);
+}
+
+#[test]
+fn a_reflexive_address_is_refused_where_nothing_would_check_it() {
+    let now = Instant::now();
+    let (mut fresh, fresh_stream) = agent(
+        config(false, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(LOCAL),
+    );
+    let learned = address("192.0.2.1:40000");
+    let server = Some(address(STUN_SERVER));
+    assert_eq!(
+        fresh.add_server_reflexive(
+            fresh_stream,
+            ComponentId::RTP,
+            address(LOCAL),
+            learned,
+            server
+        ),
+        Err(IceError::UnknownBase),
+        "before gathering there is no host candidate to be the base"
+    );
+
+    let (mut agent, stream, _, _) = gathered(Role::Controlling, config(false, false));
+    assert_eq!(
+        agent.add_server_reflexive(
+            stream,
+            ComponentId::RTP,
+            address("198.51.100.11:5000"),
+            learned,
+            server
+        ),
+        Err(IceError::UnknownBase)
+    );
+    agent
+        .set_remote(
+            stream,
+            &from_peer(vec![host(PEER, PEER_PRIORITY, "1")]),
+            now,
+        )
+        .expect("the answer");
+    assert_eq!(
+        agent.add_server_reflexive(stream, ComponentId::RTP, address(LOCAL), learned, server),
+        Err(IceError::AlreadyPaired)
+    );
+}
+
+#[test]
 fn gathering_gives_up_on_a_silent_server_when_the_timeout_says_so() {
     let now = Instant::now();
     let (mut agent, stream) = agent(
