@@ -111,6 +111,12 @@ unit_tested = true
 flows = ["local conference"]
 
 [[feature]]
+name = "G.729 (Annex A), offered when named"
+implemented = true
+unit_tested = true
+flows = ["G.729, echoed"]
+
+[[feature]]
 name = "Narrowed inbound offer"
 implemented = true
 unit_tested = true
