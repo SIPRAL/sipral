@@ -378,12 +378,17 @@ headless_socket_agent() {
     client_beside=$(cd "$(dirname "$HEADLESS_CLIENT")" && pwd)
     docker rm -f "$HEADLESS_APP_NAME" "$HEADLESS_CLIENT_NAME" >/dev/null 2>&1
 
+    # Mounted beside the image's own directories, never over /bin: on Debian
+    # 13 /bin is /usr/bin, and covering it takes the container's shell away.
     docker run -d --name "$HEADLESS_APP_NAME" --network sipral-interop_lab \
-        -v "$app_beside:/bin:ro" \
+        -v "$app_beside:/sipral:ro" \
         debian:trixie-slim sh -c '
             own=$(hostname -i)
-            exec /bin/headless-socket-agent \
-                --host "$own" --port 5060 --socket 0.0.0.0:7001' >/dev/null \
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            exec /sipral/headless-socket-agent \
+                --host "$own" --port 5060 --socket 0.0.0.0:7001 \
+                --register labuser-agent-headless@asterisk \
+                --registrar "$address:5060" --pass labpass' >/dev/null \
         || { printf '  could not start the application container\n'; return 1; }
 
     tries=0
@@ -400,8 +405,8 @@ headless_socket_agent() {
     done
 
     docker run -d --name "$HEADLESS_CLIENT_NAME" --network sipral-interop_lab \
-        -v "$client_beside:/bin:ro" \
-        debian:trixie-slim /bin/agent --addr "$HEADLESS_APP_NAME:7001" >/dev/null \
+        -v "$client_beside:/sipral:ro" \
+        debian:trixie-slim /sipral/agent --addr "$HEADLESS_APP_NAME:7001" >/dev/null \
         || {
             printf '  could not start the agent container\n'
             docker rm -f "$HEADLESS_APP_NAME" >/dev/null 2>&1

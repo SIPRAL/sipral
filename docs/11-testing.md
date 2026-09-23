@@ -621,6 +621,19 @@ heard the `#` it hangs up on. What this proves that the loopback test in
 `bindings/python/tests` cannot is that what the agent advertises, its Contact
 and its answer's SDP, is somewhere a real server can reach.
 
+The same call then goes to `sipral-headless`'s socket path, with an account of
+its own (`labuser-agent-headless`) so neither call can land on the other's
+registration. `crates/sipral/examples/headless-socket-agent.rs` registers with
+Asterisk, carries the call, and speaks the wire protocol over TCP to
+`crates/sipral-headless/examples/agent.rs`, a separate process that echoes what
+it hears a frame later and hangs up on `#` — two containers, as an application
+and its agent would be. It passes when the application answered, reported the
+`#`, and ended the call with packets both received and sent. Like the Python
+flow this proves both directions are live against a real server, not what
+the audio contains: that the caller's tone comes back through the resampling
+and the queues is `crates/sipral/tests/headless_bridge.rs`'s to show, in
+process.
+
 The four `baresip only` rows are all hung up by this end, the same shape
 every other flow in this table but the two transfers takes. A fifth worth
 having — the far end ending the call on its own, which every flow above

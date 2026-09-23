@@ -35,6 +35,10 @@
 //!     --host 127.0.0.1 --port 5070 --socket 0.0.0.0:7001
 //! ```
 //!
+//! Dialled directly as above, or reached through a server it registers with
+//! — `--register user@domain --registrar ip:port --pass secret` — which is
+//! how the interop lab runs it behind Asterisk.
+//!
 //! The socket's own audio is fixed at 16 kHz; the codec catalogue is G.711
 //! only, so every call is 8 kHz regardless of which law is chosen, and
 //! `HeadlessSession` resamples between the two both ways — proving that seam
@@ -61,8 +65,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Account, CallHandle, CodecCatalog, EndpointConfig, Event, MediaConfig, MediaEngine, MediaEvent,
-    StatusCode, UaEvent, Uri, UserAgent, WallClock,
+    Account, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, MediaConfig,
+    MediaEngine, MediaEvent, StatusCode, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_headless::{
     AudioConfig, CallState, CallStateKind, ControlMessage, Decoded, Decoder, IncomingCall,
@@ -88,10 +92,30 @@ fn codecs() -> CodecCatalog {
 const CODEC_RATE: u32 = 8_000;
 const PACE: Duration = Duration::from_millis(20);
 
-fn args() -> (std::net::IpAddr, u16, SocketAddr) {
+/// Where to register, for an application reached through a server rather
+/// than dialled directly: `--register user@domain --registrar ip:port
+/// --pass secret`, the way an agent sits behind a PBX.
+struct Registration {
+    user: String,
+    domain: String,
+    registrar: SocketAddr,
+    pass: String,
+}
+
+struct Args {
+    host: std::net::IpAddr,
+    port: u16,
+    socket: SocketAddr,
+    registration: Option<Registration>,
+}
+
+fn args() -> Args {
     let mut host = std::net::IpAddr::from([127, 0, 0, 1]);
     let mut port = 5070_u16;
     let mut socket = SocketAddr::from(([0, 0, 0, 0], 7001));
+    let mut register: Option<(String, String)> = None;
+    let mut registrar: Option<SocketAddr> = None;
+    let mut pass = String::new();
     let mut it = env::args().skip(1);
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -110,10 +134,31 @@ fn args() -> (std::net::IpAddr, u16, SocketAddr) {
                     socket = v;
                 }
             }
+            "--register" => {
+                register = it.next().and_then(|t| {
+                    t.split_once('@')
+                        .map(|(user, domain)| (user.to_owned(), domain.to_owned()))
+                });
+            }
+            "--registrar" => registrar = it.next().and_then(|t| t.parse().ok()),
+            "--pass" => pass = it.next().unwrap_or_default(),
             _ => {}
         }
     }
-    (host, port, socket)
+    let registration = register
+        .zip(registrar)
+        .map(|((user, domain), registrar)| Registration {
+            user,
+            domain,
+            registrar,
+            pass,
+        });
+    Args {
+        host,
+        port,
+        socket,
+        registration,
+    }
 }
 
 /// One complete message read off the agent's own socket.
@@ -175,7 +220,12 @@ struct Bridge {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (host, port, socket_addr) = args();
+    let Args {
+        host,
+        port,
+        socket: socket_addr,
+        registration,
+    } = args();
     let now = Instant::now();
     let agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
     let engine = MediaEngine::new(
@@ -185,17 +235,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entropy::seed()?,
     );
     let mut endpoint = Endpoint::bind(SocketAddr::new(host, port), agent, engine, now)?;
-    let identity = Uri::parse_str(&format!("sip:agent@{}", endpoint.local))?;
-    endpoint.add_account(Account::unregistered(
-        identity.clone(),
-        identity,
-        endpoint.transport,
-        endpoint.local,
-    ));
-    println!(
-        "listening on {}; dial sip:agent@{}",
-        endpoint.local, endpoint.local
-    );
+    if let Some(registration) = &registration {
+        let aor = Uri::parse_str(&format!(
+            "sip:{}@{}",
+            registration.user, registration.domain
+        ))?;
+        let registrar = Uri::parse_str(&format!("sip:{}", registration.domain))?;
+        let contact = Uri::parse_str(&format!("sip:{}@{}", registration.user, endpoint.local))?;
+        let account = endpoint.add_account(
+            Account::new(
+                aor,
+                registrar,
+                contact,
+                endpoint.transport,
+                registration.registrar,
+            )
+            .credentials(Credentials::new(&registration.user, &registration.pass)),
+        );
+        endpoint.agent.register(account, now)?;
+        println!(
+            "listening on {}; registering {}@{} at {}",
+            endpoint.local, registration.user, registration.domain, registration.registrar
+        );
+    } else {
+        // Still one account, never registered, so the `Contact` on a call it
+        // answers is a real address (`headless-agent.rs` says why).
+        let identity = Uri::parse_str(&format!("sip:agent@{}", endpoint.local))?;
+        endpoint.add_account(Account::unregistered(
+            identity.clone(),
+            identity,
+            endpoint.transport,
+            endpoint.local,
+        ));
+        println!(
+            "listening on {}; dial sip:agent@{}",
+            endpoint.local, endpoint.local
+        );
+    }
 
     println!("waiting for the agent to connect on {socket_addr}");
     let listener = TcpListener::bind(socket_addr)?;
@@ -425,6 +501,10 @@ fn handle_event(
         // so it declines rather than leaving the caller ringing forever.
         Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
             let _ = endpoint.agent.reject(*call, StatusCode::BUSY_HERE, now);
+        }
+        Event::Signalling(UaEvent::Registered { .. }) => println!("registered"),
+        Event::Signalling(UaEvent::RegistrationFailed { reason, status, .. }) => {
+            println!("registration failed: {reason} ({status:?})");
         }
         // Only the bridged call's own end stops its audio: the call refused
         // just above ends too, and its end is not this one's.
