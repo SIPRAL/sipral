@@ -137,7 +137,8 @@ pub enum MappingEvent {
         /// What it is now.
         public: SocketAddr,
     },
-    /// The first transaction on a socket ended without an address. The
+    /// The transaction [`Mappings::map`] started ended without an address,
+    /// on a socket with none to fall back on. The
     /// socket is [`MappingState::Unmapped`] and described by its own address;
     /// a socket kept [`Keep::Refreshed`] asks again at the next refresh, and a
     /// later answer arrives as [`MappingEvent::Learned`].
@@ -229,9 +230,16 @@ impl Mappings {
 
     /// Start asking where `local` appears from.
     ///
-    /// A socket already mapped is asked again at once, and keeps the address
-    /// it had until the answer says otherwise; `keep` replaces what it was
-    /// kept as. A server of the other address family is never asked: a
+    /// A socket named again is asked again at once, and the answer is
+    /// reported whichever way it goes; `keep` replaces what it was kept as.
+    /// Kept [`Keep::Refreshed`], it keeps the address it had until the answer
+    /// says otherwise, and an answer that differs is
+    /// [`MappingEvent::Moved`]. Kept [`Keep::Once`], its old answer is
+    /// dropped: it is [`MappingState::Asking`] until the server says, and
+    /// what the server says is [`MappingEvent::Learned`] or
+    /// [`MappingEvent::Unanswered`], as the first time.
+    ///
+    /// A server of the other address family is never asked: a
     /// socket of that family is [`MappingState::Unmapped`] at once, and
     /// [`MappingEvent::Unanswered`] says so with
     /// [`Failure::TimedOut`], since that is what asking would have come to.
@@ -245,6 +253,18 @@ impl Mappings {
             refresh_at: None,
         });
         socket.keep = keep;
+        // named again, a socket is asked a new question, and its answer is
+        // reported whichever way it goes. A media socket's old answer is
+        // dropped with it: the application named it again because nothing
+        // kept that answer true, so a description written before the new one
+        // arrives is refused rather than lent the old one. A signalling
+        // socket keeps what it had, because every `Contact` already names it
+        if keep == Keep::Once {
+            socket.public = None;
+        }
+        if socket.public.is_none() {
+            socket.settled = false;
+        }
         if local.is_ipv4() != self.server.is_ipv4() {
             socket.settled = true;
             socket.asking = false;
@@ -534,6 +554,11 @@ pub(crate) mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].local, at(SIP));
         assert_eq!(sent[0].destination, at(SERVER));
+        assert_eq!(
+            sent[0].payload.len(),
+            28,
+            "the header and FINGERPRINT, the figure docs/06-nat.md gives"
+        );
 
         let taken = mappings.receive(
             at(SIP),
@@ -725,6 +750,130 @@ pub(crate) mod tests {
         assert_eq!(
             mappings.state(at("[2001:db8::1]:40000")),
             Some(MappingState::Unmapped)
+        );
+    }
+
+    /// Run every deadline until nothing more is due or `until` is passed, and
+    /// count the requests that went out.
+    fn run_out(mappings: &mut Mappings, until: Instant) -> usize {
+        let mut sent = drain(mappings).len();
+        while let Some(due) = mappings.poll_timeout() {
+            if due > until {
+                break;
+            }
+            mappings.handle_timeout(due);
+            sent += drain(mappings).len();
+        }
+        sent
+    }
+
+    #[test]
+    fn a_socket_named_again_after_a_silence_is_a_new_question_with_its_own_answer() {
+        // what an application does when the server did not answer for a media
+        // socket and it tries once more before the call: it waits for the
+        // event again, and it must get one either way
+        let start = Instant::now();
+        let mut mappings = Mappings::new(at(SERVER), [7; 32]);
+        mappings.map(at(MEDIA), Keep::Once, start);
+        assert_eq!(run_out(&mut mappings, start + Duration::from_secs(60)), 4);
+        assert_eq!(
+            events(&mut mappings),
+            vec![MappingEvent::Unanswered {
+                local: at(MEDIA),
+                failure: Failure::TimedOut,
+            }]
+        );
+
+        let again = start + Duration::from_secs(10);
+        mappings.map(at(MEDIA), Keep::Once, again);
+        assert_eq!(
+            mappings.state(at(MEDIA)),
+            Some(MappingState::Asking),
+            "a call described now would name the private address while the answer is on its way"
+        );
+        assert_eq!(run_out(&mut mappings, again + Duration::from_secs(60)), 4);
+        assert_eq!(
+            events(&mut mappings),
+            vec![MappingEvent::Unanswered {
+                local: at(MEDIA),
+                failure: Failure::TimedOut,
+            }],
+            "the second question is answered too"
+        );
+        assert_eq!(mappings.state(at(MEDIA)), Some(MappingState::Unmapped));
+    }
+
+    #[test]
+    fn a_media_socket_named_again_does_not_lend_the_old_answer_to_the_new_call() {
+        let now = Instant::now();
+        let mut mappings = Mappings::new(at(SERVER), [7; 32]);
+        mappings.map(at(MEDIA), Keep::Once, now);
+        let first = drain(&mut mappings);
+        mappings.receive(
+            at(MEDIA),
+            at(SERVER),
+            &answer(&first[0].payload, at("203.0.113.7:41002")),
+            now,
+        );
+        let _learned = events(&mut mappings);
+
+        // asked again: until the server says, the socket is being asked
+        // about, and the answer that comes back is reported as what it is
+        let later = now + Duration::from_secs(120);
+        mappings.map(at(MEDIA), Keep::Once, later);
+        assert_eq!(mappings.state(at(MEDIA)), Some(MappingState::Asking));
+        let second = drain(&mut mappings);
+        mappings.receive(
+            at(MEDIA),
+            at(SERVER),
+            &answer(&second[0].payload, at("203.0.113.7:52002")),
+            later,
+        );
+        assert_eq!(
+            events(&mut mappings),
+            vec![MappingEvent::Learned {
+                local: at(MEDIA),
+                public: at("203.0.113.7:52002"),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_ipv6_socket_reads_the_address_the_way_rfc_8489_masks_it() {
+        // the answer written out by hand from RFC 8489 §14.2 rather than
+        // with this tree's own builder: the port masked with the cookie's
+        // top sixteen bits, the address with the cookie and then the
+        // transaction id
+        const COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
+        let server = at("[2001:db8::1]:3478");
+        let local = at("[2001:db8:ffff::10]:40000");
+        let seen = at("[2001:db8:1234:5678:11:2233:4455:6677]:32853");
+        let now = Instant::now();
+        let mut mappings = Mappings::new(server, [7; 32]);
+        mappings.map(local, Keep::Once, now);
+        let sent = drain(&mut mappings);
+        assert_eq!(sent.len(), 1);
+        let request = &sent[0].payload;
+
+        let mut mask = Vec::from(COOKIE);
+        mask.extend_from_slice(request.get(8..20).expect("a whole header"));
+        let std::net::IpAddr::V6(ip) = seen.ip() else {
+            panic!("an IPv6 address");
+        };
+        let mut out = vec![0x01, 0x01, 0x00, 0x18];
+        out.extend_from_slice(&COOKIE);
+        out.extend_from_slice(request.get(8..20).expect("a whole header"));
+        out.extend_from_slice(&[0x00, 0x20, 0x00, 0x14, 0x00, 0x02]);
+        out.extend_from_slice(&(seen.port() ^ 0x2112).to_be_bytes());
+        out.extend(ip.octets().iter().zip(mask.iter()).map(|(a, m)| a ^ m));
+
+        assert!(mappings.receive(local, server, &out, now));
+        assert_eq!(
+            events(&mut mappings),
+            vec![MappingEvent::Learned {
+                local,
+                public: seen,
+            }]
         );
     }
 

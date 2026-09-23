@@ -75,7 +75,7 @@ chosen for it rather than for the general case.
 | Mechanism | Default | On the wire if turned on |
 |---|---|---|
 | ICE, in any role | **off** | **143 bytes** per candidate, at a floor of one, plus a round of checks before the first audio packet |
-| STUN | off | one 20-byte Binding request per socket, again every 25 s on the signalling socket; nothing on a request |
+| STUN | off | one 28-byte Binding request per socket (the header and FINGERPRINT), again every 25 s on the signalling socket; nothing on a request |
 | TURN | off | a 4-byte channel header per media packet |
 
 The 143 is measured, not estimated, and pinned by

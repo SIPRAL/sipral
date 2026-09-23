@@ -459,7 +459,8 @@ entry! {
             // the STUN server's answer about this socket, when the stack asks
             // one: the server's own address and a transaction this stack
             // started, or it goes on to the parser like anything else
-            if crate::nat::Nat::intercept(state, local, remote, datagram, now) {
+            let socket = crate::nat::Nat::socket_of(state, transport, local);
+            if crate::nat::Nat::intercept(state, socket, remote, datagram, now) {
                 return Ok(());
             }
             state

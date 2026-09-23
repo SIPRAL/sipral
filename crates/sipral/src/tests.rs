@@ -6569,3 +6569,62 @@ fn a_public_address_is_the_reflexive_candidate_and_the_default_one() {
         "the default destination is one of the candidates"
     );
 }
+
+#[cfg(feature = "stun")]
+#[test]
+fn an_answer_from_behind_the_nat_and_its_answer_to_a_later_offer_name_the_public_address() {
+    // the other side of the call: the end behind the NAT is the one called,
+    // so the public address goes into the answer, and into the answer this
+    // engine writes itself when the far end offers again
+    let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
+    let mut pair = Pair::new(catalog.clone());
+    let incoming = pair.ring();
+    let public: SocketAddr = "203.0.113.9:41010".parse().expect("an address");
+    let media = CallMedia::new(catalog, MediaConfig::default()).public_address(public);
+    pair.callee
+        .engine
+        .answer_with(
+            &mut pair.callee.agent,
+            incoming,
+            callee_media(),
+            media,
+            pair.now,
+        )
+        .expect("the answer goes");
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+
+    let answer = pair
+        .caller
+        .answer_received()
+        .expect("the caller saw the answer")
+        .to_string();
+    assert!(answer.contains("c=IN IP4 203.0.113.9\r\n"), "{answer}");
+    assert!(answer.contains("m=audio 41010 "), "{answer}");
+    assert!(
+        !answer.contains("192.0.2.2"),
+        "the private address leaked: {answer}"
+    );
+    let call = pair.caller.call().expect("the caller's side of the call");
+    assert_eq!(
+        pair.caller
+            .engine
+            .session(call)
+            .expect("the caller's media")
+            .destination(),
+        public
+    );
+
+    // a codec change is a re-offer the user agent has no answer of its own
+    // for, so the callee's engine writes that answer, and it must not fall
+    // back to the address the socket is bound to
+    let _ = change_codecs(&mut pair, call, &["PCMA"]);
+    let (_, answered) = last_described(&pair.caller).expect("the caller saw the change");
+    let answered = answered.to_string();
+    assert!(
+        answered.contains("a=rtpmap:8 PCMA"),
+        "not that answer: {answered}"
+    );
+    assert!(answered.contains("c=IN IP4 203.0.113.9\r\n"), "{answered}");
+    assert!(answered.contains("m=audio 41010 "), "{answered}");
+}

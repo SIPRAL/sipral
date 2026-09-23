@@ -299,6 +299,34 @@ impl Nat {
         active.signalling_out.pop_front()
     }
 
+    /// The socket a datagram handed in on `transport` arrived on, as far as
+    /// its STUN answer goes: the one that transport is kept mapped from.
+    ///
+    /// A datagram transport is one socket, and its number says which one
+    /// more surely than `to` does: an application that hands in a second
+    /// transport's datagrams by number alone leaves `to` meaning the address
+    /// the stack was created with, and the answer then has to reach the
+    /// transaction it answers rather than the main socket's. `arrived_on`
+    /// for a transport that is not kept mapped.
+    pub(crate) fn socket_of(
+        state: &StackState,
+        transport: TransportId,
+        arrived_on: SocketAddr,
+    ) -> SocketAddr {
+        state
+            .nat
+            .active
+            .as_ref()
+            .and_then(|active| {
+                active
+                    .signalling
+                    .iter()
+                    .find(|(_, id)| **id == transport)
+                    .map(|(address, _)| *address)
+            })
+            .unwrap_or(arrived_on)
+    }
+
     /// Whether a datagram that arrived on `local` from `from` was the STUN
     /// server's answer, which nothing else then reads.
     pub(crate) fn intercept(
@@ -547,6 +575,14 @@ impl Nat {
 
     pub(crate) const fn poll_signalling(_state: &mut StackState) -> Option<Transmit> {
         None
+    }
+
+    pub(crate) const fn socket_of(
+        _state: &StackState,
+        _transport: TransportId,
+        arrived_on: SocketAddr,
+    ) -> SocketAddr {
+        arrived_on
     }
 
     pub(crate) const fn intercept(
@@ -1288,6 +1324,111 @@ mod tests {
             signalling_out(stack).is_empty(),
             "no STUN request goes out on a stack that was not asked for one"
         );
+    }
+
+    #[test]
+    fn a_second_datagram_transport_is_mapped_by_its_own_answer() {
+        // a transport of the application's own beside the main one, whose
+        // datagrams are handed in by transport number alone, the way every
+        // SIP message on it is: the answer is that transport's socket's, and
+        // nobody else's
+        const SECOND: u32 = 2;
+        const SECOND_AT: &str = "192.0.2.10:5070";
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let _ = signalling_out(stack);
+        let status = unsafe {
+            crate::transport::sipral_stack_transport_bind(
+                stack,
+                SECOND,
+                crate::stack::SipralTransport::Udp as u32,
+                SECOND_AT.as_ptr().cast::<c_char>(),
+                SECOND_AT.len(),
+                ptr::null(),
+                0,
+                10,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        let mut buffers = Buffers::new();
+        let mut transmit = buffers.transmit();
+        let status = unsafe { sipral_stack_poll_transmit(stack, &raw mut transmit) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            transmit.transport, SECOND,
+            "it leaves by the transport it asks about"
+        );
+        let (request, destination, _) = buffers.taken(&transmit);
+        assert!(is_stun(&request));
+        assert_eq!(destination, SERVER);
+
+        let reply = answer(&request, "203.0.113.7:41070");
+        let status = unsafe {
+            sipral_stack_receive_datagram(
+                stack,
+                SECOND,
+                reply.as_ptr(),
+                reply.len(),
+                SERVER.as_ptr().cast::<c_char>(),
+                SERVER.len(),
+                ptr::null(),
+                0,
+                20,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = poll(stack, 20);
+        assert_eq!(
+            mapped(),
+            vec![Mapped {
+                mapping: SipralNatMapping::Learned as u32,
+                signalling: 1,
+                transport: SECOND,
+                accounts: 0,
+                local: SECOND_AT.to_owned(),
+                public: "203.0.113.7:41070".to_owned(),
+                previous: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_media_socket_named_again_waits_for_its_new_answer_and_hears_it() {
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 20),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 20);
+        assert_eq!(mapped().len(), 1);
+
+        // named again before any call used the answer: the same answer comes
+        // back, and the application waiting for the event still gets one
+        assert_eq!(map_media(stack, 30), SipralStatus::Ok);
+        let (status, _) = place(stack, account, &managed_config(), 35);
+        assert_eq!(
+            status,
+            SipralStatus::WrongState,
+            "the old answer is not lent to a call while the new one is asked"
+        );
+        let out = stun_out(stack);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 40),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 40);
+        let said = mapped();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].mapping, SipralNatMapping::Learned as u32);
+        assert_eq!(said[0].public, MEDIA_PUBLIC);
     }
 
     #[test]
