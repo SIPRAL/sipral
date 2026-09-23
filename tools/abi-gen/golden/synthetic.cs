@@ -447,7 +447,7 @@ internal static class NativeMethods
 {
     /// <summary>What the native library is called, before the
     /// platform puts its own prefix and suffix on it.</summary>
-    internal const string Library = "sipral";
+    internal const string Library = "sipral_ffi";
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_abi_check(uint major, uint minor);

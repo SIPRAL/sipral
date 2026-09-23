@@ -44,6 +44,9 @@ that header fields handed over in a list can be found in the message they went
 out in. The gate links both against the shared library and runs them on a JVM
 under `-Xcheck:jni`.
 
-The Gradle and AAR packaging is not in the tree yet. `docs/08-ffi.md` says what
-else the binding does not carry: the event payload union, and the two structs a
-caller part-fills with buffers, which still cross as addresses.
+There is no Gradle project in the tree: `scripts/package/aar.sh` assembles
+`sipral.aar` by hand instead, straight to Android's own archive format, with
+`libsipral_jni.so` linked against `libsipral_ffi.so` for each ABI beside
+`SipralAbi.kt`'s compiled classes. `docs/08-ffi.md` says what else the binding
+does not carry: the event payload union, and the two structs a caller
+part-fills with buffers, which still cross as addresses.

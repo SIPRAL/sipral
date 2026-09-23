@@ -275,7 +275,7 @@ fn native(surface: &Surface) -> Result<String, Refused> {
          internal static class NativeMethods\n{\n\
          \x20   /// <summary>What the native library is called, before the\n\
          \x20   /// platform puts its own prefix and suffix on it.</summary>\n\
-         \x20   internal const string Library = \"sipral\";\n\n",
+         \x20   internal const string Library = \"sipral_ffi\";\n\n",
     );
     for (function, read) in functions(surface)? {
         let parts = roles(surface, &read);

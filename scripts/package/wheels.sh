@@ -165,6 +165,24 @@ DISTDIR=$(find "$UNPACKED" -mindepth 1 -maxdepth 1 -type d | head -1)
 cp "$NATIVE_PATH" "$DISTDIR/sipral/$NATIVE"
 pass "$NATIVE placed in $(basename "$DISTDIR")/sipral/"
 
+# hatchling built this wheel pure -- Root-Is-Purelib: true, meaning pip
+# installs it into purelib. It is not pure any more: a platform's native
+# library now sits beside sipral, and `wheel tags` below only ever changes
+# the filename's tag, never this line. On every venv this is tested against,
+# purelib and platlib are one directory, so the wrong flag does not show up
+# there; on a host where they differ (a multiarch Linux distutils install is
+# the common one), it would still install to the wrong tree.
+WHEEL_METADATA=$(find "$DISTDIR" -maxdepth 1 -name '*.dist-info' -print -quit)/WHEEL
+if [ -f "$WHEEL_METADATA" ] && grep -q '^Root-Is-Purelib: true$' "$WHEEL_METADATA"; then
+    sed 's/^Root-Is-Purelib: true$/Root-Is-Purelib: false/' "$WHEEL_METADATA" >"$WHEEL_METADATA.new" \
+        && mv "$WHEEL_METADATA.new" "$WHEEL_METADATA" \
+        && pass "Root-Is-Purelib: false, now that a native is bundled in" \
+        || fail "could not flip Root-Is-Purelib in $WHEEL_METADATA"
+else
+    fail "$WHEEL_METADATA has no 'Root-Is-Purelib: true' line to flip"
+fi
+[ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
+
 REPACKED="$STAGE/repacked"
 mkdir -p "$REPACKED"
 "$VENV_PY" -m wheel pack "$DISTDIR" --dest-dir "$REPACKED" >"$STAGE/pack.log" 2>&1 \

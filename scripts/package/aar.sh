@@ -2,19 +2,22 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Tiberiu Balasea
 #
-# The Android artefact: sipral.aar, carrying libsipral_ffi.so for
-# arm64-v8a, armeabi-v7a and x86_64 under jni/, and SipralAbi.kt's and
-# sipral_jni.c's compiled classes over it.
+# The Android artefact: sipral.aar, carrying libsipral_ffi.so (the C ABI) and
+# libsipral_jni.so (the shim in bindings/kotlin/sipral/src/main/jni, linked
+# against it -- the one a JVM actually loads, per bindings/kotlin/README.md)
+# for arm64-v8a, armeabi-v7a and x86_64 under jni/, and SipralAbi.kt's
+# compiled classes over it.
 #
 #   scripts/package/aar.sh collect-natives --out DIR
 #       needs Docker: builds the three ABIs with cargo-ndk inside a
 #       container that installs the Android NDK itself (neither ships on
-#       this workspace's machines), and writes
-#       DIR/jni/<abi>/libsipral_ffi.so
+#       this workspace's machines), links sipral_jni.c against each with the
+#       same NDK's own clang, and writes DIR/jni/<abi>/libsipral_ffi.so and
+#       DIR/jni/<abi>/libsipral_jni.so
 #
 #   scripts/package/aar.sh assemble --out DIR --natives DIR [--dry-run] [--publish]
-#       compiles bindings/kotlin's two printed files with kotlinc, the same
-#       compiler check.sh already requires for them, and zips the result
+#       compiles bindings/kotlin's Kotlin with kotlinc, the same compiler
+#       check.sh already requires for it, and zips the result
 #       into sipral.aar over Android's own archive format (documented at
 #       developer.android.com/studio/projects/android-library#aar-contents
 #       -- a manifest, classes.jar, jni/<abi>/*.so, nothing Gradle-specific
@@ -42,6 +45,12 @@ note() { printf '  note  %s\n' "$1"; }
 step() { printf '\n%s\n' "$1"; }
 
 ABIS=(arm64-v8a armeabi-v7a x86_64)
+# The two natives every ABI directory carries: the C ABI itself, and the JNI
+# shim linked against it.
+NATIVE_LIBS=(libsipral_ffi.so libsipral_jni.so)
+# "<abi>:<NDK clang triple, minus the API suffix MIN_SDK appends>" -- what
+# collect-natives links that ABI's shim with, below.
+NDK_CLANG_TRIPLE=(arm64-v8a:aarch64-linux-android armeabi-v7a:armv7a-linux-androideabi x86_64:x86_64-linux-android)
 
 CMD="${1:-}"
 [ $# -ge 1 ] && shift
@@ -70,6 +79,9 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
 NDK_VERSION="r30" # developer.android.com/ndk/downloads, checked 2026-09-23
+MIN_SDK="21" # matches AndroidManifest.xml's minSdkVersion, below: cargo-ndk's
+             # own default target platform, and the floor the NDK's 64-bit
+             # ABIs (arm64-v8a, x86_64) require regardless.
 
 if [ "$CMD" = "collect-natives" ]; then
     step "collect-natives, via Docker"
@@ -89,7 +101,17 @@ if [ "$CMD" = "collect-natives" ]; then
             export ANDROID_NDK_HOME=/opt/android-ndk-$NDK_VERSION
             cargo install --quiet cargo-ndk --locked
             cd /work
-            cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o /out/jni build --release -p sipral-ffi" \
+            cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o /out/jni build --release -p sipral-ffi
+            LLVM_BIN=\$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+            for pair in ${NDK_CLANG_TRIPLE[*]}; do
+                abi=\${pair%%:*}
+                clang=\"\$LLVM_BIN/\${pair#*:}$MIN_SDK-clang\"
+                \"\$clang\" -shared -fPIC -O2 \
+                    -I/work/bindings/c/include \
+                    -o /out/jni/\$abi/libsipral_jni.so \
+                    /work/bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
+                    -L/out/jni/\$abi -lsipral_ffi -Wl,-soname,libsipral_jni.so
+            done" \
         >"$OUT/collect-natives.log" 2>&1; then
         pass "container run"
     else
@@ -98,13 +120,15 @@ if [ "$CMD" = "collect-natives" ]; then
     fi
     step "structure"
     for abi in "${ABIS[@]}"; do
-        f="$OUT/jni/$abi/libsipral_ffi.so"
-        if [ -f "$f" ]; then
-            size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
-            pass "jni/$abi/libsipral_ffi.so ($size bytes)"
-        else
-            fail "jni/$abi/libsipral_ffi.so was not produced"
-        fi
+        for lib in "${NATIVE_LIBS[@]}"; do
+            f="$OUT/jni/$abi/$lib"
+            if [ -f "$f" ]; then
+                size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+                pass "jni/$abi/$lib ($size bytes)"
+            else
+                fail "jni/$abi/$lib was not produced"
+            fi
+        done
     done
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'aar.sh collect-natives: done, %s\n' "$OUT"; exit 0; }
@@ -161,21 +185,31 @@ pass "AndroidManifest.xml"
 step "natives, from $NATIVES"
 populated=0
 for abi in "${ABIS[@]}"; do
-    src="$NATIVES/jni/$abi/libsipral_ffi.so"
     dest="$STAGE/aar/jni/$abi"
     mkdir -p "$dest"
-    if [ -f "$src" ]; then
-        cp "$src" "$dest/libsipral_ffi.so"
+    have=0
+    for lib in "${NATIVE_LIBS[@]}"; do
+        [ -f "$NATIVES/jni/$abi/$lib" ] && have=$((have + 1))
+    done
+    if [ "$have" -eq "${#NATIVE_LIBS[@]}" ]; then
+        for lib in "${NATIVE_LIBS[@]}"; do
+            cp "$NATIVES/jni/$abi/$lib" "$dest/$lib"
+        done
         pass "$abi"
         populated=$((populated + 1))
-    elif [ "$DRY_RUN" -eq 1 ]; then
+    elif [ "$have" -eq 0 ] && [ "$DRY_RUN" -eq 1 ]; then
         note "$abi: no native staged, layout only (jni/$abi/ created empty)"
+    elif [ "$have" -eq 0 ]; then
+        fail "$abi: no native at $NATIVES/jni/$abi/ (run collect-natives first)"
     else
-        fail "$abi: no native at $src (run collect-natives first)"
+        # A shim without the ABI it calls into, or the reverse, is a native
+        # nothing can load -- worse than shipping neither, so this fails
+        # even under --dry-run rather than passing as partial layout.
+        fail "$abi: only some of ${NATIVE_LIBS[*]} staged at $NATIVES/jni/$abi/ (run collect-natives again)"
     fi
 done
 [ "$FAIL" -ne 0 ] && { printf '\naar.sh: failed\n'; exit 1; }
-[ "$populated" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && { fail "no ABI had a native staged"; printf '\naar.sh: failed\n'; exit 1; }
+[ "$populated" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && { fail "no ABI had its natives staged"; printf '\naar.sh: failed\n'; exit 1; }
 
 step "the archive"
 AAR="$OUT/sipral.aar"
@@ -188,10 +222,12 @@ if [ -f "$AAR" ]; then
         printf '%s\n' "$listing" | grep -q "$entry" && pass "carries $entry" || fail "missing $entry"
     done
     for abi in "${ABIS[@]}"; do
-        [ -f "$NATIVES/jni/$abi/libsipral_ffi.so" ] || continue
-        printf '%s\n' "$listing" | grep -q "jni/$abi/libsipral_ffi.so" \
-            && pass "carries jni/$abi/libsipral_ffi.so" \
-            || fail "missing jni/$abi/libsipral_ffi.so"
+        for lib in "${NATIVE_LIBS[@]}"; do
+            [ -f "$NATIVES/jni/$abi/$lib" ] || continue
+            printf '%s\n' "$listing" | grep -q "jni/$abi/$lib" \
+                && pass "carries jni/$abi/$lib" \
+                || fail "missing jni/$abi/$lib"
+        done
     done
 fi
 
