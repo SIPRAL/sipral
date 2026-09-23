@@ -58,7 +58,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)23)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)24)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -613,8 +613,8 @@ enum {
     /**
      * G.729 with Annex A, payload type 18: eight kilobits of narrowband
      * speech. In every build and in no default offer: a call offers it
-     * only when a codec order names `G729`, and it states `annexb=no`
-     * wherever it is offered or answered.
+     * only when a codec order names `G729`, and it states `annexb=no` in
+     * every offer and in every answer that chooses codecs.
      */
     SIPRAL_CODEC_G729 = 5,
 };

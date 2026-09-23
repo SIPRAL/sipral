@@ -2908,6 +2908,69 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     assert!(quality.lost > 0, "the loss was not counted");
 }
 
+/// A far end that is not this stack answers an offer of G.729 on its static
+/// number alone, with no `a=rtpmap`, and says `annexb=yes` although the
+/// offer said no: the call still runs on G.729, the tone crosses, and each
+/// packet it loses is filled by the codec's own concealment rather than by
+/// silence. (A run of losses longer than the buffer's delay reads as the far
+/// end having stopped, for every codec alike; that is the jitter buffer's
+/// business, not this test's.)
+#[test]
+fn a_g729_answer_that_says_annexb_yes_still_carries_the_call_through_losses() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 18\r\na=fmtp:18 annexb=yes\r\n",
+    );
+    let mut sender = session(&theirs, &ours, now);
+    let mut receiver = session(&ours, &theirs, now);
+    assert_eq!(sender.codec(), Codec::G729);
+    assert_eq!(receiver.codec(), Codec::G729);
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut at = now;
+    let mut played = vec![0_i16; 160];
+    let mut heard = 0;
+    let mut concealed = 0;
+
+    for index in 0..60 {
+        tone(&mut samples, 8_000, &mut phase);
+        let datagram = sender
+            .capture(&samples, Instant::now())
+            .expect("it encodes")
+            .map(|out| out.payload.to_vec());
+        let lost = matches!(index, 30 | 38 | 45 | 52);
+        if let Some(mut datagram) = datagram
+            && !lost
+        {
+            assert_eq!(datagram.len(), 12 + 20, "two frames behind the header");
+            receiver.receive(
+                &mut datagram,
+                "192.0.2.2:40002".parse().expect("an address"),
+                at,
+            );
+        }
+        match receiver.playback(&mut played) {
+            Playback::Packet if index > 20 && loudness(&played) > 1_000 => heard += 1,
+            Playback::Concealed => {
+                concealed += 1;
+                assert!(
+                    loudness(&played) > 100,
+                    "a concealed G.729 frame came out silent, which is a click"
+                );
+            }
+            _ => {}
+        }
+        at += TICK;
+    }
+
+    assert!(heard > 20, "the tone was heard in only {heard} frames");
+    assert_eq!(concealed, 4, "each of the four lost packets is concealed");
+}
+
 /// A payload type nobody negotiated, and that is not the sibling G.711 law
 /// either, is dropped rather than decoded through the wrong table, which is
 /// loud distortion rather than quiet. The sibling law itself is

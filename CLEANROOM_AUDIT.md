@@ -139,7 +139,7 @@ decoder. What went into it, by source:
   Annex B's voice activity detector, which is not here.
 - **The trained tables, and one exception to the four lines above.** The
   LSP codebooks and MA predictors, the gain codebooks and their maps, the
-  interpolation filters and the encoder's preselection constants are
+  interpolation filter and the encoder's preselection constants are
   numbers the text does not print; it defers them to the software
   attachment. On counsel's advice and the owner's decision (23 September
   2026), those numbers — and nothing else — were copied out of the
@@ -148,7 +148,7 @@ decoder. What went into it, by source:
   that list and named from what the text calls each table;
   `g729/tables.rs` records which name came from which array, and every
   table with a formula in the text — the LP window, the lag window, the
-  cosine grid, the interpolation filters — is checked against the formula.
+  cosine grid, the interpolation filter — is checked against the formula.
   The rest of the attachment, the C source included, was never opened,
   listed or searched.
 - **The conformance streams.** Where the text leaves the fixed-point

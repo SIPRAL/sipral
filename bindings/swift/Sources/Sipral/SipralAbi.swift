@@ -234,8 +234,8 @@ public enum SipralCodec: UInt32, Sendable {
     case opus = 4
     /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
     /// speech. In every build and in no default offer: a call offers it
-    /// only when a codec order names `G729`, and it states `annexb=no`
-    /// wherever it is offered or answered.
+    /// only when a codec order names `G729`, and it states `annexb=no` in
+    /// every offer and in every answer that chooses codecs.
     case g729 = 5
 }
 
@@ -1442,7 +1442,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 23
+    public static let abiVersionMinor: UInt32 = 24
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0

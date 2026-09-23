@@ -1142,6 +1142,13 @@ The pipeline between the codec and whatever produces or consumes samples.
   so a twenty-millisecond frame is 320 samples, 160 octets and 160 timestamp
   ticks. Any code that keeps one constant for "samples in a frame" and "ticks
   in a frame" is correct for G.711 and wrong here.
+- **Echo cancellation, gain control, noise suppression** are attached at a seam,
+  not implemented here. This is signal processing research, it exists under a
+  permissive licence, and rewriting it would buy nothing that a customer pays
+  for. What that costs is described below, because a seam nothing can reach is
+  not a seam.
+- **Voice activity detection and comfort noise**, needed by the jitter buffer's
+  adjustment schedule and by silence suppression where a carrier expects it.
 
 ### G.729: the decoder, bit-exact against Annex A
 
@@ -1301,13 +1308,6 @@ G.113 rates G.729 in Table I.4 only with Annex B, so `Codec::quality_model`
 answers `None` for it, the way it does for G.722: an XR VoIP Metrics report
 on a G.729 call carries the R factor and MOS "unavailable" sentinel rather
 than numbers for a codec this build does not carry.
-- **Echo cancellation, gain control, noise suppression** are attached at a seam,
-  not implemented here. This is signal processing research, it exists under a
-  permissive licence, and rewriting it would buy nothing that a customer pays
-  for. What that costs is described below, because a seam nothing can reach is
-  not a seam.
-- **Voice activity detection and comfort noise**, needed by the jitter buffer's
-  adjustment schedule and by silence suppression where a carrier expects it.
 
 ### Opus is behind a feature, and the feature is on
 

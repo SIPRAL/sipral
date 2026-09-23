@@ -346,8 +346,8 @@ enum class SipralCodec(val value: Int) {
     /**
      * G.729 with Annex A, payload type 18: eight kilobits of narrowband
      * speech. In every build and in no default offer: a call offers it
-     * only when a codec order names `G729`, and it states `annexb=no`
-     * wherever it is offered or answered.
+     * only when a codec order names `G729`, and it states `annexb=no` in
+     * every offer and in every answer that chooses codecs.
      */
     G729(5),
     ;
@@ -4770,7 +4770,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 23)
+        agree(0, 24)
     }
 
     /**
@@ -4919,7 +4919,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 23
+    const val ABI_VERSION_MINOR: Long = 24
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.

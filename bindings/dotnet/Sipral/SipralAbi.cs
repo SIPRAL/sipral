@@ -327,8 +327,8 @@ public enum SipralCodec : uint
     /// <summary>
     /// G.729 with Annex A, payload type 18: eight kilobits of narrowband
     /// speech. In every build and in no default offer: a call offers it
-    /// only when a codec order names `G729`, and it states `annexb=no`
-    /// wherever it is offered or answered.
+    /// only when a codec order names `G729`, and it states `annexb=no` in
+    /// every offer and in every answer that chooses codecs.
     /// </summary>
     G729 = 5,
 }
@@ -4866,7 +4866,7 @@ public static class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 23;
+    public const uint AbiVersionMinor = 24;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
