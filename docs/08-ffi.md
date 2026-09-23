@@ -1174,6 +1174,20 @@ with no `_len` after it, a struct or a union held by value — stops the
 generator, rather than crossing as an address nobody on the Kotlin side has a
 way to make.
 
+**A struct the library hands to a listener can carry a buffer the listener is
+expected to fill, as well as ones it only reads** — `sipral_processor_frame_t`
+is the one declaration that does, `near_end` and `far_end` read, `out` filled.
+A `const` pointer and its `_len` cross in as an array copied from the native
+side before the call, the same as a struct going in; a writable one crosses as
+a fresh array the size the native side says, left zeroed rather than copied
+in, because there is nothing on that side yet for the native side to say. Once
+the listener has had its chance to write into it, the landing function copies
+it back into the native buffer it stands for — before that array's own local
+reference is deleted, and whether or not the listener threw, since `New*Array`
+already zeroed it and a listener that threw partway through a frame is meant
+to hand back silence rather than whatever the last frame happened to leave in
+a scratch buffer nobody re-zeroed for it.
+
 **The listener never leaves the JVM.** `SipralEventListeners` keeps each
 listener under a key, and the key is all C sees, as `event_user_data`, beside a
 C function the shim prints for the callback to land in. That function attaches
