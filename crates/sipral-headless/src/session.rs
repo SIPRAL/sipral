@@ -569,7 +569,9 @@ mod tests {
         session.push_capture(tagged(2)).expect("second fits");
         assert_eq!(session.capture_dropped(), 0);
         // the queue is full: frame 1, the oldest, is the one that goes
-        session.push_capture(tagged(3)).expect("third displaces the oldest");
+        session
+            .push_capture(tagged(3))
+            .expect("third displaces the oldest");
         assert_eq!(session.capture_depth(), 2);
         assert_eq!(session.capture_dropped(), 1);
         assert_eq!(session.pop_capture(), Some(tagged(2)));
@@ -580,10 +582,14 @@ mod tests {
     #[test]
     fn a_zero_capacity_queue_drops_every_frame_from_the_first_and_counts_each_one() {
         let mut session = session(0, 0);
-        session.push_playback(frame()).expect("accepted, then dropped");
+        session
+            .push_playback(frame())
+            .expect("accepted, then dropped");
         assert_eq!(session.playback_depth(), 0);
         assert_eq!(session.playback_dropped(), 1);
-        session.push_playback(frame()).expect("accepted, then dropped");
+        session
+            .push_playback(frame())
+            .expect("accepted, then dropped");
         assert_eq!(session.playback_dropped(), 2);
     }
 
@@ -608,7 +614,9 @@ mod tests {
         // most recent run of frames rather than whatever arrived first
         let mut session = session(2, 2);
         for n in 0..5_u8 {
-            session.push_capture(tagged(n)).expect("accepted either way");
+            session
+                .push_capture(tagged(n))
+                .expect("accepted either way");
         }
         assert_eq!(session.capture_depth(), 2);
         assert_eq!(session.capture_dropped(), 3);

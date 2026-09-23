@@ -147,7 +147,11 @@ fn main() -> std::io::Result<()> {
                     println!(
                         "call {} {}",
                         activity.call_id,
-                        if activity.speaking { "speaking" } else { "quiet" }
+                        if activity.speaking {
+                            "speaking"
+                        } else {
+                            "quiet"
+                        }
                     );
                 }
                 Ok(_) => {}

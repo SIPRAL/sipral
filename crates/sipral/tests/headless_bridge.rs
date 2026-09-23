@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Account, CallHandle, CodecCatalog, DEFAULT_DIGIT, Digit, EndpointConfig, Event, MediaConfig,
-    MediaEngine, MediaEvent, OutgoingCall, UaEvent, UserAgent, Uri, WallClock,
+    MediaEngine, MediaEvent, OutgoingCall, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_headless::{AudioConfig, CallStateKind, DtmfReceived, SampleRate};
 
@@ -76,9 +76,9 @@ fn codecs() -> CodecCatalog {
 }
 
 /// One event off the agent's own SIP stack: `call_state_of` against it
-/// first (whichever call it turns out to be about), then this test's own
-/// setup — opening the `HeadlessSession` and answering on `IncomingCall`,
-/// and reading a dialled digit through `dtmf_received_of` on
+/// first (for this test's one call, or the call about to become it), then
+/// this test's own setup — opening the `HeadlessSession` and answering on
+/// `IncomingCall`, and reading a dialled digit through `dtmf_received_of` on
 /// `MediaEvent::DigitReceived`.
 #[allow(clippy::too_many_arguments)]
 fn handle_agent_event(
@@ -94,9 +94,10 @@ fn handle_agent_event(
     saw_answered: &mut bool,
 ) {
     if let Event::Signalling(sig) = event
-        && let Some(state) = sipral::call_state_of("call-1".to_owned(), sig)
+        && let Some((call, state)) = sipral::call_state_of(sig)
+        && agent_call.is_none_or(|known| known == call)
     {
-        match state.state {
+        match state {
             CallStateKind::Ringing => *saw_ringing = true,
             CallStateKind::Answered => {
                 *saw_answered = true;
@@ -192,7 +193,10 @@ fn drive_caller_call(
     if *up && !*dtmf_sent {
         if let Some(mut session) = caller_endpoint.engine.session(call) {
             session
-                .send_dtmf(Digit::from_char('5').expect("a keypad digit"), DEFAULT_DIGIT)
+                .send_dtmf(
+                    Digit::from_char('5').expect("a keypad digit"),
+                    DEFAULT_DIGIT,
+                )
                 .expect("this call negotiated named events");
         }
         *dtmf_sent = true;

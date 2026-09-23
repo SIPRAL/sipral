@@ -61,12 +61,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    Account, CallHandle, CodecCatalog, EndpointConfig, Event, MediaConfig, MediaEngine,
-    MediaEvent, StatusCode, UaEvent, UserAgent, Uri, WallClock,
+    Account, CallHandle, CodecCatalog, EndpointConfig, Event, MediaConfig, MediaEngine, MediaEvent,
+    StatusCode, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_headless::{
-    AudioConfig, CallStateKind, ControlMessage, Decoder, Decoded, IncomingCall, SampleRate,
-    SessionOpen, VoiceActivity, encode_audio, encode_control,
+    AudioConfig, CallState, CallStateKind, ControlMessage, Decoded, Decoder, IncomingCall,
+    SampleRate, SessionOpen, VoiceActivity, encode_audio, encode_control,
 };
 
 use udp_endpoint::Endpoint;
@@ -128,8 +128,7 @@ enum FromAgent {
 fn read_agent(mut stream: TcpStream) -> Receiver<FromAgent> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut decoder =
-            Decoder::new(session_audio()).expect("the fixed session audio is valid");
+        let mut decoder = Decoder::new(session_audio()).expect("the fixed session audio is valid");
         let mut buf = [0_u8; 4_096];
         loop {
             let read = match std::io::Read::read(&mut stream, &mut buf) {
@@ -213,7 +212,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let turn = Instant::now();
 
         for event in endpoint.pump(turn) {
-            handle_event(&mut endpoint, &mut bridge, &mut agent_up, &mut out, &event, turn);
+            handle_event(
+                &mut endpoint,
+                &mut bridge,
+                &mut agent_up,
+                &mut out,
+                &event,
+                turn,
+            );
         }
 
         if drain_agent(&reader, &mut endpoint, &mut bridge, turn).is_break() {
@@ -264,9 +270,9 @@ fn drain_agent(
                 if let Some(active) = bridge.as_ref().filter(|b| b.call_id == msg.call_id)
                     && let Some(mut media) = endpoint.engine.session(active.call)
                 {
-                    let duration = msg
-                        .duration_ms
-                        .map_or(sipral::DEFAULT_DIGIT, |ms| Duration::from_millis(u64::from(ms)));
+                    let duration = msg.duration_ms.map_or(sipral::DEFAULT_DIGIT, |ms| {
+                        Duration::from_millis(u64::from(ms))
+                    });
                     let _ = sipral::send_digit(&mut media, msg.digit, duration);
                 }
             }
@@ -322,6 +328,68 @@ fn drive_bridge(
     }
 }
 
+/// Takes an incoming call: its own RTP socket and `HeadlessSession`, the
+/// session's opening and the caller on the wire, then the answer.
+fn open_bridge(
+    endpoint: &mut Endpoint,
+    bridge: &mut Option<Bridge>,
+    out: &mut Vec<u8>,
+    call: CallHandle,
+    now: Instant,
+) {
+    let Ok(rtp) = UdpSocket::bind((endpoint.local.ip(), 0)) else {
+        return;
+    };
+    if rtp.set_nonblocking(true).is_err() {
+        return;
+    }
+    let Ok(local) = rtp.local_addr() else {
+        return;
+    };
+    let call_id = format!("{call:?}");
+    let Ok(session) =
+        sipral::HeadlessSession::open(call_id.clone(), session_audio(), CODEC_RATE, 50, 50)
+    else {
+        return;
+    };
+    *bridge = Some(Bridge {
+        call,
+        call_id: call_id.clone(),
+        rtp,
+        session,
+        ended: false,
+    });
+    let _ = encode_control(
+        &ControlMessage::SessionOpen(SessionOpen::new(session_audio().sample_rate())),
+        out,
+    );
+    // Who is calling comes out of the INVITE's own `From`, read while the
+    // call is still known to the agent.
+    let identity = endpoint.agent.call_identity(call);
+    let caller = identity.as_ref().map_or_else(String::new, |who| {
+        String::from_utf8_lossy(&who.from_uri).into_owned()
+    });
+    let display_name = identity
+        .as_ref()
+        .map(|who| String::from_utf8_lossy(&who.from_display).into_owned())
+        .filter(|name| !name.is_empty());
+    let _ = encode_control(
+        &ControlMessage::IncomingCall(IncomingCall {
+            call_id: call_id.clone(),
+            caller,
+            display_name,
+        }),
+        out,
+    );
+    if endpoint
+        .engine
+        .answer(&mut endpoint.agent, call, local, now)
+        .is_ok()
+    {
+        println!("answered {call_id}");
+    }
+}
+
 fn handle_event(
     endpoint: &mut Endpoint,
     bridge: &mut Option<Bridge>,
@@ -332,64 +400,25 @@ fn handle_event(
 ) {
     if let Event::Signalling(sig) = event
         && let Some(active) = bridge.as_ref()
-        && let Some(state) = sipral::call_state_of(active.call_id.clone(), sig)
+        && let Some((call, state)) = sipral::call_state_of(sig)
+        && call == active.call
     {
-        if matches!(state.state, CallStateKind::Answered) {
+        if matches!(state, CallStateKind::Answered) {
             *agent_up = true;
         }
-        let _ = encode_control(&ControlMessage::CallState(state), out);
+        let _ = encode_control(
+            &ControlMessage::CallState(CallState {
+                call_id: active.call_id.clone(),
+                state,
+            }),
+            out,
+        );
     }
     match event {
         Event::Signalling(UaEvent::IncomingCall { call, .. })
             if bridge.as_ref().is_none_or(|b| b.ended) =>
         {
-            let call = *call;
-            let Ok(rtp) = UdpSocket::bind((endpoint.local.ip(), 0)) else {
-                return;
-            };
-            if rtp.set_nonblocking(true).is_err() {
-                return;
-            }
-            let Ok(local) = rtp.local_addr() else {
-                return;
-            };
-            let call_id = format!("{call:?}");
-            let Ok(session) =
-                sipral::HeadlessSession::open(call_id.clone(), session_audio(), CODEC_RATE, 50, 50)
-            else {
-                return;
-            };
-            *bridge = Some(Bridge {
-                call,
-                call_id: call_id.clone(),
-                rtp,
-                session,
-                ended: false,
-            });
-            let _ = encode_control(
-                &ControlMessage::SessionOpen(SessionOpen::new(session_audio().sample_rate())),
-                out,
-            );
-            // The caller's own identity is not read out of the INVITE here —
-            // a real deployment reads it from `From`
-            // (`sipral_core::msg::OwnedMessage::from`) and names it below;
-            // this demo names the lab's own dialplan instead, since nothing
-            // in the lab reads it back.
-            let _ = encode_control(
-                &ControlMessage::IncomingCall(IncomingCall {
-                    call_id: call_id.clone(),
-                    caller: "sip:caller@lab".to_owned(),
-                    display_name: None,
-                }),
-                out,
-            );
-            if endpoint
-                .engine
-                .answer(&mut endpoint.agent, call, local, now)
-                .is_ok()
-            {
-                println!("answered {call_id}");
-            }
+            open_bridge(endpoint, bridge, out, *call, now);
         }
         // A second call while one is already bridged: this binary only
         // ever drives one `Bridge` at a time (its own doc comment says so),
@@ -397,11 +426,13 @@ fn handle_event(
         Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
             let _ = endpoint.agent.reject(*call, StatusCode::BUSY_HERE, now);
         }
+        // Only the bridged call's own end stops its audio: the call refused
+        // just above ends too, and its end is not this one's.
         Event::Signalling(UaEvent::CallEnded { call, .. }) => {
             if let Some(active) = bridge.as_mut().filter(|b| b.call == *call) {
                 active.ended = true;
+                *agent_up = false;
             }
-            *agent_up = false;
         }
         Event::Media {
             call,

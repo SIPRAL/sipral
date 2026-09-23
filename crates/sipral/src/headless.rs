@@ -21,12 +21,12 @@
 use std::time::{Duration, Instant};
 
 use sipral_headless::{
-    AudioConfig, CallState, CallStateKind, DtmfDigit, DtmfReceived, Session as ProtocolSession,
-    read_samples, write_samples,
+    AudioConfig, CallStateKind, DtmfDigit, DtmfReceived, Session as ProtocolSession, read_samples,
+    write_samples,
 };
 use sipral_media::resample::{RateError, Resampler};
 use sipral_media::vad::{Activity, Vad};
-use sipral_ua::UaEvent;
+use sipral_ua::{CallHandle, UaEvent};
 
 use crate::{Datagram, Digit, MediaError, MediaSession};
 
@@ -283,23 +283,32 @@ fn accumulate(resampler: &mut Resampler, input: &[i16], scratch: &mut Vec<i16>) 
     scratch.truncate(start + produced);
 }
 
-/// The socket's own [`CallState`] for what `sipral_ua::UaEvent` just said
-/// about `call_id`'s call, or `None` for every event that is not one of the
-/// three transitions the protocol names on the wire — session-local `Held`
-/// has no wire counterpart, per [`sipral_headless::SessionState`]'s own
-/// documentation, and every other `UaEvent` is not about a call's own
-/// lifecycle at all.
+/// Which call a `sipral_ua::UaEvent` is about, and the socket's own
+/// [`CallStateKind`] for what it says, or `None` for every event that is not
+/// one of the three transitions the protocol names on the wire —
+/// session-local `Held` has no wire counterpart, per
+/// [`sipral_headless::SessionState`]'s own documentation, and every other
+/// `UaEvent` is not about a call's own lifecycle at all.
+///
+/// The call comes back with the state because an agent's stack hears about
+/// every call on it, not only the one a session carries: a second INVITE
+/// refused while the first is up ends too, and its `CallEnded` is not the
+/// first call's. Compare the handle before putting a
+/// [`CallState`](sipral_headless::CallState) on the wire under a session's
+/// `call_id`.
 #[must_use]
-pub fn call_state_of(call_id: String, event: &UaEvent) -> Option<CallState> {
-    let state = match event {
-        UaEvent::IncomingCall { .. } => CallStateKind::Ringing,
-        UaEvent::CallConfirmed { .. } => CallStateKind::Answered,
-        UaEvent::CallEnded { reason, .. } => CallStateKind::Ended {
-            reason: Some(format!("{reason:?}")),
-        },
-        _ => return None,
-    };
-    Some(CallState { call_id, state })
+pub fn call_state_of(event: &UaEvent) -> Option<(CallHandle, CallStateKind)> {
+    match event {
+        UaEvent::IncomingCall { call, .. } => Some((*call, CallStateKind::Ringing)),
+        UaEvent::CallConfirmed { call, .. } => Some((*call, CallStateKind::Answered)),
+        UaEvent::CallEnded { call, reason, .. } => Some((
+            *call,
+            CallStateKind::Ended {
+                reason: Some(reason.to_string()),
+            },
+        )),
+        _ => None,
+    }
 }
 
 /// A digit `sipral::MediaEvent::DigitReceived` reported, as the socket's own
@@ -443,10 +452,7 @@ mod tests {
     fn set_codec_rate_rebuilds_the_filters_without_touching_the_protocol_state() {
         let mut session =
             HeadlessSession::open("call-1".to_owned(), audio(), 8_000, 4, 4).expect("same rate");
-        session
-            .protocol_mut()
-            .answer()
-            .expect("ringing to active");
+        session.protocol_mut().answer().expect("ringing to active");
         session
             .set_codec_rate(16_000)
             .expect("sixteen kilohertz bridges fine");
