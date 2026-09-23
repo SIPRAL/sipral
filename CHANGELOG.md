@@ -126,6 +126,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   §14.1 requires. `reoffer` and `change_formats` still answer
   `ChangeInProgress` in that window, and an ACK without the answer it owed
   no longer leaves the call waiting for one.
+- **Two re-offers that cross now both go through, and a refused offer no
+  longer skips an `o=` version.** The end waiting out a 491 refused the far
+  end's retry with a 491 of its own, although its INVITE was no longer in
+  progress (RFC 3261 §14.2), so when both ends pressed hold at once only one
+  hold ever arrived. That retry is now answered, and this end's own retry
+  waits for a far-end change still being answered. A hold or resume retried
+  after the far end's change is written again from the session that change
+  left, one version past the answer, instead of offering the old codec back;
+  an application's description is not sent over it and is reported as
+  `SessionChangeFailed`. A session-timer refresh told to wait goes again as a
+  refresh, with its `Session-Expires`, instead of as a plain re-INVITE that
+  asked for no timer and was reported as a session change. `reoffer`,
+  `change_formats` and `hold` refused before sending (a change in progress, a
+  call that cannot carry one) no longer use up a version, so the next offer
+  is one past the last one sent (RFC 3264 §8).
 - **The .NET binding no longer crashes the whole process over an
   exception thrown from an application's own `EventReceived` or
   `FrameDecoded` handler.** Both ran synchronously on the library's own

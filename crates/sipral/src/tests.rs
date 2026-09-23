@@ -3745,6 +3745,90 @@ fn printing_a_live_secured_stack_prints_no_key_material() {
     }
 }
 
+/// Run both ends' clocks forward a step at a time, moving what each writes to
+/// the other, for as long as `span` says.
+fn run_for(pair: &mut Pair, span: Duration) {
+    let end = pair.now + span;
+    while pair.now < end {
+        pair.now += Duration::from_millis(10);
+        pair.caller.agent.handle_timeout(pair.now);
+        pair.callee.agent.handle_timeout(pair.now);
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        pair.settle();
+    }
+}
+
+/// RFC 3261 §14.1's two ranges exist so that two ends whose offers crossed
+/// both get their change through: the end that did not generate the Call-ID
+/// tries again within two seconds, while the one that did is still waiting.
+#[test]
+fn two_holds_that_cross_both_go_through() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("the caller's hold");
+    pair.callee
+        .agent
+        .hold(remote, pair.now)
+        .expect("the callee's hold");
+    pair.caller.drain(pair.now, false);
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    run_for(&mut pair, Duration::from_secs(6));
+
+    let both = crate::Hold {
+        local: true,
+        remote: true,
+    };
+    assert_eq!(pair.caller.agent.hold_state(call), Some(both));
+    assert_eq!(pair.callee.agent.hold_state(remote), Some(both));
+}
+
+/// And a resume pressed at one end while the far end's hold of its own is
+/// crossing it: whatever collides, both ends settle where they were asked.
+#[test]
+fn a_resume_behind_a_crossed_hold_still_arrives() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("the caller's hold");
+    pair.callee
+        .agent
+        .hold(remote, pair.now)
+        .expect("the callee's hold");
+    pair.caller.agent.resume(call, pair.now).expect("waits");
+    pair.caller.drain(pair.now, false);
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    run_for(&mut pair, Duration::from_secs(12));
+
+    assert_eq!(
+        pair.caller.agent.hold_state(call),
+        Some(crate::Hold {
+            local: false,
+            remote: true
+        })
+    );
+    assert_eq!(
+        pair.callee.agent.hold_state(remote),
+        Some(crate::Hold {
+            local: true,
+            remote: false
+        })
+    );
+}
+
 /// And the way back out, which is the half that was missing. The watchdog
 /// measures from the last packet that arrived; during a hold none do. A
 /// resume keeps the media address — only the direction attribute moves — so

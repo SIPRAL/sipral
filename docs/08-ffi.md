@@ -628,9 +628,15 @@ One session change runs in a call at a time (RFC 3261 §14.1). A
 `sipral_call_hold` or `sipral_call_resume` asked for while another is running
 — one of this end's not yet answered, or one of the far end's not yet answered
 here — succeeds and waits, and goes when that change is over; the last one
-asked for is the one that goes. `sipral_call_change_codecs` is refused with
+asked for is the one that goes, and one still waiting when the call ends goes
+with it, unsent. `sipral_call_change_codecs` is refused with
 `SIPRAL_STATUS_WRONG_STATE` instead, because the offer it writes is built from
-a session the running change is about to move.
+a session the running change is about to move. For the same reason a codec
+change told to wait by a 491 is not offered again if the far end's own change
+was answered in that wait: it ends in `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`
+with the call on the list the far end's change left, and can be asked for
+again. A hold or a resume in the same position goes again, written over the
+session as it now stands.
 
 **Two calls can be joined into a local conference of three.**
 `sipral_call_join(stack, call_a, call_b)` pairs two calls this stack already

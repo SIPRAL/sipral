@@ -427,9 +427,26 @@ pub(crate) struct Offer {
     pub(crate) held: bool,
     /// §14.1 says to attempt it once more, not to keep attempting it.
     pub(crate) retried: bool,
-    /// Whether this is a session-timer refresh rather than a change: the
-    /// session stays exactly as it is, and only the clock moves.
-    pub(crate) refresh: bool,
+    /// Who wrote it, which decides what goes when it is offered once more.
+    pub(crate) author: Author,
+    /// Whether the far end's own change was answered while this one waited
+    /// out a 491, leaving its description written against a session that
+    /// has moved since.
+    pub(crate) overtaken: bool,
+}
+
+/// Who wrote the description an offer of ours carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Author {
+    /// The application, through `reoffer` or `change_formats`: written
+    /// against the session as it stood, and not this layer's to rewrite.
+    Application,
+    /// This layer, from the session — a hold or a resume — so it can be
+    /// written again from the session as it stands.
+    Session,
+    /// This layer, as a session-timer refresh: the session stays exactly as
+    /// it is, and only the clock moves.
+    Refresh,
 }
 
 /// One the far end offered, waiting for the application to answer it.
@@ -507,6 +524,14 @@ impl Call {
     /// before that answer has arrived.
     pub(crate) const fn changing(&self) -> bool {
         self.offering.is_some() || self.answering.is_some() || self.session.answer_owed
+    }
+
+    /// The far end's change has just been answered, and an offer of ours
+    /// still waiting to go again was written before it.
+    pub(crate) const fn overtake(&mut self) {
+        if let Some(offer) = self.offering.as_mut() {
+            offer.overtaken = true;
+        }
     }
 
     pub(crate) fn outgoing(

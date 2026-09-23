@@ -5122,7 +5122,8 @@ object Sipral {
      * `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
      * `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` like any other. What waits
      * is the state asked for last, so a resume asked for behind a hold still
-     * on its way goes after it.
+     * on its way goes after it. One still waiting when the call ends is
+     * never sent, and `SIPRAL_EVENT_KIND_CALL_ENDED` is the last word on it.
      *
      * Safety
      *

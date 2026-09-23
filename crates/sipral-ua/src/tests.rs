@@ -4674,6 +4674,599 @@ fn a_hold_asked_for_during_a_session_refresh_goes_after_it() {
 }
 
 #[test]
+fn three_presses_behind_a_hold_on_its_way_send_the_last_one_once() {
+    // resume, hold, resume while the hold is unanswered: what waits is the
+    // last word, and it goes once, with the version one past the hold's
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    agent.resume(call, t0).expect("waits");
+    agent.hold(call, t0).expect("takes the resume back");
+    agent.resume(call, t0).expect("waits again");
+    assert!(transmits(&mut agent).is_empty());
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    let invites = invites_in(&transmits(&mut agent));
+    assert_eq!(invites.len(), 1, "one resume, not one per press");
+    let offer = body_of(&invites[0]);
+    assert!(offer.contains("a=sendrecv\r\n"), "{offer}");
+    assert!(offer.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"), "{offer}");
+
+    deliver(
+        &mut agent,
+        &answered(&invites[0], 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "nothing is left waiting once the resume is answered"
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
+}
+
+#[test]
+fn a_written_offer_refused_while_a_change_runs_does_not_use_up_a_version() {
+    // RFC 3264 §8: the version in a new offer "MUST increment by one from the
+    // previous SDP". An offer refused here before it was ever written on the
+    // wire was not said, so the one written again afterwards is the next
+    // number, not the one after it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    assert!(body_of(&reinvite).contains("o=- 1 2 IN IP4 192.0.2.1\r\n"));
+    assert_eq!(
+        agent.reoffer(call, RESUMED_ON_PCMA, t0),
+        Err(UaError::ChangeInProgress)
+    );
+    assert_eq!(
+        agent.change_formats(call, RESUMED_ON_PCMA, t0),
+        Err(UaError::ChangeInProgress)
+    );
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    transmits(&mut agent);
+    agent
+        .reoffer(call, RESUMED_ON_PCMA, t0)
+        .expect("nothing is running now");
+    let offer = body_of(&sent(&mut agent));
+    assert!(offer.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+#[test]
+fn a_hold_refused_before_it_could_go_does_not_use_up_a_version() {
+    // a call still ringing, to a far end that never allowed UPDATE, cannot
+    // carry a hold at all (RFC 3311 §4); the refusal comes before anything
+    // is written, so the next offer is still one past the last one said
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 183, "Session Progress", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(agent.hold(call, t0), Err(UaError::CannotRenegotiate));
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    agent.hold(call, t0).expect("the call is up");
+    let offer = body_of(&sent(&mut agent));
+    assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+/// Our hold, refused with a 491 and waiting out the interval §14.1 draws.
+fn hold_told_to_wait(
+    agent: &mut UserAgent,
+    account: AccountId,
+    now: Instant,
+) -> (CallHandle, Vec<u8>, Duration) {
+    let (call, ack) = call_up(agent, account, now);
+    agent.hold(call, now).expect("the re-INVITE goes");
+    let reinvite = sent(agent);
+    deliver(
+        agent,
+        &answered(&reinvite, 491, "Request Pending", "desk", None),
+        now,
+    );
+    transmits(agent);
+    let wait = events(agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => retry_in,
+            _ => None,
+        })
+        .expect("491 says to wait and try again");
+    (call, ack, wait)
+}
+
+#[test]
+fn the_far_ends_offer_in_the_wait_after_a_491_is_answered_not_refused() {
+    // 14.2 answers 491 to an INVITE that arrives "while an INVITE it had sent
+    // on that dialog is in progress". Ours was over the moment the 491 came
+    // back; the far end's own retry lands in the wait §14.1 drew for us, and
+    // refusing it would leave its change failed for good
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack, wait) = hold_told_to_wait(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "theirs", 2, Some(THEIR_HOLD)),
+        t0,
+    );
+    let answer = last(&mut agent);
+    assert!(
+        answer.starts_with(b"SIP/2.0 200 "),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(body_of(&answer).contains("o=- 1 3 IN IP4 192.0.2.1\r\n"));
+    deliver(&mut agent, &reversed(&ack, "ACK", "theirsack", 2, None), t0);
+    transmits(&mut agent);
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: true
+        })
+    );
+
+    agent.handle_timeout(t0 + wait);
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("our hold goes once more");
+    let offer = body_of(&again);
+    assert!(
+        offer.contains("o=- 1 4 IN IP4 192.0.2.1\r\n"),
+        "one past the answer written in the wait, never behind it: {offer}"
+    );
+    deliver(
+        &mut agent,
+        &answered(&again, 200, "OK", "desk", Some(THEIR_HOLD)),
+        t0 + wait,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        agent.hold_state(call),
+        Some(Hold {
+            local: true,
+            remote: true
+        })
+    );
+}
+
+/// The application's answer to `THEIR_NEW_CODEC`, one version past our hold.
+const OUR_PCMA_ANSWER: &[u8] = b"v=0\r\no=- 1 3 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
+t=0 0\r\nm=audio 8000 RTP/AVP 8\r\n";
+
+#[test]
+fn a_retry_due_while_the_far_ends_offer_waits_on_the_application_waits_too() {
+    // the retry after a 491 is a new INVITE, and 14.1 forbids one while the
+    // far end's is still in progress here; it waits rather than failing
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack, wait) = hold_told_to_wait(&mut agent, id, t0);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 2, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::Reoffer { .. })),
+        "the codec change reaches the application"
+    );
+
+    agent.handle_timeout(t0 + wait);
+    assert!(invites_in(&transmits(&mut agent)).is_empty());
+    assert!(
+        !events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChangeFailed { .. })),
+        "the hold is still on its way"
+    );
+
+    agent
+        .accept_reoffer(call, Some(OUR_PCMA_ANSWER), t0 + wait)
+        .expect("answered");
+    transmits(&mut agent);
+    let later = t0 + wait + Duration::from_secs(5);
+    agent.handle_timeout(later);
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes once the far end's change is over");
+    let offer = body_of(&again);
+    assert!(offer.contains("a=sendonly\r\n"), "{offer}");
+    assert!(
+        offer.contains("m=audio 8000 RTP/AVP 8\r\n"),
+        "written over the codec the far end moved the call to, not back to the old one: {offer}"
+    );
+    assert!(offer.contains("o=- 1 4 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+#[test]
+fn an_application_offer_told_to_wait_is_not_sent_over_a_change_made_in_the_wait() {
+    // the application's description was written against the session before
+    // the far end's change was answered; sent afterwards it would undo that
+    // change, so it is reported as not made, as a reoffer asked for while a
+    // change runs is refused
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    agent
+        .reoffer(call, RESUMED_ON_PCMA, t0)
+        .expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 491, "Request Pending", "desk", None),
+        t0,
+    );
+    transmits(&mut agent);
+    let wait = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => retry_in,
+            _ => None,
+        })
+        .expect("491 says to wait and try again");
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "theirs", 2, Some(THEIR_HOLD)),
+        t0,
+    );
+    assert!(last(&mut agent).starts_with(b"SIP/2.0 200 "));
+    deliver(&mut agent, &reversed(&ack, "ACK", "theirsack", 2, None), t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + wait);
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "the stale description does not go"
+    );
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            UaEvent::SessionChangeFailed {
+                status: None,
+                retry_in: None,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    agent
+        .reoffer(call, RESUMED_ON_PCMA, t0 + wait)
+        .expect("written again, it goes");
+    let offer = body_of(&sent(&mut agent));
+    assert!(offer.contains("o=- 1 4 IN IP4 192.0.2.1\r\n"), "{offer}");
+}
+
+#[test]
+fn a_refresh_told_to_wait_repeats_the_session_as_the_wait_left_it() {
+    // RFC 4028 §7.4 has a refresh offer the session unchanged. When the far
+    // end's own change was answered in the wait after a 491, "unchanged" is
+    // what that answer said — not what the refresh carried the first time,
+    // whose version is now behind it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    let ack = sent(&mut agent);
+    events(&mut agent);
+
+    let due = t0 + Duration::from_secs(300);
+    agent.handle_timeout(due);
+    let refresh = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh");
+    assert!(body_of(&refresh).contains("o=- 1 1 IN IP4 192.0.2.1\r\n"));
+    deliver(
+        &mut agent,
+        &answered(&refresh, 491, "Request Pending", "desk", None),
+        due,
+    );
+    transmits(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "theirs", 2, Some(THEIR_HOLD)),
+        due,
+    );
+    let answer = last(&mut agent);
+    assert!(answer.starts_with(b"SIP/2.0 200 "));
+    assert!(body_of(&answer).contains("o=- 1 2 IN IP4 192.0.2.1\r\n"));
+    deliver(
+        &mut agent,
+        &reversed(&ack, "ACK", "theirsack", 2, None),
+        due,
+    );
+    transmits(&mut agent);
+
+    agent.handle_timeout(due + Duration::from_secs(5));
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh goes once more");
+    let offer = body_of(&again);
+    assert!(offer.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"), "{offer}");
+    assert!(offer.contains("a=recvonly\r\n"), "{offer}");
+}
+
+#[test]
+fn a_refresh_due_while_a_hold_is_on_its_way_does_not_cross_it() {
+    // the other order: the session timer falls due with our hold still
+    // unanswered. A refresh then would be a second INVITE in progress
+    // (§14.1), so it waits a quarter of the interval and goes after the hold
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let pressed = t0 + Duration::from_secs(299);
+    agent.hold(call, pressed).expect("the hold goes");
+    let hold = invites_in(&transmits(&mut agent)).pop().expect("the hold");
+    agent.handle_timeout(t0 + Duration::from_secs(300));
+    let cseq = header(&hold, HeaderName::CSeq);
+    assert!(
+        invites_in(&transmits(&mut agent))
+            .iter()
+            .all(|again| header(again, HeaderName::CSeq) == cseq),
+        "the hold is retransmitted, and no refresh goes while it is in progress"
+    );
+
+    deliver(
+        &mut agent,
+        &timed(&hold, Some(THEIR_RECVONLY), "600;refresher=uac"),
+        t0 + Duration::from_secs(301),
+    );
+    transmits(&mut agent);
+    assert_eq!(agent.hold_state(call).map(|held| held.local), Some(true));
+    agent.handle_timeout(t0 + Duration::from_secs(450));
+    let refresh = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh goes once the hold is over");
+    assert_ne!(header(&refresh, HeaderName::CSeq), cseq);
+    assert!(
+        body_of(&refresh).contains("a=sendonly\r\n"),
+        "and repeats the held session"
+    );
+}
+
+#[test]
+fn an_ack_that_brings_no_answer_does_not_leave_the_next_hold_waiting_for_one() {
+    // §13.2.2.4 lets the answer to an offer in a 2xx travel only in the ACK.
+    // A peer that sends the ACK empty has not answered and never will, and a
+    // hold asked for afterwards goes at once instead of waiting forever
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(&mut agent, &reversed(&ack, "INVITE", "empty", 1, None), t0);
+    transmits(&mut agent);
+    deliver(&mut agent, &reversed(&ack, "ACK", "emptyack", 1, None), t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("nothing is running");
+    let hold = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes at once");
+    assert!(body_of(&hold).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn a_hold_waiting_on_a_call_hung_up_here_is_never_sent() {
+    // the application hangs up while its hold waits behind a change still
+    // on its way: the BYE ends the dialog, and nothing is offered into it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    agent.resume(call, t0).expect("waits");
+    agent.hangup(call, t0).expect("the BYE goes");
+    let written = transmits(&mut agent);
+    assert!(written.iter().any(|bytes| bytes.starts_with(b"BYE ")));
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "nothing is offered into a call that is ending"
+    );
+    assert!(agent.holds_waiting.is_empty());
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChangeFailed { .. })),
+        "the call's end is the last word on it, not a failed change: {seen:?}"
+    );
+}
+
+#[test]
+fn a_hold_waiting_on_a_call_the_far_end_hangs_up_is_never_sent() {
+    // the far end's BYE arrives while our resume waits behind our hold; the
+    // hold's 200 comes after it, and nothing goes into the dead dialog
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    agent.hold(call, t0).expect("the re-INVITE goes");
+    let reinvite = sent(&mut agent);
+    agent.resume(call, t0).expect("waits");
+    deliver(&mut agent, &reversed(&ack, "BYE", "bye", 2, None), t0);
+    transmits(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "nothing is offered into a call that has ended"
+    );
+    assert!(agent.holds_waiting.is_empty());
+    let seen = events(&mut agent);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, UaEvent::CallEnded { .. })),
+        "{seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChangeFailed { .. })),
+        "{seen:?}"
+    );
+    assert_eq!(agent.resume(call, t0), Err(UaError::NoSuchCall));
+}
+
+#[test]
+fn a_resume_behind_a_hold_told_to_wait_goes_after_the_retry_one_version_on() {
+    // hold, 491, resume pressed in the wait: the retry repeats the hold under
+    // its own version (nothing was said in between), and the resume follows
+    // it one past — never two resumes, never a skipped number
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _ack, wait) = hold_told_to_wait(&mut agent, id, t0);
+    agent.resume(call, t0).expect("waits behind the retry");
+    assert!(transmits(&mut agent).is_empty());
+
+    agent.handle_timeout(t0 + wait);
+    let retry = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes once more");
+    let offered = body_of(&retry);
+    assert!(offered.contains("a=sendonly\r\n"), "{offered}");
+    assert!(
+        offered.contains("o=- 1 2 IN IP4 192.0.2.1\r\n"),
+        "{offered}"
+    );
+
+    deliver(
+        &mut agent,
+        &answered(&retry, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0 + wait,
+    );
+    let resumes = invites_in(&transmits(&mut agent));
+    assert_eq!(resumes.len(), 1, "one resume");
+    let offered = body_of(&resumes[0]);
+    assert!(offered.contains("a=sendrecv\r\n"), "{offered}");
+    assert!(
+        offered.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"),
+        "{offered}"
+    );
+}
+
+#[test]
+fn a_refresh_told_to_wait_still_asks_for_the_session_timer() {
+    // RFC 4028 §7.4: a refresh carries Session-Expires, and it is a refresh
+    // on its second attempt as on its first. Sent again as a plain change it
+    // would ask for no timer, and its 2xx would be reported as a session
+    // change although nothing changed
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let due = t0 + Duration::from_secs(300);
+    agent.handle_timeout(due);
+    let refresh = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh");
+    assert!(!header(&refresh, HeaderName::SessionExpires).is_empty());
+    deliver(
+        &mut agent,
+        &answered(&refresh, 491, "Request Pending", "desk", None),
+        due,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let later = due + Duration::from_secs(5);
+    agent.handle_timeout(later);
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh goes once more");
+    assert_ne!(
+        header(&again, HeaderName::CSeq),
+        header(&refresh, HeaderName::CSeq)
+    );
+    assert_eq!(
+        header(&again, HeaderName::SessionExpires),
+        header(&refresh, HeaderName::SessionExpires),
+        "the second attempt is still a refresh"
+    );
+    assert_eq!(body_of(&again), body_of(&refresh), "the session, unchanged");
+
+    deliver(
+        &mut agent,
+        &timed(&again, Some(ANSWER), "600;refresher=uac"),
+        later,
+    );
+    transmits(&mut agent);
+    let seen = events(&mut agent);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChanged { .. })),
+        "a refresh changes nothing to report: {seen:?}"
+    );
+}
+
+#[test]
 fn a_call_answered_and_never_acknowledged_is_ended_with_a_bye() {
     // 13.3.1.4: "If the UAS generates a 2xx response and never receives an
     // ACK, it SHOULD generate a BYE to terminate the dialog." Nothing else

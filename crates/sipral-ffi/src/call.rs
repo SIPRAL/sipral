@@ -861,7 +861,8 @@ entry! {
     /// `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
     /// `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` like any other. What waits
     /// is the state asked for last, so a resume asked for behind a hold still
-    /// on its way goes after it.
+    /// on its way goes after it. One still waiting when the call ends is
+    /// never sent, and `SIPRAL_EVENT_KIND_CALL_ENDED` is the last word on it.
     ///
     /// # Safety
     ///
@@ -3968,6 +3969,77 @@ a=sendrecv\r\n";
     ) -> SipralStatus {
         let (codecs, codecs_len) = as_text(list);
         unsafe { sipral_call_change_codecs(stack, call, codecs, codecs_len, now_ms) }
+    }
+
+    /// The far end's answer to the resume that follows `HELD_ANSWER`.
+    const RESUMED_ANSWER: &[u8] = b"v=0\r\n\
+o=bob 1 3 IN IP4 203.0.113.5\r\n\
+s=-\r\n\
+c=IN IP4 203.0.113.5\r\n\
+t=0 0\r\n\
+m=audio 41000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+
+    #[test]
+    fn a_resume_from_c_behind_a_hold_still_on_its_way_goes_once_the_hold_is_answered() {
+        let mut observed = Observed::default();
+        let (handle, account) = media_line(&mut observed, |config| {
+            let (codecs, codecs_len) = as_text("PCMU,PCMA");
+            config.codecs = codecs;
+            config.codecs_len = codecs_len;
+        });
+        let (status, call) = place(handle, account, &managed_config(), 1_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let invite = one(handle);
+        deliver(handle, &accepted(&invite, ANSWER, true), 1_100);
+        poll(handle, 1_100);
+        let _ = sent(handle);
+
+        assert_eq!(
+            unsafe { sipral_call_hold(handle, call, 2_000) },
+            SipralStatus::Ok
+        );
+        let hold = one(handle);
+        assert_eq!(
+            unsafe { sipral_call_resume(handle, call, 2_010) },
+            SipralStatus::Ok,
+            "the resume is taken, to go after the hold"
+        );
+        assert_eq!(
+            change_codecs(handle, call, "PCMA", 2_020),
+            SipralStatus::WrongState,
+            "a codec change is refused while a change runs, never taken and lost"
+        );
+        assert!(sent(handle).is_empty(), "nothing crosses the hold");
+
+        deliver(handle, &accepted(&hold, HELD_ANSWER, false), 2_100);
+        poll(handle, 2_100);
+        let resume = sent(handle)
+            .into_iter()
+            .find(|message| start_line(message).starts_with("INVITE"))
+            .expect("the resume goes once the hold is answered");
+        let offered = String::from_utf8_lossy(&resume).into_owned();
+        assert!(offered.contains("a=sendrecv"), "{offered}");
+        assert_eq!(held_state(handle, call), (1, 0));
+
+        deliver(handle, &accepted(&resume, RESUMED_ANSWER, false), 2_200);
+        poll(handle, 2_200);
+        assert_eq!(held_state(handle, call), (0, 0));
+        let kinds = observed.kinds();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SipralEventKind::SessionChanged)
+                .count(),
+            2,
+            "{kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&SipralEventKind::SessionChangeFailed),
+            "{kinds:?}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     #[test]

@@ -31,7 +31,7 @@ use sipral_core::msg::{HeaderName, Method, Params, RawMessage, digits};
 use sipral_core::transaction::AnyTransactionId;
 
 use crate::agent::UserAgent;
-use crate::call::{CallHandle, Direction, Offer};
+use crate::call::{Author, CallHandle, Direction, Offer};
 
 /// §4: "1800 seconds (30 minutes) is RECOMMENDED as the value for the
 /// Session-Expires header field."
@@ -408,7 +408,7 @@ impl UserAgent {
                 .and_then(|held| held.timer)
                 .is_some_and(|timer| timer.is_ours());
             if ours {
-                self.send_refresh(call, now);
+                self.send_refresh(call, false, now);
             } else {
                 // §10: "it SHOULD send a BYE to terminate the session,
                 // slightly before the session expiration". Nothing has come
@@ -420,7 +420,12 @@ impl UserAgent {
     }
 
     /// Keep the session alive (§7.4).
-    fn send_refresh(&mut self, call: CallHandle, now: Instant) {
+    ///
+    /// `retried` when this is the second attempt RFC 3261 §14.1 allows after
+    /// a 491: it is built exactly as the first was — a refresh still carries
+    /// `Session-Expires` and still offers the session unchanged — and a
+    /// second 491 is reported rather than chased.
+    pub(crate) fn send_refresh(&mut self, call: CallHandle, retried: bool, now: Instant) {
         let Some(state) = self.calls.get(&call) else {
             return;
         };
@@ -528,8 +533,9 @@ impl UserAgent {
                 transaction: Some(transaction),
                 description: body,
                 held: held.session.hold.local,
-                retried: false,
-                refresh: true,
+                retried,
+                author: Author::Refresh,
+                overtaken: false,
             });
             if let Some(timer) = held.timer.as_mut() {
                 timer.rearm(now);

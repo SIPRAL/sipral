@@ -25,7 +25,9 @@
 //! **Glare.** Both ends pressing hold in the same instant is the ordinary way
 //! two offers cross. The refusal is a 491, the wait is drawn from two ranges
 //! that do not overlap, and the change is offered once more — §14.1 says "once
-//! more", not "until it works".
+//! more", not "until it works". The far end's own retry lands in that wait and
+//! is answered; the change offered once more is then written against the
+//! session it left.
 //!
 //! **One change at a time.** §14.1 forbids a new INVITE "while another INVITE
 //! transaction is in progress in either direction", and RFC 3264 §4 a new
@@ -49,10 +51,10 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::{Event, OutgoingInDialogRequest, OutgoingResponse};
 use sipral_core::msg::{HeaderName, Method, OwnedMessage, RawMessage, StatusCode};
 use sipral_core::sdp::{self, SessionDescription};
-use sipral_core::transaction::AnyTransactionId;
+use sipral_core::transaction::{AnyTransactionId, DialogId};
 
 use crate::agent::UserAgent;
-use crate::call::{Answering, CallHandle, CallState, Direction, Offer};
+use crate::call::{Answering, Author, CallHandle, CallState, Direction, Offer};
 use crate::error::UaError;
 use crate::event::UaEvent;
 use crate::headers::onto_request;
@@ -75,6 +77,17 @@ pub(crate) struct ParkedOffer {
     /// connection to send it over (§18.1.1). Until then this is not a refusal
     /// and `settle_offer_challenges` leaves it alone.
     pub(crate) waiting_for_stream: bool,
+}
+
+/// What an offer about to go asks for, besides the description it carries.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    /// The hold it asks for.
+    held: bool,
+    /// Whether it is the second attempt §14.1 allows after a 491.
+    retried: bool,
+    /// Who wrote the description.
+    author: Author,
 }
 
 /// What this agent will answer, advertised so that the far end knows an UPDATE
@@ -122,7 +135,8 @@ impl UserAgent {
     /// and the far end never advertised UPDATE, or [`UaError::Send`] — all
     /// of them when the request would go at once. One that waits and then
     /// cannot go is reported as [`UaEvent::SessionChangeFailed`] with no
-    /// status.
+    /// status, and one still waiting when the call ends is never sent:
+    /// [`UaEvent::CallEnded`] is the last word on it.
     pub fn hold(&mut self, call: CallHandle, now: Instant) -> Result<(), UaError> {
         self.change_hold(call, true, now)
     }
@@ -164,7 +178,10 @@ impl UserAgent {
     /// description was written against the session as it stands, which that
     /// change is about to move, so sending it afterwards would offer
     /// something nobody wrote; it is refused instead, and can be written
-    /// again once the running change is reported.
+    /// again once the running change is reported. For the same reason one
+    /// told to wait by a 491 is not offered again if the far end's own
+    /// change was answered in that wait: it is reported as
+    /// [`UaEvent::SessionChangeFailed`] with no status instead.
     ///
     /// # Errors
     /// As [`UserAgent::hold`], plus [`UaError::ChangeInProgress`] when a
@@ -172,13 +189,19 @@ impl UserAgent {
     /// [`UaError::Sdp`] when the description cannot be read.
     pub fn reoffer(&mut self, call: CallHandle, sdp: &[u8], now: Instant) -> Result<(), UaError> {
         let mut description = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
+        self.carrier(call)?;
         let held = {
             let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             state.session.stamp(&mut description);
             state.session.holds_them(&description)
         };
         let fields = self.application_headers(call);
-        self.send_offer(call, description, held, false, &fields, now)
+        let asked = Asked {
+            held,
+            retried: false,
+            author: Author::Application,
+        };
+        self.send_offer(call, description, asked, &fields, now)
     }
 
     /// Offer a change to what a call's streams carry — the formats, chiefly
@@ -206,6 +229,7 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let mut description = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
+        self.carrier(call)?;
         let held = {
             let state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
             state.session.stamp(&mut description);
@@ -214,7 +238,12 @@ impl UserAgent {
             held
         };
         let fields = self.application_headers(call);
-        self.send_offer(call, description, held, false, &fields, now)
+        let asked = Asked {
+            held,
+            retried: false,
+            author: Author::Application,
+        };
+        self.send_offer(call, description, asked, &fields, now)
     }
 
     /// Answer a [`UaEvent::Reoffer`] the far end sent.
@@ -287,6 +316,7 @@ impl UserAgent {
             if let Some(answer) = written {
                 held.session.set_local(answer);
             }
+            held.overtake();
         }
         self.report_session(call);
         self.drain(now);
@@ -327,8 +357,8 @@ impl UserAgent {
 
 impl UserAgent {
     fn change_hold(&mut self, call: CallHandle, held: bool, now: Instant) -> Result<(), UaError> {
-        let offer = {
-            let call_state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+        {
+            let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             if !call_state.session.has_local() {
                 return Err(UaError::NoSession);
             }
@@ -355,10 +385,40 @@ impl UserAgent {
             if heading == held {
                 return Ok(());
             }
-            call_state.session.offer(held).ok_or(UaError::NoSession)?
-        };
+        }
+        self.carrier(call)?;
+        let offer = self
+            .calls
+            .get_mut(&call)
+            .and_then(|call_state| call_state.session.offer(held))
+            .ok_or(UaError::NoSession)?;
         let fields = self.application_headers(call);
-        self.send_offer(call, offer, held, false, &fields, now)
+        let asked = Asked {
+            held,
+            retried: false,
+            author: Author::Session,
+        };
+        self.send_offer(call, offer, asked, &fields, now)
+    }
+
+    /// The request that would carry an offer in this call now, and the dialog
+    /// it goes in — or why none can.
+    ///
+    /// Asked before an offer is written as well as when it is sent, because
+    /// writing one moves the `o=` version and RFC 3264 §8 has each new offer
+    /// "increment by one from the previous SDP": an offer refused here was
+    /// never said, and the next one written must not skip a number for it.
+    fn carrier(&self, call: CallHandle) -> Result<(Method<'static>, DialogId), UaError> {
+        let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
+        if call_state.changing() {
+            return Err(UaError::ChangeInProgress);
+        }
+        let dialog = call_state.dialog.ok_or(UaError::CannotRenegotiate)?;
+        match call_state.state {
+            CallState::Confirmed | CallState::Consulting => Ok((Method::Invite, dialog)),
+            early if early.is_early() && call_state.update_allowed => Ok((Method::Update, dialog)),
+            _ => Err(UaError::CannotRenegotiate),
+        }
     }
 
     /// Send the holds and resumes that were waiting for a change to finish.
@@ -399,27 +459,11 @@ impl UserAgent {
         &mut self,
         call: CallHandle,
         offer: SessionDescription,
-        held: bool,
-        retried: bool,
+        asked: Asked,
         fields: &[crate::account::Extra],
         now: Instant,
     ) -> Result<(), UaError> {
-        let (state, dialog, allows_update) = {
-            let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            if call_state.changing() {
-                return Err(UaError::ChangeInProgress);
-            }
-            (
-                call_state.state,
-                call_state.dialog.ok_or(UaError::CannotRenegotiate)?,
-                call_state.update_allowed,
-            )
-        };
-        let method = match state {
-            CallState::Confirmed | CallState::Consulting => Method::Invite,
-            early if early.is_early() && allows_update => Method::Update,
-            _ => return Err(UaError::CannotRenegotiate),
-        };
+        let (method, dialog) = self.carrier(call)?;
 
         let contact = self.current_contact(call, now);
         let body: Arc<[u8]> = Arc::from(offer.to_bytes());
@@ -450,9 +494,10 @@ impl UserAgent {
             call_state.offering = Some(Offer {
                 transaction: Some(transaction),
                 description: Some(offer),
-                held,
-                retried,
-                refresh: false,
+                held: asked.held,
+                retried: asked.retried,
+                author: asked.author,
+                overtaken: false,
             });
         }
         self.by_offer.insert(transaction, call);
@@ -465,31 +510,75 @@ impl UserAgent {
     /// Or held back again, when §18.1.1 wants a stream for it: that retry has
     /// not been sent rather than refused, so it is not reported as a change
     /// that failed, and it goes once the stream is bound.
+    ///
+    /// The wait after a 491 does not hold the far end off, so its own change
+    /// may have arrived in it. One still being answered here is an INVITE in
+    /// progress, which §14.1 has this one wait for in turn. One already
+    /// answered has moved the session the retry was written against: a hold
+    /// or a resume is written again from the session as it now stands, one
+    /// `o=` version past the answer (RFC 3264 §8), and a refresh repeats it;
+    /// a description the application wrote would undo the far end's change,
+    /// so it is not sent and is reported as a change that failed, exactly as
+    /// [`UserAgent::reoffer`] refuses one while a change runs.
     pub(crate) fn retry_offer(&mut self, call: CallHandle, now: Instant) {
-        let Some(offer) = self
-            .calls
-            .get_mut(&call)
-            .and_then(|held| held.offering.take())
-        else {
+        let Some(held) = self.calls.get_mut(&call) else {
             return;
         };
-        let Some(description) = offer.description else {
+        if held.offering.is_none() {
+            return;
+        }
+        if held.answering.is_some() || held.session.answer_owed {
+            let owner = held.direction == Direction::Outgoing;
+            let wait = glare_backoff(owner, &self.endpoint.token());
+            if let Some(held) = self.calls.get_mut(&call) {
+                held.retry_at = Some(now + wait);
+            }
+            return;
+        }
+        let Some(offer) = held.offering.take() else {
             return;
         };
-        // a refresh is this layer's own message, and offering it again after a
-        // 491 does not make it the application's
-        let fields = if offer.refresh {
-            Vec::new()
-        } else {
-            self.application_headers(call)
+        if offer.author == Author::Refresh {
+            // a refresh is this layer's own message, and it is a refresh on
+            // its second attempt too: RFC 4028 §7.4's Session-Expires, and
+            // the session as it stands now, unchanged
+            self.send_refresh(call, true, now);
+            return;
+        }
+        let description = match offer.description {
+            // nothing has been said since: the same bytes under the same
+            // version, which is what §8 means by an unchanged number
+            Some(ref description) if !offer.overtaken => Some(description.clone()),
+            // asked first, because writing one moves the version
+            Some(_) if offer.author == Author::Session && self.carrier(call).is_ok() => self
+                .calls
+                .get_mut(&call)
+                .and_then(|held| held.session.offer(offer.held)),
+            _ => None,
         };
-        match self.send_offer(call, description.clone(), offer.held, true, &fields, now) {
+        let Some(description) = description else {
+            self.events.push_back(UaEvent::SessionChangeFailed {
+                call,
+                status: None,
+                retry_in: None,
+                response: None,
+            });
+            return;
+        };
+        let fields = self.application_headers(call);
+        let asked = Asked {
+            held: offer.held,
+            retried: true,
+            author: offer.author,
+        };
+        match self.send_offer(call, description.clone(), asked, &fields, now) {
             Ok(()) => {}
             Err(ref error) if call_needs_a_stream(error) => {
                 let dialog = self.calls.get_mut(&call).and_then(|held| {
                     held.offering = Some(Offer {
                         transaction: None,
                         description: Some(description),
+                        overtaken: false,
                         ..offer
                     });
                     held.dialog
@@ -751,7 +840,7 @@ impl UserAgent {
         held.retry_at = None;
         // a session-timer refresh changes nothing but the clock (RFC 4028
         // §7.4), so there is no session to commit and nothing to report
-        if offer.refresh {
+        if offer.author == Author::Refresh {
             return;
         }
         if let Some(description) = offer.description {
@@ -1007,12 +1096,17 @@ impl UserAgent {
         // one of ours earns a 491, and one that arrives while an earlier offer
         // of theirs is still unanswered earns a 500 saying when to come back.
         // A re-INVITE with no description is not exempt — §14.1 has it ask
-        // *this* end to offer, which is the same exchange starting over
-        if self
-            .calls
-            .get(&call)
-            .is_some_and(|held| held.offering.is_some())
-        {
+        // *this* end to offer, which is the same exchange starting over.
+        // Ours crosses only while it is on the wire: §14.2's 491 is for an
+        // INVITE "in progress", and one already refused with a 491 is over.
+        // The far end's retry lands in exactly that wait — §14.1 draws the
+        // two ends' intervals so that it does — and refusing it would leave
+        // its change failed for good
+        if self.calls.get(&call).is_some_and(|held| {
+            held.offering
+                .as_ref()
+                .is_some_and(|offer| offer.transaction.is_some())
+        }) {
             let pending = OutgoingResponse::new(StatusCode::REQUEST_PENDING);
             self.answer_with(call, transaction, &pending, now).ok();
             return;
@@ -1100,6 +1194,7 @@ impl UserAgent {
         if let Some(held) = self.calls.get_mut(&call) {
             held.session.set_remote(offer.clone());
             held.session.set_local(answer);
+            held.overtake();
         }
         self.report_session(call);
         true
@@ -1130,6 +1225,7 @@ impl UserAgent {
         if let (Some(held), Some(description)) = (self.calls.get_mut(&call), offered) {
             held.session.set_local(description);
             held.session.answer_owed = true;
+            held.overtake();
         }
     }
 
