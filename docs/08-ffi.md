@@ -1174,6 +1174,41 @@ What is not printed: the native assets for `osx-arm64`, `osx-x64`, `win-x64`,
 event streams, and the `SafeHandle` that makes a missed `Dispose` a leak rather
 than a crash.
 
+`SipralStack`, `Account`, `Call` and `CallMedia`, in `bindings/dotnet/Sipral/`,
+are written against `NativeMethods`/`Sipral` by hand, the way
+`sipral.stack.Stack` is the base the Python package is written against.
+Every handle a call or an application holds is a `SafeHandle` subclass
+(`bindings/dotnet/Sipral/Handles.cs`), so a missed `Dispose` releases on a
+finalizer rather than leaking, and a double `Dispose` is the no-op
+`SafeHandle`'s own reference count already makes it. A `SipralStack` owns
+one UDP socket and one background poll thread — the same drain-receive,
+poll, drain-transmit, drain-farewell loop `bindings/python/sipral/stack.py`
+runs, kept alive as a GC root by the thread's own closure over it rather
+than a separate keep-alive list — and delivers events two ways: an ordinary
+C# `event` fired synchronously on the poll thread for a handler that wants
+to run there, and an unbounded `Channel<T>`-backed `IAsyncEnumerable<T>`
+(`SipralStack.Events`, `Call.Events`, `Call.Dtmf`, `CallMedia.Frames`) for
+an `await foreach` consumer, matching `docs/08-ffi.md`'s own "Events arrive
+on one callback" for the first and staying off that thread entirely for the
+second. `SipralErrors.Call` retries an ordinary `SIPRAL_STATUS_BUSY` for up
+to half a second, the same allowance `sipral.errors.call` gives it, and
+also retries the signalling clock's own "more than the ABI's slack behind
+this stack's last reading" `SIPRAL_STATUS_INVALID_ARGUMENT` — this layer
+always reads `now_ms` fresh right before the call, so what beat it there is
+the OS scheduler on the calling thread, not a stale value, and the stack's
+high-water mark only ever advances, so a retry with a later reading is
+never refused for the same reason twice. `Call.WaitForConfirmedAsync` and
+`Call.WaitForMediaAsync` are the `Task`-based surface the ABI completes
+through events rather than a return value. `PlaybackOnce`, `Capture` and
+`SendAudio` cross PCM as `Span<short>`/`ReadOnlySpan<short>`, never a
+managed array copy the caller did not already own.
+`bindings/dotnet/Sipral.Tests` is what `scripts/check.sh`'s `the dotnet
+bindings` step runs: two stacks on loopback proving the same shape
+`bindings/python/tests/test_call.py` proves, plus the threading rules
+`docs/08-ffi.md` states for every binding — events on the poll thread and
+not the caller's, `BUSY` surfaced rather than blocked on, and no
+use-after-free disposing a stack while events are still queued behind it.
+
 ## Kotlin
 
 Two printed files, because Android has no way to call C but JNI:

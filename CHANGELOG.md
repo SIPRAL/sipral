@@ -96,6 +96,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   place a call, answer, exchange RTP while idle, hold, resume, send DTMF,
   hang up, and check that both a media and a stack handle answer
   `SIPRAL_STATUS_STALE_HANDLE` once closed.
+- **The .NET binding gets its idiomatic layer.** `bindings/dotnet/Sipral`
+  writes `SipralStack`, `Account`, `Call` and `CallMedia` by hand over the
+  generated `SipralAbi.cs`, the way the Python binding already writes
+  `Stack`/`Account`/`Call` over its own generated file: every handle a
+  `SafeHandle` subclass, events as both an ordinary C# `event` on the poll
+  thread and an `IAsyncEnumerable<T>` off it, `Task`-returning helpers for
+  what the ABI completes through events, and PCM crossing as
+  `Span<short>`/`ReadOnlySpan<short>`. Proved against the real ABI on
+  loopback the way every binding's own tests prove it, including the
+  threading rules — events on the poll thread, `BUSY` surfaced rather than
+  blocked on, no use-after-free disposing a stack with events still
+  queued. A headless sample agent (`samples/Sipral.Sample.Agent`) answers,
+  echoes and hangs up on `"#"`, runs in the interop lab as
+  `labuser-agent-csharp`, and doubles as a runnable example; a skeleton WPF
+  sample (`samples/Sipral.Sample.Wpf`) covers registration, a call,
+  hold/resume and DTMF.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

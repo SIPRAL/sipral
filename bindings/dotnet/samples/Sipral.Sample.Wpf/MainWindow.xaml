@@ -1,0 +1,41 @@
+<Window x:Class="SipralSample.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sipral sample" Height="480" Width="420">
+    <StackPanel Margin="12">
+        <TextBlock Text="Account" FontWeight="Bold" Margin="0,0,0,4" />
+        <TextBox x:Name="AorBox" Text="sip:alice@example.invalid" Margin="0,0,0,4" />
+        <TextBox x:Name="RegistrarBox" Text="sip:example.invalid" Margin="0,0,0,4" />
+        <TextBox x:Name="RegistrarAddressBox" Text="203.0.113.10:5060" Margin="0,0,0,4" />
+        <TextBox x:Name="AuthUserBox" Text="" Margin="0,0,0,4" />
+        <PasswordBox x:Name="AuthPasswordBox" Margin="0,0,0,4" />
+        <Button x:Name="RegisterButton" Content="Register" Click="OnRegisterClick" Margin="0,0,0,12" />
+
+        <TextBlock Text="Call" FontWeight="Bold" Margin="0,0,0,4" />
+        <TextBox x:Name="TargetBox" Text="sip:bob@example.invalid" Margin="0,0,0,4" />
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+            <Button x:Name="CallButton" Content="Call" Click="OnCallClick" Width="80" Margin="0,0,4,0" />
+            <Button x:Name="HangupButton" Content="Hang up" Click="OnHangupClick" Width="80" Margin="0,0,4,0" />
+            <Button x:Name="HoldButton" Content="Hold" Click="OnHoldClick" Width="80" Margin="0,0,4,0" />
+            <Button x:Name="ResumeButton" Content="Resume" Click="OnResumeClick" Width="80" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBlock Text="DTMF:" VerticalAlignment="Center" Margin="0,0,4,0" />
+            <TextBox x:Name="DtmfBox" Width="120" Margin="0,0,4,0" />
+            <Button x:Name="DtmfButton" Content="Send" Click="OnDtmfClick" Width="60" />
+        </StackPanel>
+
+        <TextBlock Text="Devices" FontWeight="Bold" Margin="0,0,0,4" />
+        <!-- A skeleton, not a product: this layer carries PCM over the ABI's
+             own sockets, the same way the sample console agent and every
+             binding's own tests do, and touches no real sound device, per
+             docs/01-architecture.md's "no audio device inside the core". A
+             shipping app wires this list to whatever local audio API it
+             already uses and feeds the frames this window's Call reads and
+             writes; this list is a placeholder for where that wiring goes. -->
+        <ListBox x:Name="DevicesList" Height="48" Margin="0,0,0,12" />
+
+        <TextBlock Text="Events" FontWeight="Bold" Margin="0,0,0,4" />
+        <ListBox x:Name="EventsList" Height="120" />
+    </StackPanel>
+</Window>

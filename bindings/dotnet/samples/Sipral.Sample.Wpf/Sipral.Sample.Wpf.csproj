@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- net8.0-windows only builds on Windows: the Mac's gate keeps this
+         project out of its build (scripts/check.sh), the same way it keeps
+         out anything else that TFM refuses to touch on macOS or Linux. The
+         layer this skeleton is built on, bindings/dotnet/Sipral, is what the
+         gate builds and tests there instead. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SipralSample.Wpf</RootNamespace>
+    <AssemblyName>Sipral.Sample.Wpf</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Sipral/Sipral.csproj" />
+  </ItemGroup>
+</Project>

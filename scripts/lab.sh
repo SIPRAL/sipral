@@ -617,6 +617,80 @@ swift_agent() {
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
+# 8.6.3's .NET binding: bindings/dotnet/samples/Sipral.Sample.Agent, the same
+# echo-and-hang-up-on-"#" shape as `python_agent` above, over
+# bindings/dotnet/Sipral instead of bindings/python, and against the same
+# shared library, found beside the C harness the way `python_agent` finds it.
+# The image already carries the SDK, so nothing is installed at container
+# start; the source is copied into the container's own writable filesystem
+# before `dotnet build`, since the shared library it is mounted beside is
+# read-only and a build needs somewhere to write bin/ and obj/. Requires no
+# network once the image itself is pulled -- neither project names a NuGet
+# package.
+CSHARP_AGENT_NAME=sipral-lab-agent-csharp
+csharp_agent() {
+    local beside log tries
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    [ -s "$beside/libsipral_ffi.so" ] || { printf '  no libsipral_ffi.so beside the C harness\n'; return 1; }
+    docker rm -f "$CSHARP_AGENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$CSHARP_AGENT_NAME" --network sipral-interop_lab \
+        -e SIPRAL_LIBRARY=/lib-sipral/libsipral_ffi.so \
+        -e SIPRAL_AOR=sip:labuser-agent-csharp@asterisk \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER=labuser-agent-csharp -e SIPRAL_AUTH_PASSWORD=labpass \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/dotnet:/src-dotnet:ro" \
+        mcr.microsoft.com/dotnet/sdk:8.0 sh -c '
+            cp -r /src-dotnet /dotnet
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            cd /dotnet/samples/Sipral.Sample.Agent
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
+                exec dotnet run -c Release --no-launch-profile' >/dev/null \
+        || { printf '  could not start the agent container\n'; return 1; }
+
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-csharp; do
+        tries=$((tries + 1))
+        # a container that died, or a `dotnet build` that already came back
+        # and printed nothing further, is not going to register however
+        # long it is given -- the build's own errors are the useful part
+        if [ "$(docker inspect -f '{{.State.Running}}' "$CSHARP_AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 90 ]; then
+            printf '  the agent never registered\n'
+            docker logs "$CSHARP_AGENT_NAME" 2>&1 | tail -40
+            docker rm -f "$CSHARP_AGENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-agent-csharp extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$CSHARP_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    log=$(docker logs "$CSHARP_AGENT_NAME" 2>&1)
+    docker rm -f "$CSHARP_AGENT_NAME" >/dev/null 2>&1
+    printf '%s\n' "$log" | tail -20 | sed 's/^/    /'
+
+    printf '%s\n' "$log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq 'packets_received=[1-9]' \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq 'packets_sent=[1-9]' \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
 # 8.5.4's own flow: `crates/sipral/examples/headless-socket-agent.rs` carries
 # the call over SIP and RTP exactly as `labuser-agent` above does, and speaks
 # `sipral-headless`'s wire protocol on a TCP port instead of holding the audio
@@ -975,6 +1049,9 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     else
         printf '  note  KOTLIN_AGENT_JAR not set; see bindings/kotlin/README.md\n'
     fi
+    step "the .NET sample agent, called by Asterisk"
+    csharp_agent && pass "Sipral.Sample.Agent answered, echoed and hung up" \
+        || fail "Sipral.Sample.Agent"
 fi
 
 # The one step in this file where the far end is a client stack rather than

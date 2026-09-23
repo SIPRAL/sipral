@@ -1197,6 +1197,15 @@ step "the bindings compile"
 if command -v dotnet >/dev/null 2>&1; then
     (cd "$ROOT/bindings/dotnet/Sipral" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
         && pass "dotnet build" || fail "dotnet build -c Release, in bindings/dotnet/Sipral"
+    # The lab's own headless agent (scripts/lab.sh's csharp_agent) -- net8.0,
+    # not net8.0-windows, so it builds here same as the layer it sits on.
+    # bindings/dotnet/samples/Sipral.Sample.Wpf is deliberately not built on
+    # this machine: it targets net8.0-windows, which only Windows carries,
+    # and the layer it is a thin skeleton over is exactly what the dotnet
+    # build above and the "the dotnet bindings" step below already cover.
+    (cd "$ROOT/bindings/dotnet/samples/Sipral.Sample.Agent" && dotnet build -c Release --nologo) >/dev/null 2>&1 \
+        && pass "dotnet build, the sample agent" \
+        || fail "dotnet build -c Release, in bindings/dotnet/samples/Sipral.Sample.Agent"
 else
     skip "dotnet build: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
 fi
@@ -1386,6 +1395,34 @@ if (cd "$ROOT/bindings" && xcrun --toolchain default swift package dump-package)
 else
     skip "swift build: SwiftPM cannot read the manifest here (the Command Line Tools ship no PackageDescription module; a full Xcode does)"
     skip "swift test: same reason"
+fi
+
+# The idiomatic .NET layer (bindings/dotnet/Sipral, everything beside the
+# generated SipralAbi.cs) against the real ABI: two stacks on loopback,
+# proved the way bindings/python/tests already proves its own layer --
+# register or dial directly, answer, hold/resume, DTMF, hang up, events
+# observed, handles released -- plus the threading rules the ABI documents,
+# not just the happy path: events land on the poll thread and not the
+# caller's, SIPRAL_STATUS_BUSY surfaces rather than blocking, and disposing
+# a stack with events still queued behind it does not touch a freed handle.
+# `DOTNET_ROLL_FORWARD=LatestMajor` covers a machine, like this one, whose
+# SDK is newer than the net8.0 runtime it shipped beside; a machine that
+# actually has the net8.0 runtime installed sees no difference.
+step "the dotnet bindings"
+if ! command -v dotnet >/dev/null 2>&1; then
+    skip "dotnet test: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
+elif [ ! -s "$DYLIB" ]; then
+    fail "the dotnet bindings: $DYLIB is not there to load (the build step above must pass first)"
+else
+    work=$(mktemp -d)
+    if DOTNET_ROLL_FORWARD=LatestMajor dotnet test "$ROOT/bindings/dotnet/Sipral.Tests" \
+        -c Release --nologo -v minimal >"$work/out" 2>&1; then
+        pass "dotnet test, bindings/dotnet/Sipral.Tests"
+    else
+        fail "dotnet test, bindings/dotnet/Sipral.Tests:"
+        sed 's/^/        /' "$work/out"
+    fi
+    rm -rf "$work"
 fi
 
 # Unlike dotnet/kotlinc/swift above, python3 and cffi are not optional
