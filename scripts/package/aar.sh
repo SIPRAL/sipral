@@ -143,7 +143,17 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/aar"
 
 step "classes, from bindings/kotlin"
-if command -v kotlinc >/dev/null 2>&1; then
+# org.sipral.idiomatic is compiled against kotlinx-coroutines-core-jvm, from
+# the same cache scripts/check.sh reads it from (THIRD-PARTY-NOTICES.md says
+# where it comes from and its checksum). It is compiled against, not packed
+# in: an application depending on this AAR brings the library itself, the
+# way it brings any other Maven dependency.
+COROUTINES_JAR="${SIPRAL_COROUTINES_JAR:-$HOME/.cache/sipral/maven/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.11.0/kotlinx-coroutines-core-jvm-1.11.0.jar}"
+if ! command -v kotlinc >/dev/null 2>&1; then
+    fail "kotlinc not found (brew install kotlin)"
+elif [ ! -s "$COROUTINES_JAR" ]; then
+    fail "kotlinx-coroutines-core-jvm is not at $COROUTINES_JAR (THIRD-PARTY-NOTICES.md says how to fetch it; SIPRAL_COROUTINES_JAR names another path)"
+else
     kt_sources=()
     while IFS= read -r -d '' f; do kt_sources+=("$f"); done \
         < <(find "$ROOT/bindings/kotlin/sipral/src/main/kotlin" -name '*.kt' -print0)
@@ -151,7 +161,7 @@ if command -v kotlinc >/dev/null 2>&1; then
         fail "no Kotlin source found under bindings/kotlin/sipral/src/main/kotlin"
     else
         mkdir -p "$STAGE/classes"
-        if kotlinc "${kt_sources[@]}" -d "$STAGE/classes" >"$STAGE/kotlinc.log" 2>&1; then
+        if kotlinc -cp "$COROUTINES_JAR" "${kt_sources[@]}" -d "$STAGE/classes" >"$STAGE/kotlinc.log" 2>&1; then
             ( cd "$STAGE/classes" && jar cf "$STAGE/aar/classes.jar" . )
             pass "kotlinc, then jar cf classes.jar"
         else
@@ -159,8 +169,6 @@ if command -v kotlinc >/dev/null 2>&1; then
             tail -30 "$STAGE/kotlinc.log" | sed 's/^/        /'
         fi
     fi
-else
-    fail "kotlinc not found (brew install kotlin)"
 fi
 [ "$FAIL" -ne 0 ] && { printf '\naar.sh: failed\n'; exit 1; }
 
