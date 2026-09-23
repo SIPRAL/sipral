@@ -1126,12 +1126,37 @@ with its `size` already set. Nothing in
 the printed surface is a raw pointer except the two structs a caller part-fills
 with its own buffers, which are `inout` and typed.
 
-What is not printed is the platform work, and it is what the binding will
-actually earn its place for: `CallKit` for call UI and audio session priority,
-`PushKit` for waking on an incoming call, and `AVAudioSession` category and
-interruption handling. An iOS softphone that gets these wrong does not work,
-regardless of how good the stack is. `async`/`await` over the event callback
-belongs there too.
+What is not printed is the platform work, and it is what the binding earns its
+place for: `SipralStack`, `Account` and `Call` (`swift/Sources/Sipral/`), one
+POSIX socket per stack and per call's media (`UDPSocket.swift`, `Darwin` or
+`Glibc` directly rather than `Network.framework`, so the module also builds
+and runs on Linux), and the event callback bridged into an `AsyncStream` —
+decoded synchronously, on the poll thread, into a `Sendable` `SipralEvent`
+before it crosses, the same rule `bindings/python/sipral/events.py` follows
+for the same reason (`sipral_event_t`'s pointers outlive nothing past the
+callback that carries them). `CallKitBridge` and `PushKitBridge` run
+`docs/15-mobile.md`'s "C2" sequence — push, report to CallKit, announce,
+refresh the binding, match the INVITE, answer — behind `CallKitProviding`, a
+protocol small enough to fake in a test with no device and no `CallKit`
+framework at all; `CallKitAdapter.swift`/`PushKitAdapter.swift` are the real
+`CXProvider`/`PKPushRegistry` behind it, compiled in only where those
+frameworks actually work (`canImport(CallKit) && os(iOS)` — the module is
+importable on plain macOS too, but every type in it is marked
+`API_UNAVAILABLE(macos)`, so `canImport` alone is not enough to keep this
+module building there). `AVAudioSession` category and interruption handling,
+and the macOS sample's own microphone/speaker bridge (`AudioBridge.swift`,
+`SipralSampleMac`), are the remaining platform work an application still
+owns.
+
+One gotcha worth knowing before reaching for `sipral_stack_receive_datagram`
+from Swift directly: its generated `to: String` parameter has no way to carry
+a true null pointer, since `Array("".utf8).withUnsafeBufferPointer`'s
+`baseAddress` for an empty array is not the null pointer
+`sipral_stack_receive_datagram`'s "empty means take my own bind address"
+reads for (`crates/sipral-ffi/src/transport.rs`'s `optional_address`) — an
+empty `to` is refused rather than treated as absent. `SipralStack.run()`
+passes its own `bindAddress` explicitly instead, which is what an empty `to`
+was always meant to mean for a socket bound to one address.
 
 ## .NET
 

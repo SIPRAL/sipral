@@ -29,8 +29,13 @@ Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 `dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs`,
 `python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
 (the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
-`python/examples/agent.py`, and the readmes. Everything the packages build
-from declarations rather than write themselves is generated.
+`python/examples/agent.py`,
+`swift/Sources/Sipral/{SipralStack,Account,Call,Media,SipralEvent,UDPSocket,CStrings,CallKitBridge,PushKitBridge,CallKitAdapter,PushKitAdapter}.swift`
+(the idiomatic layer `SipralAbi.swift` is written against, the same way
+the Python files above are written against `_sipral_cffi.py`),
+`swift/Tests/SipralTests/`, `swift/Sources/SipralLabAgent/`,
+`swift/Sources/SipralSampleMac/`, and the readmes. Everything the packages
+build from declarations rather than write themselves is generated.
 
 `c/sipral.c` is the Swift package's one translation unit, and exists so that
 a header that will not compile is found by building the package. `c/smoke.c`

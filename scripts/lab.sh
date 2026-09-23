@@ -241,6 +241,34 @@ else
     fi
 fi
 
+# The Swift binding's own lab agent: `bindings/swift`'s `SipralLabAgent`
+# executable target, over the same C ABI `HARNESS_C` above and the Python
+# agent both prove, carried through `SipralStack`/`Account`/`Call`/`Media`
+# instead. Needs `libsipral_ffi.so`, already built by the C harness step
+# above -- built here, once, in a `swift:6.1` container (Swift on Linux is
+# never assumed to be on the host's own `PATH`), the same reasoning as the
+# socket-framed agent's own build: skipped rather than fatal when either is
+# missing, so a machine that cannot build one still runs the rest of the lab.
+step "the Swift binding's lab agent"
+if [ -n "${SIPRAL_SWIFT_AGENT:-}" ]; then
+    SWIFT_AGENT="$SIPRAL_SWIFT_AGENT"
+    pass "taken as given: $SWIFT_AGENT"
+elif [ -z "$HARNESS_C" ]; then
+    SWIFT_AGENT=""
+    printf '  note  no libsipral_ffi to link against; that step is skipped\n'
+elif ! command -v docker >/dev/null 2>&1; then
+    SWIFT_AGENT=""
+else
+    if docker run --rm -v "$ROOT":/work -w /work/bindings swift:6.1 \
+        swift build -c release --product SipralLabAgent >/dev/null 2>&1; then
+        SWIFT_AGENT="$ROOT/bindings/.build/release/SipralLabAgent"
+        pass "built"
+    else
+        SWIFT_AGENT=""
+        printf '  note  could not build the Swift lab agent; that step is skipped\n'
+    fi
+fi
+
 step "the lab"
 mkdir -p interop/pcap
 ( cd interop && docker compose up -d ) >/dev/null 2>&1 \
@@ -435,6 +463,69 @@ python_agent() {
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
         | grep '^ended ' | grep -Eq "'packets_sent': [1-9]" \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
+# The Swift binding's own example agent, `SWIFT_AGENT` above, registered at
+# Asterisk as `labuser-agent-swift` (`interop/asterisk/pjsip.conf`) and
+# called by it -- the same shape `python_agent` above is, and the same
+# reason: what the loopback tests in `bindings/swift/Tests` cannot show is
+# that what the agent advertises is somewhere a real server can reach, and
+# that the tone the server plays comes back through its own echo. Run in a
+# `swift:6.1` container for the runtime `SWIFT_AGENT` was linked against,
+# with `libsipral_ffi.so` mounted at the same absolute path
+# (`$ROOT`/`/work`) the build step above used, since the binary's own
+# `-rpath` is that path.
+SWIFT_AGENT_NAME=sipral-lab-agent-swift
+swift_agent() {
+    local log tries
+    [ -n "$SWIFT_AGENT" ] || return 0
+    docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$SWIFT_AGENT_NAME" --network sipral-interop_lab \
+        -v "$ROOT":/work:ro \
+        -e SIPRAL_AOR=sip:labuser-agent-swift@asterisk \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER=labuser-agent-swift -e SIPRAL_AUTH_PASSWORD=labpass \
+        swift:6.1 sh -c '
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
+                exec /work/bindings/.build/release/SipralLabAgent' >/dev/null \
+        || { printf '  could not start the agent container\n'; return 1; }
+
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-swift; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$SWIFT_AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 60 ]; then
+            printf '  the agent never registered\n'
+            docker logs "$SWIFT_AGENT_NAME" 2>&1 | tail -20
+            docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-agent-swift extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$SWIFT_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    log=$(docker logs "$SWIFT_AGENT_NAME" 2>&1)
+    docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
+    printf '%s\n' "$log" | sed 's/^/    /'
+
+    printf '%s\n' "$log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
+    printf '%s\n' "$log" | grep -Eq '^ended .*packets_received=[1-9]' \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$log" | grep -Eq '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -786,6 +877,9 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     step "the socket-framed agent, called by Asterisk"
     headless_socket_agent && pass "headless-socket-agent answered, echoed and carried DTMF" \
         || fail "headless-socket-agent"
+    step "the Swift binding's example agent, called by Asterisk"
+    swift_agent && pass "SipralLabAgent answered, echoed and carried DTMF" \
+        || fail "SipralLabAgent"
 fi
 
 # The one step in this file where the far end is a client stack rather than

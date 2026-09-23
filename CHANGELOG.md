@@ -72,6 +72,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   whose microphone and earpiece are VB-CABLE's two WASAPI endpoints, proving
   audio crosses `sipral-io-wasapi` in both directions in a real call — the
   Windows counterpart to the PipeWire flow already in the lab.
+- **A hand-written Swift layer over the generated `SipralAbi.swift`:**
+  `SipralStack`, `Account` and `Call` as classes, events as an
+  `AsyncStream`, errors as `throws`, and `CallKitBridge`/`PushKitBridge`
+  running `docs/15-mobile.md`'s wake-up sequence behind small protocols so
+  the core module also builds on Linux. Tested against two real stacks on
+  loopback (register-less direct calls, hold/resume, DTMF, media, handle
+  release with pending events) and, in the lab, as `labuser-agent-swift`, a
+  third Asterisk-registered account `scripts/lab.sh` dials, answers and
+  carries DTMF over. A skeleton macOS SwiftUI sample
+  (`bindings/swift/Sources/SipralSampleMac`) shows registration, a call,
+  hold, DTMF and devices wired to the same layer.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

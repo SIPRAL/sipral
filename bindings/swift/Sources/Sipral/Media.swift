@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+import CSipral
+import Dispatch
+
+/// One call's audio, paced at its own frame rate.
+///
+/// A call's media has a handle of its own and never takes the stack's lock
+/// (`docs/08-ffi.md`, "A call's media has a handle of its own"), so it runs
+/// on a thread of its own too -- the one place in this layer where audio
+/// crosses as `[Int16]`, paced by `sipral_media_info_t.frameMs` rather than
+/// by whatever rate the caller happens to call `sendAudio` at
+/// (`bindings/python/sipral/media.py`'s `Media` is the same shape).
+///
+/// Not built directly: `Call` mints one from its own
+/// `SipralEventKind.mediaStarted` and hands it over as `call.media`.
+public final class Media: @unchecked Sendable {
+    public let handle: SipralHandle
+    public let sampleRate: Int
+    public let frameSamples: Int
+    private let frameSeconds: Double
+
+    private let stack: SipralStack
+    private let socket: UDPSocket
+
+    private let stateQueue = DispatchQueue(label: "org.sipral.media.state")
+    private var _remoteAddress: String?
+    public var remoteAddress: String? { stateQueue.sync { _remoteAddress } }
+
+    /// Decoded 16-bit mono PCM, one frame per item.
+    public let frames: AsyncStream<[Int16]>
+    private let frameContinuation: AsyncStream<[Int16]>.Continuation
+
+    private let outgoing = DispatchQueue(label: "org.sipral.media.outgoing")
+    private var pending: [Int16] = []
+    private var toSend: [[Int16]] = []
+
+    private let closedSemaphore = DispatchSemaphore(value: 0)
+    private var closed = false
+    private let closeQueue = DispatchQueue(label: "org.sipral.media.close")
+
+    init(stack: SipralStack, callHandle: SipralHandle, socket: UDPSocket) throws {
+        self.stack = stack
+        self.socket = socket
+        self.handle = try retryingBusy { try Sipral.callMedia(stack: stack.handle, call: callHandle) }
+
+        let info = try Sipral.mediaInfo(media: handle)
+        self.sampleRate = Int(info.sample_rate)
+        self.frameSamples = info.frame_samples
+        self.frameSeconds = Double(max(info.frame_ms, 1)) / 1000.0
+
+        var continuation: AsyncStream<[Int16]>.Continuation!
+        self.frames = AsyncStream { continuation = $0 }
+        self.frameContinuation = continuation
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
+    }
+
+    public func info() throws -> sipral_media_info_t {
+        try Sipral.mediaInfo(media: handle)
+    }
+
+    public func statistics() throws -> sipral_stream_stats_t {
+        try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+    }
+
+    /// Queue 16-bit mono PCM to go out, one frame at a time.
+    ///
+    /// A chunk shorter or longer than one frame is accepted and split (or
+    /// padded with what the next call adds) across as many capture calls as
+    /// it takes. Thread-safe: called from whatever thread the application
+    /// runs its own audio loop or voice-agent callback on, never from the
+    /// media thread itself.
+    public func sendAudio(_ samples: [Int16]) {
+        outgoing.sync { toSend.append(samples) }
+    }
+
+    /// Writes straight to this call's own RTP socket -- used by
+    /// `SipralStack` to send the RTCP BYE `sipral_stack_poll_farewell` hands
+    /// back once signalling has already ended.
+    func sendRaw(_ payload: [UInt8], to address: String) {
+        socket.send(payload, to: address)
+    }
+
+    private func nextChunk() -> [Int16] {
+        outgoing.sync {
+            while pending.count < frameSamples {
+                guard !toSend.isEmpty else {
+                    return [Int16](repeating: 0, count: frameSamples)
+                }
+                pending.append(contentsOf: toSend.removeFirst())
+            }
+            let chunk = Array(pending.prefix(frameSamples))
+            pending.removeFirst(frameSamples)
+            return chunk
+        }
+    }
+
+    private func drainReceive() {
+        while let (receivedData, from) = socket.receive(capacity: 2048) {
+            stateQueue.sync { _remoteAddress = from }
+            var mutableData = receivedData
+            _ = try? Sipral.mediaReceive(media: handle, data: &mutableData, from: from, nowMs: stack.nowMs())
+        }
+    }
+
+    private func drainPacket(_ poll: (inout sipral_media_packet_t) throws -> Void) {
+        while true {
+            var packet = sipral_media_packet_t.sized()
+            var data = [UInt8](repeating: 0, count: 1500)
+            var destination = [CChar](repeating: 0, count: 128)
+            let sent: Bool = data.withUnsafeMutableBufferPointer { dataBuf in
+                destination.withUnsafeMutableBufferPointer { destBuf -> Bool in
+                    packet.data = dataBuf.baseAddress
+                    packet.capacity = 1500
+                    packet.destination = destBuf.baseAddress
+                    packet.destination_capacity = 128
+                    guard (try? poll(&packet)) != nil, packet.len > 0 else { return false }
+                    let payload = Array(UnsafeBufferPointer(start: dataBuf.baseAddress, count: packet.len))
+                    let destinationText = destBuf.withMemoryRebound(to: UInt8.self) {
+                        String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
+                    }
+                    socket.send(payload, to: destinationText)
+                    return true
+                }
+            }
+            if !sent { return }
+        }
+    }
+
+    private func captureOnce(_ samples: [Int16]) {
+        var packet = sipral_media_packet_t.sized()
+        var data = [UInt8](repeating: 0, count: 1500)
+        var destination = [CChar](repeating: 0, count: 128)
+        data.withUnsafeMutableBufferPointer { dataBuf in
+            destination.withUnsafeMutableBufferPointer { destBuf in
+                packet.data = dataBuf.baseAddress
+                packet.capacity = 1500
+                packet.destination = destBuf.baseAddress
+                packet.destination_capacity = 128
+                guard (try? Sipral.mediaCapture(media: handle, nowMs: stack.nowMs(), samples: samples, packet: &packet)) != nil,
+                      packet.len > 0 else { return }
+                let payload = Array(UnsafeBufferPointer(start: dataBuf.baseAddress, count: packet.len))
+                let destinationText = destBuf.withMemoryRebound(to: UInt8.self) {
+                    String(decoding: UnsafeBufferPointer(start: $0.baseAddress, count: packet.destination_len), as: UTF8.self)
+                }
+                socket.send(payload, to: destinationText)
+            }
+        }
+    }
+
+    private func run() {
+        var active = true
+        while !isClosed {
+            let started = DispatchTime.now()
+            drainReceive()
+
+            if active {
+                var samples = [Int16](repeating: 0, count: frameSamples)
+                do {
+                    let (written, _) = try Sipral.mediaPlayback(media: handle, samples: &samples)
+                    if written > 0 {
+                        frameContinuation.yield(Array(samples.prefix(written)))
+                    }
+                } catch let error as SipralError where error.status != .busy {
+                    // The media (or its call, or its stack) is gone
+                    // (`docs/08-ffi.md`, "A media handle outlives its call,
+                    // and says so"): stop driving it, but let the loop keep
+                    // running so `close()` still finds it responsive.
+                    active = false
+                } catch {
+                    // BUSY here means re-entry from inside a frame this
+                    // thread is already running -- not expected on this
+                    // path, but not fatal either.
+                }
+
+                captureOnce(nextChunk())
+                drainPacket { packet in
+                    try Sipral.mediaPollRtcp(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
+                }
+                drainPacket { packet in
+                    try Sipral.mediaPollTransmit(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
+                }
+            }
+
+            let elapsedNs = DispatchTime.now().uptimeNanoseconds &- started.uptimeNanoseconds
+            let remaining = frameSeconds - Double(elapsedNs) / 1_000_000_000
+            if remaining > 0 {
+                usleep(useconds_t(remaining * 1_000_000))
+            }
+        }
+        closedSemaphore.signal()
+    }
+
+    private var isClosed: Bool { closeQueue.sync { closed } }
+
+    /// Stops the frame-rate thread, `sipral_media_release`, closes the
+    /// socket. Called by `Call.close()`, not usually by an application
+    /// directly.
+    func close() {
+        let wasClosed = closeQueue.sync { () -> Bool in
+            defer { closed = true }
+            return closed
+        }
+        guard !wasClosed else { return }
+        _ = closedSemaphore.wait(timeout: .now() + 5)
+        try? Sipral.mediaRelease(media: handle)
+        socket.close()
+        frameContinuation.finish()
+    }
+}

@@ -1319,8 +1319,24 @@ fi
 if (cd "$ROOT/bindings" && xcrun --toolchain default swift package dump-package) >/dev/null 2>&1; then
     (cd "$ROOT/bindings" && xcrun --toolchain default swift build) >/dev/null 2>&1 \
         && pass "swift build" || fail "swift build, in bindings/"
+
+    # SipralTests and SipralLabAgent link against $DYLIB (Package.swift's own
+    # `linkAgainstSipralFfi`, an absolute path computed from the manifest's
+    # own location) rather than merely compiling against the header the way
+    # `swift build` above does, so this is the step that actually drives two
+    # real stacks through the Swift layer -- the loopback call
+    # bindings/python/tests/test_call.py proves the Python layer with,
+    # carried through Call/Media/Account, plus CallKitBridge/PushKitBridge's
+    # own sequence against a recording CallKitProviding.
+    if [ -s "$ROOT/$DYLIB" ]; then
+        (cd "$ROOT/bindings" && xcrun --toolchain default swift test) >/dev/null 2>&1 \
+            && pass "swift test" || fail "swift test, in bindings/"
+    else
+        fail "swift test: $DYLIB is not there to link against (the build step above must pass first)"
+    fi
 else
     skip "swift build: SwiftPM cannot read the manifest here (the Command Line Tools ship no PackageDescription module; a full Xcode does)"
+    skip "swift test: same reason"
 fi
 
 # Unlike dotnet/kotlinc/swift above, python3 and cffi are not optional
