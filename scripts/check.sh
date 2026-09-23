@@ -529,6 +529,28 @@ missing=$(comm -3 \
     printf '        add or remove its line in crates/sipral-ffi/src/abi.rs.\n'
 }
 
+# docs/11-testing.md's generated "Interoperability matrix" section
+# (scripts/interop-matrix.py) against the one fixture it can be checked
+# without Docker or a live lab: interop/fixtures/lab-run.log, a real
+# scripts/lab.sh run, and the date it ran on beside it. A live run regenerates
+# the section with scripts/lab.sh --matrix; this only asks whether the section
+# committed here is still what that fixture produces.
+step "interop matrix matches its fixture"
+if command -v python3 >/dev/null 2>&1; then
+    matrix_out=$(mktemp)
+    if python3 scripts/interop-matrix.py interop/fixtures/lab-run.log --check \
+        >"$matrix_out" 2>&1; then
+        pass "docs/11-testing.md's generated section matches interop/fixtures/lab-run.log"
+    else
+        fail "docs/11-testing.md's generated section is stale:"
+        sed 's/^/        /' "$matrix_out"
+        printf '        regenerate it: scripts/interop-matrix.py interop/fixtures/lab-run.log\n'
+    fi
+    rm -f "$matrix_out"
+else
+    fail "python3 not found, and scripts/interop-matrix.py needs it"
+fi
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }

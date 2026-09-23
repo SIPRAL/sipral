@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The one thing `scripts/interop-matrix.py` cannot read out of a lab run: which
+# flows stand for which feature, and whether that feature is implemented and
+# unit-tested at all. Interop-tested is not asked here -- the generator
+# derives it from the matrix itself, by checking whether every listed flow
+# has a passing result against some peer. A feature with no flow (nothing
+# below runs it against a live peer) reads "n/a" there rather than "no": the
+# two mean different things, and the second would be a claim this file does
+# not make.
+#
+# Kept small and hand-written on purpose, the way fixtures/rfc4475/manifest.toml
+# is: a line here is a fact somebody checked, not a derivation. `implemented`
+# and `unit_tested` are exactly that -- edit them when the fact changes, not
+# when a lab run does.
+#
+# Shape the generator expects, and nothing more general than this: repeated
+#
+#   [[feature]]
+#   name = "..."
+#   implemented = true|false
+#   unit_tested = true|false
+#   flows = ["...", "..."]
+#
+# blocks, in the order they should print. A flow name is exactly what
+# `interop/harness` prints for it (`Flow::name()` in `interop/harness/src/main.rs`,
+# or the literal strings `main.rs` prints for "local conference" and "inbound,
+# narrowed"), before `scripts/interop-matrix.py` appends " (C ABI)" for the C
+# driver's own row -- that suffix is stripped again before the two are
+# compared, so one flow name here covers both drivers, and, for the four
+# `netem` rows, before the generator appends the impairment profile's own
+# name in parentheses.
+
+[[feature]]
+name = "Registration and refresh"
+implemented = true
+unit_tested = true
+flows = ["register"]
+
+[[feature]]
+name = "Call setup and teardown"
+implemented = true
+unit_tested = true
+flows = ["call"]
+
+[[feature]]
+name = "Hold and resume"
+implemented = true
+unit_tested = true
+flows = ["hold and resume"]
+
+[[feature]]
+name = "Blind transfer"
+implemented = true
+unit_tested = true
+flows = ["blind transfer"]
+
+[[feature]]
+name = "Attended transfer"
+implemented = true
+unit_tested = true
+flows = ["attended transfer"]
+
+[[feature]]
+name = "DTMF, RFC 4733"
+implemented = true
+unit_tested = true
+flows = ["DTMF, RFC 4733"]
+
+[[feature]]
+name = "DTMF, SIP INFO"
+implemented = true
+unit_tested = true
+flows = ["DTMF, SIP INFO"]
+
+[[feature]]
+name = "SRTP (SDES)"
+implemented = true
+unit_tested = true
+flows = ["SRTP", "SRTP, phone to phone"]
+
+[[feature]]
+name = "DTLS-SRTP"
+implemented = true
+unit_tested = true
+flows = ["DTLS-SRTP, held and resumed", "DTLS-SRTP, phone to phone"]
+
+[[feature]]
+name = "Codec change while held"
+implemented = true
+unit_tested = true
+flows = ["hold with a codec change"]
+
+[[feature]]
+name = "SIP MESSAGE"
+implemented = true
+unit_tested = true
+flows = ["MESSAGE, echoed"]
+
+[[feature]]
+name = "Message waiting indication"
+implemented = true
+unit_tested = true
+flows = ["message waiting indication"]
+
+[[feature]]
+name = "Local conference (three-party mix)"
+implemented = true
+unit_tested = true
+flows = ["local conference"]
+
+[[feature]]
+name = "Narrowed inbound offer"
+implemented = true
+unit_tested = true
+flows = ["inbound, narrowed"]
+
+[[feature]]
+name = "Python binding"
+implemented = true
+unit_tested = true
+flows = ["Python agent example"]
+
+[[feature]]
+name = "Bad-network resilience (audio quality gate)"
+implemented = true
+unit_tested = true
+flows = [
+    "call, over a bad link (lossy)",
+    "call, over a bad link (mobile)",
+    "call, over a bad link (satellite)",
+    "call, over a bad link (blackout)",
+]
+
+[[feature]]
+name = "ICE (RFC 8445, full agent role)"
+implemented = true
+unit_tested = true
+flows = []

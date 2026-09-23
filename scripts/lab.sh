@@ -17,6 +17,10 @@
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
+#   scripts/lab.sh --matrix     the above, then regenerate docs/11-testing.md's
+#                               own generated section from this run
+#                               (scripts/interop-matrix.py); any of the words
+#                               above may follow it, the same as without it
 #
 # The profiles are interop/impairment/*.sh, and its README says what each one
 # is for and how to write another.
@@ -29,6 +33,32 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+
+# Regenerates docs/11-testing.md's own generated section from this run's
+# output, once the run is over -- not interleaved with it, so the generator
+# only ever reads a complete log. Re-invoking this script without the flag
+# and piping its output through tee, rather than teeing it in place with
+# exec, is what gets that for free: the shell does not return from the
+# pipeline below until both ends of it are done, so the log is whole by the
+# time interop-matrix.py opens it, and the run is still shown on screen as it
+# happens, tee's other job.
+if [ "${1:-}" = "--matrix" ]; then
+    shift
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'python3 is not on the path, and scripts/interop-matrix.py needs it.\n'
+        exit 2
+    }
+    LOG="$(mktemp)"
+    "$0" "$@" 2>&1 | tee "$LOG"
+    STATUS="${PIPESTATUS[0]}"
+    if python3 "$ROOT/scripts/interop-matrix.py" "$LOG" --date "$(date -u +%F)"; then
+        printf 'docs/11-testing.md regenerated from this run.\n'
+    else
+        printf 'note: docs/11-testing.md was not regenerated; see the error above.\n'
+    fi
+    rm -f "$LOG"
+    exit "$STATUS"
+fi
 
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }

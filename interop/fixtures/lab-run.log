@@ -1,0 +1,178 @@
+the harness
+  ok    taken as given: /opt/sipral/target-linux/release/sipral-interop
+
+the harness, in C
+  ok    taken as given: /opt/sipral/target-linux/release/harness-c
+
+the lab
+  ok    three containers up
+
+waiting for the servers to listen
+  ok    kamailio: Listening on
+  ok    freeswitch: MSG Thread 0 Started
+  note  freeswitch never said "Started Profile lab"; carrying on
+  ok    asterisk: Asterisk Ready
+
+register, call, hold, resume, transfer -- through the proxy
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 102 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+every flow passed
+  ok    kamailio to freeswitch
+
+the same, through the C ABI -- through the proxy
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (124 sent, 124 back, 92 audible, 1 refused)
+  pass  hold and resume   (53 sent, 26 back, 25 audible, 1 refused)
+  pass  blind transfer   (75 sent, 75 back, 58 audible, 1 refused)
+  pass  attended transfer   (28 sent, 28 back, 26 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (154 sent, 131 back, 99 audible, 1 refused)
+every flow passed
+  ok    kamailio to freeswitch, in C
+
+register, call, hold, resume, transfer -- through OpenSIPS
+  ok    opensips container up
+  ok    opensips: Listening on
+lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (101 sent, 98 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold and resume   (27 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  blind transfer   (5 sent, 2 back, 1 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  attended transfer   (2 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
+  pass  DTLS-SRTP, held and resumed   (129 sent, 104 back, 71 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 60ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+every flow passed
+  ok    opensips to freeswitch
+
+the same, through the C ABI -- through OpenSIPS
+lab: opensips:5060 at 172.18.0.5:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (124 sent, 124 back, 92 audible, 1 refused)
+  pass  hold and resume   (54 sent, 26 back, 25 audible, 1 refused)
+  pass  blind transfer   (75 sent, 76 back, 58 audible, 1 refused)
+  pass  attended transfer   (28 sent, 27 back, 26 audible, 2 refused)
+  pass  DTLS-SRTP, held and resumed   (154 sent, 129 back, 97 audible, 1 refused)
+every flow passed
+  ok    opensips to freeswitch, in C
+
+register, call, hold, resume, transfer -- straight at Asterisk
+lab: asterisk:5060 at 172.18.0.4:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold and resume   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  blind transfer   (4 sent, 1 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  attended transfer   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTMF, RFC 4733   (20 sent, 10 back, 0 audible, 1 refused; lost 0, late 0, jitter 4ms, delay 40ms of 120ms, shrunk 1, stretched 3; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTMF, SIP INFO   (11 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
+  pass  SRTP   (101 sent, 99 back, 67 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 40ms of 40ms, shrunk 0, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold with a codec change   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  MESSAGE, echoed
+  pass  message waiting indication   (101 sent, 0 back, 0 audible, 0 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0)
+  pass  DTLS-SRTP, held and resumed   (104 sent, 52 back, 19 audible, 1 refused; lost 50, late 0, jitter 0ms, delay 40ms of 40ms, shrunk 0, stretched 0; R 6, MOS-LQ 1.0, MOS-CQ 1.0)
+  pass  local conference   (300 frame(s) mixed, 14 carried the tone extension's audio back by way of the echo extension while the tone extension itself was silent)
+every flow passed
+  ok    asterisk
+
+the same, through the C ABI -- straight at Asterisk
+lab: asterisk:5060 at 172.18.0.4:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (124 sent, 122 back, 90 audible, 1 refused)
+  pass  hold and resume   (28 sent, 25 back, 23 audible, 1 refused)
+  pass  blind transfer   (74 sent, 73 back, 59 audible, 1 refused)
+  pass  attended transfer   (28 sent, 26 back, 24 audible, 1 refused)
+  pass  DTMF, RFC 4733   (49 sent, 8 back, 0 audible, 1 refused)
+  pass  DTMF, SIP INFO   (36 sent, 0 back, 0 audible, 0 refused)
+  pass  SRTP   (122 sent, 122 back, 90 audible, 1 refused)
+  pass  hold with a codec change   (85 sent, 87 back, 56 audible, 1 refused)
+  pass  MESSAGE, echoed   (0 sent, 0 back, 0 audible, 0 refused)
+  pass  message waiting indication   (123 sent, 0 back, 0 audible, 0 refused)
+  pass  DTLS-SRTP, held and resumed   (127 sent, 77 back, 43 audible, 1 refused)
+  pass  local conference   (133 frame(s) mixed, 40 crossed)
+every flow passed
+  ok    asterisk, in C
+
+the Python example agent, called by Asterisk
+    listening on 172.18.0.5:51677
+    answered 1200000000
+    dtmf 1
+    dtmf 2
+    dtmf #
+    ended 1200000000: {'codec': 1, 'round_trip_us': None, 'packets_sent': 200, 'octets_sent': 32000, 'packets_received': 180, 'packets_lost': 0, 'delay_us': 0, 'jitter_us': 12875, 'loss_rate': 0.0, 'score': 100.0, 'suffering': False}
+  ok    agent.py answered, echoed and hung up
+
+phone to phone -- baresip through the proxy
+  ok    baresip: built and started
+  ok    baresip: baresip@kamailio: (prio 0) {0/UDP/v4} 200 OK
+  ok    baresip: baresip-srtp@kamailio: (prio 0) {0/UDP/v4} 200 OK
+  ok    baresip: baresip-dtls@kamailio: (prio 0) {0/UDP/v4} 200 OK
+lab: kamailio:5060 at 172.18.0.2:5060, extension baresip, as labuser
+  pass  call   (101 sent, 99 back, 98 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  hold and resume   (2 sent, 0 back, 0 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 0ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  SRTP, phone to phone   (101 sent, 100 back, 99 audible, 1 refused; lost 0, late 0, jitter 0ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+  pass  DTLS-SRTP, phone to phone   (103 sent, 102 back, 101 audible, 1 refused; lost 0, late 0, jitter 1ms, delay 20ms of 40ms, shrunk 0, stretched 0; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+every flow passed
+  ok    sipral to baresip
+
+the same, through the C ABI -- baresip through the proxy
+lab: kamailio:5060 at 172.18.0.2:5060, extension baresip, as labuser
+  pass  call   (122 sent, 125 back, 121 audible, 1 refused)
+  pass  hold and resume   (28 sent, 26 back, 25 audible, 1 refused)
+  pass  SRTP, phone to phone   (121 sent, 125 back, 120 audible, 1 refused)
+  pass  DTLS-SRTP, phone to phone   (127 sent, 128 back, 123 audible, 1 refused)
+every flow passed
+  ok    sipral to baresip, in C
+
+the same call, over a bad network
+  lossy      bursty loss, jitter and reordering together
+  out: qdisc netem 8124: root refcnt 129 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 5064699463069026358 gap 1
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+  in:  qdisc netem 8125: root refcnt 2 limit 1000 delay 40ms  15ms loss gemodel p 4% r 40% 1-h 60% 1-k 2% reorder 1% 30% seed 16621213668171024059 gap 1
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (101 sent, 93 back, 62 audible, 1 refused; segSNR 29.1dB over 62 frames, concealed 3, clicks 0/6; lost 4, late 0, jitter 7ms, delay 20ms of 40ms, shrunk 1, stretched 0; R 48, MOS-LQ 2.5, MOS-CQ 2.5)
+every flow passed
+  ok    lossy: audio survived it
+  mobile     two per cent loss in bursts, on a link whose delay moves
+  out: qdisc netem 8126: root refcnt 129 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 17412273162628562193
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+  in:  qdisc netem 8127: root refcnt 2 limit 1000 delay 60ms  30ms loss gemodel p 2% r 40% 1-h 60% 1-k 1% seed 16889187681559956342
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (101 sent, 88 back, 52 audible, 6 refused; segSNR 33.0dB over 52 frames, concealed 6, clicks 0/8; lost 9, late 2, jitter 32ms, delay 100ms of 120ms, shrunk 4, stretched 2; R 26, MOS-LQ 1.5, MOS-CQ 1.5)
+every flow passed
+  ok    mobile: audio survived it
+  satellite  a geostationary carrier: half a second of round trip, and steady
+  out: qdisc netem 8128: root refcnt 129 limit 1000 delay 250ms  10ms loss 0.5% seed 8774813318802281602
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+  in:  qdisc netem 8129: root refcnt 2 limit 1000 delay 250ms  10ms loss 0.5% seed 3485839798818561605
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (102 sent, 97 back, 65 audible, 1 refused; segSNR 34.4dB over 65 frames, concealed 1, clicks 0/0; lost 0, late 0, jitter 11ms, delay 40ms of 60ms, shrunk 1, stretched 1; R 93, MOS-LQ 4.4, MOS-CQ 4.4)
+every flow passed
+  ok    satellite: audio survived it
+  blackout   the link disappears for eight seconds in the middle of the call
+  out: qdisc netem 812a: root refcnt 129 limit 1000 seed 16338147669219083416
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+  in:  qdisc netem 812b: root refcnt 2 limit 1000 seed 9504870500903458343
+lab: kamailio:5060 at 172.18.0.2:5060, extension 9000, as labuser
+  pass  register
+  pass  call   (1001 sent, 599 back, 383 audible, 1 refused; segSNR 34.4dB over 381 frames, concealed 0, clicks 0/0; lost 401, late 0, jitter 1ms, delay 20ms of 20ms, shrunk 0, stretched 0; R 7, MOS-LQ 1.0, MOS-CQ 1.0)
+every flow passed
+  ok    blackout: audio survived it
+
+the capture
+total 2656
+-rw-r--r-- 1 101 _ssh 654853 Sep 22 15:23 asterisk-c.pcap
+-rw-r--r-- 1 101 _ssh 630648 Sep 22 15:22 asterisk.pcap
+-rw-r--r-- 1 101 _ssh 285199 Sep 22 15:21 opensips-c.pcap
+-rw-r--r-- 1 101 _ssh 195902 Sep 22 15:21 opensips.pcap
+-rw-r--r-- 1 101 _ssh 248883 Sep 22 15:24 proxy-baresip-c.pcap
+-rw-r--r-- 1 101 _ssh 205925 Sep 22 15:24 proxy-baresip.pcap
+-rw-r--r-- 1 101 _ssh 290569 Sep 22 15:20 proxy-c.pcap
+-rw-r--r-- 1 101 _ssh 198463 Sep 22 15:20 proxy.pcap
+
+the lab agrees
