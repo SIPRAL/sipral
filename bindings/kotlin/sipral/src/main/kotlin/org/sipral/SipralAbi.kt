@@ -3792,7 +3792,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 22)
+        agree(0, 23)
     }
 
     /**
@@ -3941,7 +3941,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 22
+    const val ABI_VERSION_MINOR: Long = 23
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
