@@ -1040,8 +1040,12 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     headless_socket_agent && pass "headless-socket-agent answered, echoed and carried DTMF" \
         || fail "headless-socket-agent"
     step "the Swift binding's example agent, called by Asterisk"
-    swift_agent && pass "SipralLabAgent answered, echoed and carried DTMF" \
-        || fail "SipralLabAgent"
+    if [ -n "$SWIFT_AGENT" ]; then
+        swift_agent && pass "SipralLabAgent answered, echoed and carried DTMF" \
+            || fail "SipralLabAgent"
+    else
+        printf '  note  no Swift lab agent was built; see its build step above\n'
+    fi
     step "the Kotlin idiomatic-layer agent, called by Asterisk"
     if [ -n "${KOTLIN_AGENT_JAR:-}" ]; then
         kotlin_agent && pass "Agent.kt answered, echoed and carried DTMF" \
@@ -1050,8 +1054,12 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
         printf '  note  KOTLIN_AGENT_JAR not set; see bindings/kotlin/README.md\n'
     fi
     step "the .NET sample agent, called by Asterisk"
-    csharp_agent && pass "Sipral.Sample.Agent answered, echoed and hung up" \
-        || fail "Sipral.Sample.Agent"
+    if [ -n "$HARNESS_C" ]; then
+        csharp_agent && pass "Sipral.Sample.Agent answered, echoed and hung up" \
+            || fail "Sipral.Sample.Agent"
+    else
+        printf '  note  no libsipral_ffi to load; that step is skipped\n'
+    fi
 fi
 
 # The one step in this file where the far end is a client stack rather than
