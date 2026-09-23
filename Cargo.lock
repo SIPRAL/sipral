@@ -958,6 +958,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipral-license-gen"
+version = "0.0.1"
+
+[[package]]
 name = "sipral-media"
 version = "0.0.1"
 dependencies = [

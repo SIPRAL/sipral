@@ -63,10 +63,12 @@ contract, not a runtime lock.
 ## Third-party code
 
 Sipral links only permissively licensed dependencies (MIT, BSD, Apache-2.0,
-ISC, Zlib). None of them restricts either arm. Their attributions are in
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and must ship with your
-binaries. The dependency allow-list is enforced by `cargo deny`, which
-`scripts/check.sh` runs.
+ISC, Zlib). None of them restricts either arm. Their licence texts are
+generated into
+[`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt), which must ship with
+your binaries; [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) explains
+what is in it in plain language. The dependency allow-list is enforced by
+`cargo deny`, which `scripts/check.sh` runs.
 
 ### Patents, and one codec in particular
 

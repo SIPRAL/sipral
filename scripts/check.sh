@@ -551,6 +551,19 @@ else
     fail "python3 not found, and scripts/interop-matrix.py needs it"
 fi
 
+# THIRD-PARTY-LICENSES.txt against the normal dependency graph of the crates
+# Sipral ships a binary of. tools/license-gen regenerates it from
+# `cargo tree` and each dependency's own registry checkout; this only asks
+# whether the file committed here is still what that graph produces.
+step "third-party licences match the dependency graph"
+if lic_out=$(cargo run -p sipral-license-gen -- --check 2>&1); then
+    pass "THIRD-PARTY-LICENSES.txt matches the shipped dependency graph"
+else
+    fail "THIRD-PARTY-LICENSES.txt is stale:"
+    printf '        %s\n' "$lic_out"
+    printf '        regenerate it: cargo run -p sipral-license-gen\n'
+fi
+
 if [ "$HYGIENE_ONLY" -eq 1 ]; then
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'hygiene checks passed\n'; exit 0; }

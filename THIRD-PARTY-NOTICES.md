@@ -5,9 +5,14 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # Third-party notices
 
-Ship this file, or an equivalent notice screen, with any binary that contains
-Sipral. Both licence arms require it, because the components below require it
-themselves.
+Ship [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt), or an equivalent
+notice screen, with any binary that contains Sipral. Both licence arms
+require it, because the components below require it themselves: that file
+carries every one of their own licence texts, generated from the dependency
+graph by `tools/license-gen` and kept current by `scripts/check.sh`. This
+file is the plain-language explanation beside it, and the place where a
+question a licence text does not answer -- a component's patent position, in
+particular -- is written down.
 
 The protocol core is written from the RFCs and depends on nothing. Components
 are added only as the phases in `docs/10-roadmap.md` reach them, and each

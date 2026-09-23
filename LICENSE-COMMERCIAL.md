@@ -59,10 +59,10 @@ AGPL-3.0, and no term of the AGPL-3.0, section 13 included, applies to it.
 
 ## 5. Attribution
 
-The Licensee ships `THIRD-PARTY-NOTICES.md`, or an equivalent notice screen, with
-its binaries. That covers the permissively licensed components inside Sipral and
-is required by their own licences, not by this one. No attribution to Sipral
-itself is required in the Licensee's user interface.
+The Licensee ships `THIRD-PARTY-LICENSES.txt`, or an equivalent notice screen,
+with its binaries. That covers the permissively licensed components inside
+Sipral and is required by their own licences, not by this one. No attribution
+to Sipral itself is required in the Licensee's user interface.
 
 ## 6. Trademark
 
