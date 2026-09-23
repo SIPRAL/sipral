@@ -49,9 +49,12 @@ The binding itself has no Gradle project: `scripts/package/aar.sh` assembles
 `libsipral_jni.so` (both shims) linked against `libsipral_ffi.so` for
 arm64-v8a, armeabi-v7a and x86_64 beside the compiled classes of everything
 under `sipral/src/main/kotlin`, and a `proguard.txt` keeping what only native
-code calls. `docs/08-ffi.md` says what the binding still does not carry: two
-structs a caller part-fills with buffers, which still cross as addresses. The
-event payload union does cross now — every event carries every arm the union
+code calls. The classes are compiled for Kotlin 2.2 (`-language-version` and
+`-api-version`), so that an application built with Kotlin 2.1 or later -- the
+Android Gradle Plugin 9's own is 2.2 -- can compile against them.
+`docs/08-ffi.md` says what the binding still does not carry: two structs a
+caller part-fills with buffers, which still cross as addresses. The event
+payload union does cross now — every event carries every arm the union
 declares, read back through `SipralEvent.payload`, one class per arm.
 
 ## The idiomatic layer
@@ -112,7 +115,12 @@ Split in two, so that the part worth testing needs no Android:
   screen already up rather than reported again -- and maps the framework's
   answer, reject, hold, unhold, DTMF and disconnect onto the call, and the
   call's progress, hold (both ends'), and end back onto the framework, with a
-  `DisconnectCause` for each way a call ends. The framework is behind
+  `DisconnectCause` for each way a call ends -- including a call that ended
+  while the framework was still creating its connection, whose connection is
+  disconnected with that cause the moment it exists. `endAll` ends every call
+  at once, for an application about to close its client: once the client is
+  closed nothing would end them, and a connection nobody ends stays up in
+  the framework for as long as the process lives. The framework is behind
   `TelecomPlatform` and `TelecomConnection` and the SIP side behind
   `SipCalls`, the way the Swift layer puts CallKit behind
   `CallKitProviding`; `IdiomaticSipCalls` is `SipCalls` over
@@ -131,6 +139,12 @@ Split in two, so that the part worth testing needs no Android:
   the transactional telecom API (API 34); the capability is still what a
   self-managed `ConnectionService` needs on Android 8.0 to 17, and an adapter
   over the transactional API would sit over the same `TelecomBridge`.
+  `android/telecom/src/test` runs the connection's callbacks on the JVM
+  against the platform's stub jar, with TestNG: every one the framework may
+  answer, turn away (`onReject` with no argument, with a reason, or with a
+  message), hang up, abort, hold, resume or send a digit through reaches the
+  bridge. What the connection tells the framework cannot be seen there, and
+  waits for a device.
 
 Which announcement an INVITE answered is in the event payload, which does not
 cross this binding yet, so `TelecomBridge` chooses among its own by the same
@@ -147,8 +161,8 @@ pumped through `SipralMedia` as voice-communication streams.
 `scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
 three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the
 image `android/Dockerfile` describes (the Android SDK, the NDK, cargo-ndk,
-kotlinc and Gradle, every download pinned and checked), and opens each to
-check it. The flag is the person running it accepting the Android SDK
+kotlinc and Gradle, every download pinned and checked), runs the helper's
+unit tests, and opens each artefact to check it. The flag is the person running it accepting the Android SDK
 licence, which the script never does on anybody's behalf. The Gradle
 wrapper's properties are committed and its jar is not: the jar is a binary,
 so the script generates the wrapper from the Gradle distribution in the
@@ -156,6 +170,7 @@ image and checks it reproduces the committed pin. `scripts/check.sh` does not
 compile `android/`, since this machine has no Android SDK to compile it
 against.
 
-Proven off a phone: the logic, by `TelecomCheck.kt`; the three artefacts,
-built and opened. Not provable without one: what the telecom framework itself
+Proven off a phone: the logic, by `TelecomCheck.kt`; the connection's
+callbacks reaching it, by the helper's unit tests; the three artefacts, built
+and opened. Not provable without one: what the telecom framework itself
 does with a self-managed call, audio routing, and push delivery.

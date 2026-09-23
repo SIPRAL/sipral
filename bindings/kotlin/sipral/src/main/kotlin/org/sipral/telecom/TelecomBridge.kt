@@ -71,7 +71,7 @@ data class TelecomCall(
  * Feed it the client's events with [collect] (or [onEvent] one at a time),
  * the framework's callbacks with [connectionCreated], [connectionFailed],
  * [answer], [reject], [disconnect], [hold], [unhold] and [playDtmf], and a
- * push with [pushArrived].
+ * push with [pushArrived]. Before closing the client, call [endAll].
  *
  * Every entry point is safe from any thread, and each holds one monitor
  * for its whole length, calls out included. That is deliberate: the
@@ -102,6 +102,13 @@ class TelecomBridge(
          * nothing more about it. */
         var closedForTelecom = false
 
+        /** Why, once [closedForTelecom]. */
+        var closedWith: TelecomDisconnect? = null
+
+        /** The framework was asked for a connection and has neither
+         * created one nor refused to yet. */
+        var awaitingConnection = false
+
         /** The announcement still waiting for its INVITE, or zero. */
         var announcement: Long = 0
         var announcedAt: Long = 0
@@ -121,6 +128,12 @@ class TelecomBridge(
     private val entries = LinkedHashMap<String, Entry>()
     private val byCall = HashMap<Long, Entry>()
     private val announcedCalls = HashSet<Long>()
+
+    /** Calls that ended while the framework was still creating their
+     * connection, and why: the connection it creates afterwards is told
+     * this. The framework answers every request once, by creating the
+     * connection or refusing to, and the answer takes the line out. */
+    private val endedBeforeConnection = HashMap<String, TelecomDisconnect>()
     private var sequence = 0L
 
     private val callsFlow = MutableStateFlow<List<TelecomCall>>(emptyList())
@@ -171,11 +184,13 @@ class TelecomBridge(
         val entry = Entry(newId(), TelecomDirection.INCOMING, account, caller, displayName, TelecomPhase.RINGING)
         entry.announced = true
         entries[entry.id] = entry
+        entry.awaitingConnection = true
         try {
             platform.reportIncomingCall(entry.id, caller, displayName)
         } catch (refused: RuntimeException) {
             // No screen, so nothing to announce for: the push handler hears
             // why, and the INVITE, if it comes, is an ordinary call.
+            entry.awaitingConnection = false
             forget(entry)
             throw refused
         }
@@ -214,13 +229,66 @@ class TelecomBridge(
     fun placeCall(account: Long, target: String): String = settle {
         val entry = Entry(newId(), TelecomDirection.OUTGOING, account, target, null, TelecomPhase.REQUESTED)
         entries[entry.id] = entry
+        entry.awaitingConnection = true
         try {
             platform.placeOutgoingCall(entry.id, target)
         } catch (refused: RuntimeException) {
+            entry.awaitingConnection = false
             forget(entry)
             throw refused
         }
         entry.id
+    }
+
+    /**
+     * End every call this bridge knows, for an application about to close
+     * the client under it: once the client is closed no event will ever end
+     * them, and a connection nobody ends stays up in the framework -- and in
+     * the system's own call screens -- for as long as the process lives.
+     *
+     * Each connection is disconnected, as ended by this end. On the SIP
+     * side a call still ringing here is turned away as busy, any other is
+     * hung up, and each is let go at once rather than on the event that
+     * would have said it ended; an announcement still waiting is forgotten.
+     * A connection the framework creates afterwards for one of these calls
+     * is disconnected the moment it exists.
+     */
+    fun endAll(): Unit = settle {
+        for (entry in entries.values.toList()) {
+            entry.endedLocally = true
+            tellClosed(entry, TelecomDisconnect.LOCAL)
+            val call = entry.call
+            when {
+                call != 0L -> {
+                    try {
+                        if (entry.direction == TelecomDirection.INCOMING && !entry.answered) {
+                            sip.reject(call, 486)
+                        } else {
+                            sip.hangup(call)
+                        }
+                    } catch (_: Exception) {
+                        // Ended already, or never got this far: letting go
+                        // of it below is all that is left to do.
+                    }
+                    try {
+                        sip.release(call)
+                    } catch (_: Exception) {
+                        // Nothing more can be done for this call, and the
+                        // others still have to be ended.
+                    }
+                }
+                entry.announcement != 0L -> {
+                    try {
+                        sip.forgetAnnouncement(entry.announcement)
+                    } catch (_: Exception) {
+                        // Already matched or expired: the client is about to
+                        // be closed, and the INVITE with it.
+                    }
+                }
+            }
+            forget(entry)
+        }
+        announcedCalls.clear()
     }
 
     // -- the framework's side ------------------------------------------------
@@ -232,12 +300,16 @@ class TelecomBridge(
      */
     fun connectionCreated(id: String, connection: TelecomConnection): Unit = settle {
         val entry = entries[id]
+        val endedAlready = endedBeforeConnection.remove(id)
         if (entry == null || entry.closedForTelecom) {
-            // Nothing is behind this id any more: a call that ended while
-            // the framework was still creating its connection.
-            connection.setDisconnected(if (entry == null) TelecomDisconnect.ERROR else TelecomDisconnect.CANCELED)
+            // The call ended while the framework was still creating its
+            // connection, which is told why. An id nothing was ever asked
+            // for is an error.
+            connection.setDisconnected(entry?.closedWith ?: endedAlready ?: TelecomDisconnect.ERROR)
+            entry?.awaitingConnection = false
             return@settle
         }
+        entry.awaitingConnection = false
         entry.connection = connection
         if (entry.direction == TelecomDirection.OUTGOING && entry.phase == TelecomPhase.REQUESTED) {
             val handle = try {
@@ -254,8 +326,15 @@ class TelecomBridge(
 
     /** The framework refused to create the connection for [id]. */
     fun connectionFailed(id: String): Unit = settle {
+        endedBeforeConnection.remove(id)
         val entry = entries[id] ?: return@settle
+        entry.awaitingConnection = false
+        if (entry.closedForTelecom) {
+            // Ended already, and what ending it started is under way.
+            return@settle
+        }
         entry.closedForTelecom = true
+        entry.closedWith = TelecomDisconnect.ERROR
         entry.phase = TelecomPhase.ENDED
         entry.endedLocally = true
         when {
@@ -371,6 +450,7 @@ class TelecomBridge(
         entries[entry.id] = entry
         entry.call = event.call
         byCall[event.call] = entry
+        entry.awaitingConnection = true
         try {
             platform.reportIncomingCall(entry.id, caller, who.displayName)
         } catch (_: RuntimeException) {
@@ -378,7 +458,9 @@ class TelecomBridge(
             // SecurityException for an account it does not know). Nobody can
             // see it ring, so it is turned away rather than left ringing --
             // and this runs on the event stream, which a throw would end.
+            entry.awaitingConnection = false
             entry.closedForTelecom = true
+            entry.closedWith = TelecomDisconnect.ERROR
             entry.endedLocally = true
             entry.phase = TelecomPhase.ENDED
             quietly { sip.reject(event.call, 486) }
@@ -397,6 +479,11 @@ class TelecomBridge(
     private fun confirmed(call: Long) {
         val entry = byCall[call] ?: return
         entry.confirmed = true
+        if (entry.closedForTelecom) {
+            // Hung up here while the confirmation was on its way: the call
+            // is ending, and the framework was told so already.
+            return
+        }
         entry.phase = TelecomPhase.ACTIVE
         render(entry)
     }
@@ -488,6 +575,7 @@ class TelecomBridge(
             return
         }
         entry.closedForTelecom = true
+        entry.closedWith = cause
         entry.phase = TelecomPhase.ENDED
         val connection = entry.connection
         entry.connection = null
@@ -506,6 +594,9 @@ class TelecomBridge(
     private fun forget(entry: Entry) {
         entry.phase = TelecomPhase.ENDED
         entries.remove(entry.id)
+        if (entry.awaitingConnection) {
+            endedBeforeConnection[entry.id] = entry.closedWith ?: TelecomDisconnect.CANCELED
+        }
         if (entry.call != 0L && byCall[entry.call] === entry) {
             byCall.remove(entry.call)
         }

@@ -195,9 +195,23 @@ else
         fail "no Kotlin source found under bindings/kotlin/sipral/src/main/kotlin"
     else
         mkdir -p "$STAGE/classes"
-        if kotlinc -cp "$COROUTINES_JAR" "${kt_sources[@]}" -d "$STAGE/classes" >"$STAGE/kotlinc.log" 2>&1; then
+        # The language and API version the classes are compiled for, which
+        # is also the Kotlin metadata version they carry. A consumer's
+        # compiler reads metadata at most one version ahead of its own, so
+        # classes compiled for kotlinc's own 2.4 would not compile against
+        # the Kotlin 2.2 the Android Gradle Plugin 9 builds with unless told
+        # otherwise. 2.2 is the oldest kotlinc 2.4 does not call deprecated,
+        # and Kotlin 2.1 and later read it.
+        KOTLIN_TARGET="2.2"
+        if kotlinc -language-version "$KOTLIN_TARGET" -api-version "$KOTLIN_TARGET" -cp "$COROUTINES_JAR" \
+            "${kt_sources[@]}" -d "$STAGE/classes" >"$STAGE/kotlinc.log" 2>&1; then
             ( cd "$STAGE/classes" && jar cf "$STAGE/aar/classes.jar" . )
-            pass "kotlinc, then jar cf classes.jar"
+            pass "kotlinc for Kotlin $KOTLIN_TARGET, then jar cf classes.jar"
+            metadata=$(javap -v -cp "$STAGE/classes" org.sipral.Sipral 2>/dev/null \
+                | sed -n 's/^ *mv=\[\([0-9]*\),\([0-9]*\),.*/\1.\2/p' | head -1)
+            [ "$metadata" = "$KOTLIN_TARGET" ] \
+                && pass "org.sipral.Sipral carries Kotlin metadata $metadata" \
+                || fail "org.sipral.Sipral carries Kotlin metadata '${metadata}', not $KOTLIN_TARGET"
         else
             fail "kotlinc, bindings/kotlin/sipral/src/main/kotlin:"
             tail -30 "$STAGE/kotlinc.log" | sed 's/^/        /'

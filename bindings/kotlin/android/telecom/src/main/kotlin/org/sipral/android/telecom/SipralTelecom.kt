@@ -27,6 +27,9 @@ import org.sipral.telecom.TelecomBridge
  * SipralTelecom.install(bridge) { id, connection -> showIncomingCallNotification(id, connection) }
  * bridge.collect(scope, client.events)
  * ```
+ *
+ * and, when the application closes the client, `bridge.endAll()` first, so
+ * that no connection outlives the calls it was showing.
  */
 object SipralTelecom {
     /** The key a call's id travels under in the framework's extras. */

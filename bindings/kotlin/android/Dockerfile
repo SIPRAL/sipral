@@ -55,8 +55,15 @@ RUN cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked \
     && rm -rf /usr/local/cargo/registry
 
 ENV ANDROID_HOME=/opt/android-sdk
-ARG CMDLINE_TOOLS_BUILD=16111833
-ARG CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
+# cmdline-tools 22.0, one release behind the newest (23.0, build 16111833),
+# on purpose: 23.0's sdkmanager is no longer the SDK manager but a launcher
+# that downloads whatever binary dl.google.com/android/cli/latest/ serves at
+# that moment -- unpinned, unchecked -- runs it, and uploads usage metrics
+# from inside the build. 22.0's sdkmanager is still the SDK manager itself:
+# it installs from Google's repository manifest and checks each package
+# against it, and fetches nothing else.
+ARG CMDLINE_TOOLS_BUILD=15859902
+ARG CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
 RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
     && cd /tmp \
     && curl -fsSL -o clt.zip "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_BUILD}_latest.zip" \
@@ -77,7 +84,11 @@ RUN yes | sdkmanager --licenses >/dev/null \
         "build-tools;${ANDROID_BUILD_TOOLS}" \
         "ndk;${ANDROID_NDK}" \
     >/tmp/sdkmanager.log \
-    && rm /tmp/sdkmanager.log
+    && rm /tmp/sdkmanager.log \
+    && if [ -e /root/.android/bin/android-cli ]; then \
+        echo "sdkmanager fetched the unpinned Android CLI: see CMDLINE_TOOLS_BUILD above"; \
+        exit 1; \
+    fi
 
 ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK
 

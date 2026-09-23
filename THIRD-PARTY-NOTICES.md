@@ -348,9 +348,23 @@ ships the rest of them too.
 
 Those five bring in the rest of AndroidX, JetBrains' annotations and JSpecify
 with them -- 96 artefacts on the sample's runtime classpath as of this
-writing. `scripts/package/android.sh` lists them from Gradle, reads the
-licence each one's own POM declares (or its parent's), and fails on any that
-does not say Apache-2.0.
+writing.
+
+The helper's unit tests (`bindings/kotlin/android/telecom/src/test`) run on
+the following, which is test only: nothing built from this repository ships
+it.
+
+| Component | What it is | Licence |
+|---|---|---|
+| TestNG 7.12.0 | the test runner the helper's unit tests are written for (JUnit's licence, EPL, is not one this repository takes) | Apache-2.0 |
+| JCommander (with TestNG) | TestNG's command-line parsing | Apache-2.0 |
+| SLF4J API (with TestNG) | TestNG's logging facade | MIT |
+| jQuery webjar (with TestNG) | TestNG's HTML report | MIT |
+
+`scripts/package/android.sh` lists every artefact Gradle resolved for the
+helper at run time, the sample at run time and the helper's unit tests, reads
+the licence each one's own POM declares (or its parent's), and fails on any
+that is not one `deny.toml` allows.
 
 | Build tool | What it is | Licence |
 |---|---|---|
@@ -359,6 +373,15 @@ does not say Apache-2.0.
 | Kotlin Gradle plugin and Compose compiler plugin 2.4.20 | the Kotlin compiler under Gradle, and Compose's compiler step | Apache-2.0 |
 | Kotlin compiler 2.4.20 | `kotlinc`, which `aar.sh` compiles `sipral.aar`'s classes with | Apache-2.0 |
 | `cargo-ndk` 4.1.2 | drives `cargo` for Android's ABIs | Apache-2.0 OR MIT |
+
+The two plugins bring 115 artefacts onto the build's own classpath
+(`./gradlew buildEnvironment`), and not all of them are under a licence
+`deny.toml` allows: `juniversalchardet` is MPL-1.1, JAXB and Jakarta
+Activation are EDL-1.0, Bouncy Castle has its own MIT-style licence, JDOM its
+own Apache-style one, and JNA is LGPL-2.1 or Apache-2.0. They run inside
+Gradle while it builds and nothing of them is in any artefact, which is why
+`android.sh` holds only what the helper, the sample and the tests resolve to
+the allow-list.
 
 The Android SDK and NDK the image installs are under the Android SDK licence,
 not an open-source one. They are tools and are not redistributed: nothing of

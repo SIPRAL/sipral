@@ -387,6 +387,83 @@ private fun fakeSequences(): String {
         ran++
     }
 
+    // Hung up between the answer and its confirmation: the confirmation
+    // that was already on its way does not bring the call back to life.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 910, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val id = bridge.calls.value.single().id
+        val conn = platform.create(id)
+        bridge.answer(id)
+        bridge.disconnect(id)
+        assertEquals(TelecomDisconnect.LOCAL, conn.cause)
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = 910))
+        assertEquals(TelecomPhase.ENDED, bridge.calls.value.single().phase, "a call hung up came back as ${bridge.calls.value}")
+        assertEquals(0, log.count("conn $id active"))
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = 910))
+        assertTrue(bridge.calls.value.isEmpty())
+        ran++
+    }
+
+    // A call over before the framework got round to creating its
+    // connection: the connection is created all the same, and is told why
+    // the call ended rather than that something failed.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 911, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val missed = bridge.calls.value.single().id
+        bridge.onEvent(event(SipralEventKind.CALL_ENDED, call = 911))
+        assertTrue(bridge.calls.value.isEmpty())
+        assertEquals(TelecomDisconnect.MISSED, platform.create(missed).cause)
+
+        val outgoing = bridge.placeCall(ACCOUNT, "sip:dave@example.invalid")
+        bridge.disconnect(outgoing)
+        assertEquals(TelecomDisconnect.LOCAL, platform.create(outgoing).cause)
+        assertEquals(0, log.count("place $ACCOUNT"), "a call hung up before it was allowed was sent anyway")
+
+        val pushed = bridge.pushArrived(ACCOUNT, "sip:bob@example.invalid")
+        bridge.onEvent(event(SipralEventKind.ANNOUNCED_CALL_MISSING))
+        assertEquals(TelecomDisconnect.MISSED, platform.create(pushed).cause)
+
+        // Told once: the framework answers each report once, and what was
+        // kept for the answer is not kept after it.
+        val refused = bridge.placeCall(ACCOUNT, "sip:erin@example.invalid")
+        bridge.disconnect(refused)
+        bridge.connectionFailed(refused)
+        assertEquals(TelecomDisconnect.ERROR, platform.create(refused).cause)
+        ran++
+    }
+
+    // The application closing its stack ends every call it has: each
+    // connection the framework holds is disconnected, each SIP call ended
+    // and let go, each announcement forgotten -- and a connection the
+    // framework creates afterwards is disconnected the moment it exists.
+    Rig().run {
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 912, account = ACCOUNT, message = invite("<sip:alice@example.invalid>")))
+        val ringing = bridge.calls.value.single().id
+        val ringingConn = platform.create(ringing)
+        bridge.onEvent(event(SipralEventKind.INCOMING_CALL, call = 913, account = ACCOUNT, message = invite("<sip:bob@example.invalid>")))
+        val active = bridge.calls.value.last().id
+        val activeConn = platform.create(active)
+        bridge.answer(active)
+        bridge.onEvent(event(SipralEventKind.CALL_CONFIRMED, call = 913))
+        val pushed = bridge.pushArrived(ACCOUNT, "sip:carol@example.invalid")
+        val pushedConn = platform.create(pushed)
+        val requested = bridge.placeCall(ACCOUNT, "sip:dave@example.invalid")
+
+        bridge.endAll()
+        assertTrue(bridge.calls.value.isEmpty(), "calls left after endAll: ${bridge.calls.value}")
+        for (conn in listOf(ringingConn, activeConn, pushedConn)) {
+            assertEquals(TelecomDisconnect.LOCAL, conn.cause, "connection ${conn.id} left ${conn.state}")
+        }
+        assertEquals(1, log.count("reject 912 486"))
+        assertEquals(1, log.count("hangup 913"))
+        assertEquals(1, log.count("release 912"))
+        assertEquals(1, log.count("release 913"))
+        assertEquals(1, log.count("forget 100"))
+        assertEquals(TelecomDisconnect.LOCAL, platform.create(requested).cause)
+        assertEquals(0, log.count("place $ACCOUNT"))
+        ran++
+    }
+
     // The matching rule itself.
     assertTrue(sameCaller("sip:alice@example.invalid", "sip:alice@EXAMPLE.INVALID:5060;user=phone"))
     assertTrue(sameCaller("sip:al%69ce@example.invalid", "sips:alice@example.invalid"))
@@ -409,7 +486,8 @@ private fun fakeSequences(): String {
 
     return "$ran sequences against fake telecom and SIP sides (push before INVITE, answer before INVITE, " +
         "two callers out of order, INVITE before push both ways, decline crossing a match, busy, refused, missed, " +
-        "a framework that will not take the call)"
+        "a framework that will not take the call, a late confirmation after a hang-up, a call over before its " +
+        "connection existed, every call ended at once)"
 }
 
 // -- the real thing, with only the telecom framework faked -----------------

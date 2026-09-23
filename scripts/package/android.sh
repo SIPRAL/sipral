@@ -15,7 +15,9 @@
 # and then each of the three opened and checked: both natives in every ABI
 # directory, each an ELF shared object for the machine that directory names,
 # needing nothing a device does not have; the classes each is supposed to
-# carry; the service and permission the helper's manifest declares.
+# carry; the service and permission the helper's manifest declares. Before
+# that, the helper's unit tests run, and every artefact Gradle resolved for
+# the helper, the sample and those tests is held to deny.toml's licences.
 #
 #   scripts/package/android.sh --out DIR --accept-android-sdk-licenses
 #
@@ -215,11 +217,33 @@ fi
 cp telecom/build/outputs/aar/telecom-release.aar "$OUT/sipral-telecom.aar"
 cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/sipral-sample.apk"
 
-# What the sample ships besides this repository's own code, each read for
-# the licence its own POM declares -- or its parent's, when it declares
-# none -- out of Gradle's cache. THIRD-PARTY-NOTICES.md says they are all
-# Apache-2.0; this is where that is checked rather than assumed.
-step "the licences of what the sample ships"
+# The connection's callbacks, on the JVM (telecom/src/test). What ran is
+# read out of the results, because a test task that found nothing to run
+# succeeds too.
+step "the helper's unit tests"
+if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" \
+    :telecom:testDebugUnitTest >"$OUT/unit-tests.log" 2>&1; then
+    results=telecom/build/test-results/testDebugUnitTest
+    counted=$(cat "$results"/*.xml 2>/dev/null | grep -o '<testsuite [^>]*>' \
+        | sed -E 's/.* tests="([0-9]+)".* failures="([0-9]+)".* errors="([0-9]+)".*/\1 \2 \3/' \
+        | awk '{t += $1; f += $2 + $3} END {print t + 0, f + 0}')
+    if [ "${counted% *}" -gt 0 ] && [ "${counted#* }" -eq 0 ]; then
+        pass ":telecom:testDebugUnitTest, ${counted% *} tests"
+    else
+        fail ":telecom:testDebugUnitTest ran ${counted% *} tests with ${counted#* } failing"
+    fi
+else
+    fail ":telecom:testDebugUnitTest:"
+    grep -E 'FAILED|Exception|Error|What went wrong' -A3 "$OUT/unit-tests.log" | head -60 | sed 's/^/        /'
+fi
+
+# Every artefact Gradle actually resolved -- not what the build files
+# declare -- for what the helper ships, what the sample ships and what the
+# helper's unit tests run on, each read for the licence its own POM declares
+# (or its parent's, when it declares none) out of Gradle's cache, and held to
+# the licences this repository takes. THIRD-PARTY-NOTICES.md names them;
+# this is where that is checked rather than assumed.
+step "the licences of every artefact Gradle resolved"
 pom_of() {
     local group="$1" artifact="$2" version="$3"
     ls "$GRADLE_USER_HOME/caches/modules-2/files-2.1/$group/$artifact/$version"/*/"$artifact-$version.pom" 2>/dev/null | head -1
@@ -243,33 +267,58 @@ licence_of() {
     done
     printf 'none declared'
 }
-if ./gradlew --no-daemon -q -Psipral.repo="$OUT/maven" :sample:dependencies \
-    --configuration debugRuntimeClasspath >"$OUT/dependencies.txt" 2>&1; then
-    shipped=$(grep -oE '[-+\\]--- [^ ]+:[^ ]+:[^ ]+( -> [^ ]+)?' "$OUT/dependencies.txt" \
-        | sed -E 's/^[-+\\]--- //; s/^([^:]+):([^:]+):[^ ]+ -> (.*)$/\1:\2:\3/' \
-        | grep -v '^org\.sipral:' | sort -u)
+# The names POMs give the licences deny.toml allows (MIT, BSD, Apache-2.0,
+# ISC, Zlib, MIT-0, Unicode-3.0, CC0). A POM naming several is taken as
+# offering a choice, and passes when one of them is here; licences.txt keeps
+# every name it gave.
+ALLOWED='(The )?Apache (Software )?Licen[cs]e,? (Version )?2\.0|Apache-2\.0|(The )?MIT( No Attribution)? Licen[cs]e|MIT(-0)?|(The )?(New )?BSD( [23]-Clause)? Licen[cs]e|BSD-[23]-Clause|ISC( Licen[cs]e)?|zlib( Licen[cs]e)?|Zlib|Unicode-3\.0|CC0(-1\.0)?|Public Domain, per Creative Commons CC0'
+# "group:artifact:version" for each artefact a dependency report resolved.
+# A line reads "g:a:v", "g:a:v -> v2" (another version won) or "g:a -> v" (a
+# platform chose the version); a constraint "(c)" and a declaration that was
+# not resolved "(n)" are not artefacts, and a project is this build's own.
+resolved_in() {
+    awk '/--- / {
+        line = $0; sub(/.*--- /, "", line)
+        if (line ~ /\((c|n)\)$/ || line ~ /^project /) next
+        n = split(line, word, " "); split(word[1], part, ":")
+        version = (word[2] == "->") ? word[3] : part[3]
+        print part[1] ":" part[2] ":" version
+    }' "$1" | grep -v '^org\.sipral:' | sort -u
+}
+: >"$OUT/licences.txt"
+for pair in ":telecom releaseRuntimeClasspath helper-runtime" ":sample debugRuntimeClasspath sample-runtime" \
+    ":telecom debugUnitTestRuntimeClasspath helper-unit-tests"; do
+    read -r project configuration label <<<"$pair"
+    report="$OUT/dependencies-$label.txt"
+    if ! ./gradlew --no-daemon -q -Psipral.repo="$OUT/maven" "$project:dependencies" \
+        --configuration "$configuration" >"$report" 2>&1; then
+        fail "$project:dependencies --configuration $configuration:"
+        tail -20 "$report" | sed 's/^/        /'
+        continue
+    fi
     count=0
-    : >"$OUT/licences.txt"
-    for coordinate in $shipped; do
+    refused=""
+    for coordinate in $(resolved_in "$report"); do
         IFS=: read -r group artifact version <<<"$coordinate"
         pom=$(pom_of "$group" "$artifact" "$version")
         licence=$([ -n "$pom" ] && licence_of "$pom" || printf 'no POM in the cache')
-        printf '%s\t%s\n' "$coordinate" "$licence" >>"$OUT/licences.txt"
+        printf '%s\t%s\t%s\n' "$label" "$coordinate" "$licence" >>"$OUT/licences.txt"
+        # Not grep -q, which under pipefail can fail the pipeline over a
+        # match (see the note at the telecom classes below).
+        if ! printf '%s\n' "$licence" | tr '|' '\n' | grep -xE "$ALLOWED" >/dev/null; then
+            refused="$refused$coordinate ($licence)"$'\n'
+        fi
         count=$((count + 1))
     done
-    refused=$(grep -viE $'\t(The )?Apache (Software )?License,? (Version )?2\\.0|\tApache-2\\.0' "$OUT/licences.txt" || true)
     if [ "$count" -eq 0 ]; then
-        fail "no dependency was read out of :sample:dependencies, so no licence was checked"
+        fail "$label: nothing was read out of $project:dependencies, so no licence was checked"
     elif [ -z "$refused" ]; then
-        pass "$count artefacts on the sample's runtime classpath, every one Apache-2.0 by its own POM"
+        pass "$label: $count artefacts resolved ($project $configuration), every one under a licence deny.toml allows"
     else
-        fail "artefacts on the sample's runtime classpath that do not say Apache-2.0:"
-        printf '%s\n' "$refused" | sed 's/^/        /'
+        fail "$label: artefacts under a licence deny.toml does not allow:"
+        printf '%s' "$refused" | sed 's/^/        /'
     fi
-else
-    fail ":sample:dependencies:"
-    tail -20 "$OUT/dependencies.txt" | sed 's/^/        /'
-fi
+done
 
 # -- what came out ---------------------------------------------------------
 

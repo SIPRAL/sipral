@@ -523,6 +523,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   inside of and took every stack and call in the process down with it.
   Now caught at the point each is invoked, the same "the callback does
   not unwind" contract already documented for the Kotlin binding.
+- **The Android helper no longer leaves a call up that has ended, and
+  `sipral.aar` compiles in an ordinary Android project.** A connection
+  declined with a reason or a text reply (`onReject(int)`,
+  `onReject(String)`) now declines the call instead of ringing on; a
+  confirmation that lands after a hang-up no longer shows the call active
+  again; a connection the framework creates after its call ended is told why
+  it ended rather than that something failed; and `TelecomBridge.endAll`,
+  which the sample now calls before closing its client, ends every call so
+  that none outlives the client. `sipral.aar`'s classes are compiled for
+  Kotlin 2.2, which the Android Gradle Plugin 9's own compiler reads; for
+  Kotlin 2.4 they were refused. The build image pins command-line tools
+  22.0, because 23.0's `sdkmanager` downloads an unpinned tool at build time
+  and uploads usage metrics from it, and `android.sh` now runs the helper's
+  unit tests and checks the licence of every artefact Gradle resolves for
+  the helper, the sample and those tests.
 - **`sipral_headless::encode_control` no longer writes a control frame the
   far end will refuse.** It wrote up to the sixteen bits of the length
   field, while every `Decoder` refuses a control frame past

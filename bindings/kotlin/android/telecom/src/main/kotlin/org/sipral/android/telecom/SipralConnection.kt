@@ -104,6 +104,15 @@ class SipralConnection internal constructor(
 
     override fun onReject() = bridge.reject(id)
 
+    // The framework reaches a connection through these two as well -- a
+    // reason from Android 10's Call.reject(int), a text reply from
+    // Call.reject(boolean, String) -- and Connection's own versions do
+    // nothing, which would leave the call ringing. There is no reply to send
+    // here, so each is the same decline.
+    override fun onReject(rejectReason: Int) = bridge.reject(id)
+
+    override fun onReject(replyMessage: String?) = bridge.reject(id)
+
     override fun onDisconnect() = bridge.disconnect(id)
 
     override fun onAbort() = bridge.disconnect(id)

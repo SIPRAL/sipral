@@ -246,6 +246,10 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
             pump.close()
         }
         pumps.clear()
+        // Before the client goes: once it has, nothing would ever end the
+        // calls the framework is still showing.
+        bridge?.endAll()
+        bridge = null
         client?.close()
         client = null
     }
