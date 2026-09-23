@@ -2,18 +2,10 @@
 // Copyright (c) 2026 Tiberiu Balasea
 //
 // A headless voice agent over org.sipral.idiomatic: registers, answers,
-// echoes what it hears, counts DTMF, hangs up once it has heard three
-// digits, and reports what it heard. The Kotlin equivalent of
-// bindings/python/examples/agent.py, run in the lab by scripts/lab.sh's
-// kotlin_agent the way python_agent runs the Python one, against the same
-// [agent-call] extension.
-//
-// The one thing this cannot do that the Python agent does is hang up on
-// the digit "#" specifically: the generated Kotlin/JNI shim forwards no
-// event payload (bindings/kotlin/README.md, SipralCall.digits' own
-// documentation), so an RFC 4733 (RTP) digit — what Asterisk's
-// SendDTMF sends here by default — carries no character this binding can
-// read. Three DIGIT_RECEIVED events is what "12#" is heard as instead.
+// echoes what it hears, hangs up on "#", and reports what it heard. The
+// Kotlin equivalent of bindings/python/examples/agent.py, run in the lab by
+// scripts/lab.sh's kotlin_agent the way python_agent runs the Python one,
+// against the same [agent-call] extension.
 //
 //   SIPRAL_AOR=sip:labuser-agent-kotlin@asterisk \
 //   SIPRAL_REGISTRAR=sip:asterisk \
@@ -35,6 +27,7 @@ import kotlinx.coroutines.withTimeout
 import org.sipral.SipralEventKind
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.digitOf
 
 /** Which of this host's addresses a datagram to `address` leaves from.
  * `bindings/python/examples/agent.py`'s own `route_to`: connecting a UDP
@@ -70,11 +63,15 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
     // read the numbers right before hangup() rather than after it.
     var stats: org.sipral.SipralStreamStats? = null
     val hangingUp = launch {
-        var count = 0
-        call.digits.collect {
-            count += 1
-            println("dtmf-event $count")
-            if (count >= 3) {
+        call.digits.collect { event ->
+            val digit = digitOf(event) ?: return@collect
+            println("dtmf $digit")
+            if (digit == '#') {
+                // Read while the call is still up. Once the BYE is answered
+                // the stack ends the call's media on its own poll thread,
+                // and a statistics() call after that answers that the media
+                // has ended rather than with numbers -- Agent.kt's own
+                // Python equivalent has the same race and the same fix.
                 stats = try {
                     media.statistics()
                 } catch (_: Exception) {

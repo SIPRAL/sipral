@@ -100,6 +100,52 @@ private suspend fun everything(): String {
         )
         assertEquals(null, raced.media, "a MEDIA_STARTED delivered after close() must mint nothing")
 
+        // The payload union crosses whole now, flattened over JNI into
+        // SipralEvent.payload -- one class per arm -- independent of
+        // anything a real call does, so a hand-built event round-trips a
+        // field of each of the three arms an application actually reads:
+        // a DTMF digit, a registration state and a media codec.
+        val digitEvent = SipralEvent(
+            size = 0,
+            stack = clientB.handle,
+            kind = SipralEventKind.DIGIT_RECEIVED.value.toLong(),
+            account = 0,
+            call = 0,
+            message = null,
+            payloadMediaDigit = '#'.code.toLong(),
+        )
+        assertEquals('#', digitOf(digitEvent), "payload.media.digit did not round-trip")
+
+        val registrationEvent = SipralEvent(
+            size = 0,
+            stack = clientA.handle,
+            kind = SipralEventKind.REGISTRATION_CHANGED.value.toLong(),
+            account = 0,
+            call = 0,
+            message = null,
+            payloadRegistrationState = org.sipral.SipralRegistrationState.REGISTERED.value.toLong(),
+        )
+        assertEquals(
+            org.sipral.SipralRegistrationState.REGISTERED,
+            org.sipral.SipralRegistrationState.of(registrationEvent.payload.registration.state.toInt()),
+            "payload.registration.state did not round-trip",
+        )
+
+        val mediaEvent = SipralEvent(
+            size = 0,
+            stack = clientA.handle,
+            kind = SipralEventKind.MEDIA_STARTED.value.toLong(),
+            account = 0,
+            call = 0,
+            message = null,
+            payloadMediaCodec = org.sipral.SipralCodec.OPUS.value.toLong(),
+        )
+        assertEquals(
+            org.sipral.SipralCodec.OPUS.value.toLong(),
+            mediaEvent.payload.media.codec,
+            "payload.media.codec did not round-trip",
+        )
+
         // Placed directly at clientB, through accountA's own registrarAddress
         // acting as the outbound destination -- no registrar between them,
         // the same shape bindings/python's loopback tests use.
@@ -136,9 +182,10 @@ private suspend fun everything(): String {
         assertTrue(statsA.packetsReceived > 0, "callA never heard callB's silence")
         assertTrue(statsB.packetsReceived > 0, "callB never heard callA's silence")
 
-        // Hold and resume, read back through sipral_call_hold_state rather
-        // than guessed from an event whose payload this generation of the
-        // binding does not carry.
+        // Hold and resume, read back through sipral_call_hold_state: a
+        // direct query rather than the SESSION_CHANGED event's own
+        // payload.call.heldHere/heldThere, since this only wants the state
+        // and does not want to race a specific event arriving.
         callA.hold()
         withTimeout(15_000) {
             while (!callA.holdState.first) {
@@ -154,15 +201,15 @@ private suspend fun everything(): String {
         }
         assertTrue(!callA.holdState.first, "callA never reports itself off hold")
 
-        // DTMF: three digits, RTP (RFC 4733) by default. The generated
-        // Kotlin/JNI shim forwards no event payload
-        // (bindings/kotlin/README.md), so the digit itself cannot be read
-        // back for this source -- see SipralCall.digits and digitOf's own
-        // documentation -- but the three DIGIT_RECEIVED events themselves
-        // are observable, which is what this checks.
-        val digitsSeen = mutableListOf<org.sipral.SipralEvent>()
+        // DTMF: three digits, RTP (RFC 4733) by default, read back by
+        // character now that the payload union crosses -- digitOf reads
+        // each one off payload.media.digit, an RFC 4733 digit the same way
+        // as either INFO form.
+        val digitsSeen = mutableListOf<Char>()
         coroutineScope {
-            val collecting = launch { callB.digits.collect { digitsSeen.add(it) } }
+            val collecting = launch {
+                callB.digits.collect { event -> digitOf(event)?.let { digitsSeen.add(it) } }
+            }
             callA.sendDtmf("12#")
             withTimeout(15_000) {
                 while (digitsSeen.size < 3) {
@@ -171,7 +218,7 @@ private suspend fun everything(): String {
             }
             collecting.cancel()
         }
-        assertEquals(3, digitsSeen.size, "sent 3 DTMF digits, saw ${digitsSeen.size} DIGIT_RECEIVED events")
+        assertEquals(listOf('1', '2', '#'), digitsSeen, "sent \"12#\", read back $digitsSeen")
 
         // Hang up from one side; the other has to see CALL_ENDED too.
         callA.hangup()
@@ -203,7 +250,7 @@ private suspend fun everything(): String {
 
         return "two SipralClients on loopback, a call placed, answered, confirmed, " +
             "${statsA.packetsSent + statsB.packetsSent} RTP packets exchanged while idle, " +
-            "held and resumed, 3 DTMF events observed, hung up, both handles stale after close"
+            "held and resumed, \"12#\" read back off the payload, hung up, both handles stale after close"
     } finally {
         // Best-effort: every path above that succeeds already closes both,
         // and a path that threw leaves nothing running past this test's own

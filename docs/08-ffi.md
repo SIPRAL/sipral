@@ -1347,12 +1347,28 @@ listener changes: it is still kept under a key, tied to the handle its call
 made, and let go of when that handle is destroyed, exactly as
 `SipralEventListener` is.
 
-**A listener is handed the head of the event** — the size, the handles, the
-kind and the message — and not the payload union. Which arm the library wrote
-is named by `kind`, and nothing in the declarations says which kind writes
-which arm, so a generated reader would be guessing, and a wrong guess reads a
-pointer out of bytes that were written as a number. Carrying the payload needs
-the descriptors to say it first.
+**A listener is handed the head of the event, and every arm of the payload
+union beside it.** Nothing in the declarations says which kind writes which
+arm, so a generated reader that picked one would be guessing; instead every
+arm crosses, flattened a member at a time the same way a struct handed over
+directly already does, and `SipralEvent.payload` is a computed property that
+reads them back as one instance of each arm's own class —
+`SipralRegistrationEvent`, `SipralCallEvent`, `SipralMediaEvent`, and the rest,
+one per member `sipral_event_payload_t` declares. Reading a plain number out
+of an arm `kind` does not name is defined the same as it is in C, Swift and
+C# — it reads bytes the library wrote for a different arm — and never a
+crash, only not meaningful. A buffer or a whole record behind a pointer is
+not: a kind's own write into the union is real data reinterpreted as every
+other arm's layout, and a pointer read out of it, whichever arm's bytes it
+came from, is not an address anything owns. So the shim never dereferences
+one unless `crates/sipral-ffi/src/event.rs`'s `EVENT_KIND_ARMS` says `kind`
+is one of the ones that actually wrote that arm — every other kind sees that
+member as if the library had never set it, null and zero, the same as it
+reads before the event's `size` reaches it at all. `SipralMediaEvent.statistics`,
+the one arm member that itself points at another record, is guarded the same
+way, and crosses the way `sipral_media_statistics` already hands one back: a
+`long[]` of its own members, made fresh for the event rather than filled into
+an array the caller brought, and read back through `SipralStreamStats.of`.
 
 **The binding checks the ABI as it loads.** `SipralNative`'s initialiser calls
 `sipral_abi_check` with the version the file was printed from, and throws a

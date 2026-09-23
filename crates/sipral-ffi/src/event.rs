@@ -469,6 +469,89 @@ event_kinds! {
     }
 }
 
+/// Which arm of [`SipralEventPayload`] each live kind writes, once.
+///
+/// Not part of the C ABI -- nothing across the boundary reads this, and
+/// `sipral_event_kind_name` above is what a C, Swift or C# caller has
+/// instead, because they read the one arm `kind` names and no other, the
+/// same discipline every application on top of this ABI is written to. The
+/// generated Kotlin/JNI shim cannot be: it reads every arm of every event,
+/// since nothing in these declarations otherwise says which value of `kind`
+/// writes which arm (`tools/abi-gen/src/kotlin.rs`), and the bytes of an
+/// arm nothing wrote are not merely meaningless once another arm has
+/// written real data into the same union -- a buffer's own pointer,
+/// reinterpreted as some other arm's length, is a number with no relation
+/// to any allocation, and dereferencing it is what put
+/// `sipral-lab-agent-kotlin` on the floor with a `SIGSEGV` inside
+/// `NewByteArray`. So the generator reads this, once, to gate every buffer
+/// and every whole-record pointer it prints behind the kind that is the one
+/// arm this crate ever actually writes it under; `translate` above and the
+/// `MediaEvent` match below are what it transcribes, and the assertion
+/// after it is what refuses a kind that arrived here having forgotten to.
+pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
+    (SipralEventKind::Started, "call"),
+    (SipralEventKind::RegistrationChanged, "registration"),
+    (SipralEventKind::IncomingCall, "call"),
+    (SipralEventKind::CallProgress, "call"),
+    (SipralEventKind::CallForked, "call"),
+    (SipralEventKind::CallConfirmed, "call"),
+    (SipralEventKind::SessionChanged, "call"),
+    (SipralEventKind::SessionOffered, "call"),
+    (SipralEventKind::SessionChangeFailed, "call"),
+    (SipralEventKind::TransferRequested, "transfer"),
+    (SipralEventKind::TransferProgress, "transfer"),
+    (SipralEventKind::TransferDone, "transfer"),
+    (SipralEventKind::CallReplaced, "call"),
+    (SipralEventKind::CallEnded, "call"),
+    (SipralEventKind::SubscriptionChanged, "subscription"),
+    (SipralEventKind::MediaStatistics, "media"),
+    (SipralEventKind::TransportWanted, "transport_wanted"),
+    (SipralEventKind::MediaStalled, "media"),
+    (SipralEventKind::AnnouncedCallMissing, "announce"),
+    (SipralEventKind::MediaStarted, "media"),
+    (SipralEventKind::MediaChanged, "media"),
+    (SipralEventKind::MediaResumed, "media"),
+    (SipralEventKind::MediaFailed, "media"),
+    (SipralEventKind::RecordingStopped, "media"),
+    (SipralEventKind::DigitReceived, "media"),
+    (SipralEventKind::DtmfSent, "call"),
+    (SipralEventKind::Recovery, "recovery"),
+    (SipralEventKind::ResolveNeeded, "resolve"),
+    (SipralEventKind::Notified, "subscription"),
+    (SipralEventKind::CallAnnounced, "announce"),
+    (SipralEventKind::MediaSecured, "media"),
+    (SipralEventKind::MediaPathChosen, "media"),
+    (SipralEventKind::MessageReceived, "message"),
+    (SipralEventKind::MessageSent, "message"),
+    (SipralEventKind::MessagesWaiting, "message"),
+    (SipralEventKind::QualityReportSent, "media"),
+    (SipralEventKind::MediaUnjoined, "media"),
+    (SipralEventKind::NatMapping, "nat"),
+];
+
+// every live kind is here exactly once, in `SipralEventKind::ALL`'s own
+// order: the build failure a hole, a duplicate or a reordering becomes, the
+// same discipline `event_kinds!`'s own assertion holds the numbers to. Slice
+// patterns rather than indexing, which this workspace's lints refuse even
+// where a `while` beside it already proved every index in bounds.
+const fn arms_match(arms: &[(SipralEventKind, &str)], kinds: &[SipralEventKind]) -> bool {
+    match (arms, kinds) {
+        ([], []) => true,
+        ([(arm, _), rest_of_arms @ ..], [kind, rest_of_kinds @ ..]) => {
+            *arm as u32 == *kind as u32 && arms_match(rest_of_arms, rest_of_kinds)
+        }
+        _ => false,
+    }
+}
+
+const _: () = {
+    assert!(
+        arms_match(EVENT_KIND_ARMS, SipralEventKind::ALL),
+        "EVENT_KIND_ARMS and SipralEventKind::ALL do not agree, in count or in order -- a kind \
+         was added, removed or reordered on one side and not the other"
+    );
+};
+
 codes! {
     /// Where a registration is. Names for `sipral_registration_event_t::state`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1079,6 +1162,35 @@ alias! {
     pub type SipralEventCallback = fn(event: *const SipralEvent, user_data: *mut c_void);
 }
 
+/// A [`SipralEventPayload`] with the one arm named written, and every other
+/// byte of the union zero.
+///
+/// `SipralEventPayload { call: value }`'s own construction only ever writes
+/// `value`'s own bytes; nothing sets the rest of the union, up to its own
+/// size (the size of its largest arm), and a fresh value's unwritten bytes
+/// are whatever the compiler put on the stack there before -- not
+/// necessarily zero, and not the same twice. Every binding but Kotlin's
+/// reads the one arm `kind` names and nothing past it, so that was never
+/// reached; the generated Kotlin/JNI shim reads every arm of every event,
+/// because nothing in these declarations says which value of `kind` writes
+/// which arm (`tools/abi-gen/src/kotlin.rs`), and a buffer pointer read out
+/// of bytes nothing wrote is not a value with no meaning, the way an
+/// unwritten integer is -- it is an address nothing owns, and JNI dies on
+/// it exactly as it found here (`SIGSEGV` inside `NewByteArray`, from a
+/// `Kotlin lab agent`'s length reading a genuinely negative array size).
+macro_rules! payload {
+    ($arm:ident: $value:expr) => {{
+        // Safety: every member of every arm is a plain integer or a
+        // pointer with its own length beside it, and the all-zero bit
+        // pattern is already the value each of those reads as "nothing" on
+        // its own -- a null pointer, a zero length, a zero code -- so it is
+        // a valid value of every arm this union has, whichever is read.
+        let mut zeroed: SipralEventPayload = unsafe { std::mem::zeroed() };
+        zeroed.$arm = $value;
+        zeroed
+    }};
+}
+
 impl SipralEvent {
     /// An event with nothing in it but its kind, for a kind to fill in.
     ///
@@ -1154,9 +1266,7 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
     SipralEvent::of(
         stack,
         SipralEventKind::Started,
-        SipralEventPayload {
-            call: SipralCallEvent::empty(),
-        },
+        payload!(call: SipralCallEvent::empty()),
     )
 }
 
@@ -1164,11 +1274,7 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
 /// `payload` point into text the caller keeps beside the event.
 #[cfg(feature = "stun")]
 pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> SipralEvent {
-    SipralEvent::of(
-        stack,
-        SipralEventKind::NatMapping,
-        SipralEventPayload { nat: payload },
-    )
+    SipralEvent::of(stack, SipralEventKind::NatMapping, payload!(nat: payload))
 }
 
 /// Everything one translation needs to reach.
@@ -1262,7 +1368,7 @@ fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<
             let mut out = SipralEvent::of(
                 known.stack,
                 SipralEventKind::CallAnnounced,
-                SipralEventPayload { announce: payload },
+                payload!(announce: payload),
             );
             out.call = call;
             Some(out)
@@ -1282,7 +1388,7 @@ fn about_an_announcement(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::AnnouncedCallMissing,
-                SipralEventPayload { announce: payload },
+                payload!(announce: payload),
             ))
         }
         _ => None,
@@ -1342,9 +1448,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::SubscriptionChanged,
-                SipralEventPayload {
-                    subscription: payload,
-                },
+                payload!(subscription: payload),
             ))
         }
         UaEvent::Subscribed {
@@ -1360,9 +1464,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::SubscriptionChanged,
-                SipralEventPayload {
-                    subscription: payload,
-                },
+                payload!(subscription: payload),
             ))
         }
         UaEvent::SubscriptionForked {
@@ -1378,9 +1480,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::SubscriptionChanged,
-                SipralEventPayload {
-                    subscription: payload,
-                },
+                payload!(subscription: payload),
             ))
         }
         UaEvent::Notified {
@@ -1395,9 +1495,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             let mut out = SipralEvent::of(
                 known.stack,
                 SipralEventKind::Notified,
-                SipralEventPayload {
-                    subscription: payload,
-                },
+                payload!(subscription: payload),
             );
             attach(&mut out, Some(request));
             Some(out)
@@ -1425,9 +1523,7 @@ fn about_a_subscription(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<S
             let mut out = SipralEvent::of(
                 known.stack,
                 SipralEventKind::SubscriptionChanged,
-                SipralEventPayload {
-                    subscription: payload,
-                },
+                payload!(subscription: payload),
             );
             attach(&mut out, response.as_ref());
             Some(out)
@@ -1481,7 +1577,7 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
             let mut out = SipralEvent::of(
                 known.stack,
                 SipralEventKind::MessageReceived,
-                SipralEventPayload { message: payload },
+                payload!(message: payload),
             );
             out.account = account
                 .and_then(|id| known.accounts.name_of(id).ok())
@@ -1506,7 +1602,7 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
             let mut out = SipralEvent::of(
                 known.stack,
                 SipralEventKind::MessageSent,
-                SipralEventPayload { message: payload },
+                payload!(message: payload),
             );
             attach(&mut out, response.as_ref());
             Some(out)
@@ -1537,7 +1633,7 @@ fn about_a_message(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Sipral
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::MessagesWaiting,
-                SipralEventPayload { message: payload },
+                payload!(message: payload),
             ))
         }
         _ => None,
@@ -1576,9 +1672,7 @@ fn about_a_transport(
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::TransportWanted,
-                SipralEventPayload {
-                    transport_wanted: payload,
-                },
+                payload!(transport_wanted: payload),
             ))
         }
         _ => None,
@@ -1624,7 +1718,7 @@ fn about_a_resolve(
             Some(SipralEvent::of(
                 known.stack,
                 SipralEventKind::ResolveNeeded,
-                SipralEventPayload { resolve: payload },
+                payload!(resolve: payload),
             ))
         }
         _ => None,
@@ -1926,7 +2020,7 @@ fn recovery_event(known: &Vocabulary<'_>, payload: SipralRecoveryEvent) -> Sipra
     SipralEvent::of(
         known.stack,
         SipralEventKind::Recovery,
-        SipralEventPayload { recovery: payload },
+        payload!(recovery: payload),
     )
 }
 
@@ -2057,7 +2151,7 @@ pub(crate) fn media(
     if let Some(record) = statistics {
         payload.statistics = std::ptr::from_ref(record);
     }
-    let mut out = SipralEvent::of(known.stack, kind, SipralEventPayload { media: payload });
+    let mut out = SipralEvent::of(known.stack, kind, payload!(media: payload));
     out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
     Some(out)
 }
@@ -2098,9 +2192,7 @@ fn registration_event(
     let mut out = SipralEvent::of(
         known.stack,
         SipralEventKind::RegistrationChanged,
-        SipralEventPayload {
-            registration: payload,
-        },
+        payload!(registration: payload),
     );
     out.account = known
         .accounts
@@ -2145,7 +2237,7 @@ fn call_event(
     call: CallHandle,
     payload: SipralCallEvent,
 ) -> SipralEvent {
-    let mut out = SipralEvent::of(known.stack, kind, SipralEventPayload { call: payload });
+    let mut out = SipralEvent::of(known.stack, kind, payload!(call: payload));
     out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
     out
 }
@@ -2156,7 +2248,7 @@ fn transfer_event(
     call: CallHandle,
     payload: SipralTransferEvent,
 ) -> SipralEvent {
-    let mut out = SipralEvent::of(known.stack, kind, SipralEventPayload { transfer: payload });
+    let mut out = SipralEvent::of(known.stack, kind, payload!(transfer: payload));
     out.call = known.calls.name_of(call).unwrap_or(SIPRAL_HANDLE_NONE);
     out
 }
@@ -2257,9 +2349,9 @@ fn digit_source(source: DigitSource) -> SipralDigitSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        SipralCallEndReason, SipralCallEvent, SipralCallState, SipralEvent, SipralEventKind,
-        SipralEventPayload, SipralRegistrationFailure, SipralRegistrationState, call_state,
-        end_reason, millis, registration_state, sipral_event_kind_name,
+        SipralAnnounceEvent, SipralCallEndReason, SipralCallEvent, SipralCallState, SipralEvent,
+        SipralEventKind, SipralEventPayload, SipralRegistrationFailure, SipralRegistrationState,
+        call_state, end_reason, millis, registration_state, sipral_event_kind_name,
     };
     use sipral_ua::{CallEndReason, CallState, RegistrationState};
     use std::ffi::CStr;
@@ -2281,9 +2373,7 @@ mod tests {
         SipralEvent::of(
             stack,
             SipralEventKind::Started,
-            SipralEventPayload {
-                call: SipralCallEvent::empty(),
-            },
+            payload!(call: SipralCallEvent::empty()),
         )
     }
 
@@ -2315,6 +2405,39 @@ mod tests {
             offset + size_of_val(&event.payload),
             size_of::<SipralEvent>()
         );
+    }
+
+    #[test]
+    fn bytes_past_the_arm_actually_written_are_zero() {
+        // `announce` is one of the union's smallest arms -- a handle and a
+        // `u64`, sixteen bytes -- and `message`'s own tail, well past that,
+        // is where a byte only `payload!`'s own zeroing could have reached:
+        // nothing this call wrote goes anywhere near it. Before `payload!`
+        // zeroed the whole union first, that tail was whatever the stack
+        // held from before this call, and reading a pointer out of it is
+        // what put `sipral-lab-agent-kotlin` on the floor with a `SIGSEGV`
+        // inside `NewByteArray` -- the generated Kotlin/JNI shim reads
+        // every arm of every event, not only the one `kind` names the way
+        // every other binding's own application code already does
+        // (`tools/abi-gen/src/kotlin.rs`), and `EVENT_KIND_ARMS` above is
+        // what keeps it from dereferencing a pointer out of the bytes this
+        // proves are zero rather than out of the ones that are not: the
+        // ones another, larger arm's own write left behind, reinterpreted,
+        // which are not tested here because they are not zero and are not
+        // supposed to be -- see `EVENT_KIND_ARMS`'s own documentation.
+        let event = SipralEvent::of(
+            1,
+            SipralEventKind::CallAnnounced,
+            payload!(announce: SipralAnnounceEvent {
+                announcement: 7,
+                waited_ms: 0,
+            }),
+        );
+        let payload = event.payload;
+        assert_eq!(unsafe { payload.announce.announcement }, 7);
+        assert_eq!(unsafe { payload.message.urgent_old_messages }, 0);
+        assert!(unsafe { payload.message.message_account }.is_null());
+        assert_eq!(unsafe { payload.message.message_account_len }, 0);
     }
 
     #[test]

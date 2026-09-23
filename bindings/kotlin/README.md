@@ -47,9 +47,11 @@ under `-Xcheck:jni`.
 There is no Gradle project in the tree: `scripts/package/aar.sh` assembles
 `sipral.aar` by hand instead, straight to Android's own archive format, with
 `libsipral_jni.so` linked against `libsipral_ffi.so` for each ABI beside
-`SipralAbi.kt`'s compiled classes. `docs/08-ffi.md` says what else the binding
-does not carry: the event payload union, and the two structs a caller
-part-fills with buffers, which still cross as addresses.
+`SipralAbi.kt`'s compiled classes. `docs/08-ffi.md` says what the binding
+still does not carry: two structs a caller part-fills with buffers, which
+still cross as addresses. The event payload union does cross now — every
+event carries every arm the union declares, read back through
+`SipralEvent.payload`, one class per arm.
 
 ## The idiomatic layer
 
@@ -74,8 +76,8 @@ client.close()
 ```
 
 Two structs the generated shim has no way to build from Kotlin —
-`sipral_media_packet_t` and `sipral_transmit_t`, "the two structs a caller
-part-fills with buffers" the paragraph below still names — are what
+`sipral_media_packet_t` and `sipral_transmit_t`, "two structs a caller
+part-fills with buffers" the paragraph above still names — are what
 `SipralMedia`/`SipralClient` need to drive real RTP and to drain outgoing
 SIP messages; `sipral/src/main/jni/idiomatic_media.c` is a second,
 hand-written shim beside the generated one, exposing just those four ABI
@@ -87,11 +89,12 @@ It depends on `kotlinx-coroutines-core-jvm` (Apache-2.0,
 and reused offline afterward; `scripts/check.sh` names the exact path and
 checksum it expects if that cache is not there.
 
-What the event payload union does not carry follows from the same gap: a
-`SIPRAL_EVENT_KIND_DIGIT_RECEIVED` from an RFC 4733 (RTP) digit carries no
-digit in this generation of the binding, only in the two INFO forms, whose
-body is in the event's own `message` — `SipralCall.digits` and `digitOf`
-say so where they are declared.
+A `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` reads its digit off `event.payload.media`
+now, an RFC 4733 (RTP) one the same as one of the two INFO forms — `digitOf`
+reads `event.payload.media.digit` directly, and `SipralAccount.registerAndWait`
+reads the state a terminal `REGISTRATION_CHANGED` reached off
+`event.payload.registration.state`, rather than a second, synchronous call
+back into the stack for something the event already said.
 
 Nothing Android-specific is in the tree yet: a `ConnectionService` helper and
 a Compose sample both build against the Android SDK, which the layer above

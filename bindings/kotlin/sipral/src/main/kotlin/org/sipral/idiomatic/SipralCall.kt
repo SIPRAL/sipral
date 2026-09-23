@@ -78,18 +78,11 @@ class SipralCall internal constructor(
     val events: SharedFlow<SipralEvent> = eventsFlow
 
     /**
-     * Every `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` this call has heard.
-     *
-     * The current generated Kotlin/JNI shim
-     * (`bindings/kotlin/sipral/src/main/jni/sipral_jni.c`) forwards only
-     * `stack`/`kind`/`account`/`call`/`message` out of `sipral_event_t` --
-     * `bindings/kotlin/README.md` names the gap: "the event payload union
-     * ... still cross[es] as addresses". So the digit itself,
-     * `payload.media.digit`, cannot be read off an RFC 4733 (RTP) digit at
-     * all from this generation of the binding; [digitOf] recovers it only
-     * for the INFO forms, whose body is in `event.message`. A caller that
-     * only needs to know a keypress happened, and when, has that much from
-     * this flow either way.
+     * Every `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` this call has heard. [digitOf]
+     * reads the character off each one, an RFC 4733 (RTP) digit the same way
+     * as either INFO form, off `event.payload.media.digit` -- the generated
+     * JNI shim carries the whole payload union now, not only the head of the
+     * event.
      */
     val digits: Flow<SipralEvent> = events.filter { it.kind == SipralEventKind.DIGIT_RECEIVED.value.toLong() }
 
@@ -251,31 +244,15 @@ class SipralCall internal constructor(
 }
 
 /**
- * The digit an `application/dtmf` or `application/dtmf-relay` INFO carried,
- * or null when this event carries no message to read one from -- which is
- * every RFC 4733 (RTP) digit, for the reason [SipralCall.digits] documents.
+ * The key `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` carries, off
+ * `payload.media.digit`: an RFC 4733 (RTP) digit and either INFO form all
+ * read the same way, since the library already tells the two apart and
+ * writes the character either way (`payload.media.source` says which
+ * reported it). Null for an RFC 4733 event code no keypad has a key for --
+ * `payload.media.eventCode` is sixteen or above -- which is the only zero
+ * `digit` reads as, since no key this ABI names is the null character.
  */
 fun digitOf(event: SipralEvent): Char? {
-    val message = event.message ?: return null
-    val text = String(message, Charsets.US_ASCII)
-    val body = text.substringAfter("\r\n\r\n", "")
-    if (body.isEmpty()) {
-        return null
-    }
-    // application/dtmf: the whole body is the character.
-    val plain = body.trim()
-    if (plain.length == 1 && (plain[0].isDigit() || plain[0] in "*#ABCD")) {
-        return plain[0]
-    }
-    // application/dtmf-relay: "Signal=<digit>" on its own line.
-    for (line in body.lineSequence()) {
-        val trimmed = line.trim()
-        if (trimmed.startsWith("Signal=", ignoreCase = true)) {
-            val value = trimmed.substringAfter('=').trim()
-            if (value.isNotEmpty()) {
-                return value[0]
-            }
-        }
-    }
-    return null
+    val digit = event.payload.media.digit
+    return if (digit == 0L) null else digit.toInt().toChar()
 }

@@ -55,7 +55,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         if (jni_event_callback_class == NULL) {
             return JNI_ERR;
         }
-        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJ[B)V");
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJ[BJJJ[B[J)V");
         if (jni_event_callback_deliver == NULL) {
             return JNI_ERR;
         }
@@ -132,6 +132,8 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     int built = 1;
     jint found;
     jbyteArray message = NULL;
+    jbyteArray payloadMediaReason = NULL;
+    jlongArray payloadMediaStatistics = NULL;
 
     if (jni_vm == NULL || event == NULL) {
         return;
@@ -153,8 +155,32 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
             (*env)->SetByteArrayRegion(env, message, 0, (jsize)event->message_len, (const jbyte *)event->message);
         }
     }
+    if (built && 1 && JNI_REACHES(event, sipral_event_t, payload.media.reason_len) && event->payload.media.reason != NULL) {
+        payloadMediaReason = (*env)->NewByteArray(env, (jsize)event->payload.media.reason_len);
+        if (payloadMediaReason == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadMediaReason, 0, (jsize)event->payload.media.reason_len, (const jbyte *)event->payload.media.reason);
+        }
+    }
+    if (built && 1 && JNI_REACHES(event, sipral_event_t, payload.media.statistics) && event->payload.media.statistics != NULL) {
+        payloadMediaStatistics = (*env)->NewLongArray(env, 3);
+        if (payloadMediaStatistics == NULL) {
+            built = 0;
+        } else {
+            jlong slots[3];
+            slots[0] = (jlong)event->payload.media.statistics->size;
+            slots[1] = (jlong)event->payload.media.statistics->requests_sent;
+            {
+                uint32_t bits;
+                memcpy(&bits, &event->payload.media.statistics->loss, sizeof bits);
+                slots[2] = (jlong)bits;
+            }
+            (*env)->SetLongArrayRegion(env, payloadMediaStatistics, 0, 3, slots);
+        }
+    }
     if (built) {
-        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, message);
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, message, JNI_REACHES(event, sipral_event_t, payload.registration.state) ? (jlong)event->payload.registration.state : 0, JNI_REACHES(event, sipral_event_t, payload.registration.status_code) ? (jlong)event->payload.registration.status_code : 0, JNI_REACHES(event, sipral_event_t, payload.media.codec) ? (jlong)event->payload.media.codec : 0, payloadMediaReason, payloadMediaStatistics);
     }
     /* deliver hands what a listener throws to the thread's own handler, so
      * what is pending here is the JVM's -- an array it could not make --
@@ -165,6 +191,12 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
     if (message != NULL) {
         (*env)->DeleteLocalRef(env, message);
+    }
+    if (payloadMediaReason != NULL) {
+        (*env)->DeleteLocalRef(env, payloadMediaReason);
+    }
+    if (payloadMediaStatistics != NULL) {
+        (*env)->DeleteLocalRef(env, payloadMediaStatistics);
     }
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);

@@ -540,12 +540,12 @@ kotlin_agent() {
 
     printf '%s\n' "$log" | grep -q '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    # No digit value, only that three arrived: the generated Kotlin/JNI shim
-    # forwards no event payload (bindings/kotlin/README.md), so an RFC 4733
-    # digit -- what Asterisk's SendDTMF sends here by default -- carries no
-    # character this binding can read yet. Agent.kt's own header says so.
-    printf '%s\n' "$log" | grep -q '^dtmf-event 3' \
-        || { printf '  it never heard all three DTMF events\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf 1' \
+        || { printf '  it never heard the digit "1"\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf 2' \
+        || { printf '  it never heard the digit "2"\n'; return 1; }
+    printf '%s\n' "$log" | grep -q '^dtmf #' \
+        || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
         | grep '^ended ' | grep -Eq "packets_received=[1-9]" \
         || { printf '  it heard no audio\n'; return 1; }

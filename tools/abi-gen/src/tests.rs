@@ -947,6 +947,65 @@ fn the_real_surface_prints_in_every_language() {
     }
 }
 
+/// A payload buffer or a whole record behind a pointer is never
+/// dereferenced for a kind that does not write that arm.
+///
+/// The generated Kotlin/JNI shim reads every arm of `sipral_event_payload_t`
+/// on every event, not only the one `kind` names -- `SipralEvent.payload`
+/// -- and a kind's own write into the union is real data reinterpreted as
+/// every other arm's layout, not nothing: `sipral-lab-agent-kotlin`
+/// segfaulted inside `NewByteArray` over exactly this, reading a pointer's
+/// own bits as another arm's byte length. `crates/sipral-ffi/src/event.rs`'s
+/// `EVENT_KIND_ARMS` is what the shim below is guarded by; this is the
+/// regression test for the crash it fixed.
+#[test]
+fn a_payload_buffer_is_guarded_by_the_kinds_that_actually_write_its_arm() {
+    let shim = kotlin::shim(&sipral_ffi::abi::SURFACE).unwrap();
+    for line in [
+        "if (built && (event->kind == SIPRAL_EVENT_KIND_NAT_MAPPING) && \
+         JNI_REACHES(event, sipral_event_t, payload.nat.local_len) && \
+         event->payload.nat.local != NULL) {",
+        "if (built && (event->kind == SIPRAL_EVENT_KIND_MEDIA_STATISTICS || event->kind == \
+         SIPRAL_EVENT_KIND_MEDIA_STALLED || event->kind == SIPRAL_EVENT_KIND_MEDIA_STARTED || \
+         event->kind == SIPRAL_EVENT_KIND_MEDIA_CHANGED || event->kind == \
+         SIPRAL_EVENT_KIND_MEDIA_RESUMED || event->kind == SIPRAL_EVENT_KIND_MEDIA_FAILED || \
+         event->kind == SIPRAL_EVENT_KIND_RECORDING_STOPPED || event->kind == \
+         SIPRAL_EVENT_KIND_DIGIT_RECEIVED || event->kind == SIPRAL_EVENT_KIND_MEDIA_SECURED || \
+         event->kind == SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN || event->kind == \
+         SIPRAL_EVENT_KIND_QUALITY_REPORT_SENT || event->kind == \
+         SIPRAL_EVENT_KIND_MEDIA_UNJOINED) && JNI_REACHES(event, sipral_event_t, \
+         payload.media.statistics) && event->payload.media.statistics != NULL) {",
+    ] {
+        assert!(shim.contains(line), "no `{line}` in:\n{shim}");
+    }
+    // a plain number needs no guard: reading one out of another arm's own
+    // bytes is meaningless, never a pointer nothing owns
+    assert!(
+        shim.contains(
+            "JNI_REACHES(event, sipral_event_t, payload.registration.state) ? \
+             (jlong)event->payload.registration.state : 0"
+        ),
+        "{shim}"
+    );
+}
+
+/// [`kotlin::shim`]'s own kind guard has nothing to name a payload arm's
+/// kinds by on a surface with no `SipralEventKind` -- the synthetic one,
+/// whose `kind` member stands `SipralStatus` in for one by a documentation
+/// link alone, never by the member's own type -- and degrades to an
+/// unconditional `1` rather than refusing the whole surface over it.
+#[test]
+fn a_payload_buffer_on_a_surface_with_no_real_event_kind_crosses_unguarded() {
+    let shim = kotlin::shim(&SYNTHETIC).unwrap();
+    assert!(
+        shim.contains(
+            "if (built && 1 && JNI_REACHES(event, sipral_event_t, payload.media.reason_len) && \
+             event->payload.media.reason != NULL) {"
+        ),
+        "{shim}"
+    );
+}
+
 /// Two parameters of one entry point that derive one name.
 ///
 /// This is `sipral_call_consult` as it was until this was written: C# printed
@@ -1602,10 +1661,11 @@ fn a_callback_that_answers_nothing_still_prints_as_it_always_did() {
     );
     assert!(
         kotlin.contains(
-            "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: \
-             ByteArray?) {\n        val listener = synchronized(this) { listening[key] } ?: \
+            "        val listener = synchronized(this) { listening[key] } ?: \
              return\n        try {\n            listener.onEvent(SipralEvent(size, stack, \
-             kind, message))\n        } catch (failure: Throwable) {"
+             kind, message, payloadRegistrationState, payloadRegistrationStatusCode, \
+             payloadMediaCodec, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, \
+             payloadMediaStatistics))\n        } catch (failure: Throwable) {"
         ),
         "{kotlin}"
     );
@@ -1723,11 +1783,25 @@ fn the_callback_lands_in_a_kotlin_listener() {
         ),
         "{printed}"
     );
-    // the head of the event is handed over, and the union whose arm nothing
-    // in the declarations names is not
+    // the head of the event is handed over, and every arm of the union
+    // beside it, flattened: nothing in the declarations names which value of
+    // `kind` goes with which arm, so every arm is carried on every event
     assert!(
         printed.contains(
-            "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?) {"
+            "    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: \
+             ByteArray?, payloadRegistrationState: Long, payloadRegistrationStatusCode: Long, \
+             payloadMediaCodec: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: \
+             LongArray?) {"
+        ),
+        "{printed}"
+    );
+    // read back through SipralEvent.payload, one class per arm
+    assert!(
+        printed.contains(
+            "    val payload: SipralEventPayload\n        get() = SipralEventPayload(\n            \
+             SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationStatusCode),\n            \
+             SipralMediaEvent(payloadMediaCodec, payloadMediaReason, payloadMediaStatistics?.let { \
+             SipralCounters.of(it) }),\n        )"
         ),
         "{printed}"
     );
@@ -1745,9 +1819,24 @@ fn the_callback_lands_in_a_kotlin_listener() {
     let shim = kotlin::shim(&SYNTHETIC).unwrap();
     assert!(
         shim.contains(
-            "(*env)->GetStaticMethodID(env, jni_event_callback_class, \"deliver\", \"(JJJJ[B)V\")"
+            "(*env)->GetStaticMethodID(env, jni_event_callback_class, \"deliver\", \
+             \"(JJJJ[BJJJ[B[J)V\")"
         ),
         "the descriptor the shim looks deliver up by is not the one Kotlin declares:\n{shim}"
+    );
+    // a payload field is reached through the union, with the same
+    // versioning discipline as every other member: `offsetof` on a dotted
+    // path reaches into the arm the same way it reaches a direct member
+    assert!(
+        shim.contains("JNI_REACHES(event, sipral_event_t, payload.registration.state)"),
+        "{shim}"
+    );
+    assert!(
+        shim.contains(
+            "JNI_REACHES(event, sipral_event_t, payload.media.statistics) && \
+             event->payload.media.statistics != NULL"
+        ),
+        "{shim}"
     );
     assert!(
         shim.contains("    config_value.event_callback = configEventCallback != 0 ? jni_event_callback : NULL;\n"),

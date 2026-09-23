@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import org.sipral.Sipral
 import org.sipral.SipralAccountConfig
+import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralRegistrationState
 
@@ -69,16 +70,18 @@ class SipralAccount internal constructor(val client: SipralClient, val handle: L
      * the caller to poll [registrationState] itself. This is the ABI
      * completing through an event: `sipral_account_register` only enqueues
      * the REGISTER, and `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` is where
-     * the answer actually arrives.
+     * the answer actually arrives, with the state already on it --
+     * `event.payload.registration.state` -- so nothing here queries the
+     * stack a second time for what the event that woke it already said.
      */
     suspend fun registerAndWait(timeoutMs: Long = 10_000) {
         register()
         val last = withTimeout(timeoutMs) {
             client.events
                 .filter { it.kind == SipralEventKind.REGISTRATION_CHANGED.value.toLong() && it.account == handle }
-                .first { isTerminal(registrationState) }
+                .first { isTerminal(stateOf(it)) }
         }
-        val reached = registrationState
+        val reached = stateOf(last)
         if (reached != SipralRegistrationState.REGISTERED) {
             val detail = last.message?.let { String(it, Charsets.UTF_8) }
             throw IllegalStateException(
@@ -86,6 +89,9 @@ class SipralAccount internal constructor(val client: SipralClient, val handle: L
             )
         }
     }
+
+    private fun stateOf(event: SipralEvent): SipralRegistrationState =
+        SipralRegistrationState.of(event.payload.registration.state.toInt()) ?: SipralRegistrationState.UNKNOWN
 
     private fun isTerminal(state: SipralRegistrationState): Boolean = when (state) {
         SipralRegistrationState.REGISTERED,

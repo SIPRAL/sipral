@@ -146,10 +146,58 @@ class SipralStackConfig(
 /**
  * One thing that happened, as the callback is handed it.
  *
- * `payload` is not carried here. Which of its arms the library wrote is named
- * by another member, and nothing in the declarations says which value names
- * which arm, so this binding does not guess.
+ * `payload` carries every arm the union declares, every time: which one the
+ * library actually wrote is named by `kind` alone, the same as it is in C,
+ * Swift and C#. Reading another arm is defined -- it reads bytes the library
+ * wrote for a different one -- and never a crash, but is not meaningful.
  */
+/**
+ * What a registration event says.
+ */
+data class SipralRegistrationEvent(
+    /**
+     * Where it got to.
+     */
+    val state: Long,
+    val statusCode: Long,
+)
+
+/**
+ * What a media event says.
+ *
+ * Lifetime
+ *
+ * Everything a pointer here names is the library's and lives until
+ * the callback returns.
+ */
+data class SipralMediaEvent(
+    val codec: Long,
+    /**
+     * Why, as UTF-8, or null.
+     */
+    val reason: String?,
+    /**
+     * What the stream has done, or null when there is none.
+     */
+    val statistics: SipralCounters?,
+)
+
+/**
+ * One of every arm [`SipralEventPayload`] declares, read back whole:
+ * [`SipralEvent.payload`] builds one from every event, and which member of
+ * it means something is named by [`SipralEvent.kind`] alone.
+ */
+class SipralEventPayload(
+    /**
+     * Read when the kind is a registration one.
+     */
+    val registration: SipralRegistrationEvent,
+    /**
+     * Read when the kind is a media one.
+     */
+    val media: SipralMediaEvent,
+)
+
 class SipralEvent(
     val size: Long,
     /**
@@ -166,7 +214,28 @@ class SipralEvent(
      * -- see sipral_stack_create for who owns what.
      */
     val message: ByteArray?,
-)
+    /**
+     * Where it got to.
+     */
+    private val payloadRegistrationState: Long = 0,
+    private val payloadRegistrationStatusCode: Long = 0,
+    private val payloadMediaCodec: Long = 0,
+    /**
+     * Why, as UTF-8, or null.
+     */
+    private val payloadMediaReason: String? = null,
+    /**
+     * What the stream has done, or null when there is none.
+     */
+    private val payloadMediaStatistics: LongArray? = null,
+) {
+    /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
+    val payload: SipralEventPayload
+        get() = SipralEventPayload(
+            SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationStatusCode),
+            SipralMediaEvent(payloadMediaCodec, payloadMediaReason, payloadMediaStatistics?.let { SipralCounters.of(it) }),
+        )
+}
 
 /**
  * What the library calls when something happens.
@@ -230,10 +299,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationStatusCode: Long, payloadMediaCodec: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, message))
+            listener.onEvent(SipralEvent(size, stack, kind, message, payloadRegistrationState, payloadRegistrationStatusCode, payloadMediaCodec, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)

@@ -38,6 +38,7 @@ use std::fmt::Write as _;
 use sipral_ffi::abi::{
     Alias, Code, Enumeration, Function, Member, Record, Shape, Stands, Surface, Value,
 };
+use sipral_ffi::event::EVENT_KIND_ARMS;
 
 use crate::c;
 use crate::model::{
@@ -649,6 +650,7 @@ const DELIVER_LOCALS: &[(&str, &str)] = &[
 
 /// One member of a struct handed to a listener: as `deliver` takes it, as the
 /// class declares it, and as the landing function passes it.
+#[derive(Clone)]
 struct Handed {
     /// The member it came from, as the declaration spelled it.
     from: &'static str,
@@ -665,7 +667,7 @@ struct Handed {
     /// The type in the JVM descriptor.
     descriptor: String,
     /// The local the landing function makes an array in, and its type.
-    c_local: Option<(&'static str, String)>,
+    c_local: Option<(String, String)>,
     /// What the landing function does before the call to make that array.
     c_make: String,
     /// What it passes.
@@ -714,19 +716,532 @@ fn fill_handed(event: &str, spelled: &str, data: &Read<'_>, len: &Read<'_>) -> H
         field: format!("val {kotlin}: {}?", array_of(&data.ty)),
         descriptor: descriptor_of_array(&data.ty).to_owned(),
         kotlin,
-        c_local: Some((name, jni_array_of(&data.ty).to_owned())),
+        c_local: Some((name.to_owned(), jni_array_of(&data.ty).to_owned())),
         c_make,
         c_passed: name.to_owned(),
         c_after,
     }
 }
 
-/// Every member the listener is handed, with the ones left out named.
+// ------------------------------------------------------------ the payload union
+
+/// One field of a union arm's own record, as the arm's class declares it.
+struct PayloadField {
+    /// The name inside the arm's own class: `state`, `reason`, `statistics`.
+    kotlin: String,
+    /// The type inside the arm's own class.
+    kotlin_type: String,
+    /// Documentation, from the field the arm's record declares it with.
+    doc: &'static [&'static str],
+    /// The expression the arm's constructor reads it from, once every field
+    /// this event crossed JNI in is in scope under its own flattened name.
+    from_raw: String,
+}
+
+/// One arm of `SipralEventPayload`, read out whole: every arm an event's
+/// union declares is carried on every event, because nothing in the
+/// declarations says which value of `kind` names which arm -- see
+/// [`payload_arms`].
+struct PayloadArm {
+    /// The name of the arm on `SipralEventPayload`: `registration`,
+    /// `transportWanted`.
+    kotlin: String,
+    /// The record the arm's own class is printed from: `SipralRegistrationEvent`.
+    record_name: &'static str,
+    /// The record's own documentation.
+    doc: &'static [&'static str],
+    /// The union member's own documentation: which kind or kinds the arm is
+    /// for.
+    member_doc: &'static [&'static str],
+    /// This arm's fields, in the record's own declared order.
+    fields: Vec<PayloadField>,
+    /// What crosses JNI for this arm, one entry per field or per nested
+    /// struct read back whole.
+    crossing: Vec<Handed>,
+}
+
+/// One field of a union arm's record, once a pointer to bytes and a pointer
+/// to a whole other record are told apart from a plain one.
+enum ArmField<'a> {
+    /// A number, read straight off the union through the path that reaches
+    /// it: `payload.registration.state`.
+    Plain(&'a Read<'a>),
+    /// A pointer at bytes and the `_len` after it, the same convention
+    /// [`Part::Buffer`] reads off a struct handed over directly.
+    Buffer {
+        data: &'a Read<'a>,
+        len: &'a Read<'a>,
+    },
+    /// A pointer to one whole other record, filled in or null: the one shape
+    /// among the payload's own arms this back end does not already have a
+    /// reading for, because nothing handed to a listener has pointed at a
+    /// second record before. Read the same way a struct the library fills in
+    /// whole is read back everywhere else -- a `long[]` of its members, with
+    /// a float carried as its own bits -- except made fresh for this one
+    /// event rather than filled into an array the caller brought.
+    Given {
+        data: &'a Read<'a>,
+        record: &'static Record,
+    },
+}
+
+/// Read one union arm's own fields the way [`parts`] reads a struct handed
+/// over directly, with one addition: a `const` pointer to another record,
+/// with nothing counting it, is read as [`ArmField::Given`] when that record
+/// is itself read back whole elsewhere (`docs/08-ffi.md`'s "struct the
+/// library fills in" shape) -- `SipralMediaEvent::statistics` is the one
+/// case among today's arms.
+fn arm_fields<'a>(
+    surface: &Surface,
+    record: &'static Record,
+    fields: &'a [Read<'a>],
+) -> Result<Vec<ArmField<'a>>, Refused> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while let Some(field) = fields.get(index) {
+        let next = fields.get(index + 1);
+        let refuse = |why: &str| {
+            Refused::about(&format!(
+                "{}::{} {why}, which a Kotlin class has no field for; give it one in \
+                 tools/abi-gen/src/kotlin.rs",
+                record.name, field.member.name
+            ))
+        };
+        match field.ty.pointer {
+            None => {
+                out.push(ArmField::Plain(field));
+                index += 1;
+            }
+            Some(Writable::No) if field.ty.points_at_bytes() => {
+                let wanted = format!("{}_len", field.member.name);
+                let Some(len) =
+                    next.filter(|after| after.ty.is_length() && after.member.name == wanted)
+                else {
+                    return Err(refuse(&format!(
+                        "points at bytes with no `{wanted}` after it"
+                    )));
+                };
+                out.push(ArmField::Buffer { data: field, len });
+                index += 2;
+            }
+            Some(Writable::No) => {
+                let Base::Named(name) = &field.ty.base else {
+                    return Err(refuse(
+                        "is a pointer this back end has no shape for inside a payload arm",
+                    ));
+                };
+                match surface.records.iter().find(|inner| inner.name == *name) {
+                    Some(inner) if inner.shape == Shape::Struct && is_given(inner) => {
+                        out.push(ArmField::Given {
+                            data: field,
+                            record: inner,
+                        });
+                        index += 1;
+                    }
+                    _ => {
+                        return Err(refuse(
+                            "is a pointer this back end has no shape for inside a payload arm",
+                        ));
+                    }
+                }
+            }
+            Some(Writable::Yes) => {
+                return Err(refuse(
+                    "is a pointer this back end has no shape for inside a payload arm",
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A plain field read through the union: `payload.registration.state`.
+fn payload_plain(
+    event: &str,
+    spelled: &str,
+    path: &str,
+    kotlin: String,
+    field: &Read<'_>,
+) -> Handed {
+    let (cast, zero) = match field.ty.base {
+        Base::Float(_) => ("jdouble", "0.0"),
+        _ => ("jlong", "0"),
+    };
+    let c_passed =
+        format!("JNI_REACHES({event}, {spelled}, {path}) ? ({cast}){event}->{path} : {zero}");
+    Handed {
+        from: field.member.name,
+        doc: field.member.doc,
+        parameter: format!("{kotlin}: {}", plain_kotlin(&field.ty)),
+        argument: kotlin.clone(),
+        field: format!(
+            "private val {kotlin}: {} = {}",
+            plain_kotlin(&field.ty),
+            zero_of(&field.ty)
+        ),
+        descriptor: plain_descriptor(&field.ty).to_owned(),
+        kotlin,
+        c_local: None,
+        c_make: String::new(),
+        c_passed,
+        c_after: String::new(),
+    }
+}
+
+/// A buffer read through the union: `payload.nat.local`, with
+/// `payload.nat.local_len` beside it.
+fn payload_buffer(
+    event: &str,
+    spelled: &str,
+    path: &str,
+    len_path: &str,
+    kotlin: String,
+    data: &Read<'_>,
+    guard: &str,
+) -> Handed {
+    let text = data.ty.base == Base::Char;
+    let (element, kind) = jni_element_of(&data.ty);
+    let c_make = format!(
+        "    if (built && {guard} && JNI_REACHES({event}, {spelled}, {len_path}) && {event}->{path} != NULL) {{\n\
+         \x20       {kotlin} = (*env)->New{kind}Array(env, (jsize){event}->{len_path});\n\
+         \x20       if ({kotlin} == NULL) {{\n\
+         \x20           built = 0;\n\
+         \x20       }} else {{\n\
+         \x20           (*env)->Set{kind}ArrayRegion(env, {kotlin}, 0, (jsize){event}->{len_path}, (const {element} *){event}->{path});\n\
+         \x20       }}\n\
+         \x20   }}\n"
+    );
+    Handed {
+        from: data.member.name,
+        doc: data.member.doc,
+        parameter: format!("{kotlin}: {}?", array_of(&data.ty)),
+        argument: if text {
+            format!("{kotlin}?.let {{ String(it, Charsets.UTF_8) }}")
+        } else {
+            kotlin.clone()
+        },
+        field: if text {
+            format!("private val {kotlin}: String? = null")
+        } else {
+            format!("private val {kotlin}: {}? = null", array_of(&data.ty))
+        },
+        descriptor: descriptor_of_array(&data.ty).to_owned(),
+        kotlin: kotlin.clone(),
+        c_local: Some((kotlin.clone(), jni_array_of(&data.ty).to_owned())),
+        c_make,
+        c_passed: kotlin,
+        c_after: String::new(),
+    }
+}
+
+/// A whole other record read through the union, filled in or null:
+/// `payload.media.statistics`, made fresh as a `long[]` of
+/// `SipralStreamStats`'s own members the same way [`slots`] fills one, but
+/// into an array this function makes rather than one the caller brought.
+fn payload_given(
+    event: &str,
+    spelled: &str,
+    path: &str,
+    kotlin: String,
+    data: &Read<'_>,
+    record: &'static Record,
+    guard: &str,
+) -> Result<Handed, Refused> {
+    let count = record.fields.len();
+    let mut fill = String::new();
+    for (index, field) in read_all(record.name, record.fields)?.iter().enumerate() {
+        if matches!(field.ty.base, Base::Float(_)) {
+            let _ = writeln!(
+                fill,
+                "            {{\n                uint32_t bits;\n                \
+                 memcpy(&bits, &{event}->{path}->{}, sizeof bits);\n                \
+                 slots[{index}] = (jlong)bits;\n            }}",
+                field.member.name
+            );
+        } else {
+            let _ = writeln!(
+                fill,
+                "            slots[{index}] = (jlong){event}->{path}->{};",
+                field.member.name
+            );
+        }
+    }
+    let c_make = format!(
+        "    if (built && {guard} && JNI_REACHES({event}, {spelled}, {path}) && {event}->{path} != NULL) {{\n\
+         \x20       {kotlin} = (*env)->NewLongArray(env, {count});\n\
+         \x20       if ({kotlin} == NULL) {{\n\
+         \x20           built = 0;\n\
+         \x20       }} else {{\n\
+         \x20           jlong slots[{count}];\n{fill}\
+         \x20           (*env)->SetLongArrayRegion(env, {kotlin}, 0, {count}, slots);\n\
+         \x20       }}\n\
+         \x20   }}\n"
+    );
+    Ok(Handed {
+        from: data.member.name,
+        doc: data.member.doc,
+        parameter: format!("{kotlin}: LongArray?"),
+        argument: kotlin.clone(),
+        field: format!("private val {kotlin}: LongArray? = null"),
+        descriptor: "[J".to_owned(),
+        kotlin: kotlin.clone(),
+        c_local: Some((kotlin.clone(), "jlongArray".to_owned())),
+        c_make,
+        c_passed: kotlin,
+        c_after: String::new(),
+    })
+}
+
+/// The name one field of one arm crosses JNI under, flattened and unique
+/// across every arm: `payload_registration_state` becomes
+/// `payloadRegistrationState`.
+fn payload_flat(arm: &str, field: &str) -> String {
+    safe(&lower_camel(&format!("payload_{arm}_{field}")))
+}
+
+/// `event->kind == SIPRAL_EVENT_KIND_A || event->kind == SIPRAL_EVENT_KIND_B
+/// || ...`, naming every kind [`EVENT_KIND_ARMS`] says writes `arm`.
+///
+/// The guard a buffer or a whole record behind a pointer needs before the
+/// shim may dereference it: every OTHER kind's own write into the same union
+/// bytes is real data from a different arm's own layout, not nothing, so
+/// `JNI_REACHES` -- a size check alone -- is not enough to make reading it
+/// safe (`crates/sipral-ffi/src/event.rs`, `EVENT_KIND_ARMS`'s own
+/// documentation). A plain number needs no such guard: reading one out of
+/// another arm's bytes is meaningless, never a pointer nothing owns.
+fn kind_guard(surface: &Surface, event: &str, arm: &str) -> Result<String, Refused> {
+    let Some(kinds) = surface
+        .enumerations
+        .iter()
+        .find(|one| one.name == "SipralEventKind")
+    else {
+        // A surface with no SipralEventKind at all -- the synthetic test
+        // surface, which stands `SipralStatus` in for a kind enum by a
+        // documentation link alone, never by the member's own type -- has
+        // no way to name this guard by by construction, and nothing in it
+        // is the real ABI's own union, so the arm crosses unguarded, the
+        // way every arm did before this generator learned to guard one.
+        return Ok("1".to_owned());
+    };
+    let mut names = Vec::new();
+    for (kind, named_arm) in EVENT_KIND_ARMS {
+        if *named_arm != arm {
+            continue;
+        }
+        let value = i64::from(*kind as u32);
+        let Some(code) = kinds.codes.iter().find(|code| code.value == value) else {
+            return Err(Refused::about(&format!(
+                "EVENT_KIND_ARMS names a kind {value} that SipralEventKind's own codes do not \
+                 have"
+            )));
+        };
+        names.push(format!(
+            "{event}->kind == {}_{}",
+            c::screaming_prefix(kinds.name),
+            screaming(code.name)
+        ));
+    }
+    if names.is_empty() {
+        return Err(Refused::about(&format!(
+            "no live kind writes payload arm {arm}, and a buffer or a given record inside it \
+             could never be dereferenced; give EVENT_KIND_ARMS a line for it in \
+             crates/sipral-ffi/src/event.rs"
+        )));
+    }
+    Ok(format!("({})", names.join(" || ")))
+}
+
+/// Every arm `SipralEventPayload` declares, read out whole and flattened
+/// for the JNI crossing: what `handed` extends its members with, and what
+/// `listeners` builds `SipralEventPayload` and one class per arm from.
+///
+/// Every arm is carried on every event, because a struct the library fills
+/// in whole says which of its own members mean something by its own kind
+/// alone, the same as `SipralCallEvent` or `SipralMediaEvent` already do
+/// for the many kinds each of them already answers for -- `payload` is no
+/// different, just one union member wider. Reading an arm `kind` does not
+/// name is defined, the same as it is in C, Swift and C#: it reads bytes the
+/// library wrote for a different arm, and is never a crash.
+#[allow(clippy::too_many_lines)]
+fn payload_arms(
+    surface: &Surface,
+    spelled: &str,
+    event: &str,
+    union_field: &Read<'_>,
+) -> Result<Vec<PayloadArm>, Refused> {
+    let Base::Named(union_name) = &union_field.ty.base else {
+        return Err(Refused::about("a union with no name"));
+    };
+    let Some(union_record) = surface.records.iter().find(|r| r.name == *union_name) else {
+        return Err(Refused::about(&format!(
+            "{union_name} is not a record the surface declares"
+        )));
+    };
+    let mut out = Vec::new();
+    for arm in read_all(union_record.name, union_record.fields)? {
+        let Base::Named(record_name) = &arm.ty.base else {
+            return Err(Refused::about(&format!(
+                "{}::{} is a union arm that is not a named struct",
+                union_record.name, arm.member.name
+            )));
+        };
+        let Some(arm_record) = surface.records.iter().find(|r| r.name == *record_name) else {
+            return Err(Refused::about(&format!(
+                "{record_name} is not a record the surface declares"
+            )));
+        };
+        let arm_read = read_all(arm_record.name, arm_record.fields)?;
+        let guard = kind_guard(surface, event, arm.member.name)?;
+        let mut fields = Vec::new();
+        let mut crossing = Vec::new();
+        for one in arm_fields(surface, arm_record, &arm_read)? {
+            match one {
+                ArmField::Plain(field) => {
+                    let flat = payload_flat(arm.member.name, field.member.name);
+                    let path = format!(
+                        "{}.{}.{}",
+                        union_field.member.name, arm.member.name, field.member.name
+                    );
+                    crossing.push(payload_plain(event, spelled, &path, flat.clone(), field));
+                    fields.push(PayloadField {
+                        kotlin: safe(&lower_camel(field.member.name)),
+                        kotlin_type: plain_kotlin(&field.ty).to_owned(),
+                        doc: field.member.doc,
+                        from_raw: flat,
+                    });
+                }
+                ArmField::Buffer { data, len } => {
+                    let flat = payload_flat(arm.member.name, data.member.name);
+                    let path = format!(
+                        "{}.{}.{}",
+                        union_field.member.name, arm.member.name, data.member.name
+                    );
+                    let len_path = format!(
+                        "{}.{}.{}",
+                        union_field.member.name, arm.member.name, len.member.name
+                    );
+                    crossing.push(payload_buffer(
+                        event,
+                        spelled,
+                        &path,
+                        &len_path,
+                        flat.clone(),
+                        data,
+                        &guard,
+                    ));
+                    let text = data.ty.base == Base::Char;
+                    fields.push(PayloadField {
+                        kotlin: safe(&lower_camel(data.member.name)),
+                        kotlin_type: if text {
+                            "String?".to_owned()
+                        } else {
+                            format!("{}?", array_of(&data.ty))
+                        },
+                        doc: data.member.doc,
+                        from_raw: flat,
+                    });
+                }
+                ArmField::Given {
+                    data,
+                    record: given,
+                } => {
+                    let flat = payload_flat(arm.member.name, data.member.name);
+                    let path = format!(
+                        "{}.{}.{}",
+                        union_field.member.name, arm.member.name, data.member.name
+                    );
+                    crossing.push(payload_given(
+                        event,
+                        spelled,
+                        &path,
+                        flat.clone(),
+                        data,
+                        given,
+                        &guard,
+                    )?);
+                    fields.push(PayloadField {
+                        kotlin: safe(&lower_camel(data.member.name)),
+                        kotlin_type: format!("{}?", given.name),
+                        doc: data.member.doc,
+                        from_raw: format!("{flat}?.let {{ {}.of(it) }}", given.name),
+                    });
+                }
+            }
+        }
+        out.push(PayloadArm {
+            kotlin: safe(&lower_camel(arm.member.name)),
+            record_name: arm_record.name,
+            doc: arm_record.doc,
+            member_doc: arm.member.doc,
+            fields,
+            crossing,
+        });
+    }
+    Ok(out)
+}
+
+/// One class per arm [`payload_arms`] read, and the class that holds one of
+/// each: `SipralEventPayload`, printed just above the event class whose
+/// `payload` reads it back.
+fn payload_classes(surface: &Surface, arms: &[PayloadArm]) -> String {
+    let mut out = String::new();
+    for arm in arms {
+        doc(&mut out, "", &lines(surface, arm.doc));
+        let _ = writeln!(out, "data class {}(", arm.record_name);
+        for field in &arm.fields {
+            doc(&mut out, "    ", &lines(surface, field.doc));
+            let _ = writeln!(out, "    val {}: {},", field.kotlin, field.kotlin_type);
+        }
+        out.push_str(")\n\n");
+    }
+    out.push_str(
+        "/**\n\
+         \x20* One of every arm [`SipralEventPayload`] declares, read back whole:\n\
+         \x20* [`SipralEvent.payload`] builds one from every event, and which member of\n\
+         \x20* it means something is named by [`SipralEvent.kind`] alone.\n\
+         \x20*/\n",
+    );
+    out.push_str("class SipralEventPayload(\n");
+    for arm in arms {
+        doc(&mut out, "    ", &lines(surface, arm.member_doc));
+        let _ = writeln!(out, "    val {}: {},", arm.kotlin, arm.record_name);
+    }
+    out.push_str(")\n\n");
+    out
+}
+
+/// The computed property `SipralEvent.payload` reads: one instance of every
+/// arm's class, built from the fields [`handed`] flattened across JNI.
+fn payload_getter(arms: &[PayloadArm]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "    /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */\n",
+    );
+    out.push_str("    val payload: SipralEventPayload\n        get() = SipralEventPayload(\n");
+    for arm in arms {
+        let built: Vec<&str> = arm
+            .fields
+            .iter()
+            .map(|field| field.from_raw.as_str())
+            .collect();
+        let _ = writeln!(
+            out,
+            "            {}({}),",
+            arm.record_name,
+            built.join(", ")
+        );
+    }
+    out.push_str("        )\n");
+    out
+}
+
+/// Every member the listener is handed, with every arm of a payload union
+/// carried in full -- see [`payload_arms`].
 fn handed(
     surface: &Surface,
     landing: &Landing,
     fields: &[Read<'_>],
-) -> Result<(Vec<Handed>, Vec<String>), Refused> {
+) -> Result<(Vec<Handed>, Vec<PayloadArm>), Refused> {
     let record = landing.record;
     let event = landing.event.name;
     let spelled = c::named(record.name);
@@ -796,7 +1311,7 @@ fn handed(
                     },
                     descriptor: descriptor_of_array(&data.ty).to_owned(),
                     kotlin,
-                    c_local: Some((name, jni_array_of(&data.ty).to_owned())),
+                    c_local: Some((name.to_owned(), jni_array_of(&data.ty).to_owned())),
                     c_make,
                     c_passed: name.to_owned(),
                     c_after: String::new(),
@@ -805,7 +1320,13 @@ fn handed(
             Part::Fill { data, len } => out.push(fill_handed(event, &spelled, data, len)),
             Part::Records { data, .. } => return Err(records_not_handed(record, data)),
             Part::Listener { callback, .. } => return Err(not_handed(record, callback)),
-            Part::Arm(field) => left_out.push(field.member.name.to_owned()),
+            Part::Arm(field) => {
+                let arms = payload_arms(surface, &spelled, event, field)?;
+                for arm in &arms {
+                    out.extend(arm.crossing.iter().cloned());
+                }
+                left_out = arms;
+            }
         }
     }
     Ok((out, left_out))
@@ -1307,27 +1828,44 @@ fn listeners(surface: &Surface) -> Result<String, Refused> {
     for landing in landings(surface)? {
         let record = landing.record;
         let fields = read_all(record.name, record.fields)?;
-        let (members, left_out) = handed(surface, &landing, &fields)?;
+        let (members, arms) = handed(surface, &landing, &fields)?;
 
         let mut about = lines(surface, record.doc);
-        for name in &left_out {
+        if !arms.is_empty() {
             about.push(String::new());
-            about.push(format!(
-                " `{name}` is not carried here. Which of its arms the library wrote is named"
-            ));
             about.push(
-                " by another member, and nothing in the declarations says which value names"
+                " `payload` carries every arm the union declares, every time: which one the"
                     .to_owned(),
             );
-            about.push(" which arm, so this binding does not guess.".to_owned());
+            about.push(
+                " library actually wrote is named by `kind` alone, the same as it is in C,"
+                    .to_owned(),
+            );
+            about.push(
+                " Swift and C#. Reading another arm is defined -- it reads bytes the library"
+                    .to_owned(),
+            );
+            about.push(
+                " wrote for a different one -- and never a crash, but is not meaningful."
+                    .to_owned(),
+            );
         }
         doc(&mut out, "", &about);
+        if !arms.is_empty() {
+            out.push_str(&payload_classes(surface, &arms));
+        }
         let _ = writeln!(out, "class {}(", record.name);
         for member in &members {
             doc(&mut out, "    ", &lines(surface, member.doc));
             let _ = writeln!(out, "    {},", member.field);
         }
-        out.push_str(")\n\n");
+        if arms.is_empty() {
+            out.push_str(")\n\n");
+        } else {
+            out.push_str(") {\n");
+            out.push_str(&payload_getter(&arms));
+            out.push_str("}\n\n");
+        }
 
         let listener = landing.listener();
         let mut about = lines(surface, landing.alias.doc);
@@ -3251,10 +3789,7 @@ fn own_landing(
             Named::new("the wrapper", member.kotlin.clone(), from.clone()),
         ));
         if let Some((local, _)) = &member.c_local {
-            out.push((
-                landed.clone(),
-                Named::new("the shim", (*local).to_owned(), from),
-            ));
+            out.push((landed.clone(), Named::new("the shim", local.clone(), from)));
         }
     }
     for emitted in [landing.function(), landing.class(), landing.deliver()] {

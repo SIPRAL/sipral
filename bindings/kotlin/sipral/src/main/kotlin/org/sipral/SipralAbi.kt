@@ -3383,10 +3383,566 @@ class SipralSubscribeConfig(
  * union stays the last member for the same reason: an arm that grows grows
  * the tail, which is the one place a released struct may change.
  *
- * `payload` is not carried here. Which of its arms the library wrote is named
- * by another member, and nothing in the declarations says which value names
- * which arm, so this binding does not guess.
+ * `payload` carries every arm the union declares, every time: which one the
+ * library actually wrote is named by `kind` alone, the same as it is in C,
+ * Swift and C#. Reading another arm is defined -- it reads bytes the library
+ * wrote for a different one -- and never a crash, but is not meaningful.
  */
+/**
+ * What a SipralEventKind.REGISTRATION_CHANGED carries.
+ */
+data class SipralRegistrationEvent(
+    /**
+     * A SipralRegistrationState.
+     */
+    val state: Long,
+    /**
+     * A SipralRegistrationFailure, zero when nothing failed.
+     */
+    val failure: Long,
+    /**
+     * The status the registrar answered with, or zero when none arrived.
+     */
+    val statusCode: Long,
+    /**
+     * The binding's granted lifetime, zero unless it is live.
+     */
+    val expiresMs: Long,
+    /**
+     * How long until the refresh, zero unless one is scheduled.
+     */
+    val refreshInMs: Long,
+    /**
+     * How long until the next attempt. Only meaningful while the state is
+     * retrying, which is exactly when the stack is going to try again.
+     */
+    val retryInMs: Long,
+)
+
+/**
+ * What every call event carries.
+ *
+ * Not every member means something in every kind, and the ones that do not
+ * are zero. A zero here always reads as absent rather than as a value.
+ */
+data class SipralCallEvent(
+    /**
+     * A SipralCallState.
+     */
+    val state: Long,
+    /**
+     * A SipralCallEndReason, zero while the call is alive.
+     */
+    val endReason: Long,
+    /**
+     * The status a response carried, or zero.
+     */
+    val statusCode: Long,
+    /**
+     * The other call this event is also about: the sibling of a fork, or the
+     * call that was replaced. SIPRAL_HANDLE_NONE otherwise.
+     */
+    val other: Long,
+    /**
+     * Whether this end has asked the far end to stop sending.
+     */
+    val heldHere: Long,
+    /**
+     * Whether the far end has asked this one to.
+     */
+    val heldThere: Long,
+    /**
+     * What this end is describing, and how long it is.
+     */
+    val localSdp: ByteArray?,
+    /**
+     * And what the far end is.
+     */
+    val remoteSdp: ByteArray?,
+    /**
+     * When a refused session change goes out again by itself, zero when it is
+     * not going to.
+     */
+    val retryInMs: Long,
+    /**
+     * The `From` URI of the request that created this call: as written in
+     * the header, without the angle brackets and without header
+     * parameters such as `tag`. The same on every event of this call.
+     * Null and zero when this build has none to report.
+     */
+    val fromUri: ByteArray?,
+    /**
+     * That `From`'s display name, quotes and backslash escapes resolved
+     * (RFC 3261 §25.1). Null and zero when the header named none.
+     */
+    val fromDisplay: ByteArray?,
+    /**
+     * The `To` URI of the request that created this call, as written in
+     * the header.
+     */
+    val toUri: ByteArray?,
+    /**
+     * The `Call-ID` of the request that created this call.
+     */
+    val callId: ByteArray?,
+    /**
+     * The digit an INFO this end sent named, for
+     * SipralEventKind.DTMF_SENT. Zero for every other kind.
+     */
+    val digit: Long,
+)
+
+/**
+ * What a transfer event carries.
+ */
+data class SipralTransferEvent(
+    /**
+     * What the far end's own call is doing, or zero.
+     */
+    val statusCode: Long,
+    /**
+     * Whether the request named a dialog to replace, which is what makes a
+     * transfer attended rather than blind.
+     */
+    val attended: Long,
+    /**
+     * Who to call, as UTF-8. Not NUL-terminated.
+     */
+    val target: String?,
+)
+
+/**
+ * What a media event carries.
+ *
+ * As with a call event, not every member means something in every kind, and
+ * the ones that do not are zero or null.
+ */
+data class SipralMediaEvent(
+    /**
+     * A SipralCodec: what the negotiation
+     * settled on, zero where the event is not about a codec.
+     */
+    val codec: Long,
+    /**
+     * A SipralDirection: which way audio
+     * may flow, as seen from here.
+     */
+    val direction: Long,
+    /**
+     * How long the stream has been silent, for a stall and for its recovery.
+     */
+    val silentForMs: Long,
+    /**
+     * How much audio reached the file, for a recording that stopped by
+     * itself.
+     */
+    val recordedMs: Long,
+    /**
+     * A SipralMediaFault, zero when
+     * nothing failed.
+     */
+    val fault: Long,
+    /**
+     * The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
+     * when nothing failed.
+     */
+    val reason: String?,
+    /**
+     * What the stream cost, for the kind that carries it, and null for every
+     * other. It belongs to the library and lives as long as the callback.
+     */
+    val statistics: SipralStreamStats?,
+    /**
+     * The key the far end pressed, as its character, and zero for an event
+     * no keypad has a key for.
+     */
+    val digit: Long,
+    /**
+     * The RFC 4733 event code behind `digit`. Codes at and above sixteen are
+     * real events that are not keys.
+     */
+    val eventCode: Long,
+    /**
+     * How long the far end held it. Zero either for an `application/dtmf`
+     * INFO, which carries no duration at all, or for the other form's
+     * own `Duration=0` — a peer that held the key for no time at all.
+     * The Rust facade keeps the two apart; this ABI does not.
+     */
+    val heldMs: Long,
+    /**
+     * A SipralSrtpSuite: the transform
+     * this call's media is protected with, for
+     * SipralEventKind.MEDIA_SECURED and zero on every other kind.
+     */
+    val suite: Long,
+    /**
+     * A SipralDigitSource: which of the two ways this stack accepts a
+     * digit reported this one, for SipralEventKind.DIGIT_RECEIVED.
+     */
+    val source: Long,
+    /**
+     * Whether the RFC 6035 PUBLISH left this end, for
+     * SipralEventKind.QUALITY_REPORT_SENT and zero on every other
+     * kind. Not whether a collector accepted it.
+     */
+    val qualityReportSent: Long,
+)
+
+/**
+ * What a SipralEventKind.RECOVERY carries: the lifecycle machine
+ * settling, either by proving the path again or by giving the ladder up.
+ */
+data class SipralRecoveryEvent(
+    /**
+     * A SipralRecoveryOutcome.
+     */
+    val state: Long,
+    /**
+     * A SipralRecoveryRung: the last rung tried. Zero unless `state`
+     * is SipralRecoveryOutcome.GAVE_UP.
+     */
+    val rung: Long,
+    /**
+     * A SipralRecoveryFailure. Zero unless `state` is
+     * SipralRecoveryOutcome.GAVE_UP.
+     */
+    val reason: Long,
+    /**
+     * Bindings the ladder never proved. Meaningful only when `state` is
+     * SipralRecoveryOutcome.GAVE_UP.
+     */
+    val unverified: Long,
+)
+
+/**
+ * What a SipralEventKind.TRANSPORT_WANTED carries: a request RFC
+ * 3261 §18.1.1 would not let out over a datagram, and nowhere open to
+ * send it instead.
+ */
+data class SipralTransportWantedEvent(
+    /**
+     * What to open, as a
+     * SipralTransport. Zero for a
+     * protocol this build has no number for, which
+     * `sipral_stack_transport_bind` then cannot be asked to open
+     * either — nothing this build originates ever measures against a
+     * protocol like that, so this is the layer below having grown one
+     * rather than a caller mistake.
+     */
+    val protocol: Long,
+    /**
+     * Where to, as `host:port`. Not NUL-terminated.
+     */
+    val destination: String?,
+    /**
+     * How large the request came out, in bytes as they would have gone
+     * on the wire.
+     */
+    val requestBytes: Long,
+    /**
+     * The largest it could have been and still fitted a datagram: the
+     * path MTU less the §18.1.1 headroom where the MTU is known, 1300
+     * where it is not.
+     */
+    val limitBytes: Long,
+)
+
+/**
+ * What a SipralEventKind.SUBSCRIPTION_CHANGED and a
+ * SipralEventKind.NOTIFIED carry.
+ *
+ * The subscription names itself here rather than in `sipral_event_t`,
+ * which has room for an account and a call and not for every kind of
+ * handle this ABI mints. The account is not carried at all: a caller
+ * asked for the subscription on one, and a sibling from a fork belongs
+ * to the same one as the subscription it forked from.
+ */
+data class SipralSubscriptionEvent(
+    /**
+     * Which subscription. Minted by `sipral_account_subscribe`, or by
+     * this ABI when a fork made one nobody asked for.
+     */
+    val subscription: Long,
+    /**
+     * A SipralSubscriptionState.
+     */
+    val state: Long,
+    /**
+     * A SipralSubscriptionEnd:
+     * why it is not live. Zero while it is.
+     */
+    val reason: Long,
+    /**
+     * The SIP status a response gave for it, when one did. Zero
+     * otherwise.
+     */
+    val statusCode: Long,
+    /**
+     * Whether the notification carried dialog state this build could
+     * read. Zero on every kind but SipralEventKind.NOTIFIED, and
+     * zero there for a body in any other form or none at all.
+     */
+    val hasDialogInfo: Long,
+    /**
+     * What the notifier granted, in milliseconds. Zero until one has.
+     */
+    val expiresMs: Long,
+    /**
+     * How long until this stack refreshes it, in milliseconds.
+     */
+    val refreshInMs: Long,
+    /**
+     * How long until the next attempt, in milliseconds, when the state
+     * is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
+     * includes every subscription that has ended for good.
+     */
+    val retryInMs: Long,
+    /**
+     * The subscription this one forked from
+     * ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
+     * subscription of its own from here on, with its own dialog, its own
+     * refresh and its own state; RFC 4235 §3.9 makes this the normal case
+     * for dialog state, one per device the watched address is registered
+     * on.
+     *
+     * [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+     */
+    val forkedFrom: Long,
+)
+
+/**
+ * What a SipralEventKind.CALL_ANNOUNCED and a
+ * SipralEventKind.ANNOUNCED_CALL_MISSING carry.
+ */
+data class SipralAnnounceEvent(
+    /**
+     * Which announcement. Minted by `sipral_account_announce`, and it
+     * names nothing once either of these two events has been raised
+     * about it.
+     */
+    val announcement: Long,
+    /**
+     * How long the call was waited for, in milliseconds. Meaningful only
+     * on SipralEventKind.ANNOUNCED_CALL_MISSING.
+     */
+    val waitedMs: Long,
+)
+
+/**
+ * What a SipralEventKind.RESOLVE_NEEDED carries: the name a dialog's
+ * next hop is written as, and the handle an answer takes.
+ */
+data class SipralResolveEvent(
+    /**
+     * The dialog this is about, and what
+     * sipral_stack_resolved
+     * is answered with. Minted by the library, valid while the dialog
+     * is, and answering for one that has ended changes nothing rather
+     * than failing.
+     */
+    val dialog: Long,
+    /**
+     * The host to resolve, as the URI spells it — a name, or a literal
+     * address, which is still reported because the flow the dialog is on
+     * may legitimately differ from it. An IPv6 literal carries its
+     * brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+     */
+    val host: String?,
+    /**
+     * The port the URI gave, or zero for none. Zero is not 5060: RFC
+     * 3263 §4.2 leaves the choice to whoever does the lookup, because
+     * an SRV answer carries a port of its own.
+     */
+    val port: Long,
+    /**
+     * The transport the URI or the scheme named, as a
+     * SipralTransport, or zero for
+     * neither — which leaves §4.1's NAPTR step to the caller, and is
+     * also what a protocol this build has no number for reads as.
+     */
+    val protocol: Long,
+)
+
+/**
+ * What a SipralEventKind.MESSAGE_RECEIVED, a
+ * SipralEventKind.MESSAGE_SENT and a
+ * SipralEventKind.MESSAGES_WAITING carry.
+ *
+ * One struct for all three, the way SipralSubscriptionEvent answers
+ * for two kinds: a member meaningless on one kind is zero or null there.
+ * The whole request or response, when there is one, rides in
+ * `sipral_event_t::message` instead — `attach` points it at the same
+ * bytes `content_type` and `body` are read out of, so both are valid for
+ * exactly as long as the callback is.
+ */
+data class SipralMessageEvent(
+    /**
+     * SipralEventKind.MESSAGE_SENT: which send, minted by
+     * `sipral_account_message`. SIPRAL_HANDLE_NONE on the other two
+     * kinds, and names nothing once this event has been raised about it.
+     */
+    val message: Long,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: which subscription reported
+     * it. SIPRAL_HANDLE_NONE on the other two kinds, which are not
+     * subscriptions.
+     */
+    val subscription: Long,
+    /**
+     * SipralEventKind.MESSAGE_SENT: the final status. Zero on the
+     * other two kinds.
+     */
+    val statusCode: Long,
+    /**
+     * SipralEventKind.MESSAGE_RECEIVED: the `Content-Type` of the
+     * body, as written. Null on the other two kinds, and on a MESSAGE
+     * with no body at all.
+     */
+    val contentType: String?,
+    /**
+     * SipralEventKind.MESSAGE_RECEIVED: the body. Null the same as
+     * `content_type`.
+     */
+    val body: ByteArray?,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: RFC 3842 §3.5's status
+     * line, 1 for `yes` and 0 for `no`. Meaningless on the other two
+     * kinds.
+     */
+    val waiting: Long,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: new messages of the
+     * `voice-message` class (RFC 3458 §6.2), the one a phone's
+     * message-waiting light is about. Zero when the body named no
+     * `voice-message` line, which a boolean-only notification does.
+     */
+    val newMessages: Long,
+    /**
+     * The same, old.
+     */
+    val oldMessages: Long,
+    /**
+     * New messages flagged urgent.
+     */
+    val urgentNewMessages: Long,
+    /**
+     * Old messages flagged urgent.
+     */
+    val urgentOldMessages: Long,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: `Message-Account`, when the
+     * notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
+     * subscription to a group or collection of accounts). Null on the
+     * other two kinds, and on a body that named none.
+     */
+    val messageAccount: String?,
+)
+
+/**
+ * What a SipralEventKind.NAT_MAPPING
+ * carries.
+ *
+ * The three addresses are `host:port`, not NUL-terminated, and the
+ * library's: valid for as long as the callback runs.
+ */
+data class SipralNatEvent(
+    /**
+     * A SipralNatMapping.
+     */
+    val mapping: Long,
+    /**
+     * Nonzero for a signalling socket — a transport of this stack's —
+     * and zero for a media socket sipral_stack_nat_map named.
+     */
+    val signalling: Long,
+    /**
+     * The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
+     * or a number `sipral_stack_transport_bind` bound. Zero otherwise,
+     * which is not a transport here.
+     */
+    val transport: Long,
+    /**
+     * How many accounts' `Contact` moved to `public` because of this —
+     * each one that holds a binding, or is getting one, has registered it
+     * already. Zero for a media socket, and for an answer no account's
+     * `Contact` named the socket in.
+     */
+    val accounts: Long,
+    /**
+     * The socket, as the application named it.
+     */
+    val local: String?,
+    /**
+     * Where the server saw it: the public address. Empty for
+     * `SIPRAL_NAT_MAPPING_UNANSWERED`.
+     */
+    val mapped: String?,
+    /**
+     * What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
+     * otherwise.
+     */
+    val previous: String?,
+)
+
+/**
+ * One of every arm [`SipralEventPayload`] declares, read back whole:
+ * [`SipralEvent.payload`] builds one from every event, and which member of
+ * it means something is named by [`SipralEvent.kind`] alone.
+ */
+class SipralEventPayload(
+    /**
+     * For SipralEventKind.REGISTRATION_CHANGED.
+     */
+    val registration: SipralRegistrationEvent,
+    /**
+     * For every call kind.
+     */
+    val call: SipralCallEvent,
+    /**
+     * For SipralEventKind.TRANSFER_REQUESTED,
+     * SipralEventKind.TRANSFER_PROGRESS and
+     * SipralEventKind.TRANSFER_DONE.
+     */
+    val transfer: SipralTransferEvent,
+    /**
+     * For every media kind: started, changed, stalled, resumed, failed, the
+     * end-of-call statistics, and a recording that stopped by itself.
+     */
+    val media: SipralMediaEvent,
+    /**
+     * For SipralEventKind.RECOVERY.
+     */
+    val recovery: SipralRecoveryEvent,
+    /**
+     * For SipralEventKind.TRANSPORT_WANTED.
+     */
+    val transportWanted: SipralTransportWantedEvent,
+    /**
+     * For SipralEventKind.SUBSCRIPTION_CHANGED and
+     * SipralEventKind.NOTIFIED.
+     */
+    val subscription: SipralSubscriptionEvent,
+    /**
+     * For SipralEventKind.CALL_ANNOUNCED and
+     * SipralEventKind.ANNOUNCED_CALL_MISSING.
+     */
+    val announce: SipralAnnounceEvent,
+    /**
+     * For SipralEventKind.RESOLVE_NEEDED.
+     */
+    val resolve: SipralResolveEvent,
+    /**
+     * For SipralEventKind.MESSAGE_RECEIVED,
+     * SipralEventKind.MESSAGE_SENT and
+     * SipralEventKind.MESSAGES_WAITING.
+     */
+    val message: SipralMessageEvent,
+    /**
+     * For SipralEventKind.NAT_MAPPING.
+     */
+    val nat: SipralNatEvent,
+)
+
 class SipralEvent(
     /**
      * How many bytes of this struct are meaningful.
@@ -3416,7 +3972,422 @@ class SipralEvent(
      * of its own. Null when the event came from no single message.
      */
     val message: ByteArray?,
-)
+    /**
+     * A SipralRegistrationState.
+     */
+    private val payloadRegistrationState: Long = 0,
+    /**
+     * A SipralRegistrationFailure, zero when nothing failed.
+     */
+    private val payloadRegistrationFailure: Long = 0,
+    /**
+     * The status the registrar answered with, or zero when none arrived.
+     */
+    private val payloadRegistrationStatusCode: Long = 0,
+    /**
+     * The binding's granted lifetime, zero unless it is live.
+     */
+    private val payloadRegistrationExpiresMs: Long = 0,
+    /**
+     * How long until the refresh, zero unless one is scheduled.
+     */
+    private val payloadRegistrationRefreshInMs: Long = 0,
+    /**
+     * How long until the next attempt. Only meaningful while the state is
+     * retrying, which is exactly when the stack is going to try again.
+     */
+    private val payloadRegistrationRetryInMs: Long = 0,
+    /**
+     * A SipralCallState.
+     */
+    private val payloadCallState: Long = 0,
+    /**
+     * A SipralCallEndReason, zero while the call is alive.
+     */
+    private val payloadCallEndReason: Long = 0,
+    /**
+     * The status a response carried, or zero.
+     */
+    private val payloadCallStatusCode: Long = 0,
+    /**
+     * The other call this event is also about: the sibling of a fork, or the
+     * call that was replaced. SIPRAL_HANDLE_NONE otherwise.
+     */
+    private val payloadCallOther: Long = 0,
+    /**
+     * Whether this end has asked the far end to stop sending.
+     */
+    private val payloadCallHeldHere: Long = 0,
+    /**
+     * Whether the far end has asked this one to.
+     */
+    private val payloadCallHeldThere: Long = 0,
+    /**
+     * What this end is describing, and how long it is.
+     */
+    private val payloadCallLocalSdp: ByteArray? = null,
+    /**
+     * And what the far end is.
+     */
+    private val payloadCallRemoteSdp: ByteArray? = null,
+    /**
+     * When a refused session change goes out again by itself, zero when it is
+     * not going to.
+     */
+    private val payloadCallRetryInMs: Long = 0,
+    /**
+     * The `From` URI of the request that created this call: as written in
+     * the header, without the angle brackets and without header
+     * parameters such as `tag`. The same on every event of this call.
+     * Null and zero when this build has none to report.
+     */
+    private val payloadCallFromUri: ByteArray? = null,
+    /**
+     * That `From`'s display name, quotes and backslash escapes resolved
+     * (RFC 3261 §25.1). Null and zero when the header named none.
+     */
+    private val payloadCallFromDisplay: ByteArray? = null,
+    /**
+     * The `To` URI of the request that created this call, as written in
+     * the header.
+     */
+    private val payloadCallToUri: ByteArray? = null,
+    /**
+     * The `Call-ID` of the request that created this call.
+     */
+    private val payloadCallCallId: ByteArray? = null,
+    /**
+     * The digit an INFO this end sent named, for
+     * SipralEventKind.DTMF_SENT. Zero for every other kind.
+     */
+    private val payloadCallDigit: Long = 0,
+    /**
+     * What the far end's own call is doing, or zero.
+     */
+    private val payloadTransferStatusCode: Long = 0,
+    /**
+     * Whether the request named a dialog to replace, which is what makes a
+     * transfer attended rather than blind.
+     */
+    private val payloadTransferAttended: Long = 0,
+    /**
+     * Who to call, as UTF-8. Not NUL-terminated.
+     */
+    private val payloadTransferTarget: String? = null,
+    /**
+     * A SipralCodec: what the negotiation
+     * settled on, zero where the event is not about a codec.
+     */
+    private val payloadMediaCodec: Long = 0,
+    /**
+     * A SipralDirection: which way audio
+     * may flow, as seen from here.
+     */
+    private val payloadMediaDirection: Long = 0,
+    /**
+     * How long the stream has been silent, for a stall and for its recovery.
+     */
+    private val payloadMediaSilentForMs: Long = 0,
+    /**
+     * How much audio reached the file, for a recording that stopped by
+     * itself.
+     */
+    private val payloadMediaRecordedMs: Long = 0,
+    /**
+     * A SipralMediaFault, zero when
+     * nothing failed.
+     */
+    private val payloadMediaFault: Long = 0,
+    /**
+     * The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
+     * when nothing failed.
+     */
+    private val payloadMediaReason: String? = null,
+    /**
+     * What the stream cost, for the kind that carries it, and null for every
+     * other. It belongs to the library and lives as long as the callback.
+     */
+    private val payloadMediaStatistics: LongArray? = null,
+    /**
+     * The key the far end pressed, as its character, and zero for an event
+     * no keypad has a key for.
+     */
+    private val payloadMediaDigit: Long = 0,
+    /**
+     * The RFC 4733 event code behind `digit`. Codes at and above sixteen are
+     * real events that are not keys.
+     */
+    private val payloadMediaEventCode: Long = 0,
+    /**
+     * How long the far end held it. Zero either for an `application/dtmf`
+     * INFO, which carries no duration at all, or for the other form's
+     * own `Duration=0` — a peer that held the key for no time at all.
+     * The Rust facade keeps the two apart; this ABI does not.
+     */
+    private val payloadMediaHeldMs: Long = 0,
+    /**
+     * A SipralSrtpSuite: the transform
+     * this call's media is protected with, for
+     * SipralEventKind.MEDIA_SECURED and zero on every other kind.
+     */
+    private val payloadMediaSuite: Long = 0,
+    /**
+     * A SipralDigitSource: which of the two ways this stack accepts a
+     * digit reported this one, for SipralEventKind.DIGIT_RECEIVED.
+     */
+    private val payloadMediaSource: Long = 0,
+    /**
+     * Whether the RFC 6035 PUBLISH left this end, for
+     * SipralEventKind.QUALITY_REPORT_SENT and zero on every other
+     * kind. Not whether a collector accepted it.
+     */
+    private val payloadMediaQualityReportSent: Long = 0,
+    /**
+     * A SipralRecoveryOutcome.
+     */
+    private val payloadRecoveryState: Long = 0,
+    /**
+     * A SipralRecoveryRung: the last rung tried. Zero unless `state`
+     * is SipralRecoveryOutcome.GAVE_UP.
+     */
+    private val payloadRecoveryRung: Long = 0,
+    /**
+     * A SipralRecoveryFailure. Zero unless `state` is
+     * SipralRecoveryOutcome.GAVE_UP.
+     */
+    private val payloadRecoveryReason: Long = 0,
+    /**
+     * Bindings the ladder never proved. Meaningful only when `state` is
+     * SipralRecoveryOutcome.GAVE_UP.
+     */
+    private val payloadRecoveryUnverified: Long = 0,
+    /**
+     * What to open, as a
+     * SipralTransport. Zero for a
+     * protocol this build has no number for, which
+     * `sipral_stack_transport_bind` then cannot be asked to open
+     * either — nothing this build originates ever measures against a
+     * protocol like that, so this is the layer below having grown one
+     * rather than a caller mistake.
+     */
+    private val payloadTransportWantedProtocol: Long = 0,
+    /**
+     * Where to, as `host:port`. Not NUL-terminated.
+     */
+    private val payloadTransportWantedDestination: String? = null,
+    /**
+     * How large the request came out, in bytes as they would have gone
+     * on the wire.
+     */
+    private val payloadTransportWantedRequestBytes: Long = 0,
+    /**
+     * The largest it could have been and still fitted a datagram: the
+     * path MTU less the §18.1.1 headroom where the MTU is known, 1300
+     * where it is not.
+     */
+    private val payloadTransportWantedLimitBytes: Long = 0,
+    /**
+     * Which subscription. Minted by `sipral_account_subscribe`, or by
+     * this ABI when a fork made one nobody asked for.
+     */
+    private val payloadSubscriptionSubscription: Long = 0,
+    /**
+     * A SipralSubscriptionState.
+     */
+    private val payloadSubscriptionState: Long = 0,
+    /**
+     * A SipralSubscriptionEnd:
+     * why it is not live. Zero while it is.
+     */
+    private val payloadSubscriptionReason: Long = 0,
+    /**
+     * The SIP status a response gave for it, when one did. Zero
+     * otherwise.
+     */
+    private val payloadSubscriptionStatusCode: Long = 0,
+    /**
+     * Whether the notification carried dialog state this build could
+     * read. Zero on every kind but SipralEventKind.NOTIFIED, and
+     * zero there for a body in any other form or none at all.
+     */
+    private val payloadSubscriptionHasDialogInfo: Long = 0,
+    /**
+     * What the notifier granted, in milliseconds. Zero until one has.
+     */
+    private val payloadSubscriptionExpiresMs: Long = 0,
+    /**
+     * How long until this stack refreshes it, in milliseconds.
+     */
+    private val payloadSubscriptionRefreshInMs: Long = 0,
+    /**
+     * How long until the next attempt, in milliseconds, when the state
+     * is `SIPRAL_SUBSCRIPTION_STATE_RETRYING`. Zero otherwise, which
+     * includes every subscription that has ended for good.
+     */
+    private val payloadSubscriptionRetryInMs: Long = 0,
+    /**
+     * The subscription this one forked from
+     * ([RFC 6665 §4.1.4]), or `SIPRAL_HANDLE_NONE`. A sibling is a
+     * subscription of its own from here on, with its own dialog, its own
+     * refresh and its own state; RFC 4235 §3.9 makes this the normal case
+     * for dialog state, one per device the watched address is registered
+     * on.
+     *
+     * [RFC 6665 §4.1.4]: https://www.rfc-editor.org/rfc/rfc6665#section-4.1.4
+     */
+    private val payloadSubscriptionForkedFrom: Long = 0,
+    /**
+     * Which announcement. Minted by `sipral_account_announce`, and it
+     * names nothing once either of these two events has been raised
+     * about it.
+     */
+    private val payloadAnnounceAnnouncement: Long = 0,
+    /**
+     * How long the call was waited for, in milliseconds. Meaningful only
+     * on SipralEventKind.ANNOUNCED_CALL_MISSING.
+     */
+    private val payloadAnnounceWaitedMs: Long = 0,
+    /**
+     * The dialog this is about, and what
+     * sipral_stack_resolved
+     * is answered with. Minted by the library, valid while the dialog
+     * is, and answering for one that has ended changes nothing rather
+     * than failing.
+     */
+    private val payloadResolveDialog: Long = 0,
+    /**
+     * The host to resolve, as the URI spells it — a name, or a literal
+     * address, which is still reported because the flow the dialog is on
+     * may legitimately differ from it. An IPv6 literal carries its
+     * brackets (RFC 3261 §19.1.1). Not NUL-terminated.
+     */
+    private val payloadResolveHost: String? = null,
+    /**
+     * The port the URI gave, or zero for none. Zero is not 5060: RFC
+     * 3263 §4.2 leaves the choice to whoever does the lookup, because
+     * an SRV answer carries a port of its own.
+     */
+    private val payloadResolvePort: Long = 0,
+    /**
+     * The transport the URI or the scheme named, as a
+     * SipralTransport, or zero for
+     * neither — which leaves §4.1's NAPTR step to the caller, and is
+     * also what a protocol this build has no number for reads as.
+     */
+    private val payloadResolveProtocol: Long = 0,
+    /**
+     * SipralEventKind.MESSAGE_SENT: which send, minted by
+     * `sipral_account_message`. SIPRAL_HANDLE_NONE on the other two
+     * kinds, and names nothing once this event has been raised about it.
+     */
+    private val payloadMessageMessage: Long = 0,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: which subscription reported
+     * it. SIPRAL_HANDLE_NONE on the other two kinds, which are not
+     * subscriptions.
+     */
+    private val payloadMessageSubscription: Long = 0,
+    /**
+     * SipralEventKind.MESSAGE_SENT: the final status. Zero on the
+     * other two kinds.
+     */
+    private val payloadMessageStatusCode: Long = 0,
+    /**
+     * SipralEventKind.MESSAGE_RECEIVED: the `Content-Type` of the
+     * body, as written. Null on the other two kinds, and on a MESSAGE
+     * with no body at all.
+     */
+    private val payloadMessageContentType: String? = null,
+    /**
+     * SipralEventKind.MESSAGE_RECEIVED: the body. Null the same as
+     * `content_type`.
+     */
+    private val payloadMessageBody: ByteArray? = null,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: RFC 3842 §3.5's status
+     * line, 1 for `yes` and 0 for `no`. Meaningless on the other two
+     * kinds.
+     */
+    private val payloadMessageWaiting: Long = 0,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: new messages of the
+     * `voice-message` class (RFC 3458 §6.2), the one a phone's
+     * message-waiting light is about. Zero when the body named no
+     * `voice-message` line, which a boolean-only notification does.
+     */
+    private val payloadMessageNewMessages: Long = 0,
+    /**
+     * The same, old.
+     */
+    private val payloadMessageOldMessages: Long = 0,
+    /**
+     * New messages flagged urgent.
+     */
+    private val payloadMessageUrgentNewMessages: Long = 0,
+    /**
+     * Old messages flagged urgent.
+     */
+    private val payloadMessageUrgentOldMessages: Long = 0,
+    /**
+     * SipralEventKind.MESSAGES_WAITING: `Message-Account`, when the
+     * notifier sent one (RFC 3842 §3.5 makes it mandatory only for a
+     * subscription to a group or collection of accounts). Null on the
+     * other two kinds, and on a body that named none.
+     */
+    private val payloadMessageMessageAccount: String? = null,
+    /**
+     * A SipralNatMapping.
+     */
+    private val payloadNatMapping: Long = 0,
+    /**
+     * Nonzero for a signalling socket — a transport of this stack's —
+     * and zero for a media socket sipral_stack_nat_map named.
+     */
+    private val payloadNatSignalling: Long = 0,
+    /**
+     * The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
+     * or a number `sipral_stack_transport_bind` bound. Zero otherwise,
+     * which is not a transport here.
+     */
+    private val payloadNatTransport: Long = 0,
+    /**
+     * How many accounts' `Contact` moved to `public` because of this —
+     * each one that holds a binding, or is getting one, has registered it
+     * already. Zero for a media socket, and for an answer no account's
+     * `Contact` named the socket in.
+     */
+    private val payloadNatAccounts: Long = 0,
+    /**
+     * The socket, as the application named it.
+     */
+    private val payloadNatLocal: String? = null,
+    /**
+     * Where the server saw it: the public address. Empty for
+     * `SIPRAL_NAT_MAPPING_UNANSWERED`.
+     */
+    private val payloadNatMapped: String? = null,
+    /**
+     * What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
+     * otherwise.
+     */
+    private val payloadNatPrevious: String? = null,
+) {
+    /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
+    val payload: SipralEventPayload
+        get() = SipralEventPayload(
+            SipralRegistrationEvent(payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs),
+            SipralCallEvent(payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit),
+            SipralTransferEvent(payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget),
+            SipralMediaEvent(payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason, payloadMediaStatistics?.let { SipralStreamStats.of(it) }, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent),
+            SipralRecoveryEvent(payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified),
+            SipralTransportWantedEvent(payloadTransportWantedProtocol, payloadTransportWantedDestination, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes),
+            SipralSubscriptionEvent(payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom),
+            SipralAnnounceEvent(payloadAnnounceAnnouncement, payloadAnnounceWaitedMs),
+            SipralResolveEvent(payloadResolveDialog, payloadResolveHost, payloadResolvePort, payloadResolveProtocol),
+            SipralMessageEvent(payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount),
+            SipralNatEvent(payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal, payloadNatMapped, payloadNatPrevious),
+        )
+}
 
 /**
  * The one callback a stack has.
@@ -3486,10 +4457,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationState: Long, payloadRegistrationFailure: Long, payloadRegistrationStatusCode: Long, payloadRegistrationExpiresMs: Long, payloadRegistrationRefreshInMs: Long, payloadRegistrationRetryInMs: Long, payloadCallState: Long, payloadCallEndReason: Long, payloadCallStatusCode: Long, payloadCallOther: Long, payloadCallHeldHere: Long, payloadCallHeldThere: Long, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallRetryInMs: Long, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallDigit: Long, payloadTransferStatusCode: Long, payloadTransferAttended: Long, payloadTransferTarget: ByteArray?, payloadMediaCodec: Long, payloadMediaDirection: Long, payloadMediaSilentForMs: Long, payloadMediaRecordedMs: Long, payloadMediaFault: Long, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaDigit: Long, payloadMediaEventCode: Long, payloadMediaHeldMs: Long, payloadMediaSuite: Long, payloadMediaSource: Long, payloadMediaQualityReportSent: Long, payloadRecoveryState: Long, payloadRecoveryRung: Long, payloadRecoveryReason: Long, payloadRecoveryUnverified: Long, payloadTransportWantedProtocol: Long, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedRequestBytes: Long, payloadTransportWantedLimitBytes: Long, payloadSubscriptionSubscription: Long, payloadSubscriptionState: Long, payloadSubscriptionReason: Long, payloadSubscriptionStatusCode: Long, payloadSubscriptionHasDialogInfo: Long, payloadSubscriptionExpiresMs: Long, payloadSubscriptionRefreshInMs: Long, payloadSubscriptionRetryInMs: Long, payloadSubscriptionForkedFrom: Long, payloadAnnounceAnnouncement: Long, payloadAnnounceWaitedMs: Long, payloadResolveDialog: Long, payloadResolveHost: ByteArray?, payloadResolvePort: Long, payloadResolveProtocol: Long, payloadMessageMessage: Long, payloadMessageSubscription: Long, payloadMessageStatusCode: Long, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageWaiting: Long, payloadMessageNewMessages: Long, payloadMessageOldMessages: Long, payloadMessageUrgentNewMessages: Long, payloadMessageUrgentOldMessages: Long, payloadMessageMessageAccount: ByteArray?, payloadNatMapping: Long, payloadNatSignalling: Long, payloadNatTransport: Long, payloadNatAccounts: Long, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationState, payloadRegistrationFailure, payloadRegistrationStatusCode, payloadRegistrationExpiresMs, payloadRegistrationRefreshInMs, payloadRegistrationRetryInMs, payloadCallState, payloadCallEndReason, payloadCallStatusCode, payloadCallOther, payloadCallHeldHere, payloadCallHeldThere, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallRetryInMs, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallDigit, payloadTransferStatusCode, payloadTransferAttended, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadMediaCodec, payloadMediaDirection, payloadMediaSilentForMs, payloadMediaRecordedMs, payloadMediaFault, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaDigit, payloadMediaEventCode, payloadMediaHeldMs, payloadMediaSuite, payloadMediaSource, payloadMediaQualityReportSent, payloadRecoveryState, payloadRecoveryRung, payloadRecoveryReason, payloadRecoveryUnverified, payloadTransportWantedProtocol, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedRequestBytes, payloadTransportWantedLimitBytes, payloadSubscriptionSubscription, payloadSubscriptionState, payloadSubscriptionReason, payloadSubscriptionStatusCode, payloadSubscriptionHasDialogInfo, payloadSubscriptionExpiresMs, payloadSubscriptionRefreshInMs, payloadSubscriptionRetryInMs, payloadSubscriptionForkedFrom, payloadAnnounceAnnouncement, payloadAnnounceWaitedMs, payloadResolveDialog, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolvePort, payloadResolveProtocol, payloadMessageMessage, payloadMessageSubscription, payloadMessageStatusCode, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageWaiting, payloadMessageNewMessages, payloadMessageOldMessages, payloadMessageUrgentNewMessages, payloadMessageUrgentOldMessages, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadNatMapping, payloadNatSignalling, payloadNatTransport, payloadNatAccounts, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)

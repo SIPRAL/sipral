@@ -12,6 +12,21 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **The Kotlin binding carries an event's whole payload, not just its head.**
+  The generator now flattens every arm `sipral_event_payload_t` declares
+  across JNI, and `SipralEvent.payload` reads them back as one instance of
+  each arm's own class -- an RFC 4733 digit, a codec, a media fault's
+  reason, registration state details, the NAT mapping and the rest are all
+  readable from Kotlin now, the same as from C, Swift and C#. A buffer or a
+  whole record behind a pointer is only ever dereferenced for a kind that
+  actually wrote that arm (`crates/sipral-ffi/src/event.rs`'s
+  `EVENT_KIND_ARMS`, read by the generator); every other kind sees it as
+  null, the same as before the library set it, rather than a pointer
+  reinterpreted from another arm's own data, which segfaulted the shim
+  outright the one way `docs/08-ffi.md`'s existing "reading another arm is
+  defined" promise does not cover. `org.sipral.idiomatic` reads
+  `payload.media.digit` and `payload.registration.state` directly instead
+  of the workarounds this replaces.
 - **A `THIRD-PARTY-LICENSES.txt` that actually carries the licence texts a
   binary has to ship.** `THIRD-PARTY-NOTICES.md` named the dependencies and
   their licences but reproduced no licence text and no MIT copyright line, so
