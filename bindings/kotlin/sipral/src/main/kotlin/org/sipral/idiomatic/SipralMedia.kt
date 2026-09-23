@@ -46,8 +46,16 @@ class SipralMedia internal constructor(
     private val callHandle: Long,
     private val socket: DatagramSocket,
 ) : AutoCloseable {
-    /** `sipral_call_media`'s own handle. */
-    val handle: Long = Sipral.callMedia(client.handle, callHandle)
+    /**
+     * `sipral_call_media`'s own handle. Retried on `SIPRAL_STATUS_BUSY` the
+     * same way every other signalling call in this layer is: minting
+     * normally runs from inside the poll thread's own event callback, where
+     * the ABI never answers Busy (docs/08-ffi.md, re-entry), but a second
+     * thread's own signalling call -- [SipralCall.close] hanging up, most
+     * often -- can still land on the stack's lock at the same moment, which
+     * is exactly the ordinary contention [retryBusy] exists for.
+     */
+    val handle: Long = retryBusy { Sipral.callMedia(client.handle, callHandle) }
 
     private val negotiated: SipralMediaInfo = Sipral.mediaInfo(handle)
 

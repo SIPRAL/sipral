@@ -15,7 +15,9 @@ import org.sipral.Sipral
 import org.sipral.SipralCallState
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralStatus
 
 /**
  * A `sipral_handle_t` naming one call, and the actions it takes.
@@ -44,6 +46,19 @@ class SipralCall internal constructor(
     @Volatile
     var ended: Boolean = false
         private set
+
+    // Guards every read-then-act on [media] that [close] and [deliver] each
+    // do, and the [closing] flag [close] sets under it before doing
+    // anything else. Without this, close() reading `media == null` and
+    // deliver() minting one for the same MEDIA_STARTED race exactly the way
+    // any check-then-act does: close() finds nothing to release and closes
+    // the raw socket out from under deliver()'s still-running mint, which
+    // then either throws (uncaught, since neither call site expects it) or
+    // hands back a SipralMedia nothing ever closes -- a `sipral_call_media`
+    // handle minted and never released, the one failure mode
+    // docs/08-ffi.md's "Handles" section exists to rule out.
+    private val mediaLock = Any()
+    private var closing = false
 
     // A SharedFlow, not a Channel: a Channel is single-consumer, and an
     // application reasonably wants more than one concurrent reader of one
@@ -93,13 +108,44 @@ class SipralCall internal constructor(
     /** Called by [SipralClient] on its own poll thread. Not for application
      * use. */
     internal fun deliver(event: SipralEvent) {
-        if (event.kind == SipralEventKind.MEDIA_STARTED.value.toLong() && media == null) {
-            media = SipralMedia(client, handle, mediaSocket)
+        if (event.kind == SipralEventKind.MEDIA_STARTED.value.toLong()) {
+            synchronized(mediaLock) {
+                if (media == null && !closing) {
+                    media = mintMedia()
+                }
+            }
         }
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
             ended = true
         }
         eventsFlow.tryEmit(event)
+    }
+
+    /**
+     * `SipralMedia`'s own constructor mints through `sipral_call_media`,
+     * unguarded by [retryBusy] the way every other signalling call in this
+     * layer is, because minting normally runs from inside the poll thread's
+     * own event callback (docs/08-ffi.md, "re-entry rules") where the
+     * ordinary contention `retryBusy` waits out cannot arise on its own.
+     * The one way it still can is a second thread's own signalling call --
+     * [SipralCall.hangup] from [close], most often -- landing on the stack's
+     * lock at the same moment, which is ordinary contention by the same
+     * definition and deserves the same retry rather than a mint this method
+     * lets escape uncaught out of the poll thread's own delivery loop. A
+     * call that has ended in the meantime is not ordinary: `WRONG_STATE` or
+     * `STALE_HANDLE` here means the session this event announced is already
+     * gone, which [close] running concurrently already accounts for by way
+     * of [closing], so there is nothing left to mint and null is the answer
+     * rather than a throw.
+     */
+    private fun mintMedia(): SipralMedia? = try {
+        SipralMedia(client, handle, mediaSocket)
+    } catch (gone: SipralException) {
+        if (gone.status == SipralStatus.WRONG_STATE || gone.status == SipralStatus.STALE_HANDLE) {
+            null
+        } else {
+            throw gone
+        }
     }
 
     // -- actions -------------------------------------------------------------
@@ -181,6 +227,12 @@ class SipralCall internal constructor(
      * `use { }` regardless of how the call ended.
      */
     override fun close() {
+        // Claimed before anything else, and under the same lock [deliver]
+        // mints media under: once this is true, a MEDIA_STARTED that
+        // deliver() has not yet started handling mints nothing, and one it
+        // is already in the middle of minting is still finished and handed
+        // back below rather than raced past -- see [mediaLock]'s own note.
+        synchronized(mediaLock) { closing = true }
         if (!ended) {
             try {
                 hangup()
@@ -188,7 +240,7 @@ class SipralCall internal constructor(
                 // best effort on the way out
             }
         }
-        val current = media
+        val current = synchronized(mediaLock) { media }
         if (current != null) {
             current.close()
         } else {

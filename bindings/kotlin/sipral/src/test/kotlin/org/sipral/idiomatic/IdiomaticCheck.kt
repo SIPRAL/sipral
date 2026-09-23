@@ -24,6 +24,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.sipral.Sipral
+import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralStatus
@@ -55,6 +56,49 @@ private suspend fun everything(): String {
             aor = "sip:bob@example.invalid",
             registrarAddress = clientA.bindAddress,
         )
+
+        // A call closed the instant it is placed, before anything has
+        // negotiated -- close() has already taken the "no media yet, close
+        // the raw socket" path by the time this returns. Then the exact
+        // event the poll thread would still be free to deliver in a real
+        // race, SIPRAL_EVENT_KIND_MEDIA_STARTED, is handed to the same
+        // internal `deliver` the poll thread calls, landing after close()
+        // the way a real race can land it: MEDIA_STARTED already read off
+        // the wire on one thread while close() runs on another. Before this
+        // was fixed, deliver() minted a SipralMedia over the already-closed
+        // socket unconditionally, whose own init block
+        // (`socket.soTimeout = 5`) threw a SocketException straight out of
+        // deliver() -- uncaught, on what is the poll thread in real use --
+        // and, whenever the mint itself won that race instead of the raw
+        // socket check, left a `sipral_call_media` handle minted and
+        // reachable from nowhere, since the SipralCall this raced was
+        // already forgotten by its client. Now `deliver` sees the call is
+        // closing and mints nothing, silently and safely.
+        //
+        // Placed from clientB at clientA -- the opposite direction from the
+        // rest of this test -- so the real INVITE this sends and the real
+        // INCOMING_CALL it raises land on clientA, which nothing below ever
+        // reads a bare `first { INCOMING_CALL }` from. Placing it the same
+        // direction as callA below would leave that same event sitting in
+        // clientB.events (replay = 0 only trims what a *new* subscriber
+        // replays, not what an unread item already in the buffer keeps for
+        // the first subscriber that comes along), where the real callA's
+        // own INCOMING_CALL is read the same untargeted way a moment later
+        // -- so it would be this stale call's event that answerCall() below
+        // actually answers, not callA's.
+        val raced = clientB.placeCall(accountB, target = "sip:alice@example.invalid")
+        raced.close()
+        raced.deliver(
+            SipralEvent(
+                size = 0,
+                stack = clientB.handle,
+                kind = SipralEventKind.MEDIA_STARTED.value.toLong(),
+                account = 0,
+                call = raced.handle,
+                message = null,
+            ),
+        )
+        assertEquals(null, raced.media, "a MEDIA_STARTED delivered after close() must mint nothing")
 
         // Placed directly at clientB, through accountA's own registrarAddress
         // acting as the outbound destination -- no registrar between them,

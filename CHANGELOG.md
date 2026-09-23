@@ -484,6 +484,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   control message. It also ignored `BargeIn`, never reported the bridged
   call's `ringing`, and left the protocol session's state at ringing for the
   whole call.
+- **`org.sipral.idiomatic.SipralCall.close()` no longer races
+  `SIPRAL_EVENT_KIND_MEDIA_STARTED`.** Closing a call the instant it is
+  placed, or the instant its far end hangs up, could land between the poll
+  thread minting a `sipral_call_media` handle and this call handing it to
+  the application: the raw socket `close()` had already released was then
+  handed to that mint's own `SipralMedia`, whose constructor threw
+  uncaught out of the event-delivery path, and, when the mint itself won
+  the race instead, its handle was minted and reachable from nowhere. Both
+  sides of that race are now serialized, and a `SIPRAL_STATUS_BUSY` from
+  the mint colliding with a concurrent signalling call is retried the same
+  way every other call in this layer already retries it.
 - **The local conference's `MediaEvent::Unjoined` now reaches the C ABI.** A
   call ending while its partner is still joined told the facade, but the
   translation to `sipral_event_t` dropped it silently; an application driving
