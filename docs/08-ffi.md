@@ -661,8 +661,8 @@ deadlocking.
 path, not on the poll thread.** Unlike `sipral_event_callback_t`, which is
 called from inside `sipral_stack_poll` with nothing held, `process` is
 called from inside `sipral_media_playback` and `sipral_media_capture`, on
-whichever thread the application called those from, with this call's media
-locked for the length of the call — the same footing
+whichever thread the application called those from, with the phone call's
+media locked for the duration of that one entry point — the same footing
 `sipral_screen_callback_t` stands on, and the opposite of every other
 callback in this ABI. Two consequences follow directly from that lock:
 `process` must not call back into the media handle it was attached through,
