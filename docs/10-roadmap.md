@@ -60,8 +60,8 @@ unit suite had ever asked.
   messages rejected without a panic;
 - **met** — the parser survives 24 hours on each fuzz target with no crash and
   no timeout, which is the gate `11-testing.md` sets for this criterion: 24
-  CPU-hours on each of eighteen targets, about 37 billion executions, nothing
-  found;
+  CPU-hours on each of the twenty-six targets that existed by 23 September
+  2026, about 61 billion executions, nothing found;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
   Asterisk;
 - **met** — the same flows, plus DTMF in both forms, run through

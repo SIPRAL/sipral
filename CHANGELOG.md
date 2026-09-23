@@ -192,10 +192,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `crates/sipral-headless/examples/agent.rs` carry a call over that socket
   end to end, and the interop lab gained a second agent account to exercise
   it the same way the Python one already is.
-- **Twenty-four CPU-hours of fuzzing on every target.** All eighteen
-  `cargo-fuzz` targets, each 48 runs of 30 minutes on one machine, about 37
-  billion executions: no crash, no timeout, no run out of memory. That is the
-  last of phase 1's exit criteria but the carrier account.
+- **Twenty-four CPU-hours of fuzzing on every target but the newest.** The
+  eighteen original `cargo-fuzz` targets and then the eight media ones, each
+  48 runs of 30 minutes on one machine, about 61 billion executions in all:
+  no crash, no timeout, no run out of memory. That is the last of phase 1's
+  exit criteria but the carrier account.
 - **A local conference of two calls.** `MediaEngine::join`/`leave` pair two
   active calls on one facade and `MediaEngine::mix` drives a frame of the
   three-party mix — each far end hears the other far end and this end's own
