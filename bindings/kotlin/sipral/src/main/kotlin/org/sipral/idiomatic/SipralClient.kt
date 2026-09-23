@@ -138,6 +138,7 @@ class SipralClient private constructor(
         authUser: String? = null,
         authPassword: String? = null,
         expiresSeconds: Long = 0,
+        push: SipralPush? = null,
     ): SipralAccount = SipralAccount.add(
         this,
         aor,
@@ -148,6 +149,7 @@ class SipralClient private constructor(
         authUser = authUser,
         authPassword = authPassword,
         expiresSeconds = expiresSeconds,
+        push = push,
     )
 
     private fun defaultContact(aor: String): String {
@@ -188,19 +190,47 @@ class SipralClient private constructor(
      * Open a media socket for an incoming call and answer it there.
      * `event` is the `SIPRAL_EVENT_KIND_INCOMING_CALL` read off [events].
      */
-    fun answerCall(event: SipralEvent, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall {
+    fun answerCall(event: SipralEvent, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
+        answerCall(event.call, mediaHost, mediaPort)
+
+    /**
+     * [answerCall] by call handle, for a caller that has the handle and not
+     * the event -- [SipralAnnounced.Arrived] hands back only the handle, and
+     * the `SIPRAL_EVENT_KIND_INCOMING_CALL` behind it may already have been
+     * read by somebody else.
+     */
+    fun answerCall(callHandle: Long, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall {
         val mediaSocket = DatagramSocket(mediaPort, InetAddress.getByName(mediaHost))
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
-        val call = SipralCall(this, event.call, mediaSocket, mediaAddress)
-        calls[event.call] = call
-        call.answer(mediaAddress)
+        val call = SipralCall(this, callHandle, mediaSocket, mediaAddress)
+        calls[callHandle] = call
+        try {
+            call.answer(mediaAddress)
+        } catch (refused: Exception) {
+            calls.remove(callHandle)
+            mediaSocket.close()
+            throw refused
+        }
         return call
     }
 
     /** `sipral_call_reject`, for a call nothing has answered: no media
      * socket was ever needed. */
     fun rejectCall(event: SipralEvent, code: Long = 486) {
-        retryBusy { Sipral.callReject(handle, event.call, code, nowMs()) }
+        rejectCall(event.call, code)
+    }
+
+    /** [rejectCall] by call handle. */
+    fun rejectCall(callHandle: Long, code: Long = 486) {
+        retryBusy { Sipral.callReject(handle, callHandle, code, nowMs()) }
+    }
+
+    /** `sipral_announcement_forget`: the user dismissed a screen a push
+     * raised before its INVITE came. `SIPRAL_STATUS_WRONG_STATE` when it
+     * was already fulfilled or had already expired -- the event saying so
+     * and this call can cross. */
+    fun forgetAnnouncement(announcement: Long) {
+        retryBusy { Sipral.announcementForget(handle, announcement) }
     }
 
     internal fun callFor(callHandle: Long): SipralCall? = calls[callHandle]

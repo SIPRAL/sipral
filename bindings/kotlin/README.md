@@ -44,14 +44,15 @@ that header fields handed over in a list can be found in the message they went
 out in. The gate links both against the shared library and runs them on a JVM
 under `-Xcheck:jni`.
 
-There is no Gradle project in the tree: `scripts/package/aar.sh` assembles
-`sipral.aar` by hand instead, straight to Android's own archive format, with
-`libsipral_jni.so` linked against `libsipral_ffi.so` for each ABI beside
-`SipralAbi.kt`'s compiled classes. `docs/08-ffi.md` says what the binding
-still does not carry: two structs a caller part-fills with buffers, which
-still cross as addresses. The event payload union does cross now — every
-event carries every arm the union declares, read back through
-`SipralEvent.payload`, one class per arm.
+The binding itself has no Gradle project: `scripts/package/aar.sh` assembles
+`sipral.aar` by hand, straight to Android's own archive format, with
+`libsipral_jni.so` (both shims) linked against `libsipral_ffi.so` for
+arm64-v8a, armeabi-v7a and x86_64 beside the compiled classes of everything
+under `sipral/src/main/kotlin`, and a `proguard.txt` keeping what only native
+code calls. `docs/08-ffi.md` says what the binding still does not carry: two
+structs a caller part-fills with buffers, which still cross as addresses. The
+event payload union does cross now — every event carries every arm the union
+declares, read back through `SipralEvent.payload`, one class per arm.
 
 ## The idiomatic layer
 
@@ -96,6 +97,65 @@ reads the state a terminal `REGISTRATION_CHANGED` reached off
 `event.payload.registration.state`, rather than a second, synchronous call
 back into the stack for something the event already said.
 
-Nothing Android-specific is in the tree yet: a `ConnectionService` helper and
-a Compose sample both build against the Android SDK, which the layer above
-does not need and the machine this was written on did not have.
+`SipralAccount.announce` and `refreshBinding`, `SipralClient.forgetAnnouncement`
+and a `SipralPush` on `addAccount` are `docs/15-mobile.md`'s C2 and push
+parameters from Kotlin.
+
+## The ConnectionService helper
+
+Split in two, so that the part worth testing needs no Android:
+
+- `org.sipral.telecom` (`sipral/src/main/kotlin/org/sipral/telecom/`, inside
+  `sipral.aar`) is the logic. `TelecomBridge` runs C2's sequence -- a push
+  is reported to the telecom framework first, then announced (which
+  refreshes the binding), and the INVITE that follows is matched to the
+  screen already up rather than reported again -- and maps the framework's
+  answer, reject, hold, unhold, DTMF and disconnect onto the call, and the
+  call's progress, hold (both ends'), and end back onto the framework, with a
+  `DisconnectCause` for each way a call ends. The framework is behind
+  `TelecomPlatform` and `TelecomConnection` and the SIP side behind
+  `SipCalls`, the way the Swift layer puts CallKit behind
+  `CallKitProviding`; `IdiomaticSipCalls` is `SipCalls` over
+  `org.sipral.idiomatic`. `sipral/src/test/kotlin/org/sipral/telecom/TelecomCheck.kt`
+  drives it through fakes of both sides, one sequence per race
+  `docs/15-mobile.md` names, and then end to end over two real stacks on
+  loopback with only the framework faked; `scripts/check.sh` runs it.
+- `android/telecom` is the Android library over it: a self-managed
+  `PhoneAccount` (`SipralTelecom.registerAccount`), the `ConnectionService`
+  its manifest declares, a `Connection` per call, and `AndroidTelecomPlatform`
+  over `TelecomManager`. Audio routing is left to the platform: a connection
+  reports the routes the platform offers (`CallEndpoint` on Android 14 and
+  later, `CallAudioState` before) and passes a choice back, and never touches
+  `AudioManager`. API 37 marks `PhoneAccount.CAPABILITY_SELF_MANAGED`
+  deprecated, and the platform's newer route for a calling application is
+  the transactional telecom API (API 34); the capability is still what a
+  self-managed `ConnectionService` needs on Android 8.0 to 17, and an adapter
+  over the transactional API would sit over the same `TelecomBridge`.
+
+Which announcement an INVITE answered is in the event payload, which does not
+cross this binding yet, so `TelecomBridge` chooses among its own by the same
+rule the library applied -- same account, same user and host in `From`,
+oldest first on a tie -- and they agree whenever the two readings of the URI
+do. An `ANNOUNCED_CALL_MISSING` is the oldest announcement still waiting,
+because every announcement waits the same window.
+
+`android/sample` is a Compose skeleton, not a product: register, call, a
+simulated push standing in for a push service, answer and decline, hold, a
+DTMF keypad and the audio routes, with the device's microphone and speaker
+pumped through `SipralMedia` as voice-communication streams.
+
+`scripts/package/android.sh --out DIR --accept-android-sdk-licenses` builds all
+three -- `sipral.aar`, `sipral-telecom.aar` and the sample's APK -- inside the
+image `android/Dockerfile` describes (the Android SDK, the NDK, cargo-ndk,
+kotlinc and Gradle, every download pinned and checked), and opens each to
+check it. The flag is the person running it accepting the Android SDK
+licence, which the script never does on anybody's behalf. The Gradle
+wrapper's properties are committed and its jar is not: the jar is a binary,
+so the script generates the wrapper from the Gradle distribution in the
+image and checks it reproduces the committed pin. `scripts/check.sh` does not
+compile `android/`, since this machine has no Android SDK to compile it
+against.
+
+Proven off a phone: the logic, by `TelecomCheck.kt`; the three artefacts,
+built and opened. Not provable without one: what the telecom framework itself
+does with a self-managed call, audio routing, and push delivery.

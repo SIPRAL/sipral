@@ -4,7 +4,10 @@
 package org.sipral.idiomatic
 
 import java.net.DatagramSocket
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -188,17 +191,12 @@ class SipralCall internal constructor(
      * happened on the wire.
      */
     suspend fun waitConfirmed(timeoutMs: Long = 30_000) {
-        if (state == SipralCallState.CONFIRMED) {
-            return
-        }
-        withTimeout(timeoutMs) {
-            events
-                .filter {
-                    it.kind == SipralEventKind.CALL_CONFIRMED.value.toLong() ||
-                        it.kind == SipralEventKind.CALL_ENDED.value.toLong()
-                }
-                .first()
-        }
+        awaitEvent(
+            timeoutMs,
+            { ended || state == SipralCallState.CONFIRMED },
+            SipralEventKind.CALL_CONFIRMED,
+            SipralEventKind.CALL_ENDED,
+        )
         if (ended) {
             throw IllegalStateException("call ${handle.toString(16)} ended before it was confirmed")
         }
@@ -206,11 +204,29 @@ class SipralCall internal constructor(
 
     /** Suspend until `SIPRAL_EVENT_KIND_CALL_ENDED` has been delivered. */
     suspend fun waitEnded(timeoutMs: Long = 30_000) {
-        if (ended) {
-            return
-        }
+        awaitEvent(timeoutMs, { ended }, SipralEventKind.CALL_ENDED)
+    }
+
+    /**
+     * Suspend until [settled] holds or one of [kinds] is delivered. The
+     * subscription is made before [settled] is read, never after: [events]
+     * replays nothing, so an event delivered between reading the state and
+     * subscribing would otherwise be missed, and the wait would run out
+     * over a call that had long since moved on.
+     */
+    private suspend fun awaitEvent(timeoutMs: Long, settled: () -> Boolean, vararg kinds: SipralEventKind) {
+        val wanted = kinds.map { it.value.toLong() }.toSet()
         withTimeout(timeoutMs) {
-            events.filter { it.kind == SipralEventKind.CALL_ENDED.value.toLong() }.first()
+            coroutineScope {
+                // Undispatched: the collector has subscribed by the time
+                // async returns, before [settled] is asked.
+                val seen = async(start = CoroutineStart.UNDISPATCHED) { events.first { it.kind in wanted } }
+                if (settled()) {
+                    seen.cancel()
+                } else {
+                    seen.await()
+                }
+            }
         }
     }
 

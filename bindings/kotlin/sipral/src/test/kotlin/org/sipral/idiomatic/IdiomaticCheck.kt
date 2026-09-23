@@ -12,6 +12,8 @@
 
 package org.sipral.idiomatic
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -149,10 +151,18 @@ private suspend fun everything(): String {
         // Placed directly at clientB, through accountA's own registrarAddress
         // acting as the outbound destination -- no registrar between them,
         // the same shape bindings/python's loopback tests use.
-        val callA = clientA.placeCall(accountA, target = "sip:bob@example.invalid")
-
-        val incoming = withTimeout(15_000) {
-            clientB.events.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
+        //
+        // clientB's events are subscribed to before the call is placed, not
+        // after: the flow replays nothing, so an INVITE that lands between
+        // placeCall returning and the subscription -- on a loaded machine,
+        // it does -- would never be seen.
+        val (callA, incoming) = coroutineScope {
+            val arriving = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeout(15_000) {
+                    clientB.events.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
+                }
+            }
+            clientA.placeCall(accountA, target = "sip:bob@example.invalid") to arriving.await()
         }
         val callB = clientB.answerCall(incoming)
 
@@ -207,7 +217,9 @@ private suspend fun everything(): String {
         // as either INFO form.
         val digitsSeen = mutableListOf<Char>()
         coroutineScope {
-            val collecting = launch {
+            // Undispatched, so the collector is subscribed before the first
+            // digit is sent rather than whenever the event loop reaches it.
+            val collecting = launch(start = CoroutineStart.UNDISPATCHED) {
                 callB.digits.collect { event -> digitOf(event)?.let { digitsSeen.add(it) } }
             }
             callA.sendDtmf("12#")

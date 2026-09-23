@@ -1,0 +1,15 @@
+# The wrapper's scripts and its jar are generated from the Gradle
+# distribution the build image carries, by scripts/package/android.sh, and
+# never committed: the jar is a binary. gradle/wrapper/gradle-wrapper.properties,
+# which pins the version and its checksum, is committed.
+/gradlew
+/gradlew.bat
+/gradle/wrapper/gradle-wrapper.jar
+
+# Gradle and Android Studio output
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.iml

@@ -328,6 +328,54 @@ downloads it, and fails naming the expected path and checksum if it is not
 there. `kotlinx-coroutines-core-jvm`'s own `LICENSE.txt` is the standard
 Apache-2.0 text with JetBrains s.r.o. as the copyright holder.
 
+### The Android ConnectionService helper and sample
+
+`bindings/kotlin/android` -- the helper's Android library (`:telecom`) and the
+Compose sample (`:sample`) -- is built with Gradle by
+`scripts/package/android.sh`. Everything below is a dependency of those two
+and of their build, never of `libsipral_ffi` or of `sipral.aar`, which carries
+only this repository's own classes and natives. An application that ships the
+helper ships the two runtime dependencies in its first table; the sample
+ships the rest of them too.
+
+| Component | What it is | Used by | Licence |
+|---|---|---|---|
+| `kotlinx-coroutines-android` 1.11.0 | coroutines' Android main dispatcher, over `kotlinx-coroutines-core` | helper, at run time | Apache-2.0 |
+| Kotlin standard library 2.4.20 | what compiled Kotlin calls into | helper and sample, at run time | Apache-2.0 |
+| Jetpack Compose (`compose-bom` 2026.09.00: `ui`, `material3` and what they bring) | the sample's user interface | sample, at run time | Apache-2.0 |
+| `androidx.activity:activity-compose` 1.13.0 | a Compose screen in an activity | sample, at run time | Apache-2.0 |
+| `androidx.lifecycle:lifecycle-runtime-compose` 2.11.0 | lifecycle-aware state for Compose | sample, at run time | Apache-2.0 |
+
+Those five bring in the rest of AndroidX, JetBrains' annotations and JSpecify
+with them -- 96 artefacts on the sample's runtime classpath as of this
+writing. `scripts/package/android.sh` lists them from Gradle, reads the
+licence each one's own POM declares (or its parent's), and fails on any that
+does not say Apache-2.0.
+
+| Build tool | What it is | Licence |
+|---|---|---|
+| Gradle 9.7.1 | the build, and the wrapper `android.sh` generates from it | Apache-2.0 |
+| Android Gradle Plugin 9.4.1 | Android builds under Gradle | Apache-2.0 |
+| Kotlin Gradle plugin and Compose compiler plugin 2.4.20 | the Kotlin compiler under Gradle, and Compose's compiler step | Apache-2.0 |
+| Kotlin compiler 2.4.20 | `kotlinc`, which `aar.sh` compiles `sipral.aar`'s classes with | Apache-2.0 |
+| `cargo-ndk` 4.1.2 | drives `cargo` for Android's ABIs | Apache-2.0 OR MIT |
+
+The Android SDK and NDK the image installs are under the Android SDK licence,
+not an open-source one. They are tools and are not redistributed: nothing of
+the SDK is in this repository or in any artefact built from it except what the
+NDK's compiler puts into every shared object it links, its compiler runtime,
+which is LLVM's (Apache-2.0 WITH LLVM-exception, whose exception removes the
+attribution requirement for object code). `libsipral_ffi.so` and
+`libsipral_jni.so` need nothing from the device but Bionic's `libc`, `libm`
+and `libdl`, which `scripts/package/android.sh` checks. Whoever builds the
+image accepts the SDK licence themselves, by passing
+`--accept-android-sdk-licenses`; nothing here accepts it for them.
+
+The Gradle wrapper's jar is not committed, because it is a binary and nothing
+binary is carried in this tree: `android.sh` generates it from the Gradle
+distribution in the image, whose SHA-256 is pinned, and checks that it
+reproduces the committed `gradle-wrapper.properties`.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

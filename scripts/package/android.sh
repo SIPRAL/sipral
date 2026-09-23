@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# Everything Android, built for real inside the image
+# bindings/kotlin/android/Dockerfile describes:
+#
+#   sipral.aar            scripts/package/aar.sh collect-natives + assemble:
+#                         libsipral_ffi.so and libsipral_jni.so for
+#                         arm64-v8a, armeabi-v7a and x86_64, and the
+#                         binding's classes
+#   sipral-telecom.aar    the ConnectionService helper, by Gradle
+#   sipral-sample.apk     the Compose sample, by Gradle (debug-signed)
+#
+# and then each of the three opened and checked: both natives in every ABI
+# directory, each an ELF shared object for the machine that directory names,
+# needing nothing a device does not have; the classes each is supposed to
+# carry; the service and permission the helper's manifest declares.
+#
+#   scripts/package/android.sh --out DIR --accept-android-sdk-licenses
+#
+# needs Docker, and nothing else on the host. The flag is not a formality:
+# the image installs Android SDK packages, which are under the Android SDK
+# licence (developer.android.com/studio/terms), and passing it is the person
+# running this accepting that licence -- this script never accepts it on
+# anybody's behalf. Caches live in two Docker volumes
+# (sipral-android-cargo, sipral-android-gradle), so a second run builds
+# only what changed; `docker volume rm` them to start clean.
+#
+# No emulator run: nothing here needs /dev/kvm, and what the telecom
+# framework itself does with a self-managed call -- and audio routing, and
+# push delivery -- is only observable on a device.
+set -uo pipefail
+
+cd "$(dirname "$0")/../.."
+ROOT="$PWD"
+
+FAIL=0
+pass() { printf '  ok    %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
+step() { printf '\n%s\n' "$1"; }
+
+usage() {
+    printf 'usage: android.sh --out DIR --accept-android-sdk-licenses\n' >&2
+    exit 2
+}
+
+MODE="host"
+if [ "${1:-}" = "inside" ]; then
+    MODE="inside"
+    shift
+fi
+
+OUT=""
+ACCEPTED=0
+IMAGE="sipral-android-build"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT="$2"; shift 2 ;;
+        --accept-android-sdk-licenses) ACCEPTED=1; shift ;;
+        --image) IMAGE="$2"; shift 2 ;;
+        *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
+    esac
+done
+[ -z "$OUT" ] && usage
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+
+VERSION=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' "$ROOT/Cargo.toml")
+ABIS=(arm64-v8a armeabi-v7a x86_64)
+# "<abi>:<ELF e_machine>:<ELF class>", as in aar.sh.
+ELF_EXPECTED=(arm64-v8a:183:64 armeabi-v7a:40:32 x86_64:62:64)
+# What a native here may need from the device: Bionic's own libraries, and
+# the other native beside it. Anything else -- libc++_shared.so, most
+# likely -- would have to ship in the archive too, and does not.
+SYSTEM_LIBS="libc.so libm.so libdl.so liblog.so"
+
+if [ "$MODE" = "host" ]; then
+    if [ "$ACCEPTED" -ne 1 ]; then
+        printf 'The build image installs Android SDK packages, which are under the Android SDK\n' >&2
+        printf 'licence: developer.android.com/studio/terms. Read it, and pass\n' >&2
+        printf '--accept-android-sdk-licenses to accept it and build.\n' >&2
+        exit 2
+    fi
+    command -v docker >/dev/null 2>&1 || { fail "docker not found"; exit 1; }
+
+    step "the build image ($IMAGE)"
+    if docker build -t "$IMAGE" --build-arg ANDROID_SDK_LICENSE_ACCEPTED=yes \
+        "$ROOT/bindings/kotlin/android" >"$OUT/image.log" 2>&1; then
+        pass "docker build bindings/kotlin/android"
+    else
+        fail "docker build:"
+        tail -30 "$OUT/image.log" | sed 's/^/        /'
+        printf '\nandroid.sh: failed\n'; exit 1
+    fi
+
+    step "the build, inside it"
+    docker run --rm \
+        -v "$ROOT:/src:ro" \
+        -v "$OUT:/out" \
+        -v sipral-android-cargo:/cache/cargo \
+        -v sipral-android-gradle:/cache/gradle \
+        -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
+        "$IMAGE" \
+        bash /src/scripts/package/android.sh inside --out /out
+    exit $?
+fi
+
+# -- inside the image ------------------------------------------------------
+
+[ -n "${ANDROID_HOME:-}" ] && [ -n "${ANDROID_NDK_HOME:-}" ] || {
+    fail "android.sh inside runs in the build image, which sets ANDROID_HOME and ANDROID_NDK_HOME"
+    exit 1
+}
+[ -z "${CARGO_BUILD_JOBS:-}" ] && unset CARGO_BUILD_JOBS
+
+# The checkout is mounted read-only, and Gradle writes beside its project:
+# the build runs on a copy, and nothing it does reaches the host's tree.
+SRC=/tmp/sipral
+step "a working copy of the checkout"
+rm -rf "$SRC"
+mkdir -p "$SRC"
+(cd /src && tar --exclude=./target --exclude=./.git --exclude='./bindings/kotlin/android/.gradle' \
+    --exclude='./bindings/kotlin/android/build' --exclude='./bindings/kotlin/android/*/build' -cf - .) \
+    | (cd "$SRC" && tar -xf -) && pass "$SRC" || { fail "copying /src"; exit 1; }
+cd "$SRC"
+# The target directory and cargo's registry both live on the cache volume,
+# so a second run downloads and builds only what changed.
+export CARGO_TARGET_DIR=/cache/cargo/target
+mkdir -p /cache/cargo/registry
+ln -sfn /cache/cargo/registry "$CARGO_HOME/registry"
+export GRADLE_USER_HOME=/cache/gradle
+
+step "sipral.aar"
+rm -rf "$OUT/natives" "$OUT/aar"
+if scripts/package/aar.sh collect-natives --out "$OUT/natives" >"$OUT/collect-natives.out" 2>&1; then
+    pass "aar.sh collect-natives"
+else
+    fail "aar.sh collect-natives:"
+    sed 's/^/        /' "$OUT/collect-natives.out"
+    printf '\nandroid.sh: failed\n'; exit 1
+fi
+if scripts/package/aar.sh assemble --out "$OUT/aar" --natives "$OUT/natives" >"$OUT/assemble.out" 2>&1; then
+    pass "aar.sh assemble"
+else
+    fail "aar.sh assemble:"
+    sed 's/^/        /' "$OUT/assemble.out"
+    printf '\nandroid.sh: failed\n'; exit 1
+fi
+cp "$OUT/aar/sipral.aar" "$OUT/sipral.aar"
+
+# A Maven layout for Gradle to resolve org.sipral:sipral from, with the POM
+# naming what an AAR cannot carry inside itself.
+REPO="$OUT/maven/org/sipral/sipral/$VERSION"
+rm -rf "$OUT/maven"
+mkdir -p "$REPO"
+cp "$OUT/sipral.aar" "$REPO/sipral-$VERSION.aar"
+cat >"$REPO/sipral-$VERSION.pom" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.sipral</groupId>
+  <artifactId>sipral</artifactId>
+  <version>$VERSION</version>
+  <packaging>aar</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlinx</groupId>
+      <artifactId>kotlinx-coroutines-core</artifactId>
+      <version>1.11.0</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+pass "local Maven repository, org.sipral:sipral:$VERSION"
+
+step "Gradle"
+cd "$SRC/bindings/kotlin/android"
+wrapper=gradle/wrapper/gradle-wrapper.properties
+gradle_version=$(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' "$wrapper")
+gradle_sha=$(sed -n 's/^distributionSha256Sum=//p' "$wrapper")
+if [ ! -x gradlew ]; then
+    # The wrapper is generated rather than committed (its jar is a binary),
+    # from the Gradle distribution the image carries, pinned to the version
+    # and checksum the committed properties name. It is generated in an
+    # empty project, so that making it does not configure this one, and the
+    # properties it writes are compared with the committed ones: a wrapper
+    # that drifted from the committed pin is not the build this repository
+    # describes.
+    gen=/tmp/wrapper-gen
+    rm -rf "$gen" && mkdir -p "$gen" && touch "$gen/settings.gradle.kts"
+    if (cd "$gen" && gradle --no-daemon -q wrapper --gradle-version "$gradle_version" \
+        --gradle-distribution-sha256-sum "$gradle_sha") >"$OUT/wrapper.log" 2>&1 \
+        && cmp -s "$gen/$wrapper" "$wrapper"; then
+        cp "$gen/gradlew" "$gen/gradlew.bat" .
+        cp "$gen/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
+        pass "gradle wrapper, $gradle_version"
+    else
+        fail "gradle wrapper did not reproduce the committed $wrapper:"
+        [ -f "$gen/$wrapper" ] && diff "$wrapper" "$gen/$wrapper" | sed 's/^/        /'
+        tail -20 "$OUT/wrapper.log" | sed 's/^/        /'
+        printf '\nandroid.sh: failed\n'; exit 1
+    fi
+fi
+if ./gradlew --no-daemon --console=plain -Psipral.repo="$OUT/maven" \
+    :telecom:assembleRelease :sample:assembleDebug >"$OUT/gradle.log" 2>&1; then
+    pass ":telecom:assembleRelease :sample:assembleDebug"
+else
+    fail "Gradle:"
+    grep -E '^e: |error:|FAILURE|What went wrong' -A3 "$OUT/gradle.log" | head -60 | sed 's/^/        /'
+    tail -20 "$OUT/gradle.log" | sed 's/^/        /'
+    printf '\nandroid.sh: failed\n'; exit 1
+fi
+cp telecom/build/outputs/aar/telecom-release.aar "$OUT/sipral-telecom.aar"
+cp sample/build/outputs/apk/debug/sample-debug.apk "$OUT/sipral-sample.apk"
+
+# What the sample ships besides this repository's own code, each read for
+# the licence its own POM declares -- or its parent's, when it declares
+# none -- out of Gradle's cache. THIRD-PARTY-NOTICES.md says they are all
+# Apache-2.0; this is where that is checked rather than assumed.
+step "the licences of what the sample ships"
+pom_of() {
+    local group="$1" artifact="$2" version="$3"
+    ls "$GRADLE_USER_HOME/caches/modules-2/files-2.1/$group/$artifact/$version"/*/"$artifact-$version.pom" 2>/dev/null | head -1
+}
+licence_of() {
+    local pom="$1" depth=0 names
+    while [ -n "$pom" ] && [ "$depth" -lt 5 ]; do
+        names=$(tr -d '\n' <"$pom" | grep -o '<licenses>.*</licenses>' | grep -o '<name>[^<]*</name>' \
+            | sed 's/<[^>]*>//g' | paste -sd'|' -)
+        if [ -n "$names" ]; then
+            printf '%s' "$names"
+            return
+        fi
+        local parent
+        parent=$(tr -d '\n' <"$pom" | grep -o '<parent>.*</parent>' | head -1)
+        [ -z "$parent" ] && break
+        pom=$(pom_of "$(printf '%s' "$parent" | sed 's|.*<groupId>\([^<]*\)</groupId>.*|\1|')" \
+            "$(printf '%s' "$parent" | sed 's|.*<artifactId>\([^<]*\)</artifactId>.*|\1|')" \
+            "$(printf '%s' "$parent" | sed 's|.*<version>\([^<]*\)</version>.*|\1|')")
+        depth=$((depth + 1))
+    done
+    printf 'none declared'
+}
+if ./gradlew --no-daemon -q -Psipral.repo="$OUT/maven" :sample:dependencies \
+    --configuration debugRuntimeClasspath >"$OUT/dependencies.txt" 2>&1; then
+    shipped=$(grep -oE '[-+\\]--- [^ ]+:[^ ]+:[^ ]+( -> [^ ]+)?' "$OUT/dependencies.txt" \
+        | sed -E 's/^[-+\\]--- //; s/^([^:]+):([^:]+):[^ ]+ -> (.*)$/\1:\2:\3/' \
+        | grep -v '^org\.sipral:' | sort -u)
+    count=0
+    : >"$OUT/licences.txt"
+    for coordinate in $shipped; do
+        IFS=: read -r group artifact version <<<"$coordinate"
+        pom=$(pom_of "$group" "$artifact" "$version")
+        licence=$([ -n "$pom" ] && licence_of "$pom" || printf 'no POM in the cache')
+        printf '%s\t%s\n' "$coordinate" "$licence" >>"$OUT/licences.txt"
+        count=$((count + 1))
+    done
+    refused=$(grep -viE $'\t(The )?Apache (Software )?License,? (Version )?2\\.0|\tApache-2\\.0' "$OUT/licences.txt" || true)
+    if [ "$count" -eq 0 ]; then
+        fail "no dependency was read out of :sample:dependencies, so no licence was checked"
+    elif [ -z "$refused" ]; then
+        pass "$count artefacts on the sample's runtime classpath, every one Apache-2.0 by its own POM"
+    else
+        fail "artefacts on the sample's runtime classpath that do not say Apache-2.0:"
+        printf '%s\n' "$refused" | sed 's/^/        /'
+    fi
+else
+    fail ":sample:dependencies:"
+    tail -20 "$OUT/dependencies.txt" | sed 's/^/        /'
+fi
+
+# -- what came out ---------------------------------------------------------
+
+LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+
+elf_line() {
+    # "<machine> <class>" out of the ELF header itself.
+    local file="$1"
+    local class emachine
+    class=$(od -An -tu1 -j4 -N1 "$file" | tr -d ' \n')
+    emachine=$(od -An -tu1 -j18 -N2 "$file" | awk '{print $1 + 256 * $2}')
+    printf '%s %s' "$emachine" "$([ "$class" = 2 ] && echo 64 || echo 32)"
+}
+
+# Check the natives unpacked from an archive under <dir>/<prefix>/<abi>/.
+check_natives() {
+    local label="$1" dir="$2" prefix="$3"
+    for pair in "${ELF_EXPECTED[@]}"; do
+        local abi="${pair%%:*}" want="${pair#*:}"
+        want="${want%%:*} ${want#*:}"
+        for lib in libsipral_ffi.so libsipral_jni.so; do
+            local f="$dir/$prefix/$abi/$lib"
+            if [ ! -s "$f" ]; then
+                fail "$label: $prefix/$abi/$lib is missing"
+                continue
+            fi
+            local got
+            got=$(elf_line "$f")
+            if [ "$got" != "$want" ]; then
+                fail "$label: $prefix/$abi/$lib is ELF machine/class '$got', not '$want'"
+                continue
+            fi
+            local needed stray
+            needed=$("$LLVM/llvm-readelf" -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+            stray=""
+            for n in $needed; do
+                case " $SYSTEM_LIBS libsipral_ffi.so " in
+                    *" $n "*) ;;
+                    *) stray="$stray $n" ;;
+                esac
+            done
+            if [ -n "$stray" ]; then
+                fail "$label: $prefix/$abi/$lib needs$stray, which nothing ships"
+                continue
+            fi
+            pass "$label: $prefix/$abi/$lib, ELF machine ${want% *}, ${want#* }-bit, needs ${needed% }"
+        done
+        # The shim is what the JVM loads: it has to be linked against the
+        # C ABI and export the entry points the Kotlin side declares.
+        local jni="$dir/$prefix/$abi/libsipral_jni.so"
+        if [ -s "$jni" ]; then
+            local exported onload
+            exported=$("$LLVM/llvm-nm" -D --defined-only "$jni" | grep -c ' T Java_org_sipral_' || true)
+            onload=$("$LLVM/llvm-nm" -D --defined-only "$jni" | grep -c ' T JNI_OnLoad$' || true)
+            if [ "$exported" -gt 0 ] && [ "$onload" -eq 1 ]; then
+                pass "$label: $prefix/$abi/libsipral_jni.so exports JNI_OnLoad and $exported Java_org_sipral_ entry points"
+            else
+                fail "$label: $prefix/$abi/libsipral_jni.so exports $exported Java_org_sipral_ entry points and JNI_OnLoad $onload times"
+            fi
+        fi
+    done
+}
+
+step "sipral.aar"
+X=/tmp/unpacked
+rm -rf "$X" && mkdir -p "$X/sipral" "$X/telecom" "$X/apk"
+unzip -q "$OUT/sipral.aar" -d "$X/sipral"
+for entry in AndroidManifest.xml classes.jar proguard.txt; do
+    [ -s "$X/sipral/$entry" ] && pass "sipral.aar carries $entry" || fail "sipral.aar is missing $entry"
+done
+check_natives "sipral.aar" "$X/sipral" jni
+declared=$(unzip -Z1 "$X/sipral/classes.jar" | grep -c '\.class$')
+pass "sipral.aar: classes.jar holds $declared classes"
+# Every `external fun` the Kotlin side declares, against what the shim
+# exports, so that a native method nothing implements is found here rather
+# than as an UnsatisfiedLinkError on a phone.
+expected_symbols=$(grep -rhoE 'external fun [A-Za-z_][A-Za-z0-9_]*' "$SRC/bindings/kotlin/sipral/src/main/kotlin" \
+    | awk '{print $3}' | sort -u)
+# Java_org_sipral[_idiomatic]_<Class>_<method>, with every '_' in the method
+# name written '_1' (the JNI specification's escape): the class segment is
+# dropped and the escape undone, leaving the name as Kotlin spells it.
+exported_symbols=$("$LLVM/llvm-nm" -D --defined-only "$X/sipral/jni/arm64-v8a/libsipral_jni.so" \
+    | awk '/ T Java_org_sipral_/{print $3}' \
+    | sed -e 's/^Java_org_sipral_\(idiomatic_\)\{0,1\}[A-Za-z0-9]*_//' -e 's/_1/_/g' | sort -u)
+unresolved=$(comm -23 <(printf '%s\n' "$expected_symbols") <(printf '%s\n' "$exported_symbols") || true)
+if [ -z "$expected_symbols" ]; then
+    fail "no external fun found in bindings/kotlin/sipral/src/main/kotlin, so nothing was compared"
+elif [ -z "$unresolved" ]; then
+    pass "sipral.aar: every one of $(printf '%s\n' "$expected_symbols" | wc -l) external funs has its JNI symbol"
+else
+    fail "sipral.aar: external funs with no JNI symbol in libsipral_jni.so:"
+    printf '        %s\n' $unresolved
+fi
+
+step "sipral-telecom.aar"
+unzip -q "$OUT/sipral-telecom.aar" -d "$X/telecom"
+for class in org/sipral/android/telecom/SipralConnectionService.class \
+    org/sipral/android/telecom/SipralConnection.class \
+    org/sipral/android/telecom/AndroidTelecomPlatform.class; do
+    # grep reads to the end rather than -q: under pipefail, grep -q leaving
+    # at the first match kills the writer with SIGPIPE and fails the
+    # pipeline over a match it found.
+    unzip -Z1 "$X/telecom/classes.jar" | grep -x "$class" >/dev/null \
+        && pass "sipral-telecom.aar: $class" || fail "sipral-telecom.aar is missing $class"
+done
+manifest="$X/telecom/AndroidManifest.xml"
+grep -q 'android.permission.BIND_TELECOM_CONNECTION_SERVICE' "$manifest" \
+    && grep -q 'android.telecom.ConnectionService' "$manifest" \
+    && pass "sipral-telecom.aar: the service, bindable only by the telecom framework" \
+    || fail "sipral-telecom.aar: the manifest does not declare the ConnectionService as it should"
+grep -q 'android.permission.MANAGE_OWN_CALLS' "$manifest" \
+    && pass "sipral-telecom.aar: MANAGE_OWN_CALLS" || fail "sipral-telecom.aar: MANAGE_OWN_CALLS is not requested"
+
+step "sipral-sample.apk"
+unzip -q "$OUT/sipral-sample.apk" -d "$X/apk"
+check_natives "sipral-sample.apk" "$X/apk" lib
+dexes=$(ls "$X/apk"/classes*.dex 2>/dev/null | wc -l)
+[ "$dexes" -gt 0 ] && pass "sipral-sample.apk: $dexes dex file(s)" || fail "sipral-sample.apk carries no dex"
+classes=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" dex packages --defined-only "$OUT/sipral-sample.apk" 2>/dev/null \
+    | awk '$1 == "C" {print $NF}')
+for class in org.sipral.telecom.TelecomBridge org.sipral.idiomatic.SipralClient org.sipral.SipralEventListeners \
+    org.sipral.android.telecom.SipralConnectionService org.sipral.sample.MainActivity; do
+    printf '%s\n' "$classes" | grep -x "$class" >/dev/null \
+        && pass "sipral-sample.apk: $class" || fail "sipral-sample.apk is missing $class"
+done
+badging=$("$BUILD_TOOLS/aapt2" dump badging "$OUT/sipral-sample.apk" 2>/dev/null)
+for permission in android.permission.MANAGE_OWN_CALLS android.permission.RECORD_AUDIO; do
+    printf '%s\n' "$badging" | grep "uses-permission: name='$permission'" >/dev/null \
+        && pass "sipral-sample.apk: $permission" || fail "sipral-sample.apk does not request $permission"
+done
+printf '%s\n' "$badging" | grep -x "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'" >/dev/null \
+    && pass "sipral-sample.apk: native code for arm64-v8a, armeabi-v7a and x86_64" \
+    || fail "sipral-sample.apk: $(printf '%s\n' "$badging" | grep native-code)"
+
+printf '\n'
+if [ "$FAIL" -eq 0 ]; then
+    printf 'android.sh: done\n'
+    printf '  %s\n' "$OUT/sipral.aar" "$OUT/sipral-telecom.aar" "$OUT/sipral-sample.apk"
+    exit 0
+fi
+printf 'android.sh: failed\n'; exit 1

@@ -1072,7 +1072,9 @@ C linker could collide with.
 **A missing toolchain is a named skip, not silence.** `scripts/check.sh` has a
 step, `the bindings compile`, that builds every one of the three generated
 bindings: `dotnet build -c Release` on `bindings/dotnet/Sipral`; `kotlinc` over
-every `.kt` file it finds under `bindings/kotlin`; and `xcrun --toolchain
+every `.kt` file it finds under `bindings/kotlin` except the Android-only
+`bindings/kotlin/android`, which needs the Android SDK and is built by
+`scripts/package/android.sh` instead; and `xcrun --toolchain
 default swift build` on `bindings/`. Kotlin goes further than a compile: once
 `kotlinc` and a JDK carrying `include/jni.h` are both there, `cc -fsyntax-only
 -Wall -Wextra -Werror` checks `sipral_jni.c` against that JDK's own headers,
@@ -1379,11 +1381,16 @@ first touch of the binding surfaces as the cause of an
 **What still crosses as an address.** `sipral_media_packet_t` and
 `sipral_transmit_t`, the structs a caller part-fills with buffers the library
 writes into, cross as a `Long`, so `callCapture`, `stackPollRtcp` and
-`stackPollTransmit` cannot be called from Kotlin alone yet. The AAR — with the
-keep rule R8 needs for `SipralEventListeners.deliver`, which nothing but native
-code calls — coroutines and `Flow` for events, `ConnectionService` for the
-system dialer and the foreground service for the call lifetime are all still
-ahead.
+`stackPollTransmit` cannot be called from Kotlin alone through the generated
+shim; `org.sipral.idiomatic` reaches them through a second, hand-written one
+(`idiomatic_media.c`) linked into the same library. `sipral.aar`, built by
+`scripts/package/aar.sh`, carries a `proguard.txt` with the keep rules R8
+needs for the three listener keepers' `deliver`, which nothing but native code
+calls, and for every `external fun`. Coroutines and `Flow` for events are
+`org.sipral.idiomatic`, and the `ConnectionService` helper is
+`org.sipral.telecom` over it with `bindings/kotlin/android` on top
+(`bindings/kotlin/README.md`). A foreground service for the call's lifetime is
+still ahead.
 
 `bindings/kotlin/sipral/src/test/kotlin/org/sipral/BindingCheck.kt` is what
 holds the rest to account. `scripts/check.sh` links the printed shim against

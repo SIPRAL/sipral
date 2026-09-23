@@ -1236,10 +1236,17 @@ elif command -v kotlinc >/dev/null 2>&1; then
     # path has a space in it -- and this one has -- splits an unquoted list
     # into halves that are not filenames, and the compiler then reports that
     # it found no source while looking at two.
+    #
+    # bindings/kotlin/android is the one part left out: it is Android code
+    # (android.telecom, Compose) that compiles only against the Android SDK,
+    # which this machine does not carry. It is built, with the Android SDK,
+    # by scripts/package/android.sh; its logic is not in there but in
+    # org.sipral.telecom, which is compiled and run here.
     kotlin_sources=()
     while IFS= read -r -d '' one; do
         kotlin_sources+=("$one")
-    done < <(find "$ROOT/bindings/kotlin" -name '*.kt' -print0 2>/dev/null)
+    done < <(find "$ROOT/bindings/kotlin" -path "$ROOT/bindings/kotlin/android" -prune \
+        -o -name '*.kt' -print0 2>/dev/null)
     # BindingCheck.kt is compiled with the rest and asserts with kotlin.test,
     # which ships in the lib/ of the distribution kotlinc runs from, beside
     # the standard library the JVM run below needs as well. The directory is
@@ -1361,6 +1368,28 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
                 printf '%s\n' "$warned" | sed 's/^/        /'
             else
                 pass "${said#kotlin idiomatic: }"
+            fi
+
+            # org.sipral.telecom, the Android ConnectionService helper's
+            # logic, against fakes of the telecom framework and then over
+            # two real stacks on loopback.
+            ran=$("$jdk/bin/java" -Xcheck:jni -Djava.library.path="$work" \
+                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar:$COROUTINES_JAR" \
+                org.sipral.telecom.TelecomCheckKt 2>&1)
+            exited=$?
+            said=$(printf '%s\n' "$ran" | grep '^kotlin telecom: ' || true)
+            warned=$(printf '%s\n' "$ran" \
+                | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
+            if [ "$exited" -ne 0 ]; then
+                fail "TelecomCheck.kt did not come back zero:"
+                printf '%s\n' "$ran" | sed 's/^/        /'
+            elif [ -z "$said" ]; then
+                fail "TelecomCheck.kt came back zero and said nothing, so nothing was checked"
+            elif [ -n "$warned" ]; then
+                fail "-Xcheck:jni found something wrong under the telecom helper:"
+                printf '%s\n' "$warned" | sed 's/^/        /'
+            else
+                pass "${said#kotlin telecom: }"
             fi
         fi
         rm -rf "$work"

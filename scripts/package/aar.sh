@@ -3,21 +3,26 @@
 # Copyright (c) 2026 Tiberiu Balasea
 #
 # The Android artefact: sipral.aar, carrying libsipral_ffi.so (the C ABI) and
-# libsipral_jni.so (the shim in bindings/kotlin/sipral/src/main/jni, linked
+# libsipral_jni.so (the two shims in bindings/kotlin/sipral/src/main/jni,
+# the generated sipral_jni.c and the hand-written idiomatic_media.c, linked
 # against it -- the one a JVM actually loads, per bindings/kotlin/README.md)
-# for arm64-v8a, armeabi-v7a and x86_64 under jni/, and SipralAbi.kt's
-# compiled classes over it.
+# for arm64-v8a, armeabi-v7a and x86_64 under jni/, and the compiled classes
+# of everything under bindings/kotlin/sipral/src/main/kotlin over it:
+# SipralAbi.kt, org.sipral.idiomatic and org.sipral.telecom.
 #
 #   scripts/package/aar.sh collect-natives --out DIR
-#       needs Docker: builds the three ABIs with cargo-ndk inside a
-#       container that installs the Android NDK itself (neither ships on
-#       this workspace's machines), links sipral_jni.c against each with the
-#       same NDK's own clang, and writes DIR/jni/<abi>/libsipral_ffi.so and
+#       needs the Android NDK (ANDROID_NDK_HOME) and cargo-ndk, which the
+#       image bindings/kotlin/android/Dockerfile carries and
+#       scripts/package/android.sh runs this inside: builds the three ABIs
+#       with cargo-ndk, links both shims against each with the same NDK's
+#       own clang, and writes DIR/jni/<abi>/libsipral_ffi.so and
 #       DIR/jni/<abi>/libsipral_jni.so
 #
 #   scripts/package/aar.sh assemble --out DIR --natives DIR [--dry-run] [--publish]
 #       compiles bindings/kotlin's Kotlin with kotlinc, the same compiler
-#       check.sh already requires for it, and zips the result
+#       check.sh already requires for it, against the same
+#       kotlinx-coroutines jar, checks that each native is an ELF shared
+#       object for the machine its directory names, and zips the result
 #       into sipral.aar over Android's own archive format (documented at
 #       developer.android.com/studio/projects/android-library#aar-contents
 #       -- a manifest, classes.jar, jni/<abi>/*.so, nothing Gradle-specific
@@ -27,12 +32,15 @@
 #       repo would then carry, for a build Gradle would not do any
 #       differently to the archive spec itself. A consumer adds this file
 #       to a Gradle project the same way either route would have produced
-#       it: `implementation(files("sipral.aar"))`, or as a local Maven
-#       artifact.
+#       it: `implementation(files("sipral.aar"))` in an application, or as
+#       a local Maven artifact, which is how bindings/kotlin/android's own
+#       Gradle build takes it (scripts/package/android.sh writes the POM).
+#       Either way the application also depends on kotlinx-coroutines,
+#       which an AAR does not carry inside itself.
 #
-# collect-natives is the only half that needs another machine; assemble
-# runs anywhere kotlinc does, including with no natives at all under
-# --dry-run.
+# collect-natives is the only half that needs another machine's toolchain;
+# assemble runs anywhere kotlinc does, including with no natives at all
+# under --dry-run.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -51,6 +59,27 @@ NATIVE_LIBS=(libsipral_ffi.so libsipral_jni.so)
 # "<abi>:<NDK clang triple, minus the API suffix MIN_SDK appends>" -- what
 # collect-natives links that ABI's shim with, below.
 NDK_CLANG_TRIPLE=(arm64-v8a:aarch64-linux-android armeabi-v7a:armv7a-linux-androideabi x86_64:x86_64-linux-android)
+# "<abi>:<ELF e_machine>:<ELF class>" -- what a native in that ABI's
+# directory has to be, read out of its own ELF header by elf_matches below:
+# EM_AARCH64 (183), EM_ARM (40) and EM_X86_64 (62), and 64 or 32 bits.
+ELF_EXPECTED=(arm64-v8a:183:64 armeabi-v7a:40:32 x86_64:62:64)
+
+# Whether $1 is an ELF shared object for the machine and word size $2:$3.
+# Read from the header's own bytes -- EI_CLASS at 4, e_type at 16, e_machine
+# at 18, both little-endian on every ABI here -- so no binutils is needed.
+elf_matches() {
+    local file="$1" machine="$2" bits="$3"
+    local magic class etype emachine
+    magic=$(od -An -tx1 -N4 "$file" 2>/dev/null | tr -d ' \n')
+    [ "$magic" = "7f454c46" ] || return 1
+    class=$(od -An -tu1 -j4 -N1 "$file" | tr -d ' \n')
+    etype=$(od -An -tu1 -j16 -N1 "$file" | tr -d ' \n')
+    emachine=$(od -An -tu1 -j18 -N2 "$file" | awk '{print $1 + 256 * $2}')
+    local want_class=1
+    [ "$bits" = "64" ] && want_class=2
+    # e_type 3 is ET_DYN, a shared object.
+    [ "$class" = "$want_class" ] && [ "$etype" = "3" ] && [ "$emachine" = "$machine" ]
+}
 
 CMD="${1:-}"
 [ $# -ge 1 ] && shift
@@ -78,55 +107,60 @@ done
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
-NDK_VERSION="r30" # developer.android.com/ndk/downloads, checked 2026-09-23
-MIN_SDK="21" # matches AndroidManifest.xml's minSdkVersion, below: cargo-ndk's
-             # own default target platform, and the floor the NDK's 64-bit
-             # ABIs (arm64-v8a, x86_64) require regardless.
+MIN_SDK="21" # matches AndroidManifest.xml's minSdkVersion, below, and the
+             # platform cargo-ndk is told to build against: the floor the
+             # NDK's 64-bit ABIs (arm64-v8a, x86_64) require regardless.
 
 if [ "$CMD" = "collect-natives" ]; then
-    step "collect-natives, via Docker"
-    command -v docker >/dev/null 2>&1 || { fail "docker not found"; printf '\naar.sh: failed\n'; exit 1; }
-    RUSTC_VERSION=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT/rust-toolchain.toml")
-    if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -w /work \
-        -e CARGO_TARGET_DIR=/tmp/target \
-        rust:1.95-trixie \
-        bash -c "set -eu
-            rustup toolchain install $RUSTC_VERSION --profile minimal >/tmp/rustup.log 2>&1
-            rustup default $RUSTC_VERSION >>/tmp/rustup.log 2>&1
-            rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android >>/tmp/rustup.log 2>&1
-            apt-get update -qq && apt-get install -qq -y --no-install-recommends unzip cmake >/dev/null
-            cd /opt
-            curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-linux.zip
-            unzip -q ndk.zip && rm ndk.zip
-            export ANDROID_NDK_HOME=/opt/android-ndk-$NDK_VERSION
-            cargo install --quiet cargo-ndk --locked
-            cd /work
-            cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o /out/jni build --release -p sipral-ffi
-            LLVM_BIN=\$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-            for pair in ${NDK_CLANG_TRIPLE[*]}; do
-                abi=\${pair%%:*}
-                clang=\"\$LLVM_BIN/\${pair#*:}$MIN_SDK-clang\"
-                \"\$clang\" -shared -fPIC -O2 \
-                    -I/work/bindings/c/include \
-                    -o /out/jni/\$abi/libsipral_jni.so \
-                    /work/bindings/kotlin/sipral/src/main/jni/sipral_jni.c \
-                    -L/out/jni/\$abi -lsipral_ffi -Wl,-soname,libsipral_jni.so
-            done" \
-        >"$OUT/collect-natives.log" 2>&1; then
-        pass "container run"
+    step "collect-natives, with the NDK at ${ANDROID_NDK_HOME:-(unset)}"
+    # The NDK is not fetched here: it comes with the Android SDK licence,
+    # which is accepted once, by whoever builds the image
+    # (bindings/kotlin/android/Dockerfile), and not on every run of a
+    # packaging script.
+    LLVM_BIN="${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "$LLVM_BIN" ]; then
+        fail "no Linux NDK at ANDROID_NDK_HOME; run this through scripts/package/android.sh, whose image carries one"
+        printf '\naar.sh: failed\n'; exit 1
+    fi
+    command -v cargo-ndk >/dev/null 2>&1 || { fail "cargo-ndk not found (cargo install cargo-ndk --locked)"; printf '\naar.sh: failed\n'; exit 1; }
+
+    if cargo ndk --platform "$MIN_SDK" -t arm64-v8a -t armeabi-v7a -t x86_64 -o "$OUT/jni" \
+        build --release -p sipral-ffi >"$OUT/collect-natives.log" 2>&1; then
+        pass "cargo ndk build --release -p sipral-ffi"
     else
-        fail "container run:"
+        fail "cargo ndk build:"
         tail -40 "$OUT/collect-natives.log" | sed 's/^/        /'
     fi
+    for pair in "${NDK_CLANG_TRIPLE[@]}"; do
+        abi="${pair%%:*}"
+        clang="$LLVM_BIN/${pair#*:}$MIN_SDK-clang"
+        [ -f "$OUT/jni/$abi/libsipral_ffi.so" ] || continue
+        if "$clang" -std=c11 -shared -fPIC -O2 -Wall -Wextra -Werror \
+            -I"$ROOT/bindings/c/include" \
+            -o "$OUT/jni/$abi/libsipral_jni.so" \
+            "$ROOT/bindings/kotlin/sipral/src/main/jni/sipral_jni.c" \
+            "$ROOT/bindings/kotlin/sipral/src/main/jni/idiomatic_media.c" \
+            -L"$OUT/jni/$abi" -lsipral_ffi -Wl,-soname,libsipral_jni.so \
+            >>"$OUT/collect-natives.log" 2>&1; then
+            pass "$abi: libsipral_jni.so linked against libsipral_ffi.so"
+        else
+            fail "$abi: linking the JNI shims:"
+            tail -20 "$OUT/collect-natives.log" | sed 's/^/        /'
+        fi
+    done
     step "structure"
     for abi in "${ABIS[@]}"; do
+        expected=""
+        for e in "${ELF_EXPECTED[@]}"; do [ "${e%%:*}" = "$abi" ] && expected="${e#*:}"; done
         for lib in "${NATIVE_LIBS[@]}"; do
             f="$OUT/jni/$abi/$lib"
-            if [ -f "$f" ]; then
-                size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
-                pass "jni/$abi/$lib ($size bytes)"
-            else
+            if [ ! -f "$f" ]; then
                 fail "jni/$abi/$lib was not produced"
+            elif elf_matches "$f" "${expected%%:*}" "${expected#*:}"; then
+                size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+                pass "jni/$abi/$lib ($size bytes, ELF machine ${expected%%:*}, ${expected#*:}-bit)"
+            else
+                fail "jni/$abi/$lib is not an ELF shared object for machine ${expected%%:*}, ${expected#*:}-bit"
             fi
         done
     done
@@ -181,14 +215,28 @@ cat >"$STAGE/aar/AndroidManifest.xml" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.sipral">
-    <!-- 21: what collect-natives' `cargo ndk` built the three .so's against
-         (its own default -- neither subcommand here names a platform, so
-         changing this without changing that would claim a floor the native
-         library was not actually built for). -->
+    <!-- 21: the platform collect-natives builds the natives against
+         (MIN_SDK in aar.sh). Changing one without the other would claim a
+         floor the native libraries were not built for. -->
     <uses-sdk android:minSdkVersion="21" />
 </manifest>
 EOF
 pass "AndroidManifest.xml"
+
+# The consumer keep rules an AAR carries as proguard.txt, which R8 applies to
+# any application that shrinks: the three listener keepers are reached only
+# from native code, by name, through FindClass and GetStaticMethodID in
+# sipral_jni.c's JNI_OnLoad, and every external fun's name is what the
+# shims' exported symbols are spelled from. Nothing in Kotlin calls
+# `deliver`, so without these a release build removes or renames it and the
+# first event finds nothing to land in.
+cat >"$STAGE/aar/proguard.txt" <<'EOF'
+-keep class org.sipral.SipralEventListeners { *** deliver(...); }
+-keep class org.sipral.SipralScreenListeners { *** deliver(...); }
+-keep class org.sipral.SipralProcessorListeners { *** deliver(...); }
+-keepclasseswithmembernames class org.sipral.** { native <methods>; }
+EOF
+pass "proguard.txt"
 
 step "natives, from $NATIVES"
 populated=0
@@ -200,11 +248,19 @@ for abi in "${ABIS[@]}"; do
         [ -f "$NATIVES/jni/$abi/$lib" ] && have=$((have + 1))
     done
     if [ "$have" -eq "${#NATIVE_LIBS[@]}" ]; then
+        expected=""
+        for e in "${ELF_EXPECTED[@]}"; do [ "${e%%:*}" = "$abi" ] && expected="${e#*:}"; done
+        wrong=""
         for lib in "${NATIVE_LIBS[@]}"; do
+            elf_matches "$NATIVES/jni/$abi/$lib" "${expected%%:*}" "${expected#*:}" || wrong="$wrong $lib"
             cp "$NATIVES/jni/$abi/$lib" "$dest/$lib"
         done
-        pass "$abi"
-        populated=$((populated + 1))
+        if [ -z "$wrong" ]; then
+            pass "$abi (ELF machine ${expected%%:*}, ${expected#*:}-bit, both libraries)"
+            populated=$((populated + 1))
+        else
+            fail "$abi:$wrong not an ELF shared object for machine ${expected%%:*}, ${expected#*:}-bit"
+        fi
     elif [ "$have" -eq 0 ] && [ "$DRY_RUN" -eq 1 ]; then
         note "$abi: no native staged, layout only (jni/$abi/ created empty)"
     elif [ "$have" -eq 0 ]; then
@@ -226,8 +282,17 @@ rm -f "$AAR"
 
 if [ -f "$AAR" ]; then
     listing=$(unzip -l "$AAR" 2>/dev/null)
-    for entry in AndroidManifest.xml classes.jar; do
+    for entry in AndroidManifest.xml classes.jar proguard.txt; do
         printf '%s\n' "$listing" | grep -q "$entry" && pass "carries $entry" || fail "missing $entry"
+    done
+    # One class from each layer: the printed binding, the idiomatic layer
+    # and the telecom helper's logic. A classes.jar that compiled but lost
+    # a package would otherwise pass as "present".
+    classes=$(unzip -l "$STAGE/aar/classes.jar" 2>/dev/null)
+    for class in org/sipral/SipralNative.class org/sipral/idiomatic/SipralClient.class \
+        org/sipral/telecom/TelecomBridge.class; do
+        printf '%s\n' "$classes" | grep -q " $class\$" \
+            && pass "classes.jar carries $class" || fail "classes.jar is missing $class"
     done
     for abi in "${ABIS[@]}"; do
         for lib in "${NATIVE_LIBS[@]}"; do

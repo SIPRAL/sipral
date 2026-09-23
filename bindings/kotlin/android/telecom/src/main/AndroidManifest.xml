@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- A self-managed PhoneAccount needs this and nothing more: the
+         application draws its own call screens, and the framework only
+         arbitrates between it and every other calling application. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+
+    <application>
+        <!-- Merged into the application that uses this library. Only the
+             telecom framework can bind to it. -->
+        <service
+            android:name="org.sipral.android.telecom.SipralConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

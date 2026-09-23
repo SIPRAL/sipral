@@ -127,43 +127,23 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `labuser-agent-csharp`, and doubles as a runnable example; a skeleton WPF
   sample (`samples/Sipral.Sample.Wpf`) covers registration, a call,
   hold/resume and DTMF.
-
-### Fixed
-
-- **A resume asked for while the hold was still on its way is no longer
-  accepted and lost.** `hold` and `resume` compared the request against the
-  hold state last agreed, which a hold whose re-INVITE had not been answered
-  yet had not moved, so a resume in that window answered `Ok`, sent nothing,
-  and left the call held with nothing said. Both are now measured against
-  where the call is headed and, while another session change is running in
-  either direction — including an offer of ours whose answer the ACK has
-  still to bring (RFC 3264 §4) — wait and go once it is over, as RFC 3261
-  §14.1 requires. `reoffer` and `change_formats` still answer
-  `ChangeInProgress` in that window, and an ACK without the answer it owed
-  no longer leaves the call waiting for one.
-- **Two re-offers that cross now both go through, and a refused offer no
-  longer skips an `o=` version.** The end waiting out a 491 refused the far
-  end's retry with a 491 of its own, although its INVITE was no longer in
-  progress (RFC 3261 §14.2), so when both ends pressed hold at once only one
-  hold ever arrived. That retry is now answered, and this end's own retry
-  waits for a far-end change still being answered. A hold or resume retried
-  after the far end's change is written again from the session that change
-  left, one version past the answer, instead of offering the old codec back;
-  an application's description is not sent over it and is reported as
-  `SessionChangeFailed`. A session-timer refresh told to wait goes again as a
-  refresh, with its `Session-Expires`, instead of as a plain re-INVITE that
-  asked for no timer and was reported as a session change. `reoffer`,
-  `change_formats` and `hold` refused before sending (a change in progress, a
-  call that cannot carry one) no longer use up a version, so the next offer
-  is one past the last one sent (RFC 3264 §8).
-- **The .NET binding no longer crashes the whole process over an
-  exception thrown from an application's own `EventReceived` or
-  `FrameDecoded` handler.** Both ran synchronously on the library's own
-  worker threads with nothing catching what they threw, so a bug in one
-  subscriber's handler unwound back into the native call the thread was
-  inside of and took every stack and call in the process down with it.
-  Now caught at the point each is invoked, the same "the callback does
-  not unwind" contract already documented for the Kotlin binding.
+- **Android: a `ConnectionService` helper, a Compose sample, and a real
+  AAR.** `org.sipral.telecom.TelecomBridge` carries `docs/15-mobile.md`'s C2
+  onto the telecom framework — a push reported first, then announced, and
+  the INVITE that follows matched to the screen already up — and maps
+  answer, reject, hold, DTMF and disconnect both ways, leaving audio routing
+  to the platform; it is tested on a JVM through fakes, one sequence per
+  race, and over two real stacks on loopback. `bindings/kotlin/android` puts
+  it behind a self-managed `ConnectionService` and adds a Compose skeleton
+  (registration, a call, hold, DTMF, audio routes). `scripts/package/android.sh`
+  builds `sipral.aar` (both natives for arm64-v8a, armeabi-v7a and x86_64,
+  the JNI library now linking the idiomatic layer's own shim too, which it
+  had left out, and R8 keep rules), the helper's AAR and the sample's APK inside a
+  pinned Android SDK and NDK image, and checks each. The idiomatic layer gains `announce`, `refreshBinding`,
+  `forgetAnnouncement` and RFC 8599 push parameters on an account, and
+  `SipralCall.waitConfirmed` and `waitEnded` now subscribe before they read
+  the call's state, so an event landing between the two is no longer missed
+  and waited out to the timeout.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity
@@ -509,6 +489,40 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A resume asked for while the hold was still on its way is no longer
+  accepted and lost.** `hold` and `resume` compared the request against the
+  hold state last agreed, which a hold whose re-INVITE had not been answered
+  yet had not moved, so a resume in that window answered `Ok`, sent nothing,
+  and left the call held with nothing said. Both are now measured against
+  where the call is headed and, while another session change is running in
+  either direction — including an offer of ours whose answer the ACK has
+  still to bring (RFC 3264 §4) — wait and go once it is over, as RFC 3261
+  §14.1 requires. `reoffer` and `change_formats` still answer
+  `ChangeInProgress` in that window, and an ACK without the answer it owed
+  no longer leaves the call waiting for one.
+- **Two re-offers that cross now both go through, and a refused offer no
+  longer skips an `o=` version.** The end waiting out a 491 refused the far
+  end's retry with a 491 of its own, although its INVITE was no longer in
+  progress (RFC 3261 §14.2), so when both ends pressed hold at once only one
+  hold ever arrived. That retry is now answered, and this end's own retry
+  waits for a far-end change still being answered. A hold or resume retried
+  after the far end's change is written again from the session that change
+  left, one version past the answer, instead of offering the old codec back;
+  an application's description is not sent over it and is reported as
+  `SessionChangeFailed`. A session-timer refresh told to wait goes again as a
+  refresh, with its `Session-Expires`, instead of as a plain re-INVITE that
+  asked for no timer and was reported as a session change. `reoffer`,
+  `change_formats` and `hold` refused before sending (a change in progress, a
+  call that cannot carry one) no longer use up a version, so the next offer
+  is one past the last one sent (RFC 3264 §8).
+- **The .NET binding no longer crashes the whole process over an
+  exception thrown from an application's own `EventReceived` or
+  `FrameDecoded` handler.** Both ran synchronously on the library's own
+  worker threads with nothing catching what they threw, so a bug in one
+  subscriber's handler unwound back into the native call the thread was
+  inside of and took every stack and call in the process down with it.
+  Now caught at the point each is invoked, the same "the callback does
+  not unwind" contract already documented for the Kotlin binding.
 - **`sipral_headless::encode_control` no longer writes a control frame the
   far end will refuse.** It wrote up to the sixteen bits of the length
   field, while every `Decoder` refuses a control frame past
