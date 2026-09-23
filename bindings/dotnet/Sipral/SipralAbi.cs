@@ -962,6 +962,24 @@ public enum SipralEventKind : uint
     /// next given directly rather than through `sipral_media_mix`.
     /// </summary>
     MediaUnjoined = 38,
+    /// <summary>
+    /// A STUN server said where one of this end's sockets appears from,
+    /// said it has moved, or never answered (RFC 8489). Only on a stack
+    /// created with `SIPRAL_NAT_STUN`.
+    ///
+    /// `payload.nat` says which socket and what it came to. For a
+    /// signalling socket the work is already done by the time this
+    /// arrives: every account whose `Contact` named the socket names the
+    /// public address now, and each one holding a binding has sent the
+    /// REGISTER that says so. For a media socket
+    /// `sipral_stack_nat_map` named, this is the moment a call can be
+    /// placed, rung or answered on it — before it, that is
+    /// `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
+    /// for is described by its own address, as it would have been with
+    /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
+    /// a socket is neither.
+    /// </summary>
+    NatMapping = 39,
 }
 
 /// <summary>
@@ -1320,6 +1338,58 @@ public enum SipralRecovery : uint
     /// There is no interface. Nothing is tried until there is one.
     /// </summary>
     Detach = 6,
+}
+
+/// <summary>
+/// What a stack does about a NAT in front of it. Names for
+/// `sipral_stack_config_t::nat`.
+///
+/// Zero is not one of them: it means this build's own built-in default,
+/// which is SipralNat.Off. `docs/06-nat.md` says why that is the
+/// default and what `rport` and symmetric RTP already carry without it.
+/// </summary>
+public enum SipralNat : uint
+{
+    /// <summary>
+    /// Ask nobody. Every address this stack writes is the one the
+    /// application gave it.
+    /// </summary>
+    Off = 1,
+    /// <summary>
+    /// Ask the STUN server `sipral_stack_config_t::stun_server` names
+    /// where each socket appears from, and write that instead: the
+    /// signalling socket's in the `Contact`, a media socket's in `c=` and
+    /// `m=`.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_STUN`.
+    /// </summary>
+    Stun = 2,
+}
+
+/// <summary>
+/// What a socket's mapping came to. Names for
+/// `sipral_nat_event_t::mapping`.
+/// </summary>
+public enum SipralNatMapping : uint
+{
+    /// <summary>
+    /// The first answer: the socket appears at `public`.
+    /// </summary>
+    Learned = 1,
+    /// <summary>
+    /// A later answer about a signalling socket named another address:
+    /// the NAT let the mapping go and made a new one, or the network
+    /// under the socket changed. `previous` is what it was.
+    /// </summary>
+    Moved = 2,
+    /// <summary>
+    /// The server did not answer, in five and a half seconds, or refused.
+    /// The socket is described by its own address, exactly as it would
+    /// have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
+    /// its next refresh.
+    /// </summary>
+    Unanswered = 3,
 }
 
 /// <summary>
@@ -2096,6 +2166,30 @@ public struct SipralStackConfig
     /// unmoved.
     /// </summary>
     public uint Ice;
+    /// <summary>
+    /// What this stack does about a NAT in front of it: a `SipralNat`, or
+    /// zero for this build's own built-in default, which is
+    /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
+    /// socket appears from and writes the answer where a far end reads
+    /// it — see crate::nat. Any other value is
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+    ///
+    /// Appended at the tail (task 8.5.5), with the two below; the pinned
+    /// `MIN_SIZE` is unmoved.
+    /// </summary>
+    public uint Nat;
+    /// <summary>
+    /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
+    /// address, not a name, since resolving one is the application's.
+    /// Required with `SIPRAL_NAT_STUN` and refused without it, since a
+    /// server nothing asks is a setting nothing reads. Copied; the
+    /// caller's buffer is its own again when this returns.
+    /// </summary>
+    public IntPtr StunServer;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint StunServerLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -3716,6 +3810,66 @@ public struct SipralMessageEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.NatMapping
+/// carries.
+///
+/// The three addresses are `host:port`, not NUL-terminated, and the
+/// library's: valid for as long as the callback runs.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralNatEvent
+{
+    /// <summary>
+    /// A SipralNatMapping.
+    /// </summary>
+    public uint Mapping;
+    /// <summary>
+    /// Nonzero for a signalling socket — a transport of this stack's —
+    /// and zero for a media socket sipral_stack_nat_map named.
+    /// </summary>
+    public uint Signalling;
+    /// <summary>
+    /// The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
+    /// or a number `sipral_stack_transport_bind` bound. Zero otherwise,
+    /// which is not a transport here.
+    /// </summary>
+    public uint Transport;
+    /// <summary>
+    /// How many accounts' `Contact` moved to `public` because of this —
+    /// each one that holds a binding, or is getting one, has registered it
+    /// already. Zero for a media socket, and for an answer no account's
+    /// `Contact` named the socket in.
+    /// </summary>
+    public uint Accounts;
+    /// <summary>
+    /// The socket, as the application named it.
+    /// </summary>
+    public IntPtr Local;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint LocalLen;
+    /// <summary>
+    /// Where the server saw it: the public address. Empty for
+    /// `SIPRAL_NAT_MAPPING_UNANSWERED`.
+    /// </summary>
+    public IntPtr Mapped;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MappedLen;
+    /// <summary>
+    /// What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
+    /// otherwise.
+    /// </summary>
+    public IntPtr Previous;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint PreviousLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// Reading any other arm reads bytes the library did not write for it.
@@ -3780,6 +3934,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralMessageEvent Message;
+    /// <summary>
+    /// For SipralEventKind.NatMapping.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralNatEvent Nat;
 }
 
 /// <summary>
@@ -4483,6 +4642,15 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_stack_stream_closed(ulong stack, uint transport, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_nat_map(ulong stack, sbyte[] local, nuint localLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_poll_stun(ulong stack, ref SipralTransmit transmit);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_receive_stun(ulong stack, byte[] data, nuint len, sbyte[] from, nuint fromLen, sbyte[] to, nuint toLen, ulong nowMs);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern IntPtr sipral_event_kind_name(uint kind);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -4708,6 +4876,17 @@ public static class Sipral
     /// `sipral_media_poll_transmit`; see there.
     /// </summary>
     public const uint FeatureIce = 256;
+
+    /// <summary>
+    /// See SIPRAL_FEATURE_DTMF. STUN (RFC 8489): a stack created with
+    /// `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
+    /// writes the answer in the `Contact` and in `c=` and `m=`.
+    ///
+    /// Behind a compile-time feature of its own, which brings nothing ICE
+    /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
+    /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    /// </summary>
+    public const uint FeatureStun = 512;
 
     /// <summary>
     /// The buffer a caller has to bring for one outgoing packet.
@@ -6793,6 +6972,93 @@ public static class Sipral
     public static void StackStreamClosed(ulong stack, uint transport, ulong nowMs)
     {
         Check(NativeMethods.sipral_stack_stream_closed(stack, transport, nowMs));
+    }
+
+    /// <summary>
+    /// Ask where a media socket appears from, before a call is described
+    /// on it.
+    ///
+    /// `local` is the address the socket is bound to, as `host:port` — the
+    /// same text the call's `media_address` will be. The request is waiting
+    /// in sipral_stack_poll_stun when this returns, the answer goes in
+    /// through sipral_stack_receive_stun, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
+    /// a half seconds whatever the server does. From then on a call placed,
+    /// rung or answered with that `media_address` is described by the public
+    /// address, and asks for `a=rtcp-mux`, since one mapping describes one
+    /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+    ///
+    /// The mapping is spent by the call it describes. A socket used for a
+    /// second call is named here again — nothing kept the first answer true
+    /// in between.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// signalling socket of the stack's own, which is kept mapped already.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    /// </summary>
+    public static void StackNatMap(ulong stack, string local, ulong nowMs)
+    {
+        var localBytes = Encoding.UTF8.GetBytes(local);
+        var localSigned = new sbyte[localBytes.Length];
+        Buffer.BlockCopy(localBytes, 0, localSigned, 0, localBytes.Length);
+        Check(NativeMethods.sipral_stack_nat_map(stack, localSigned, (nuint)localSigned.Length, nowMs));
+    }
+
+    /// <summary>
+    /// Take the next STUN request a media socket has to send.
+    ///
+    /// The same record and the same rules as `sipral_stack_poll_transmit`,
+    /// on a queue of its own: loop until `len` comes back zero, after every
+    /// sipral_stack_nat_map, every sipral_stack_receive_stun and
+    /// every `sipral_stack_poll`, since the stack retransmits a request
+    /// nobody answered. `source` is always written, and it is the socket to
+    /// send from — the whole point is the address the server sees it come
+    /// from, so sending it from any other socket learns the wrong one.
+    /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    ///
+    /// Safety
+    ///
+    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
+    /// how long it is and whose buffers are writable for the capacities beside
+    /// them.
+    /// </summary>
+    public static void StackPollStun(ulong stack, ref SipralTransmit transmit)
+    {
+        Check(NativeMethods.sipral_stack_poll_stun(stack, ref transmit));
+    }
+
+    /// <summary>
+    /// Hand over a datagram that arrived on a media socket
+    /// sipral_stack_nat_map named, before a call has media on it.
+    ///
+    /// `to` is the socket it arrived on, as `local` was given there; `from`
+    /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
+    /// server's answer, which is then the stack's and nobody else's;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
+    /// a far end, a datagram from a stranger, an answer from any address but
+    /// the server's — which costs that one datagram and nothing more. Only
+    /// the server's own address is believed, and only an answer to a request
+    /// this stack sent: that is the whole defence against a forged answer
+    /// naming an address of the attacker's choosing as this end's own.
+    ///
+    /// Safety
+    ///
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and
+    /// `to` for `to_len`.
+    /// </summary>
+    public static void StackReceiveStun(ulong stack, byte[] data, string from, string to, ulong nowMs)
+    {
+        var fromBytes = Encoding.UTF8.GetBytes(from);
+        var fromSigned = new sbyte[fromBytes.Length];
+        Buffer.BlockCopy(fromBytes, 0, fromSigned, 0, fromBytes.Length);
+        var toBytes = Encoding.UTF8.GetBytes(to);
+        var toSigned = new sbyte[toBytes.Length];
+        Buffer.BlockCopy(toBytes, 0, toSigned, 0, toBytes.Length);
+        Check(NativeMethods.sipral_stack_receive_stun(stack, data, (nuint)data.Length, fromSigned, (nuint)fromSigned.Length, toSigned, (nuint)toSigned.Length, nowMs));
     }
 
     /// <summary>

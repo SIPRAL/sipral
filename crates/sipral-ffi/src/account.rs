@@ -411,10 +411,16 @@ entry! {
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;
             let id = state.agent.add_account(account);
-            state.accounts.insert(id).map_err(|status| {
+            let handle = state.accounts.insert(id).map_err(|status| {
                 state.agent.remove_account(id);
                 fail(status, "no room for another account on this stack")
-            })
+            })?;
+            // behind a NAT whose answer is already in, the account starts out
+            // on the public address rather than waiting for the next refresh
+            // to say so; it has not registered, so nothing is sent
+            let now = state.last_instant();
+            crate::nat::Nat::contacts_changed(state, now);
+            Ok(handle)
         })?;
         unsafe { out_account.write(handle) };
         Ok(())

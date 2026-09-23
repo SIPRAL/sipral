@@ -178,6 +178,17 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_ICE ((uint32_t)256)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. STUN (RFC 8489): a stack created with
+ * `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
+ * writes the answer in the `Contact` and in `c=` and `m=`.
+ *
+ * Behind a compile-time feature of its own, which brings nothing ICE
+ * does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
+ * without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+ */
+#define SIPRAL_FEATURE_STUN ((uint32_t)512)
+
+/**
  * The buffer a caller has to bring for one outgoing packet.
  *
  * Not a path MTU — RTP does not discover one — but the bound the session
@@ -276,6 +287,7 @@ typedef struct sipral_subscription_event sipral_subscription_event_t;
 typedef struct sipral_announce_event sipral_announce_event_t;
 typedef struct sipral_resolve_event sipral_resolve_event_t;
 typedef struct sipral_message_event sipral_message_event_t;
+typedef struct sipral_nat_event sipral_nat_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -1236,6 +1248,24 @@ enum {
      * next given directly rather than through `sipral_media_mix`.
      */
     SIPRAL_EVENT_KIND_MEDIA_UNJOINED = 38,
+    /**
+     * A STUN server said where one of this end's sockets appears from,
+     * said it has moved, or never answered (RFC 8489). Only on a stack
+     * created with `SIPRAL_NAT_STUN`.
+     *
+     * `payload.nat` says which socket and what it came to. For a
+     * signalling socket the work is already done by the time this
+     * arrives: every account whose `Contact` named the socket names the
+     * public address now, and each one holding a binding has sent the
+     * REGISTER that says so. For a media socket
+     * `sipral_stack_nat_map` named, this is the moment a call can be
+     * placed, rung or answered on it — before it, that is
+     * `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
+     * for is described by its own address, as it would have been with
+     * no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
+     * a socket is neither.
+     */
+    SIPRAL_EVENT_KIND_NAT_MAPPING = 39,
 };
 
 /**
@@ -1594,6 +1624,58 @@ enum {
      * There is no interface. Nothing is tried until there is one.
      */
     SIPRAL_RECOVERY_DETACH = 6,
+};
+
+/**
+ * What a stack does about a NAT in front of it. Names for
+ * `sipral_stack_config_t::nat`.
+ *
+ * Zero is not one of them: it means this build's own built-in default,
+ * which is SIPRAL_NAT_OFF. `docs/06-nat.md` says why that is the
+ * default and what `rport` and symmetric RTP already carry without it.
+ */
+typedef uint32_t sipral_nat_t;
+enum {
+    /**
+     * Ask nobody. Every address this stack writes is the one the
+     * application gave it.
+     */
+    SIPRAL_NAT_OFF = 1,
+    /**
+     * Ask the STUN server `sipral_stack_config_t::stun_server` names
+     * where each socket appears from, and write that instead: the
+     * signalling socket's in the `Contact`, a media socket's in `c=` and
+     * `m=`.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_STUN`.
+     */
+    SIPRAL_NAT_STUN = 2,
+};
+
+/**
+ * What a socket's mapping came to. Names for
+ * `sipral_nat_event_t::mapping`.
+ */
+typedef uint32_t sipral_nat_mapping_t;
+enum {
+    /**
+     * The first answer: the socket appears at `public`.
+     */
+    SIPRAL_NAT_MAPPING_LEARNED = 1,
+    /**
+     * A later answer about a signalling socket named another address:
+     * the NAT let the mapping go and made a new one, or the network
+     * under the socket changed. `previous` is what it was.
+     */
+    SIPRAL_NAT_MAPPING_MOVED = 2,
+    /**
+     * The server did not answer, in five and a half seconds, or refused.
+     * The socket is described by its own address, exactly as it would
+     * have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
+     * its next refresh.
+     */
+    SIPRAL_NAT_MAPPING_UNANSWERED = 3,
 };
 
 /**
@@ -2327,6 +2409,30 @@ struct sipral_stack_config {
      * unmoved.
      */
     uint32_t ice;
+    /**
+     * What this stack does about a NAT in front of it: a `SipralNat`, or
+     * zero for this build's own built-in default, which is
+     * `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
+     * socket appears from and writes the answer where a far end reads
+     * it — see crate::nat. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     *
+     * Appended at the tail (task 8.5.5), with the two below; the pinned
+     * `MIN_SIZE` is unmoved.
+     */
+    uint32_t nat;
+    /**
+     * The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
+     * address, not a name, since resolving one is the application's.
+     * Required with `SIPRAL_NAT_STUN` and refused without it, since a
+     * server nothing asks is a setting nothing reads. Copied; the
+     * caller's buffer is its own again when this returns.
+     */
+    const char *stun_server;
+    /**
+     * How many bytes of it.
+     */
+    size_t stun_server_len;
 };
 
 /**
@@ -3806,6 +3912,64 @@ struct sipral_message_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_NAT_MAPPING
+ * carries.
+ *
+ * The three addresses are `host:port`, not NUL-terminated, and the
+ * library's: valid for as long as the callback runs.
+ */
+struct sipral_nat_event {
+    /**
+     * A sipral_nat_mapping_t.
+     */
+    uint32_t mapping;
+    /**
+     * Nonzero for a signalling socket — a transport of this stack's —
+     * and zero for a media socket sipral_stack_nat_map named.
+     */
+    uint32_t signalling;
+    /**
+     * The transport, when `signalling` is nonzero: `SIPRAL_TRANSPORT_MAIN`
+     * or a number `sipral_stack_transport_bind` bound. Zero otherwise,
+     * which is not a transport here.
+     */
+    uint32_t transport;
+    /**
+     * How many accounts' `Contact` moved to `public` because of this —
+     * each one that holds a binding, or is getting one, has registered it
+     * already. Zero for a media socket, and for an answer no account's
+     * `Contact` named the socket in.
+     */
+    uint32_t accounts;
+    /**
+     * The socket, as the application named it.
+     */
+    const char *local;
+    /**
+     * How many bytes of it.
+     */
+    size_t local_len;
+    /**
+     * Where the server saw it: the public address. Empty for
+     * `SIPRAL_NAT_MAPPING_UNANSWERED`.
+     */
+    const char *mapped;
+    /**
+     * How many bytes of it.
+     */
+    size_t mapped_len;
+    /**
+     * What it was before, for `SIPRAL_NAT_MAPPING_MOVED`. Empty
+     * otherwise.
+     */
+    const char *previous;
+    /**
+     * How many bytes of it.
+     */
+    size_t previous_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * Reading any other arm reads bytes the library did not write for it.
@@ -3858,6 +4022,10 @@ union sipral_event_payload {
      * SIPRAL_EVENT_KIND_MESSAGES_WAITING.
      */
     sipral_message_event_t message;
+    /**
+     * For SIPRAL_EVENT_KIND_NAT_MAPPING.
+     */
+    sipral_nat_event_t nat;
 };
 
 /**
@@ -5777,6 +5945,75 @@ sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t tr
  * Safe to call with any handle value. Reads no memory the caller owns.
  */
 sipral_status_t sipral_stack_stream_closed(sipral_handle_t stack, uint32_t transport, uint64_t now_ms);
+
+/**
+ * Ask where a media socket appears from, before a call is described
+ * on it.
+ *
+ * `local` is the address the socket is bound to, as `host:port` — the
+ * same text the call's `media_address` will be. The request is waiting
+ * in sipral_stack_poll_stun when this returns, the answer goes in
+ * through sipral_stack_receive_stun, and
+ * `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
+ * a half seconds whatever the server does. From then on a call placed,
+ * rung or answered with that `media_address` is described by the public
+ * address, and asks for `a=rtcp-mux`, since one mapping describes one
+ * port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+ *
+ * The mapping is spent by the call it describes. A socket used for a
+ * second call is named here again — nothing kept the first answer true
+ * in between.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+ * `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+ * signalling socket of the stack's own, which is kept mapped already.
+ *
+ * Safety
+ *
+ * `local` must be readable for `local_len` bytes.
+ */
+sipral_status_t sipral_stack_nat_map(sipral_handle_t stack, const char *local, size_t local_len, uint64_t now_ms);
+
+/**
+ * Take the next STUN request a media socket has to send.
+ *
+ * The same record and the same rules as `sipral_stack_poll_transmit`,
+ * on a queue of its own: loop until `len` comes back zero, after every
+ * sipral_stack_nat_map, every sipral_stack_receive_stun and
+ * every `sipral_stack_poll`, since the stack retransmits a request
+ * nobody answered. `source` is always written, and it is the socket to
+ * send from — the whole point is the address the server sees it come
+ * from, so sending it from any other socket learns the wrong one.
+ * `transport` is zero and names nothing here, and `protocol` is UDP.
+ *
+ * Safety
+ *
+ * `transmit` must point at a `sipral_transmit_t` whose `size` member says
+ * how long it is and whose buffers are writable for the capacities beside
+ * them.
+ */
+sipral_status_t sipral_stack_poll_stun(sipral_handle_t stack, sipral_transmit_t *transmit);
+
+/**
+ * Hand over a datagram that arrived on a media socket
+ * sipral_stack_nat_map named, before a call has media on it.
+ *
+ * `to` is the socket it arrived on, as `local` was given there; `from`
+ * is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
+ * server's answer, which is then the stack's and nobody else's;
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
+ * a far end, a datagram from a stranger, an answer from any address but
+ * the server's — which costs that one datagram and nothing more. Only
+ * the server's own address is believed, and only an answer to a request
+ * this stack sent: that is the whole defence against a forged answer
+ * naming an address of the attacker's choosing as this end's own.
+ *
+ * Safety
+ *
+ * `data` must be readable for `len` bytes, `from` for `from_len`, and
+ * `to` for `to_len`.
+ */
+sipral_status_t sipral_stack_receive_stun(sipral_handle_t stack, const uint8_t *data, size_t len, const char *from, size_t from_len, const char *to, size_t to_len, uint64_t now_ms);
 
 /**
  * The short name of an event kind, as a static NUL-terminated

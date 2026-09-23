@@ -152,8 +152,15 @@ and each is cheaper before the ABI carries it than after:
   `sipral_media_mix` carry it across the C ABI, and the interop lab proves
   one call's audio crosses to the other's wire on Asterisk;
 - **STUN reached from a call** — the softphone profile behind a NAT learns its
-  public address from `sipral-nat`, which is written, tested and linked by
-  nothing; ICE-lite stays where `06-nat.md` puts it, on a public server;
+  public address from `sipral-nat`; ICE-lite stays where `06-nat.md` puts it,
+  on a public server.
+  *Built* (task 8.5.5): `sipral::Mappings` asks a STUN server about the
+  signalling socket and each media socket, `UserAgent::readdress` moves the
+  accounts' `Contact` onto the answer and `CallMedia::public_address` puts it in
+  `c=` and `m=` — and in a server-reflexive ICE candidate when ICE is on.
+  `SIPRAL_NAT_STUN` and `stun_server` carry it across the C ABI, and the lab
+  proves it through a NAT against coturn and Asterisk. ICE-lite for the
+  headless profile and TURN are not wired yet;
 - **early media on the answering side**, so a stack that answers can speak
   before 200 OK through its own engine rather than through a second one.
   *Built* (task 8.4.9): `MediaEngine::ring`/`ring_with`, and

@@ -21,8 +21,12 @@
 //!   (RFC 8445 §7.3.1.1). Both are fixed when the call's first description is
 //!   written, because [`Role::initial_full`] reads which end offered.
 //! - **Candidates.** One host candidate per component, from the address the
-//!   application bound. What [`LocalIce`] remembers, so that the second and
-//!   every later description of a call says the same thing as the first.
+//!   application bound, and a server-reflexive one beside it when the call
+//!   was given the address that socket appears at from outside — which is
+//!   what `Mappings` learns from a STUN server, and what
+//!   [`CallMedia::public_address`](crate::CallMedia::public_address) hands a
+//!   call. What [`LocalIce`] remembers, so that the second and every later
+//!   description of a call says the same thing as the first.
 //! - **Transaction ids.** Every check, consent request and keepalive spends
 //!   one, and RFC 7675 §5.1 makes consent worth exactly as much as their
 //!   unpredictability: an off-path attacker who can guess one can kill a pair
@@ -31,12 +35,16 @@
 //!
 //! # What this module does not do, and why it is not a gap
 //!
-//! **No STUN and no TURN servers.** Host candidates only, which is what makes
-//! gathering finish inside the call that started it: with no server to wait
-//! for, [`IceAgent::gather`] completes before it returns, so an offer is still
-//! written in one pass and neither the Rust API nor the C ABI grows a
-//! two-phase description. A server-reflexive candidate is what the step after
-//! this one adds, and `docs/06-nat.md` says what it will cost.
+//! **The agent asks no server itself.** Its configuration names no STUN and
+//! no TURN server, which is what makes gathering finish inside the call that
+//! started it: with nothing to wait for, [`IceAgent::gather`] completes before
+//! it returns, so an offer is still written in one pass and neither the Rust
+//! API nor the C ABI grows a two-phase description. The server-reflexive
+//! candidate comes from the mapping the application already made of the same
+//! socket before the call, for the `c=` line a peer without ICE reads — the
+//! same server, the same question, asked once — and
+//! [`IceAgent::add_server_reflexive`] is how that answer becomes a candidate.
+//! TURN is the step after this one, and `docs/06-nat.md` says why it waits.
 //!
 //! **No fallback that is silent.** A peer that does not do ICE, a peer whose
 //! candidates are unusable, and a description an ALG rewrote on the way are
@@ -183,6 +191,10 @@ pub(crate) struct LocalIce {
     credentials: Credentials,
     role: Role,
     tiebreaker: u64,
+    /// The address the socket appears at from outside, when the call was
+    /// given one: its server-reflexive candidate, kept so that the agent
+    /// rebuilt at [`LocalIce::agent`] holds it too.
+    public: Option<SocketAddr>,
     candidates: Vec<Candidate>,
 }
 
@@ -194,6 +206,10 @@ impl LocalIce {
     /// that turns out to be lite moves it, and the agent does that itself
     /// inside [`IceAgent::set_remote`].
     ///
+    /// `public` is where `address` appears from outside, when the call was
+    /// given one: a server-reflexive candidate beside the host one, and the
+    /// default candidate RFC 8839 §4.2.1.2 wants in `c=` and `m=`.
+    ///
     /// # Errors
     ///
     /// [`MediaError::Ice`] when the address the application bound is one RFC
@@ -202,6 +218,7 @@ impl LocalIce {
     pub(crate) fn draw(
         keys: &mut KeySource,
         address: SocketAddr,
+        public: Option<SocketAddr>,
         we_are_offerer: bool,
         now: Instant,
     ) -> Result<Self, MediaError> {
@@ -231,12 +248,13 @@ impl LocalIce {
         // a peer that is lite is not known until its description arrives, and
         // the agent moves the role itself when it is
         let role = Role::initial_full(we_are_offerer, false);
-        let (agent, stream) = new_agent(&credentials, role, tiebreaker, address, now)?;
+        let (agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
         let candidates = agent.local_candidates(stream);
         Ok(Self {
             credentials,
             role,
             tiebreaker,
+            public,
             candidates,
         })
     }
@@ -254,10 +272,11 @@ impl LocalIce {
     /// The agent this call runs, built from what was written down.
     ///
     /// Built here rather than kept alive from [`LocalIce::draw`] because
-    /// gathering is deterministic: the same address, the same components and
-    /// no server to ask produce the same candidates with the same
-    /// foundations and the same priorities, every time. `a_rebuilt_agent_
-    /// gathers_the_candidates_that_were_offered` is what holds that true.
+    /// gathering is deterministic: the same address, the same components, the
+    /// same public address and no server to ask produce the same candidates
+    /// with the same foundations and the same priorities, every time.
+    /// `a_rebuilt_agent_gathers_the_candidates_that_were_offered` is what
+    /// holds that true.
     ///
     /// `seed` is what the call's own transaction ids are drawn from, and it
     /// comes from the engine's [`KeySource`] rather than from the session's
@@ -274,8 +293,14 @@ impl LocalIce {
         seed: [u8; 32],
         now: Instant,
     ) -> Result<Ice, MediaError> {
-        let (agent, stream) =
-            new_agent(&self.credentials, self.role, self.tiebreaker, address, now)?;
+        let (agent, stream) = new_agent(
+            &self.credentials,
+            self.role,
+            self.tiebreaker,
+            address,
+            self.public,
+            now,
+        )?;
         let mut ice = Ice {
             agent,
             stream,
@@ -289,13 +314,15 @@ impl LocalIce {
     }
 }
 
-/// One agent on one stream with one component, gathered.
+/// One agent on one stream with one component, gathered, with the
+/// server-reflexive candidate `public` names when there is one.
 #[cfg(feature = "ice")]
 fn new_agent(
     credentials: &Credentials,
     role: Role,
     tiebreaker: u64,
     address: SocketAddr,
+    public: Option<SocketAddr>,
     now: Instant,
 ) -> Result<(IceAgent, StreamId), MediaError> {
     // no STUN and no TURN server, which is what makes `gather` below finish
@@ -308,6 +335,15 @@ fn new_agent(
         .add_stream(&[(ComponentId::RTP, address)])
         .map_err(MediaError::Ice)?;
     agent.gather(now).map_err(MediaError::Ice)?;
+    // no server is named: the call was handed the address, and which server
+    // the application asked is not something it carries. Every call has at
+    // most one reflexive candidate, so the foundation it would have told
+    // apart from a second one has nothing to tell apart
+    if let Some(public) = public {
+        agent
+            .add_server_reflexive(stream, ComponentId::RTP, address, public, None)
+            .map_err(MediaError::Ice)?;
+    }
     Ok((agent, stream))
 }
 
@@ -494,6 +530,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use sipral_core::auth::KeySource;
+    use sipral_nat::ice::CandidateType;
 
     use super::{ICE_CHARS, IcePolicy, LocalIce, PWD_CHARS, UFRAG_CHARS};
 
@@ -505,6 +542,7 @@ mod tests {
         LocalIce::draw(
             &mut KeySource::new([seed; 32]),
             address(),
+            None,
             true,
             Instant::now(),
         )
@@ -550,9 +588,54 @@ mod tests {
     }
 
     #[test]
+    fn a_call_given_its_public_address_offers_it_as_a_reflexive_candidate() {
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("a literal address");
+        let now = Instant::now();
+        let ice = LocalIce::draw(
+            &mut KeySource::new([6; 32]),
+            address(),
+            Some(public),
+            true,
+            now,
+        )
+        .expect("an ordinary address gathers");
+        let offered = ice.candidates();
+        assert_eq!(offered.len(), 2, "a host candidate and a reflexive one");
+        assert_eq!(offered[0].kind, CandidateType::Host);
+        assert_eq!(offered[0].address, address());
+        assert_eq!(offered[1].kind, CandidateType::ServerReflexive);
+        assert_eq!(offered[1].address, public);
+        assert_eq!(offered[1].related, Some(address()));
+        // and the agent that runs the checks believes it owns the same two
+        let rebuilt = ice
+            .agent(address(), [9; 32], now)
+            .expect("the same address gathers");
+        assert_eq!(offered, rebuilt.local_candidates().as_slice());
+    }
+
+    #[test]
+    fn a_public_address_that_is_the_local_one_adds_no_candidate() {
+        let ice = LocalIce::draw(
+            &mut KeySource::new([6; 32]),
+            address(),
+            Some(address()),
+            true,
+            Instant::now(),
+        )
+        .expect("an ordinary address gathers");
+        assert_eq!(ice.candidates().len(), 1);
+    }
+
+    #[test]
     fn an_address_no_peer_could_reach_is_refused_rather_than_offered() {
         let loopback = "127.0.0.1:40000".parse().expect("a literal address");
-        let drawn = LocalIce::draw(&mut KeySource::new([4; 32]), loopback, true, Instant::now());
+        let drawn = LocalIce::draw(
+            &mut KeySource::new([4; 32]),
+            loopback,
+            None,
+            true,
+            Instant::now(),
+        );
         assert!(
             drawn.is_err(),
             "RFC 8445 §5.1.1.1 rules a loopback address out of a candidate"

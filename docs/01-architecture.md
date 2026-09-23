@@ -177,9 +177,10 @@ The facade depends on it, and on `sipral-nat` beside it, behind the `dtls`
 feature: the handshake runs on the call's own media socket, and telling its
 records from the RTP there is the first-octet rule of RFC 7983, which lives in
 `sipral-nat` because ICE needs it in the same place. The `ice` feature is the
-second edge into that crate and reaches the full agent; both features are
-optional, and with both off a build that will only ever place SDES calls
-leaves four cryptographic crates and the agent out of its binary.
+second edge into that crate and reaches the full agent, and `stun` the third,
+reaching the Binding client; all three are optional, and with all three off a
+build that will only ever place SDES calls leaves four cryptographic crates
+and the agent out of its binary.
 
 Detail in [05-media.md](05-media.md).
 
@@ -268,13 +269,13 @@ state carried across, described in full in
 Sipral crate of its own, the same way `sipral-ua` and the media crates still
 do not name each other; only the facade's manifest grows an edge.
 
-What is still not joined is the rest of `sipral-nat`. One octet of it is —
-the RFC 7983 rule that tells a DTLS record from the RTP beside it — and
-nothing above `ice::` is: a call behind a NAT that symmetric RTP does not
-solve is the application's to arrange, and the candidates that would go in the
-offer have no route through this crate yet. The C ABI is already pointed here
-— `sipral-ffi` names `sipral` in its manifest — so what the boundary does not
-carry is what this crate does not.
+What is still not joined is the rest of `sipral-nat`: the lite ICE agent and
+the TURN client. The RFC 7983 demultiplexing rule, the full agent and the STUN
+Binding client are — the last through `sipral::Mappings`, which asks where
+each socket appears from and hands the answer to `UserAgent::readdress` for the
+`Contact` and to `CallMedia::public_address` for `c=`, `m=` and the reflexive
+candidate. The mapping crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still
+names no NAT crate.
 
 ## What is not in the tree
 

@@ -535,6 +535,46 @@ beside a record with no `size`, which only an array is made of. So does a call
 that answers with text and takes a list, directly or in a struct, because such
 a call is printed with its parameters handed through as they came.
 
+### Behind a NAT
+
+**`nat` and `stun_server` on `sipral_stack_config_t`** (task 8.5.5, appended at
+the tail; `MIN_SIZE` unmoved) turn on STUN: `SIPRAL_NAT_STUN` and a server as
+`host:port`. Either without the other is `SIPRAL_STATUS_INVALID_ARGUMENT`, and
+a build without `SIPRAL_FEATURE_STUN` answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+`docs/06-nat.md` has the decisions; this is the order an application meets
+them in.
+
+The **signalling socket** asks for nothing new. Its Binding request is the
+first thing `sipral_stack_poll_transmit` hands out, on the transport it is
+about, and the answer goes back in through `sipral_stack_receive_datagram`,
+where it is taken before the parser sees it. Every UDP transport
+`sipral_stack_transport_bind` binds is kept mapped the same way, and binding
+one again at the same address asks again at once. What was learned arrives as
+`SIPRAL_EVENT_KIND_NAT_MAPPING` (39), with `payload.nat` saying which socket,
+what it maps to, and how many accounts' `Contact` moved onto it — the ones
+already holding a binding have registered it by the time the event arrives. An
+application that registers only after that event registers the public
+`Contact` the first time, which is what the lab's own flow does.
+
+A **media socket** is named before its call, because it is the application's
+and exists before the call does: `sipral_stack_nat_map(stack, local, len,
+now_ms)`, then send what `sipral_stack_poll_stun` hands out — a
+`sipral_transmit_t` like `sipral_stack_poll_transmit`'s, whose `source` is the
+socket to send from and whose `transport` is zero — and hand what arrives on
+that socket to `sipral_stack_receive_stun` until the event for it arrives,
+within five and a half seconds whatever the server does. A call placed, rung or
+answered with that `media_address` before then is `SIPRAL_STATUS_WRONG_STATE`;
+after it, the description names the public address. `sipral_stack_receive_stun`
+answers `SIPRAL_STATUS_INVALID_ARGUMENT` for anything that is not the
+configured server's answer to a request this stack sent, which costs that
+datagram and nothing more. The answer is spent by the call it describes.
+
+Three entry points rather than a second use of the two signalling ones,
+because a media socket is not a transport: a STUN request for it that came out
+of `sipral_stack_poll_transmit` would be sent from the SIP socket by every loop
+that ignores `source` on a request — every one written so far — and would
+learn the SIP socket's mapping instead, silently.
+
 ## Media across the boundary
 
 The ABI is built over `crates/sipral`, the facade that joins signalling to

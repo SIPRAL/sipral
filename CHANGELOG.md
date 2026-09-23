@@ -33,6 +33,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   pitch. The in-process call test now holds and resumes its call, and
   requires both re-INVITEs to reach the agent as changes and neither as a
   second `answered`.
+- **A softphone behind a NAT says where it can really be reached (STUN,
+  RFC 8489).** Off by default; on with `SIPRAL_NAT_STUN` and a `stun_server`
+  in `sipral_stack_config_t`, or with `sipral::Mappings` from Rust. The stack
+  asks the server where its signalling socket appears from, moves every
+  account's `Contact` onto that address and registers it, and asks again
+  every 25 seconds, which also keeps the NAT's mapping open; a media socket
+  named with `sipral_stack_nat_map` is asked once before its call, and the
+  call's `c=` and `m=` name what the server saw — and, with ICE on, so does a
+  server-reflexive candidate beside the host one. A mapping that moves
+  re-registers at once, and a server that never answers leaves every address
+  as it would have been without STUN. `SIPRAL_EVENT_KIND_NAT_MAPPING` says
+  what each socket learned, and `SIPRAL_FEATURE_STUN` whether the build has
+  it. Proven in the lab from behind a NAT, against coturn and Asterisk.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

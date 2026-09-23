@@ -46,6 +46,7 @@ mod announce;
 mod audit_tests;
 mod call;
 mod calls;
+mod contact;
 mod dialoginfo;
 /// Validation shared by every way a digit crosses this stack's boundary, and
 /// the two ad hoc `Content-Type`s an INFO carries one in — grouped under its

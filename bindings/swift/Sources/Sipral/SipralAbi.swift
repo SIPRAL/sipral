@@ -684,6 +684,22 @@ public enum SipralEventKind: UInt32, Sendable {
     /// whatever `sipral_media_playback`/`sipral_media_capture` it is
     /// next given directly rather than through `sipral_media_mix`.
     case mediaUnjoined = 38
+    /// A STUN server said where one of this end's sockets appears from,
+    /// said it has moved, or never answered (RFC 8489). Only on a stack
+    /// created with `SIPRAL_NAT_STUN`.
+    ///
+    /// `payload.nat` says which socket and what it came to. For a
+    /// signalling socket the work is already done by the time this
+    /// arrives: every account whose `Contact` named the socket names the
+    /// public address now, and each one holding a binding has sent the
+    /// REGISTER that says so. For a media socket
+    /// `sipral_stack_nat_map` named, this is the moment a call can be
+    /// placed, rung or answered on it — before it, that is
+    /// `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
+    /// for is described by its own address, as it would have been with
+    /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
+    /// a socket is neither.
+    case natMapping = 39
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -892,6 +908,42 @@ public enum SipralRecovery: UInt32, Sendable {
     case resolve = 5
     /// There is no interface. Nothing is tried until there is one.
     case detach = 6
+}
+
+/// What a stack does about a NAT in front of it. Names for
+/// `sipral_stack_config_t::nat`.
+///
+/// Zero is not one of them: it means this build's own built-in default,
+/// which is SipralNat.off. `docs/06-nat.md` says why that is the
+/// default and what `rport` and symmetric RTP already carry without it.
+public enum SipralNat: UInt32, Sendable {
+    /// Ask nobody. Every address this stack writes is the one the
+    /// application gave it.
+    case off = 1
+    /// Ask the STUN server `sipral_stack_config_t::stun_server` names
+    /// where each socket appears from, and write that instead: the
+    /// signalling socket's in the `Contact`, a media socket's in `c=` and
+    /// `m=`.
+    ///
+    /// `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+    /// `SIPRAL_FEATURE_STUN`.
+    case stun = 2
+}
+
+/// What a socket's mapping came to. Names for
+/// `sipral_nat_event_t::mapping`.
+public enum SipralNatMapping: UInt32, Sendable {
+    /// The first answer: the socket appears at `public`.
+    case learned = 1
+    /// A later answer about a signalling socket named another address:
+    /// the NAT let the mapping go and made a new one, or the network
+    /// under the socket changed. `previous` is what it was.
+    case moved = 2
+    /// The server did not answer, in five and a half seconds, or refused.
+    /// The socket is described by its own address, exactly as it would
+    /// have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
+    /// its next refresh.
+    case unanswered = 3
 }
 
 /// Where a subscription is. Names for
@@ -1463,6 +1515,15 @@ public enum Sipral {
     /// An application that sets one of those policies must also drain
     /// `sipral_media_poll_transmit`; see there.
     public static let featureIce: UInt32 = 256
+
+    /// See SIPRAL_FEATURE_DTMF. STUN (RFC 8489): a stack created with
+    /// `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
+    /// writes the answer in the `Contact` and in `c=` and `m=`.
+    ///
+    /// Behind a compile-time feature of its own, which brings nothing ICE
+    /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
+    /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    public static let featureStun: UInt32 = 512
 
     /// The buffer a caller has to bring for one outgoing packet.
     ///
@@ -3590,6 +3651,97 @@ public enum Sipral {
     public static func stackStreamClosed(stack: SipralHandle, transport: UInt32, nowMs: UInt64) throws {
         try ensureAbi()
         let status = sipral_stack_stream_closed(stack, transport, nowMs)
+        try check(status)
+    }
+
+    /// Ask where a media socket appears from, before a call is described
+    /// on it.
+    ///
+    /// `local` is the address the socket is bound to, as `host:port` — the
+    /// same text the call's `media_address` will be. The request is waiting
+    /// in sipral_stack_poll_stun when this returns, the answer goes in
+    /// through sipral_stack_receive_stun, and
+    /// `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
+    /// a half seconds whatever the server does. From then on a call placed,
+    /// rung or answered with that `media_address` is described by the public
+    /// address, and asks for `a=rtcp-mux`, since one mapping describes one
+    /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+    ///
+    /// The mapping is spent by the call it describes. A socket used for a
+    /// second call is named here again — nothing kept the first answer true
+    /// in between.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// signalling socket of the stack's own, which is kept mapped already.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    public static func stackNatMap(stack: SipralHandle, local: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(local.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_nat_map(stack, p1.baseAddress, p1.count, nowMs)
+                }
+            }
+        try check(status)
+    }
+
+    /// Take the next STUN request a media socket has to send.
+    ///
+    /// The same record and the same rules as `sipral_stack_poll_transmit`,
+    /// on a queue of its own: loop until `len` comes back zero, after every
+    /// sipral_stack_nat_map, every sipral_stack_receive_stun and
+    /// every `sipral_stack_poll`, since the stack retransmits a request
+    /// nobody answered. `source` is always written, and it is the socket to
+    /// send from — the whole point is the address the server sees it come
+    /// from, so sending it from any other socket learns the wrong one.
+    /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    ///
+    /// Safety
+    ///
+    /// `transmit` must point at a `sipral_transmit_t` whose `size` member says
+    /// how long it is and whose buffers are writable for the capacities beside
+    /// them.
+    public static func stackPollStun(stack: SipralHandle, transmit: inout sipral_transmit_t) throws {
+        try ensureAbi()
+        let status = sipral_stack_poll_stun(stack, &transmit)
+        try check(status)
+    }
+
+    /// Hand over a datagram that arrived on a media socket
+    /// sipral_stack_nat_map named, before a call has media on it.
+    ///
+    /// `to` is the socket it arrived on, as `local` was given there; `from`
+    /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
+    /// server's answer, which is then the stack's and nobody else's;
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
+    /// a far end, a datagram from a stranger, an answer from any address but
+    /// the server's — which costs that one datagram and nothing more. Only
+    /// the server's own address is believed, and only an answer to a request
+    /// this stack sent: that is the whole defence against a forged answer
+    /// naming an address of the attacker's choosing as this end's own.
+    ///
+    /// Safety
+    ///
+    /// `data` must be readable for `len` bytes, `from` for `from_len`, and
+    /// `to` for `to_len`.
+    public static func stackReceiveStun(stack: SipralHandle, data: [UInt8], from: String, to: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            data.withUnsafeBufferPointer { p1 in
+                Array(from.utf8).withUnsafeBufferPointer { raw2 in
+                    raw2.withMemoryRebound(to: CChar.self) { p2 in
+                        Array(to.utf8).withUnsafeBufferPointer { raw3 in
+                            raw3.withMemoryRebound(to: CChar.self) { p3 in
+                                sipral_stack_receive_stun(stack, p1.baseAddress, p1.count, p2.baseAddress, p2.count, p3.baseAddress, p3.count, nowMs)
+                            }
+                        }
+                    }
+                }
+            }
         try check(status)
     }
 

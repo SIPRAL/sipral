@@ -49,10 +49,19 @@ publish = true
 # application can ask for ICE at all, and the policy decides whether this call
 # does. A build that must not carry the agent at all turns it off, and then
 # `Capabilities` says so before a call is placed.
-default = ["opus", "dtls", "ice"]
+#
+# `stun` is the fourth, and the cheapest of them: `sipral::Mappings`, the
+# Binding transactions that tell a softphone behind a NAT which address to put
+# in its `Contact` and its `c=` line. It brings nothing `ice` does not already
+# bring, and it costs nothing on the wire until an application names a STUN
+# server — `docs/06-nat.md` says what it costs then. A build that will only
+# ever run on a network with no NAT in front of it leaves it out, and
+# `Capabilities::stun` says so.
+default = ["opus", "dtls", "ice", "stun"]
 opus = ["sipral-media/opus"]
 dtls = ["dep:sipral-dtls", "dep:sipral-nat"]
 ice = ["dep:sipral-nat"]
+stun = ["dep:sipral-nat"]
 # `tls.rs` alone: a feature cannot turn on a dev-dependency, only a normal
 # one, so `rustls` sits here, optional, reached by nothing this crate ships.
 # It is how that one example supplies the TLS this crate never links itself

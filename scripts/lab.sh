@@ -15,6 +15,8 @@
 #   scripts/lab.sh opensips     the second proxy only
 #   scripts/lab.sh asterisk
 #   scripts/lab.sh baresip      only the phone-to-phone flows, against baresip
+#   scripts/lab.sh nat          only the call from behind a NAT, with STUN
+#                               against coturn, through the C ABI
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -172,7 +174,10 @@ mkdir -p interop/pcap
 teardown() {
     step "what the servers said"
     ( cd interop && docker compose logs --no-color | tail -80 )
-    ( cd interop && docker compose down ) >/dev/null 2>&1
+    # a `down` with no profile named leaves profiled services running and the
+    # networks only they use in place, so the `nat` step's two containers and
+    # its `inside` network go here too, in case it never got to remove them
+    ( cd interop && docker compose --profile nat down ) >/dev/null 2>&1
 }
 trap teardown EXIT
 
@@ -508,6 +513,73 @@ flows_baresip_c() {
             exit \$status"
 }
 
+# 8.5.5's own step: the C harness behind a NAT, registering and calling
+# Asterisk with the stack asking coturn where its sockets appear from
+# (SIPRAL_NAT_STUN). interop/nat is the NAT -- a container with a leg on the
+# lab network and one on `inside`, masquerading between them -- and the
+# harness runs on `inside` alone, with its default route through it, so the
+# address coturn reports for each socket is the NAT's and not the one the
+# socket is bound to. The harness checks that difference first and fails a
+# run where there is none, since a Contact that matched what STUN said would
+# then prove nothing. See interop/harness-c's own flow_nat for the rest.
+#
+# Both containers carry the `nat` profile, so the lab every other step sees
+# never has them; they come up here and are removed straight after, the way
+# opensips and baresip are. The harness container is the NAT's own image,
+# because it needs `ip` to set its route and nothing else a slim Debian
+# lacks, and it cannot install anything: `inside` has no way out but the NAT.
+# The lab's names do not resolve there either, so Asterisk is handed to it by
+# address.
+#
+# The networks are named from the Compose project rather than written out, so
+# that the step also runs under a COMPOSE_PROJECT_NAME of its own -- a second
+# copy of the lab beside one somebody else already has up.
+nat_flow() {
+    local beside natbox gateway coturn stun asterisk status
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    ( cd interop && docker compose --profile nat up -d --build coturn natbox ) >/dev/null 2>&1 \
+        || { printf '  could not start coturn and the NAT\n'; return 1; }
+    wait_for natbox "nat: masquerading out of" required nat || return 1
+    # coturn 4.18 logs the addresses it will listen on and then nothing about
+    # having opened them; the harness's own retransmissions cover the gap
+    wait_for coturn "Listener address to use" optional nat || true
+
+    natbox=$(cd interop && docker compose --profile nat ps -q natbox)
+    coturn=$(cd interop && docker compose --profile nat ps -q coturn)
+    asterisk=$(cd interop && docker compose ps -q asterisk)
+    gateway=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside\"}}{{.IPAddress}}{{end}}" \
+        "$natbox")
+    stun=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$coturn")
+    asterisk=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$asterisk")
+    if [ -z "$gateway" ] || [ -z "$stun" ] || [ -z "$asterisk" ]; then
+        printf '  could not read the addresses: NAT %s, coturn %s, Asterisk %s\n' \
+            "${gateway:-?}" "${stun:-?}" "${asterisk:-?}"
+        return 1
+    fi
+    printf '  behind %s, STUN at %s:3478, Asterisk at %s\n' "$gateway" "$stun" "$asterisk"
+
+    docker run --rm --network "${project}_inside" \
+        --cap-add NET_ADMIN \
+        --add-host "asterisk:$asterisk" \
+        -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=nat \
+        -e "SIPRAL_STUN_SERVER=$stun:3478" \
+        -e LD_LIBRARY_PATH=/lib-sipral \
+        -v "$HARNESS_C:/harness-c:ro" \
+        -v "$beside:/lib-sipral:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $gateway || exit 1
+            exec /harness-c asterisk 5060 9000"
+    status=$?
+    ( cd interop && docker compose --profile nat rm -sf coturn natbox ) >/dev/null 2>&1
+    return "$status"
+}
+
 # The same call again, over a link deliberately made bad in both directions.
 #
 # netem only ever shapes egress. That used to be enough on the strength of a
@@ -683,6 +755,20 @@ if [ "$WANT" = all ] || [ "$WANT" = baresip ]; then
     fi
     ( cd interop && docker compose stop baresip && docker compose rm -f baresip ) \
         >/dev/null 2>&1
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = nat ]; then
+    step "behind a NAT -- STUN against coturn, then register and call Asterisk, in C"
+    if [ -n "$HARNESS_C" ]; then
+        nat_flow && pass "registered and heard from behind the NAT, at the address STUN reported" \
+            || fail "behind a NAT"
+    elif [ "$WANT" = nat ]; then
+        # the flow is the C harness's, since the setting it proves is the C
+        # ABI's: asked for by name, a machine with no C harness fails it
+        fail "behind a NAT: there is no C harness to run it with"
+    else
+        printf '  note  no C harness, so the flow behind a NAT is skipped with the other C flows\n'
+    fi
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then

@@ -123,6 +123,10 @@ struct Managed {
     /// for its whole life, and its re-offers and session changes are the
     /// application's; see [`MediaEngine::answer_reoffer`].
     address: Option<SocketAddr>,
+    /// Where that socket appears from outside, when the call was given it
+    /// ([`CallMedia::public_address`]): what every description of the call
+    /// names in `c=` and `m=` instead of `address`.
+    public: Option<SocketAddr>,
     identity: StreamIdentity,
     session_id: u64,
     /// The `o=` version this end is up to. RFC 3264 §8 makes it the way one
@@ -222,13 +226,55 @@ pub struct CallMedia {
     pub catalog: CodecCatalog,
     /// How to open the session.
     pub config: MediaConfig,
+    /// Where the call's media socket appears from outside, when that is not
+    /// where it is bound — see [`CallMedia::public_address`].
+    pub public: Option<SocketAddr>,
 }
 
 impl CallMedia {
     /// Bundle a catalogue and a configuration for one call.
     #[must_use]
     pub fn new(catalog: CodecCatalog, config: MediaConfig) -> Self {
-        Self { catalog, config }
+        Self {
+            catalog,
+            config,
+            public: None,
+        }
+    }
+
+    /// Describe the call's media socket by the address it appears at from
+    /// outside rather than the one it is bound to.
+    ///
+    /// What `Mappings` learns from a STUN server for a
+    /// socket behind a NAT, or what a one-to-one NAT's configuration says.
+    /// Every description of the call names it in `c=` and `m=` — the offer,
+    /// the answer and every re-offer after them — while the session keeps
+    /// the bound address for everything that is local: the socket, and the
+    /// base of the call's ICE candidates.
+    ///
+    /// Two further things follow, and both are for the same reason — one
+    /// mapping describes one port. The description asks for `a=rtcp-mux`
+    /// (RFC 5761), as an ICE offer does, since RTCP on a port of its own
+    /// would need a mapping of its own; a peer that declines leaves RTCP on
+    /// the public port plus one, which a NAT that preserves ports maps
+    /// correctly and another does not, and what is lost then is the reports,
+    /// never the audio. And under an [`IcePolicy`](crate::IcePolicy) that
+    /// offers ICE, the address is a server-reflexive candidate beside the
+    /// host one, and the default candidate RFC 8839 §4.2.1.2 puts in `c=`.
+    #[must_use]
+    pub fn public_address(mut self, public: SocketAddr) -> Self {
+        self.public = Some(public);
+        self
+    }
+
+    /// The catalogue this call offers from: its own, asking for multiplexing
+    /// when the call is described by a public address.
+    fn offering(catalog: CodecCatalog, public: Option<SocketAddr>) -> CodecCatalog {
+        if public.is_some() {
+            catalog.with_rtcp_mux(true)
+        } else {
+            catalog
+        }
     }
 }
 
@@ -326,6 +372,23 @@ impl MediaEngine {
             #[cfg(feature = "dtls")]
             identity: None,
         }
+    }
+
+    /// STUN mappings against `server`, whose transaction ids are drawn from
+    /// this engine's own generator.
+    ///
+    /// The generator every SRTP key comes from, and the reason it is used
+    /// here rather than a seed of the application's: a transaction id is the
+    /// whole of what stops an attacker off the path from answering first and
+    /// naming an address of its choosing as this end's own, so it needs the
+    /// same unpredictability a key does, and this is the one place in a stack
+    /// that already has it. Drawing from it moves the keys this engine makes
+    /// afterwards along, the same as any other draw does, and reveals none of
+    /// them.
+    #[cfg(feature = "stun")]
+    #[must_use]
+    pub fn mappings(&mut self, server: SocketAddr) -> crate::Mappings {
+        crate::Mappings::new(server, self.keys.block())
     }
 
     /// The key and certificate this stack presents, making one if there is
@@ -519,6 +582,7 @@ impl MediaEngine {
         call: Option<CallHandle>,
         catalog: &CodecCatalog,
         address: SocketAddr,
+        public: Option<SocketAddr>,
         we_are_offerer: bool,
         now: Instant,
     ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
@@ -531,7 +595,7 @@ impl MediaEngine {
         {
             return Ok(Some(existing));
         }
-        crate::ice::LocalIce::draw(&mut self.keys, address, we_are_offerer, now).map(Some)
+        crate::ice::LocalIce::draw(&mut self.keys, address, public, we_are_offerer, now).map(Some)
     }
 
     /// Without the feature there is nothing to gather and no attribute to
@@ -543,6 +607,7 @@ impl MediaEngine {
         _call: Option<CallHandle>,
         _catalog: &CodecCatalog,
         _address: SocketAddr,
+        _public: Option<SocketAddr>,
         _we_are_offerer: bool,
         _now: Instant,
     ) -> Result<Option<crate::ice::LocalIce>, MediaError> {
@@ -830,14 +895,27 @@ impl MediaEngine {
         media: CallMedia,
         now: Instant,
     ) -> Result<CallHandle, MediaError> {
-        let CallMedia { catalog, config } = media;
+        let CallMedia {
+            catalog,
+            config,
+            public,
+        } = media;
+        let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
         // drawn after the identity, so that the same call placed with and
         // without SDES starts from the same SSRC and the same sequence number
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
-        let ice = self.ice_lines(None, &catalog, local, true, now)?;
-        let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let ice = self.ice_lines(None, &catalog, local, public, true, now)?;
+        let described = public.unwrap_or(local);
+        let mut offer = write_offer(
+            &catalog,
+            described,
+            session_id,
+            1,
+            keys,
+            keyed(dtls.as_ref()),
+        );
         describe_ice(&mut offer, ice.as_ref());
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
@@ -848,6 +926,7 @@ impl MediaEngine {
                 local: Some(offer),
                 remote: None,
                 address: Some(local),
+                public,
                 identity,
                 session_id,
                 version: 1,
@@ -912,12 +991,25 @@ impl MediaEngine {
         media: CallMedia,
         now: Instant,
     ) -> Result<CallHandle, MediaError> {
-        let CallMedia { catalog, config } = media;
+        let CallMedia {
+            catalog,
+            config,
+            public,
+        } = media;
+        let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
         let keys = catalog.srtp().offers().then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Offering, None, None, now)?;
-        let ice = self.ice_lines(None, &catalog, local, true, now)?;
-        let mut offer = write_offer(&catalog, local, session_id, 1, keys, keyed(dtls.as_ref()));
+        let ice = self.ice_lines(None, &catalog, local, public, true, now)?;
+        let described = public.unwrap_or(local);
+        let mut offer = write_offer(
+            &catalog,
+            described,
+            session_id,
+            1,
+            keys,
+            keyed(dtls.as_ref()),
+        );
         describe_ice(&mut offer, ice.as_ref());
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
@@ -927,6 +1019,7 @@ impl MediaEngine {
                 local: Some(offer),
                 remote: None,
                 address: Some(local),
+                public,
                 identity,
                 session_id,
                 version: 1,
@@ -1016,7 +1109,12 @@ impl MediaEngine {
         media: CallMedia,
         now: Instant,
     ) -> Result<(), MediaError> {
-        let CallMedia { catalog, config } = media;
+        let CallMedia {
+            catalog,
+            config,
+            public,
+        } = media;
+        let catalog = CallMedia::offering(catalog, public);
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         if managed.rung_with_media || agent.has_described(call) {
             let state = agent.call_state(call).unwrap_or(CallState::EarlyMedia);
@@ -1036,11 +1134,11 @@ impl MediaEngine {
         }
         let keys = will_key(&catalog, Some(&offer)).then(|| draw_key(&mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
-        let ice = self.ice_lines(Some(call), &catalog, local, false, now)?;
+        let ice = self.ice_lines(Some(call), &catalog, local, public, false, now)?;
         let mut description = write_answer(
             &catalog,
             &offer,
-            local,
+            public.unwrap_or(local),
             session_id,
             version,
             keys.as_ref(),
@@ -1054,6 +1152,7 @@ impl MediaEngine {
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.local = Some(description);
             managed.address = Some(local);
+            managed.public = public;
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
@@ -1138,7 +1237,13 @@ impl MediaEngine {
         if managed.rung_with_media {
             return self.answer_after_ring(agent, call, now);
         }
-        let CallMedia { catalog, config } = media;
+        let CallMedia {
+            catalog,
+            config,
+            public,
+        } = media;
+        let catalog = CallMedia::offering(catalog, public);
+        let described = public.unwrap_or(local);
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         let (session_id, version) = (managed.session_id, managed.version.saturating_add(1));
         let offered = managed.remote.clone();
@@ -1155,12 +1260,12 @@ impl MediaEngine {
             Side::Offering
         };
         let dtls = self.dtls_lines(&catalog, side, offered.as_ref(), None, now)?;
-        let ice = self.ice_lines(Some(call), &catalog, local, offered.is_none(), now)?;
+        let ice = self.ice_lines(Some(call), &catalog, local, public, offered.is_none(), now)?;
         let mut description = match offered {
             Some(offer) => write_answer(
                 &catalog,
                 &offer,
-                local,
+                described,
                 session_id,
                 version,
                 keys.as_ref(),
@@ -1168,7 +1273,7 @@ impl MediaEngine {
             )?,
             None => write_offer(
                 &catalog,
-                local,
+                described,
                 session_id,
                 version,
                 keys,
@@ -1183,6 +1288,7 @@ impl MediaEngine {
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.local = Some(description);
             managed.address = Some(local);
+            managed.public = public;
             managed.version = version;
             managed.catalog = catalog;
             managed.config = config;
@@ -1524,6 +1630,7 @@ impl MediaEngine {
                 local: None,
                 remote: body_description(Some(request)),
                 address: None,
+                public: None,
                 identity,
                 session_id,
                 version: 1,
@@ -1646,6 +1753,7 @@ impl MediaEngine {
         let Some(address) = managed.address else {
             return;
         };
+        let public = managed.public;
         // §8.3.2 binds a number from the moment either end writes it, and an
         // offer about to be refused was still written
         if let Some(offer) = offered.as_ref() {
@@ -1701,7 +1809,7 @@ impl MediaEngine {
                 return;
             }
         };
-        let ice = match self.ice_lines(Some(call), &catalog, address, false, now) {
+        let ice = match self.ice_lines(Some(call), &catalog, address, public, false, now) {
             Ok(ice) => ice,
             Err(error) => {
                 self.events.push_back((call, MediaEvent::Failed(error)));
@@ -1712,7 +1820,7 @@ impl MediaEngine {
         match write_answer(
             &catalog,
             &offer,
-            address,
+            public.unwrap_or(address),
             session_id,
             version,
             keys.as_ref(),

@@ -74,6 +74,7 @@ use sipral_core::msg::{HostRef, Uri};
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
+use crate::contact::{contact_at, contact_names};
 use crate::error::UaError;
 use crate::event::{RegistrationState, UaEvent};
 use crate::registration::spread;
@@ -647,6 +648,77 @@ impl UserAgent {
             self.climb(now);
         }
         Ok(())
+    }
+
+    /// This end is reached at `to` now, where it was reached at `from`: every
+    /// account on `transport` whose `Contact` names `from` is rewritten to
+    /// name `to`, and says so to its registrar.
+    ///
+    /// What a STUN server's answer about the signalling socket turns into
+    /// (`docs/06-nat.md`): `from` is the address the socket is bound to, or
+    /// the public address an earlier answer gave, and `to` is the one this
+    /// answer gives. Only the host and the port move. The user part, the
+    /// parameters and the headers the application wrote stay as written, and
+    /// a `Contact` written with a name or with some other address is one the
+    /// application chose on purpose and is left alone.
+    ///
+    /// An account that holds a binding, or is on its way to one, sends a
+    /// REGISTER at once with the new `Contact`, superseding anything in
+    /// flight the way [`UserAgent::retarget`] does: a registrar holding the
+    /// old one is routing this end's calls to an address that reaches
+    /// nothing. The old binding is not removed first. It expires on its own,
+    /// and a registrar that has this account's `+sip.instance` replaces it at
+    /// once (RFC 5626 §6). An account that was never asked to register, or is
+    /// giving its binding up, is only rewritten.
+    ///
+    /// Calls already up keep the `Contact` their dialog was given until their
+    /// next target refresh: every re-INVITE and UPDATE this stack sends — a
+    /// hold, a resume, a session timer's refresh — carries the account's
+    /// `Contact` as it is then (RFC 3261 §12.2), and none is sent just for
+    /// this.
+    ///
+    /// Answers how many accounts were rewritten.
+    ///
+    /// # Errors
+    /// [`UaError::Send`] when one of the REGISTERs cannot be built or sent.
+    /// Every account is rewritten before any is registered, so an error here
+    /// leaves no account naming `from`.
+    pub fn readdress(
+        &mut self,
+        transport: TransportId,
+        from: SocketAddr,
+        to: SocketAddr,
+        now: Instant,
+    ) -> Result<usize, UaError> {
+        let mut moved = Vec::new();
+        for (id, config) in &mut self.accounts {
+            if config.transport != transport || !contact_names(&config.contact, from) {
+                continue;
+            }
+            let Some(contact) = contact_at(&config.contact, to) else {
+                continue;
+            };
+            config.contact = contact;
+            moved.push(*id);
+        }
+        moved.sort_unstable();
+        let mut first_error = None;
+        for id in &moved {
+            let Some(reg) = self.registrations.get(id) else {
+                continue;
+            };
+            if reg.unregistering || (reg.transaction.is_none() && reg.due.is_none()) {
+                continue;
+            }
+            if let Err(error) = self.send_register(*id, false, now) {
+                first_error.get_or_insert(error);
+            }
+        }
+        self.drain(now);
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(moved.len()),
+        }
     }
 
     /// What is scheduled, and whether there is anything at all to do.
@@ -2003,6 +2075,86 @@ mod tests {
             agent.rebind(id, UDP, registrar(), &uri("sip:alice@192.0.2.1"), t0),
             Err(UaError::NoSuchAccount)
         );
+    }
+
+    // -- a NAT's public address ----------------------------------------------
+
+    fn contact_of(agent: &UserAgent, id: AccountId) -> String {
+        agent
+            .account(id)
+            .expect("the account")
+            .contact()
+            .as_str()
+            .to_owned()
+    }
+
+    #[test]
+    fn a_registered_account_moves_to_the_public_address_and_registers_it() {
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(1));
+        assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:41000");
+        let out = transmits(&mut agent);
+        assert_eq!(registering(&out).len(), 1, "one REGISTER, at once");
+        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        assert_eq!(
+            String::from_utf8_lossy(&contact),
+            "<sip:alice@203.0.113.7:41000>"
+        );
+
+        // and a later move starts from where the last one left it
+        let again: SocketAddr = "203.0.113.7:52000".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), again, t0), Ok(0));
+        assert_eq!(agent.readdress(UDP, public, again, t0), Ok(1));
+        assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:52000");
+    }
+
+    #[test]
+    fn an_account_never_registered_is_rewritten_and_sends_nothing() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        let trunk = agent.add_account(trunk());
+        let public: SocketAddr = "203.0.113.7:5060".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(2));
+        // the port is written out even where it is the default: the address
+        // is the NAT's, and what the NAT said is a port as well as a host
+        assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:5060");
+        assert_eq!(contact_of(&agent, trunk), "sip:pbx@203.0.113.7:5060");
+        assert!(transmits(&mut agent).is_empty());
+    }
+
+    #[test]
+    fn a_contact_the_application_chose_is_left_alone() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let named = agent.add_account(Account::new(
+            uri("sip:carol@example.com"),
+            uri("sip:example.com"),
+            uri("sip:carol@phone.example.com"),
+            UDP,
+            registrar(),
+        ));
+        let elsewhere = agent.add_account(Account::new(
+            uri("sip:dave@example.com"),
+            uri("sip:example.com"),
+            uri("sip:dave@192.0.2.1:5070"),
+            UDP,
+            registrar(),
+        ));
+        let other_transport = agent.add_account(Account::new(
+            uri("sip:erin@example.com"),
+            uri("sip:example.com"),
+            uri("sip:erin@192.0.2.1"),
+            GONE,
+            registrar(),
+        ));
+        let public: SocketAddr = "203.0.113.7:5060".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(0));
+        assert_eq!(contact_of(&agent, named), "sip:carol@phone.example.com");
+        assert_eq!(contact_of(&agent, elsewhere), "sip:dave@192.0.2.1:5070");
+        assert_eq!(contact_of(&agent, other_transport), "sip:erin@192.0.2.1");
     }
 
     #[test]

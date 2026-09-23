@@ -484,7 +484,11 @@ entry! {
             state
                 .agent
                 .rebind(id, transport, remote, &contact, now)
-                .map_err(|error| ua_failed(&error))
+                .map_err(|error| ua_failed(&error))?;
+            // a `Contact` naming a socket whose public address is already
+            // known is written as that address, the same as when it was added
+            crate::nat::Nat::contacts_changed(state, now);
+            Ok(())
         })
     }
 }

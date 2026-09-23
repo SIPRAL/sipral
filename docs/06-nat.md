@@ -20,7 +20,9 @@ Most of the NAT problem in SIP telephony is solved before ICE is reached:
 5. **TURN** as the relay of last resort.
 
 Steps 1 to 3 cover the large majority of carrier and PBX paths, and they are in
-phase 1. Steps 4 and 5 are phase 2.
+phase 1. Step 4 is in the facade and the C ABI, off unless asked for — *STUN,
+from a softphone behind a NAT* below. Step 5 waits for a phone to prove it on
+(phase 4).
 
 That is a deliberate ordering, not a refusal. Full ICE — gathering, checks,
 nomination, role conflicts, restarts, consent — is written on top of the pieces
@@ -73,7 +75,7 @@ chosen for it rather than for the general case.
 | Mechanism | Default | On the wire if turned on |
 |---|---|---|
 | ICE, in any role | **off** | **143 bytes** per candidate, at a floor of one, plus a round of checks before the first audio packet |
-| STUN | off | its own packets; nothing on a request |
+| STUN | off | one 20-byte Binding request per socket, again every 25 s on the signalling socket; nothing on a request |
 | TURN | off | a 4-byte channel header per media packet |
 
 The 143 is measured, not estimated, and pinned by
@@ -98,13 +100,15 @@ the default is still the table above. The switch decides what an offer
 carries; the feature `ice` decides whether the agent is compiled in at all,
 and `Capabilities::ice` says which before a call is placed.
 
-What the switch turns on is host candidates and nothing else: no STUN server,
-no TURN server, one candidate per call. That cut is what keeps an offer a
-single pass of work — with no server to wait for, gathering finishes before
-the call that started it returns — so neither the Rust API nor the C ABI grew
-a two-phase description to accommodate it. A server-reflexive candidate is the
-next step and costs one more 143-byte line per address; what it does not cost
-is any of the above.
+What the switch turns on is a host candidate, and a server-reflexive one
+beside it when the call's media socket was mapped by STUN first (below). The
+agent itself is configured with no STUN and no TURN server. That cut is what
+keeps an offer a single pass of work — with no server to wait for, gathering
+finishes before the call that started it returns — so neither the Rust API nor
+the C ABI grew a two-phase description to accommodate it. The reflexive
+candidate costs one more 143-byte line; it does not cost a second question to
+the server, because it is the answer the stack already has for the `c=` line a
+peer without ICE reads.
 
 **A peer that does not do ICE is not a peer that loses its call.** Three
 conditions each drop the agent and leave the stream on `c=`/`m=` and symmetric
@@ -158,6 +162,101 @@ No NAT type classification. RFC 5389 removed it when it obsoleted RFC 3489: the
 classification algorithm proved faulty because real NATs do not fit the classic
 types, and the technique was too brittle across the variety of devices in the
 field (RFC 5389 §2 and §19).
+
+### STUN, from a softphone behind a NAT
+
+`rport` and symmetric RTP carry a path when the far end corrects what it was
+told. STUN is for the far end that does not: a registrar with no NAT helper
+that sends the INVITE to the `Contact` it holds, a peer that sends its audio
+to `c=` and nowhere else. For those this end has to write its public address
+in the first place, and a Binding request from the socket in question is how
+it learns it. Off by default everywhere; on with `SIPRAL_NAT_STUN` and a
+`stun_server` in `sipral_stack_config_t`, or with `sipral::Mappings` from Rust.
+`Capabilities::stun` and `SIPRAL_FEATURE_STUN` say whether the build has it.
+
+The decisions, and why each one is what it is:
+
+- **Where the transaction lives.** In `sipral::Mappings`, sans-I/O like
+  everything else: it hands out datagrams for the application's socket to send
+  and takes back what arrives, and it reads no clock. One transaction per
+  socket against one server, because each socket is its own NAT binding and a
+  NAT that maps them to different public ports — most do — answers
+  differently for each. The C ABI keeps one on the stack.
+- **Which address goes where.** The signalling socket's answer goes into the
+  `Contact` of every account on that transport whose `Contact` names the
+  socket's own address (`UserAgent::readdress`), and a media socket's answer
+  into the `c=` line and the `m=` port of the call described on it
+  (`CallMedia::public_address`). They are never mixed: the SIP socket's
+  mapping says nothing about the RTP socket's. The `Via` `sent-by` stays the
+  local address. `rport` already brings the response back along the path the
+  request took, and a `Via` naming an address this host does not own is a lie
+  a strict server can catch.
+- **How the signalling socket is sent from.** Its requests leave through the
+  transport's own queue (`sipral_stack_poll_transmit`) and its answers come
+  back through the transport's own receive call, taken out before the SIP
+  parser sees them. An application's loop does not change at all.
+- **How a media socket is sent from.** It is the application's, bound for one
+  call, and it exists before the call does. So the application names it
+  (`sipral_stack_nat_map`), sends what `sipral_stack_poll_stun` hands out from
+  it — the record says which socket, since sending from any other learns the
+  wrong mapping — and hands back what arrives until
+  `SIPRAL_EVENT_KIND_NAT_MAPPING` says the answer is in. That is the one wait
+  STUN adds, and it is the application's, before the call: the offer itself is
+  still written in one pass. A call described on a socket still being asked
+  about is refused with `SIPRAL_STATUS_WRONG_STATE` rather than written with an
+  address nobody outside can reach. The answer is spent by the call it
+  describes; a socket used again is asked again.
+- **How long to wait.** Four requests at RFC 8489's 500 ms RTO and two more
+  seconds for the last: five and a half seconds, the same order as ICE's own
+  gathering timeout. The RFC's default Rc of seven waits 39.5 seconds, which
+  for the first answer is a REGISTER or a call held that long for a server that
+  is not there.
+- **When the server does not answer.** The socket is described by its own
+  address, exactly as it would have been with STUN off — the fallback is the
+  configuration that already worked — and the event says so.
+- **Refresh.** The signalling socket is asked again every 25 seconds for as
+  long as it is bound: the figure the endpoint's own stream keepalive uses,
+  short enough for the NATs that release an idle UDP mapping after thirty
+  seconds, which RFC 4787 §4.3 forbids and which are deployed all the same.
+  The same request is the keepalive: RFC 5626 §4.4.2's STUN keepalive is this
+  exchange addressed to the edge proxy, and this one is addressed to the STUN
+  server, which keeps the mapping open for a NAT whose mapping is
+  endpoint-independent (RFC 4787 REQ-1). It does not open a NAT's filter
+  towards the registrar; the registration's own refreshes do that. A media
+  socket is asked once. Once a call runs on it, RTP every frame and RTCP every
+  few seconds hold its binding, and a STUN request beside them would only
+  compete with them for the same mapping.
+- **When the mapping changes.** A refresh that answers with a different
+  address is `SIPRAL_NAT_MAPPING_MOVED`: every account is moved onto the new
+  address and each one holding a binding registers it at once, superseding the
+  one in flight. The old binding is not removed first; it expires on its own,
+  and a registrar holding the account's `+sip.instance` replaces it at once
+  (RFC 5626 §6). A call already up is not re-INVITEd just for this. Its next
+  re-INVITE or UPDATE — a hold, a resume, the session timer's own refresh —
+  carries the account's `Contact` as it is then, which is the target refresh
+  RFC 3261 §12.2 describes, and until then the far end reaches this end along
+  the flow the dialog is already on. A media mapping is not watched during a
+  call: nothing refreshes it, and a far end that latches follows it, while one
+  that does not is the case ICE, or TURN, exists for. Rebinding a transport at
+  the same address — what an application does after a network change — asks
+  again at once rather than at the next refresh.
+- **Multiplexing.** A call described by a public address asks for
+  `a=rtcp-mux`, because one mapping describes one port. A far end that
+  declines sends RTCP to the public port plus one, which a NAT that keeps ports
+  in step maps and another does not; what is lost then is the reports, never
+  the audio.
+- **With ICE on.** The same public address is the call's server-reflexive
+  candidate (RFC 8445 §5.1.1.2), with the host candidate as its base and
+  related address, and the default candidate RFC 8839 §4.2.1.2 puts in `c=` —
+  so a peer running §4.2.5's mismatch check finds it among the candidates. The
+  agent is not asked to query the server a second time. An address equal to
+  the host's own — a host with no NAT in front of it — adds nothing, as §5.1.3
+  asks.
+- **Who is believed.** Only the configured server's address, and only an
+  answer carrying the id of a request this end sent. The ids come from the
+  media engine's generator, the one SRTP keys come from: an attacker off the
+  path who could guess one could answer first and have this end advertise an
+  address of the attacker's choosing, in every `Contact` and every offer.
 
 ## TURN
 
@@ -293,9 +392,13 @@ Not done yet: TURN over TCP or TLS (the TURN client has the framing; the
 agent's datagram model does not carry it), and `a=remote-candidates` (RFC 8839
 §4.4.1.2.2). The second is not written because nothing yet writes an offer it
 would go in: it belongs in the updated offer a controlling agent sends after
-nomination, and only when the selected pair differs from the default candidate
-pair — which cannot happen while the facade gathers one candidate per
-component. It comes with the pass that lifts that.
+nomination, when the selected pair differs from the default candidate pair.
+With a reflexive candidate that can now happen in address — `c=` names the
+reflexive address and the selected pair's local candidate is its base, the
+same socket — and on the remote side whenever the peer offered more than one
+candidate; a later re-offer from this stack (a hold, a codec change) still
+names the reflexive address as default and carries no `a=remote-candidates`.
+It comes with the pass that writes the updated offer.
 
 It is proven against itself and against the lite agent over a simulated
 network: endpoint-independent mapping with address-dependent filtering, a

@@ -49,10 +49,18 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # without the feature answers `SIPRAL_STATUS_NOT_SUPPORTED` to the policies
 # and never emits the event, and `SIPRAL_FEATURE_ICE` says so before an
 # application asks.
-default = ["opus", "dtls", "ice"]
+#
+# `stun` is the fourth, and branches here for the same reason: the stack's
+# mappings are the facade's `Mappings`. `SIPRAL_NAT_STUN`, the three
+# `sipral_stack_*stun*`/`nat` entry points and `SIPRAL_EVENT_KIND_NAT_MAPPING`
+# are in every build of the header; a build without the feature refuses
+# `SIPRAL_NAT_STUN` with `SIPRAL_STATUS_NOT_SUPPORTED`, and
+# `SIPRAL_FEATURE_STUN` says so first.
+default = ["opus", "dtls", "ice", "stun"]
 opus = ["sipral/opus"]
 dtls = ["sipral/dtls"]
 ice = ["sipral/ice"]
+stun = ["sipral/stun"]
 
 [dependencies]
 # the facade, which is what carries media across this boundary. The two below

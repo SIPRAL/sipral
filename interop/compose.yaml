@@ -92,6 +92,46 @@ services:
       - ./baresip/config/accounts:/etc/sipral-baresip/accounts:ro
     networks: [lab]
 
+  # 8.5.5's pair: a STUN server on the lab network, and a NAT between it and
+  # a network of its own, `inside`, where scripts/lab.sh's `nat` step puts
+  # the C harness. Behind the NAT, what coturn reports for a socket differs
+  # from the address the socket is bound to, which is the only way a flow can
+  # tell STUN doing its job from STUN doing nothing -- see interop/nat. Both
+  # carry the `nat` profile, so a run that does not name that step starts
+  # neither and every other flow sees the lab it always saw. coturn is BSD,
+  # pinned to the release current on 2026-09-23, and answers Binding
+  # requests only (`--stun-only`): nothing here allocates a relay. From 4.18
+  # DTLS and the admin CLI are off unless asked for, and `--no-dtls` and
+  # `--no-cli` are refused rather than ignored, so they are not here.
+  coturn:
+    image: coturn/coturn:4.18.0-debian
+    profiles: [nat]
+    command:
+      - -n
+      - --stun-only
+      - --listening-port=3478
+      - --no-tls
+      - --log-file=stdout
+      - --simple-log
+    networks: [lab]
+
+  natbox:
+    build:
+      context: ./nat
+    image: sipral-lab-nat
+    profiles: [nat]
+    command: ["sh", "/usr/local/bin/sipral-nat-route"]
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks: [lab, inside]
+
 networks:
   lab:
     driver: bridge
+  # No way out but the NAT: Docker gives an internal network no route to the
+  # host or to any other network, so a packet from `inside` reaches the lab
+  # only by way of `natbox`, translated.
+  inside:
+    driver: bridge
+    internal: true

@@ -6316,3 +6316,256 @@ fn a_joined_calls_recording_keeps_a_far_end_it_never_dialled() {
          which reaches it only by way of the joined pair: {audio:?}"
     );
 }
+
+// -- behind a NAT: what a STUN server said, in the Contact and the offer ------
+
+/// Where the lab's STUN server is, as far as these tests are concerned.
+#[cfg(feature = "stun")]
+fn stun_server() -> SocketAddr {
+    "198.51.100.1:3478".parse().expect("an address")
+}
+
+/// What a NAT in front of the caller shows the world for each of its two
+/// sockets: another host, and another port for each.
+#[cfg(feature = "stun")]
+fn behind_the_nat(local: SocketAddr) -> SocketAddr {
+    let port = if local == caller_sip() {
+        41_000
+    } else {
+        41_002
+    };
+    SocketAddr::new("203.0.113.7".parse().expect("an address"), port)
+}
+
+/// Map the caller's two sockets against a STUN server that answers every
+/// request with [`behind_the_nat`], and hand each answer to where it goes:
+/// the signalling socket's to the user agent, which moves the accounts onto
+/// it, and the media socket's back to the test, for the call it places.
+#[cfg(feature = "stun")]
+fn map_the_caller(pair: &mut Pair) -> SocketAddr {
+    use crate::nat::tests::answer;
+    use crate::{Keep, MappingEvent, MappingState};
+
+    let mut mappings = pair.caller.engine.mappings(stun_server());
+    mappings.map(caller_sip(), Keep::Refreshed, pair.now);
+    mappings.map(caller_media(), Keep::Once, pair.now);
+    while let Some(request) = mappings.poll_transmit() {
+        assert_eq!(request.destination, stun_server());
+        let reply = answer(&request.payload, behind_the_nat(request.local));
+        assert!(mappings.receive(request.local, stun_server(), &reply, pair.now));
+    }
+    let mut media = None;
+    while let Some(event) = mappings.poll_event() {
+        match event {
+            MappingEvent::Learned { local, public } if local == caller_sip() => {
+                pair.caller
+                    .agent
+                    .readdress(UDP, local, public, pair.now)
+                    .expect("the accounts move");
+            }
+            MappingEvent::Learned { local, public } if local == caller_media() => {
+                media = Some(public);
+            }
+            other => panic!("nothing else was asked: {other:?}"),
+        }
+    }
+    assert_eq!(
+        mappings.state(caller_media()),
+        Some(MappingState::Mapped(behind_the_nat(caller_media())))
+    );
+    media.expect("the media socket was answered")
+}
+
+/// The `Contact` of the first request in `datagrams` whose method is `method`.
+#[cfg(feature = "stun")]
+fn contact_of_request(datagrams: &[Vec<u8>], method: &str) -> Option<String> {
+    datagrams.iter().find_map(|datagram| {
+        if !datagram.starts_with(method.as_bytes()) {
+            return None;
+        }
+        let mut scratch = ParseScratch::new();
+        let message = sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient).ok()?;
+        message
+            .header(sipral_core::msg::HeaderName::Contact)
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+    })
+}
+
+/// Place the caller's call on the public address its media socket was given,
+/// capturing the INVITE on its way, and take the call all the way to
+/// confirmed.
+#[cfg(feature = "stun")]
+fn place_from_behind_the_nat(pair: &mut Pair, catalog: CodecCatalog) -> (CallHandle, Vec<Vec<u8>>) {
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let public = map_the_caller(pair);
+    let media = CallMedia::new(catalog, MediaConfig::default()).public_address(public);
+    let placed = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            media,
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let invite = pair.caller.outbound();
+    for datagram in &invite {
+        pair.callee.deliver(datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+    (placed, invite)
+}
+
+#[cfg(feature = "stun")]
+#[test]
+fn what_the_stun_server_said_is_the_contact_and_the_media_address_the_far_end_is_given() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog.clone());
+    let (call, invite) = place_from_behind_the_nat(&mut pair, catalog);
+    let remote = pair.callee.call().expect("the callee's side of the call");
+
+    // the signalling socket's answer, in the Contact of the INVITE: what the
+    // far end sends its BYE and its re-INVITEs to
+    assert_eq!(
+        contact_of_request(&invite, "INVITE").as_deref(),
+        Some("<sip:alice@203.0.113.7:41000>")
+    );
+
+    // the media socket's, in `c=` and `m=`: what the far end sends its audio
+    // to. Read off the INVITE the callee was handed, since that is what a far
+    // end with no NAT helper acts on
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    assert!(offer.contains("c=IN IP4 203.0.113.7\r\n"), "{offer}");
+    assert!(offer.contains("m=audio 41002 "), "{offer}");
+    assert!(
+        !offer.contains("192.0.2.1"),
+        "the private address leaked into the offer: {offer}"
+    );
+    // one mapping describes one port, so the call asks for one
+    assert!(offer.contains("a=rtcp-mux\r\n"), "{offer}");
+
+    // and the far end's session sends there. This one's catalogue does not
+    // multiplex, so it declined the offer's `a=rtcp-mux` and sends its reports
+    // to the public port plus one — which a NAT that keeps ports in step maps
+    // and another does not, and what is lost then is the reports and never
+    // the audio (`CallMedia::public_address`)
+    let theirs = pair
+        .callee
+        .engine
+        .session(remote)
+        .expect("the callee's media");
+    assert_eq!(theirs.destination(), behind_the_nat(caller_media()));
+    assert_eq!(
+        theirs.control_destination(),
+        Some(SocketAddr::new(
+            behind_the_nat(caller_media()).ip(),
+            behind_the_nat(caller_media()).port() + 1
+        ))
+    );
+    drop(theirs);
+
+    // while this end's own session stays on the socket it is bound to: the
+    // public address is what it is called, not where it listens
+    let ours = pair
+        .caller
+        .engine
+        .session(call)
+        .expect("the caller's media");
+    assert_eq!(ours.destination(), callee_media());
+}
+
+#[cfg(feature = "stun")]
+#[test]
+fn a_hold_after_the_mapping_moved_carries_the_new_contact_and_keeps_the_public_media() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog.clone());
+    let (call, _) = place_from_behind_the_nat(&mut pair, catalog);
+
+    // the NAT let the signalling mapping go and made another: the next
+    // re-INVITE is the target refresh (RFC 3261 §12.2) that tells the far end
+    let moved: SocketAddr = "203.0.113.7:52000".parse().expect("an address");
+    pair.caller
+        .agent
+        .readdress(UDP, behind_the_nat(caller_sip()), moved, pair.now)
+        .expect("the account moves");
+    let _ = pair.caller.outbound();
+    pair.caller
+        .agent
+        .hold(call, pair.now)
+        .expect("a confirmed call can be held");
+    pair.caller.drain(pair.now, false);
+    let reinvite = pair.caller.outbound();
+    assert_eq!(
+        contact_of_request(&reinvite, "INVITE").as_deref(),
+        Some("<sip:alice@203.0.113.7:52000>")
+    );
+    for datagram in &reinvite {
+        pair.callee.deliver(datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+
+    // the hold is a re-offer, so it is read off the session change and not
+    // off the INVITE that opened the call
+    let (_, held) = last_described(&pair.callee).expect("the callee saw the hold");
+    let held = held.to_string();
+    assert!(held.contains("a=sendonly"), "that was not the hold: {held}");
+    assert!(held.contains("c=IN IP4 203.0.113.7\r\n"), "{held}");
+    assert!(held.contains("m=audio 41002 "), "{held}");
+}
+
+#[cfg(all(feature = "stun", feature = "ice"))]
+#[test]
+fn a_public_address_is_the_reflexive_candidate_and_the_default_one() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let _ = place_from_behind_the_nat(&mut pair, catalog);
+    let described = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer");
+    let offer = one_stream(&described);
+    let candidates: Vec<&str> = offer
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "candidate")
+        .filter_map(|attribute| attribute.value.as_deref())
+        .collect();
+    assert_eq!(
+        candidates.len(),
+        2,
+        "a host and a reflexive: {candidates:?}"
+    );
+    assert!(
+        candidates[0].contains("192.0.2.1 40000 typ host"),
+        "{}",
+        candidates[0]
+    );
+    assert!(
+        candidates[1].contains("203.0.113.7 41002 typ srflx raddr 192.0.2.1 rport 40000"),
+        "{}",
+        candidates[1]
+    );
+    // RFC 8839 §4.2.1.2 puts the reflexive one in `c=` and `m=`, and a peer
+    // running RFC 8839 §4.2.5's mismatch check finds it among the candidates
+    let text = described.to_string();
+    assert!(text.contains("c=IN IP4 203.0.113.7\r\n"), "{text}");
+    assert!(text.contains("m=audio 41002 "), "{text}");
+    let remote = sipral_nat::ice::parse_remote(&described, &offer).expect("ICE attributes");
+    assert!(
+        !sipral_nat::ice::ice_mismatch(&described, &offer, &remote, true),
+        "the default destination is one of the candidates"
+    );
+}

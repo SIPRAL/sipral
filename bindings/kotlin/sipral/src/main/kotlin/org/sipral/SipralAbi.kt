@@ -1018,6 +1018,24 @@ enum class SipralEventKind(val value: Int) {
      * next given directly rather than through `sipral_media_mix`.
      */
     MEDIA_UNJOINED(38),
+    /**
+     * A STUN server said where one of this end's sockets appears from,
+     * said it has moved, or never answered (RFC 8489). Only on a stack
+     * created with `SIPRAL_NAT_STUN`.
+     *
+     * `payload.nat` says which socket and what it came to. For a
+     * signalling socket the work is already done by the time this
+     * arrives: every account whose `Contact` named the socket names the
+     * public address now, and each one holding a binding has sent the
+     * REGISTER that says so. For a media socket
+     * `sipral_stack_nat_map` named, this is the moment a call can be
+     * placed, rung or answered on it — before it, that is
+     * `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
+     * for is described by its own address, as it would have been with
+     * no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
+     * a socket is neither.
+     */
+    NAT_MAPPING(39),
     ;
 
     companion object {
@@ -1420,6 +1438,66 @@ enum class SipralRecovery(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralRecovery? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a stack does about a NAT in front of it. Names for
+ * `sipral_stack_config_t::nat`.
+ *
+ * Zero is not one of them: it means this build's own built-in default,
+ * which is SipralNat.OFF. `docs/06-nat.md` says why that is the
+ * default and what `rport` and symmetric RTP already carry without it.
+ */
+enum class SipralNat(val value: Int) {
+    /**
+     * Ask nobody. Every address this stack writes is the one the
+     * application gave it.
+     */
+    OFF(1),
+    /**
+     * Ask the STUN server `sipral_stack_config_t::stun_server` names
+     * where each socket appears from, and write that instead: the
+     * signalling socket's in the `Contact`, a media socket's in `c=` and
+     * `m=`.
+     *
+     * `SIPRAL_STATUS_NOT_SUPPORTED` in a build without
+     * `SIPRAL_FEATURE_STUN`.
+     */
+    STUN(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNat? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a socket's mapping came to. Names for
+ * `sipral_nat_event_t::mapping`.
+ */
+enum class SipralNatMapping(val value: Int) {
+    /**
+     * The first answer: the socket appears at `public`.
+     */
+    LEARNED(1),
+    /**
+     * A later answer about a signalling socket named another address:
+     * the NAT let the mapping go and made a new one, or the network
+     * under the socket changed. `previous` is what it was.
+     */
+    MOVED(2),
+    /**
+     * The server did not answer, in five and a half seconds, or refused.
+     * The socket is described by its own address, exactly as it would
+     * have been with `SIPRAL_NAT_OFF`; a signalling socket asks again at
+     * its next refresh.
+     */
+    UNANSWERED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNatMapping? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -2944,6 +3022,26 @@ class SipralStackConfig(
      * unmoved.
      */
     val ice: Long = 0,
+    /**
+     * What this stack does about a NAT in front of it: a `SipralNat`, or
+     * zero for this build's own built-in default, which is
+     * `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
+     * socket appears from and writes the answer where a far end reads
+     * it — see crate::nat. Any other value is
+     * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+     *
+     * Appended at the tail (task 8.5.5), with the two below; the pinned
+     * `MIN_SIZE` is unmoved.
+     */
+    val nat: Long = 0,
+    /**
+     * The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
+     * address, not a name, since resolving one is the application's.
+     * Required with `SIPRAL_NAT_STUN` and refused without it, since a
+     * server nothing asks is a setting nothing reads. Copied; the
+     * caller's buffer is its own again when this returns.
+     */
+    val stunServer: String? = null,
 )
 
 /**
@@ -3585,7 +3683,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -3660,6 +3758,9 @@ internal object SipralNative {
     external fun sipral_stack_transport_bind(stack: Long, transport: Long, protocol: Long, local: ByteArray, remote: ByteArray, nowMs: Long, transportId: LongArray): Int
     external fun sipral_stack_transport_failed(stack: Long, transport: Long, error: Long, nowMs: Long): Int
     external fun sipral_stack_stream_closed(stack: Long, transport: Long, nowMs: Long): Int
+    external fun sipral_stack_nat_map(stack: Long, local: ByteArray, nowMs: Long): Int
+    external fun sipral_stack_poll_stun(stack: Long, transmit: Long): Int
+    external fun sipral_stack_receive_stun(stack: Long, data: ByteArray, from: ByteArray, to: ByteArray, nowMs: Long): Int
     external fun sipral_event_kind_name(kind: Long): String?
     external fun sipral_message_header_count(message: ByteArray, name: ByteArray, count: LongArray): Int
     external fun sipral_message_header(message: ByteArray, name: ByteArray, index: Long, offset: LongArray, len: LongArray): Int
@@ -3822,6 +3923,17 @@ object Sipral {
      * `sipral_media_poll_transmit`; see there.
      */
     const val FEATURE_ICE: Long = 256
+
+    /**
+     * See SIPRAL_FEATURE_DTMF. STUN (RFC 8489): a stack created with
+     * `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
+     * writes the answer in the `Contact` and in `c=` and `m=`.
+     *
+     * Behind a compile-time feature of its own, which brings nothing ICE
+     * does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
+     * without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+     */
+    const val FEATURE_STUN: Long = 512
 
     /**
      * The buffer a caller has to bring for one outgoing packet.
@@ -4057,11 +4169,12 @@ object Sipral {
         val configBindAddress = config.bindAddress?.toByteArray(Charsets.UTF_8)
         val configUserAgent = config.userAgent?.toByteArray(Charsets.UTF_8)
         val configCodecs = config.codecs?.toByteArray(Charsets.UTF_8)
+        val configStunServer = config.stunServer?.toByteArray(Charsets.UTF_8)
         val stackSlot = LongArray(1)
         val configEventCallback = SipralEventListeners.register(config.eventListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
         }
@@ -5864,6 +5977,84 @@ object Sipral {
      */
     fun stackStreamClosed(stack: Long, transport: Long, nowMs: Long) {
         check(SipralNative.sipral_stack_stream_closed(stack, transport, nowMs))
+    }
+
+    /**
+     * Ask where a media socket appears from, before a call is described
+     * on it.
+     *
+     * `local` is the address the socket is bound to, as `host:port` — the
+     * same text the call's `media_address` will be. The request is waiting
+     * in sipral_stack_poll_stun when this returns, the answer goes in
+     * through sipral_stack_receive_stun, and
+     * `SIPRAL_EVENT_KIND_NAT_MAPPING` says what it came to, within five and
+     * a half seconds whatever the server does. From then on a call placed,
+     * rung or answered with that `media_address` is described by the public
+     * address, and asks for `a=rtcp-mux`, since one mapping describes one
+     * port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+     *
+     * The mapping is spent by the call it describes. A socket used for a
+     * second call is named here again — nothing kept the first answer true
+     * in between.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+     * `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+     * signalling socket of the stack's own, which is kept mapped already.
+     *
+     * Safety
+     *
+     * `local` must be readable for `local_len` bytes.
+     */
+    fun stackNatMap(stack: Long, local: String, nowMs: Long) {
+        val localBytes = local.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_nat_map(stack, localBytes, nowMs))
+    }
+
+    /**
+     * Take the next STUN request a media socket has to send.
+     *
+     * The same record and the same rules as `sipral_stack_poll_transmit`,
+     * on a queue of its own: loop until `len` comes back zero, after every
+     * sipral_stack_nat_map, every sipral_stack_receive_stun and
+     * every `sipral_stack_poll`, since the stack retransmits a request
+     * nobody answered. `source` is always written, and it is the socket to
+     * send from — the whole point is the address the server sees it come
+     * from, so sending it from any other socket learns the wrong one.
+     * `transport` is zero and names nothing here, and `protocol` is UDP.
+     *
+     * Safety
+     *
+     * `transmit` must point at a `sipral_transmit_t` whose `size` member says
+     * how long it is and whose buffers are writable for the capacities beside
+     * them.
+     */
+    fun stackPollStun(stack: Long, transmit: Long) {
+        check(SipralNative.sipral_stack_poll_stun(stack, transmit))
+    }
+
+    /**
+     * Hand over a datagram that arrived on a media socket
+     * sipral_stack_nat_map named, before a call has media on it.
+     *
+     * `to` is the socket it arrived on, as `local` was given there; `from`
+     * is where it came from. `SIPRAL_STATUS_OK` when it was the STUN
+     * server's answer, which is then the stack's and nobody else's;
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for anything else — early media from
+     * a far end, a datagram from a stranger, an answer from any address but
+     * the server's — which costs that one datagram and nothing more. Only
+     * the server's own address is believed, and only an answer to a request
+     * this stack sent: that is the whole defence against a forged answer
+     * naming an address of the attacker's choosing as this end's own.
+     *
+     * Safety
+     *
+     * `data` must be readable for `len` bytes, `from` for `from_len`, and
+     * `to` for `to_len`.
+     */
+    fun stackReceiveStun(stack: Long, data: ByteArray, from: String, to: String, nowMs: Long) {
+        val fromBytes = from.toByteArray(Charsets.UTF_8)
+        val toBytes = to.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_stack_receive_stun(stack, data, fromBytes, toBytes, nowMs))
     }
 
     /**

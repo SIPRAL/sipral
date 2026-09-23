@@ -351,13 +351,19 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
 /// a call is allowed to name both and a second branch that rebuilt the
 /// catalogue from names would be a branch that dropped the policy the first
 /// one applied.
+///
+/// `public` is where the call's media socket appears from outside, when the
+/// stack asked a STUN server about it ([`crate::nat`]): a call described by
+/// it is never the stack's own catalogue untouched, because the description
+/// names another address and asks for multiplexing.
 fn call_media(
     state: &StackState,
+    public: Option<SocketAddr>,
     srtp: Option<SrtpPolicy>,
     ice: Option<IcePolicy>,
     codecs: Option<&[&str]>,
 ) -> Result<Option<CallMedia>, Fail> {
-    if srtp.is_none() && ice.is_none() && codecs.is_none() {
+    if srtp.is_none() && ice.is_none() && codecs.is_none() && public.is_none() {
         return Ok(None);
     }
     let mut catalog = state.engine.catalog().clone();
@@ -372,7 +378,11 @@ fn call_media(
     if let Some(policy) = ice {
         catalog = catalog.with_ice(policy);
     }
-    Ok(Some(CallMedia::new(catalog, state.media_config())))
+    let media = CallMedia::new(catalog, state.media_config());
+    Ok(Some(match public {
+        Some(public) => media.public_address(public),
+        None => media,
+    }))
 }
 
 /// Where `config` sends the INVITE, other than the account's own address, and
@@ -510,7 +520,8 @@ entry! {
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
-                    let placed = match call_media(state, srtp, ice, codecs.as_deref())? {
+                    let public = crate::nat::Nat::public_for(state, local)?;
+                    let placed = match call_media(state, public, srtp, ice, codecs.as_deref())? {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -527,6 +538,7 @@ entry! {
                         ),
                     }
                     .map_err(|error| media_failed(&error))?;
+                    crate::nat::Nat::spent(state, local);
                     state.manage(placed);
                     placed
                 }
@@ -638,7 +650,8 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            match call_media(state, srtp, ice, codecs.as_deref())? {
+            let public = crate::nat::Nat::public_for(state, local)?;
+            match call_media(state, public, srtp, ice, codecs.as_deref())? {
                 // the stack's own catalogue, untouched: this is what `srtp`
                 // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
@@ -647,6 +660,7 @@ entry! {
                     .ring_with(&mut state.agent, id, local, media, now),
             }
             .map_err(|error| media_failed(&error))?;
+            crate::nat::Nat::spent(state, local);
             state.manage(id);
             Ok(())
         })
@@ -718,10 +732,26 @@ entry! {
         let local = unsafe { address(media_address, media_address_len, "media_address") }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            state
-                .engine
-                .answer(&mut state.agent, id, local, now)
-                .map_err(|error| media_failed(&error))?;
+            // a call already rung with media keeps the description its 183
+            // carried, so its socket's mapping is not asked about again
+            let public = if state.agent.has_described(id) {
+                None
+            } else {
+                crate::nat::Nat::public_for(state, local)?
+            };
+            let catalog = state.engine.call_catalog(id).cloned();
+            match (public, catalog) {
+                (Some(public), Some(catalog)) => {
+                    let media =
+                        CallMedia::new(catalog, state.media_config()).public_address(public);
+                    state
+                        .engine
+                        .answer_with(&mut state.agent, id, local, media, now)
+                }
+                _ => state.engine.answer(&mut state.agent, id, local, now),
+            }
+            .map_err(|error| media_failed(&error))?;
+            crate::nat::Nat::spent(state, local);
             state.manage(id);
             Ok(())
         })
@@ -1398,7 +1428,8 @@ entry! {
                 headers: &headers,
             };
             let placed = if let Some(local) = media {
-                let placed = match call_media(state, srtp, ice, codecs.as_deref())? {
+                let public = crate::nat::Nat::public_for(state, local)?;
+                let placed = match call_media(state, public, srtp, ice, codecs.as_deref())? {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -1415,6 +1446,7 @@ entry! {
                     ),
                 }
                 .map_err(|error| media_failed(&error))?;
+                crate::nat::Nat::spent(state, local);
                 state.manage(placed);
                 placed
             } else {

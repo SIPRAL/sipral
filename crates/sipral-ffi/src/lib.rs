@@ -78,6 +78,7 @@ mod load;
 pub mod media;
 pub mod message;
 mod names;
+pub mod nat;
 pub mod record;
 pub mod resolve;
 pub mod screening;

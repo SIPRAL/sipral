@@ -501,9 +501,20 @@ authenticator refuses anything not signed under the short-term credential
 reading the checklist and nomination machinery with an attacker's eye. The
 default is `Off`, so a deployment that has not asked for ICE is where it was.
 
+The STUN Binding client is reachable now too, on a stack configured with
+`SIPRAL_NAT_STUN`, and what it believes goes into every `Contact` and every
+offer. It believes only the configured server's address and only an answer
+carrying the id of a request it sent, and the ids are drawn from the media
+engine's generator, the one SRTP keys come from (`docs/06-nat.md`). An
+attacker on the path between this end and the server can still answer with
+an address of its choosing — unauthenticated STUN has no defence against that,
+and RFC 8489 §16 says so — which moves this end's `Contact` and `c=` somewhere
+the attacker chose; what that buys is calls and audio that do not arrive, the
+same as dropping the packets would.
+
 The TURN client (`crates/sipral-nat/src/turn/client.rs`, 2,893 lines) is still
-reachable from nothing: the seam gathers host candidates only, and configures
-no TURN server. That reading has to happen before the step that adds one.
+reachable from nothing: the agent is configured with no TURN server. That
+reading has to happen before the step that adds one.
 
 **`RawMessage::validate`'s absence from the live dispatch path**, described
 above under parsing, is a gap in wiring rather than in reading: the code that

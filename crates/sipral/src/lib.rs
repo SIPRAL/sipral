@@ -146,6 +146,8 @@ mod headless;
 mod ice;
 mod join;
 mod keying;
+#[cfg(feature = "stun")]
+mod nat;
 mod payloads;
 mod pipeline;
 mod record;
@@ -173,9 +175,15 @@ pub use headless::{
 pub use ice::IcePolicy;
 pub use join::{MixOutcome, mix_two};
 pub use keying::SrtpPolicy;
+#[cfg(feature = "stun")]
+pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};
 pub use record::RecordingSink;
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
+/// Why a STUN transaction ended without an address, as
+/// [`MappingEvent::Unanswered`] reports it.
+#[cfg(feature = "stun")]
+pub use sipral_nat::stun::Failure as StunFailure;
 pub use stats::StreamStatistics;
 
 /// What the negotiation produces and consumes, from the layer that owns the

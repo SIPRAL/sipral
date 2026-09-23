@@ -41,6 +41,7 @@ use crate::error::entry;
 use crate::handle::{SIPRAL_HANDLE_NONE, SipralHandle};
 use crate::media::{SipralStreamStats, direction_of, fault_of, named_codec};
 use crate::names::Names;
+use crate::nat::SipralNatEvent;
 use crate::subscription::{SipralSubscriptionState, named_end, named_state};
 
 /// Declare the event number space, once.
@@ -449,6 +450,22 @@ event_kinds! {
         /// whatever `sipral_media_playback`/`sipral_media_capture` it is
         /// next given directly rather than through `sipral_media_mix`.
         38 = MediaUnjoined, c"media unjoined";
+        /// A STUN server said where one of this end's sockets appears from,
+        /// said it has moved, or never answered (RFC 8489). Only on a stack
+        /// created with `SIPRAL_NAT_STUN`.
+        ///
+        /// `payload.nat` says which socket and what it came to. For a
+        /// signalling socket the work is already done by the time this
+        /// arrives: every account whose `Contact` named the socket names the
+        /// public address now, and each one holding a binding has sent the
+        /// REGISTER that says so. For a media socket
+        /// `sipral_stack_nat_map` named, this is the moment a call can be
+        /// placed, rung or answered on it — before it, that is
+        /// `SIPRAL_STATUS_WRONG_STATE`. A socket the server never answered
+        /// for is described by its own address, as it would have been with
+        /// no STUN at all. `account` and `call` are `SIPRAL_HANDLE_NONE`:
+        /// a socket is neither.
+        39 = NatMapping, c"nat mapping";
     }
 }
 
@@ -1013,6 +1030,8 @@ record! {
         /// [`SipralEventKind::MessageSent`] and
         /// [`SipralEventKind::MessagesWaiting`].
         pub message: SipralMessageEvent,
+        /// For [`SipralEventKind::NatMapping`].
+        pub nat: SipralNatEvent,
     }
 }
 
@@ -1138,6 +1157,17 @@ pub(crate) fn started(stack: SipralHandle) -> SipralEvent {
         SipralEventPayload {
             call: SipralCallEvent::empty(),
         },
+    )
+}
+
+/// What a STUN server said about one socket, as C reads it. The pointers in
+/// `payload` point into text the caller keeps beside the event.
+#[cfg(feature = "stun")]
+pub(crate) fn nat_mapping(stack: SipralHandle, payload: SipralNatEvent) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::NatMapping,
+        SipralEventPayload { nat: payload },
     )
 }
 
@@ -2419,7 +2449,8 @@ mod tests {
         assert_eq!(SipralEventKind::MessagesWaiting as u32, 36);
         assert_eq!(SipralEventKind::QualityReportSent as u32, 37);
         assert_eq!(SipralEventKind::MediaUnjoined as u32, 38);
-        assert_eq!(SipralEventKind::ALL.len(), 37, "and there are no others");
+        assert_eq!(SipralEventKind::NatMapping as u32, 39);
+        assert_eq!(SipralEventKind::ALL.len(), 38, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -2487,7 +2518,8 @@ mod tests {
             "37 is live"
         );
         assert_eq!(name(38).as_deref(), Some("media unjoined"), "38 is live");
-        assert_eq!(name(39), None, "past the last kind");
+        assert_eq!(name(39).as_deref(), Some("nat mapping"), "39 is live");
+        assert_eq!(name(40), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

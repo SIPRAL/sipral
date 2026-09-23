@@ -178,6 +178,17 @@ pub struct Capabilities {
     /// [`IcePolicy::Offered`]: crate::IcePolicy::Offered
     /// [`IcePolicy::Required`]: crate::IcePolicy::Required
     pub ice: bool,
+    /// Whether this build can ask a STUN server where its sockets appear
+    /// from (RFC 8489): `Mappings`, and the public address it puts in a
+    /// `Contact` and a `c=` line.
+    ///
+    /// Behind a compile-time feature of its own. Without it a call can still
+    /// be described by a public address the application knows some other
+    /// way — [`CallMedia::public_address`] takes one from anywhere — and only
+    /// the asking is gone.
+    ///
+    /// [`CallMedia::public_address`]: crate::CallMedia::public_address
+    pub stun: bool,
 }
 
 impl Capabilities {
@@ -201,6 +212,7 @@ impl Capabilities {
             subscriptions: true,
             opus: contains_opus(&Codec::ALL),
             ice: cfg!(feature = "ice"),
+            stun: cfg!(feature = "stun"),
         }
     }
 }

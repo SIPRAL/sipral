@@ -270,7 +270,14 @@ entry! {
         let mut out = unsafe { read_versioned(transmit) }?;
         prepare(&mut out)?;
         with_stack(stack, |state| {
-            let Some(pending) = state.held.take().or_else(|| state.agent.poll_transmit()) else {
+            // a STUN request for a signalling socket leaves by the transport
+            // that socket is, which is what makes the answer describe it
+            let Some(pending) = state
+                .held
+                .take()
+                .or_else(|| crate::nat::Nat::poll_signalling(state))
+                .or_else(|| state.agent.poll_transmit())
+            else {
                 return Ok(());
             };
             if pending.payload.len() > out.capacity {
@@ -310,7 +317,7 @@ entry! {
 /// The lengths are cleared for the same reason the buffers are checked: they are
 /// the library's to write, and whatever the caller left in them must never read
 /// as a message that was produced.
-fn prepare(transmit: &mut SipralTransmit) -> Result<(), Fail> {
+pub(crate) fn prepare(transmit: &mut SipralTransmit) -> Result<(), Fail> {
     transmit.transport = 0;
     transmit.protocol = 0;
     transmit.len = 0;
@@ -387,7 +394,7 @@ unsafe fn put(transmit: &mut SipralTransmit, pending: &Transmit) -> Result<(), F
 /// # Safety
 ///
 /// `buffer`, when it is not null, must be writable for [`SIPRAL_ADDRESS_BYTES`].
-unsafe fn write_address(
+pub(crate) unsafe fn write_address(
     buffer: *mut c_char,
     address: Option<SocketAddr>,
     name: &'static str,
@@ -449,6 +456,12 @@ entry! {
         with_stack_at(stack, now_ms, |state, now| {
             let transport = named(state, transport)?;
             let local = arrived_on.unwrap_or(state.local);
+            // the STUN server's answer about this socket, when the stack asks
+            // one: the server's own address and a transaction this stack
+            // started, or it goes on to the parser like anything else
+            if crate::nat::Nat::intercept(state, local, remote, datagram, now) {
+                return Ok(());
+            }
             state
                 .agent
                 .receive(
@@ -607,6 +620,9 @@ entry! {
             if transport == SIPRAL_TRANSPORT_MAIN {
                 state.local = advertised;
             }
+            // a datagram transport is kept mapped from the address it is
+            // bound at now, and not from the one it had before
+            crate::nat::Nat::bound(state, id, resolved, advertised, now);
             if !out_transport_id.is_null() {
                 unsafe { out_transport_id.write(transport) };
             }
@@ -678,7 +694,7 @@ entry! {
 /// # Safety
 ///
 /// `pointer`, when it is not null, must be readable for `len` bytes.
-unsafe fn optional_address(
+pub(crate) unsafe fn optional_address(
     pointer: *const c_char,
     len: usize,
     name: &'static str,
@@ -712,7 +728,11 @@ pub(crate) fn named(state: &StackState, transport: u32) -> Result<TransportId, F
 /// # Safety
 ///
 /// `data`, when it is not null, must be readable for `len` bytes.
-unsafe fn arrived<'a>(data: *const u8, len: usize, what: &'static str) -> Result<&'a [u8], Fail> {
+pub(crate) unsafe fn arrived<'a>(
+    data: *const u8,
+    len: usize,
+    what: &'static str,
+) -> Result<&'a [u8], Fail> {
     if data.is_null() {
         return Err(fail(SipralStatus::InvalidArgument, "data is null"));
     }

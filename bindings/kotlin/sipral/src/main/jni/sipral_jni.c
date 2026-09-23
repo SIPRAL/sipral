@@ -446,7 +446,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -488,6 +488,11 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.media_seed_len = (size_t)configMediaSeed_size;
     config_value.srtp = (uint32_t)configSrtp;
     config_value.ice = (uint32_t)configIce;
+    config_value.nat = (uint32_t)configNat;
+    jbyte *configStunServer_data = configStunServer ? (*env)->GetByteArrayElements(env, configStunServer, NULL) : NULL;
+    jsize configStunServer_size = configStunServer ? (*env)->GetArrayLength(env, configStunServer) : 0;
+    config_value.stun_server = (const char *)configStunServer_data;
+    config_value.stun_server_len = (size_t)configStunServer_size;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -504,6 +509,9 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     }
     if (configMediaSeed) {
         (*env)->ReleaseByteArrayElements(env, configMediaSeed, configMediaSeed_data, JNI_ABORT);
+    }
+    if (configStunServer) {
+        (*env)->ReleaseByteArrayElements(env, configStunServer, configStunServer_data, JNI_ABORT);
     }
     {
         jlong slot = (jlong)stack_value;
@@ -2021,6 +2029,53 @@ Java_org_sipral_SipralNative_sipral_1stack_1stream_1closed(JNIEnv *env, jobject 
     (void)env;
     (void)self;
     sipral_status_t status = sipral_stack_stream_closed((sipral_handle_t)stack, (uint32_t)transport, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1nat_1map(JNIEnv *env, jobject self, jlong stack, jbyteArray local, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *local_data = local ? (*env)->GetByteArrayElements(env, local, NULL) : NULL;
+    jsize local_size = local ? (*env)->GetArrayLength(env, local) : 0;
+    sipral_status_t status = sipral_stack_nat_map((sipral_handle_t)stack, (const char *)local_data, (size_t)local_size, (uint64_t)nowMs);
+    if (local) {
+        (*env)->ReleaseByteArrayElements(env, local, local_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1poll_1stun(JNIEnv *env, jobject self, jlong stack, jlong transmit)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_poll_stun((sipral_handle_t)stack, (sipral_transmit_t *)(intptr_t)transmit);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1receive_1stun(JNIEnv *env, jobject self, jlong stack, jbyteArray data, jbyteArray from, jbyteArray to, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *data_data = data ? (*env)->GetByteArrayElements(env, data, NULL) : NULL;
+    jsize data_size = data ? (*env)->GetArrayLength(env, data) : 0;
+    jbyte *from_data = from ? (*env)->GetByteArrayElements(env, from, NULL) : NULL;
+    jsize from_size = from ? (*env)->GetArrayLength(env, from) : 0;
+    jbyte *to_data = to ? (*env)->GetByteArrayElements(env, to, NULL) : NULL;
+    jsize to_size = to ? (*env)->GetArrayLength(env, to) : 0;
+    sipral_status_t status = sipral_stack_receive_stun((sipral_handle_t)stack, (const uint8_t *)data_data, (size_t)data_size, (const char *)from_data, (size_t)from_size, (const char *)to_data, (size_t)to_size, (uint64_t)nowMs);
+    if (data) {
+        (*env)->ReleaseByteArrayElements(env, data, data_data, JNI_ABORT);
+    }
+    if (from) {
+        (*env)->ReleaseByteArrayElements(env, from, from_data, JNI_ABORT);
+    }
+    if (to) {
+        (*env)->ReleaseByteArrayElements(env, to, to_data, JNI_ABORT);
+    }
     return (jint)status;
 }
 

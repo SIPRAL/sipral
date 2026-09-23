@@ -108,6 +108,14 @@ constants! {
     /// An application that sets one of those policies must also drain
     /// `sipral_media_poll_transmit`; see there.
     pub const SIPRAL_FEATURE_ICE: u32 = 1 << 8;
+    /// See [`SIPRAL_FEATURE_DTMF`]. STUN (RFC 8489): a stack created with
+    /// `SIPRAL_NAT_STUN` asks a server where its sockets appear from and
+    /// writes the answer in the `Contact` and in `c=` and `m=`.
+    ///
+    /// Behind a compile-time feature of its own, which brings nothing ICE
+    /// does not already bring. `SIPRAL_NAT_STUN` keeps its number in a build
+    /// without it, and naming it there answers `SIPRAL_STATUS_NOT_SUPPORTED`.
+    pub const SIPRAL_FEATURE_STUN: u32 = 1 << 9;
 }
 
 record! {
@@ -210,6 +218,9 @@ fn capabilities_of(capabilities: Capabilities) -> SipralCapabilities {
     // and the same again: the facade's own answer, not this crate's flag
     if capabilities.ice {
         features |= SIPRAL_FEATURE_ICE;
+    }
+    if capabilities.stun {
+        features |= SIPRAL_FEATURE_STUN;
     }
     SipralCapabilities {
         size: size_of::<SipralCapabilities>(),

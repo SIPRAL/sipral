@@ -1536,10 +1536,10 @@ The transport half of D5 — which flow a request left on, and why a request
 was promoted onto a stream transport or refused — is `sipral-core`'s
 diagnostic record (`docs/14-diagnostics.md`), already answered without this
 crate's help. Which port carries RTCP, muxed or its own, is already on
-`MediaSession::plan().rtcp`. The NAT half has nothing to answer yet:
-`sipral-nat` exists as a crate but nothing in `sipral` or `sipral-core` calls
-into it, so there is no NAT strategy decision anywhere in this tree to
-explain.
+`MediaSession::plan().rtcp`. The NAT half is answered where the decision is
+made: which address a call was described by is in the description itself,
+and a stack that asks a STUN server says what each socket learned as
+`SIPRAL_EVENT_KIND_NAT_MAPPING` (`docs/06-nat.md`).
 
 ## A local conference of two calls
 

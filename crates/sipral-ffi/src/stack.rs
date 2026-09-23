@@ -406,6 +406,24 @@ record! {
         /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
         /// unmoved.
         pub ice: u32,
+        /// What this stack does about a NAT in front of it: a `SipralNat`, or
+        /// zero for this build's own built-in default, which is
+        /// `SIPRAL_NAT_OFF`. `SIPRAL_NAT_STUN` asks `stun_server` where each
+        /// socket appears from and writes the answer where a far end reads
+        /// it — see [`crate::nat`]. Any other value is
+        /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
+        ///
+        /// Appended at the tail (task 8.5.5), with the two below; the pinned
+        /// `MIN_SIZE` is unmoved.
+        pub nat: u32,
+        /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
+        /// address, not a name, since resolving one is the application's.
+        /// Required with `SIPRAL_NAT_STUN` and refused without it, since a
+        /// server nothing asks is a setting nothing reads. Copied; the
+        /// caller's buffer is its own again when this returns.
+        pub stun_server: *const c_char,
+        /// How many bytes of it.
+        pub stun_server_len: usize,
     }
 }
 
@@ -790,6 +808,10 @@ pub(crate) struct StackState {
     polled_at_ms: u64,
     /// Whether the first poll has said the stack is running.
     started: bool,
+    /// What it asks a STUN server, when its configuration said to. A build
+    /// without the feature never asks, and has nothing to keep.
+    #[cfg(feature = "stun")]
+    pub(crate) nat: crate::nat::Nat,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -815,6 +837,12 @@ impl StackState {
     /// The caller's clock, as an instant the layers below can use.
     pub(crate) fn instant(&self, now_ms: u64) -> Result<Instant, Fail> {
         instant_at(self.origin, now_ms)
+    }
+
+    /// The latest time this stack has been told, for work an entry point
+    /// that takes no clock of its own sets off.
+    pub(crate) fn last_instant(&self) -> Instant {
+        instant_at(self.origin, self.polled_at_ms).unwrap_or(self.origin)
     }
 
     /// What `now_ms` of zero means on this stack, for a media handle that
@@ -1182,29 +1210,11 @@ pub(crate) unsafe fn create_on(
         ));
     };
     let named = unsafe { text(config.user_agent, config.user_agent_len, "user_agent") }?;
-    let seed = seed_from(
-        unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
-        "entropy",
-    )?;
-    let media_seed = seed_from(
-        unsafe { bytes(config.media_seed, config.media_seed_len, "media_seed") }?,
-        "media_seed",
-    )?;
-    if media_seed == seed {
-        // The one check that has to live here: nowhere else can see both.
-        // Sharing them undoes the separation silently — every message
-        // still looks right, and every SRTP key is derivable from a
-        // recording that was meant to carry none.
-        return Err(fail(
-            SipralStatus::InvalidArgument,
-            "media_seed is the same as entropy; they must be two independent draws, because a \
-             replay recording carries entropy in clear and must not permit deriving a key"
-                .to_owned(),
-        ));
-    }
+    let (seed, media_seed) = unsafe { seeds_of(&config) }?;
 
     let timers = timers_for(speaks.protocol(), &config)?;
     let media = media_for(&config)?;
+    let stun_server = unsafe { crate::nat::configured(&config) }?;
     let mut endpoint = EndpointConfig::default();
     endpoint.timers = timers;
 
@@ -1240,40 +1250,86 @@ pub(crate) unsafe fn create_on(
         )
     })?;
     let stamp = tag.tag();
+    let mut state = StackState {
+        callback,
+        user_data: config.event_user_data,
+        agent,
+        engine,
+        managed: Vec::new(),
+        accounts: Names::new(&tag, Kind::Account),
+        calls: Names::new(&tag, Kind::Call),
+        subscriptions: Names::new(&tag, Kind::Subscription),
+        messages: Names::new(&tag, Kind::Message),
+        announcements: Names::new(&tag, Kind::Announcement),
+        dialogs: Names::new(&tag, Kind::Dialog),
+        identities: HashMap::new(),
+        tag,
+        transports: Transports::new(speaks.protocol()),
+        speaks,
+        local,
+        held: None,
+        timers,
+        media,
+        user_agent: named.map(|name| Box::from(name.as_bytes())),
+        farewells: VecDeque::new(),
+        events_dropped: 0,
+        farewells_dropped: 0,
+        origin,
+        polled_at_ms: 0,
+        started: false,
+        #[cfg(feature = "stun")]
+        nat: crate::nat::Nat::default(),
+    };
+    // the main transport is the first signalling socket kept mapped; its
+    // first request is waiting in `sipral_stack_poll_transmit` from here on
+    crate::nat::Nat::start(
+        &mut state,
+        stun_server,
+        TRANSPORT,
+        speaks.protocol(),
+        local,
+        origin,
+    );
     let entry = StackEntry {
-        state: Mutex::new(StackState {
-            callback,
-            user_data: config.event_user_data,
-            agent,
-            engine,
-            managed: Vec::new(),
-            accounts: Names::new(&tag, Kind::Account),
-            calls: Names::new(&tag, Kind::Call),
-            subscriptions: Names::new(&tag, Kind::Subscription),
-            messages: Names::new(&tag, Kind::Message),
-            announcements: Names::new(&tag, Kind::Announcement),
-            dialogs: Names::new(&tag, Kind::Dialog),
-            identities: HashMap::new(),
-            tag,
-            transports: Transports::new(speaks.protocol()),
-            speaks,
-            local,
-            held: None,
-            timers,
-            media,
-            user_agent: named.map(|name| Box::from(name.as_bytes())),
-            farewells: VecDeque::new(),
-            events_dropped: 0,
-            farewells_dropped: 0,
-            origin,
-            polled_at_ms: 0,
-            started: false,
-        }),
+        state: Mutex::new(state),
         outbox: Mutex::new(Outbox::default()),
     };
     STACKS
         .insert(stamp, entry)
         .map_err(|status| fail(status, "no room for another stack"))
+}
+
+/// The signalling seed and the media seed a configuration hands over, each
+/// thirty-two bytes and never the same bytes twice.
+///
+/// # Safety
+///
+/// `config.entropy` and `config.media_seed` must be readable for the lengths
+/// beside them.
+unsafe fn seeds_of(
+    config: &SipralStackConfig,
+) -> Result<([u8; SEED_BYTES], [u8; SEED_BYTES]), Fail> {
+    let seed = seed_from(
+        unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
+        "entropy",
+    )?;
+    let media_seed = seed_from(
+        unsafe { bytes(config.media_seed, config.media_seed_len, "media_seed") }?,
+        "media_seed",
+    )?;
+    if media_seed == seed {
+        // The one check that has to live here: nowhere else can see both.
+        // Sharing them undoes the separation silently — every message
+        // still looks right, and every SRTP key is derivable from a
+        // recording that was meant to carry none.
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "media_seed is the same as entropy; they must be two independent draws, because a \
+             replay recording carries entropy in clear and must not permit deriving a key"
+                .to_owned(),
+        ));
+    }
+    Ok((seed, media_seed))
 }
 
 fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<[u8; SEED_BYTES], Fail> {
@@ -1451,6 +1507,7 @@ fn run(
 ) -> SipralPollResult {
     state.agent.handle_timeout(now);
     state.engine.handle_timeout(now);
+    crate::nat::Nat::handle_timeout(state, now);
 
     let mut unclaimed = 0_usize;
     if !state.started {
@@ -1458,11 +1515,26 @@ fn run(
         raised.push(Delivery::bare(crate::event::started(stack)));
     }
     drain(stack, state, now, raised, &mut unclaimed);
+    // after the engine's, so that a REGISTER an answer moved the accounts to
+    // follows every event the poll already had about them
+    for (event, text) in crate::nat::Nat::drain(state, stack, now) {
+        raised.push(Delivery {
+            event,
+            _raised: None,
+            _reason: Some(text),
+            _record: None,
+            _identity: None,
+        });
+    }
 
-    let deadline = match (state.agent.poll_timeout(), state.engine.poll_timeout()) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (left, right) => left.or(right),
-    };
+    let deadline = [
+        state.agent.poll_timeout(),
+        state.engine.poll_timeout(),
+        crate::nat::Nat::poll_timeout(state),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     SipralPollResult {
         size: size_of::<SipralPollResult>(),
         events_delivered: 0,
@@ -2033,6 +2105,9 @@ pub(crate) mod tests {
             media_clock_unix_seconds: 0,
             srtp: 0,
             ice: 0,
+            nat: 0,
+            stun_server: ptr::null(),
+            stun_server_len: 0,
         }
     }
 

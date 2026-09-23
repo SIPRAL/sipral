@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+//! Which address a `Contact` names, and the same `Contact` naming another.
+//!
+//! What [`UserAgent::readdress`](crate::UserAgent::readdress) needs to move an
+//! account from the address its socket is bound to onto the one a NAT shows
+//! the world, without touching anything else the application wrote into it.
+
+use std::net::{IpAddr, SocketAddr};
+
+use sipral_core::msg::{Uri, UriScheme};
+
+/// `contact` with its host and port replaced by `address`, or `None` for a
+/// URI that is not `sip:` or `sips:`.
+///
+/// The user part, the parameters and the headers stay exactly as written: an
+/// instance identifier or a `transport` parameter is as true of the public
+/// address as of the private one. An IPv6 address is bracketed, as RFC 3261
+/// §25.1's `hostport` requires.
+pub(crate) fn contact_at(contact: &Uri, address: SocketAddr) -> Option<Uri> {
+    let text = contact.as_str();
+    let (start, end) = hostport_span(text)?;
+    let mut rewritten = String::with_capacity(text.len() + 8);
+    rewritten.push_str(text.get(..start)?);
+    rewritten.push_str(&address.to_string());
+    rewritten.push_str(text.get(end..)?);
+    Uri::parse_str(&rewritten).ok()
+}
+
+/// Whether `contact` names `address`: the same IP literal, and the same port
+/// or no port where `address` has the one RFC 3261 §19.1.2 makes the default
+/// for the scheme.
+///
+/// A contact written with a name, or with another address, is one the
+/// application chose on purpose, and nothing here rewrites it.
+pub(crate) fn contact_names(contact: &Uri, address: SocketAddr) -> bool {
+    let Some(sip) = contact.sip() else {
+        return false;
+    };
+    let Some((start, end)) = hostport_span(contact.as_str()) else {
+        return false;
+    };
+    let Some(hostport) = contact.as_str().get(start..end) else {
+        return false;
+    };
+    let host = match hostport.rfind(':') {
+        Some(colon) if !hostport.ends_with(']') => hostport.get(..colon).unwrap_or(hostport),
+        _ => hostport,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    let default = if matches!(sip.scheme, UriScheme::Sips) {
+        5061
+    } else {
+        5060
+    };
+    ip == address.ip() && sip.port.unwrap_or(default) == address.port()
+}
+
+/// Where the `hostport` of a `sip:` or `sips:` URI begins and ends, in bytes.
+///
+/// The same cuts the parser makes (RFC 3261 §19.1.1): the user part ends at
+/// the first `@`, the headers begin at the first `?` and the parameters at
+/// the first `;` before them.
+fn hostport_span(text: &str) -> Option<(usize, usize)> {
+    let colon = text.find(':')?;
+    let scheme = text.get(..colon)?;
+    if !scheme.eq_ignore_ascii_case("sip") && !scheme.eq_ignore_ascii_case("sips") {
+        return None;
+    }
+    let after_scheme = colon + 1;
+    let rest = text.get(after_scheme..)?;
+    let start = after_scheme + rest.find('@').map_or(0, |at| at + 1);
+    let tail = text.get(start..)?;
+    let before_headers = tail.find('?').unwrap_or(tail.len());
+    let end = start
+        + tail
+            .get(..before_headers)?
+            .find(';')
+            .unwrap_or(before_headers);
+    (end > start).then_some((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use sipral_core::msg::Uri;
+
+    use super::{contact_at, contact_names};
+
+    fn uri(text: &str) -> Uri {
+        Uri::parse_str(text).expect("a URI")
+    }
+
+    fn at(text: &str) -> SocketAddr {
+        text.parse().expect("an address")
+    }
+
+    #[test]
+    fn a_contact_moves_to_the_public_address_and_keeps_everything_else() {
+        let contact = uri("sip:alice@192.168.1.10:5060;transport=udp;ob?X-Hint=1");
+        let moved = contact_at(&contact, at("203.0.113.7:41000")).expect("a sip URI");
+        assert_eq!(
+            moved.as_str(),
+            "sip:alice@203.0.113.7:41000;transport=udp;ob?X-Hint=1"
+        );
+    }
+
+    #[test]
+    fn a_contact_with_no_user_part_or_port_moves_too() {
+        let moved = contact_at(&uri("sip:192.168.1.10"), at("203.0.113.7:5062")).expect("sip");
+        assert_eq!(moved.as_str(), "sip:203.0.113.7:5062");
+        let moved = contact_at(
+            &uri("sips:bob@[2001:db8::1]:5061"),
+            at("[2001:db8::9]:6000"),
+        )
+        .expect("sips");
+        assert_eq!(moved.as_str(), "sips:bob@[2001:db8::9]:6000");
+    }
+
+    #[test]
+    fn a_uri_that_is_not_sip_is_not_rewritten() {
+        assert!(contact_at(&uri("tel:+15551234567"), at("203.0.113.7:5060")).is_none());
+    }
+
+    #[test]
+    fn a_contact_names_an_address_only_by_its_own_literal_and_port() {
+        let local = at("192.168.1.10:5060");
+        assert!(contact_names(&uri("sip:alice@192.168.1.10:5060"), local));
+        assert!(
+            contact_names(&uri("sip:alice@192.168.1.10"), local),
+            "no port is the scheme's default, and 5060 is sip's"
+        );
+        assert!(!contact_names(&uri("sips:alice@192.168.1.10"), local));
+        assert!(!contact_names(&uri("sip:alice@192.168.1.11:5060"), local));
+        assert!(!contact_names(
+            &uri("sip:alice@phone.example.com:5060"),
+            local
+        ));
+        assert!(contact_names(
+            &uri("sip:alice@[2001:db8::1]:5070"),
+            at("[2001:db8::1]:5070")
+        ));
+    }
+}
