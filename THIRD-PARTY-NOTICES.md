@@ -304,6 +304,30 @@ Building it needs `meson`, `ninja` and a C++ compiler on the machine, which
 the rest of this tree does not ask for; `scripts/check.sh` has its own step
 for it, and does not skip that step when those tools are missing.
 
+## A dependency of a binding, not of the library
+
+### Kotlin binding (kotlinx.coroutines)
+
+`bindings/kotlin`'s idiomatic layer (`org.sipral.idiomatic`, over the
+generated `org.sipral.Sipral`/`SipralAbi.kt`) uses `kotlinx-coroutines-core`
+for its events `Flow` and its suspend functions — a call placed or a
+registration asked for that only completes once the matching event arrives.
+It is a test and build dependency of the binding, never of the Rust
+workspace, and never shipped inside `libsipral_ffi`.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `kotlinx-coroutines-core-jvm` 1.11.0 | structured concurrency, channels and `Flow` for the JVM | Apache-2.0 |
+
+Fetched once from Maven Central into a cache outside the repository
+(`~/.cache/sipral/maven/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.11.0/`),
+verified against the sha256 Maven Central itself publishes for the jar
+(`d1d75aa01dffbb4d1c520e67e4c4e7f5f6174718e7cb4632412503f2f0e604fa`), and
+reused from there by `scripts/check.sh` on every run after — the gate never
+downloads it, and fails naming the expected path and checksum if it is not
+there. `kotlinx-coroutines-core-jvm`'s own `LICENSE.txt` is the standard
+Apache-2.0 text with JetBrains s.r.o. as the copyright holder.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

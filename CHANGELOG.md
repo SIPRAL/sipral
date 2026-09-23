@@ -83,6 +83,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   carries DTMF over. A skeleton macOS SwiftUI sample
   (`bindings/swift/Sources/SipralSampleMac`) shows registration, a call,
   hold, DTMF and devices wired to the same layer.
+- **An idiomatic Kotlin layer, `org.sipral.idiomatic`, over the generated
+  `SipralAbi.kt`.** `SipralClient`, `SipralAccount`, `SipralCall` and
+  `SipralMedia` wrap the handles as `AutoCloseable` classes, events arrive
+  as a `kotlinx.coroutines.Flow`, and placing a call or registering an
+  account is a suspend function that completes once the matching event
+  does. A hand-written JNI helper beside the generated shim
+  (`bindings/kotlin/sipral/src/main/jni/idiomatic_media.c`) builds the two
+  structs — `sipral_media_packet_t` and `sipral_transmit_t` — the generator
+  cannot yet construct from Kotlin, so the layer can drive real RTP.
+  Exercised against the shared library on a JVM: two stacks on loopback
+  place a call, answer, exchange RTP while idle, hold, resume, send DTMF,
+  hang up, and check that both a media and a stack handle answer
+  `SIPRAL_STATUS_STALE_HANDLE` once closed.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

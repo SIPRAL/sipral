@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+//
+// Hand-written, beside bindings/kotlin/sipral/src/main/jni/idiomatic_media.c
+// -- see SipralMediaNative.kt's own note. sipral_transmit_t is the other
+// struct SipralAbi.kt cannot build from Kotlin: sipral_stack_poll_transmit
+// is printed as `stackPollTransmit(stack: Long, transmit: Long)`, a native
+// address with nothing generated to construct one.
+
+package org.sipral.idiomatic
+
+/**
+ * What SipralAbi.kt cannot print a usable signature for on the signalling
+ * side, package-private to [SipralClient], the only caller.
+ */
+internal object SipralSignalNative {
+    init {
+        System.loadLibrary("sipral_jni")
+    }
+
+    /**
+     * `sipral_stack_poll_transmit`, with no source address: the caller's own
+     * socket answers from wherever the platform routes it, which is exactly
+     * right for a stack with one transport and no wildcard bind. `outLen`
+     * comes back as `[len, destination_len, protocol]`.
+     */
+    external fun stackPollTransmit(
+        stack: Long,
+        outData: ByteArray,
+        outDestination: ByteArray,
+        outLen: LongArray,
+    ): Int
+}

@@ -466,6 +466,94 @@ python_agent() {
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
+# org.sipral.idiomatic's own headless agent, bindings/kotlin/examples/Agent.kt,
+# on a JVM (`eclipse-temurin`, the JDK variant -- its own `jni.h` is what the
+# container compiles the shim against). Kotlin has no build tool in this tree
+# (`bindings/kotlin/README.md`), so the classes are compiled once with
+# `kotlinc` wherever this is run from and handed to this step as a jar,
+# exactly the way `SIPRAL_HARNESS_C` above is a binary built elsewhere rather
+# than something this script builds for itself;
+# KOTLIN_AGENT_JAR/KOTLIN_STDLIB_JAR/KOTLIN_COROUTINES_JAR name the three jars
+# its classpath needs. Skipped, not fatal, when any of the three -- or the
+# shared library the C harness also needs -- is not there.
+KOTLIN_AGENT_NAME=sipral-lab-agent-kotlin
+kotlin_agent() {
+    local log tries beside
+    [ -n "${KOTLIN_AGENT_JAR:-}" ] && [ -n "${KOTLIN_STDLIB_JAR:-}" ] \
+        && [ -n "${KOTLIN_COROUTINES_JAR:-}" ] || return 0
+    [ -n "$HARNESS_C" ] || return 0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
+    docker run -d --name "$KOTLIN_AGENT_NAME" --network sipral-interop_lab \
+        -e SIPRAL_AOR=sip:labuser-agent-kotlin@asterisk \
+        -e SIPRAL_REGISTRAR=sip:asterisk \
+        -e SIPRAL_AUTH_USER=labuser-agent-kotlin -e SIPRAL_AUTH_PASSWORD=labpass \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/c/include:/sipral-include:ro" \
+        -v "$ROOT/bindings/kotlin/sipral/src/main/jni:/sipral-jni:ro" \
+        -v "$KOTLIN_AGENT_JAR:/kotlin/sipral-kotlin.jar:ro" \
+        -v "$KOTLIN_STDLIB_JAR:/kotlin/kotlin-stdlib.jar:ro" \
+        -v "$KOTLIN_COROUTINES_JAR:/kotlin/kotlinx-coroutines.jar:ro" \
+        eclipse-temurin:21-jdk sh -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y gcc >/dev/null 2>&1
+            cc -std=c11 -Wall -shared -fPIC \
+                -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" -I/sipral-include \
+                -o /tmp/libsipral_jni.so \
+                /sipral-jni/sipral_jni.c /sipral-jni/idiomatic_media.c \
+                -L/lib-sipral -lsipral_ffi -Wl,-rpath,/lib-sipral
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
+                exec java -Djava.library.path=/tmp \
+                -cp "/kotlin/sipral-kotlin.jar:/kotlin/kotlin-stdlib.jar:/kotlin/kotlinx-coroutines.jar" \
+                org.sipral.examples.AgentKt' >/dev/null \
+        || { printf '  could not start the Kotlin agent container\n'; return 1; }
+
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-kotlin; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$KOTLIN_AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 90 ]; then
+            printf '  the agent never registered\n'
+            docker logs "$KOTLIN_AGENT_NAME" 2>&1 | tail -30
+            docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
+            return 1
+        fi
+        sleep 2
+    done
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-agent-kotlin extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$KOTLIN_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && break
+        sleep 1
+    done
+    log=$(docker logs "$KOTLIN_AGENT_NAME" 2>&1)
+    docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
+    printf '%s\n' "$log" | sed 's/^/    /'
+
+    printf '%s\n' "$log" | grep -q '^answered ' \
+        || { printf '  it never answered\n'; return 1; }
+    # No digit value, only that three arrived: the generated Kotlin/JNI shim
+    # forwards no event payload (bindings/kotlin/README.md), so an RFC 4733
+    # digit -- what Asterisk's SendDTMF sends here by default -- carries no
+    # character this binding can read yet. Agent.kt's own header says so.
+    printf '%s\n' "$log" | grep -q '^dtmf-event 3' \
+        || { printf '  it never heard all three DTMF events\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq "packets_received=[1-9]" \
+        || { printf '  it heard no audio\n'; return 1; }
+    printf '%s\n' "$log" \
+        | grep '^ended ' | grep -Eq "packets_sent=[1-9]" \
+        || { printf '  it sent no audio back\n'; return 1; }
+}
+
 # The Swift binding's own example agent, `SWIFT_AGENT` above, registered at
 # Asterisk as `labuser-agent-swift` (`interop/asterisk/pjsip.conf`) and
 # called by it -- the same shape `python_agent` above is, and the same
@@ -880,6 +968,13 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
     step "the Swift binding's example agent, called by Asterisk"
     swift_agent && pass "SipralLabAgent answered, echoed and carried DTMF" \
         || fail "SipralLabAgent"
+    step "the Kotlin idiomatic-layer agent, called by Asterisk"
+    if [ -n "${KOTLIN_AGENT_JAR:-}" ]; then
+        kotlin_agent && pass "Agent.kt answered, echoed and carried DTMF" \
+            || fail "Agent.kt"
+    else
+        printf '  note  KOTLIN_AGENT_JAR not set; see bindings/kotlin/README.md\n'
+    fi
 fi
 
 # The one step in this file where the far end is a client stack rather than

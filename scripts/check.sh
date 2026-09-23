@@ -1201,9 +1201,26 @@ else
     skip "dotnet build: no .NET SDK (https://dot.net/v1/dotnet-install.sh --channel 8.0)"
 fi
 
+# org.sipral.idiomatic needs kotlinx-coroutines-core-jvm (Apache-2.0,
+# THIRD-PARTY-NOTICES.md), fetched once into a cache outside the repo so the
+# gate can reuse it offline afterward -- never downloaded here, and never
+# accepted here without its checksum matching what Maven Central published.
+COROUTINES_VERSION="1.11.0"
+COROUTINES_SHA256="d1d75aa01dffbb4d1c520e67e4c4e7f5f6174718e7cb4632412503f2f0e604fa"
+COROUTINES_JAR="$HOME/.cache/sipral/maven/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/$COROUTINES_VERSION/kotlinx-coroutines-core-jvm-$COROUTINES_VERSION.jar"
+coroutines_ok=0
+if [ -s "$COROUTINES_JAR" ]; then
+    found_sha256=$(shasum -a 256 "$COROUTINES_JAR" 2>/dev/null | cut -d' ' -f1)
+    if [ "$found_sha256" = "$COROUTINES_SHA256" ]; then
+        coroutines_ok=1
+    fi
+fi
+
 kotlin_classes=""
 kotlin_lib=""
-if command -v kotlinc >/dev/null 2>&1; then
+if [ "$coroutines_ok" -ne 1 ]; then
+    fail "kotlinx-coroutines-core-jvm $COROUTINES_VERSION is not cached with the right checksum at $COROUTINES_JAR (fetch it once from Maven Central and verify its sha256 matches $COROUTINES_SHA256)"
+elif command -v kotlinc >/dev/null 2>&1; then
     # The sources are found rather than listed: a new file nobody added here
     # would otherwise go uncompiled, which is the failure this step exists
     # for. Collected NUL-separated into an array, because a checkout whose
@@ -1235,7 +1252,7 @@ if command -v kotlinc >/dev/null 2>&1; then
         fail "kotlinc runs from a distribution with no kotlin-test.jar and kotlin-stdlib.jar in $kotlin_lib"
     else
         kotlin_classes=$(mktemp -d)
-        if kotlinc -cp "$kotlin_lib/kotlin-test.jar" "${kotlin_sources[@]}" \
+        if kotlinc -cp "$kotlin_lib/kotlin-test.jar:$COROUTINES_JAR" "${kotlin_sources[@]}" \
             -d "$kotlin_classes" >/dev/null 2>&1; then
             pass "kotlinc"
         else
@@ -1253,17 +1270,20 @@ fi
 # header is what is looked for, not the command.
 jdk="${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}"
 if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
-    cc -fsyntax-only -Wall -Wextra -Werror \
-        -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
-        "$ROOT/bindings/kotlin/sipral/src/main/jni/sipral_jni.c" >/dev/null 2>&1 \
-        && pass "cc -fsyntax-only, the JNI shim" \
-        || fail "cc -fsyntax-only, bindings/kotlin/sipral/src/main/jni/sipral_jni.c"
+    for shim in sipral_jni idiomatic_media; do
+        cc -fsyntax-only -Wall -Wextra -Werror \
+            -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
+            "$ROOT/bindings/kotlin/sipral/src/main/jni/$shim.c" >/dev/null 2>&1 \
+            && pass "cc -fsyntax-only, $shim.c" \
+            || fail "cc -fsyntax-only, bindings/kotlin/sipral/src/main/jni/$shim.c"
+    done
 
     # Compiling the shim says it is C, not that it works. So it is linked
     # against the shared library built above, beside a helper that polls from
-    # a thread no JVM made, and BindingCheck.kt runs against the two on a JVM
-    # under -Xcheck:jni. What the run printed is looked for as well as how it
-    # exited, because a JVM that ran nothing also exits zero.
+    # a thread no JVM made, and BindingCheck.kt / IdiomaticCheck.kt run
+    # against the two on a JVM under -Xcheck:jni. What each run printed is
+    # looked for as well as how it exited, because a JVM that ran nothing
+    # also exits zero.
     if [ -z "$kotlin_classes" ]; then
         skip "the JVM run: kotlinc compiled nothing to run, which the lines above say why"
     elif [ ! -s "$DYLIB" ]; then
@@ -1273,21 +1293,31 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
     else
         work=$(mktemp -d)
         linked=1
-        for pair in "sipral_jni:bindings/kotlin/sipral/src/main/jni/sipral_jni.c" \
+        # idiomatic_media.c is hand-written, not generated, and links into
+        # the same "sipral_jni" library the generated shim does: the two
+        # structs it builds (sipral_media_packet_t, sipral_transmit_t) are
+        # what SipralAbi.kt itself cannot construct (bindings/kotlin/README.md),
+        # so org.sipral.idiomatic's own native calls have to resolve out of
+        # the library the generated one already loads.
+        for pair in "sipral_jni:bindings/kotlin/sipral/src/main/jni/sipral_jni.c bindings/kotlin/sipral/src/main/jni/idiomatic_media.c" \
             "sipral_jni_check:bindings/kotlin/sipral/src/test/jni/native_thread.c"; do
+            name="${pair%%:*}"
+            sources="${pair#*:}"
+            abs_sources=()
+            for src in $sources; do abs_sources+=("$ROOT/$src"); done
             if ! cc -std=c11 -Wall -Wextra -Werror -dynamiclib \
                 -I"$jdk/include" -I"$jdk/include/darwin" -I"$ROOT/bindings/c/include" \
-                -o "$work/lib${pair%%:*}.dylib" "$ROOT/${pair#*:}" \
+                -o "$work/lib${name}.dylib" "${abs_sources[@]}" \
                 -L"$ROOT/target/release" -lsipral_ffi -Wl,-rpath,"$ROOT/target/release" \
                 >"$work/cc" 2>&1; then
-                fail "${pair#*:} does not build against the shared library:"
+                fail "$sources does not build against the shared library:"
                 sed 's/^/        /' "$work/cc"
                 linked=0
             fi
         done
         if [ "$linked" -eq 1 ]; then
             ran=$("$jdk/bin/java" -Xcheck:jni -Djava.library.path="$work" \
-                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar" \
+                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar:$COROUTINES_JAR" \
                 org.sipral.BindingCheckKt 2>&1)
             exited=$?
             said=$(printf '%s\n' "$ran" | grep '^kotlin binding: ' || true)
@@ -1303,6 +1333,25 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
                 printf '%s\n' "$warned" | sed 's/^/        /'
             else
                 pass "${said#kotlin binding: }"
+            fi
+
+            ran=$("$jdk/bin/java" -Xcheck:jni -Djava.library.path="$work" \
+                -cp "$kotlin_classes:$kotlin_lib/kotlin-stdlib.jar:$kotlin_lib/kotlin-test.jar:$COROUTINES_JAR" \
+                org.sipral.idiomatic.IdiomaticCheckKt 2>&1)
+            exited=$?
+            said=$(printf '%s\n' "$ran" | grep '^kotlin idiomatic: ' || true)
+            warned=$(printf '%s\n' "$ran" \
+                | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
+            if [ "$exited" -ne 0 ]; then
+                fail "IdiomaticCheck.kt did not come back zero:"
+                printf '%s\n' "$ran" | sed 's/^/        /'
+            elif [ -z "$said" ]; then
+                fail "IdiomaticCheck.kt came back zero and said nothing, so nothing was checked"
+            elif [ -n "$warned" ]; then
+                fail "-Xcheck:jni found something wrong in the idiomatic layer's native calls:"
+                printf '%s\n' "$warned" | sed 's/^/        /'
+            else
+                pass "${said#kotlin idiomatic: }"
             fi
         fi
         rm -rf "$work"

@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+// Copyright (c) 2026 Tiberiu Balasea
+
+package org.sipral.idiomatic
+
+import java.net.DatagramSocket
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
+import org.sipral.Sipral
+import org.sipral.SipralCallState
+import org.sipral.SipralEvent
+import org.sipral.SipralEventKind
+import org.sipral.SipralHeader
+
+/**
+ * A `sipral_handle_t` naming one call, and the actions it takes.
+ *
+ * Built by [SipralClient.placeCall] for one this stack placed, and by
+ * [SipralClient.answerCall] for one that came in; either way it is
+ * registered with its client before the caller ever sees it, so
+ * [deliver] always has somewhere to put an event that names this call.
+ */
+class SipralCall internal constructor(
+    val client: SipralClient,
+    val handle: Long,
+    private val mediaSocket: DatagramSocket,
+    private val mediaAddress: String,
+) : AutoCloseable {
+    /**
+     * This call's audio, once `SIPRAL_EVENT_KIND_MEDIA_STARTED` has minted
+     * it. Null before then and after the call has ended and [close] has
+     * run.
+     */
+    @Volatile
+    var media: SipralMedia? = null
+        private set
+
+    /** Set once `SIPRAL_EVENT_KIND_CALL_ENDED` has been delivered. */
+    @Volatile
+    var ended: Boolean = false
+        private set
+
+    // A SharedFlow, not a Channel: a Channel is single-consumer, and an
+    // application reasonably wants more than one concurrent reader of one
+    // call's events -- a coroutine counting digits and another waiting for
+    // the call to end, the way bindings/kotlin/examples/Agent.kt runs both
+    // at once. Two concurrent collectors of one Channel-backed Flow race
+    // for every element instead of each seeing all of them, which is a
+    // silent, sporadic way to lose exactly the event a second collector was
+    // waiting for.
+    private val eventsFlow = MutableSharedFlow<SipralEvent>(
+        replay = 0,
+        extraBufferCapacity = 4096,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Every event this call's handle names, decoded whole, in order. */
+    val events: SharedFlow<SipralEvent> = eventsFlow
+
+    /**
+     * Every `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` this call has heard.
+     *
+     * The current generated Kotlin/JNI shim
+     * (`bindings/kotlin/sipral/src/main/jni/sipral_jni.c`) forwards only
+     * `stack`/`kind`/`account`/`call`/`message` out of `sipral_event_t` --
+     * `bindings/kotlin/README.md` names the gap: "the event payload union
+     * ... still cross[es] as addresses". So the digit itself,
+     * `payload.media.digit`, cannot be read off an RFC 4733 (RTP) digit at
+     * all from this generation of the binding; [digitOf] recovers it only
+     * for the INFO forms, whose body is in `event.message`. A caller that
+     * only needs to know a keypress happened, and when, has that much from
+     * this flow either way.
+     */
+    val digits: Flow<SipralEvent> = events.filter { it.kind == SipralEventKind.DIGIT_RECEIVED.value.toLong() }
+
+    /** `sipral_call_state`, read fresh -- not cached from the last event,
+     * which a status query between events would otherwise miss. */
+    val state: SipralCallState
+        get() = SipralCallState.of(retryBusy { Sipral.callState(client.handle, handle) }.toInt())
+            ?: SipralCallState.UNKNOWN
+
+    /** `sipral_call_hold_state`: (this end holding the far end, the far end
+     * holding this one). */
+    val holdState: Pair<Boolean, Boolean>
+        get() = retryBusy { Sipral.callHoldState(client.handle, handle) }
+            .let { (here, there) -> (here != 0L) to (there != 0L) }
+
+    /** Called by [SipralClient] on its own poll thread. Not for application
+     * use. */
+    internal fun deliver(event: SipralEvent) {
+        if (event.kind == SipralEventKind.MEDIA_STARTED.value.toLong() && media == null) {
+            media = SipralMedia(client, handle, mediaSocket)
+        }
+        if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
+            ended = true
+        }
+        eventsFlow.tryEmit(event)
+    }
+
+    // -- actions -------------------------------------------------------------
+
+    /** `sipral_call_answer_media`: accept, with this stack running the
+     * audio through the media socket this call already opened. */
+    internal fun answer(address: String) {
+        retryBusy { Sipral.callAnswerMedia(client.handle, handle, address, client.nowMs()) }
+    }
+
+    /** `sipral_call_reject`. */
+    fun reject(code: Long = 486) {
+        retryBusy { Sipral.callReject(client.handle, handle, code, client.nowMs()) }
+    }
+
+    /** `sipral_call_hangup`. */
+    fun hangup() {
+        retryBusy { Sipral.callHangup(client.handle, handle, client.nowMs()) }
+    }
+
+    /** `sipral_call_hold`. */
+    fun hold() {
+        retryBusy { Sipral.callHold(client.handle, handle, client.nowMs()) }
+    }
+
+    /** `sipral_call_resume`. */
+    fun resume() {
+        retryBusy { Sipral.callResume(client.handle, handle, client.nowMs()) }
+    }
+
+    /** `sipral_call_set_headers`. */
+    fun setHeaders(headers: List<SipralHeader>) {
+        retryBusy { Sipral.callSetHeaders(client.handle, handle, headers) }
+    }
+
+    /** `sipral_call_send_dtmf`. `via` is a `SipralDtmf` value; RTP (1) is
+     * the default and the one every gateway on the path carries end to end. */
+    fun sendDtmf(digits: String, via: Long = 1, durationMs: Long = 100) {
+        retryBusy { Sipral.callSendDtmf(client.handle, handle, digits, via, durationMs, client.nowMs()) }
+    }
+
+    /**
+     * Suspend until this call reaches `CONFIRMED` or ends -- the ABI
+     * completing through `SIPRAL_EVENT_KIND_CALL_CONFIRMED` /
+     * `SIPRAL_EVENT_KIND_CALL_ENDED` rather than through `sipral_call_place`'s
+     * own return, which only hands back the handle before anything has
+     * happened on the wire.
+     */
+    suspend fun waitConfirmed(timeoutMs: Long = 30_000) {
+        if (state == SipralCallState.CONFIRMED) {
+            return
+        }
+        withTimeout(timeoutMs) {
+            events
+                .filter {
+                    it.kind == SipralEventKind.CALL_CONFIRMED.value.toLong() ||
+                        it.kind == SipralEventKind.CALL_ENDED.value.toLong()
+                }
+                .first()
+        }
+        if (ended) {
+            throw IllegalStateException("call ${handle.toString(16)} ended before it was confirmed")
+        }
+    }
+
+    /** Suspend until `SIPRAL_EVENT_KIND_CALL_ENDED` has been delivered. */
+    suspend fun waitEnded(timeoutMs: Long = 30_000) {
+        if (ended) {
+            return
+        }
+        withTimeout(timeoutMs) {
+            events.filter { it.kind == SipralEventKind.CALL_ENDED.value.toLong() }.first()
+        }
+    }
+
+    /**
+     * Hang up if this call is still up, release its media, forget it with
+     * the client. Idempotent, and safe to call from a `finally` or from
+     * `use { }` regardless of how the call ended.
+     */
+    override fun close() {
+        if (!ended) {
+            try {
+                hangup()
+            } catch (_: Exception) {
+                // best effort on the way out
+            }
+        }
+        val current = media
+        if (current != null) {
+            current.close()
+        } else {
+            mediaSocket.close()
+        }
+        client.forgetCall(handle)
+    }
+}
+
+/**
+ * The digit an `application/dtmf` or `application/dtmf-relay` INFO carried,
+ * or null when this event carries no message to read one from -- which is
+ * every RFC 4733 (RTP) digit, for the reason [SipralCall.digits] documents.
+ */
+fun digitOf(event: SipralEvent): Char? {
+    val message = event.message ?: return null
+    val text = String(message, Charsets.US_ASCII)
+    val body = text.substringAfter("\r\n\r\n", "")
+    if (body.isEmpty()) {
+        return null
+    }
+    // application/dtmf: the whole body is the character.
+    val plain = body.trim()
+    if (plain.length == 1 && (plain[0].isDigit() || plain[0] in "*#ABCD")) {
+        return plain[0]
+    }
+    // application/dtmf-relay: "Signal=<digit>" on its own line.
+    for (line in body.lineSequence()) {
+        val trimmed = line.trim()
+        if (trimmed.startsWith("Signal=", ignoreCase = true)) {
+            val value = trimmed.substringAfter('=').trim()
+            if (value.isNotEmpty()) {
+                return value[0]
+            }
+        }
+    }
+    return null
+}
