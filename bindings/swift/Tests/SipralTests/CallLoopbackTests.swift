@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 import XCTest
 @testable import Sipral
 
@@ -157,5 +162,75 @@ final class CallLoopbackTests: XCTestCase {
         // The handle is now stale; every entry point on it must answer
         // SIPRAL_STATUS_STALE_HANDLE (or invalid_handle), never crash.
         XCTAssertThrowsError(try aliceCall.hangup())
+    }
+
+    /// `Call.close()`'s own doc comment promises "idempotent, and safe to
+    /// call regardless of how the call ended" -- two callers racing to close
+    /// the same call, such as a `CALL_ENDED` handler and a user action
+    /// landing at once. Sixteen concurrent closers on a call whose media
+    /// never started (so the only thing a non-idempotent `close()` would do
+    /// twice is close the raw `mediaSocket` descriptor) must not hang.
+    func testCloseFromManyConcurrentCallersDoesNotHang() throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
+        )
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        XCTAssertNil(aliceCall.media, "media must not have started yet for this test to exercise the no-media path")
+
+        let closers = 16
+        let group = DispatchGroup()
+        for _ in 0..<closers {
+            group.enter()
+            DispatchQueue.global().async {
+                aliceCall.close()
+                group.leave()
+            }
+        }
+        let outcome = group.wait(timeout: .now() + 5)
+        XCTAssertEqual(outcome, .success, "close() from \(closers) concurrent callers must not hang")
+    }
+
+    /// The concrete harm a non-idempotent `close()` does on the no-media
+    /// path, made deterministic rather than raced: `close()` legitimately
+    /// frees `aliceCall`'s media descriptor once, a fresh, unrelated socket
+    /// is immediately handed that same descriptor number -- the ordinary
+    /// POSIX behaviour of allocating the lowest free one -- and a *second*
+    /// `close()` call, standing in for a second caller racing the first,
+    /// must not reach past its own guard to close that unrelated socket's
+    /// descriptor out from under it.
+    func testSecondCloseDoesNotStealAReusedDescriptor() throws {
+        let alice = try SipralStack()
+        let bob = try SipralStack()
+        defer { alice.close(); bob.close() }
+
+        let aliceAccount = try alice.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress
+        )
+        let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        XCTAssertNil(aliceCall.media, "media must not have started yet for this test to exercise the no-media path")
+
+        let victimDescriptor = aliceCall.debugMediaSocketDescriptor
+        XCTAssertEqual(fcntl(victimDescriptor, F_GETFD), 0, "the media descriptor must start out open")
+
+        aliceCall.close()
+        XCTAssertEqual(fcntl(victimDescriptor, F_GETFD), -1, "the first close must have freed the descriptor")
+
+        let impostor = try UDPSocket(host: "127.0.0.1", port: 0)
+        defer { impostor.close() }
+        try XCTSkipUnless(
+            impostor.fd == victimDescriptor,
+            "the platform did not reuse the freed descriptor number for the new socket, nothing to race here"
+        )
+
+        aliceCall.close()
+
+        XCTAssertEqual(
+            fcntl(impostor.fd, F_GETFD), 0,
+            "a second close() must not close a descriptor number that has since been reused by an unrelated socket"
+        )
     }
 }

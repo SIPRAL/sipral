@@ -28,6 +28,7 @@ public final class Call: @unchecked Sendable {
     private let stateQueue = DispatchQueue(label: "org.sipral.call.state")
     private var _media: Media?
     private var _ended = false
+    private var _closed = false
 
     public var media: Media? {
         stateQueue.sync { _media }
@@ -43,6 +44,12 @@ public final class Call: @unchecked Sendable {
 
     private let mediaSocket: UDPSocket
     private let mediaAddress: String
+
+    /// The raw descriptor `close()` releases on the no-media path -- `internal`
+    /// rather than `private` only so `SipralTests` can watch it directly, the
+    /// way a white-box concurrency test has to; nothing outside this module
+    /// reads it, so the public surface this package exposes is unchanged.
+    var debugMediaSocketDescriptor: Int32 { mediaSocket.fd }
 
     init(stack: SipralStack, handle: SipralHandle, mediaSocket: UDPSocket) {
         self.stack = stack
@@ -139,8 +146,23 @@ public final class Call: @unchecked Sendable {
     }
 
     /// Hang up if this call is still up, release its media, forget it.
-    /// Idempotent, and safe to call regardless of how the call ended.
+    /// Idempotent, and safe to call regardless of how the call ended --
+    /// including two callers racing to close the same call, such as a
+    /// `CALL_ENDED` event handler and a user action landing at once, which
+    /// is exactly the shape `stateQueue` guards `Media.close()` and
+    /// `SipralStack.close()` against elsewhere in this layer. Without the
+    /// guard, a second, concurrent call here that finds `media` still `nil`
+    /// -- a call closed before its media ever started -- would close
+    /// `mediaSocket`'s file descriptor a second time, which POSIX does not
+    /// make safe: a fresh, unrelated socket opened by another thread in
+    /// between can already hold that same descriptor number by then.
     public func close() {
+        let wasClosed = stateQueue.sync { () -> Bool in
+            defer { _closed = true }
+            return _closed
+        }
+        guard !wasClosed else { return }
+
         if !ended {
             try? hangup()
         }
