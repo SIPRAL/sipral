@@ -531,7 +531,7 @@ pub const MIN_SIZES: &[(&str, usize)] = &[
 /// no oldest published length that matters. The exceptions are named here
 /// rather than left to be noticed, because a struct that quietly went unpinned
 /// would look exactly like these two.
-pub const FILLED_BY_US: &[&str] = &["SipralEvent", "SipralScreenRequest"];
+pub const FILLED_BY_US: &[&str] = &["SipralEvent", "SipralScreenRequest", "SipralProcessorFrame"];
 
 /// Everything this ABI publishes, and the only list a person maintains.
 ///
@@ -548,6 +548,7 @@ pub const SURFACE: Surface = Surface {
         crate::handle::SipralHandle,
         crate::event::SipralEventCallback,
         crate::screening::SipralScreenCallback,
+        crate::media::SipralProcessorCallback,
     ],
     enumerations: &[
         crate::status::SipralStatus::ABI,
@@ -600,6 +601,7 @@ pub const SURFACE: Surface = Surface {
         crate::media::SipralMediaInfo::ABI,
         crate::media::SipralStreamStats::ABI,
         crate::media::SipralMediaPacket::ABI,
+        crate::media::SipralProcessorFrame::ABI,
         crate::transport::SipralTransmit::ABI,
         crate::event::SipralRegistrationEvent::ABI,
         crate::event::SipralCallEvent::ABI,
@@ -696,6 +698,9 @@ pub const SURFACE: Surface = Surface {
         crate::media::sipral_media_receive::ABI,
         crate::media::sipral_media_playback::ABI,
         crate::media::sipral_media_capture::ABI,
+        crate::media::sipral_call_attach_processor::ABI,
+        crate::media::sipral_call_detach_processor::ABI,
+        crate::media::sipral_call_reset_processor::ABI,
         crate::media::sipral_media_mix::ABI,
         crate::media::sipral_media_poll_rtcp::ABI,
         crate::media::sipral_media_poll_transmit::ABI,
@@ -947,6 +952,13 @@ mod tests {
             .filter(|alias| matches!(alias.stands, Stands::Callback(_, _)))
             .map(|alias| alias.name)
             .collect();
-        assert_eq!(callbacks, ["SipralEventCallback", "SipralScreenCallback"]);
+        assert_eq!(
+            callbacks,
+            [
+                "SipralEventCallback",
+                "SipralScreenCallback",
+                "SipralProcessorCallback",
+            ]
+        );
     }
 }

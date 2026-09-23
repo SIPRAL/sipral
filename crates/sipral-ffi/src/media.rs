@@ -55,19 +55,20 @@
 //! address is worth more than the microseconds.
 
 use std::cell::RefCell;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::net::SocketAddr;
+use std::ptr;
 use std::slice;
 use std::time::{Duration, Instant};
 
 use sipral::{
     Arrival, Codec, CodecCandidate, CodecCatalog, CodecOutcome, Direction, IcePolicy, MediaError,
-    MediaSession, Playback, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
+    MediaSession, Playback, Processor, RtcpPlan, SessionShare, SessionUnavailable, SrtpPolicy,
     StreamStatistics, UNAVAILABLE, mix_two,
 };
 use sipral_core::sdp::SdpError;
 
-use crate::abi::{codes, constants, record};
+use crate::abi::{alias, codes, constants, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::{HandleTable, Kind, SipralHandle};
 use crate::stack::{StackState, handle_failed, instant_at, with_stack};
@@ -1802,6 +1803,246 @@ entry! {
             }
         })?;
         unsafe { write_versioned(packet, out) }
+    }
+}
+
+record! {
+    /// What [`SipralProcessorCallback`] is handed for one call: an ordinary
+    /// frame to process, or a request to forget what has been learned.
+    ///
+    /// Filled by the library and handed to the callback as a `const`
+    /// pointer, the same shape [`crate::screening::SipralScreenRequest`] is:
+    /// read `size` before anything past it, and read nothing once the
+    /// callback has returned — `near_end`, `far_end` and `out` borrow from
+    /// buffers that belong to this one call and are not this ABI's to keep
+    /// alive a moment longer.
+    #[derive(Clone, Copy)]
+    pub struct SipralProcessorFrame {
+        /// How many bytes of this struct the library filled in.
+        pub size: usize,
+        /// 0 for an ordinary frame; 1 for a request to forget whatever state
+        /// the processor holds — a device change or a codec change mid-call
+        /// asks for this, and `near_end`, `far_end` and `out`, with the three
+        /// lengths beside them, are all null and zero when it is set.
+        pub reset: u32,
+        /// The frame just captured from the microphone. Null when `reset` is
+        /// set.
+        pub near_end: *const i16,
+        /// How many samples `near_end` is. Always the same number as
+        /// `far_end_len` and `out_len` — carried three times, once beside
+        /// each buffer, because that is the one buffer each binding marshals
+        /// on its own. 0 when `reset` is set.
+        pub near_end_len: usize,
+        /// The far-end audio rendered to the loudspeaker over the same span
+        /// of time as `near_end`, the same length. Null when `reset` is set.
+        pub far_end: *const i16,
+        /// How many samples `far_end` is. See `near_end_len`. 0 when `reset`
+        /// is set.
+        pub far_end_len: usize,
+        /// Where the callback writes the frame that replaces `near_end` —
+        /// every sample of it, since what is not written is read back as
+        /// whatever was there before. Null when `reset` is set, since there
+        /// is nothing to write.
+        pub out: *mut i16,
+        /// How many samples `out` has room for, which is also how many the
+        /// callback has to write. See `near_end_len`. 0 when `reset` is set.
+        pub out_len: usize,
+    }
+}
+
+alias! {
+    /// Echo cancellation, gain control or noise suppression, run over one
+    /// frame, or told to forget what it has learned — [`SipralProcessorFrame`]
+    /// says which. Installed with [`sipral_call_attach_processor`].
+    ///
+    /// **It runs with this call's media locked**, which is the opposite of
+    /// [`crate::event::SipralEventCallback`] and the reason
+    /// [`sipral_call_attach_processor`]'s own doc comment says so before it
+    /// says anything else — read it there. In consequence: **this callback
+    /// must not call back into the media handle it was attached through**,
+    /// on this thread or on any other. It must not unwind, for the same
+    /// reason nothing in this ABI may.
+    ///
+    /// `frame` and everything it points at belong to the library and are
+    /// valid for the duration of this one call and no longer.
+    pub type SipralProcessorCallback = fn(
+        frame: *const SipralProcessorFrame,
+        user_data: *mut c_void,
+    );
+}
+
+/// A [`Processor`] that hands both operations [`SipralProcessorFrame`] can
+/// mean to one C callback.
+///
+/// # Safety
+///
+/// `callback` is the caller's own function, called under the contract
+/// [`SipralProcessorCallback`]'s doc comment states: it must not unwind, and
+/// it must not call back into the media handle this was attached through,
+/// enforced by that handle's own re-entry guard rather than by anything
+/// here. `user_data` is the caller's own pointer, read by nothing here and
+/// only ever handed back to the same callback it arrived with.
+struct CProcessor {
+    callback: unsafe extern "C" fn(frame: *const SipralProcessorFrame, user_data: *mut c_void),
+    user_data: *mut c_void,
+    /// Where the callback writes the frame it hands back, sized to the last
+    /// frame seen — which changes when a codec change gives this call a
+    /// different frame length, and never otherwise.
+    out: Vec<i16>,
+}
+
+// Safety: see the struct's own doc comment above.
+unsafe impl Send for CProcessor {}
+
+impl Processor for CProcessor {
+    fn process(&mut self, near_end: &mut [i16], reference: &[i16]) {
+        if self.out.len() != near_end.len() {
+            self.out.clear();
+            self.out.resize(near_end.len(), 0);
+        }
+        let frame = SipralProcessorFrame {
+            size: size_of::<SipralProcessorFrame>(),
+            reset: 0,
+            near_end: near_end.as_ptr(),
+            near_end_len: near_end.len(),
+            far_end: reference.as_ptr(),
+            far_end_len: near_end.len(),
+            out: self.out.as_mut_ptr(),
+            out_len: near_end.len(),
+        };
+        // Safety: `near_end` and `reference` are each `near_end.len()`
+        // samples, readable for the length of this call; `self.out` was just
+        // sized to the same length and is writable for it. `frame` is read
+        // by the callback for the duration of this one call, under
+        // `SipralProcessorCallback`'s contract.
+        unsafe { (self.callback)(&raw const frame, self.user_data) };
+        near_end.copy_from_slice(&self.out);
+    }
+
+    fn reset(&mut self) {
+        let frame = SipralProcessorFrame {
+            size: size_of::<SipralProcessorFrame>(),
+            reset: 1,
+            near_end: ptr::null(),
+            near_end_len: 0,
+            far_end: ptr::null(),
+            far_end_len: 0,
+            out: ptr::null_mut(),
+            out_len: 0,
+        };
+        // Safety: as in `process` above; there is nothing beyond `frame`
+        // itself for the callback to read or write this time.
+        unsafe { (self.callback)(&raw const frame, self.user_data) };
+    }
+}
+
+entry! {
+    /// Run `process` over every frame captured on this call, against the
+    /// far-end audio this call played [`MediaSession::render_delay`] earlier
+    /// — echo cancellation, gain control and noise suppression are all this
+    /// one seam, and `docs/05-media.md` says why.
+    ///
+    /// What was attached before is dropped, along with the echo path it had
+    /// learned. Attaching mid-call is allowed and costs the first few hundred
+    /// milliseconds of a fresh adaptation, the same price a call pays at its
+    /// start.
+    ///
+    /// **`process` runs with this call's media locked**, the same as
+    /// [`crate::screening::SipralScreenCallback`] and unlike
+    /// [`crate::event::SipralEventCallback`]: it is called from inside
+    /// [`sipral_media_playback`] (to learn what the loudspeaker was just
+    /// given) and inside [`sipral_media_capture`] (to run the frame just
+    /// captured), and — with [`SipralProcessorFrame`]'s `reset` set — whenever
+    /// this call's media forgets what it has learned, a device change or a
+    /// codec change mid-call. All three run on whichever thread called the
+    /// entry point that triggered them. In consequence, **it must not call
+    /// back into the media handle it was attached through**, on this thread
+    /// or on any other — doing so does not deadlock, since every media entry
+    /// point takes its session's lock without waiting and answers
+    /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
+    /// rather than relied on. A *different* call's media, or this stack's
+    /// own entry points, are unaffected. It must not unwind: a panic that
+    /// reached C across this boundary would take the host process with it,
+    /// the same rule every callback in this ABI is held to.
+    ///
+    /// `user_data` is handed back to `process` untouched on every call, read
+    /// by nothing here, and has to outlive the last one — which the caller
+    /// who installed it is the one to know is over:
+    /// `sipral_call_detach_processor` or the call ending are the two ways.
+    ///
+    /// # Safety
+    ///
+    /// `process` is called on whichever thread calls
+    /// [`sipral_media_playback`] or [`sipral_media_capture`] on this call,
+    /// for as long as the processor stays attached, and `user_data` has to
+    /// outlive the last such call.
+    fn sipral_call_attach_processor(
+        media: SipralHandle,
+        process: SipralProcessorCallback,
+        user_data: *mut c_void,
+    ) {
+        let Some(callback) = process else {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "process is null: there is nothing to attach",
+            ));
+        };
+        with_media(media, |session, _| {
+            session.attach_processor(Box::new(CProcessor {
+                callback,
+                user_data,
+                out: Vec::new(),
+            }));
+            Ok(())
+        })
+    }
+}
+
+entry! {
+    /// Stop running the processor [`sipral_call_attach_processor`] attached,
+    /// if there was one.
+    ///
+    /// `out_was_attached`, when not null, says whether there was one to stop:
+    /// 1 if a processor was attached and is now detached, 0 if there was
+    /// none. The frames the application hands over reach the encoder
+    /// untouched again from the next one, and the loudspeaker history kept
+    /// for it is released. Once this returns, `process` is not called again
+    /// for this attachment — the moment `user_data` may be freed.
+    ///
+    /// # Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    fn sipral_call_detach_processor(media: SipralHandle, out_was_attached: *mut u32) {
+        let was_attached = with_media(media, |session, _| Ok(session.detach_processor()))?;
+        if !out_was_attached.is_null() {
+            unsafe { out_was_attached.write(u32::from(was_attached)) };
+        }
+        Ok(())
+    }
+}
+
+entry! {
+    /// Forget the echo path, the noise floor and the gain the attached
+    /// processor has learned, keeping the processor itself attached.
+    ///
+    /// What a device change asks for: the estimate was built for a different
+    /// loudspeaker and a different microphone, and carrying it forward makes
+    /// the processor fight it for a while instead of adapting cleanly. Calls
+    /// the `process` given to [`sipral_call_attach_processor`] with
+    /// [`SipralProcessorFrame`]'s `reset` set.
+    ///
+    /// `out_was_attached`, when not null, says whether there was a processor
+    /// to reset: 1 if there was, 0 if there was none.
+    ///
+    /// # Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    fn sipral_call_reset_processor(media: SipralHandle, out_was_attached: *mut u32) {
+        let was_attached = with_media(media, |session, _| Ok(session.reset_processor()))?;
+        if !out_was_attached.is_null() {
+            unsafe { out_was_attached.write(u32::from(was_attached)) };
+        }
+        Ok(())
     }
 }
 

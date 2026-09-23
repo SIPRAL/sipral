@@ -38,7 +38,8 @@
     X(sipral_codec_candidate) X(sipral_media_info) X(sipral_stream_stats)     \
     X(sipral_media_packet) X(sipral_transmit) X(sipral_event)                 \
     X(sipral_suspending) X(sipral_screen_request)                             \
-    X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)
+    X(sipral_subscribe_config) X(sipral_watched_dialog) X(sipral_push_echo)   \
+    X(sipral_processor_frame)
 
 static int failures;
 
@@ -1220,6 +1221,211 @@ static void headers_cross_a_call(void)
     sipral_stack_destroy(caller);
 }
 
+/* -- a processor attached, detached and reset through the C ABI -------------
+ *
+ * sipral_call_attach_processor, sipral_call_detach_processor and
+ * sipral_call_reset_processor, exercised on a real call's real media handle:
+ * a null callback refused, nothing-attached answered honestly, a reset seen
+ * clean, a played frame and a captured frame hand the callback exactly what
+ * sipral_media_info_t says the call's frame is shaped like, replacing the
+ * processor stops the one it replaced from being called, and detaching stops
+ * both.
+ */
+static const char processor_caller_bind[] = "192.0.2.50:5060";
+static const char processor_callee_bind[] = "192.0.2.51:5060";
+static const char processor_target[] = "sip:hank@192.0.2.51:5060";
+static const char processor_caller_media[] = "192.0.2.50:40010";
+static const char processor_callee_media[] = "192.0.2.51:40010";
+
+/* What one attachment of the callback saw, read back by the test rather than
+ * reached for from inside the callback -- which must never call back into
+ * the media handle it was attached through. */
+struct processor_seen {
+    int calls;
+    int resets;
+    int reset_was_clean;
+    size_t near_len;
+    size_t far_len;
+    size_t out_len;
+    int16_t near_first;
+    int16_t far_first;
+    int wrote_out;
+};
+
+static void on_processor_frame(const sipral_processor_frame_t *frame, void *user_data)
+{
+    struct processor_seen *seen = (struct processor_seen *)user_data;
+    if (frame->reset) {
+        seen->resets++;
+        seen->reset_was_clean = frame->near_end == NULL && frame->far_end == NULL &&
+                                frame->out == NULL && frame->near_end_len == 0 &&
+                                frame->far_end_len == 0 && frame->out_len == 0;
+        return;
+    }
+    seen->calls++;
+    seen->near_len = frame->near_end_len;
+    seen->far_len = frame->far_end_len;
+    seen->out_len = frame->out_len;
+    seen->near_first = frame->near_end_len > 0 ? frame->near_end[0] : 0;
+    seen->far_first = frame->far_end_len > 0 ? frame->far_end[0] : 0;
+    /* Every sample doubled, so the test can tell this callback is the one
+     * that ran without decoding what went out on the wire. */
+    for (size_t i = 0; i < frame->out_len; i++) {
+        frame->out[i] = (int16_t)(frame->near_end[i] * 2);
+    }
+    seen->wrote_out = 1;
+}
+
+static void a_processor_runs_the_frames_of_a_call(void)
+{
+    struct crossing caller_seen = { SIPRAL_HANDLE_NONE, 0, 0, { 0 } };
+    struct crossing callee_seen = { SIPRAL_HANDLE_NONE, 0, 0, { 0 } };
+    sipral_handle_t caller_account = SIPRAL_HANDLE_NONE;
+    sipral_handle_t callee_account = SIPRAL_HANDLE_NONE;
+    sipral_handle_t call = SIPRAL_HANDLE_NONE;
+    sipral_handle_t media = SIPRAL_HANDLE_NONE;
+    sipral_poll_result_t poll = { 0 };
+    sipral_media_info_t info = { 0 };
+    sipral_media_packet_t packet = { 0 };
+    sipral_call_config_t call_config = { 0 };
+    struct processor_seen seen = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    struct processor_seen other = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint32_t was_attached = 42;
+    int16_t playback_frame[960];
+    int16_t capture_frame[960];
+    size_t written = 0;
+    size_t i;
+    poll.size = sizeof poll;
+    info.size = sizeof info;
+    packet.size = sizeof packet;
+    packet.data = packet_buffer;
+    packet.capacity = sizeof packet_buffer;
+    packet.destination = destination_buffer;
+    packet.destination_capacity = sizeof destination_buffer;
+
+    sipral_handle_t caller =
+        crossing_end(&caller_seen, processor_caller_bind, "sip:grace@example.com",
+                    "sip:grace@192.0.2.50:5060", processor_callee_bind, &caller_account);
+    sipral_handle_t callee =
+        crossing_end(&callee_seen, processor_callee_bind, "sip:hank@example.com",
+                    "sip:hank@192.0.2.51:5060", processor_caller_bind, &callee_account);
+
+    call_config.size = sizeof call_config;
+    call_config.target = processor_target;
+    call_config.target_len = strlen(processor_target);
+    call_config.media_address = processor_caller_media;
+    call_config.media_address_len = strlen(processor_caller_media);
+    expect("a call for the processor test would not go out",
+           sipral_call_place(caller, caller_account, &call_config, &call, 0) ==
+               SIPRAL_STATUS_OK);
+    expect("the INVITE for the processor test did not reach the callee",
+           carry(caller, processor_caller_bind, callee, processor_callee_bind) == 1);
+    expect("the callee for the processor test would not poll",
+           sipral_stack_poll(callee, 0, &poll) == SIPRAL_STATUS_OK);
+    expect("the call for the processor test never reached the callee",
+           callee_seen.call != SIPRAL_HANDLE_NONE);
+    if (callee_seen.call == SIPRAL_HANDLE_NONE) {
+        sipral_stack_destroy(callee);
+        sipral_stack_destroy(caller);
+        return;
+    }
+    expect("the callee for the processor test would not answer with its own media",
+           sipral_call_answer_media(callee, callee_seen.call, processor_callee_media,
+                                    strlen(processor_callee_media), 0) == SIPRAL_STATUS_OK);
+    expect("the 200 for the processor test did not reach the caller",
+           carry(callee, processor_callee_bind, caller, processor_caller_bind) >= 1);
+    expect("the caller for the processor test would not poll",
+           sipral_stack_poll(caller, 0, &poll) == SIPRAL_STATUS_OK);
+
+    expect("the processor test's call has no media handle",
+           sipral_call_media(caller, call, &media) == SIPRAL_STATUS_OK);
+    expect("the processor test's media handle is none", media != SIPRAL_HANDLE_NONE);
+    expect("the processor test could not read the media info",
+           sipral_media_info(media, &info) == SIPRAL_STATUS_OK);
+    expect("the processor test's frame does not fit the fixed buffers",
+           info.frame_samples > 0 &&
+               info.frame_samples <= sizeof playback_frame / sizeof playback_frame[0]);
+
+    /* A null callback is refused rather than read as a request to attach
+     * nothing -- sipral_call_detach_processor is that request. */
+    expect("a null process callback was accepted",
+           sipral_call_attach_processor(media, NULL, &seen) ==
+               SIPRAL_STATUS_INVALID_ARGUMENT);
+
+    expect("detaching a processor never attached said there was one",
+           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+               was_attached == 0);
+    expect("resetting a processor never attached said there was one",
+           sipral_call_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+               was_attached == 0);
+
+    expect("the processor would not attach",
+           sipral_call_attach_processor(media, on_processor_frame, &seen) ==
+               SIPRAL_STATUS_OK);
+
+    expect("resetting the freshly attached processor did not run it",
+           sipral_call_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+               was_attached == 1 && seen.resets == 1 && seen.reset_was_clean);
+
+    for (i = 0; i < info.frame_samples; i++) {
+        playback_frame[i] = (int16_t)(1000 + (int)i);
+    }
+    expect("the processor test could not play a frame",
+           sipral_media_playback(media, playback_frame, info.frame_samples, &written, NULL) ==
+                   SIPRAL_STATUS_OK &&
+               written == info.frame_samples);
+
+    for (i = 0; i < info.frame_samples; i++) {
+        capture_frame[i] = (int16_t)(2000 + (int)i);
+    }
+    expect("the processor test could not capture a frame",
+           sipral_media_capture(media, 0, capture_frame, info.frame_samples, &packet) ==
+               SIPRAL_STATUS_OK);
+    expect("the attached processor did not see the captured frame",
+           seen.calls == 1 && seen.near_len == info.frame_samples &&
+               seen.far_len == info.frame_samples && seen.out_len == info.frame_samples &&
+               seen.near_first == capture_frame[0] && seen.wrote_out);
+    /* Nothing was played before this call's first frame reached the far end
+     * that lines up with it, so what the processor is handed as the far end
+     * is silence -- docs/05-media.md's alignment, read from C. */
+    expect("the far end handed to a fresh processor was not silence",
+           seen.far_first == 0);
+
+    /* Attaching again replaces what was there: the callback the first
+     * attachment was given must not be reached from here on. */
+    expect("re-attaching the processor did not succeed",
+           sipral_call_attach_processor(media, on_processor_frame, &other) ==
+               SIPRAL_STATUS_OK);
+    for (i = 0; i < info.frame_samples; i++) {
+        capture_frame[i] = (int16_t)(3000 + (int)i);
+    }
+    expect("the processor test could not capture a second frame",
+           sipral_media_capture(media, 20, capture_frame, info.frame_samples, &packet) ==
+               SIPRAL_STATUS_OK);
+    expect("replacing the processor left the one it replaced running",
+           seen.calls == 1 && other.calls == 1 && other.near_first == capture_frame[0]);
+
+    expect("detaching the processor did not say one was attached",
+           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+               was_attached == 1);
+    expect("detaching an already detached processor said one was attached",
+           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+               was_attached == 0);
+
+    for (i = 0; i < info.frame_samples; i++) {
+        capture_frame[i] = (int16_t)(4000 + (int)i);
+    }
+    expect("the processor test could not capture a frame after detaching",
+           sipral_media_capture(media, 40, capture_frame, info.frame_samples, &packet) ==
+               SIPRAL_STATUS_OK);
+    expect("a detached processor still saw a frame",
+           seen.calls == 1 && other.calls == 1);
+
+    sipral_media_release(media);
+    sipral_stack_destroy(callee);
+    sipral_stack_destroy(caller);
+}
+
 /* -- a next hop nothing here will look up ------------------------------------
  *
  * RFC 3263 4 through the ABI: the far end answered with a Contact naming a
@@ -1891,6 +2097,7 @@ int main(void)
     sizes_agree();
     oldest_lengths_still_work();
     headers_cross_a_call();
+    a_processor_runs_the_frames_of_a_call();
     a_call_names_its_own_codecs();
     every_codec_says_what_became_of_it();
     a_call_keyed_by_a_handshake_says_so_in_its_offer();

@@ -330,6 +330,99 @@ internal object SipralScreenListeners {
 }
 
 /**
+ * What a processing callback is handed: a frame to read and one to fill.
+ */
+class SipralProcessorEvent(
+    val size: Long,
+    /**
+     * The frame just captured, to read.
+     */
+    val near: ShortArray?,
+    /**
+     * Where the processed frame is written.
+     */
+    val far: ShortArray?,
+)
+
+/**
+ * Run over one frame, and hand back what replaces it.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralProcessListener {
+    fun onEvent(event: SipralProcessorEvent)
+}
+
+/**
+ * Every SipralProcessListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralProcessListeners {
+    private val listening = HashMap<Long, SipralProcessListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralProcessListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /**
+     * Hand a kept listener to a handle the caller already had, letting go of
+     * whatever that handle held before it. A key of zero is the call that
+     * removed the listener outright, and a call that failed leaves the handle
+     * with what it had.
+     */
+    fun installed(key: Long, status: Int, handle: Long) {
+        synchronized(this) {
+            if (status != SipralStatus.OK.value) {
+                listening.remove(key)
+                return
+            }
+            val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)
+            if (before != null) {
+                listening.remove(before)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was left with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, near: ShortArray?, far: ShortArray?) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onEvent(SipralProcessorEvent(size, near, far))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -380,6 +473,7 @@ internal object SipralNative {
     external fun sipral_call_mix(stack: Long, mic: ShortArray, local: ShortArray): Int
     external fun sipral_call_media_receive(stack: Long, data: ByteArray, arrival: LongArray): Int
     external fun sipral_stack_screen(stack: Long, callback: Long): Int
+    external fun sipral_stack_process(stack: Long, callback: Long): Int
     external fun sipral_stack_destroy(stack: Long): Int
 }
 
@@ -585,12 +679,35 @@ object Sipral {
     }
 
     /**
+     * Install a processor on it, replace the one installed, or remove it.
+     *
+     * The callback and the pointer after it are one listener, the same
+     * pair a struct going in already means by them, and a null callback
+     * removes whatever was installed.
+     */
+    fun stackProcess(stack: Long, listener: SipralProcessListener?) {
+        // held across the call so that what SipralProcessListeners records and what
+        // the library installed cannot disagree
+        synchronized(SipralProcessListeners) {
+            val callback = SipralProcessListeners.register(listener)
+            var status = -1
+            try {
+                status = SipralNative.sipral_stack_process(stack, callback)
+            } finally {
+                SipralProcessListeners.installed(callback, status, stack)
+            }
+            check(status)
+        }
+    }
+
+    /**
      * Take it apart.
      */
     fun stackDestroy(stack: Long) {
         val status = SipralNative.sipral_stack_destroy(stack)
         SipralEventListeners.gone(stack)
         SipralScreenListeners.gone(stack)
+        SipralProcessListeners.gone(stack)
         check(status)
     }
 

@@ -284,16 +284,27 @@ enum Part<'a> {
     },
     /// A union held by value, whose live arm another member names.
     Arm(&'a Read<'a>),
+    /// A writable pointer and the `_len` after it: a buffer the far side
+    /// fills rather than reads, an array the same as [`Part::Buffer`] but
+    /// copied back once the call that was handed it returns.
+    Fill {
+        /// The pointer.
+        data: &'a Read<'a>,
+        /// The length that follows it.
+        len: &'a Read<'a>,
+    },
 }
 
 /// Read the members of a record, from `first` on, as a Kotlin class holds
 /// them.
 ///
 /// The conventions are the ones a parameter list follows, read off a struct:
-/// a pointer followed by its `_len` is one buffer, or a list when it points
-/// at records, and the callback followed by a `*mut c_void` is one listener.
-/// Anything else that is not a number is refused, naming the member, rather
-/// than crossing as an address nobody on the Kotlin side has a way to make.
+/// a `const` pointer followed by its `_len` is one buffer going in, or a list
+/// when it points at records; a writable one followed by its `_len` is a
+/// buffer the far side fills; and the callback followed by a `*mut c_void` is
+/// one listener. Anything else that is not a number is refused, naming the
+/// member, rather than crossing as an address nobody on the Kotlin side has a
+/// way to make.
 fn parts<'a>(
     surface: &Surface,
     record: &Record,
@@ -356,9 +367,23 @@ fn parts<'a>(
                 index += 2;
                 continue;
             }
+            (Some(Writable::Yes), _) if field.ty.points_at_bytes() => {
+                let wanted = format!("{}_len", field.member.name);
+                let Some(len) =
+                    next.filter(|after| after.ty.is_length() && after.member.name == wanted)
+                else {
+                    return Err(refuse(&format!(
+                        "points at bytes with no `{wanted}` after it"
+                    )));
+                };
+                out.push(Part::Fill { data: field, len });
+                index += 2;
+                continue;
+            }
             _ => {
                 return Err(refuse(
-                    "is a pointer that is neither a buffer going in nor a callback's user pointer",
+                    "is a pointer that is neither a buffer going in, a buffer to fill, nor a \
+                     callback's user pointer",
                 ));
             }
         }
@@ -392,6 +417,19 @@ fn records_not_handed(record: &Record, field: &Read<'_>) -> Refused {
         "{}::{} is an array of records inside a struct the library hands to a listener, and \
          this back end builds such arrays but reads none back; give it a shape in \
          tools/abi-gen/src/kotlin.rs",
+        record.name, field.member.name
+    ))
+}
+
+/// A struct a caller builds to pass in holds a buffer the library only ever
+/// fills for a listener -- [`Part::Fill`] -- which a struct going in has no
+/// business declaring: nothing would read what the caller wrote there, and
+/// the caller has no way to read back what the library would have written.
+fn not_built_fill(record: &Record, field: &Read<'_>) -> Refused {
+    Refused::about(&format!(
+        "{}::{} is a buffer the library only ever fills for a listener, inside a struct a \
+         caller builds to pass in, which is not a shape this back end has a reading for; give \
+         it one in tools/abi-gen/src/kotlin.rs",
         record.name, field.member.name
     ))
 }
@@ -632,6 +670,55 @@ struct Handed {
     c_make: String,
     /// What it passes.
     c_passed: String,
+    /// What the landing function does after the call, once the listener has
+    /// had its chance to fill the array: empty for everything but a
+    /// [`Part::Fill`], which copies the array back into the native buffer it
+    /// stands for.
+    c_after: String,
+}
+
+/// A [`Part::Fill`] as [`handed`] hands it over: a fresh array the listener
+/// writes into, copied back into the native buffer before the landing
+/// function's local refs are let go.
+///
+/// Zero-length JNI arrays are legal and `New*Array` leaves a fresh array
+/// zeroed, so the listener is handed a real array to write into and nothing
+/// here has to seed it first -- unlike [`Part::Buffer`], which copies the
+/// native side in before the call because there the native side is the one
+/// with something to say. The copy back happens whether or not the listener
+/// threw: `New*Array` zeroed the array, so a listener that threw partway
+/// through hands back silence rather than a previous frame's stale content.
+fn fill_handed(event: &str, spelled: &str, data: &Read<'_>, len: &Read<'_>) -> Handed {
+    let kotlin = held(data);
+    let name = data.member.name;
+    let len = len.member.name;
+    let (element, kind) = jni_element_of(&data.ty);
+    let c_make = format!(
+        "    if (built && JNI_REACHES({event}, {spelled}, {len}) && {event}->{name} != NULL) {{\n\
+         \x20       {name} = (*env)->New{kind}Array(env, (jsize){event}->{len});\n\
+         \x20       if ({name} == NULL) {{\n\
+         \x20           built = 0;\n\
+         \x20       }}\n\
+         \x20   }}\n"
+    );
+    let c_after = format!(
+        "    if ({name} != NULL) {{\n\
+         \x20       (*env)->Get{kind}ArrayRegion(env, {name}, 0, (jsize){event}->{len}, ({element} *){event}->{name});\n\
+         \x20   }}\n"
+    );
+    Handed {
+        from: data.member.name,
+        doc: data.member.doc,
+        parameter: format!("{kotlin}: {}?", array_of(&data.ty)),
+        argument: kotlin.clone(),
+        field: format!("val {kotlin}: {}?", array_of(&data.ty)),
+        descriptor: descriptor_of_array(&data.ty).to_owned(),
+        kotlin,
+        c_local: Some((name, jni_array_of(&data.ty).to_owned())),
+        c_make,
+        c_passed: name.to_owned(),
+        c_after,
+    }
 }
 
 /// Every member the listener is handed, with the ones left out named.
@@ -674,6 +761,7 @@ fn handed(
                     c_local: None,
                     c_make: String::new(),
                     c_passed,
+                    c_after: String::new(),
                 });
             }
             Part::Buffer { data, len } => {
@@ -711,8 +799,10 @@ fn handed(
                     c_local: Some((name, jni_array_of(&data.ty).to_owned())),
                     c_make,
                     c_passed: name.to_owned(),
+                    c_after: String::new(),
                 });
             }
+            Part::Fill { data, len } => out.push(fill_handed(event, &spelled, data, len)),
             Part::Records { data, .. } => return Err(records_not_handed(record, data)),
             Part::Listener { callback, .. } => return Err(not_handed(record, callback)),
             Part::Arm(field) => left_out.push(field.member.name.to_owned()),
@@ -774,8 +864,15 @@ fn installed_by<'a>(
 }
 
 /// The entry point that destroys the thing a listener was installed on: the
-/// one ending in `_destroy` that takes that handle alone, under the same
-/// name.
+/// one ending in `_destroy` or `_release` that takes that handle alone,
+/// under the same name.
+///
+/// Two suffixes, not one, because this ABI already has two ways a handle is
+/// let go of: `_destroy` for the ones a stack's own lock guards, and
+/// `_release` for a media handle, whose one matching free is
+/// `sipral_media_release` rather than a `sipral_media_destroy` this surface
+/// has never declared — `docs/08-ffi.md`'s "Handles" section is where that
+/// distinction is made, not this generator's to invent a second time.
 ///
 /// A listener installed on a handle outlives the call that installed it, so
 /// something has to let it go; an installer whose handle nothing destroys is
@@ -787,15 +884,15 @@ fn destroyer_of(
     handle: &Read<'_>,
 ) -> Result<&'static Function, Refused> {
     let found = surface.functions.iter().find(|function| {
-        function.name.ends_with("_destroy")
+        (function.name.ends_with("_destroy") || function.name.ends_with("_release"))
             && matches!(function.parameters, [only] if only.name == handle.member.name
                 && Type::read(only.rust_type).is_ok_and(|ty| ty == handle.ty))
     });
     found.ok_or_else(|| {
         Refused::about(&format!(
             "{} installs a listener on `{}`, and the surface has no entry point ending in \
-             `_destroy` that takes that one handle, which is where the listener would be let \
-             go of",
+             `_destroy` or `_release` that takes that one handle, which is where the listener \
+             would be let go of",
             installer.name, handle.member.name
         ))
     })
@@ -990,6 +1087,7 @@ fn fields_crossing(surface: &Surface, read: &Read<'_>) -> Result<Crossing, Refus
             ),
             Part::Listener { callback, .. } => (callback, "Long".to_owned(), "jlong".to_owned()),
             Part::Arm(field) => return Err(not_built(record, field)),
+            Part::Fill { data, .. } => return Err(not_built_fill(record, data)),
         };
         let name = flat(read, member);
         let from = format!("{}::{}", record.name, member.member.name);
@@ -1103,6 +1201,7 @@ fn built_classes(surface: &Surface) -> Result<String, Refused> {
                     ),
                 ),
                 Part::Arm(field) => return Err(not_built(record, field)),
+                Part::Fill { data, .. } => return Err(not_built_fill(record, data)),
             };
             doc(&mut out, "    ", &lines(surface, field.member.doc));
             let _ = writeln!(out, "    {declared},");
@@ -1799,6 +1898,7 @@ fn built_argument(surface: &Surface, read: &Read<'_>) -> Result<BuiltArgument, R
                 out.kept.push((keeper, local));
             }
             Part::Arm(field) => return Err(not_built(record, field)),
+            Part::Fill { data, .. } => return Err(not_built_fill(record, data)),
         }
     }
     Ok(out)
@@ -2404,6 +2504,7 @@ impl Around {
                     );
                 }
                 Part::Arm(field) => return Err(not_built(record, field)),
+                Part::Fill { data, .. } => return Err(not_built_fill(record, data)),
             }
         }
         self.passed.push(format!("&{value}"));
@@ -2978,6 +3079,9 @@ fn landing_function(surface: &Surface, landing: &Landing) -> Result<String, Refu
     out.push_str(&landing_call(landing, answer.as_deref(), &passed));
     out.push_str(landing_exception_check(answer.is_some()));
     for member in &members {
+        out.push_str(&member.c_after);
+    }
+    for member in &members {
         if let Some((name, _)) = &member.c_local {
             let _ = writeln!(
                 out,
@@ -3343,6 +3447,7 @@ impl Spelling for Names {
                         (listener_field(callback), callback.member.name)
                     }
                     Part::Arm(field) => return Err(not_built(record, field)),
+                    Part::Fill { data, .. } => return Err(not_built_fill(record, data)),
                 };
                 out.push((
                     class.clone(),

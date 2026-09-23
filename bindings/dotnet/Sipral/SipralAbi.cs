@@ -1731,6 +1731,28 @@ public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);
 public delegate uint SipralScreenCallback(IntPtr request, IntPtr userData);
 
 /// <summary>
+/// Echo cancellation, gain control or noise suppression, run over one
+/// frame, or told to forget what it has learned — SipralProcessorFrame
+/// says which. Installed with sipral_call_attach_processor.
+///
+/// **It runs with this call's media locked**, which is the opposite of
+/// crate::event::SipralEventCallback and the reason
+/// sipral_call_attach_processor's own doc comment says so before it
+/// says anything else — read it there. In consequence: **this callback
+/// must not call back into the media handle it was attached through**,
+/// on this thread or on any other. It must not unwind, for the same
+/// reason nothing in this ABI may.
+///
+/// `frame` and everything it points at belong to the library and are
+/// valid for the duration of this one call and no longer.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void SipralProcessorCallback(IntPtr frame, IntPtr userData);
+
+/// <summary>
 /// The version of the ABI this library provides.
 ///
 /// Set `size` to `sizeof(sipral_abi_version_t)` before the call.
@@ -3194,6 +3216,76 @@ public struct SipralMediaPacket
 }
 
 /// <summary>
+/// What SipralProcessorCallback is handed for one call: an ordinary
+/// frame to process, or a request to forget what has been learned.
+///
+/// Filled by the library and handed to the callback as a `const`
+/// pointer, the same shape crate::screening::SipralScreenRequest is:
+/// read `size` before anything past it, and read nothing once the
+/// callback has returned — `near_end`, `far_end` and `out` borrow from
+/// buffers that belong to this one call and are not this ABI's to keep
+/// alive a moment longer.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralProcessorFrame
+{
+    /// <summary>
+    /// How many bytes of this struct the library filled in.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// 0 for an ordinary frame; 1 for a request to forget whatever state
+    /// the processor holds — a device change or a codec change mid-call
+    /// asks for this, and `near_end`, `far_end` and `out`, with the three
+    /// lengths beside them, are all null and zero when it is set.
+    /// </summary>
+    public uint Reset;
+    /// <summary>
+    /// The frame just captured from the microphone. Null when `reset` is
+    /// set.
+    /// </summary>
+    public IntPtr NearEnd;
+    /// <summary>
+    /// How many samples `near_end` is. Always the same number as
+    /// `far_end_len` and `out_len` — carried three times, once beside
+    /// each buffer, because that is the one buffer each binding marshals
+    /// on its own. 0 when `reset` is set.
+    /// </summary>
+    public nuint NearEndLen;
+    /// <summary>
+    /// The far-end audio rendered to the loudspeaker over the same span
+    /// of time as `near_end`, the same length. Null when `reset` is set.
+    /// </summary>
+    public IntPtr FarEnd;
+    /// <summary>
+    /// How many samples `far_end` is. See `near_end_len`. 0 when `reset`
+    /// is set.
+    /// </summary>
+    public nuint FarEndLen;
+    /// <summary>
+    /// Where the callback writes the frame that replaces `near_end` —
+    /// every sample of it, since what is not written is read back as
+    /// whatever was there before. Null when `reset` is set, since there
+    /// is nothing to write.
+    /// </summary>
+    public IntPtr Out;
+    /// <summary>
+    /// How many samples `out` has room for, which is also how many the
+    /// callback has to write. See `near_end_len`. 0 when `reset` is set.
+    /// </summary>
+    public nuint OutLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralProcessorFrame Sized()
+    {
+        var value = default(SipralProcessorFrame);
+        value.Size = (nuint)Marshal.SizeOf<SipralProcessorFrame>();
+        return value;
+    }
+}
+
+/// <summary>
 /// One message on its way out, written into the caller's own buffers.
 ///
 /// The caller fills in `size`, the three pointers and the three capacities; the
@@ -4595,6 +4687,15 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_capture(ulong media, ulong nowMs, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_attach_processor(ulong media, SipralProcessorCallback process, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_detach_processor(ulong media, out uint wasAttached);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_call_reset_processor(ulong media, out uint wasAttached);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_mix(ulong mediaA, ulong mediaB, ulong nowMs, short[] mic, nuint micCount, short[] local, nuint localCount, ref SipralMediaPacket packetA, ref SipralMediaPacket packetB);
@@ -6568,6 +6669,96 @@ public static class Sipral
     public static void MediaCapture(ulong media, ulong nowMs, short[] samples, ref SipralMediaPacket packet)
     {
         Check(NativeMethods.sipral_media_capture(media, nowMs, samples, (nuint)samples.Length, ref packet));
+    }
+
+    /// <summary>
+    /// Run `process` over every frame captured on this call, against the
+    /// far-end audio this call played MediaSession::render_delay earlier
+    /// — echo cancellation, gain control and noise suppression are all this
+    /// one seam, and `docs/05-media.md` says why.
+    ///
+    /// What was attached before is dropped, along with the echo path it had
+    /// learned. Attaching mid-call is allowed and costs the first few hundred
+    /// milliseconds of a fresh adaptation, the same price a call pays at its
+    /// start.
+    ///
+    /// **`process` runs with this call's media locked**, the same as
+    /// crate::screening::SipralScreenCallback and unlike
+    /// crate::event::SipralEventCallback: it is called from inside
+    /// sipral_media_playback (to learn what the loudspeaker was just
+    /// given) and inside sipral_media_capture (to run the frame just
+    /// captured), and — with SipralProcessorFrame's `reset` set — whenever
+    /// this call's media forgets what it has learned, a device change or a
+    /// codec change mid-call. All three run on whichever thread called the
+    /// entry point that triggered them. In consequence, **it must not call
+    /// back into the media handle it was attached through**, on this thread
+    /// or on any other — doing so does not deadlock, since every media entry
+    /// point takes its session's lock without waiting and answers
+    /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
+    /// rather than relied on. A *different* call's media, or this stack's
+    /// own entry points, are unaffected. It must not unwind: a panic that
+    /// reached C across this boundary would take the host process with it,
+    /// the same rule every callback in this ABI is held to.
+    ///
+    /// `user_data` is handed back to `process` untouched on every call, read
+    /// by nothing here, and has to outlive the last one — which the caller
+    /// who installed it is the one to know is over:
+    /// `sipral_call_detach_processor` or the call ending are the two ways.
+    ///
+    /// Safety
+    ///
+    /// `process` is called on whichever thread calls
+    /// sipral_media_playback or sipral_media_capture on this call,
+    /// for as long as the processor stays attached, and `user_data` has to
+    /// outlive the last such call.
+    /// </summary>
+    public static void CallAttachProcessor(ulong media, SipralProcessorCallback process, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_call_attach_processor(media, process, userData));
+    }
+
+    /// <summary>
+    /// Stop running the processor sipral_call_attach_processor attached,
+    /// if there was one.
+    ///
+    /// `out_was_attached`, when not null, says whether there was one to stop:
+    /// 1 if a processor was attached and is now detached, 0 if there was
+    /// none. The frames the application hands over reach the encoder
+    /// untouched again from the next one, and the loudspeaker history kept
+    /// for it is released. Once this returns, `process` is not called again
+    /// for this attachment — the moment `user_data` may be freed.
+    ///
+    /// Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    /// </summary>
+    public static uint CallDetachProcessor(ulong media)
+    {
+        Check(NativeMethods.sipral_call_detach_processor(media, out var wasAttached));
+        return wasAttached;
+    }
+
+    /// <summary>
+    /// Forget the echo path, the noise floor and the gain the attached
+    /// processor has learned, keeping the processor itself attached.
+    ///
+    /// What a device change asks for: the estimate was built for a different
+    /// loudspeaker and a different microphone, and carrying it forward makes
+    /// the processor fight it for a while instead of adapting cleanly. Calls
+    /// the `process` given to sipral_call_attach_processor with
+    /// SipralProcessorFrame's `reset` set.
+    ///
+    /// `out_was_attached`, when not null, says whether there was a processor
+    /// to reset: 1 if there was, 0 if there was none.
+    ///
+    /// Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    /// </summary>
+    public static uint CallResetProcessor(ulong media)
+    {
+        Check(NativeMethods.sipral_call_reset_processor(media, out var wasAttached));
+        return wasAttached;
     }
 
     /// <summary>

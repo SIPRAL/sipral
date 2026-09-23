@@ -3642,6 +3642,139 @@ internal object SipralScreenListeners {
 }
 
 /**
+ * What SipralProcessorCallback is handed for one call: an ordinary
+ * frame to process, or a request to forget what has been learned.
+ *
+ * Filled by the library and handed to the callback as a `const`
+ * pointer, the same shape crate::screening::SipralScreenRequest is:
+ * read `size` before anything past it, and read nothing once the
+ * callback has returned — `near_end`, `far_end` and `out` borrow from
+ * buffers that belong to this one call and are not this ABI's to keep
+ * alive a moment longer.
+ */
+class SipralProcessorFrame(
+    /**
+     * How many bytes of this struct the library filled in.
+     */
+    val size: Long,
+    /**
+     * 0 for an ordinary frame; 1 for a request to forget whatever state
+     * the processor holds — a device change or a codec change mid-call
+     * asks for this, and `near_end`, `far_end` and `out`, with the three
+     * lengths beside them, are all null and zero when it is set.
+     */
+    val reset: Long,
+    /**
+     * The frame just captured from the microphone. Null when `reset` is
+     * set.
+     */
+    val nearEnd: ShortArray?,
+    /**
+     * The far-end audio rendered to the loudspeaker over the same span
+     * of time as `near_end`, the same length. Null when `reset` is set.
+     */
+    val farEnd: ShortArray?,
+    /**
+     * Where the callback writes the frame that replaces `near_end` —
+     * every sample of it, since what is not written is read back as
+     * whatever was there before. Null when `reset` is set, since there
+     * is nothing to write.
+     */
+    val out: ShortArray?,
+)
+
+/**
+ * Echo cancellation, gain control or noise suppression, run over one
+ * frame, or told to forget what it has learned — SipralProcessorFrame
+ * says which. Installed with sipral_call_attach_processor.
+ *
+ * **It runs with this call's media locked**, which is the opposite of
+ * crate::event::SipralEventCallback and the reason
+ * sipral_call_attach_processor's own doc comment says so before it
+ * says anything else — read it there. In consequence: **this callback
+ * must not call back into the media handle it was attached through**,
+ * on this thread or on any other. It must not unwind, for the same
+ * reason nothing in this ABI may.
+ *
+ * `frame` and everything it points at belong to the library and are
+ * valid for the duration of this one call and no longer.
+ *
+ * In Kotlin it is this interface, called on the thread that polls. The JNI
+ * shim attaches that thread to the JVM for the length of the call when it
+ * is not attached already. What a listener throws goes to that thread's
+ * uncaught exception handler, and the poll carries on once the handler
+ * returns. Android's default handler does not return: it ends the process.
+ */
+fun interface SipralProcessorListener {
+    fun onFrame(frame: SipralProcessorFrame)
+}
+
+/**
+ * Every SipralProcessorListener a live handle was made with, under the key the JNI
+ * shim hands back with each event. The native side holds no reference
+ * to a listener at all: an event for a handle already destroyed finds
+ * nothing here and goes nowhere.
+ */
+internal object SipralProcessorListeners {
+    private val listening = HashMap<Long, SipralProcessorListener>()
+    private val handles = HashMap<Long, Long>()
+    private var last = 0L
+
+    /** Keep a listener, and say what key the shim will hand it back under: zero for none. */
+    fun register(listener: SipralProcessorListener?): Long {
+        if (listener == null) {
+            return 0
+        }
+        synchronized(this) {
+            // the key crosses as a C pointer, which is 32 bits wide on half of Android
+            check(last < Int.MAX_VALUE) { "every key a listener can be kept under has been handed out" }
+            last += 1
+            listening[last] = listener
+            return last
+        }
+    }
+
+    /**
+     * Hand a kept listener to a handle the caller already had, letting go of
+     * whatever that handle held before it. A key of zero is the call that
+     * removed the listener outright, and a call that failed leaves the handle
+     * with what it had.
+     */
+    fun installed(key: Long, status: Int, handle: Long) {
+        synchronized(this) {
+            if (status != SipralStatus.OK.value) {
+                listening.remove(key)
+                return
+            }
+            val before = if (key == 0L) handles.remove(handle) else handles.put(handle, key)
+            if (before != null) {
+                listening.remove(before)
+            }
+        }
+    }
+
+    /** Let go of the listener a destroyed handle was left with. */
+    fun gone(handle: Long) {
+        synchronized(this) {
+            val key = handles.remove(handle) ?: return
+            listening.remove(key)
+        }
+    }
+
+    /** Called by the JNI shim, once per event, on the thread that polls. */
+    @JvmStatic
+    fun deliver(key: Long, size: Long, reset: Long, nearEnd: ShortArray?, farEnd: ShortArray?, out: ShortArray?) {
+        val listener = synchronized(this) { listening[key] } ?: return
+        try {
+            listener.onFrame(SipralProcessorFrame(size, reset, nearEnd, farEnd, out))
+        } catch (failure: Throwable) {
+            val thread = Thread.currentThread()
+            thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
+        }
+    }
+}
+
+/**
  * What a call across the boundary answered, when it did not answer
  * OK. The message is the calling thread's last error, read before
  * anything else on this thread could replace it.
@@ -3743,6 +3876,9 @@ internal object SipralNative {
     external fun sipral_media_receive(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
     external fun sipral_media_playback(media: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
     external fun sipral_media_capture(media: Long, nowMs: Long, samples: ShortArray, packet: Long): Int
+    external fun sipral_call_attach_processor(media: Long, process: Long): Int
+    external fun sipral_call_detach_processor(media: Long, wasAttached: LongArray): Int
+    external fun sipral_call_reset_processor(media: Long, wasAttached: LongArray): Int
     external fun sipral_media_mix(mediaA: Long, mediaB: Long, nowMs: Long, mic: ShortArray, local: ShortArray, packetA: Long, packetB: Long): Int
     external fun sipral_media_poll_rtcp(media: Long, nowMs: Long, packet: Long): Int
     external fun sipral_media_poll_transmit(media: Long, nowMs: Long, packet: Long): Int
@@ -5430,7 +5566,9 @@ object Sipral {
      * Safe to call with any handle value. Reads no memory the caller owns.
      */
     fun mediaRelease(media: Long) {
-        check(SipralNative.sipral_media_release(media))
+        val status = SipralNative.sipral_media_release(media)
+        SipralProcessorListeners.gone(media)
+        check(status)
     }
 
     /**
@@ -5592,6 +5730,106 @@ object Sipral {
      */
     fun mediaCapture(media: Long, nowMs: Long, samples: ShortArray, packet: Long) {
         check(SipralNative.sipral_media_capture(media, nowMs, samples, packet))
+    }
+
+    /**
+     * Run `process` over every frame captured on this call, against the
+     * far-end audio this call played MediaSession::render_delay earlier
+     * — echo cancellation, gain control and noise suppression are all this
+     * one seam, and `docs/05-media.md` says why.
+     *
+     * What was attached before is dropped, along with the echo path it had
+     * learned. Attaching mid-call is allowed and costs the first few hundred
+     * milliseconds of a fresh adaptation, the same price a call pays at its
+     * start.
+     *
+     * **`process` runs with this call's media locked**, the same as
+     * crate::screening::SipralScreenCallback and unlike
+     * crate::event::SipralEventCallback: it is called from inside
+     * sipral_media_playback (to learn what the loudspeaker was just
+     * given) and inside sipral_media_capture (to run the frame just
+     * captured), and — with SipralProcessorFrame's `reset` set — whenever
+     * this call's media forgets what it has learned, a device change or a
+     * codec change mid-call. All three run on whichever thread called the
+     * entry point that triggered them. In consequence, **it must not call
+     * back into the media handle it was attached through**, on this thread
+     * or on any other — doing so does not deadlock, since every media entry
+     * point takes its session's lock without waiting and answers
+     * `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
+     * rather than relied on. A *different* call's media, or this stack's
+     * own entry points, are unaffected. It must not unwind: a panic that
+     * reached C across this boundary would take the host process with it,
+     * the same rule every callback in this ABI is held to.
+     *
+     * `user_data` is handed back to `process` untouched on every call, read
+     * by nothing here, and has to outlive the last one — which the caller
+     * who installed it is the one to know is over:
+     * `sipral_call_detach_processor` or the call ending are the two ways.
+     *
+     * Safety
+     *
+     * `process` is called on whichever thread calls
+     * sipral_media_playback or sipral_media_capture on this call,
+     * for as long as the processor stays attached, and `user_data` has to
+     * outlive the last such call.
+     */
+    fun callAttachProcessor(media: Long, processListener: SipralProcessorListener?) {
+        // held across the call so that what SipralProcessorListeners records and what
+        // the library installed cannot disagree
+        synchronized(SipralProcessorListeners) {
+            val process = SipralProcessorListeners.register(processListener)
+            var status = -1
+            try {
+                status = SipralNative.sipral_call_attach_processor(media, process)
+            } finally {
+                SipralProcessorListeners.installed(process, status, media)
+            }
+            check(status)
+        }
+    }
+
+    /**
+     * Stop running the processor sipral_call_attach_processor attached,
+     * if there was one.
+     *
+     * `out_was_attached`, when not null, says whether there was one to stop:
+     * 1 if a processor was attached and is now detached, 0 if there was
+     * none. The frames the application hands over reach the encoder
+     * untouched again from the next one, and the loudspeaker history kept
+     * for it is released. Once this returns, `process` is not called again
+     * for this attachment — the moment `user_data` may be freed.
+     *
+     * Safety
+     *
+     * `out_was_attached` must point at one `uint32_t` or be null.
+     */
+    fun callDetachProcessor(media: Long): Long {
+        val wasAttachedSlot = LongArray(1)
+        check(SipralNative.sipral_call_detach_processor(media, wasAttachedSlot))
+        return wasAttachedSlot[0]
+    }
+
+    /**
+     * Forget the echo path, the noise floor and the gain the attached
+     * processor has learned, keeping the processor itself attached.
+     *
+     * What a device change asks for: the estimate was built for a different
+     * loudspeaker and a different microphone, and carrying it forward makes
+     * the processor fight it for a while instead of adapting cleanly. Calls
+     * the `process` given to sipral_call_attach_processor with
+     * SipralProcessorFrame's `reset` set.
+     *
+     * `out_was_attached`, when not null, says whether there was a processor
+     * to reset: 1 if there was, 0 if there was none.
+     *
+     * Safety
+     *
+     * `out_was_attached` must point at one `uint32_t` or be null.
+     */
+    fun callResetProcessor(media: Long): Long {
+        val wasAttachedSlot = LongArray(1)
+        check(SipralNative.sipral_call_reset_processor(media, wasAttachedSlot))
+        return wasAttachedSlot[0]
     }
 
     /**

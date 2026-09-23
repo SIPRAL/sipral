@@ -1253,6 +1253,16 @@ public extension sipral_media_packet_t {
     }
 }
 
+public extension sipral_processor_frame_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 public extension sipral_transmit_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
@@ -3239,6 +3249,95 @@ public enum Sipral {
                 sipral_media_capture(media, nowMs, p2.baseAddress, p2.count, &packet)
             }
         try check(status)
+    }
+
+    /// Run `process` over every frame captured on this call, against the
+    /// far-end audio this call played MediaSession::render_delay earlier
+    /// — echo cancellation, gain control and noise suppression are all this
+    /// one seam, and `docs/05-media.md` says why.
+    ///
+    /// What was attached before is dropped, along with the echo path it had
+    /// learned. Attaching mid-call is allowed and costs the first few hundred
+    /// milliseconds of a fresh adaptation, the same price a call pays at its
+    /// start.
+    ///
+    /// **`process` runs with this call's media locked**, the same as
+    /// crate::screening::SipralScreenCallback and unlike
+    /// crate::event::SipralEventCallback: it is called from inside
+    /// sipral_media_playback (to learn what the loudspeaker was just
+    /// given) and inside sipral_media_capture (to run the frame just
+    /// captured), and — with sipral_processor_frame_t's `reset` set — whenever
+    /// this call's media forgets what it has learned, a device change or a
+    /// codec change mid-call. All three run on whichever thread called the
+    /// entry point that triggered them. In consequence, **it must not call
+    /// back into the media handle it was attached through**, on this thread
+    /// or on any other — doing so does not deadlock, since every media entry
+    /// point takes its session's lock without waiting and answers
+    /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
+    /// rather than relied on. A *different* call's media, or this stack's
+    /// own entry points, are unaffected. It must not unwind: a panic that
+    /// reached C across this boundary would take the host process with it,
+    /// the same rule every callback in this ABI is held to.
+    ///
+    /// `user_data` is handed back to `process` untouched on every call, read
+    /// by nothing here, and has to outlive the last one — which the caller
+    /// who installed it is the one to know is over:
+    /// `sipral_call_detach_processor` or the call ending are the two ways.
+    ///
+    /// Safety
+    ///
+    /// `process` is called on whichever thread calls
+    /// sipral_media_playback or sipral_media_capture on this call,
+    /// for as long as the processor stays attached, and `user_data` has to
+    /// outlive the last such call.
+    public static func callAttachProcessor(media: SipralHandle, process: sipral_processor_callback_t, userData: UnsafeMutableRawPointer) throws {
+        try ensureAbi()
+        let status = sipral_call_attach_processor(media, process, userData)
+        try check(status)
+    }
+
+    /// Stop running the processor sipral_call_attach_processor attached,
+    /// if there was one.
+    ///
+    /// `out_was_attached`, when not null, says whether there was one to stop:
+    /// 1 if a processor was attached and is now detached, 0 if there was
+    /// none. The frames the application hands over reach the encoder
+    /// untouched again from the next one, and the loudspeaker history kept
+    /// for it is released. Once this returns, `process` is not called again
+    /// for this attachment — the moment `user_data` may be freed.
+    ///
+    /// Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    public static func callDetachProcessor(media: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
+        var wasAttached = UInt32()
+        let status = sipral_call_detach_processor(media, &wasAttached)
+        try check(status)
+        return wasAttached
+    }
+
+    /// Forget the echo path, the noise floor and the gain the attached
+    /// processor has learned, keeping the processor itself attached.
+    ///
+    /// What a device change asks for: the estimate was built for a different
+    /// loudspeaker and a different microphone, and carrying it forward makes
+    /// the processor fight it for a while instead of adapting cleanly. Calls
+    /// the `process` given to sipral_call_attach_processor with
+    /// sipral_processor_frame_t's `reset` set.
+    ///
+    /// `out_was_attached`, when not null, says whether there was a processor
+    /// to reset: 1 if there was, 0 if there was none.
+    ///
+    /// Safety
+    ///
+    /// `out_was_attached` must point at one `uint32_t` or be null.
+    public static func callResetProcessor(media: SipralHandle) throws -> UInt32 {
+        try ensureAbi()
+        var wasAttached = UInt32()
+        let status = sipral_call_reset_processor(media, &wasAttached)
+        try check(status)
+        return wasAttached
     }
 
     /// One frame of a local conference of two calls: decode what `media_a`'s

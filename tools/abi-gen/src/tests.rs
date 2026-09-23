@@ -383,6 +383,32 @@ const SCREEN_EVENT: Record = Record {
     size: 24,
 };
 
+/// What a processing callback is handed: a frame to read, of the one integer
+/// width nothing else here uses, and a frame to fill -- the shapes `*const
+/// i16` and `*mut i16` cross in, which a struct going in and a struct handed
+/// back whole never do.
+const PROCESSOR_EVENT: Record = Record {
+    name: "SipralProcessorEvent",
+    doc: &[" What a processing callback is handed: a frame to read and one to fill."],
+    shape: Shape::Struct,
+    fields: &[
+        member("size", "usize"),
+        Member {
+            name: "near",
+            rust_type: "*const i16",
+            doc: &[" The frame just captured, to read."],
+        },
+        member("near_len", "usize"),
+        Member {
+            name: "far",
+            rust_type: "*mut i16",
+            doc: &[" Where the processed frame is written."],
+        },
+        member("far_len", "usize"),
+    ],
+    size: 40,
+};
+
 const FUNCTIONS: &[Function] = &[
     ABI_CHECK,
     Function {
@@ -553,6 +579,22 @@ const FUNCTIONS: &[Function] = &[
         returns: "SipralStatus",
     },
     Function {
+        name: "sipral_stack_process",
+        doc: &[
+            " Install a processor on it, replace the one installed, or remove it.",
+            "",
+            " The callback and the pointer after it are one listener, the same",
+            " pair a struct going in already means by them, and a null callback",
+            " removes whatever was installed.",
+        ],
+        parameters: &[
+            member("stack", "SipralHandle"),
+            member("callback", "SipralProcessCallback"),
+            member("user_data", "*mut c_void"),
+        ],
+        returns: "SipralStatus",
+    },
+    Function {
         name: "sipral_stack_destroy",
         doc: &[" Take it apart."],
         parameters: &[member("stack", "SipralHandle")],
@@ -604,6 +646,17 @@ const SYNTHETIC: Surface = Surface {
                 Some("u32"),
             ),
         },
+        Alias {
+            name: "SipralProcessCallback",
+            doc: &[" Run over one frame, and hand back what replaces it."],
+            stands: Stands::Callback(
+                &[
+                    member("event", "*const SipralProcessorEvent"),
+                    member("user_data", "*mut c_void"),
+                ],
+                None,
+            ),
+        },
     ],
     enumerations: &[STATUS, TOGGLE],
     records: &[
@@ -616,6 +669,7 @@ const SYNTHETIC: Surface = Surface {
         PAYLOAD,
         EVENT,
         SCREEN_EVENT,
+        PROCESSOR_EVENT,
     ],
     constants: &[
         &[Value {

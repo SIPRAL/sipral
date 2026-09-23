@@ -72,6 +72,7 @@ typedef struct sipral_media_event sipral_media_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_screen_event sipral_screen_event_t;
+typedef struct sipral_processor_event sipral_processor_event_t;
 
 /**
  * What a call across the boundary answered.
@@ -120,6 +121,11 @@ typedef void (*sipral_event_callback_t)(const sipral_event_t *event, void *user_
  * as "no".
  */
 typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_event_t *event, void *user_data);
+
+/**
+ * Run over one frame, and hand back what replaces it.
+ */
+typedef void (*sipral_process_callback_t)(const sipral_processor_event_t *event, void *user_data);
 
 /**
  * What a stack has done since it was made.
@@ -282,6 +288,23 @@ struct sipral_screen_event {
 };
 
 /**
+ * What a processing callback is handed: a frame to read and one to fill.
+ */
+struct sipral_processor_event {
+    size_t size;
+    /**
+     * The frame just captured, to read.
+     */
+    const int16_t *near;
+    size_t near_len;
+    /**
+     * Where the processed frame is written.
+     */
+    int16_t *far;
+    size_t far_len;
+};
+
+/**
  * Whether this library can serve a binding generated against `major`.`minor`.
  */
 sipral_status_t sipral_abi_check(uint32_t major, uint32_t minor);
@@ -367,6 +390,15 @@ sipral_status_t sipral_call_media_receive(sipral_handle_t stack, uint8_t *data, 
  * removes whatever was installed.
  */
 sipral_status_t sipral_stack_screen(sipral_handle_t stack, sipral_screen_callback_t callback, void *user_data);
+
+/**
+ * Install a processor on it, replace the one installed, or remove it.
+ *
+ * The callback and the pointer after it are one listener, the same
+ * pair a struct going in already means by them, and a null callback
+ * removes whatever was installed.
+ */
+sipral_status_t sipral_stack_process(sipral_handle_t stack, sipral_process_callback_t callback, void *user_data);
 
 /**
  * Take it apart.

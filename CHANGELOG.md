@@ -369,6 +369,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   authenticator and reaches nothing behind it — the seeds alone reach more of
   the agent than several hundred thousand random runs did.
 
+- **Echo cancellation, gain control and noise suppression are attachable
+  from C.** `sipral_call_attach_processor` installs a callback that runs
+  `sipral-media`'s existing `Processor` seam over every frame a call plays
+  and captures, against the far-end audio lined up by the render delay the
+  application already sets; `sipral_call_detach_processor` and
+  `sipral_call_reset_processor` complete the surface. All three are
+  generated into every binding, including a Kotlin/JNI back end taught to
+  marshal a struct with a buffer the listener fills as well as one it only
+  reads.
+
 ### Fixed
 
 - **`sipral_headless::encode_control` no longer writes a control frame the

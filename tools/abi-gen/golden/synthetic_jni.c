@@ -28,6 +28,8 @@ static jclass jni_event_callback_class;
 static jmethodID jni_event_callback_deliver;
 static jclass jni_screen_callback_class;
 static jmethodID jni_screen_callback_deliver;
+static jclass jni_process_callback_class;
+static jmethodID jni_process_callback_deliver;
 
 /* Whether the struct a callback was handed reaches as far as one of its
  * members: the library fills in no more of it than its size member says. */
@@ -73,6 +75,21 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
             return JNI_ERR;
         }
     }
+    {
+        jclass found = (*env)->FindClass(env, "org/sipral/SipralProcessListeners");
+        if (found == NULL) {
+            return JNI_ERR;
+        }
+        jni_process_callback_class = (jclass)(*env)->NewGlobalRef(env, found);
+        (*env)->DeleteLocalRef(env, found);
+        if (jni_process_callback_class == NULL) {
+            return JNI_ERR;
+        }
+        jni_process_callback_deliver = (*env)->GetStaticMethodID(env, jni_process_callback_class, "deliver", "(JJ[S[S)V");
+        if (jni_process_callback_deliver == NULL) {
+            return JNI_ERR;
+        }
+    }
     jni_vm = vm;
     return JNI_VERSION_1_6;
 }
@@ -94,6 +111,10 @@ JNI_OnUnload(JavaVM *vm, void *reserved)
     if (jni_screen_callback_class != NULL) {
         (*env)->DeleteGlobalRef(env, jni_screen_callback_class);
         jni_screen_callback_class = NULL;
+    }
+    if (jni_process_callback_class != NULL) {
+        (*env)->DeleteGlobalRef(env, jni_process_callback_class);
+        jni_process_callback_class = NULL;
     }
 }
 
@@ -206,6 +227,72 @@ jni_screen_callback(const sipral_screen_event_t *event, void *user_data)
         (*jni_vm)->DetachCurrentThread(jni_vm);
     }
     return (uint32_t)answer;
+}
+
+/* Where a sipral_process_callback_t lands. The event is handed to
+ * SipralProcessListeners.deliver under the key its user pointer carries, on a
+ * thread attached to the JVM for the length of the call when it was not
+ * attached already, and every local reference made here is deleted
+ * before it returns: a poll delivers all its events inside one native
+ * call, and nothing made here would be released until that call ended. */
+static void
+jni_process_callback(const sipral_processor_event_t *event, void *user_data)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    int built = 1;
+    jint found;
+    jshortArray near = NULL;
+    jshortArray far = NULL;
+
+    if (jni_vm == NULL || event == NULL) {
+        return;
+    }
+    found = (*jni_vm)->GetEnv(jni_vm, (void *)&env, JNI_VERSION_1_6);
+    if (found == JNI_EDETACHED) {
+        if ((*jni_vm)->AttachCurrentThread(jni_vm, (void *)&env, NULL) != JNI_OK) {
+            return;
+        }
+        attached = 1;
+    } else if (found != JNI_OK) {
+        return;
+    }
+    if (built && JNI_REACHES(event, sipral_processor_event_t, near_len) && event->near != NULL) {
+        near = (*env)->NewShortArray(env, (jsize)event->near_len);
+        if (near == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetShortArrayRegion(env, near, 0, (jsize)event->near_len, (const jshort *)event->near);
+        }
+    }
+    if (built && JNI_REACHES(event, sipral_processor_event_t, far_len) && event->far != NULL) {
+        far = (*env)->NewShortArray(env, (jsize)event->far_len);
+        if (far == NULL) {
+            built = 0;
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_process_callback_class, jni_process_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, near, far);
+    }
+    /* deliver hands what a listener throws to the thread's own handler, so
+     * what is pending here is the JVM's -- an array it could not make --
+     * and a callback has no Java frame beneath it to throw into */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    if (far != NULL) {
+        (*env)->GetShortArrayRegion(env, far, 0, (jsize)event->far_len, (jshort *)event->far);
+    }
+    if (near != NULL) {
+        (*env)->DeleteLocalRef(env, near);
+    }
+    if (far != NULL) {
+        (*env)->DeleteLocalRef(env, far);
+    }
+    if (attached) {
+        (*jni_vm)->DetachCurrentThread(jni_vm);
+    }
 }
 
 /* Throw a new exception of the class named. What is wrong with a list the
@@ -609,6 +696,15 @@ Java_org_sipral_SipralNative_sipral_1stack_1screen(JNIEnv *env, jobject self, jl
     (void)env;
     (void)self;
     sipral_status_t status = sipral_stack_screen((sipral_handle_t)stack, callback != 0 ? jni_screen_callback : NULL, (void *)(intptr_t)callback);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1process(JNIEnv *env, jobject self, jlong stack, jlong callback)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_stack_process((sipral_handle_t)stack, callback != 0 ? jni_process_callback : NULL, (void *)(intptr_t)callback);
     return (jint)status;
 }
 

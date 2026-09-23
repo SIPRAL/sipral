@@ -67,6 +67,15 @@ public delegate void SipralEventCallback(IntPtr @event, IntPtr userData);
 public delegate uint SipralScreenCallback(IntPtr @event, IntPtr userData);
 
 /// <summary>
+/// Run over one frame, and hand back what replaces it.
+///
+/// Hand it over as a function pointer: keep the delegate alive for as
+/// long as the stack is, and pass Marshal.GetFunctionPointerForDelegate.
+/// </summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void SipralProcessCallback(IntPtr @event, IntPtr userData);
+
+/// <summary>
 /// What a stack has done since it was made.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -292,6 +301,34 @@ public struct SipralScreenEvent
 }
 
 /// <summary>
+/// What a processing callback is handed: a frame to read and one to fill.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralProcessorEvent
+{
+    public nuint Size;
+    /// <summary>
+    /// The frame just captured, to read.
+    /// </summary>
+    public IntPtr Near;
+    public nuint NearLen;
+    /// <summary>
+    /// Where the processed frame is written.
+    /// </summary>
+    public IntPtr Far;
+    public nuint FarLen;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralProcessorEvent Sized()
+    {
+        var value = default(SipralProcessorEvent);
+        value.Size = (nuint)Marshal.SizeOf<SipralProcessorEvent>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -459,6 +496,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_screen(ulong stack, SipralScreenCallback callback, IntPtr userData);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_process(ulong stack, SipralProcessCallback callback, IntPtr userData);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_destroy(ulong stack);
@@ -689,6 +729,18 @@ public static class Sipral
     public static void StackScreen(ulong stack, SipralScreenCallback callback, IntPtr userData)
     {
         Check(NativeMethods.sipral_stack_screen(stack, callback, userData));
+    }
+
+    /// <summary>
+    /// Install a processor on it, replace the one installed, or remove it.
+    ///
+    /// The callback and the pointer after it are one listener, the same
+    /// pair a struct going in already means by them, and a null callback
+    /// removes whatever was installed.
+    /// </summary>
+    public static void StackProcess(ulong stack, SipralProcessCallback callback, IntPtr userData)
+    {
+        Check(NativeMethods.sipral_stack_process(stack, callback, userData));
     }
 
     /// <summary>

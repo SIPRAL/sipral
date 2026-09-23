@@ -95,6 +95,16 @@ public extension sipral_screen_event_t {
     }
 }
 
+public extension sipral_processor_event_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
 /// One header field: a name and a value.
 ///
 /// Built here and handed to C in a list. `withUnsafeArray` copies every
@@ -416,6 +426,17 @@ public enum Sipral {
     public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t, userData: UnsafeMutableRawPointer) throws {
         try ensureAbi()
         let status = sipral_stack_screen(stack, callback, userData)
+        try check(status)
+    }
+
+    /// Install a processor on it, replace the one installed, or remove it.
+    ///
+    /// The callback and the pointer after it are one listener, the same
+    /// pair a struct going in already means by them, and a null callback
+    /// removes whatever was installed.
+    public static func stackProcess(stack: SipralHandle, callback: sipral_process_callback_t, userData: UnsafeMutableRawPointer) throws {
+        try ensureAbi()
+        let status = sipral_stack_process(stack, callback, userData)
         try check(status)
     }
 

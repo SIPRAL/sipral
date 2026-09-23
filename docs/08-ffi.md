@@ -657,6 +657,28 @@ never by which one the caller named first, so that two threads mixing the
 same pair with the arguments swapped wait for each other instead of
 deadlocking.
 
+**A processor attached with `sipral_call_attach_processor` runs on the media
+path, not on the poll thread.** Unlike `sipral_event_callback_t`, which is
+called from inside `sipral_stack_poll` with nothing held, `process` is
+called from inside `sipral_media_playback` and `sipral_media_capture`, on
+whichever thread the application called those from, with this call's media
+locked for the length of the call — the same footing
+`sipral_screen_callback_t` stands on, and the opposite of every other
+callback in this ABI. Two consequences follow directly from that lock:
+`process` must not call back into the media handle it was attached through,
+on this thread or on any other, because every media entry point takes its
+session's lock without waiting and answers `SIPRAL_STATUS_BUSY` rather than
+block — so the call would not deadlock, it would just be refused, but it is
+refused outright rather than a caller being invited to rely on it. And
+`process` must not unwind past this boundary, the same rule every callback
+here is held to: a panic that reached C uncaught would abort the host
+process rather than fail one call. A *different* call's media, and this
+stack's own entry points reached through `sipral_stack_config_t`, are both
+unaffected — the lock is the one session's, not the stack's.
+`sipral_call_reset_processor` calls `process` the same way, from whichever
+thread called it, with `sipral_processor_frame_t::reset` set instead of a
+frame to run.
+
 **SRTP is a policy, chosen from C, for a call this stack describes.**
 `sipral_stack_config_t::srtp` is the stack's default and `sipral_call_config_t::srtp`
 overrides it for one call; both are a `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`,
