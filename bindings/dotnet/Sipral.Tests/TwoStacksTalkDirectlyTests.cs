@@ -311,6 +311,90 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         alice.Dispose();
     }
 
+    /// <summary>
+    /// A handler on <see cref="SipralStack.EventReceived"/> that throws
+    /// must not unwind back into the native poll call it runs inside of
+    /// (<c>docs/08-ffi.md</c>'s "the callback does not unwind", stated by
+    /// name for the Kotlin listener and no less true here) — before this
+    /// was guarded, this exact scenario took the whole test process down
+    /// rather than failing the one test (confirmed with a throwaway
+    /// console repro outside xunit, since a crash here would abort the
+    /// run instead of reporting a failure). Proves both that the poll
+    /// thread survives a throwing handler and that it keeps delivering
+    /// events afterwards — a swallowed exception that quietly stopped the
+    /// poll thread would hang this test's own second wait forever.
+    /// </summary>
+    [Fact]
+    public async Task ExceptionFromAnEventHandlerDoesNotCrashTheProcessAndPollingContinues()
+    {
+        using var stack = new SipralStack();
+        var afterThrow = new SemaphoreSlim(0);
+        var threw = 0;
+        stack.EventReceived += (_, args) =>
+        {
+            if (Interlocked.Exchange(ref threw, 1) == 0)
+            {
+                throw new InvalidOperationException("deliberate failure from a test event handler");
+            }
+            afterThrow.Release();
+        };
+
+        var account = stack.AddAccount(
+            "sip:alice@sipral.invalid", registrarAddress: "203.0.113.1:5060", registrar: "sip:registrar.invalid");
+        account.Register(); // unreachable registrar: keeps the poll thread producing further events to retry on
+
+        Assert.True(await afterThrow.WaitAsync(Timeout), "the poll thread should still be delivering events after a handler threw");
+    }
+
+    /// <summary>
+    /// Same guard, for <see cref="CallMedia.FrameDecoded"/> on the media's
+    /// own frame-rate thread: an unhandled exception on any .NET thread
+    /// ends the whole process by default, so a throwing handler there must
+    /// not either, and the media pump must keep running afterwards.
+    /// </summary>
+    [Fact]
+    public async Task ExceptionFromFrameDecodedDoesNotCrashTheProcessAndPlaybackContinues()
+    {
+        var (aliceCall, bobCall) = await PlaceAndAnswerAsync();
+        try
+        {
+            var frameSamples = aliceCall.Media!.FrameSamples;
+            var tone = new short[frameSamples];
+            Array.Fill(tone, (short)4096);
+
+            var threw = 0;
+            bobCall.Media!.FrameDecoded += _ =>
+            {
+                Interlocked.Exchange(ref threw, 1);
+                throw new InvalidOperationException("deliberate failure from a test frame handler");
+            };
+
+            // The media thread was already decoding silence before this
+            // subscription (it starts the moment `Media` is minted), so
+            // the first throw can land before this test ever reads a
+            // frame off `Frames` — wait for the throw on its own terms
+            // rather than tying it to a particular frame's arrival.
+            var deadline = DateTime.UtcNow + Timeout;
+            while (Volatile.Read(ref threw) == 0 && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(10);
+            }
+            Assert.Equal(1, threw);
+
+            for (var i = 0; i < 5; i++)
+            {
+                aliceCall.Media.SendAudio(tone);
+            }
+            var heardAfter = await FirstAsync(bobCall.Media.Frames, Timeout);
+            Assert.Equal(frameSamples, heardAfter.Length);
+        }
+        finally
+        {
+            aliceCall.Close();
+            bobCall.Close();
+        }
+    }
+
     private static async Task<T> FirstAsync<T>(IAsyncEnumerable<T> source, TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);

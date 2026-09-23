@@ -89,7 +89,19 @@ public sealed class Call : IDisposable
             Ended = true;
         }
 
-        EventReceived?.Invoke(this, args);
+        // Same guard as `SipralStack.EventReceived`, and for the same
+        // reason: this runs on the stack's own poll thread, one frame
+        // above the native call that thread is inside, so a handler's
+        // exception must stop here rather than unwind back across it and
+        // take the whole process down with it.
+        try
+        {
+            EventReceived?.Invoke(this, args);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceError($"Sipral: Call.EventReceived handler threw: {ex}");
+        }
         _events.Writer.TryWrite(args);
 
         if (args.Kind == SipralEventKind.DigitReceived && args.Media?.Digit is char digit)

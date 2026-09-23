@@ -112,6 +112,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `labuser-agent-csharp`, and doubles as a runnable example; a skeleton WPF
   sample (`samples/Sipral.Sample.Wpf`) covers registration, a call,
   hold/resume and DTMF.
+
+### Fixed
+
+- **The .NET binding no longer crashes the whole process over an
+  exception thrown from an application's own `EventReceived` or
+  `FrameDecoded` handler.** Both ran synchronously on the library's own
+  worker threads with nothing catching what they threw, so a bug in one
+  subscriber's handler unwound back into the native call the thread was
+  inside of and took every stack and call in the process down with it.
+  Now caught at the point each is invoked, the same "the callback does
+  not unwind" contract already documented for the Kotlin binding.
 - **`sipral-media`'s DSP stages get their own fuzz targets and property
   tests, and `indexing_slicing` becomes a hard denial.** Resampling, drift
   correction, packet-loss concealment, comfort noise, voice-activity

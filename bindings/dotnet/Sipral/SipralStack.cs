@@ -319,7 +319,29 @@ public sealed class SipralStack : IDisposable
         var call = args.Call != 0 ? CallFor(args.Call) : null;
         call?.Deliver(args);
 
-        EventReceived?.Invoke(this, args);
+        // `EventReceived` runs synchronously on this thread, which is the
+        // one the native side is inside `sipral_stack_poll` on: what a
+        // handler throws must not unwind back into that native frame, the
+        // same "the callback does not unwind" contract `docs/08-ffi.md`
+        // states by name for the Kotlin listener, and for the same
+        // reason — undefined behaviour at best, and in practice the CLR's
+        // own fatal-exception handling for a reverse P/Invoke, which takes
+        // the whole process down over one subscriber's bug, every other
+        // stack and call included. Caught here, at the one place this
+        // thread crosses back into native code, exactly the way that
+        // Kotlin section says a thrown listener "goes to the uncaught
+        // exception handler of the thread it runs on ... never anywhere
+        // else in the application" — this poll thread's own handler is
+        // this catch, which lets it keep polling rather than let the whole
+        // application go down with it.
+        try
+        {
+            EventReceived?.Invoke(this, args);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceError($"Sipral: SipralStack.EventReceived handler threw: {ex}");
+        }
         _events.Writer.TryWrite(args);
     }
 

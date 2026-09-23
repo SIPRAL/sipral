@@ -1208,6 +1208,14 @@ bindings` step runs: two stacks on loopback proving the same shape
 `docs/08-ffi.md` states for every binding — events on the poll thread and
 not the caller's, `BUSY` surfaced rather than blocked on, and no
 use-after-free disposing a stack while events are still queued behind it.
+What an application's own `EventReceived`/`FrameDecoded` handler throws is
+caught at the point it is invoked and never allowed to unwind back into
+the native frame that thread is inside of — the same "the callback does
+not unwind" contract this section states by name for the Kotlin listener,
+and for the same reason: a reverse P/Invoke that unwinds is undefined
+behaviour, and in practice the CLR's own fatal-exception handling for one,
+which would take the whole process down over one subscriber's bug rather
+than only the thread it ran on.
 
 ## Kotlin
 

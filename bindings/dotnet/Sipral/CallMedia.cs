@@ -222,7 +222,19 @@ public sealed class CallMedia : IDisposable
                 if (status == SipralStatus.Ok && written > 0)
                 {
                     var frame = scratch.AsSpan(0, written).ToArray();
-                    FrameDecoded?.Invoke(frame);
+                    // Same guard as `SipralStack.EventReceived`: an
+                    // unhandled exception on any .NET thread, background
+                    // or not, ends the whole process, and this is this
+                    // call's own frame-rate thread — one bad handler must
+                    // not take every other call and stack down with it.
+                    try
+                    {
+                        FrameDecoded?.Invoke(frame);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Trace.TraceError($"Sipral: CallMedia.FrameDecoded handler threw: {ex}");
+                    }
                     _frames.Writer.TryWrite(frame);
                 }
 
