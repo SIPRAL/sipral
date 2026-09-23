@@ -11,18 +11,18 @@ using System.Threading;
 namespace Sipral.Interop;
 
 /// <summary>
-/// Points <c>NativeMethods.Library</c> ("sipral") at the actual shared
+/// Points <c>NativeMethods.Library</c> ("sipral_ffi") at the actual shared
 /// library the Rust workspace builds, <c>libsipral_ffi.{dylib,so}</c> or
-/// <c>sipral_ffi.dll</c>.
+/// <c>sipral_ffi.dll</c>, wherever it is.
 ///
-/// The generated <c>SipralAbi.cs</c> is printed with the short library
-/// name every language binding shares in <c>docs/08-ffi.md</c>, but
-/// nothing in this repository ever produces a file with that exact name
-/// on disk — the crate is <c>sipral-ffi</c>, so Cargo's own naming rule
-/// gives it the crate's name in the file. A caller who never resolves the
-/// difference gets a <see cref="DllNotFoundException"/> with a name that
-/// matches nothing in <c>target/</c>, which is confusing on a checkout
-/// where the library plainly exists. <see cref="NativeLibrary.SetDllImportResolver"/>
+/// The generated <c>SipralAbi.cs</c> names the library the way Cargo names
+/// the crate's own file, so a NuGet package that carries it under
+/// <c>runtimes/</c> loads with no help at all. What the runtime's own
+/// search does not know is a library that has not been packaged: one a
+/// test run or a lab container points at, or a checkout's own
+/// <c>target/</c>. A caller in that position would otherwise get a
+/// <see cref="DllNotFoundException"/> on a machine where the library
+/// plainly exists. <see cref="NativeLibrary.SetDllImportResolver"/>
 /// closes that gap the same way <c>bindings/python/sipral/_sipral_cffi.py</c>
 /// closes it for `cffi`: try <c>SIPRAL_LIBRARY</c> first, then a path next
 /// to this assembly, then a repository checkout's own <c>target/release</c>
@@ -57,7 +57,7 @@ internal static class NativeLibraryLoader
 
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        if (!string.Equals(libraryName, "sipral", StringComparison.Ordinal))
+        if (!string.Equals(libraryName, NativeMethods.Library, StringComparison.Ordinal))
         {
             return IntPtr.Zero;
         }
