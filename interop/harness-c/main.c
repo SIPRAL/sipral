@@ -102,6 +102,15 @@
  * be on, since the catalogue offers PCMU first. */
 #define CHANGED_CODECS "PCMA"
 
+/* `FLOW_NAT`'s two sockets are bound at these ports rather than at ephemeral
+ * ones, because interop/nat/route.sh translates exactly these two to other
+ * ports on the way out. A NAT that kept every port would let a Contact or an
+ * `m=` that took the host from the STUN answer and the port from the socket
+ * pass for right; with the ports moved, only the port the server reported
+ * reaches this end. The two files have to agree on the numbers. */
+#define NAT_SIP_PORT 5062u
+#define NAT_RTP_PORT 40062u
+
 /* -- the clock ------------------------------------------------------------ */
 
 /* Milliseconds since some point before this process started.
@@ -204,8 +213,9 @@ static int resolve(const char *host, uint16_t port, struct sockaddr_in *out)
     return 0;
 }
 
-/* A non-blocking UDP socket on an ephemeral port, and where it landed. */
-static int bind_udp(struct sockaddr_in *out)
+/* A non-blocking UDP socket on `port`, or on an ephemeral one for zero, and
+ * where it landed. */
+static int bind_udp_at(struct sockaddr_in *out, uint16_t port)
 {
     struct sockaddr_in any;
     struct timeval instant;
@@ -217,6 +227,7 @@ static int bind_udp(struct sockaddr_in *out)
     memset(&any, 0, sizeof any);
     any.sin_family = AF_INET;
     any.sin_addr.s_addr = htonl(INADDR_ANY);
+    any.sin_port = htons(port);
     if (bind(fd, (const struct sockaddr *)&any, sizeof any) != 0
         || getsockname(fd, (struct sockaddr *)out, &length) != 0) {
         (void)close(fd);
@@ -227,6 +238,12 @@ static int bind_udp(struct sockaddr_in *out)
     instant.tv_usec = 1000;
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &instant, sizeof instant);
     return fd;
+}
+
+/* The same on an ephemeral port, which is what every flow but one wants. */
+static int bind_udp(struct sockaddr_in *out)
+{
+    return bind_udp_at(out, 0u);
 }
 
 /* -- the tone, and hearing it back ---------------------------------------- */
@@ -1033,8 +1050,9 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         wrong_text("no route to the lab network");
         return -1;
     }
-    end->sip_fd = bind_udp(&sip_local);
-    end->rtp_fd = bind_udp(&rtp_local);
+    /* behind the lab's NAT, at the two ports it moves (NAT_SIP_PORT) */
+    end->sip_fd = bind_udp_at(&sip_local, stun_for_this_flow != NULL ? NAT_SIP_PORT : 0u);
+    end->rtp_fd = bind_udp_at(&rtp_local, stun_for_this_flow != NULL ? NAT_RTP_PORT : 0u);
     if (end->sip_fd < 0 || end->rtp_fd < 0) {
         wrong_text("cannot bind a socket");
         close_endpoint(end);
@@ -1751,14 +1769,24 @@ static const char *split_address(const char *address, char *host, size_t room)
     return colon + 1;
 }
 
+/* Whether two `host:port`s name different ports: the NAT moved this one. */
+static int port_moved(const char *local, const char *public_address)
+{
+    char host[SIPRAL_ADDRESS_BYTES];
+    const char *before = split_address(local, host, sizeof host);
+    const char *after = split_address(public_address, host, sizeof host);
+    return before != NULL && after != NULL && strcmp(before, after) != 0;
+}
+
 /* Register and call from behind a NAT, with the stack asking a STUN server
  * where each of its two sockets appears from, and check that the far end was
  * told what the server said -- not what this end is bound to.
  *
  * Three things make the check mean something, and each is checked rather
  * than assumed. The server's answer differs from the socket's own address,
- * so there is a translation in the way and a Contact or a `c=` that named the
- * socket would name somewhere the lab cannot reach. The registrar's own 200
+ * in the host and in the port (NAT_SIP_PORT), so there is a translation in
+ * the way and a Contact or a `c=`/`m=` that took either half from the socket
+ * would name somewhere the lab cannot reach. The registrar's own 200
  * lists the public address among the bindings it holds. And the tone comes
  * back: Asterisk sends its audio where `c=` says and nowhere else
  * (`rtp_symmetric` is off in interop/asterisk), so audio arriving at all is
@@ -1788,6 +1816,11 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
     if (strcmp(end->seen.sip_public, end->sip_address) == 0) {
         wrong_text("the STUN server saw the signalling socket at its own address: nothing "
                    "translates in front of this end, and the run proves nothing");
+        return -1;
+    }
+    if (!port_moved(end->sip_address, end->seen.sip_public)) {
+        wrong_text("the NAT kept the signalling socket's port: a Contact with the socket's own "
+                   "port would pass for right, and the run proves nothing about the port");
         return -1;
     }
     printf("  nat   signalling %s appears as %s\n", end->sip_address, end->seen.sip_public);
@@ -1831,6 +1864,11 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
     }
     if (strcmp(end->seen.media_public, end->rtp_address) == 0) {
         wrong_text("the STUN server saw the RTP socket at its own address");
+        return -1;
+    }
+    if (!port_moved(end->rtp_address, end->seen.media_public)) {
+        wrong_text("the NAT kept the RTP socket's port, and the run proves nothing about the "
+                   "m= port");
         return -1;
     }
     printf("  nat   media %s appears as %s\n", end->rtp_address, end->seen.media_public);

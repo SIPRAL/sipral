@@ -13,6 +13,14 @@
 # in only what answers a flow the inside host opened -- address- and
 # port-dependent, the strictest a consumer router ships with.
 #
+# Keeping the port is also what a NAT that proves nothing about ports does: a
+# Contact or an `m=` line that took the host from the STUN answer and the port
+# from the socket would still reach the harness. So the two sockets the C
+# harness binds for the `nat` flow (interop/harness-c's NAT_SIP_PORT and
+# NAT_RTP_PORT; the numbers here have to match) leave from other ports: SNAT
+# to one fixed port gives every flow from that socket the same outside port,
+# which is still endpoint-independent, and now different from the inside one.
+#
 # The lab leg is found rather than named: it is whichever interface the route
 # to Asterisk leaves by, since Docker numbers a container's interfaces in the
 # order its networks were attached and that order is not something compose
@@ -22,7 +30,11 @@ set -eu
 asterisk=$(getent hosts asterisk | cut -d' ' -f1)
 lab=$(ip -o route get "$asterisk" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
 [ -n "$lab" ] || { echo "no route to the lab network"; exit 1; }
+outside=$(ip -o -4 addr show dev "$lab" | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p')
+[ -n "$outside" ] || { echo "no address on $lab"; exit 1; }
 
+iptables -t nat -A POSTROUTING -o "$lab" -p udp --sport 5062 -j SNAT --to-source "$outside:15062"
+iptables -t nat -A POSTROUTING -o "$lab" -p udp --sport 40062 -j SNAT --to-source "$outside:45062"
 iptables -t nat -A POSTROUTING -o "$lab" -j MASQUERADE
-echo "nat: masquerading out of $lab"
+echo "nat: masquerading out of $lab, 5062 as $outside:15062 and 40062 as $outside:45062"
 exec sleep infinity
