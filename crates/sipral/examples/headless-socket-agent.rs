@@ -56,11 +56,14 @@ mod media_socket;
 #[path = "common/udp_endpoint.rs"]
 mod udp_endpoint;
 
+use std::collections::VecDeque;
 use std::env;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::ops::ControlFlow;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -69,8 +72,9 @@ use sipral::{
     MediaEngine, MediaEvent, StatusCode, UaEvent, Uri, UserAgent, WallClock,
 };
 use sipral_headless::{
-    AudioConfig, CallState, CallStateKind, ControlMessage, Decoded, Decoder, IncomingCall,
-    SampleRate, SessionOpen, VoiceActivity, encode_audio, encode_control,
+    AudioConfig, CallState, CallStateKind, ControlMessage, DecodeError, Decoded, Decoder,
+    ErrorCode, ErrorMessage, HEADER_LEN, IncomingCall, SampleRate, SessionOpen, VoiceActivity,
+    encode_audio, encode_control,
 };
 
 use udp_endpoint::Endpoint;
@@ -91,6 +95,27 @@ fn codecs() -> CodecCatalog {
 
 const CODEC_RATE: u32 = 8_000;
 const PACE: Duration = Duration::from_millis(20);
+
+/// Writes the writer thread may have under way at once, beyond what the
+/// kernel's own send buffer already holds. Past that the agent is not
+/// reading, and what it has not taken waits here, turn by turn, in order.
+const WRITES_IN_FLIGHT: usize = 4;
+
+/// Turns of the caller's audio held for an agent that is not reading — one
+/// second at the twenty milliseconds a turn — past which the oldest turn's
+/// audio is the one that goes, the policy the capture queue itself keeps.
+const MOST_AUDIO_TURNS: usize = 50;
+
+/// Control bytes held back for an agent that has stopped reading, past which
+/// it is taken for gone. Control is never dropped the way audio is: a missed
+/// `CallState` or `VoiceActivity` is a lie about the call, not a gap in it.
+const MOST_HELD: usize = 64 * 1_024;
+
+/// How much of the caller's address and display name reach the agent, each.
+/// Both come off an INVITE a stranger wrote, and the `IncomingCall` carrying
+/// them has to fit `sipral_headless::MAX_CONTROL_PAYLOAD` even when every
+/// byte of both is one JSON escapes six times over.
+const IDENTITY_BYTES: usize = 512;
 
 /// Where to register, for an application reached through a server rather
 /// than dialled directly: `--register user@domain --registrar ip:port
@@ -165,6 +190,10 @@ fn args() -> Args {
 enum FromAgent {
     Audio(Vec<u8>),
     Control(ControlMessage),
+    /// A whole frame that was refused — audio of the wrong size, a control
+    /// message that did not decode — which the stream reads on past, and
+    /// which the agent is told about on the error channel.
+    Refused(DecodeError),
 }
 
 /// Reads the agent's socket on a thread of its own, so the main loop never
@@ -182,26 +211,120 @@ fn read_agent(mut stream: TcpStream) -> Receiver<FromAgent> {
             };
             decoder.push(buf.get(..read).unwrap_or_default());
             loop {
-                match decoder.next_message() {
-                    Ok(Some(Decoded::Audio(payload))) => {
-                        if tx.send(FromAgent::Audio(payload.to_vec())).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(Some(Decoded::Control(message))) => {
-                        if tx.send(FromAgent::Control(message)).is_err() {
-                            return;
-                        }
-                    }
+                let message = match decoder.next_message() {
+                    Ok(Some(Decoded::Audio(payload))) => FromAgent::Audio(payload.to_vec()),
+                    Ok(Some(Decoded::Control(message))) => FromAgent::Control(message),
                     Ok(None) => break,
-                    // a malformed frame ends the connection; there is no way
-                    // to resynchronise to a length that lied
-                    Err(_) => return,
+                    // a length that lied ends the connection: there is no
+                    // way to know where the frame it announced ends
+                    Err(error) if error.is_final() => return,
+                    Err(error) => FromAgent::Refused(error),
+                };
+                if tx.send(message).is_err() {
+                    return;
                 }
             }
         }
     });
     rx
+}
+
+/// One turn's wire frames for the agent, in the order the turn produced
+/// them: control first — whatever signalling, the agent's own messages and
+/// this turn's voice activity gave rise to — then the caller's audio.
+#[derive(Default)]
+struct Turn {
+    control: Vec<u8>,
+    audio: Vec<u8>,
+}
+
+/// The agent's socket, written from a thread of its own for the same reason
+/// it is read from one: an agent that stops reading fills the kernel's send
+/// buffer, and a write that blocks there would stall every call's SIP and
+/// RTP behind it.
+struct ToAgent {
+    writes: Sender<Vec<u8>>,
+    /// Writes handed to the thread and not finished yet.
+    in_flight: Arc<AtomicUsize>,
+    /// Turns the writer had no room for yet, oldest first. Kept as turns
+    /// rather than bytes so that the order between a `VoiceActivity` and the
+    /// frames around it survives an agent falling behind, and so that the
+    /// audio can still be told apart from the control and dropped alone.
+    held: VecDeque<Turn>,
+    /// Frames of the caller's audio dropped here, oldest first, for an
+    /// agent that was not reading.
+    audio_dropped: u64,
+}
+
+impl ToAgent {
+    fn spawn(mut stream: TcpStream) -> Self {
+        let (writes, pending) = mpsc::channel::<Vec<u8>>();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::clone(&in_flight);
+        thread::spawn(move || {
+            for bytes in pending {
+                if stream.write_all(&bytes).is_err() {
+                    return;
+                }
+                finished.fetch_sub(1, Ordering::AcqRel);
+            }
+        });
+        Self {
+            writes,
+            in_flight,
+            held: VecDeque::new(),
+            audio_dropped: 0,
+        }
+    }
+
+    /// Queues `turn` behind whatever is held and hands the writer as much as
+    /// it has room for. `Break` once the writer is gone or the agent has left
+    /// more control unread than [`MOST_HELD`].
+    fn send(&mut self, turn: Turn) -> ControlFlow<()> {
+        if !turn.control.is_empty() || !turn.audio.is_empty() {
+            self.held.push_back(turn);
+        }
+        let frame = usize::from(session_audio().frame_bytes().unwrap_or(0)) + HEADER_LEN;
+        let mut with_audio = self.held.iter().filter(|t| !t.audio.is_empty()).count();
+        for turn in &mut self.held {
+            if with_audio <= MOST_AUDIO_TURNS {
+                break;
+            }
+            if !turn.audio.is_empty() {
+                let frames = turn.audio.len() / frame.max(1);
+                self.audio_dropped = self
+                    .audio_dropped
+                    .saturating_add(u64::try_from(frames).unwrap_or(u64::MAX));
+                turn.audio.clear();
+                with_audio -= 1;
+            }
+        }
+        if self.held.iter().map(|t| t.control.len()).sum::<usize>() > MOST_HELD {
+            return ControlFlow::Break(());
+        }
+        while self.in_flight.load(Ordering::Acquire) < WRITES_IN_FLIGHT
+            && let Some(Turn { mut control, audio }) = self.held.pop_front()
+        {
+            control.extend_from_slice(&audio);
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            if self.writes.send(control).is_err() {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// `text`, cut to at most `most` bytes on a character boundary.
+fn bounded(mut text: String, most: usize) -> String {
+    if text.len() > most {
+        let mut end = most;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 /// One call's socket-side state: its own RTP socket, the `HeadlessSession`
@@ -275,30 +398,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("waiting for the agent to connect on {socket_addr}");
     let listener = TcpListener::bind(socket_addr)?;
-    let (mut socket, from) = listener.accept()?;
+    let (socket, from) = listener.accept()?;
     println!("agent connected from {from}");
     let reader = read_agent(socket.try_clone()?);
+    let mut to_agent = ToAgent::spawn(socket);
 
     let mut bridge: Option<Bridge> = None;
     let mut agent_up = false;
     let mut next_tick = now;
-    let mut out = Vec::new();
 
     loop {
         let turn = Instant::now();
+        let mut out = Turn::default();
 
         for event in endpoint.pump(turn) {
             handle_event(
                 &mut endpoint,
                 &mut bridge,
                 &mut agent_up,
-                &mut out,
+                &mut out.control,
                 &event,
-                turn,
+                (turn, to_agent.audio_dropped),
             );
         }
 
-        if drain_agent(&reader, &mut endpoint, &mut bridge, turn).is_break() {
+        if drain_agent(&reader, &mut endpoint, &mut bridge, &mut out.control, turn).is_break() {
             println!("the agent's socket closed");
             return Ok(());
         }
@@ -309,9 +433,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             drive_bridge(active, &mut media, agent_up, &mut next_tick, &mut out, turn);
         }
 
-        if !out.is_empty() {
-            let _ = socket.write_all(&out);
-            out.clear();
+        if to_agent.send(out).is_break() {
+            println!("the agent stopped reading its socket");
+            return Ok(());
         }
 
         endpoint.timers(turn);
@@ -322,12 +446,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Everything the agent's own socket had queued: audio goes straight onto
-/// this call's playback queue, `Hangup` ends the call, `DtmfSend` dials a
-/// digit. `ControlFlow::Break` once the socket has closed for good.
+/// this call's playback queue, `BargeIn` empties it, `Hangup` ends the call,
+/// `DtmfSend` dials a digit, and a frame that was refused is reported back
+/// on the error channel. `ControlFlow::Break` once the socket has closed for
+/// good.
 fn drain_agent(
     reader: &Receiver<FromAgent>,
     endpoint: &mut Endpoint,
     bridge: &mut Option<Bridge>,
+    out: &mut Vec<u8>,
     turn: Instant,
 ) -> ControlFlow<()> {
     loop {
@@ -335,6 +462,25 @@ fn drain_agent(
             Ok(FromAgent::Audio(payload)) => {
                 if let Some(active) = bridge.as_mut() {
                     let _ = active.session.protocol_mut().push_playback(payload);
+                }
+            }
+            Ok(FromAgent::Refused(error)) => {
+                let code = match error {
+                    DecodeError::Audio(_) => ErrorCode::InvalidAudioFrame,
+                    _ => ErrorCode::ProtocolViolation,
+                };
+                let _ = encode_control(
+                    &ControlMessage::Error(ErrorMessage {
+                        call_id: None,
+                        code,
+                        message: error.to_string(),
+                    }),
+                    out,
+                );
+            }
+            Ok(FromAgent::Control(ControlMessage::BargeIn(msg))) => {
+                if let Some(active) = bridge.as_mut().filter(|b| b.call_id == msg.call_id) {
+                    active.session.protocol_mut().barge_in();
                 }
             }
             Ok(FromAgent::Control(ControlMessage::Hangup(msg))) => {
@@ -369,7 +515,7 @@ fn drive_bridge(
     media: &mut sipral::MediaSession,
     agent_up: bool,
     next_tick: &mut Instant,
-    out: &mut Vec<u8>,
+    out: &mut Turn,
     turn: Instant,
 ) {
     if active.ended {
@@ -383,7 +529,16 @@ fn drive_bridge(
     if !agent_up || turn < *next_tick {
         return;
     }
-    *next_tick += PACE;
+    // More than a tick behind — the first tick of a call answered long after
+    // the loop began, or a turn that stalled — starts the cadence again from
+    // now. Catching up instead would run every missed tick back to back:
+    // RTP out several times faster than real time, and the far end's audio
+    // pulled out of its jitter buffer just as fast.
+    *next_tick = if turn.saturating_duration_since(*next_tick) > PACE {
+        turn + PACE
+    } else {
+        *next_tick + PACE
+    };
     let frame = media.frame_samples();
     let mut decoded = vec![0_i16; frame];
     let _ = media.playback(&mut decoded);
@@ -393,11 +548,11 @@ fn drive_bridge(
                 call_id: active.call_id.clone(),
                 speaking,
             }),
-            out,
+            &mut out.control,
         );
     }
     while let Some(bytes) = active.session.protocol_mut().pop_capture() {
-        let _ = encode_audio(session_audio(), &bytes, out);
+        let _ = encode_audio(session_audio(), &bytes, &mut out.audio);
     }
     if let Ok(Some(datagram)) = active.session.speak(media, turn) {
         let _ = active.rtp.send_to(datagram.payload, datagram.destination);
@@ -440,14 +595,22 @@ fn open_bridge(
         out,
     );
     // Who is calling comes out of the INVITE's own `From`, read while the
-    // call is still known to the agent.
+    // call is still known to the agent, and cut to what the socket carries.
     let identity = endpoint.agent.call_identity(call);
     let caller = identity.as_ref().map_or_else(String::new, |who| {
-        String::from_utf8_lossy(&who.from_uri).into_owned()
+        bounded(
+            String::from_utf8_lossy(&who.from_uri).into_owned(),
+            IDENTITY_BYTES,
+        )
     });
     let display_name = identity
         .as_ref()
-        .map(|who| String::from_utf8_lossy(&who.from_display).into_owned())
+        .map(|who| {
+            bounded(
+                String::from_utf8_lossy(&who.from_display).into_owned(),
+                IDENTITY_BYTES,
+            )
+        })
         .filter(|name| !name.is_empty());
     let _ = encode_control(
         &ControlMessage::IncomingCall(IncomingCall {
@@ -472,24 +635,8 @@ fn handle_event(
     agent_up: &mut bool,
     out: &mut Vec<u8>,
     event: &Event,
-    now: Instant,
+    (now, audio_dropped): (Instant, u64),
 ) {
-    if let Event::Signalling(sig) = event
-        && let Some(active) = bridge.as_ref()
-        && let Some((call, state)) = sipral::call_state_of(sig)
-        && call == active.call
-    {
-        if matches!(state, CallStateKind::Answered) {
-            *agent_up = true;
-        }
-        let _ = encode_control(
-            &ControlMessage::CallState(CallState {
-                call_id: active.call_id.clone(),
-                state,
-            }),
-            out,
-        );
-    }
     match event {
         Event::Signalling(UaEvent::IncomingCall { call, .. })
             if bridge.as_ref().is_none_or(|b| b.ended) =>
@@ -533,12 +680,43 @@ fn handle_event(
             if bridge.as_ref().is_some_and(|b| b.call == *call)
                 && let Some(active) = bridge.take()
             {
+                // audio the agent did not read: dropped on this call's capture
+                // queue, or held for the socket until newer turns pushed it
+                // out — the second counted since the agent connected
                 println!(
-                    "ended {}: packets_received={} packets_sent={}",
-                    active.call_id, stats.quality.received, stats.packets_sent
+                    "ended {}: packets_received={} packets_sent={} capture_dropped={} audio_dropped={}",
+                    active.call_id,
+                    stats.quality.received,
+                    stats.packets_sent,
+                    active.session.protocol().capture_dropped(),
+                    audio_dropped
                 );
             }
         }
         _ => {}
+    }
+    // After the bridge above has had its chance to open, so that a call's own
+    // `IncomingCall` finds it and reaches the wire as `ringing`: only the
+    // bridged call's own transitions are reported, under its own id.
+    if let Event::Signalling(sig) = event
+        && let Some((call, state)) = sipral::call_state_of(sig)
+        && let Some(active) = bridge.as_mut().filter(|b| b.call == call)
+    {
+        let protocol = active.session.protocol_mut();
+        let _ = match state {
+            CallStateKind::Ringing => Ok(()),
+            CallStateKind::Answered => {
+                *agent_up = true;
+                protocol.answer()
+            }
+            CallStateKind::Ended { .. } => protocol.hangup(),
+        };
+        let _ = encode_control(
+            &ControlMessage::CallState(CallState {
+                call_id: active.call_id.clone(),
+                state,
+            }),
+            out,
+        );
     }
 }

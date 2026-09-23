@@ -176,7 +176,26 @@ that produced onto the socket as this crate's own audio frames (kind 0); read
 what the socket offers back with [`Decoder`](crate::Decoder), push it onto
 [`Session::push_playback`](crate::Session::push_playback), and let
 `HeadlessSession::speak` turn it into the next frame `MediaSession::capture`
-sends as RTP.
+sends as RTP. `speak` hands `capture` a frame on every tick, one of silence
+while the agent has nothing queued: that call is where the RTP timestamp
+moves on, where a digit the agent asked for with `DtmfSend` goes out, and
+where the session's own silence suppression, if configured, decides whether
+the frame is sent — skipping it would stop the clock, strand the digit, and
+leave a listening agent's far end with no RTP at all.
+
+The media tick keeps its own cadence rather than catching up: a loop that
+finds itself more than a tick behind — the first tick of a call answered
+long after the loop began is always one — starts again from now, since
+running every missed tick back to back sends RTP several times faster than
+real time. And nothing on the media side waits on the agent's socket. A
+write that blocks there, behind an agent that stopped reading, stalls every
+call's SIP and RTP with it; the application writes from somewhere that
+cannot block the loop, and what the socket has no room for yet it holds in
+the order it was produced — so a `VoiceActivity` still arrives among the
+frames it describes — dropping the oldest held audio past a bound, the
+capture queue's own policy one step further along, and never a control
+message. `headless-socket-agent.rs` is that shape, and prints how much audio
+it had to drop when a call ends.
 
 `HeadlessSession` has no socket of its own either way — the paragraph above
 is the wiring an application writes, not something this type does for it —

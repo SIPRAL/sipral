@@ -374,6 +374,22 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   at the socket's rate. It is now a no-op at the same rate, the detector
   reads the socket's fixed rate, and only what is at the old codec rate
   goes. An empty frame no longer reports `speaking: true`.
+- **The socket-framed agent survives a hostile caller and a misbehaving
+  agent, keeps real time, and acts on `BargeIn`.** In the lab, against
+  `crates/sipral/examples/headless-socket-agent.rs`: one 3.4 KB INVITE whose
+  display name was escaped control characters made an `IncomingCall` the
+  reference agent refused, and the application exited — the caller's address
+  and display name are now cut to fit; one control frame that was not JSON
+  also made it exit — it now answers on the error channel; its media tick
+  replayed every tick since start-up once a call was answered, 188 RTP
+  packets a second instead of 50 for a call taken 40 seconds in — it now
+  restarts from now when it falls behind; and a write to an agent that
+  stopped reading blocked the whole loop, so the call's BYE was never
+  answered — the socket is now written from its own thread, what it has no
+  room for held in order and the oldest audio dropped past a second, never a
+  control message. It also ignored `BargeIn`, never reported the bridged
+  call's `ringing`, and left the protocol session's state at ringing for the
+  whole call.
 - **The local conference's `MediaEvent::Unjoined` now reaches the C ABI.** A
   call ending while its partner is still joined told the facade, but the
   translation to `sipral_event_t` dropped it silently; an application driving
