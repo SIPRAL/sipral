@@ -495,6 +495,20 @@ impl Call {
         }
     }
 
+    /// Whether a session change is running in either direction, which a new
+    /// one has to wait for.
+    ///
+    /// RFC 3261 §14.1: "a UAC MUST NOT initiate a new INVITE transaction
+    /// within a dialog while another INVITE transaction is in progress in
+    /// either direction". Ours runs from the moment it is sent until it is
+    /// answered, through the wait a 491 asks for; theirs until the
+    /// application answers it. And an offer this end put in a 2xx is only
+    /// answered by the ACK (§13.2.2.4) — RFC 3264 §4 lets no new offer go
+    /// before that answer has arrived.
+    pub(crate) const fn changing(&self) -> bool {
+        self.offering.is_some() || self.answering.is_some() || self.session.answer_owed
+    }
+
     pub(crate) fn outgoing(
         account: AccountId,
         forks: ForkPolicy,

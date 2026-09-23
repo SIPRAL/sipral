@@ -4342,6 +4342,337 @@ fn two_changes_that_cross_back_off_once_and_then_give_up() {
     assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
 }
 
+/// The INVITEs among what went out, in order.
+fn invites_in(written: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    written
+        .iter()
+        .filter(|bytes| bytes.starts_with(b"INVITE "))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_resume_asked_for_while_the_hold_is_on_its_way_goes_once_the_hold_is_answered() {
+    // 14.1: "If there is an ongoing INVITE client transaction, the TU MUST
+    // wait until the transaction reaches the completed or terminated state
+    // before initiating the new INVITE." The resume used to be measured
+    // against the hold agreed so far, which the hold still on its way had not
+    // moved, so it was taken as done already: accepted, and never sent
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+
+    agent
+        .resume(call, t0)
+        .expect("taken, to go once the hold is answered");
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "nothing goes while the hold's INVITE is in progress"
+    );
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .first()
+            .is_some_and(|bytes| bytes.starts_with(b"ACK ")),
+        "the hold is acknowledged first"
+    );
+    let resume = invites_in(&written)
+        .pop()
+        .expect("the resume goes once the hold is complete");
+    assert_eq!(header(&resume, HeaderName::CSeq), b"3 INVITE");
+    let offer = body_of(&resume);
+    assert!(offer.contains("a=sendrecv\r\n"), "{offer}");
+    assert!(offer.contains("o=- 1 3 IN IP4 192.0.2.1\r\n"), "{offer}");
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: true,
+            remote: false
+        }),
+        "the hold is still reported, as it was agreed"
+    );
+
+    deliver(
+        &mut agent,
+        &answered(&resume, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert_eq!(
+        session_changed(&mut agent),
+        Some(Hold {
+            local: false,
+            remote: false
+        })
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
+}
+
+#[test]
+fn a_hold_asked_for_again_while_a_resume_waits_takes_the_resume_back() {
+    // what waits is the state the application last asked for, not a list of
+    // presses: hold, resume, hold again leaves a hold to be answered and
+    // nothing after it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    agent.resume(call, t0).expect("waits");
+    agent
+        .hold(call, t0)
+        .expect("the hold on its way already says this");
+    assert!(transmits(&mut agent).is_empty());
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0,
+    );
+    let written = transmits(&mut agent);
+    assert!(
+        invites_in(&written).is_empty(),
+        "nothing is left to change: {} message(s) went",
+        written.len()
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(true));
+}
+
+#[test]
+fn a_resume_waiting_behind_a_refused_hold_finds_nothing_to_resume() {
+    // 14.1: after a refusal "the session parameters MUST remain unchanged",
+    // so the call was never held and the resume has nothing to send; the
+    // refusal itself is still reported
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    agent.resume(call, t0).expect("waits");
+
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 488, "Not Acceptable Here", "desk", None),
+        t0,
+    );
+    assert!(invites_in(&transmits(&mut agent)).is_empty());
+    assert!(
+        events(&mut agent).iter().any(|event| matches!(
+            event,
+            UaEvent::SessionChangeFailed {
+                status: Some(status),
+                ..
+            } if status.get() == 488
+        )),
+        "the hold's refusal reaches the application"
+    );
+    assert_eq!(agent.hold_state(call).map(|hold| hold.local), Some(false));
+}
+
+#[test]
+fn a_resume_asked_for_while_a_hold_waits_out_a_491_goes_after_the_retry() {
+    // 14.1's wait after a 491 is part of the same change: the resume goes
+    // once the hold's second attempt is answered, not in the middle of it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, reinvite) = on_hold(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &answered(&reinvite, 491, "Request Pending", "desk", None),
+        t0,
+    );
+    transmits(&mut agent);
+    let wait = events(&mut agent)
+        .into_iter()
+        .find_map(|event| match event {
+            UaEvent::SessionChangeFailed { retry_in, .. } => retry_in,
+            _ => None,
+        })
+        .expect("491 says to wait and try again");
+
+    agent.resume(call, t0).expect("waits for the hold");
+    assert!(transmits(&mut agent).is_empty());
+
+    agent.handle_timeout(t0 + wait);
+    let again = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes out again");
+    assert!(body_of(&again).contains("a=sendonly\r\n"));
+    deliver(
+        &mut agent,
+        &answered(&again, 200, "OK", "desk", Some(THEIR_RECVONLY)),
+        t0 + wait,
+    );
+    let resume = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("and then the resume");
+    assert_eq!(header(&resume, HeaderName::CSeq), b"4 INVITE");
+    assert!(body_of(&resume).contains("a=sendrecv\r\n"));
+}
+
+#[test]
+fn a_resume_waiting_on_a_call_that_ends_goes_with_the_call() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    agent.hold(call, t0).expect("the hold goes");
+    transmits(&mut agent);
+    agent.resume(call, t0).expect("waits");
+
+    deliver(&mut agent, &reversed(&ack, "BYE", "gone", 1, None), t0);
+    let written = transmits(&mut agent);
+    assert!(
+        invites_in(&written).is_empty(),
+        "nothing is offered into a call that has ended"
+    );
+    let told = events(&mut agent);
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, UaEvent::CallEnded { .. })),
+        "{told:?}"
+    );
+    assert!(
+        !told
+            .iter()
+            .any(|event| matches!(event, UaEvent::SessionChangeFailed { status: None, .. })),
+        "the ending is the last word, not a resume that failed: {told:?}"
+    );
+    assert!(agent.holds_waiting.is_empty());
+}
+
+#[test]
+fn a_written_offer_asked_for_while_a_change_is_on_its_way_is_refused_out_loud() {
+    // a description the application wrote cannot wait: it was written
+    // against the session as it stood, and the change in progress is about
+    // to move that. So it is refused with a status, never taken and lost
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, _) = on_hold(&mut agent, id, t0);
+
+    assert_eq!(
+        agent.reoffer(call, RESUMED_ON_PCMA, t0),
+        Err(UaError::ChangeInProgress)
+    );
+    assert_eq!(
+        agent.change_formats(call, RESUMED_ON_PCMA, t0),
+        Err(UaError::ChangeInProgress)
+    );
+    assert!(transmits(&mut agent).is_empty());
+}
+
+#[test]
+fn a_hold_asked_for_while_the_far_ends_offer_waits_on_the_application_goes_after_the_answer() {
+    // 14.1 forbids a new INVITE "while another INVITE transaction is in
+    // progress in either direction", and one the application has not
+    // answered yet is in progress here
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(
+        &mut agent,
+        &reversed(&ack, "INVITE", "codec", 1, Some(THEIR_NEW_CODEC)),
+        t0,
+    );
+    transmits(&mut agent);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(event, UaEvent::Reoffer { .. })),
+        "a codec change is the application's to answer"
+    );
+
+    agent.hold(call, t0).expect("waits for the answer");
+    assert!(transmits(&mut agent).is_empty());
+
+    agent
+        .accept_reoffer(call, Some(THEIR_PCMA), t0)
+        .expect("answered");
+    let written = transmits(&mut agent);
+    assert!(
+        written
+            .first()
+            .is_some_and(|bytes| bytes.starts_with(b"SIP/2.0 200 ")),
+        "the far end's offer is answered first"
+    );
+    let hold = invites_in(&written).pop().expect("then the hold goes");
+    assert!(body_of(&hold).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn a_hold_asked_for_while_this_ends_offer_waits_for_the_ack_goes_after_it() {
+    // a re-INVITE with no offer is answered with ours, and the answer to that
+    // travels in the ACK (§13.2.2.4). RFC 3264 §4 lets no new offer go until
+    // it has, so the hold waits for the ACK
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let (call, ack) = call_up(&mut agent, id, t0);
+    deliver(&mut agent, &reversed(&ack, "INVITE", "empty", 1, None), t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.hold(call, t0).expect("waits for the ACK");
+    assert!(
+        invites_in(&transmits(&mut agent)).is_empty(),
+        "no offer while ours is unanswered"
+    );
+
+    deliver(
+        &mut agent,
+        &reversed(&ack, "ACK", "emptyack", 1, Some(ANSWER)),
+        t0,
+    );
+    let hold = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes once the answer is in");
+    assert!(body_of(&hold).contains("a=sendonly\r\n"));
+}
+
+#[test]
+fn a_hold_asked_for_during_a_session_refresh_goes_after_it() {
+    // RFC 4028 §7.4 sends the refresh as a re-INVITE when the far end never
+    // allowed UPDATE, and that is an INVITE in progress like any other
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &timed(&invite, Some(ANSWER), "600;refresher=uac"),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    let due = t0 + Duration::from_secs(300);
+    agent.handle_timeout(due);
+    let refresh = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the refresh");
+    agent.hold(call, due).expect("waits for the refresh");
+    assert!(transmits(&mut agent).is_empty());
+
+    deliver(
+        &mut agent,
+        &timed(&refresh, Some(ANSWER), "600;refresher=uac"),
+        due,
+    );
+    let hold = invites_in(&transmits(&mut agent))
+        .pop()
+        .expect("the hold goes once the refresh is answered");
+    assert!(body_of(&hold).contains("a=sendonly\r\n"));
+}
+
 #[test]
 fn a_call_answered_and_never_acknowledged_is_ended_with_a_bye() {
     // 13.3.1.4: "If the UAS generates a 2xx response and never receives an

@@ -624,6 +624,14 @@ or `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` with the call left on the list it
 had. A call placed or answered with `sdp` is the application's to re-offer,
 and is `SIPRAL_STATUS_WRONG_STATE` here.
 
+One session change runs in a call at a time (RFC 3261 §14.1). A
+`sipral_call_hold` or `sipral_call_resume` asked for while another is running
+— one of this end's not yet answered, or one of the far end's not yet answered
+here — succeeds and waits, and goes when that change is over; the last one
+asked for is the one that goes. `sipral_call_change_codecs` is refused with
+`SIPRAL_STATUS_WRONG_STATE` instead, because the offer it writes is built from
+a session the running change is about to move.
+
 **Two calls can be joined into a local conference of three.**
 `sipral_call_join(stack, call_a, call_b)` pairs two calls this stack already
 has media on, so that each far end hears the other's far end and this end's

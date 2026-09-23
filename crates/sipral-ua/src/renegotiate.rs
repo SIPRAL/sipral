@@ -27,6 +27,14 @@
 //! that do not overlap, and the change is offered once more — §14.1 says "once
 //! more", not "until it works".
 //!
+//! **One change at a time.** §14.1 forbids a new INVITE "while another INVITE
+//! transaction is in progress in either direction", and RFC 3264 §4 a new
+//! offer before the last one is answered. A hold or a resume asked for in
+//! that window waits and goes when the running change is over — it is a
+//! state, derivable at any moment, so the latest one asked for is the one
+//! that goes. A description the application wrote is refused instead: it
+//! was written against a session the running change is about to move.
+//!
 //! One judgement call, and it is RFC 3311 §5.2's: an UPDATE "MUST be responded
 //! to promptly", and a UAS that "cannot change the session parameters without
 //! prompting the user ... SHOULD reject the request with a 504". An
@@ -96,13 +104,25 @@ impl UserAgent {
     /// The description is this layer's to write: the one already negotiated,
     /// with every stream's direction changed to say this end will not receive,
     /// and an `o=` version that has moved. Asking for a hold that is already
-    /// in place sends nothing.
+    /// in place, or already on its way, sends nothing.
+    ///
+    /// Asked for while another session change is running in the call — one
+    /// of ours not yet answered, one of the far end's not yet answered here,
+    /// or an offer of ours whose answer the ACK has still to bring — it
+    /// waits, and goes once that change is over (RFC 3261 §14.1). What waits
+    /// is the state asked for last: a resume asked for behind a hold that is
+    /// still on its way goes after it, and a hold asked for again before
+    /// then takes that resume back. Either way the outcome is the
+    /// [`UaEvent::SessionChanged`] or [`UaEvent::SessionChangeFailed`] of the
+    /// request that carries it.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::NoSession`] when nothing has been
-    /// described yet, [`UaError::ChangeInProgress`] when a change is already
-    /// running, [`UaError::CannotRenegotiate`] when the call is not up and the
-    /// far end never advertised UPDATE, or [`UaError::Send`].
+    /// described yet, [`UaError::CannotRenegotiate`] when the call is not up
+    /// and the far end never advertised UPDATE, or [`UaError::Send`] — all
+    /// of them when the request would go at once. One that waits and then
+    /// cannot go is reported as [`UaEvent::SessionChangeFailed`] with no
+    /// status.
     pub fn hold(&mut self, call: CallHandle, now: Instant) -> Result<(), UaError> {
         self.change_hold(call, true, now)
     }
@@ -140,9 +160,16 @@ impl UserAgent {
     /// flag kept from before would leave the next [`UserAgent::hold`] sending
     /// nothing, because it would find the call already held.
     ///
+    /// Unlike a hold, this does not wait for a change already running. The
+    /// description was written against the session as it stands, which that
+    /// change is about to move, so sending it afterwards would offer
+    /// something nobody wrote; it is refused instead, and can be written
+    /// again once the running change is reported.
+    ///
     /// # Errors
-    /// As [`UserAgent::hold`], plus [`UaError::Sdp`] when the description
-    /// cannot be read.
+    /// As [`UserAgent::hold`], plus [`UaError::ChangeInProgress`] when a
+    /// session change is running in the call in either direction, and
+    /// [`UaError::Sdp`] when the description cannot be read.
     pub fn reoffer(&mut self, call: CallHandle, sdp: &[u8], now: Instant) -> Result<(), UaError> {
         let mut description = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
         let held = {
@@ -166,6 +193,9 @@ impl UserAgent {
     /// this end's side is an answer to the far end, not a statement of what
     /// this end wants, and copying it into an offer is how a call held from
     /// the far end would end up held from both.
+    ///
+    /// Refused while another change is running, for the reason
+    /// [`UserAgent::reoffer`] gives.
     ///
     /// # Errors
     /// As [`UserAgent::reoffer`].
@@ -242,7 +272,14 @@ impl UserAgent {
             };
             response = response.body(b"application/sdp", Arc::from(body));
         }
-        self.answer_with(call, answering.transaction, &response, now)?;
+        if let Err(error) = self.answer_with(call, answering.transaction, &response, now) {
+            // the far end's change is over here even so — the transaction it
+            // named is gone — and a hold waiting behind it goes now rather
+            // than at whatever drain comes next, a long way off on a quiet
+            // call
+            self.send_waiting_holds(now);
+            return Err(error);
+        }
         if let Some(held) = self.calls.get_mut(&call) {
             if let Some(offer) = answering.offer {
                 held.session.set_remote(offer);
@@ -276,7 +313,11 @@ impl UserAgent {
         if status == StatusCode::NOT_ACCEPTABLE_HERE {
             response = response.header(HeaderName::Warning, WHY_488);
         }
-        self.answer_with(call, answering.transaction, &response, now)?;
+        if let Err(error) = self.answer_with(call, answering.transaction, &response, now) {
+            // as in accept_reoffer
+            self.send_waiting_holds(now);
+            return Err(error);
+        }
         self.drain(now);
         Ok(())
     }
@@ -288,13 +329,70 @@ impl UserAgent {
     fn change_hold(&mut self, call: CallHandle, held: bool, now: Instant) -> Result<(), UaError> {
         let offer = {
             let call_state = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
-            if call_state.session.hold.local == held {
+            if !call_state.session.has_local() {
+                return Err(UaError::NoSession);
+            }
+            // measured against where the call is headed, not where it was
+            // last agreed: a hold still on its way has not moved the second,
+            // and a resume measured against it would find nothing to do
+            let heading = call_state
+                .offering
+                .as_ref()
+                .map_or(call_state.session.hold.local, |offer| offer.held);
+            if call_state.changing() {
+                // §14.1 has the new INVITE wait for the one in progress
+                if held == heading {
+                    self.holds_waiting.remove(&call);
+                } else {
+                    self.holds_waiting.insert(call, held);
+                }
+                return Ok(());
+            }
+            // nothing is running, so this is the latest word, and one still
+            // waiting from before — its change ended outside a drain — is
+            // not to go after it
+            self.holds_waiting.remove(&call);
+            if heading == held {
                 return Ok(());
             }
             call_state.session.offer(held).ok_or(UaError::NoSession)?
         };
         let fields = self.application_headers(call);
         self.send_offer(call, offer, held, false, &fields, now)
+    }
+
+    /// Send the holds and resumes that were waiting for a change to finish.
+    ///
+    /// One that can no longer be sent — the call is not up any more, or the
+    /// transport refused it — is reported as a session change that failed,
+    /// exactly as the same refusal would have been had it come back from
+    /// [`UserAgent::hold`] itself.
+    pub(crate) fn send_waiting_holds(&mut self, now: Instant) {
+        if self.holds_waiting.is_empty() {
+            return;
+        }
+        let calls = &self.calls;
+        let ready: Vec<CallHandle> = self
+            .holds_waiting
+            .keys()
+            .filter(|call| calls.get(call).is_some_and(|held| !held.changing()))
+            .copied()
+            .collect();
+        for call in ready {
+            // sending one drains, and the drain may have sent the next one
+            // already
+            let Some(held) = self.holds_waiting.remove(&call) else {
+                continue;
+            };
+            if self.change_hold(call, held, now).is_err() {
+                self.events.push_back(UaEvent::SessionChangeFailed {
+                    call,
+                    status: None,
+                    retry_in: None,
+                    response: None,
+                });
+            }
+        }
     }
 
     fn send_offer(
@@ -308,7 +406,7 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let (state, dialog, allows_update) = {
             let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            if call_state.offering.is_some() || call_state.answering.is_some() {
+            if call_state.changing() {
                 return Err(UaError::ChangeInProgress);
             }
             (
@@ -1066,20 +1164,22 @@ impl UserAgent {
 
     /// The ACK for a 2xx this end answered with an offer.
     pub(crate) fn on_ack(&mut self, call: CallHandle, request: &OwnedMessage) {
-        let body = request.as_raw().body();
-        if body.is_empty() {
-            return;
-        }
         let Some(held) = self.calls.get_mut(&call) else {
             return;
         };
         if !held.session.answer_owed {
             return;
         }
-        // owed either way: an answer that cannot be read is not going to
-        // arrive a second time, and leaving the flag set would have the next
-        // ACK on this dialog read as one
+        // owed either way: this ACK is the only place §13.2.2.4 lets the
+        // answer travel, so one that is missing or cannot be read is not
+        // going to arrive a second time. Leaving the flag set would have the
+        // next ACK on this dialog read as one, and every change this end asks
+        // for waiting on an answer that is never coming
         held.session.answer_owed = false;
+        let body = request.as_raw().body();
+        if body.is_empty() {
+            return;
+        }
         let Ok(answer) = sdp::parse_with_limits(body, self.sdp_limits) else {
             return;
         };

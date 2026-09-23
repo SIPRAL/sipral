@@ -441,7 +441,7 @@ impl UserAgent {
             }
             return;
         };
-        if state.offering.is_some() || state.answering.is_some() {
+        if state.changing() {
             // something else is already renegotiating, and it will rearm the
             // timer when it is answered; a second request now would be glare
             // we caused ourselves

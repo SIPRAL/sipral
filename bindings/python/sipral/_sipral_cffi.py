@@ -5172,7 +5172,15 @@ sipral_status_t sipral_call_set_headers(sipral_handle_t stack, sipral_handle_t c
  *
  * The description is the stack's to write: the one already negotiated
  * with every stream's direction changed. Asking for a hold that is
- * already in place sends nothing and succeeds.
+ * already in place, or already on its way, sends nothing and succeeds.
+ *
+ * Asked for while another session change is running in the call, in
+ * either direction, it succeeds and waits: its request goes once that
+ * change is over (RFC 3261 §14.1), and the outcome arrives as
+ * `SIPRAL_EVENT_KIND_SESSION_CHANGED` or
+ * `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED` like any other. What waits
+ * is the state asked for last, so a resume asked for behind a hold still
+ * on its way goes after it.
  *
  * Safety
  *
@@ -5185,7 +5193,8 @@ sipral_status_t sipral_call_hold(sipral_handle_t stack, sipral_handle_t call, ui
  *
  * Every stream goes back to the direction it had before, which is not
  * always both ways: one that was offered receive-only is resumed
- * receive-only.
+ * receive-only. It waits for a change already running exactly as
+ * `sipral_call_hold` does.
  *
  * Safety
  *

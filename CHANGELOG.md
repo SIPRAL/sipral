@@ -115,6 +115,17 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Fixed
 
+- **A resume asked for while the hold was still on its way is no longer
+  accepted and lost.** `hold` and `resume` compared the request against the
+  hold state last agreed, which a hold whose re-INVITE had not been answered
+  yet had not moved, so a resume in that window answered `Ok`, sent nothing,
+  and left the call held with nothing said. Both are now measured against
+  where the call is headed and, while another session change is running in
+  either direction — including an offer of ours whose answer the ACK has
+  still to bring (RFC 3264 §4) — wait and go once it is over, as RFC 3261
+  §14.1 requires. `reoffer` and `change_formats` still answer
+  `ChangeInProgress` in that window, and an ACK without the answer it owed
+  no longer leaves the call waiting for one.
 - **The .NET binding no longer crashes the whole process over an
   exception thrown from an application's own `EventReceived` or
   `FrameDecoded` handler.** Both ran synchronously on the library's own

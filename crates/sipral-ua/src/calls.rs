@@ -833,6 +833,9 @@ impl UserAgent {
         // queue nothing will ever empty again is a leak for the life of the
         // process
         self.dtmf_queue.remove(&call);
+        // and a hold or a resume waiting for a change to finish has no
+        // session left to change: `CallEnded` is the last word on it
+        self.holds_waiting.remove(&call);
         // by_request is not touched: the BYE that ended the call outlives the
         // call, and its answer is still this layer's rather than the
         // application's. `on_transaction_over` clears the entry when the

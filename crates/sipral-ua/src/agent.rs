@@ -108,6 +108,11 @@ pub struct UserAgent {
     pub(crate) dtmf_queue: HashMap<CallHandle, crate::dtmf::DtmfQueue>,
     /// The re-INVITEs and UPDATEs offering a session change.
     pub(crate) by_offer: HashMap<AnyTransactionId, CallHandle>,
+    /// A hold (`true`) or a resume asked for while another session change was
+    /// running in the call, sent once it is over (RFC 3261 §14.1). One per
+    /// call: what waits is the state last asked for, so a second press
+    /// replaces the first.
+    pub(crate) holds_waiting: HashMap<CallHandle, bool>,
     /// Refusals of an INVITE that carried a challenge, held until the drain
     /// ends. Whether one was a refusal or the first half of a retry is decided
     /// by whether a challenge follows it.
@@ -241,6 +246,7 @@ impl UserAgent {
             by_dtmf_info: HashMap::new(),
             dtmf_queue: HashMap::new(),
             by_offer: HashMap::new(),
+            holds_waiting: HashMap::new(),
             challenged: HashMap::new(),
             challenged_requests: HashMap::new(),
             challenged_offers: HashMap::new(),
@@ -764,6 +770,9 @@ impl UserAgent {
         self.settle_subscription_challenges(now);
         self.settle_message_challenges();
         self.settle_announcements(now);
+        // last, so that every change this round finished — answered, refused,
+        // or given up on after a challenge — has let go of its call first
+        self.send_waiting_holds(now);
     }
 
     /// `None` when this layer claimed the event; the event back when nothing
