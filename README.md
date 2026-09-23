@@ -194,7 +194,8 @@ licence possible; the record of how, component by component, is in
 [`CLEANROOM_AUDIT.md`](CLEANROOM_AUDIT.md).
 
 The name is a trademark and is not covered by either licence, see
-[`TRADEMARK.md`](TRADEMARK.md).
+[`TRADEMARK.md`](TRADEMARK.md), which also carries the additional terms under
+section 7 of the AGPL-3.0 that come with every file.
 
 ## Contributing
 

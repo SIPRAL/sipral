@@ -7,11 +7,19 @@ Copyright (c) 2026 Tiberiu Balasea
 
 Sipral is dual-licensed. You pick the arm that fits what you are building.
 
+In the SPDX header of every file, `LicenseRef-Sipral-Commercial` stands for a
+signed commercial agreement, described in
+[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md). Without one, the AGPL-3.0 is
+the licence you have.
+
 ## The free arm — AGPL-3.0-only
 
-Use Sipral at no cost, for anything, as long as **your own application is also
-released under the AGPL-3.0**, source included. That covers students, research,
-hobby projects, and any open source product that is itself copyleft.
+Use Sipral at no cost under the AGPL-3.0. If you give your application to anyone
+else, the whole application, Sipral included, has to reach them under the
+AGPL-3.0 with its source (section 13 also lets you combine it with code under the
+GPL-3.0). If you modify Sipral and people use it over a network, section 13
+applies as well. That covers students, research, hobby projects, and any open
+source product that is itself copyleft.
 
 The AGPL adds one obligation over the plain GPL: if you run a modified Sipral as
 a **network service**, the people using that service must be able to get your
@@ -22,7 +30,8 @@ See section 13 of `LICENSE`.
 
 You need a commercial licence if any of the following is true:
 
-- your application is closed source, or under a licence that is not AGPL-compatible;
+- your application is closed source, or under a licence that is not
+  AGPL-compatible, and you distribute it to others;
 - you ship it through the App Store, Google Play, or any store whose terms
   conflict with the AGPL;
 - you run Sipral, modified, as part of a service and do not want to publish
@@ -46,10 +55,10 @@ contract, not a runtime lock.
 |---|---|
 | Open source app under AGPL-3.0 | Free |
 | Research, teaching, evaluation, a prototype you do not ship | Free |
-| Closed source desktop, mobile or server product | Commercial |
+| Closed source desktop, mobile or on-premises server product that you distribute | Commercial |
 | App Store / Google Play distribution | Commercial |
 | Hosted service using a modified Sipral, source not published | Commercial |
-| SDK or library you resell with Sipral inside, its own source not under AGPL-3.0 | Commercial |
+| SDK or library you resell with Sipral inside, its own source not under AGPL-3.0 | Commercial, under an OEM agreement |
 
 ## Third-party code
 
@@ -91,7 +100,8 @@ G.722. What such a build offers is in
 ## The name
 
 The licence covers the code, not the name. Read [`TRADEMARK.md`](TRADEMARK.md)
-before calling something "Sipral".
+before calling something "Sipral"; it also carries the additional terms under
+section 7 of the AGPL-3.0 that come with every file.
 
 ## Getting a commercial licence
 

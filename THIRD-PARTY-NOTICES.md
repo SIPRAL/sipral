@@ -79,11 +79,13 @@ That is advice given to them, not to this project, and it is recorded here as
 what it is. IETF rules require a disclosure to name actual patent numbers, so a
 licensee who needs more than that can have their own counsel read them.
 
-Since December 2025 that picture is no longer complete, and a licensee should
-know it before shipping. **Dolby Laboratories, Fraunhofer IIS and NTT are
-asserting patents against Opus implementations**, through a licensing vehicle
-trading as Vectis at `opuspool.com`, reading on RFC 6716, 8251 and 8486 and on
-the reference software. The pool publishes its patent list: as it stood on
+Since 2025 that picture is no longer complete, and a licensee should know it
+before shipping. **Dolby, Fraunhofer-Gesellschaft and NTT are asserting patents
+against Opus implementations**, through a licensing vehicle trading as Vectis at
+`opuspool.com`, reading on RFC 6716, 8251 and 8486 and on the reference
+software. The pool names the official libopus releases up to 1.3.1; the one
+linked here is 1.6.1, which implements the same RFCs, so a later version number
+is not a way out of the pool's claims. The pool publishes its patent list: as it stood on
 1 June 2026 it ran to several hundred entries across more than forty
 jurisdictions, Romania among them. The published rate is **0.15 € per unit**.
 The actions on record are Dolby against Acer, filed at the Unified Patent
@@ -106,8 +108,7 @@ So the two arms of this project are not in the same position, and neither is
 safe by virtue of a policy. A library distributed on its own is outside what
 the programme says it currently pursues. **A licensee who puts Sipral into an
 IP telephone is inside a category it names**, at a rate that turns into real
-money on any volume: a hundred thousand handsets is fifteen thousand euro a
-year. That is their exposure rather than ours, and it is written here so that
+money on any volume: a hundred thousand handsets is fifteen thousand euro. That is their exposure rather than ours, and it is written here so that
 it is a decision they make rather than a thing they discover. Nothing in this
 file, and nothing in either licence, is a representation that Sipral infringes
 no patent; see `LICENSE-COMMERCIAL.md`.

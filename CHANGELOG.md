@@ -346,6 +346,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Changed
 
+- **The licence documents say what they mean.** `LICENSE-COMMERCIAL.md` is
+  now plainly a description that grants nothing on its own, with the licensor
+  named by the signed agreement rather than by `AUTHORS`. It gains the rights a
+  licensee's customers, stores and contractors need, a patent clause that
+  grants nothing and names the Opus pool, a first year of maintenance inside
+  the one-time fee, a liability cap that does not fall to zero and keeps what
+  the law does not allow to be limited, and a termination clause that protects
+  copies already delivered. `LICENSING.md` describes the AGPL arm as the AGPL
+  actually reads and explains `LicenseRef-Sipral-Commercial`; `TRADEMARK.md`
+  attaches the AGPL section 7 additional terms; `AUTHORS` promises a
+  contributor licence rather than an assignment; the Opus pool facts in
+  `THIRD-PARTY-NOTICES.md` are corrected; `SECURITY.md` lists the one advisory
+  a scanner will report and why it does not apply.
 - **Every re-offer hands the DTLS roles back, and a far end that moves them
   is refused by name.** RFC 8842 §5.5 asks each subsequent offer for
   `a=setup:actpass`; the hold, the resume and the codec change now write it

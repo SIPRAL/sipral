@@ -44,6 +44,20 @@ network is in scope, and the parser especially:
   their maintainers.
 - Anything requiring the attacker to already control the process.
 
+## Known advisories that do not apply
+
+A dependency scanner run over this tree will report these. Each is set aside in
+`deny.toml`, with the reason beside it, and the reason is repeated here for
+whoever reads a scan without reading the configuration.
+
+- **RUSTSEC-2023-0071 / CVE-2023-49092, `rsa` (the Marvin attack).** A timing
+  side channel in operations with an RSA *private* key — decryption and
+  signing — that leaks that key. `sipral-dtls` uses the crate only to verify a
+  peer's signature with the peer's *public* key, and holds no RSA private key
+  at all: this end's own key is P-256. There is no secret for the channel to
+  reach. Any use of an RSA private key added later removes the exception from
+  `deny.toml` first.
+
 ## Supported versions
 
 There are no releases yet, so the supported version is the current `main`. Once

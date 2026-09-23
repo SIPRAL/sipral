@@ -13,8 +13,8 @@ body:
         <https://sipral.org> instead. It reaches the same place and nobody else
         sees it.
 
-        Read [LICENSING.md](../blob/main/LICENSING.md) first: if your own
-        application is AGPL-3.0, you need no licence and no enquiry.
+        Read [LICENSING.md](../blob/main/LICENSING.md) first: if you release
+        your application under the AGPL-3.0, you need no licence and no enquiry.
 
   - type: input
     id: company

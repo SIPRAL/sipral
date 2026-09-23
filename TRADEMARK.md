@@ -5,9 +5,16 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # Trademark policy
 
-"Sipral" and the Sipral logo are marks of the copyright holder named in
-`AUTHORS`. The AGPL and the commercial licence grant rights in the code. Neither
-grants rights in the name.
+"Sipral" and the Sipral logo are marks of their owner, named in `AUTHORS`. The
+AGPL and the commercial licence grant rights in the code. Neither grants rights
+in the name.
+
+## Additional terms under section 7 of the AGPL-3.0
+
+Every file of Sipral conveyed under the AGPL-3.0 carries these additional terms,
+as section 7 permits: under 7(e), the licence grants no rights under trademark
+law in the name Sipral or its logo; under 7(c), a modified version must not be
+presented as Sipral and must be marked as different from the original.
 
 ## Allowed without asking
 
