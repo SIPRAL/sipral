@@ -466,6 +466,9 @@ pub enum IceError {
     /// A candidate arrived for a stream whose candidates have already been
     /// paired with the peer's, where it would be advertised and never checked.
     AlreadyPaired,
+    /// A TURN client handed to [`IceAgent::add_relayed`] holds no allocation
+    /// of the base's address family.
+    NotAllocated,
 }
 
 impl fmt::Display for IceError {
@@ -480,6 +483,7 @@ impl fmt::Display for IceError {
             Self::NoUsableHost => "no host address the agent may use",
             Self::UnknownBase => "not a host candidate of that stream and component",
             Self::AlreadyPaired => "the stream's candidates have already been paired",
+            Self::NotAllocated => "the TURN client holds no allocation for that base",
         })
     }
 }

@@ -323,6 +323,113 @@ impl IceAgent {
         Ok(())
     }
 
+    /// A relayed candidate on an allocation the application made itself, from
+    /// `base` on the TURN server at `server`, before the agent existed.
+    ///
+    /// The same reason [`IceAgent::add_server_reflexive`] exists, one server
+    /// further: an Allocate is two round trips (the first one bare, answered
+    /// 401, RFC 8489 §9.2), and an agent that ran them itself would hold the
+    /// offer until they came back. An application that allocates while the
+    /// user is still dialling has the answer when the offer is written, and
+    /// this is how it becomes a candidate — RFC 8445 §5.1.1.2's relayed
+    /// candidate, its base the relayed address itself, and beside it the
+    /// server-reflexive candidate the response's XOR-MAPPED-ADDRESS names,
+    /// unless that one is redundant (§5.1.3).
+    ///
+    /// From here on the allocation is the agent's, exactly as one it gathered
+    /// itself: it installs the permissions the peer's candidates need, binds
+    /// channels, keeps the NAT binding towards the server alive with Binding
+    /// indications, refreshes the allocation before it lapses, and gives it
+    /// back when ICE concludes on another pair (§8.3.1) or when
+    /// [`IceAgent::release_relays`] is called. Events the client queued before
+    /// it was handed over are history by then and are dropped with it; what
+    /// it still has to send is sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`IceAgent::add_server_reflexive`], [`IceError::NotAllocated`] for a
+    /// client that holds no allocation of the base's address family, and
+    /// [`IceError::TooMany`] past eight relays.
+    pub fn add_relayed(
+        &mut self,
+        stream: StreamId,
+        component: ComponentId,
+        base: SocketAddr,
+        server: SocketAddr,
+        mut client: TurnClient,
+        now: Instant,
+    ) -> Result<(), IceError> {
+        let entry = self.streams.get(stream.0).ok_or(IceError::UnknownStream)?;
+        if entry.remote.is_some() {
+            return Err(IceError::AlreadyPaired);
+        }
+        if self.phase == Phase::New {
+            return Err(IceError::UnknownBase);
+        }
+        let index = self
+            .bases
+            .iter()
+            .position(|held| {
+                held.stream == stream.0 && held.component == component && held.address == base
+            })
+            .ok_or(IceError::UnknownBase)?;
+        if self.relays.len() >= super::MAX_SERVERS {
+            return Err(IceError::TooMany);
+        }
+        let relayed = client
+            .relayed_addresses()
+            .iter()
+            .find(|relayed| relayed.is_ipv4() == base.is_ipv4())
+            .copied()
+            .filter(|_| client.is_allocated())
+            .ok_or(IceError::NotAllocated)?;
+        let mapped = client.mapped_address();
+        while client.poll_event().is_some() {}
+        let top = self.bases.get(index).map_or(0, |held| held.top);
+        let servers = 1 + self.config.stun_servers.len() + 2 * self.config.turn_servers.len();
+        self.relays.push(Allocation {
+            base: index,
+            server,
+            relay_preference: below(top, servers),
+            reflexive_preference: below(top, servers + 1),
+            client,
+            progress: Progress::Done,
+            candidate: None,
+            refresh_at: now.checked_add(self.config.keepalive),
+        });
+        let relay = self.relays.len() - 1;
+        self.add_relayed_candidate(relay, relayed, mapped);
+        self.drain_relay(relay, now);
+        Ok(())
+    }
+
+    /// Give every allocation back to its server: a Refresh with a lifetime of
+    /// zero (RFC 8656 §8), for the call that has ended.
+    ///
+    /// A relay left to lapse holds a port and the account's quota on the
+    /// server for up to ten minutes after the call that used it is gone, and
+    /// a user whose quota is a handful of allocations cannot place the next
+    /// call through it until then. The requests leave through
+    /// [`IceAgent::poll_transmit`] like everything else; nobody waits for the
+    /// answers.
+    pub fn release_relays(&mut self, now: Instant) {
+        for relay in 0..self.relays.len() {
+            let live = self.relays.get(relay).is_some_and(|entry| {
+                entry.progress != Progress::Freed && entry.client.is_allocated()
+            });
+            if !live {
+                continue;
+            }
+            self.feed_relay(relay);
+            if let Some(entry) = self.relays.get_mut(relay) {
+                let _unallocated = entry.client.delete(now);
+                entry.progress = Progress::Freed;
+                entry.refresh_at = None;
+            }
+            self.drain_relay(relay, now);
+        }
+    }
+
     /// A server-reflexive candidate, unless it is redundant with one already
     /// held: "A candidate is redundant if and only if its transport address
     /// and base equal those of another candidate. The agent SHOULD eliminate
@@ -433,9 +540,6 @@ impl IceAgent {
         let Some(entry) = self.relays.get(relay) else {
             return;
         };
-        let (base, server) = (entry.base, entry.server);
-        let (relay_preference, reflexive_preference) =
-            (entry.relay_preference, entry.reflexive_preference);
         if entry.progress != Progress::Running || self.phase != Phase::Gathering {
             // gathering gave up on this one and nobody was told about it, so
             // the relay's resources go back at once
@@ -446,14 +550,31 @@ impl IceAgent {
             }
             return;
         }
-        let Some(host) = self.bases.get(base) else {
-            return;
-        };
-        let (stream, component, socket) = (host.stream, host.component, host.address);
         if let Some(entry) = self.relays.get_mut(relay) {
             entry.progress = Progress::Done;
             entry.refresh_at = now.checked_add(keepalive);
         }
+        self.add_relayed_candidate(relay, relayed, mapped);
+    }
+
+    /// The relayed candidate an allocation stands for, and the
+    /// server-reflexive one its response named beside it.
+    fn add_relayed_candidate(
+        &mut self,
+        relay: usize,
+        relayed: SocketAddr,
+        mapped: Option<SocketAddr>,
+    ) {
+        let Some(entry) = self.relays.get(relay) else {
+            return;
+        };
+        let (base, server) = (entry.base, entry.server);
+        let (relay_preference, reflexive_preference) =
+            (entry.relay_preference, entry.reflexive_preference);
+        let Some(host) = self.bases.get(base) else {
+            return;
+        };
+        let (stream, component, socket) = (host.stream, host.component, host.address);
 
         // "If a relayed candidate is identical to a host candidate (which can
         // happen in rare cases), the relayed candidate MUST be discarded"

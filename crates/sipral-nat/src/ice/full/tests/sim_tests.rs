@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use crate::ice::{ComponentId, IceAgent, IceEvent, LiteAgent, Received, StreamId};
 use crate::stun::address::decode_xor;
 use crate::stun::{AttributeType, Class, Message, MessageBuilder, Method, TransactionId};
-use crate::turn::{ChannelData, ChannelNumber, Transport, method};
+use crate::turn::{ChannelData, ChannelNumber, Transport, TurnClient, TurnConfig, method};
 
 pub(super) const STUN_SERVER: &str = "203.0.113.200:3478";
 pub(super) const TURN_SERVER: &str = "203.0.113.201:3478";
@@ -523,6 +523,42 @@ impl Network {
                 data,
             },
         );
+    }
+
+    /// An allocation made on the TURN server from `socket`, through the NAT
+    /// of the node at `index`, by a client of the application's own rather
+    /// than by the node's agent — what `IceAgent::add_relayed` takes over.
+    /// The exchange is carried at once rather than over the simulated wire:
+    /// what is being tested is what the agent does with the client after.
+    pub(super) fn allocate_outside(&mut self, index: usize, socket: SocketAddr) -> TurnClient {
+        let nat = self.peer(index).nat;
+        let server = self.turn.address;
+        let now = self.now;
+        let mut client = TurnClient::new(TurnConfig::default());
+        let mut next = 0_u32;
+        let mut supply = |client: &mut TurnClient| {
+            while client.transaction_ids_wanted() > 0 {
+                next += 1;
+                let mut bytes = [0xa7_u8; 12];
+                bytes[..4].copy_from_slice(&u32::try_from(index).unwrap().to_be_bytes());
+                bytes[8..].copy_from_slice(&next.to_be_bytes());
+                client.supply_transaction_id(TransactionId::new(bytes));
+            }
+        };
+        supply(&mut client);
+        client.allocate(now).expect("an allocation starts");
+        while let Some(request) = client.poll_transmit() {
+            let seen = match nat {
+                Some(nat) => self.nats[nat].outbound(socket, server),
+                None => socket,
+            };
+            for reply in self.turn.on_client(seen, &request) {
+                client.handle_input(&reply.data, now);
+            }
+            supply(&mut client);
+        }
+        assert!(client.is_allocated(), "the relay allocated");
+        client
     }
 
     /// Hand a datagram straight to the agent that owns `socket`, as if it had

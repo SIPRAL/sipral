@@ -233,6 +233,120 @@ fn a_symmetric_nat_on_both_sides_forces_a_relayed_pair() {
 }
 
 #[test]
+fn an_allocation_the_application_made_carries_the_call_and_is_given_back() {
+    // the same two symmetric NATs, with agents that name no server at all:
+    // the relays are allocated outside them, handed over, and have to do
+    // everything one the agent gathered itself would
+    let mut net = Network::new(31);
+    let (nat_a, nat_b) = nat_pair(
+        &mut net,
+        Mapping::AddressAndPortDependent,
+        Filtering::AddressAndPortDependent,
+    );
+    let (a_agent, a_stream) = agent(
+        config(false, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(A_HOST),
+    );
+    let (b_agent, b_stream) = agent(
+        config(false, false),
+        "B",
+        Role::Controlled,
+        20,
+        address(B_HOST),
+    );
+    let a = net.add_full(a_agent, a_stream, &[address(A_HOST)], Some(nat_a));
+    let b = net.add_full(b_agent, b_stream, &[address(B_HOST)], Some(nat_b));
+    for (index, host) in [(a, A_HOST), (b, B_HOST)] {
+        let now = net.now;
+        net.peer_mut(index)
+            .agent
+            .gather(now)
+            .expect("gathering starts");
+        let client = net.allocate_outside(index, address(host));
+        let relayed = client.relayed_addresses()[0];
+        let peer = net.peer_mut(index);
+        let stream = peer.stream;
+        peer.agent
+            .add_relayed(
+                stream,
+                ComponentId::RTP,
+                address(host),
+                net_turn(),
+                client,
+                now,
+            )
+            .expect("an allocated client is taken over");
+        let candidates = net.peer(index).agent.local_candidates(stream);
+        let relay = candidates
+            .iter()
+            .find(|candidate| candidate.kind == CandidateType::Relay)
+            .expect("a relayed candidate");
+        assert_eq!(relay.address, relayed);
+        // and the server-reflexive one the Allocate response named beside it
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == CandidateType::ServerReflexive)
+        );
+    }
+    exchange(&mut net, a, b);
+    assert!(net.run_until(Duration::from_secs(60), |n| completed(n, a)
+        && completed(n, b)));
+    for index in [a, b] {
+        let pair = selected(&net, index);
+        assert!(
+            pair.local_kind == CandidateType::Relay || pair.remote_kind == CandidateType::Relay,
+            "{pair:?}"
+        );
+    }
+    assert_media_flows(&mut net, a, b);
+    assert_eq!(net.turn.allocations.len(), 2);
+
+    // the call ends: both allocations go back at once, not ten minutes later
+    for index in [a, b] {
+        let now = net.now;
+        net.peer_mut(index).agent.release_relays(now);
+    }
+    net.run_for(Duration::from_millis(200));
+    assert!(
+        net.turn.allocations.is_empty(),
+        "a Refresh of lifetime 0 each"
+    );
+}
+
+#[test]
+fn a_client_with_no_allocation_is_not_taken_over() {
+    let (mut agent, stream) = agent(
+        config(false, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(A_HOST),
+    );
+    let now = std::time::Instant::now();
+    agent.gather(now).expect("gathering starts");
+    let idle = crate::turn::TurnClient::new(crate::turn::TurnConfig::default());
+    assert_eq!(
+        agent.add_relayed(
+            stream,
+            ComponentId::RTP,
+            address(A_HOST),
+            net_turn(),
+            idle,
+            now
+        ),
+        Err(crate::ice::IceError::NotAllocated)
+    );
+}
+
+fn net_turn() -> std::net::SocketAddr {
+    address(super::sim_tests::TURN_SERVER)
+}
+
+#[test]
 fn a_symmetric_nat_facing_address_dependent_filtering_meets_on_a_peer_reflexive_candidate() {
     let mut net = Network::new(4);
     let nat_a = net.add_nat(
