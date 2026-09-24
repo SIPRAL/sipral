@@ -19,7 +19,7 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
@@ -126,17 +126,26 @@ fun main() = runBlocking {
     }
     println("listening on ${client.bindAddress}")
 
+    // One persistent collector, not a loop calling `events.first { }`
+    // again for every call: a fresh subscription each time round that loop
+    // would leave a real gap between one match completing and the next
+    // subscribe -- an INCOMING_CALL landing in it would be missed outright
+    // (a SharedFlow with replay = 0 never queues a value for a subscriber
+    // that has not subscribed yet, bindings/kotlin/README.md's own note) --
+    // and this agent is meant to keep listening for the next call, forever,
+    // not to miss one to a race with its own bookkeeping.
     coroutineScope {
-        while (true) {
-            val event = client.events.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
-            val call = client.answerCall(event, mediaHost = host)
-            launch {
-                try {
-                    handleCall(call)
-                } catch (failure: Throwable) {
-                    println("call failed: $failure")
+        client.events
+            .filter { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
+            .collect { event ->
+                val call = client.answerCall(event, mediaHost = host)
+                launch {
+                    try {
+                        handleCall(call)
+                    } catch (failure: Throwable) {
+                        println("call failed: $failure")
+                    }
                 }
             }
-        }
     }
 }

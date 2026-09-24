@@ -3,9 +3,6 @@
 
 package org.sipral.idiomatic
 
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeout
 import org.sipral.Sipral
 import org.sipral.SipralAccountConfig
 import org.sipral.SipralEvent
@@ -78,14 +75,20 @@ class SipralAccount internal constructor(val client: SipralClient, val handle: L
      * the answer actually arrives, with the state already on it --
      * `event.payload.registration.state` -- so nothing here queries the
      * stack a second time for what the event that woke it already said.
+     *
+     * Subscribed before [register] runs, through [awaitNext], not after:
+     * a terminal `REGISTRATION_CHANGED` for this account can arrive
+     * within microseconds of the REGISTER going out, and `register()`
+     * first, subscribe second would be free to miss it and then hang
+     * until, or wrongly match, whatever this account's *next*
+     * registration change happens to be -- a periodic refresh, a retry --
+     * see [awaitNext]'s own note.
      */
     suspend fun registerAndWait(timeoutMs: Long = 10_000) {
-        register()
-        val last = withTimeout(timeoutMs) {
-            client.events
-                .filter { it.kind == SipralEventKind.REGISTRATION_CHANGED.value.toLong() && it.account == handle }
-                .first { isTerminal(stateOf(it)) }
-        }
+        val (_, last) = client.events.awaitNext(
+            timeoutMs = timeoutMs,
+            matches = { it.kind == SipralEventKind.REGISTRATION_CHANGED.value.toLong() && it.account == handle && isTerminal(stateOf(it)) },
+        ) { register() }
         val reached = stateOf(last)
         if (reached != SipralRegistrationState.REGISTERED) {
             val detail = last.message?.let { String(it, Charsets.UTF_8) }

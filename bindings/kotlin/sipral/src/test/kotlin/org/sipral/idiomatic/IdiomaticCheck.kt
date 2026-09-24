@@ -14,12 +14,15 @@ package org.sipral.idiomatic
 
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.system.exitProcess
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -79,15 +82,18 @@ private suspend fun everything(): String {
         //
         // Placed from clientB at clientA -- the opposite direction from the
         // rest of this test -- so the real INVITE this sends and the real
-        // INCOMING_CALL it raises land on clientA, which nothing below ever
-        // reads a bare `first { INCOMING_CALL }` from. Placing it the same
-        // direction as callA below would leave that same event sitting in
-        // clientB.events (replay = 0 only trims what a *new* subscriber
-        // replays, not what an unread item already in the buffer keeps for
-        // the first subscriber that comes along), where the real callA's
-        // own INCOMING_CALL is read the same untargeted way a moment later
-        // -- so it would be this stale call's event that answerCall() below
-        // actually answers, not callA's.
+        // INCOMING_CALL it raises land on clientA, not on clientB.events,
+        // which callA below reads with an untargeted `awaitNext {
+        // INCOMING_CALL }`. clientB.events aggregates every call clientB
+        // ever handles, this raced one included, so placing it the same
+        // direction as callA would put a second, unrelated INCOMING_CALL
+        // producer on the exact flow that read is watching -- a real
+        // ambiguity awaitNext's subscribe-before-act ordering does not
+        // remove, since both events would then be genuinely emitted after
+        // the subscription starts (see awaitNext's own KDoc: this has
+        // nothing to do with a SharedFlow replaying a stale value, which it
+        // never does, proven a few lines below). Routing this one away is
+        // what actually rules the ambiguity out.
         val raced = clientB.placeCall(accountB, target = "sip:alice@example.invalid")
         raced.close()
         raced.deliver(
@@ -148,21 +154,85 @@ private suspend fun everything(): String {
             "payload.media.codec did not round-trip",
         )
 
+        // A SharedFlow does not hand a stale, already-emitted value to a
+        // subscriber that starts late -- proven directly, and the real
+        // ordering bug an untargeted `events.first { it.kind == X }` still
+        // has, demonstrated and then fixed with awaitNext: see the block
+        // above the real network traffic starts, and awaitNext's own KDoc.
+        run {
+            val probe = MutableSharedFlow<SipralEvent>(
+                replay = 0,
+                extraBufferCapacity = 4096,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
+            fun incomingCallEvent(call: Long) = SipralEvent(
+                size = 0,
+                stack = 0,
+                kind = SipralEventKind.INCOMING_CALL.value.toLong(),
+                account = 0,
+                call = call,
+                message = null,
+            )
+
+            // 1) Emitted with zero subscribers, then someone subscribes:
+            // never delivered. Refutes "an event emitted before any
+            // collector subscribed can still be handed to the first later
+            // subscriber" outright -- replay = 0 governs where a fresh
+            // subscriber's own read position starts, extraBufferCapacity
+            // or not, and 4096 slots of it are sitting unused here.
+            probe.tryEmit(incomingCallEvent(call = 0x5EEDL))
+            val stale = withTimeoutOrNull(200) {
+                probe.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
+            }
+            assertEquals(
+                null,
+                stale,
+                "a SharedFlow(replay = 0) handed a pre-subscription value to a subscriber that started later",
+            )
+
+            // 2) The real bug: act, *then* subscribe -- the order
+            // `events.first { it.kind == X }` reaches for by hand. The
+            // action's own event, emitted to nobody, is gone for good, and
+            // first{} goes on to match the next event of that kind instead
+            // -- a later, unrelated one, a probe call's among them.
+            probe.tryEmit(incomingCallEvent(call = 0x900DL)) // "our" event -- emitted before anything subscribes
+            val wrong = coroutineScope {
+                val matching = async(start = CoroutineStart.UNDISPATCHED) {
+                    withTimeoutOrNull(200) { probe.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() } }
+                }
+                probe.tryEmit(incomingCallEvent(call = 0xBADL)) // a probe's own, unrelated, later event
+                matching.await()
+            }
+            assertEquals(
+                0xBADL,
+                wrong?.call,
+                "acting before subscribing should miss our own event and match the probe's instead",
+            )
+
+            // 3) awaitNext subscribes first: our own event, emitted from
+            // inside [action] once the subscription is live, is always
+            // what it matches, never a later probe's.
+            val (_, right) = probe.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 200) {
+                probe.tryEmit(incomingCallEvent(call = 0x900DL))
+            }
+            assertEquals(0x900DL, right.call, "awaitNext matched something other than the event its own action caused")
+        }
+
         // Placed directly at clientB, through accountA's own registrarAddress
         // acting as the outbound destination -- no registrar between them,
         // the same shape bindings/python's loopback tests use.
         //
-        // clientB's events are subscribed to before the call is placed, not
-        // after: the flow replays nothing, so an INVITE that lands between
-        // placeCall returning and the subscription -- on a loaded machine,
-        // it does -- would never be seen.
-        val (callA, incoming) = coroutineScope {
-            val arriving = async(start = CoroutineStart.UNDISPATCHED) {
-                withTimeout(15_000) {
-                    clientB.events.first { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }
-                }
-            }
-            clientA.placeCall(accountA, target = "sip:bob@example.invalid") to arriving.await()
+        // awaitNext subscribes to clientB.events before placeCall ever
+        // runs, not after: an INVITE that reached clientB in the gap
+        // between placeCall returning and a subscription starting -- on a
+        // loaded machine, it does -- would otherwise be missed outright,
+        // and events.first { it.kind == X } would then wait for, and
+        // wrongly match, whatever this client's *next* INCOMING_CALL turns
+        // out to be, not a value the flow "still had" from before (a
+        // SharedFlow with replay = 0 never keeps one for a subscriber that
+        // starts late, proven above).
+        val (callA, incoming) = clientB.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+            clientA.placeCall(accountA, target = "sip:bob@example.invalid")
         }
         val callB = clientB.answerCall(incoming)
 

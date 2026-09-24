@@ -104,6 +104,27 @@ back into the stack for something the event already said.
 and a `SipralPush` on `addAccount` are `docs/15-mobile.md`'s C2 and push
 parameters from Kotlin.
 
+`SipralClient.events` and `SipralCall.events` (and `SipralCall.digits`,
+derived from it) are a `kotlinx.coroutines.flow.SharedFlow` with `replay =
+0`: a fresh subscriber never sees a value emitted before it subscribed, no
+matter how large `extraBufferCapacity` is -- that capacity only lets
+emitting keep up with an existing *slow* collector, it never queues a value
+for one that has not subscribed yet. `events.first { it.kind == X }` run
+*after* the action that is expected to cause kind `X`, rather than before
+it, can therefore subscribe too late to ever see that event, and then match
+the *next* one of that kind instead -- from another call on the same
+client, say, not the one the action caused. `SharedFlow<SipralEvent>.awaitNext`
+(`org.sipral.idiomatic.SipralEventWait.kt`) is the fix: it subscribes
+before running its `action`, the same order `SipralAccount.registerAndWait`
+and `SipralCall.waitConfirmed`/`waitEnded` already keep.
+
+```kotlin
+val (call, incoming) = client.events.awaitNext(SipralEventKind.INCOMING_CALL) {
+    peer.placeCall(peerAccount, target = "sip:alice@example.com")
+}
+val answered = client.answerCall(incoming)
+```
+
 ## The ConnectionService helper
 
 Split in two, so that the part worth testing needs no Android:

@@ -694,6 +694,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   The 180 and the 200 for an INVITE that matched no account carried an
   empty `Contact` field, which is not a SIP message at all; they now name the
   address and transport the INVITE arrived on.
+- **`SipralAccount.registerAndWait` no longer risks hanging on, or wrongly
+  matching, a later, unrelated registration change.** It sent the REGISTER
+  and only then subscribed to `SipralClient.events`, so a terminal
+  `REGISTRATION_CHANGED` for that account arriving in the gap -- and it
+  can, within microseconds of the request going out -- was missed outright,
+  leaving the wait to catch whatever that account's *next* registration
+  change happened to be: a periodic refresh, a retry. It now subscribes
+  before sending. The Kotlin idiomatic layer's `SharedFlow`-backed event
+  streams (`SipralClient.events`, `SipralCall.events`, and `digits`) never
+  replay a value to a subscriber that starts late, buffered or not, so the
+  fix is ordering, not buffering; the same ordering bug in
+  `IdiomaticCheck.kt`'s own untargeted wait for an incoming call is fixed
+  the same way, through a new `SharedFlow<SipralEvent>.awaitNext` that
+  subscribes before running the action that is expected to cause the event.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered
