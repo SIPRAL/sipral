@@ -259,7 +259,12 @@ elif [ -z "$HARNESS_C" ]; then
 elif ! command -v docker >/dev/null 2>&1; then
     SWIFT_AGENT=""
 else
-    if docker run --rm -v "$ROOT":/work -w /work/bindings swift:6.1 \
+    # Package.swift links against `<repo>/target/release`, which is where a
+    # checkout's own `cargo build` leaves the library; the lab's is wherever
+    # the C harness was built, so that directory is mounted there instead.
+    SWIFT_LIB_DIR=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    if docker run --rm -v "$ROOT":/work -v "$SWIFT_LIB_DIR":/work/target/release:ro \
+        -w /work/bindings swift:6.1 \
         swift build -c release --product SipralLabAgent >/dev/null 2>&1; then
         SWIFT_AGENT="$ROOT/bindings/.build/release/SipralLabAgent"
         pass "built"
@@ -570,7 +575,7 @@ swift_agent() {
     [ -n "$SWIFT_AGENT" ] || return 0
     docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
     docker run -d --name "$SWIFT_AGENT_NAME" --network sipral-interop_lab \
-        -v "$ROOT":/work:ro \
+        -v "$ROOT":/work:ro -v "${SWIFT_LIB_DIR:-$ROOT/target/release}":/work/target/release:ro \
         -e SIPRAL_AOR=sip:labuser-agent-swift@asterisk \
         -e SIPRAL_REGISTRAR=sip:asterisk \
         -e SIPRAL_AUTH_USER=labuser-agent-swift -e SIPRAL_AUTH_PASSWORD=labpass \
