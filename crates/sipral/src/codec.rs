@@ -218,9 +218,12 @@ impl Codec {
     /// `sipral_rtp::RtpSession::voip_metrics`.
     ///
     /// G.729 gets `None` too, for a narrower reason. Table I.4 does rate it,
-    /// but only as "G.729 Annex A with Annex B (VAD)", and this build carries
-    /// no Annex B; Table I.1 rates Annex A alone for `Ie` and gives no `Bpl`
-    /// to go with it. Half a pair is not a model.
+    /// but only as "G.729 Annex A with Annex B (VAD)", and a call here runs
+    /// Annex B only where both ends allowed it — which the codec alone, all
+    /// this function is asked about, does not say. A call with Annex B off is
+    /// not the configuration the table rates, and Table I.1 rates Annex A
+    /// alone for `Ie` and gives no `Bpl` to go with it. Half a pair is not a
+    /// model.
     #[must_use]
     pub const fn quality_model(self) -> Option<sipral_rtp::CodecQualityModel> {
         match self {

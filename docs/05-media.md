@@ -1416,13 +1416,15 @@ What is established about it, in three tiers:
 | | What | How |
 |---|---|---|
 | Bit-exact | Annex A's decoder and encoder, and Annex B over them: the voice activity detector, the DTX and SID, the comfort noise | every ITU Annex A and Annex B conformance stream and input, bit for bit (above) |
-| Interoperable | a call offered G.729 alone, through the lab's Asterisk to its echo extension and back | `interop/harness`'s own `g729` flow: this end's encoder, Asterisk passing the frames through untranscoded, this end's decoder hearing the tone |
+| Interoperable | a call offered G.729 alone, through the lab's Asterisk to its echo extension and back | `interop/harness`'s own `g729` flow: this end's encoder, Asterisk passing the frames through untranscoded, this end's decoder hearing the tone. The offer says `annexb=yes` and Asterisk 22.10.1 answers `annexb=no`, so the lab proves the answer turning Annex B off on the wire — every frame sent as speech, no SID — and not SID frames crossing a server |
 | Tested in-tree | Annex B in a call: `annexb` in offers and answers, SID frames and silence on the wire, comfort noise played, speech after a pause | two-stack tests between this stack and itself, both ways and with Annex B off at either end |
 
-G.113 rates G.729 in Table I.4 only with Annex B, so `Codec::quality_model`
-answers `None` for it, the way it does for G.722: an XR VoIP Metrics report
-on a G.729 call carries the R factor and MOS "unavailable" sentinel rather
-than numbers for a codec this build does not carry.
+G.113 rates G.729 in Table I.4 only with Annex B, and a call runs Annex B
+only where both ends allowed it, which the codec on its own does not say. So
+`Codec::quality_model` answers `None` for it, the way it does for G.722: an
+XR VoIP Metrics report on a G.729 call carries the R factor and MOS
+"unavailable" sentinel rather than numbers rated for a configuration the call
+may not be running.
 
 ### Opus is behind a feature, and the feature is on
 
