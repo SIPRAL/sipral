@@ -561,13 +561,18 @@ and exists before the call does: `sipral_stack_nat_map(stack, local, len,
 now_ms)`, then send what `sipral_stack_poll_stun` hands out — a
 `sipral_transmit_t` like `sipral_stack_poll_transmit`'s, whose `source` is the
 socket to send from and whose `transport` is zero — and hand what arrives on
-that socket to `sipral_stack_receive_stun` until the event for it arrives,
-within five and a half seconds whatever the server does. A call placed, rung or
+that socket to `sipral_stack_receive_stun`. The event for it arrives within
+five and a half seconds whatever the server does. A call placed, rung or
 answered with that `media_address` before then is `SIPRAL_STATUS_WRONG_STATE`;
-after it, the description names the public address. `sipral_stack_receive_stun`
-answers `SIPRAL_STATUS_INVALID_ARGUMENT` for anything that is not the
-configured server's answer to a request this stack sent, which costs that
-datagram and nothing more. The answer is spent by the call it describes.
+after it, the description names the public address. Until that call the socket
+is asked again every twenty-five seconds, since nothing else holds its NAT
+binding open and an answer minutes old may name a mapping that is gone, so the
+loop keeps sending and handing in for it; an answer that differs arrives as
+`SIPRAL_NAT_MAPPING_MOVED`, and the queue never holds more than one request per
+socket. `sipral_stack_receive_stun` answers `SIPRAL_STATUS_INVALID_ARGUMENT`
+for anything that is not the configured server's answer to a request this stack
+sent, which costs that datagram and nothing more. The answer is spent by the
+call it describes.
 
 Three entry points rather than a second use of the two signalling ones,
 because a media socket is not a transport: a STUN request for it that came out

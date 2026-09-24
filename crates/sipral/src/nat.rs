@@ -34,12 +34,15 @@
 //!   [`MappingEvent::Moved`]. Both answers go to
 //!   [`UserAgent::readdress`](crate::UserAgent::readdress), which moves every
 //!   account's `Contact` onto the public address and registers it again.
-//! - **A media socket** is asked once, before the description that names it
-//!   is written ([`Keep::Once`]), and the answer goes to
-//!   [`CallMedia::public_address`](crate::CallMedia::public_address). From
-//!   then on RTP every frame and RTCP every few seconds hold the binding for
-//!   the length of the call, and a STUN request beside them would only
-//!   compete with them for the same mapping.
+//! - **A media socket** is asked before the description that names it is
+//!   written ([`Keep::Once`]), and the answer goes to
+//!   [`CallMedia::public_address`](crate::CallMedia::public_address). Until
+//!   then it is asked again every refresh interval, as the signalling socket
+//!   is: nothing else crosses its binding while it waits, and an answer
+//!   minutes old names a mapping the NAT may have let go. From the call on,
+//!   RTP every frame and RTCP every few seconds hold the binding, a STUN
+//!   request beside them would only compete with them for the same mapping,
+//!   and the application forgets the socket.
 //!
 //! # What this does not do
 //!
@@ -95,8 +98,10 @@ pub enum Keep {
     /// mapped: the signalling socket, which is idle for minutes at a time
     /// and whose mapping has to outlive the silence.
     Refreshed,
-    /// Asked once. A media socket, whose own traffic holds its binding once a
-    /// call is running on it.
+    /// A media socket, whose own traffic holds its binding once a call is
+    /// running on it. Named again, it drops the answer it had; answered, it
+    /// is asked again every [`Mappings::refresh`] until it is forgotten, so
+    /// that the answer a call is described with is never older than that.
     Once,
 }
 
@@ -128,7 +133,8 @@ pub enum MappingEvent {
     /// A refresh came back with a different address: the NAT released the
     /// mapping and made another, or the network under the socket changed.
     /// Everything that advertised `previous` now names somewhere that reaches
-    /// nothing.
+    /// nothing. For a media socket still waiting for its call, the call it is
+    /// described in names `public`.
     Moved {
         /// The socket, as the application named it.
         local: SocketAddr,
@@ -214,8 +220,9 @@ impl Mappings {
     }
 
     /// Ask again every `every` instead of [`DEFAULT_REFRESH`], on sockets
-    /// kept [`Keep::Refreshed`]. A zero is taken as one second, so that a
-    /// setting cannot make the refresh spin.
+    /// kept [`Keep::Refreshed`] and on answered ones kept [`Keep::Once`]. A
+    /// zero is taken as one second, so that a setting cannot make the refresh
+    /// spin.
     #[must_use]
     pub fn refresh(mut self, every: Duration) -> Self {
         self.refresh = every.max(Duration::from_secs(1));
@@ -457,9 +464,14 @@ impl Mappings {
         };
         socket.asking = false;
         socket.settled = true;
+        // a media socket's answer is asked again on the same schedule for as
+        // long as it waits for its call: nothing else crosses that NAT
+        // binding until the call's RTP does, and an answer that is minutes
+        // old names a mapping the NAT may have let go. A socket that never
+        // had an answer is described by its own address and left alone
         socket.refresh_at = match socket.keep {
             Keep::Refreshed => now.checked_add(refresh),
-            Keep::Once => None,
+            Keep::Once => socket.public.and_then(|_| now.checked_add(refresh)),
         };
         if let Some(event) = ended {
             self.events.push_back(event);
@@ -836,6 +848,57 @@ pub(crate) mod tests {
                 public: at("203.0.113.7:52002"),
             }]
         );
+    }
+
+    #[test]
+    fn a_media_answer_waiting_for_its_call_does_not_grow_old() {
+        // an application that maps the socket for its next call as soon as
+        // the last one ends, and places that call ten minutes later: a NAT
+        // lets an idle mapping go long before that (RFC 4787 REQ-5 allows
+        // two minutes, and thirty seconds is deployed), and the answer it
+        // gave then names a port that reaches nothing now. Until a call is
+        // described on it, the socket is asked again as the signalling one is
+        let start = Instant::now();
+        let mut mappings = Mappings::new(at(SERVER), [7; 32]);
+        mappings.map(at(MEDIA), Keep::Once, start);
+        let first = drain(&mut mappings);
+        mappings.receive(
+            at(MEDIA),
+            at(SERVER),
+            &answer(&first[0].payload, at("203.0.113.7:41002")),
+            start,
+        );
+        let _learned = events(&mut mappings);
+
+        let due = mappings
+            .poll_timeout()
+            .expect("an answer nothing keeps true is left to age");
+        assert!(due <= start + super::DEFAULT_REFRESH);
+        mappings.handle_timeout(due);
+        let again = drain(&mut mappings);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].local, at(MEDIA));
+        assert_eq!(
+            mappings.state(at(MEDIA)),
+            Some(MappingState::Mapped(at("203.0.113.7:41002"))),
+            "the answer in hand stands while the next one is on its way"
+        );
+
+        mappings.receive(
+            at(MEDIA),
+            at(SERVER),
+            &answer(&again[0].payload, at("203.0.113.7:52002")),
+            due,
+        );
+        assert_eq!(
+            events(&mut mappings),
+            vec![MappingEvent::Moved {
+                local: at(MEDIA),
+                previous: at("203.0.113.7:41002"),
+                public: at("203.0.113.7:52002"),
+            }]
+        );
+        assert_eq!(mappings.public(at(MEDIA)), Some(at("203.0.113.7:52002")));
     }
 
     #[test]

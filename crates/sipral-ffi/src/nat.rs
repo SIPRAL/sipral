@@ -25,7 +25,8 @@
 //!   and is bound for one call, so the application names it with
 //!   [`sipral_stack_nat_map`] before that call, sends what
 //!   [`sipral_stack_poll_stun`] hands back from it, and hands in what arrives
-//!   on it with [`sipral_stack_receive_stun`] until the answer is in.
+//!   on it with [`sipral_stack_receive_stun`] until the call is placed on it:
+//!   the socket is asked again every twenty-five seconds while it waits.
 //!
 //! [`SipralEventKind::NatMapping`](crate::event::SipralEventKind::NatMapping)
 //! says what each socket learned, and when a signalling socket's mapping
@@ -84,9 +85,10 @@ codes! {
     pub enum SipralNatMapping: u32 {
         /// The first answer: the socket appears at `public`.
         Learned = 1,
-        /// A later answer about a signalling socket named another address:
-        /// the NAT let the mapping go and made a new one, or the network
-        /// under the socket changed. `previous` is what it was.
+        /// A later answer named another address: the NAT let the mapping go
+        /// and made a new one, or the network under the socket changed.
+        /// `previous` is what it was. About a signalling socket, or a media
+        /// socket still waiting for its call.
         Moved = 2,
         /// The server did not answer, in five and a half seconds, or refused.
         /// The socket is described by its own address, exactly as it would
@@ -396,11 +398,13 @@ impl Nat {
             // what the accounts' `Contact` names now: the socket itself the
             // first time, and the address the last answer gave after that
             let from = previous.unwrap_or(local);
+            // every account moved is counted, a REGISTER that could not
+            // leave included: its `Contact` names `public` either way, and
+            // the registration's own event says it is owed again
             let accounts = match (transport, public) {
-                (Some(transport), Some(public)) => state
-                    .agent
-                    .readdress(transport, from, public, now)
-                    .unwrap_or(0),
+                (Some(transport), Some(public)) => {
+                    state.agent.readdress(transport, from, public, now)
+                }
                 _ => 0,
             };
             raised.push(event(
@@ -425,9 +429,8 @@ impl Nat {
             })
             .collect();
         for (local, transport, public) in answered {
-            // an account that was never asked to register sends nothing
-            // here, so the only error possible is one no account added a
-            // moment ago can be the cause of
+            // how many moved is the NAT_MAPPING event's to say, and there is
+            // no event here: nothing was learned, an account was added
             let _moved = state.agent.readdress(transport, local, public, now);
         }
     }
@@ -533,17 +536,25 @@ impl Active {
     /// Move what the transactions wrote into the queue of the path it
     /// leaves by: the transport's own, for a signalling socket, and
     /// [`sipral_stack_poll_stun`]'s for a media one.
+    ///
+    /// A media socket waits in that queue with one request at most: the
+    /// newest is the retransmission or the refresh that supersedes what is
+    /// there, and an application that leaves the queue alone while a socket
+    /// waits minutes for its call is owed that one, not a backlog of them.
     fn sort(&mut self) {
         while let Some(request) = self.mappings.poll_transmit() {
-            match self.signalling.get(&request.local) {
-                Some(transport) => self.signalling_out.push_back(Transmit {
+            if let Some(transport) = self.signalling.get(&request.local) {
+                self.signalling_out.push_back(Transmit {
                     transport: *transport,
                     destination: request.destination,
                     source: None,
                     payload: Arc::from(request.payload),
                     protocol: TransportProtocol::Udp,
-                }),
-                None => self.media_out.push_back(request),
+                });
+            } else {
+                self.media_out
+                    .retain(|queued| queued.local != request.local);
+                self.media_out.push_back(request);
             }
         }
     }
@@ -711,6 +722,14 @@ entry! {
     /// rung or answered with that `media_address` is described by the public
     /// address, and asks for `a=rtcp-mux`, since one mapping describes one
     /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+    ///
+    /// Until that call, the socket is asked again every twenty-five seconds,
+    /// as the signalling socket is: nothing else crosses its NAT binding
+    /// while it waits, and an answer minutes old names a mapping the NAT may
+    /// have let go. Keep sending what `sipral_stack_poll_stun` hands out for
+    /// it and handing in what arrives; an answer that differs is
+    /// `SIPRAL_NAT_MAPPING_MOVED`, and the call is described by it. At most
+    /// one request per socket waits in the queue.
     ///
     /// The mapping is spent by the call it describes. A socket used for a
     /// second call is named here again — nothing kept the first answer true
@@ -1179,7 +1198,8 @@ mod tests {
                 previous: String::new(),
             }]
         );
-        // and the registrar is told at once, without waiting for a refresh
+        // and the registrar is told at once, without waiting for a refresh,
+        // and told to drop the private binding the first REGISTER left it
         let out = signalling_out(stack);
         let register = out
             .iter()
@@ -1187,7 +1207,7 @@ mod tests {
             .expect("a REGISTER went out with the new Contact");
         assert_eq!(
             header(&register.0, "Contact").as_deref(),
-            Some("<sip:alice@203.0.113.7:41000>")
+            Some("<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.10:5060>;expires=0")
         );
     }
 
@@ -1281,6 +1301,81 @@ mod tests {
             String::from_utf8_lossy(&second.0).contains("c=IN IP4 192.0.2.10\r\n"),
             "a socket nobody asked about again is described by its own address"
         );
+    }
+
+    #[test]
+    fn a_media_socket_mapped_long_before_its_call_is_described_by_a_fresh_answer() {
+        // mapped when the last call ended, placed ten minutes later: the
+        // stack asks again while the socket waits, holds at most one request
+        // for it however long the application leaves the queue alone, and the
+        // call names what the latest answer said
+        let mut observed = Observed::default();
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        assert_eq!(map_media(stack, 10), SipralStatus::Ok);
+        let first = stun_out(stack);
+        assert_eq!(
+            on_media_socket(stack, &answer(&first[0].0, MEDIA_PUBLIC), SERVER, 30),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 30);
+        let _ = mapped();
+
+        // ten minutes of an application that polls the stack and never the
+        // STUN queue: one request is waiting at the end, not two dozen
+        let mut now = 30;
+        while now < 600_000 {
+            now += 1_000;
+            let _ = poll(stack, now);
+            let _ = signalling_out(stack);
+        }
+        let waiting = stun_out(stack);
+        assert_eq!(
+            waiting.len(),
+            1,
+            "an application that never polled is owed one request, not a backlog"
+        );
+        assert_eq!(waiting[0].2, MEDIA);
+
+        // and one that does send it hears the next refresh, whose answer is
+        // a mapping the NAT made again somewhere else
+        let request = loop {
+            now += 1_000;
+            let _ = poll(stack, now);
+            let _ = signalling_out(stack);
+            if let Some(request) = stun_out(stack).pop() {
+                break request;
+            }
+            assert!(now < 700_000, "the socket was never asked again");
+        };
+        assert_eq!(
+            on_media_socket(stack, &answer(&request.0, "203.0.113.7:52002"), SERVER, now),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, now);
+        let said: Vec<Mapped> = mapped()
+            .into_iter()
+            .filter(|said| said.local == MEDIA)
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].mapping, SipralNatMapping::Moved as u32);
+        assert_eq!(said[0].signalling, 0);
+        assert_eq!(said[0].previous, MEDIA_PUBLIC);
+        assert_eq!(said[0].public, "203.0.113.7:52002");
+
+        let (status, _) = place(stack, account, &managed_config(), now);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let out = signalling_out(stack);
+        let invite = out
+            .iter()
+            .find(|(message, _)| message.starts_with(b"INVITE "))
+            .expect("the INVITE");
+        assert!(String::from_utf8_lossy(&invite.0).contains("m=audio 52002 "));
     }
 
     #[test]

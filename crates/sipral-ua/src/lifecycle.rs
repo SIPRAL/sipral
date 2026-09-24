@@ -666,10 +666,19 @@ impl UserAgent {
     /// REGISTER at once with the new `Contact`, superseding anything in
     /// flight the way [`UserAgent::retarget`] does: a registrar holding the
     /// old one is routing this end's calls to an address that reaches
-    /// nothing. The old binding is not removed first. It expires on its own,
-    /// and a registrar that has this account's `+sip.instance` replaces it at
-    /// once (RFC 5626 §6). An account that was never asked to register, or is
-    /// giving its binding up, is only rewritten.
+    /// nothing. The same REGISTER carries the old `Contact` with
+    /// `expires=0`, and every one after it does until the registrar has
+    /// answered one with a 2xx, so the old binding is removed rather than
+    /// left to expire (RFC 3261 §10.2.2) — including the private address a
+    /// REGISTER sent before the first STUN answer arrived. No `reg-id` is
+    /// sent, so the registrar keys each binding by its URI (RFC 5626 §6) and
+    /// removing the old one cannot touch the new. An account that was never
+    /// asked to register, or is giving its binding up, is only rewritten.
+    ///
+    /// A REGISTER that cannot leave is what a refresh that cannot leave is:
+    /// [`UaEvent::RegistrationFailed`](crate::UaEvent::RegistrationFailed)
+    /// with [`RegistrationFailure::Unreachable`](crate::RegistrationFailure::Unreachable),
+    /// and another attempt on the back-off.
     ///
     /// Calls already up keep the `Contact` their dialog was given until their
     /// next target refresh: every re-INVITE and UPDATE this stack sends — a
@@ -677,19 +686,15 @@ impl UserAgent {
     /// `Contact` as it is then (RFC 3261 §12.2), and none is sent just for
     /// this.
     ///
-    /// Answers how many accounts were rewritten.
-    ///
-    /// # Errors
-    /// [`UaError::Send`] when one of the REGISTERs cannot be built or sent.
-    /// Every account is rewritten before any is registered, so an error here
-    /// leaves no account naming `from`.
+    /// Answers how many accounts were rewritten, whether or not their
+    /// REGISTERs could leave.
     pub fn readdress(
         &mut self,
         transport: TransportId,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<usize, UaError> {
+    ) -> usize {
         let mut moved = Vec::new();
         for (id, config) in &mut self.accounts {
             if config.transport != transport || !contact_names(&config.contact, from) {
@@ -698,27 +703,26 @@ impl UserAgent {
             let Some(contact) = contact_at(&config.contact, to) else {
                 continue;
             };
+            let old = config.register_contact_value(true);
             config.contact = contact;
-            moved.push(*id);
+            moved.push((*id, old, config.register_contact_value(true)));
         }
-        moved.sort_unstable();
-        let mut first_error = None;
-        for id in &moved {
-            let Some(reg) = self.registrations.get(id) else {
+        moved.sort_unstable_by_key(|(id, ..)| *id);
+        let count = moved.len();
+        for (id, old, new) in moved {
+            let Some(reg) = self.registrations.get_mut(&id) else {
                 continue;
             };
             if reg.unregistering || (reg.transaction.is_none() && reg.due.is_none()) {
                 continue;
             }
-            if let Err(error) = self.send_register(*id, false, now) {
-                first_error.get_or_insert(error);
+            reg.retire(old, &new);
+            if self.send_register(id, false, now).is_err() {
+                self.retry_later(id, None, None, None, now);
             }
         }
         self.drain(now);
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(moved.len()),
-        }
+        count
     }
 
     /// What is scheduled, and whether there is anything at all to do.
@@ -1064,7 +1068,7 @@ mod tests {
     use crate::lifecycle::LifecycleState;
     use crate::subscription::{Subscribe, SubscriptionEnd, SubscriptionState};
     use crate::{EndpointConfig, Input, TransportId, TransportProtocol, UaError, Uri};
-    use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, RawMessage, parse};
+    use sipral_core::msg::{Contacts, HeaderName, ParseMode, ParseScratch, RawMessage, parse};
     use std::net::{IpAddr, SocketAddr};
     use std::time::{Duration, Instant};
 
@@ -2093,21 +2097,129 @@ mod tests {
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
-        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(1));
+        assert_eq!(agent.readdress(UDP, local(), public, t0), 1);
         assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:41000");
         let out = transmits(&mut agent);
         assert_eq!(registering(&out).len(), 1, "one REGISTER, at once");
         let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
         assert_eq!(
             String::from_utf8_lossy(&contact),
-            "<sip:alice@203.0.113.7:41000>"
+            "<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.1>;expires=0"
         );
 
-        // and a later move starts from where the last one left it
+        // and a later move starts from where the last one left it, asking
+        // for both addresses it left to be dropped while neither REGISTER
+        // has been answered
         let again: SocketAddr = "203.0.113.7:52000".parse().expect("an address");
-        assert_eq!(agent.readdress(UDP, local(), again, t0), Ok(0));
-        assert_eq!(agent.readdress(UDP, public, again, t0), Ok(1));
+        assert_eq!(agent.readdress(UDP, local(), again, t0), 0);
+        assert_eq!(agent.readdress(UDP, public, again, t0), 1);
         assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:52000");
+        let out = transmits(&mut agent);
+        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        assert_eq!(
+            String::from_utf8_lossy(&contact),
+            "<sip:alice@203.0.113.7:52000>, <sip:alice@192.0.2.1>;expires=0, \
+             <sip:alice@203.0.113.7:41000>;expires=0"
+        );
+
+        // a mapping that moves back never asks for the address it is on to go
+        assert_eq!(agent.readdress(UDP, again, public, t0), 1);
+        let out = transmits(&mut agent);
+        let contact = header(out.last().expect("the REGISTER"), HeaderName::Contact);
+        assert_eq!(
+            String::from_utf8_lossy(&contact),
+            "<sip:alice@203.0.113.7:41000>, <sip:alice@192.0.2.1>;expires=0, \
+             <sip:alice@203.0.113.7:52000>;expires=0"
+        );
+    }
+
+    #[test]
+    fn a_register_sent_before_the_nat_answer_is_taken_back_by_the_one_after() {
+        // the account registered its private address, because the STUN
+        // answer had not arrived yet; the REGISTER that moves it must also
+        // remove that binding, or the registrar forks every call to an
+        // address that reaches nothing until the binding expires an hour
+        // later (RFC 3261 §10.2.2: a Contact with expires=0 removes it)
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(account());
+        agent.register(id, t0).expect("a REGISTER");
+        let first = transmits(&mut agent);
+        let first_contact = header(first.last().expect("the REGISTER"), HeaderName::Contact);
+        assert_eq!(
+            String::from_utf8_lossy(&first_contact),
+            "<sip:alice@192.0.2.1>"
+        );
+
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        assert_eq!(agent.readdress(UDP, local(), public, t0), 1);
+        let out = transmits(&mut agent);
+        let request = out.last().expect("the REGISTER that moves it");
+        let contacts = with(request, |message| match message.contact() {
+            Ok(Contacts::Addrs(addrs)) => addrs
+                .map(|addr| {
+                    let addr = addr.expect("a contact");
+                    (
+                        String::from_utf8_lossy(addr.uri_bytes()).into_owned(),
+                        addr.expires()
+                            .ok()
+                            .flatten()
+                            .and_then(|value| value.require().ok()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("no contact list: {other:?}"),
+        });
+        assert_eq!(
+            contacts,
+            vec![
+                ("sip:alice@203.0.113.7:41000".to_owned(), None),
+                ("sip:alice@192.0.2.1".to_owned(), Some(0)),
+            ]
+        );
+
+        // once the registrar has said yes, the private binding is gone and
+        // the next refresh has nothing left to take back
+        deliver(&mut agent, &granted(request, 3_600), t0);
+        let _ = events(&mut agent);
+        let later = t0 + Duration::from_secs(3_600);
+        agent.handle_timeout(later);
+        let refresh = transmits(&mut agent);
+        let refresh = refresh
+            .iter()
+            .rev()
+            .find(|bytes| bytes.starts_with(b"REGISTER "))
+            .expect("a refresh");
+        assert_eq!(
+            String::from_utf8_lossy(&header(refresh, HeaderName::Contact)),
+            "<sip:alice@203.0.113.7:41000>"
+        );
+    }
+
+    #[test]
+    fn an_account_moved_whose_register_cannot_leave_is_still_counted_and_retried() {
+        // the Contact moves whatever happens to the REGISTER that says so;
+        // an answer of "none moved" would have the application believe its
+        // accounts still name the private address, and the REGISTER that
+        // could not leave is a refresh that could not leave, owed again on
+        // the back-off rather than dropped
+        let t0 = Instant::now();
+        let (mut agent, id) = registered(t0);
+        let _ = events(&mut agent);
+        if let Some(config) = agent.accounts.get_mut(&id) {
+            config.transport = GONE;
+        }
+        let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
+        assert_eq!(agent.readdress(GONE, local(), public, t0), 1);
+        assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:41000");
+        assert!(events(&mut agent).iter().any(|event| matches!(
+            *event,
+            UaEvent::RegistrationFailed {
+                reason: RegistrationFailure::Unreachable,
+                retry_in: Some(_),
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -2117,7 +2229,7 @@ mod tests {
         let id = agent.add_account(account());
         let trunk = agent.add_account(trunk());
         let public: SocketAddr = "203.0.113.7:5060".parse().expect("an address");
-        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(2));
+        assert_eq!(agent.readdress(UDP, local(), public, t0), 2);
         // the port is written out even where it is the default: the address
         // is the NAT's, and what the NAT said is a port as well as a host
         assert_eq!(contact_of(&agent, id), "sip:alice@203.0.113.7:5060");
@@ -2151,7 +2263,7 @@ mod tests {
             registrar(),
         ));
         let public: SocketAddr = "203.0.113.7:5060".parse().expect("an address");
-        assert_eq!(agent.readdress(UDP, local(), public, t0), Ok(0));
+        assert_eq!(agent.readdress(UDP, local(), public, t0), 0);
         assert_eq!(contact_of(&agent, named), "sip:carol@phone.example.com");
         assert_eq!(contact_of(&agent, elsewhere), "sip:dave@192.0.2.1:5070");
         assert_eq!(contact_of(&agent, other_transport), "sip:erin@192.0.2.1");

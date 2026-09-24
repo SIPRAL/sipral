@@ -139,7 +139,17 @@ pub(crate) struct Registration {
     /// up. Read through [`Registration::learned`], which also stops answering
     /// the moment that binding lapses.
     pub(crate) learned: Option<RegistrarInfo>,
+    /// `Contact`s the registrar may still hold for this account at an
+    /// address it no longer has, as a REGISTER writes them, each sent again
+    /// with `expires=0` until a 2xx says the registrar has read them
+    /// (RFC 3261 §10.2.2). What `UserAgent::readdress` leaves behind.
+    pub(crate) retired: Vec<Box<[u8]>>,
 }
+
+/// How many moved-away `Contact`s one account keeps asking to remove. A NAT
+/// that moves the mapping on every refresh, with no REGISTER answered in
+/// between, would otherwise grow the list and the request with it.
+const MAX_RETIRED: usize = 4;
 
 impl Registration {
     pub(crate) fn new(call_id: CallId, asking: Duration) -> Self {
@@ -160,7 +170,20 @@ impl Registration {
             owed: false,
             waiting_for_stream: None,
             learned: None,
+            retired: Vec::new(),
         }
+    }
+
+    /// Ask the registrar to drop `old`, the `Contact` this account has just
+    /// moved away from, and never `current`, the one it moved to — which a
+    /// mapping that moves back to where it was would otherwise remove.
+    pub(crate) fn retire(&mut self, old: Box<[u8]>, current: &[u8]) {
+        self.retired
+            .retain(|kept| **kept != *current && *kept != old);
+        if self.retired.len() >= MAX_RETIRED {
+            self.retired.remove(0);
+        }
+        self.retired.push(old);
     }
 
     /// What the registrar last said, for as long as the binding it said it

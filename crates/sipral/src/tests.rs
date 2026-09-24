@@ -6617,10 +6617,11 @@ fn map_the_caller(pair: &mut Pair) -> SocketAddr {
     while let Some(event) = mappings.poll_event() {
         match event {
             MappingEvent::Learned { local, public } if local == caller_sip() => {
-                pair.caller
-                    .agent
-                    .readdress(UDP, local, public, pair.now)
-                    .expect("the accounts move");
+                assert_eq!(
+                    pair.caller.agent.readdress(UDP, local, public, pair.now),
+                    1,
+                    "the account moves"
+                );
             }
             MappingEvent::Learned { local, public } if local == caller_media() => {
                 media = Some(public);
@@ -6753,10 +6754,13 @@ fn a_hold_after_the_mapping_moved_carries_the_new_contact_and_keeps_the_public_m
     // the NAT let the signalling mapping go and made another: the next
     // re-INVITE is the target refresh (RFC 3261 §12.2) that tells the far end
     let moved: SocketAddr = "203.0.113.7:52000".parse().expect("an address");
-    pair.caller
-        .agent
-        .readdress(UDP, behind_the_nat(caller_sip()), moved, pair.now)
-        .expect("the account moves");
+    assert_eq!(
+        pair.caller
+            .agent
+            .readdress(UDP, behind_the_nat(caller_sip()), moved, pair.now),
+        1,
+        "the account moves"
+    );
     let _ = pair.caller.outbound();
     pair.caller
         .agent

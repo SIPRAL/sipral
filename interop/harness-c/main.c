@@ -544,6 +544,15 @@ struct endpoint {
      * arrives on it before the call has media goes to the STUN client rather
      * than nowhere */
     int mapping_media;
+    /* `FLOW_NAT`: while this is set, the STUN server's answers on the
+     * signalling socket are held back, the newest kept, so that the account
+     * registers its private address first -- the REGISTER a phone sends
+     * before a slow STUN server has answered -- and the flow can prove that
+     * the REGISTER after the answer takes that binding back */
+    int withhold_stun;
+    uint8_t withheld[1024];
+    size_t withheld_len;
+    char withheld_from[SIPRAL_ADDRESS_BYTES];
 
     /* the same four numbers the Rust harness prints, counted the same way:
      * from outside the session, watching what each call returns */
@@ -621,6 +630,16 @@ static void read_signalling(struct endpoint *end, uint64_t now)
             return;
         }
         if (address_text(&from, from_text, sizeof from_text) != 0) {
+            continue;
+        }
+        if (end->withhold_stun && stun_for_this_flow != NULL
+            && strcmp(from_text, stun_for_this_flow) == 0) {
+            if ((size_t)got <= sizeof end->withheld) {
+                memcpy(end->withheld, in, (size_t)got);
+                end->withheld_len = (size_t)got;
+                keep(end->withheld_from, sizeof end->withheld_from, from_text,
+                     strlen(from_text));
+            }
             continue;
         }
         /* a refusal here is one packet's worth of trouble and no more: an
@@ -1045,6 +1064,9 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     end->rtp_fd = -1;
     end->seen.marker = MARKER;
     end->server = *remote;
+    /* from before the first poll, which is when the signalling socket's
+     * first request goes out */
+    end->withhold_stun = stun_for_this_flow != NULL;
 
     if (route_to(remote, routable, sizeof routable) != 0) {
         wrong_text("no route to the lab network");
@@ -1803,8 +1825,39 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
     const char *port;
     sipral_status_t status;
 
-    /* the signalling socket's request went out on the first poll, on the SIP
-     * socket itself, and nothing about this loop had to change for it */
+    /* first the REGISTER a phone sends before a slow STUN server has
+     * answered: the signalling socket's request went out on the first poll,
+     * on the SIP socket itself, and its answers are held back until the
+     * registrar holds the private address */
+    status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered at the private address");
+        return -1;
+    }
+    (void)snprintf(binding, sizeof binding, "@%s>", end->sip_address);
+    if (strstr(end->seen.registered_with, binding) == NULL) {
+        wrong_text("the registrar never held the private binding, and the run proves nothing "
+                   "about taking it back");
+        printf("%s\n", end->seen.registered_with);
+        return -1;
+    }
+
+    /* now the answer, as if it had just arrived: the account moves, and the
+     * REGISTER that says so has to take the private binding back */
+    end->withhold_stun = 0;
+    end->seen.registration = 0;
+    end->seen.registered_with[0] = '\0';
+    if (end->withheld_len > 0) {
+        (void)sipral_stack_receive_datagram(
+            end->stack, SIPRAL_TRANSPORT_MAIN, end->withheld, end->withheld_len,
+            end->withheld_from, strlen(end->withheld_from), end->sip_address,
+            strlen(end->sip_address), now_ms());
+    }
     if (!wait_until(end, sip_mapped, FLOW_PATIENCE_MS)) {
         wrong_text("the STUN server never said where the signalling socket is");
         return -1;
@@ -1824,15 +1877,14 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
         return -1;
     }
     printf("  nat   signalling %s appears as %s\n", end->sip_address, end->seen.sip_public);
-
-    status = sipral_account_register(end->stack, end->account, now_ms());
-    if (status != SIPRAL_STATUS_OK) {
-        wrong("sipral_account_register", status);
+    if (end->seen.sip_accounts_moved != 1u) {
+        wrong_text("the mapping event does not count the one account it moved");
         return -1;
     }
+
     if (!wait_until(end, registered, FLOW_PATIENCE_MS)
         || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
-        wrong_text("not registered from behind the NAT");
+        wrong_text("not registered again at the public address");
         return -1;
     }
     (void)snprintf(binding, sizeof binding, "@%s>", end->seen.sip_public);

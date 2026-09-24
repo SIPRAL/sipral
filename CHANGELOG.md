@@ -590,6 +590,29 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   `StreamFraming` kept appending whatever arrived after the stream broke,
   for as long as the caller kept reading; it now holds nothing after the
   break.
+- **Behind a NAT, the private `Contact` a REGISTER sent before the STUN
+  answer is removed from the registrar, not left there for an hour.** The
+  REGISTER that moves an account onto its public address, or onto a mapping
+  that moved, now carries the `Contact` it replaces with `expires=0`, and
+  every REGISTER after it does until the registrar answers one with a 2xx;
+  before, the registrar kept forking calls to the dead address until that
+  binding expired. A mapping that moves back never asks for the address it is
+  on to go.
+- **`SIPRAL_EVENT_KIND_NAT_MAPPING` no longer says `accounts=0` when the
+  accounts did move.** `UserAgent::readdress` answered an error, and the
+  event zero, whenever one REGISTER could not leave, although every
+  account's `Contact` had already been rewritten. It now answers the count
+  (`usize` rather than `Result`), and a REGISTER that could not leave is
+  retried on the back-off with `RegistrationFailed { Unreachable }`, the way
+  a refresh that could not leave already was.
+- **A media socket's STUN answer no longer grows old while it waits for its
+  call.** A socket mapped long before its call — the next call's socket,
+  mapped as the last call ends — was described with whatever the server said
+  then, although a NAT lets an idle mapping go in minutes. `sipral::Mappings`
+  now asks again every refresh interval (25 s) until the socket is forgotten,
+  an answer that differs is `MappingEvent::Moved` (`SIPRAL_NAT_MAPPING_MOVED`
+  with `signalling` zero), and `sipral_stack_poll_stun` never holds more than
+  one request per socket for an application that leaves it alone.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered

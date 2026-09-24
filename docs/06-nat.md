@@ -199,8 +199,8 @@ The decisions, and why each one is what it is:
   call, and it exists before the call does. So the application names it
   (`sipral_stack_nat_map`), sends what `sipral_stack_poll_stun` hands out from
   it — the record says which socket, since sending from any other learns the
-  wrong mapping — and hands back what arrives until
-  `SIPRAL_EVENT_KIND_NAT_MAPPING` says the answer is in. That is the one wait
+  wrong mapping — and hands back what arrives, the first answer being
+  `SIPRAL_EVENT_KIND_NAT_MAPPING`. That is the one wait
   STUN adds, and it is the application's, before the call: the offer itself is
   still written in one pass. A call described on a socket still being asked
   about is refused with `SIPRAL_STATUS_WRONG_STATE` rather than written with an
@@ -223,15 +223,25 @@ The decisions, and why each one is what it is:
   server, which keeps the mapping open for a NAT whose mapping is
   endpoint-independent (RFC 4787 REQ-1). It does not open a NAT's filter
   towards the registrar; the registration's own refreshes do that. A media
-  socket is asked once. Once a call runs on it, RTP every frame and RTCP every
-  few seconds hold its binding, and a STUN request beside them would only
-  compete with them for the same mapping.
+  socket is asked on the same schedule while it waits for its call — an
+  application that maps the next call's socket when the last call ends may
+  place that call many minutes later, and nothing else crosses the binding in
+  between, so the answer a call is described with is never older than one
+  refresh. At most one request per socket waits in `sipral_stack_poll_stun`'s
+  queue. Once a call runs on it, RTP every frame and RTCP every few seconds
+  hold its binding, a STUN request beside them would only compete with them
+  for the same mapping, and the socket is asked nothing more.
 - **When the mapping changes.** A refresh that answers with a different
-  address is `SIPRAL_NAT_MAPPING_MOVED`: every account is moved onto the new
-  address and each one holding a binding registers it at once, superseding the
-  one in flight. The old binding is not removed first; it expires on its own,
-  and a registrar holding the account's `+sip.instance` replaces it at once
-  (RFC 5626 §6). A call already up is not re-INVITEd just for this. Its next
+  address is `SIPRAL_NAT_MAPPING_MOVED`. For the signalling socket every
+  account is moved onto the new address and each one holding a binding, or on
+  its way to one, registers it at once, superseding the one in flight — and
+  that REGISTER also carries the `Contact` it replaces with `expires=0`, so
+  the registrar drops the old binding instead of forking calls to it until it
+  expires (RFC 3261 §10.2.2). That includes the private address a REGISTER
+  sent before the first answer arrived. No `reg-id` is ever sent, so the
+  registrar keys both bindings by their URI (RFC 5626 §6) and removing the
+  one cannot remove the other. For a media socket still waiting, the call is
+  described by the new address. A call already up is not re-INVITEd just for this. Its next
   re-INVITE or UPDATE — a hold, a resume, the session timer's own refresh —
   carries the account's `Contact` as it is then, which is the target refresh
   RFC 3261 §12.2 describes, and until then the far end reaches this end along

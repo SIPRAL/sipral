@@ -704,6 +704,14 @@ fn build_register(
     expires: Duration,
 ) -> OutgoingRequest {
     let seconds = expires.as_secs().to_string();
+    // the addresses this account moved away from go in the same field, each
+    // with a zero that removes that binding and no other (§10.2.2)
+    let mut contact = account.register_contact_value(expires.is_zero()).into_vec();
+    for old in &reg.retired {
+        contact.extend_from_slice(b", ");
+        contact.extend_from_slice(old);
+        contact.extend_from_slice(b";expires=0");
+    }
     let mut request = OutgoingRequest::new(
         Method::Register,
         registrar.clone(),
@@ -716,7 +724,7 @@ fn build_register(
     .cseq(reg.cseq.saturating_add(1))
     // the one request the RFC 8599 push parameters belong in, and a
     // de-registration leaves the identifier out of them (§4.1.2)
-    .contact(&account.register_contact_value(expires.is_zero()))
+    .contact(&contact)
     .header(HeaderName::Expires, seconds.as_bytes());
     // RFC 5627 §4.1: a UA that wants GRUUs "MUST include the Supported header
     // field in the request", with `gruu` in it, and §5.2 hands them out only
@@ -915,6 +923,11 @@ impl UserAgent {
             return;
         }
         if status.is_success() {
+            // the registrar has read every `Contact` the request carried,
+            // the ones it was asked to drop included
+            if let Some(reg) = self.registrations.get_mut(&account) {
+                reg.retired.clear();
+            }
             self.on_registered(account, response, now);
             return;
         }
@@ -1220,7 +1233,7 @@ impl UserAgent {
     }
 
     /// Something recoverable: schedule the next attempt (RFC 5626 §4.5).
-    fn retry_later(
+    pub(crate) fn retry_later(
         &mut self,
         account: AccountId,
         status: Option<StatusCode>,

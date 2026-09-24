@@ -940,9 +940,10 @@ public enum SipralNat: UInt32, Sendable {
 public enum SipralNatMapping: UInt32, Sendable {
     /// The first answer: the socket appears at `public`.
     case learned = 1
-    /// A later answer about a signalling socket named another address:
-    /// the NAT let the mapping go and made a new one, or the network
-    /// under the socket changed. `previous` is what it was.
+    /// A later answer named another address: the NAT let the mapping go
+    /// and made a new one, or the network under the socket changed.
+    /// `previous` is what it was. About a signalling socket, or a media
+    /// socket still waiting for its call.
     case moved = 2
     /// The server did not answer, in five and a half seconds, or refused.
     /// The socket is described by its own address, exactly as it would
@@ -3781,6 +3782,14 @@ public enum Sipral {
     /// rung or answered with that `media_address` is described by the public
     /// address, and asks for `a=rtcp-mux`, since one mapping describes one
     /// port. Placing one before the answer is `SIPRAL_STATUS_WRONG_STATE`.
+    ///
+    /// Until that call, the socket is asked again every twenty-five seconds,
+    /// as the signalling socket is: nothing else crosses its NAT binding
+    /// while it waits, and an answer minutes old names a mapping the NAT may
+    /// have let go. Keep sending what `sipral_stack_poll_stun` hands out for
+    /// it and handing in what arrives; an answer that differs is
+    /// `SIPRAL_NAT_MAPPING_MOVED`, and the call is described by it. At most
+    /// one request per socket waits in the queue.
     ///
     /// The mapping is spent by the call it describes. A socket used for a
     /// second call is named here again — nothing kept the first answer true
