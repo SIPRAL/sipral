@@ -23,10 +23,16 @@
 # installs nothing.
 #
 # The default earpiece/microphone match (`interop/harness/src/wasapi.rs`'s
-# `DEFAULT_EARPIECE_NAME`/`DEFAULT_MIC_NAME`) assumes VB-CABLE's own naming;
-# a paid multi-channel edition names its render side differently ("CABLE In
-# 16 Ch", say, not "CABLE Input") and needs $env:SIPRAL_WASAPI_EARPIECE_ID
-# (or _NAME) set to what -ListDevices printed.
+# `is_vb_cable_endpoint`) recognises VB-CABLE's free edition under either
+# naming variant Windows shows it with -- the installer's own "CABLE Input"/
+# "CABLE Output", and the generic "Speakers (VB-Audio Virtual Cable)"/
+# "Microphone (VB-Audio Virtual Cable)" Windows falls back to when the
+# driver leaves its device description unset, which is what this lab's own
+# test machine shows. A paid multi-channel edition names its render side
+# differently still ("CABLE In 16 Ch", say) and needs
+# $env:SIPRAL_WASAPI_EARPIECE_ID (or _NAME) set to what -ListDevices
+# printed; so does a machine with more than one VB-Audio cable installed,
+# where the default rule finds two and refuses to guess.
 param(
     [string]$ServerHost = $(if ($env:SIPRAL_SERVER_HOST) { $env:SIPRAL_SERVER_HOST } else { "192.168.3.172" }),
     [int]$ServerPort = $(if ($env:SIPRAL_SERVER_PORT) { [int]$env:SIPRAL_SERVER_PORT } else { 5062 }),

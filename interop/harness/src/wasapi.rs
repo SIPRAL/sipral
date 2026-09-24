@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use sipral::{CallHandle, CallMedia, Event, MediaConfig, MediaEvent, OutgoingCall, UaEvent};
 use sipral_io_wasapi::{
-    CaptureStream, DeviceId, Direction, PlaybackStream, StreamConfig, StreamFormat,
+    CaptureStream, Device, DeviceId, Direction, PlaybackStream, StreamConfig, StreamFormat,
 };
 use sipral_media::resample::Resampler;
 
@@ -88,22 +88,17 @@ const DWELL: Duration = Duration::from_secs(8);
 /// dwell has little left to prove the loop keeps carrying it unaided.
 const SEED_FRAMES: u32 = 50;
 
-/// Environment variable naming the earpiece endpoint's id exactly, when the
-/// substring match below is not enough — two cables installed, say.
+/// Environment variable naming the earpiece endpoint's id exactly, when
+/// [`is_vb_cable_endpoint`] below is not enough — two cables installed, say.
 const EARPIECE_ID_ENV: &str = "SIPRAL_WASAPI_EARPIECE_ID";
 /// Same, for the microphone endpoint.
 const MIC_ID_ENV: &str = "SIPRAL_WASAPI_MIC_ID";
 /// Environment variable naming the substring an output endpoint's name is
-/// matched against, when the cable is not named the way VB-CABLE's
-/// installer names it.
+/// matched against, overriding [`is_vb_cable_endpoint`] entirely — a second,
+/// unrelated cable installed, say, where the default rule would find two.
 const EARPIECE_NAME_ENV: &str = "SIPRAL_WASAPI_EARPIECE_NAME";
 /// Same, for the input endpoint.
 const MIC_NAME_ENV: &str = "SIPRAL_WASAPI_MIC_NAME";
-
-/// What VB-CABLE's installer calls its render endpoint.
-const DEFAULT_EARPIECE_NAME: &str = "CABLE Input";
-/// What it calls the capture side of the same cable.
-const DEFAULT_MIC_NAME: &str = "CABLE Output";
 
 /// Frames loud enough to be the tone, captured from the microphone once the
 /// seed has stopped, below which the loop is not proven: half a second's
@@ -140,16 +135,8 @@ struct Devices {
 
 impl Devices {
     fn open(session_format: StreamFormat) -> Result<Self, String> {
-        let earpiece_id = find_endpoint(
-            Direction::Output,
-            &endpoint_name(EARPIECE_NAME_ENV, DEFAULT_EARPIECE_NAME),
-            EARPIECE_ID_ENV,
-        )?;
-        let mic_id = find_endpoint(
-            Direction::Input,
-            &endpoint_name(MIC_NAME_ENV, DEFAULT_MIC_NAME),
-            MIC_ID_ENV,
-        )?;
+        let earpiece_id = find_endpoint(Direction::Output, EARPIECE_ID_ENV, EARPIECE_NAME_ENV)?;
+        let mic_id = find_endpoint(Direction::Input, MIC_ID_ENV, MIC_NAME_ENV)?;
         let open = |what: &str, error: sipral_io_wasapi::Error| format!("{what}: {error}");
         let mut earpiece = PlaybackStream::open(&StreamConfig::on(earpiece_id, session_format))
             .map_err(|error| open("earpiece", error))?;
@@ -186,26 +173,42 @@ impl Devices {
     }
 }
 
-/// The substring an endpoint's name is matched against: the environment
-/// variable if it names one, `default` otherwise.
-fn endpoint_name(env_var: &str, default: &str) -> String {
-    env::var(env_var)
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| default.to_owned())
+/// True when an endpoint's own friendly name says it is one of VB-Audio's
+/// cable endpoints, under either naming variant the driver ships under —
+/// specific enough that a real speaker or a real microphone never matches
+/// it by accident:
+///
+/// - the classic naming VB-CABLE's installer gives its own device
+///   description: "CABLE Input" for the render side, "CABLE Output" for the
+///   capture side of the same cable;
+/// - the generic port class Windows falls back to when that description is
+///   absent, with the audio interface's own friendly name in parentheses
+///   instead — "Speakers (VB-Audio Virtual Cable)" and "Microphone
+///   (VB-Audio Virtual Cable)" on the lab's own test machine, which is why
+///   `SIPRAL_WASAPI_EARPIECE_ID` had to be set before this rule existed.
+///
+/// Direction is not decided here: [`find_endpoint`] already asks Windows for
+/// the render or the capture list separately, so telling the two ends of the
+/// cable apart is its job, not this predicate's — a real "Speakers" or
+/// "Microphone" endpoint never carries "vb-audio", "cable input" or
+/// "cable output" in its own name, so none of the three substrings needs the
+/// direction to stay safe.
+fn is_vb_cable_endpoint(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("vb-audio") || lower.contains("cable input") || lower.contains("cable output")
 }
 
-/// The one endpoint, in the given direction, whose name contains
-/// `name_contains` — or, when `id_env` names one, exactly that endpoint,
+/// The one endpoint, in the given direction, that `name_env` singles out by
+/// substring when it names one, or else the one [`is_vb_cable_endpoint`]
+/// recognises — or, when `id_env` names one, exactly that endpoint,
 /// unchecked against the machine's own list.
 ///
 /// # Errors
-/// No such endpoint, more than one, or the list itself could not be read.
-fn find_endpoint(
-    direction: Direction,
-    name_contains: &str,
-    id_env: &str,
-) -> Result<DeviceId, String> {
+/// No such endpoint, more than one, or the list itself could not be read;
+/// every error names every endpoint this machine actually has in that
+/// direction, so the fix is legible from the failure alone, without a
+/// separate `-ListDevices` run.
+fn find_endpoint(direction: Direction, id_env: &str, name_env: &str) -> Result<DeviceId, String> {
     if let Ok(id) = env::var(id_env)
         && !id.is_empty()
     {
@@ -213,23 +216,56 @@ fn find_endpoint(
     }
     let all =
         sipral_io_wasapi::devices().map_err(|error| format!("cannot list endpoints: {error}"))?;
-    let wanted = name_contains.to_lowercase();
-    let mut matching = all.into_iter().filter(|device| {
-        device.direction == direction && device.name.to_lowercase().contains(&wanted)
-    });
+    let wanted = env::var(name_env).ok().filter(|name| !name.is_empty());
+    let matches = |device: &&Device| {
+        device.direction == direction
+            && match &wanted {
+                Some(substring) => device
+                    .name
+                    .to_lowercase()
+                    .contains(&substring.to_lowercase()),
+                None => is_vb_cable_endpoint(&device.name),
+            }
+    };
+    let mut matching = all.iter().filter(matches);
     let Some(first) = matching.next() else {
         return Err(format!(
-            "no {direction} endpoint's name contains \"{name_contains}\" — set {id_env} to \
-             the endpoint's id"
+            "no {direction} endpoint {} — set {id_env} (or {name_env}) to the one to use; \
+             this machine's {direction} endpoints:\n{}",
+            rule_description(wanted.as_deref()),
+            list_endpoints(&all, direction),
         ));
     };
     if matching.next().is_some() {
         return Err(format!(
-            "more than one {direction} endpoint's name contains \"{name_contains}\" — set \
-             {id_env} to the one to use"
+            "more than one {direction} endpoint {} — set {id_env} (or {name_env}) to the one \
+             to use; this machine's {direction} endpoints:\n{}",
+            rule_description(wanted.as_deref()),
+            list_endpoints(&all, direction),
         ));
     }
-    Ok(first.id)
+    Ok(first.id.clone())
+}
+
+/// The clause an error names for why an endpoint was or was not picked.
+fn rule_description(wanted: Option<&str>) -> String {
+    match wanted {
+        Some(substring) => format!("has \"{substring}\" in its name"),
+        None => "is one of VB-Audio's cable endpoints".to_owned(),
+    }
+}
+
+/// Every endpoint this machine has in the given direction, one per line.
+fn list_endpoints(all: &[Device], direction: Direction) -> String {
+    let mut lines: Vec<String> = all
+        .iter()
+        .filter(|device| device.direction == direction)
+        .map(|device| format!("  {device}"))
+        .collect();
+    if lines.is_empty() {
+        lines.push("  (none)".to_owned());
+    }
+    lines.join("\n")
 }
 
 /// What crossed each stream.
