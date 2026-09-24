@@ -145,6 +145,53 @@ pub(crate) struct Heard {
     /// nothing was due, because the buffer was still filling or had run dry
     /// and gone back to filling.
     pub(crate) silent: u32,
+    /// Runs of that silence that began straight after the tone or ended
+    /// straight into it, once each: the tone cut off, which the ear hears as
+    /// a gap. The far end's own pauses arrive as quiet packets, not as
+    /// silence, so a buffer that runs dry in a pause is not counted here and
+    /// one that runs dry in a word is.
+    pub(crate) cut: u32,
+    /// Frames `MediaSession::playback` reported as [`Playback::Concealed`]:
+    /// a packet that never came, filled in, or a pause stretched by a frame.
+    /// Counted here rather than read off the buffer's own loss count, which
+    /// also counts the sequence numbers it skipped over without playing
+    /// anything in their place.
+    pub(crate) concealed: u32,
+}
+
+/// Where the earpiece's silence falls against the tone, frame by frame.
+#[derive(Debug, Default)]
+struct Gaps {
+    /// Whether the last frame was the tone.
+    was_audible: bool,
+    /// Whether the last frame was silence.
+    was_silent: bool,
+    /// Whether the run of silence going on now has been counted.
+    counted: bool,
+}
+
+impl Gaps {
+    /// Take one frame, audible or silent (or neither: a quiet packet, a
+    /// concealed one), and say whether it is the frame that makes a run of
+    /// silence a [`Heard::cut`]: one that began straight after the tone, or
+    /// one that ended straight into it. Either way the tone lost frames to
+    /// it, and a run is counted once.
+    fn cuts(&mut self, audible: bool, silent: bool) -> bool {
+        let cut = if silent {
+            let starts_in_tone = self.was_audible;
+            if starts_in_tone {
+                self.counted = true;
+            }
+            starts_in_tone
+        } else {
+            let ends_in_tone = audible && self.was_silent && !self.counted;
+            self.counted = false;
+            ends_in_tone
+        };
+        self.was_audible = audible;
+        self.was_silent = silent;
+        cut
+    }
 }
 
 /// G.729's static payload type (RFC 3551 table 4).
@@ -177,6 +224,8 @@ pub(crate) struct Media {
     /// How long the earpiece takes to play one frame: [`PACE`], unless
     /// [`Media::skew_playout`] set its clock off by a known amount.
     play_pace: Duration,
+    /// What decides whether a run of silence is [`Heard::cut`].
+    gaps: Gaps,
     phase: u32,
     heard: Heard,
     inbox: [u8; 2_048],
@@ -202,6 +251,7 @@ impl Media {
             next: now,
             next_play: now,
             play_pace: PACE,
+            gaps: Gaps::default(),
             phase: 0,
             heard: Heard::default(),
             inbox: [0; 2_048],
@@ -399,14 +449,22 @@ impl Media {
         while now >= self.next_play {
             let room = played.get_mut(..frame).unwrap_or_default();
             let outcome = session.playback(room);
-            if matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE {
+            let audible = matches!(outcome, Playback::Packet) && loudness(room) >= AUDIBLE;
+            if audible {
                 self.heard.audible = self.heard.audible.saturating_add(1);
             }
             if matches!(outcome, Playback::ComfortNoise) {
                 self.heard.comfort = self.heard.comfort.saturating_add(1);
             }
-            if matches!(outcome, Playback::Silence) {
+            if matches!(outcome, Playback::Concealed) {
+                self.heard.concealed = self.heard.concealed.saturating_add(1);
+            }
+            let silent = matches!(outcome, Playback::Silence);
+            if silent {
                 self.heard.silent = self.heard.silent.saturating_add(1);
+            }
+            if self.gaps.cuts(audible, silent) {
+                self.heard.cut = self.heard.cut.saturating_add(1);
             }
             if let Some(gate) = self.quality.as_mut() {
                 gate.observe(outcome, room, rate);
@@ -430,7 +488,35 @@ impl Media {
 
 #[cfg(test)]
 mod tests {
-    use super::{TONE_HZ, tone};
+    use super::{Gaps, TONE_HZ, tone};
+
+    /// Frames as the earpiece took them: `T` the tone, `q` a quiet packet
+    /// (the far end's own pause), `s` silence because the buffer had nothing.
+    /// How many runs of silence the tone was cut by.
+    fn cuts(frames: &str) -> usize {
+        let mut gaps = Gaps::default();
+        frames
+            .chars()
+            .filter(|frame| gaps.cuts(*frame == 'T', *frame == 's'))
+            .count()
+    }
+
+    /// A buffer that runs dry in the tone cuts it, once however long the
+    /// silence lasts; one that runs dry in the far end's pause does not.
+    #[test]
+    fn silence_in_the_tone_is_a_cut_and_in_a_pause_is_not() {
+        assert_eq!(cuts("TTsTT"), 1);
+        assert_eq!(cuts("TTsssTT"), 1);
+        assert_eq!(cuts("TTqqsqqTT"), 0);
+    }
+
+    /// Silence that began in a pause and ended where the tone had already
+    /// started again took the start of the tone with it.
+    #[test]
+    fn silence_that_runs_on_into_the_tone_is_a_cut() {
+        assert_eq!(cuts("TTqqssssTT"), 1);
+        assert_eq!(cuts("TTsqqTTssTT"), 2);
+    }
 
     /// The tone has to stay at the same pitch when the rate doubles, or a
     /// G.722 flow is measuring a different signal from a G.711 one.

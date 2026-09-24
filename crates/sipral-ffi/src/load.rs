@@ -219,7 +219,7 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
     let per_frame = nanos.load(Ordering::Relaxed) / u64::try_from(turns).unwrap_or(1);
     println!(
         "load: {calls} calls, {THREADS} threads, {frames} frames each: {turns} frames in \
-         {:.2}s, {per_frame} ns of thread time per frame (receive and playback), \
+         {:.2}s, {per_frame} ns of wall time per frame (receive and playback), \
          {} us to open the stack, {} us to bring up a call, {} busy, {} refused",
         elapsed.as_secs_f64(),
         started.as_micros(),
@@ -239,12 +239,13 @@ fn two_hundred_calls_run_on_four_threads_without_one_waiting_on_another() {
         "a frame was refused outright"
     );
     // A frame is twenty milliseconds of audio. Anything near that per frame
-    // of thread time would mean one core could not carry even one call, and
-    // the figure measured on the machines this has run on is three orders
-    // below it; the assertion is a floor under a regression, not the number.
+    // of wall time on its thread would mean one core could not carry even
+    // one call, and the figure measured on the machines this has run on is
+    // three orders below it; the assertion is a floor under a regression,
+    // not the number.
     assert!(
         per_frame < 2_000_000,
-        "a frame cost {per_frame} ns of thread time"
+        "a frame cost {per_frame} ns of wall time"
     );
 
     for handle in media {

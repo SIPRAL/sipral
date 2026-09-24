@@ -45,10 +45,13 @@
 //! buffer held more than [`MAX_DELAY`] — a buffer that grows without bound
 //! passes that within minutes at the skews this runs — and one in which a
 //! call played fewer than half the audible frames its tone should have given
-//! it, which is audio that stopped. A call whose measured skew at the end is
-//! further than [`TOLERANCE`] from the one it was given, the control
-//! included: a count that does not add up is a frame going somewhere nothing
-//! here can see.
+//! it, which is audio that stopped, and a call the stack reported stalled. A
+//! call whose measured skew at the end is further than [`TOLERANCE`] from
+//! the one it was given, the control included: a count that does not add up
+//! is a frame going somewhere nothing here can see. And a call whose buffer
+//! ran dry in the middle of the tone, however well its count balances: that
+//! is the drift absorbed as a gap the ear hears, where the buffer should have
+//! stretched a pause instead.
 
 use std::env;
 use std::fmt::Write as _;
@@ -353,18 +356,21 @@ fn snapshot(endpoint: &mut Endpoint, leg: &Leg, now: Instant) -> Option<(Quality
 /// the two clocks, whichever way it did it.
 ///
 /// Played is what the earpiece took. What it took that did not arrive was
-/// stretched into a pause, concealed, or played as silence because the
-/// buffer had run dry; what arrived and was not taken was dropped from a
-/// pause, came too late, was pushed out, or is still in the buffer — the
-/// change in its delay, a frame per frame of it.
+/// stretched into a pause or concealed — both reach the earpiece as
+/// [`sipral::Playback::Concealed`] — or played as silence because the buffer
+/// had run dry, and all of it is counted as the earpiece took it: the
+/// buffer's own loss count also holds sequence numbers it skipped without
+/// playing anything for them, which would count a gap twice. What arrived
+/// and was not taken was dropped from a pause, came too late, was pushed
+/// out, or is still in the buffer — the change in its delay, a frame per
+/// frame of it.
 fn balance(first: &(Quality, Heard), now: &(Quality, Heard)) -> i64 {
     let delta = |later: u64, earlier: u64| {
         i64::try_from(later).unwrap_or(i64::MAX) - i64::try_from(earlier).unwrap_or(i64::MAX)
     };
     let (q0, h0) = first;
     let (q1, h1) = now;
-    let invented = delta(q1.stretched, q0.stretched)
-        + delta(q1.lost, q0.lost)
+    let invented = delta(u64::from(h1.concealed), u64::from(h0.concealed))
         + delta(u64::from(h1.silent), u64::from(h0.silent));
     let thrown = delta(q1.shrunk, q0.shrunk)
         + delta(q1.discarded_late, q0.discarded_late)
@@ -376,11 +382,16 @@ fn balance(first: &(Quality, Heard), now: &(Quality, Heard)) -> i64 {
     invented - thrown - held
 }
 
-/// The skew `balance` comes to, in parts per million of what was played.
+/// The skew `balance` comes to, in parts per million: the ratio of the
+/// earpiece's clock to the far end's, less one. The earpiece's clock counted
+/// the frames played; the far end's counted those played less the balance,
+/// which is the frames that arrived.
 #[allow(clippy::cast_precision_loss)]
 fn measured(first: &(Quality, Heard), now: &(Quality, Heard)) -> f64 {
-    let played = now.1.played.saturating_sub(first.1.played).max(1);
-    balance(first, now) as f64 * 1e6 / f64::from(played)
+    let played = i64::from(now.1.played.saturating_sub(first.1.played));
+    let balance = balance(first, now);
+    let arrived = (played - balance).max(1);
+    balance as f64 * 1e6 / arrived as f64
 }
 
 /// One line for one call: the interval's own figures and the call's so far.
@@ -402,8 +413,8 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
     let seconds = elapsed.as_secs() % 60;
     let mut line = format!(
         "  drift {:+5} ppm {minutes:3}:{seconds:02}  delay {:3} ms of {:3} ms, jitter {} ms; \
-         shrunk {}, stretched {}, ran dry {}, concealed {}, late {}, overflow {}; played {}, \
-         audible {} of {:.0} due; measured {:+.1} ppm",
+         shrunk {}, stretched {}, ran dry {} ({} in the tone), concealed {}, late {}, \
+         overflow {}; played {}, audible {} of {:.0} due; measured {:+.1} ppm",
         leg.asked,
         quality.delay.as_millis(),
         quality.target_delay.as_millis(),
@@ -411,7 +422,14 @@ fn report(endpoint: &mut Endpoint, leg: &mut Leg, since: Instant, every: Duratio
         quality.shrunk.saturating_sub(first.0.shrunk),
         quality.stretched.saturating_sub(first.0.stretched),
         heard.silent.saturating_sub(first.1.silent),
-        quality.lost.saturating_sub(first.0.lost),
+        heard.cut.saturating_sub(first.1.cut),
+        heard
+            .concealed
+            .saturating_sub(first.1.concealed)
+            .saturating_sub(
+                u32::try_from(quality.stretched.saturating_sub(first.0.stretched))
+                    .unwrap_or(u32::MAX),
+            ),
         quality
             .discarded_late
             .saturating_sub(first.0.discarded_late),
@@ -475,8 +493,15 @@ fn verdict(legs: &[Leg], ppm: i32, ran: Option<Duration>) -> Result<String, Stri
                     leg.skew
                 ));
             }
+            let cut = last.1.cut.saturating_sub(first.1.cut);
+            if cut > 0 {
+                failures.push(format!(
+                    "the tone was cut off {cut} times by a buffer that ran dry"
+                ));
+            }
             format!(
-                "{:+} ppm given, {skew:+.1} measured, {} frames balanced of which {} ran dry",
+                "{:+} ppm given, {skew:+.1} measured, {} frames balanced of which {} ran dry, \
+                 {cut} in the tone",
                 leg.asked,
                 balance(&first, &last),
                 last.1.silent.saturating_sub(first.1.silent)
@@ -485,6 +510,12 @@ fn verdict(legs: &[Leg], ppm: i32, ran: Option<Duration>) -> Result<String, Stri
             failures.push("no audio ever ran".to_owned());
             format!("{:+} ppm given, nothing measured", leg.asked)
         };
+        if leg.stalls > 0 {
+            failures.push(format!(
+                "the stack said the audio stalled {} times",
+                leg.stalls
+            ));
+        }
         let _ = write!(
             said,
             "; {result}, {} session change(s), {} stall(s)",
@@ -508,7 +539,7 @@ mod tests {
 
     use sipral::Quality;
 
-    use super::{FRAME, balance, measured};
+    use super::{FRAME, Leg, balance, measured, verdict};
     use crate::audio::Heard;
 
     fn at(stretched: u64, shrunk: u64, delay: Duration, played: u32) -> (Quality, Heard) {
@@ -518,11 +549,26 @@ mod tests {
             delay,
             ..Quality::default()
         };
+        // a stretched pause reaches the earpiece as a concealed frame
         let heard = Heard {
             played,
+            concealed: u32::try_from(stretched).unwrap_or(u32::MAX),
             ..Heard::default()
         };
         (quality, heard)
+    }
+
+    /// Five seconds of the far end's audio lost: the buffer runs dry and
+    /// plays silence through it, then skips the sequence numbers it never
+    /// got, which its own loss count records. Those are the same 250 frames,
+    /// and they count once.
+    #[test]
+    fn a_gap_played_as_silence_counts_once() {
+        let start = at(0, 0, FRAME, 0);
+        let (mut quality, mut heard) = at(0, 0, FRAME, 2_500);
+        quality.lost = 250;
+        heard.silent = 250;
+        assert_eq!(balance(&start, &(quality, heard)), 250);
     }
 
     /// A fast earpiece that the buffer kept up with by stretching reads as
@@ -531,9 +577,9 @@ mod tests {
     #[test]
     fn stretching_reads_as_a_fast_earpiece_and_shrinking_as_a_slow_one() {
         let start = at(0, 0, FRAME * 3, 0);
-        let fast = at(45, 0, FRAME * 3, 180_000);
+        let fast = at(45, 0, FRAME * 3, 180_045);
         assert!((measured(&start, &fast) - 250.0).abs() < 0.01);
-        let slow = at(0, 45, FRAME * 3, 180_000);
+        let slow = at(0, 45, FRAME * 3, 179_955);
         assert!((measured(&start, &slow) + 250.0).abs() < 0.01);
     }
 
@@ -553,9 +599,61 @@ mod tests {
     #[test]
     fn a_buffer_that_ran_dry_counts_the_silence_it_played() {
         let start = at(0, 0, FRAME, 0);
-        let (quality, mut heard) = at(0, 0, FRAME, 100_000);
+        let (quality, mut heard) = at(0, 0, FRAME, 100_025);
         heard.silent = 25;
         assert_eq!(balance(&start, &(quality, heard)), 25);
         assert!((measured(&start, &(quality, heard)) - 250.0).abs() < 0.01);
+    }
+
+    /// A skew is the ratio of the two clocks, so an earpiece 5 % fast plays
+    /// 105 frames for every 100 that arrive: five in 105 were invented, and
+    /// that is 50 000 ppm of the frames that arrived, not of those played.
+    #[test]
+    fn a_large_skew_reads_as_the_ratio_of_the_two_clocks() {
+        let start = at(0, 0, FRAME, 0);
+        let fast = at(50, 0, FRAME, 1_050);
+        assert!((measured(&start, &fast) - 50_000.0).abs() < 0.01);
+        let slow = at(0, 50, FRAME, 950);
+        assert!((measured(&start, &slow) + 50_000.0).abs() < 0.01);
+    }
+
+    /// A control call whose skew balanced and whose audio never stopped,
+    /// from a run given `ppm` either side of it.
+    fn control(silent: u32, cut: u32) -> Leg {
+        let start = at(0, 0, FRAME, 0);
+        let (quality, mut heard) = at(0, 0, FRAME, 9_000);
+        heard.silent = silent;
+        heard.cut = cut;
+        let mut leg = Leg::new(0);
+        leg.first = Some(start);
+        leg.last = Some((quality, heard));
+        leg
+    }
+
+    /// Frames played as silence in a pause are the buffer catching up, and
+    /// nobody hears them: they are within the tolerance, and they pass.
+    #[test]
+    fn silence_where_the_tone_paused_passes() {
+        assert!(verdict(&[control(3, 0)], 2_000, Some(FRAME * 9_000)).is_ok());
+    }
+
+    /// The same frames of silence in the middle of the tone are gaps in the
+    /// audio, however well the count of them balances.
+    #[test]
+    fn silence_that_cut_the_tone_off_fails() {
+        let verdict = verdict(&[control(3, 3)], 2_000, Some(FRAME * 9_000));
+        let why = verdict.expect_err("the tone was cut three times");
+        assert!(why.contains("cut off 3 times"), "{why}");
+    }
+
+    /// A call the stack itself said had stopped receiving audio fails, even
+    /// when the frames it missed happen to balance.
+    #[test]
+    fn a_stalled_call_fails() {
+        let mut leg = control(0, 0);
+        leg.stalls = 1;
+        let verdict = verdict(&[leg], 2_000, Some(FRAME * 9_000));
+        let why = verdict.expect_err("the stream stalled");
+        assert!(why.contains("stalled"), "{why}");
     }
 }

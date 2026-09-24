@@ -11,18 +11,21 @@
 #
 # - the shared library's size, stripped, for this platform: what an
 #   application ships, and the first question every integrator asks;
-# - the cost of one frame of audio, in thread time, with two hundred calls
-#   running on four threads (crates/sipral-ffi's own load test): what decides
-#   how many calls a machine holds;
+# - the cost of one frame of audio, with two hundred calls running on four
+#   threads (crates/sipral-ffi's own load test): what decides how many calls
+#   a machine holds. Every time here is wall-clock time on the thread making
+#   the calls, not the processor time the operating system charged it, so a
+#   busy machine reads slower;
 # - the peak memory of that run against the same run with one call: the
 #   difference over a hundred and ninety-nine is what a call costs;
 # - how long opening a stack takes, and how long bringing one call up takes;
 # - a hundred calls' worth of signalling, then a thousand, between two stacks
 #   (crates/sipral-ffi/tests/signalling_load.rs): every call challenged,
-#   answered, held, resumed and hung up, with the thread time each end spent
-#   per call set up and per transaction, the messages a second one stack gets
-#   through, and the memory a live call holds at each end, counted by that
-#   test's own allocator rather than read off the operating system.
+#   answered, held, resumed and hung up, with the time each end spent inside
+#   the library per call set up and per transaction, the messages a second
+#   one stack gets through, and the memory a live call holds at each end,
+#   counted by that test's own allocator rather than read off the operating
+#   system.
 #
 # Everything here runs in this process, against the library, with no network
 # underneath it: what is measured is the library's own cost. A lab run's own
@@ -82,17 +85,24 @@ step_library() {
 
 # The load test prints its own line; this runs it twice, once with the calls
 # asked for and once with a single call, and reads peak memory from the
-# platform's own timer around each run. macOS reports bytes, GNU time
-# kilobytes, which is why each is read where it is printed rather than
-# converted blind.
+# platform's own timer around each run. The timer is put around the test's
+# own binary, not around cargo: it reports the largest process under it, and
+# with cargo in between that is cargo, the same forty-odd megabytes whatever
+# the test does. macOS reports bytes, GNU time kilobytes, which is why each
+# is read where it is printed rather than converted blind.
 step_load() {
     local calls="$1" out rss
     out="$(mktemp)"
+    if [ -z "$LOAD_BIN" ]; then
+        printf 'load(%s): no test binary to run\n' "$calls"
+        rm -f "$out"
+        return 1
+    fi
     if /usr/bin/time -l env SIPRAL_LOAD_CALLS="$calls" SIPRAL_LOAD_FRAMES="$FRAMES" \
-        cargo test --release -q -p sipral-ffi --lib load -- --nocapture >"$out" 2>&1; then
+        "$LOAD_BIN" load:: --nocapture >"$out" 2>&1; then
         :
     elif /usr/bin/time -v env SIPRAL_LOAD_CALLS="$calls" SIPRAL_LOAD_FRAMES="$FRAMES" \
-        cargo test --release -q -p sipral-ffi --lib load -- --nocapture >"$out" 2>&1; then
+        "$LOAD_BIN" load:: --nocapture >"$out" 2>&1; then
         :
     else
         printf 'load(%s): the test did not pass; its output:\n' "$calls"
@@ -119,10 +129,11 @@ step_load() {
 printf 'library\n'
 step_library
 
-# built before anything is measured: a run that compiles the test first
-# reports the compiler's own memory, which on a cold checkout is hundreds of
-# megabytes and has nothing to do with a call
-cargo test --release -q -p sipral-ffi --lib load --no-run >/dev/null 2>&1 \
+# built before anything is measured, and run as the binary cargo built rather
+# than through cargo, so that the peak memory read around it is the test's
+LOAD_BIN="$(cargo test --release -q -p sipral-ffi --lib --no-run --message-format=json \
+    2>/dev/null | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -1)"
+[ -n "$LOAD_BIN" ] \
     || printf 'note: the load test would not build; the numbers below say so\n'
 cargo test --release -q -p sipral-ffi --test signalling_load --no-run >/dev/null 2>&1 \
     || printf 'note: the signalling test would not build; the numbers below say so\n'

@@ -374,10 +374,13 @@ someone configured once. Design targets:
   the delay passes its target by one. A fast one never stretches: on a clean
   path the target is one frame, and the pull that finds the next packet not
   yet arrived is by construction a pull with nothing arrived since the last
-  one, which is the one case the stretch waits for. The buffer runs dry
-  instead, plays one frame of silence wherever that falls — in a word as
-  readily as in a pause — and starts again from the next packet. Each frame
-  of drift costs one such frame: at 250 ppm, one every eighty seconds.
+  one, the one case in which the stretch never fires, since it needs a packet
+  to have arrived since the last pull. The buffer runs dry instead, plays one
+  frame of silence wherever that falls — in a word as readily as in a pause —
+  and starts again from the next packet. Each frame of drift costs one such
+  frame: at 250 ppm, one every eighty seconds. The drift flow fails on every
+  one of them that cuts the tone off, so it stays red until the stretch can
+  fire at a one-frame target.
 
 Measured against the exit criterion in [10-roadmap.md](10-roadmap.md): mean
 opinion score under simulated loss and jitter, compared side by side with a

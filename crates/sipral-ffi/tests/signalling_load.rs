@@ -16,11 +16,14 @@
 //! hangup after it.
 //!
 //! What it prints, and `scripts/bench.sh` collects into
-//! `docs/19-numbers.md`: the thread time each stack spent bringing one call
-//! up and on one transaction, how many messages one stack gets through in a
-//! second of its own thread time, and what a live call holds in memory on
-//! each end — the dialog and its transactions apart from the media session
-//! that is opened beside them. Memory is counted by this file's own
+//! `docs/19-numbers.md`: the time each stack spent inside the library
+//! bringing one call up and on one transaction, how many messages one stack
+//! gets through in a second of that time, and what a live call holds in
+//! memory on each end — the dialog and its transactions apart from the media
+//! session that is opened beside them. The time is the wall clock read
+//! around every call into the library, on the one thread making them, not
+//! the processor time the operating system charged that thread: a machine
+//! busy with other work reads slower. Memory is counted by this file's own
 //! allocator rather than read off the operating system, so it is the bytes
 //! the library asked for and nothing the process did around it; that
 //! allocator's one `unsafe impl` is why the test lives in this crate, the one
@@ -161,7 +164,7 @@ fn media_address(host: &str, n: usize) -> SocketAddr {
     address(&format!("{host}:{}", 20_000 + 2 * n))
 }
 
-/// One stack, and what it cost: the thread time spent inside the library on
+/// One stack, and what it cost: the wall time spent inside the library on
 /// its behalf, and the messages that crossed its edge either way.
 struct Side {
     agent: UserAgent,

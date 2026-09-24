@@ -47,12 +47,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   would otherwise drift by nothing. Every five minutes it prints each call's
   buffer depth, frames shrunk, stretched, concealed and played as silence
   for want of a packet, and the skew those come to, and it fails if a call
-  ends early, a buffer grows past 250 ms, audio stops, or the measured skew
-  is more than a quarter of the run's skew from the one given. The first
-  full hour is in `docs/19-numbers.md`: no buffer ever deeper than its
-  20 ms target, a slow earpiece's drift shrunk out of pauses, and a fast
-  one's heard as a 20 ms gap every eighty seconds or so, since at a
-  one-frame target the buffer runs dry before it would stretch a pause.
+  ends early, a buffer grows past 250 ms, audio stops or stalls, the
+  measured skew is more than a quarter of the run's skew from the one
+  given, or a buffer runs dry in the middle of the tone. The first full
+  hour is in `docs/19-numbers.md`: no buffer ever deeper than its 20 ms
+  target, a slow earpiece's drift shrunk out of pauses, and a fast one's
+  heard as a 20 ms gap every eighty seconds or so, since at a one-frame
+  target the buffer runs dry before it would stretch a pause — which the
+  flow now fails on.
 - **A hundred calls' worth of signalling, measured and tested.**
   `crates/sipral-ffi/tests/signalling_load.rs` puts two stacks — a user agent
   and a media engine each — on either end of a hundred concurrent calls with
@@ -61,9 +63,9 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   and its ACK, a hold, a resume and a BYE. It fails if any call ends the wrong
   way, if a single message is missing or extra against what the exchange
   makes, or if anything goes out once every transaction's timers have run.
-  It prints the thread time each end spends per call set up and per
-  transaction, the messages a second one stack gets through, and the memory
-  a live call holds at each end, counted by its own allocator.
+  It prints the wall time each end spends inside the library per call set
+  up and per transaction, the messages a second one stack gets through, and
+  the memory a live call holds at each end, counted by its own allocator.
   `scripts/bench.sh` runs it at a hundred calls and at a thousand, and
   `docs/19-numbers.md` has the figures.
 - **`crates/sipral-aec-webrtc` ships its own licence texts.** It sits outside
@@ -666,6 +668,11 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   for a request the parser refuses, which used to be dropped unless all
   five fields could be read. Only a request with no readable `Via` is
   still dropped.
+- **`scripts/bench.sh` reads the load test's peak memory, not cargo's.** The
+  timer was around `cargo test`, and reported cargo's own peak whatever the
+  test did; it now runs the test binary cargo built, and a call's resident
+  memory reads about 79 KB rather than 1.4 KB. The times the benchmarks
+  print are called wall time, which is what they are.
 - **A request the parser refuses is answered, not dropped without a trace.**
   An INVITE with a 6,000-byte display name got nothing back at all: one
   field past the parser's bound on a single value, and the whole request was

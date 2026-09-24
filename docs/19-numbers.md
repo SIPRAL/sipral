@@ -41,7 +41,12 @@ opinion score come from RTCP-XR on a real call (`docs/05-media.md`).
 jitter buffer did about two clocks for all of it (`scripts/lab.sh drift`,
 below).
 
-**Not measured yet:** the same load on a mobile processor.
+**Not measured yet:** the same load on a mobile processor; a frame of Opus
+rather than G.711; the delay from one end's microphone to the other's
+earpiece in the lab; a hundred calls through a real proxy and PBX rather than
+between two stacks in one process; the media load test's memory on Linux; and
+drift on a path with loss and jitter, where the buffer's target is more than
+the one frame a clean path gives it.
 
 ## 23 September 2026 — `0.0.1`
 
@@ -53,12 +58,12 @@ honest way to report it.
 | What | Number | How |
 |---|---|---|
 | Shared library, `libsipral_ffi.dylib` | 2.79 MB | as built; the release profile carries no debug information, so stripping it changes nothing |
-| Audio, per frame of 20 ms, 200 calls on 4 threads | 1.8–2.7 µs of thread time | `sipral_media_receive` and `sipral_media_playback` together, G.711 through the jitter buffer |
+| Audio, per frame of 20 ms, 200 calls on 4 threads | 1.8–2.7 µs of wall time | `sipral_media_receive` and `sipral_media_playback` together, G.711 through the jitter buffer, timed by the wall clock on each of the four threads |
 | The same, one call | 0.3–0.4 µs | the difference is contention and cache, not locking: no call ever waited on another |
 | 200 calls, a minute of audio each | 600 000 frames in 0.3–0.4 s of wall time | four threads on one stack |
 | Opening a stack | 56 µs–4 ms | the first stack in a process pays for its own lazy initialisation; a later one does not |
 | Bringing one call up | 69–161 µs | placing the INVITE, reading the answer, opening the session |
-| Memory per call | 1.4–1.7 KB | the difference in peak resident memory between the 200-call run and the one-call run, divided by 199 |
+| Memory per call | not measured | the 1.4–1.7 KB first given here was cargo's own peak memory, not the test's: see 24 September |
 
 The same run inside a `rust:1.95-trixie` container on a Linux x86-64 machine,
 eight cores given to it: **2.6 µs** per frame with two hundred calls, 1.0 µs
@@ -70,7 +75,7 @@ script now does first exists to prevent, and it has not been rerun since.
 Two hundred calls at 50 frames a second is 10 000 frames a second; at 2 µs
 each that is about 20 milliseconds of one core per second of audio, two per
 cent of a single core. The load test's own assertion is far looser — a frame
-may cost up to 2 ms of thread time before it fails — because what it guards
+may cost up to 2 ms of wall time before it fails — because what it guards
 is a regression, not this machine's figure.
 
 ## 24 September 2026 — `0.0.1`, signalling
@@ -93,13 +98,17 @@ direction and by kind, and if anything is sent once the clock has been run
 forty seconds past the hangups, beyond the last timer any RFC 3261
 transaction keeps. The gate runs it on every commit, at a hundred calls.
 
-Thread time is what each stack spent inside the library, measured around
-every call into it: placing, receiving, polling, answering, holding,
-hanging up and running its timers — writing the offer and the answer and
-opening each call's media session included, since that is part of setting a
-call up in this stack. The far end's half of the digest exchange, which a
-user agent never does, is outside it. "Per transaction" is the whole run's
-thread time over the six transactions a call makes. Memory is counted by the
+Time is what each stack spent inside the library, read off the wall clock
+around every call into it, on the one thread making them all: placing,
+receiving, polling, answering, holding, hanging up and running its timers —
+writing the offer and the answer and opening each call's media session
+included, since that is part of setting a call up in this stack. It is not
+the processor time the operating system charged the thread, so a machine
+busy with other work reads slower; that is why the ranges below are wide. The
+far end's half of the digest exchange, which a user agent never does, is
+outside it. "Per transaction" is the whole run's time inside the library,
+the forty seconds of timers after the hangups included, over the six
+transactions a call makes. Memory is counted by the
 test's own allocator, not read from the operating system: what each half of
 each stack gives back when it is dropped, holding all the calls against
 holding none, over the number of calls — signalling (the user agent and its
@@ -111,15 +120,20 @@ are gone; "fresh" is straight after.
 Apple M2, macOS, `rustc 1.95.0`, release profile. The machine was shared with
 other builds throughout — a load average between eleven and sixteen on eight
 cores — so the ranges are wide, and the low end is the one taken when it was
-least busy.
+least busy. A review later the same day, at a load average between four and
+seven, read lower still: a call set up in 124–203 µs and 254–403 µs, a
+transaction in 33–47 µs and 80–106 µs, 75 000–106 000 and 33 000–44 000
+messages a second. Those are the same kind of time as the table's, taken on a
+quieter machine, and they are the better guide to what the code costs; the
+table keeps what was first measured.
 
 | What, a hundred calls | Calling end | Answering end | How |
 |---|---|---|---|
-| Setting one call up | 187–424 µs | 390–833 µs | thread time from the first INVITE to the ACK, per call |
-| One transaction | 52–112 µs | 125–265 µs | the whole run's thread time over six transactions a call |
-| Messages a second, one stack | 31 000–68 000 | 13 000–28 000 | messages written and read over the stack's own thread time |
-| A live call, signalling, settled | 16.1 KB | 17.3–17.5 KB | the user agent's share |
-| The same, fresh | 18.0 KB | 22.6 KB | while the transactions that set it up still run |
+| Setting one call up | 187–424 µs | 390–833 µs | time inside the library from the first INVITE to the ACK, all the calls' together, over the number of calls |
+| One transaction | 52–112 µs | 125–265 µs | the whole run's time inside the library over six transactions a call |
+| Messages a second, one stack | 31 000–68 000 | 13 000–28 000 | messages written and read over the stack's own time inside the library |
+| A live call, signalling, settled | 16.1 KB | 14.0–17.5 KB | the user agent's share |
+| The same, fresh | 18.0 KB | 19.2–22.6 KB | while the transactions that set it up still run |
 | A live call, media | 35.3 KB | 35.3 KB | the media engine's share: one idle G.711 session |
 
 A thousand calls, same machine: 204–578 µs and 544–1 483 µs to set a call up,
@@ -132,12 +146,17 @@ ships.
 
 The same test inside a `rust:1.95-trixie` container on the Linux x86-64
 machine, an Intel Xeon E5-2698 v4 at 2.2 GHz with eight cores given to it and
-nothing else running: a hundred calls cost **346 µs** of thread time to set
+nothing else running: a hundred calls cost **346 µs** inside the library to set
 one up at the calling end and **640 µs** at the answering end, 91 µs and
 191 µs a transaction, 38 600 and 18 300 messages a second; a thousand calls
-cost 392 µs and 974 µs, 125 µs and 301 µs, 28 000 and 11 600. Memory is the
-same to within a few dozen bytes: 16.1 KB and 17.3 KB of signalling a settled
-call, 35.2 KB of media.
+cost 392 µs and 974 µs, 125 µs and 301 µs, 28 000 and 11 600. Memory: 16.1 KB
+and 17.3 KB of signalling a settled call, 35.2 KB of media.
+
+The calling end's memory is the same to the byte from run to run; the
+answering end's is not. Seven runs of a hundred calls on the Mac, on the same
+code, gave 14.0, 14.0, 17.3, 17.3, 17.4, 17.5 and 17.5 KB a settled call and
+19.2 to 22.6 KB a fresh one, so a single figure for that end is one draw
+from a range, and the range is what the table gives.
 
 Read together:
 
@@ -171,8 +190,12 @@ Read together:
   load test's own binary, timed directly on the same machine, peaks at
   4.7 MB with one call and 20.2 MB with two hundred — about 78 KB a call of
   resident memory, against the 51 KB the allocator above counts at one end.
-  `scripts/bench.sh` still reads it through cargo, and its memory line should
-  not be quoted until it does not.
+  `scripts/bench.sh` now puts the timer around the test's own binary rather
+  than around cargo, and on the same machine later the same day it printed
+  4.5 MB with one call, 20.2 MB with two hundred, and 79 203 bytes a call.
+  The same run put the shared library at 2.99 MB, up from 2.79 MB the day
+  before, and a frame of audio at 0.8 µs with two hundred calls and 0.3 µs
+  with one, at a load average of four to five.
 
 What a real peer adds — a proxy's and a PBX's own processing, and the
 network — is not in these figures; a hundred calls through the lab's
@@ -190,19 +213,25 @@ clock its microphone and the network run on. The echo returns audio at the
 pace it was sent, so each call's jitter buffer faces exactly the skew its
 earpiece was given, and the true one is the control. The skew is then read
 back out of what the buffer did — frames played that never arrived, less
-frames that arrived and were never played, over the frames played — and set
-beside the one given.
+frames that arrived and were never played, over the frames that arrived,
+which is the ratio of the two clocks less one — and set beside the one given.
 
 The Linux x86-64 lab machine, an Intel Xeon E5-2698 v4 at 2.2 GHz, Debian
 13; the harness built with `rustc 1.95.0` in `rust:1.95-trixie`, release
 profile, and run in a `debian:trixie-slim` container on the lab network
 against Asterisk 22.10.1. G.711, 20 ms frames, the lab's cadenced tone
-(1.2 s on, 0.6 s off). The flow passed.
+(1.2 s on, 0.6 s off). The flow passed, as it judged a call then; it now
+also fails a call whose buffer runs dry in the middle of the tone. How many
+of the fast earpiece's 44 did was not counted in this run; in the short runs
+below, most of them did, so it would almost certainly have failed. The
+skews in the table are the run's own counts read the way the flow now reads
+them, over the frames that arrived; over the frames played, as the run
+printed them, they were −245.2 and +250.6.
 
 | After an hour | Earpiece 250 ppm slow | Control | Earpiece 250 ppm fast |
 |---|---|---|---|
 | Frames played | 179 456 | 179 500 | 179 545 |
-| Skew measured | −245.2 ppm | 0.0 ppm | +250.6 ppm |
+| Skew measured | −245.1 ppm | 0.0 ppm | +250.7 ppm |
 | Frames of drift absorbed | 44 (44.9 due) | 0 | 45 (44.9 due) |
 | Dropped from a pause (shrunk) | 44 | 0 | 0 |
 | Stretched into a pause | 0 | 0 | 0 |
@@ -241,16 +270,45 @@ Read together:
   seconds or so. The mean opinion score does not see it — RTCP-XR counts
   loss and discard, and nothing was lost or discarded — and neither did the
   audible-frame check, which a single frame in five minutes does not move.
-  `docs/05-media.md` says so beside the buffer's design targets; making the
-  stretch reachable at a one-frame target is the change it asks for.
+  The flow now counts silence that begins straight after the tone, or ends
+  straight into it, as the tone cut off, and fails on any, so it stays red on the fast earpiece until
+  the buffer changes. `docs/05-media.md` says so beside the buffer's design
+  targets; making the stretch reachable at a one-frame target is the change
+  it asks for.
 - **The control is the count's own check.** One frame shrunk early in the
   control's call, and its buffer one frame shallower for it, balance to
   nothing: every frame the other two moved is accounted for by the same
   count.
 
-A three-minute run at 2000 ppm on the same machine, the review length
-`docs/11-testing.md` gives, measured −2004.0 and +1996.0 ppm: 17 frames each
-way, the fast earpiece's all run dry.
+The review of this flow, on the same machine the same evening, ran it short
+— three minutes at 2000 ppm, the review length `docs/11-testing.md` gives —
+and broke it on purpose to see it fail:
+
+- **As it stands**, it measured −2000.0, 0.0 and +2000.0 ppm, 17 frames
+  each way, and failed: the fast earpiece's 17 frames were all the buffer
+  running dry, and 11 of them cut the tone off. Before the check on the tone
+  the same run passed; the ratio it printed then, over the frames played,
+  was −2004.0 and +1996.0.
+- **At an absurd skew**, ±50 000 ppm for two minutes, the flow as first
+  committed passed, with the fast earpiece's buffer running dry 275 times —
+  a gap every 0.4 s — and its audible count still above half. On the code as
+  it stands the same run fails: 183 of the 275 cut the tone off. Its slow
+  earpiece passed both times, 275 frames shrunk out of pauses and never
+  deeper than 80 ms at a report.
+- **At a skew no buffer can absorb**, ±500 000 ppm for two minutes, the slow
+  earpiece's buffer sat at 1 960–1 980 ms at every report, 2 384 frames
+  discarded for overflow, and the flow failed it at every report; the fast
+  one failed on 1 896 cuts. Its R factor and MOS-LQ stayed at 93 and 4.4
+  throughout, overflow and all, which is worth a look of its own.
+- **With the far end's audio dropped for five seconds** in the middle of a
+  two-minute run at 2000 ppm, it failed on every call's skew. It also showed
+  the measure counting that gap twice, once as the silence played and once
+  as the sequence numbers the buffer skipped afterwards: the control
+  balanced 500 frames for a gap of 250. The count now comes from what the
+  earpiece played, and the same run on the code as it stands balanced 250,
+  +47 619 ppm over the 5 250 frames that arrived, and failed every call on
+  the tone as well: the gap began in a pause and ended in the tone, which
+  counts.
 
 ## What would make these numbers worse
 
