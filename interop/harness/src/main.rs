@@ -38,6 +38,7 @@
 )]
 
 mod audio;
+mod drift;
 mod ice_lite;
 mod ice_nat;
 mod join;
@@ -387,6 +388,17 @@ fn extra_flows(
             Ok(said) => println!("  pass  local conference{said}"),
             Err(why) => {
                 println!("  FAIL  local conference — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // an hour on three calls to the same echo, and only when named: nothing
+    // that runs by default may take an hour (see `drift`)
+    if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "drift") {
+        match drift::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  an hour of drift{said}"),
+            Err(why) => {
+                println!("  FAIL  an hour of drift — {why}");
                 failures += 1;
             }
         }

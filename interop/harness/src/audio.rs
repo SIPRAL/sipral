@@ -138,6 +138,13 @@ pub(crate) struct Heard {
     pub(crate) sid_sent: u32,
     pub(crate) sid_received: u32,
     pub(crate) comfort: u32,
+    /// Frames taken for the earpiece, whatever they held: the count a clock
+    /// is measured against, since it is the earpiece's clock that decides it.
+    pub(crate) played: u32,
+    /// Frames `MediaSession::playback` reported as [`Playback::Silence`]:
+    /// nothing was due, because the buffer was still filling or had run dry
+    /// and gone back to filling.
+    pub(crate) silent: u32,
 }
 
 /// G.729's static payload type (RFC 3551 table 4).
@@ -167,6 +174,9 @@ pub(crate) struct Media {
     next: Instant,
     /// When the next frame is taken for the earpiece.
     next_play: Instant,
+    /// How long the earpiece takes to play one frame: [`PACE`], unless
+    /// [`Media::skew_playout`] set its clock off by a known amount.
+    play_pace: Duration,
     phase: u32,
     heard: Heard,
     inbox: [u8; 2_048],
@@ -191,6 +201,7 @@ impl Media {
             started: now,
             next: now,
             next_play: now,
+            play_pace: PACE,
             phase: 0,
             heard: Heard::default(),
             inbox: [0; 2_048],
@@ -198,6 +209,32 @@ impl Media {
                 .is_some()
                 .then(quality::Gate::new),
         })
+    }
+
+    /// Run this call's earpiece on a clock `ppm` parts per million fast (or
+    /// slow, below zero) against the one the microphone and the network run
+    /// on, and say how far off the pace that gives actually is.
+    ///
+    /// Two ends of a real call never share a clock, and the lab's do: every
+    /// container on one host reads the same one, so a call there has no
+    /// drift for the jitter buffer to absorb unless one is made. This makes
+    /// one of a known size. A fast earpiece asks for frames sooner than they
+    /// arrive, so the buffer has to invent some; a slow one leaves them
+    /// piling up, so it has to drop some; either way the count it keeps says
+    /// what it did, against a number known before the call.
+    ///
+    /// The pace is whole nanoseconds, so the skew actually run is not quite
+    /// the one asked for — a quarter of a nanosecond in twenty milliseconds,
+    /// a hundredth of a part per million — and the one returned is the one
+    /// to compare against.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn skew_playout(&mut self, ppm: i32) -> f64 {
+        // a clock `ppm` fast plays 1 + ppm/10^6 frames in the time the other
+        // plays one, so each of its frames lasts that much less
+        let pace = i128::try_from(PACE.as_nanos()).unwrap_or(i128::MAX);
+        let nanos = (pace * 1_000_000 / (1_000_000 + i128::from(ppm)).max(1)).max(1);
+        self.play_pace = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
+        (pace as f64 / nanos as f64 - 1.0) * 1e6
     }
 
     /// The port the offer has to advertise.
@@ -368,10 +405,14 @@ impl Media {
             if matches!(outcome, Playback::ComfortNoise) {
                 self.heard.comfort = self.heard.comfort.saturating_add(1);
             }
+            if matches!(outcome, Playback::Silence) {
+                self.heard.silent = self.heard.silent.saturating_add(1);
+            }
             if let Some(gate) = self.quality.as_mut() {
                 gate.observe(outcome, room, rate);
             }
-            self.next_play += PACE;
+            self.heard.played = self.heard.played.saturating_add(1);
+            self.next_play += self.play_pace;
         }
     }
 

@@ -33,6 +33,20 @@
 #                               in interop/pipewire's own image, and not part
 #                               of a run that names nothing, because it
 #                               compiles the facade inside a container
+#   scripts/lab.sh drift        an hour on three calls to Asterisk's echo, with
+#                               each earpiece's clock set off by a known skew,
+#                               reporting what the jitter buffer did every
+#                               five minutes -- not part of a run that names
+#                               nothing, because it takes an hour.
+#                               SIPRAL_DRIFT_MS, SIPRAL_DRIFT_REPORT_MS and
+#                               SIPRAL_DRIFT_PPM change its length, its
+#                               interval and its skew (milliseconds,
+#                               milliseconds, parts per million); a few
+#                               minutes wants a larger skew, since 250 ppm
+#                               is two frames of drift in three minutes:
+#                               SIPRAL_DRIFT_MS=180000
+#                               SIPRAL_DRIFT_REPORT_MS=30000
+#                               SIPRAL_DRIFT_PPM=2000 scripts/lab.sh drift
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -1381,6 +1395,28 @@ bad_network() {
             fi
             exit $status'
 }
+
+# An hour on three calls to Asterisk's echo (interop/harness/src/drift.rs):
+# the drift a real pair of clocks makes, which the lab's two ends cannot make
+# on their own since they read one host's clock, made instead by running each
+# call's earpiece a known number of parts per million fast or slow. No
+# capture: three calls for an hour are over a million packets, and what this
+# step proves is in the report lines, not on the wire.
+drift_flow() {
+    docker run --rm --network sipral-interop_lab \
+        -e SIPRAL_FLOWS=drift \
+        -e SIPRAL_DRIFT_MS="${SIPRAL_DRIFT_MS:-3600000}" \
+        -e SIPRAL_DRIFT_REPORT_MS="${SIPRAL_DRIFT_REPORT_MS:-300000}" \
+        -e SIPRAL_DRIFT_PPM="${SIPRAL_DRIFT_PPM:-250}" \
+        -v "$HARNESS:/harness:ro" \
+        debian:trixie-slim /harness asterisk 5060 9000
+}
+
+if [ "$WANT" = drift ]; then
+    step "an hour on one call -- three calls to Asterisk's echo, their earpieces skewed"
+    drift_flow && pass "the jitter buffer kept all three calls level" \
+        || fail "an hour of drift"
+fi
 
 if [ "$WANT" = all ] || [ "$WANT" = kamailio ]; then
     step "register, call, hold, resume, transfer -- through the proxy"

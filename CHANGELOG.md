@@ -39,6 +39,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   stacks behind two NATs that drop everything between them but SIP fail to
   connect without a relay, and with one the call completes through coturn
   and both allocations are given back.
+- **An hour on a call, and what the jitter buffer did for all of it.**
+  `scripts/lab.sh drift` — not part of a run that names nothing, since it
+  takes an hour — holds three calls to Asterisk's echo for sixty minutes,
+  each with its earpiece's clock set a known number of parts per million
+  fast, slow or true, because the lab's two ends read one host's clock and
+  would otherwise drift by nothing. Every five minutes it prints each call's
+  buffer depth, frames shrunk, stretched, concealed and played as silence
+  for want of a packet, and the skew those come to, and it fails if a call
+  ends early, a buffer grows past 250 ms, audio stops, or the measured skew
+  is more than a quarter of the run's skew from the one given.
 - **A hundred calls' worth of signalling, measured and tested.**
   `crates/sipral-ffi/tests/signalling_load.rs` puts two stacks — a user agent
   and a media engine each — on either end of a hundred concurrent calls with
