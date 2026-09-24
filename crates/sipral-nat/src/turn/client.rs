@@ -1048,8 +1048,10 @@ impl TurnClient {
             return;
         }
         // an unsigned 400 is discarded as if it had never arrived, and the
-        // request is retransmitted as before (RFC 8489 §9.2.5)
-        if is_unsigned_bad_request(message) {
+        // request is retransmitted as before (RFC 8489 §9.2.5), by a client
+        // running the long-term mechanism; without credentials it fails the
+        // request (§6.3.4)
+        if self.config.credentials.is_some() && is_unsigned_bad_request(message) {
             return;
         }
         if authenticated
@@ -2100,6 +2102,27 @@ mod tests {
         let second = sent(&mut client);
         let second = Message::parse(&second).unwrap();
         assert_eq!(second.nonce(), Some(NONCE));
+    }
+
+    #[test]
+    fn without_credentials_a_400_to_the_allocate_ends_it() {
+        // an open relay: no long-term mechanism is running, so the 400 is
+        // the answer (RFC 8489 §6.3.4), not something to wait out
+        let now = Instant::now();
+        let mut client = TurnClient::new(TurnConfig::default());
+        let mut ids = Ids::new();
+        ids.feed(&mut client);
+        client.allocate(now).unwrap();
+        let first = sent(&mut client);
+        let first = Message::parse(&first).unwrap();
+
+        let mut builder = MessageBuilder::new(Class::Error, first.method(), first.transaction_id());
+        builder.add_error_code(400, b"Bad Request").unwrap();
+        assert_eq!(client.handle_input(&builder.finish(), now), Input::Consumed);
+        assert_eq!(
+            events(&mut client),
+            vec![Event::Closed(TurnError::Rejected { code: 400 })]
+        );
     }
 
     #[test]

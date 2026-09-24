@@ -417,8 +417,9 @@ impl BindingClient {
         // (Bad Request) and does not contain either the MESSAGE-INTEGRITY or
         // MESSAGE-INTEGRITY-SHA256 attribute, then the response MUST be
         // discarded, as if it were never received" (§9.2.5): the request
-        // goes on being retransmitted
-        if is_unsigned_bad_request(&message) {
+        // goes on being retransmitted. That is the long-term mechanism's
+        // rule; without credentials a 400 fails the request (§6.3.4)
+        if self.config.credentials.is_some() && is_unsigned_bad_request(&message) {
             return Progress::Idle;
         }
 
@@ -1264,7 +1265,7 @@ mod tests {
         // MESSAGE-INTEGRITY-SHA256 attribute, then the response MUST be
         // discarded, as if it were never received" (RFC 8489 §9.2.5)
         let start = Instant::now();
-        let mut client = client();
+        let mut client = authenticated_client();
         client.start(identifier(1), start);
 
         let mut builder = MessageBuilder::new(Class::Error, Method::BINDING, identifier(1));
@@ -1276,6 +1277,27 @@ mod tests {
         assert_eq!(
             client.on_datagram(&response),
             Progress::Mapped(address("198.51.100.7:53412"))
+        );
+    }
+
+    #[test]
+    fn without_credentials_a_400_ends_the_transaction_at_once() {
+        // §9.2.5 is the long-term credential mechanism's; a client that has
+        // no credentials is not running it, and for a plain Binding request
+        // "if the error code is 400 through 499, the client declares the
+        // transaction failed" (§6.3.4). Discarding it would only have a
+        // server's refusal reported as a timeout, seconds later, and would
+        // protect nothing: nothing an unauthenticated exchange receives can
+        // be told from what anyone on the path writes
+        let start = Instant::now();
+        let mut client = client();
+        client.start(identifier(1), start);
+
+        let mut builder = MessageBuilder::new(Class::Error, Method::BINDING, identifier(1));
+        builder.add_error_code(400, b"Bad Request").unwrap();
+        assert_eq!(
+            client.on_datagram(&builder.finish()),
+            Progress::Failed(Failure::Rejected { code: 400 })
         );
     }
 

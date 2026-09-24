@@ -266,9 +266,12 @@ The decisions, and why each one is what it is:
   answer carrying the id of a request this end sent. The ids come from the
   media engine's generator, the one SRTP keys come from: an attacker off the
   path who could guess one could answer first and have this end advertise an
-  address of the attacker's choosing, in every `Contact` and every offer. An
-  unsigned 400 is not an answer: RFC 8489 §9.2.5 has it discarded and the
-  request retransmitted, and so it is.
+  address of the attacker's choosing, in every `Contact` and every offer. A
+  400 is the server's refusal and ends the request at once (RFC 8489 §6.3.4):
+  the rule that discards an unsigned one belongs to the long-term credential
+  mechanism (§9.2.5), which a mapping asked without credentials does not run,
+  and it would protect nothing there, since nothing an unauthenticated
+  exchange receives can be told from what anyone on the path writes.
 
 ## TURN
 
@@ -285,8 +288,10 @@ who wrote them beyond the relay's 5-tuple. The full ICE agent does. Long-term
 credentials follow RFC 8489 §9.2: the first request goes out bare, a 401 is
 answered once per transaction, a 438 once per new nonce and at most three
 times, and a server that rotates its nonce without saying stale costs one
-retry per request rather than a loop. The derived key is wiped with every copy
-of it that is dropped, and neither it nor the password reaches a `Debug`.
+retry per request rather than a loop. The derived key is overwritten as it is
+dropped, with the password's own best effort — no volatile write without
+`unsafe`, and a move leaves the bytes it moved from — and neither it nor the
+password reaches a `Debug`.
 
 Nothing in the facade reaches it yet: the agent the facade builds names no
 TURN server.
