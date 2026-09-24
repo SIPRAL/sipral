@@ -131,6 +131,18 @@ const LOSS_WINDOW: usize = LOSS_WORDS * 64;
 /// The same, as the counter's own type.
 const LOSS_CAPACITY: u16 = 512;
 
+/// How far behind the playout point, in sequence numbers, a packet counted
+/// lost may still turn up and be recounted as a discard for RFC 3611
+/// §4.7.1: ten seconds at twenty milliseconds. Later than that it stays
+/// lost, the "degree of lateness that triggers a loss", which §4.7.1 asks
+/// to be "significantly greater than that which triggers a discard"; a
+/// packet is late for a discard as soon as its turn has passed.
+const LATE_WINDOW: u16 = 512;
+
+/// Sixty-four bit words of which of the last [`LATE_WINDOW`] sequence
+/// numbers were counted lost.
+const LATE_WORDS: usize = LATE_WINDOW as usize / 64;
+
 /// Whether the frame about to be played is speech or a pause.
 ///
 /// The buffer only changes its delay in a pause, so this decides when it is
@@ -600,20 +612,27 @@ pub struct JitterBuffer {
     loss: LossWindow,
     counts: Counters,
     /// RFC 3611 §4.7.2's burst/gap classification, fed exactly once per
-    /// sequence number as its fate is finally decided: `Received` when a
-    /// held packet is played (in [`Self::pull`]), `Lost` when a slot comes
-    /// due empty or the window jumps clean past it (in [`Self::pull`] and
-    /// [`Self::slide`]), and `Discarded` when a held-but-unplayed packet
-    /// is evicted by a window jump (`Self::slide`), passed over before
-    /// playout starts (`Self::pass_over`), or thrown out with the window by
-    /// [`Self::restart`] or [`Self::reformat`]. A late or duplicate
-    /// arrival ([`Insert::Late`], [`Insert::Duplicate`]) contributes
-    /// nothing: its sequence number was already resolved, or (duplicates)
-    /// SS4.7.1 excludes it outright ("excluding duplicate packet
-    /// discards"). A held-and-accepted packet is not fed here either — it
-    /// still awaits the outcome [`Self::pull`] gives it later, and feeding
-    /// it twice would double the count.
+    /// sequence number as its fate is finally decided, through
+    /// `Self::resolve`: `Received` when a held packet is played (in
+    /// [`Self::pull`]) or given up in a pause (`Self::shorten`), `Lost` when
+    /// a slot comes due empty, is skipped in a pause, or is passed over, and
+    /// `Discarded` when a held-but-unplayed packet is evicted by a window
+    /// jump (`Self::slide`), passed over before playout starts
+    /// (`Self::pass_over`), or thrown out with the window by
+    /// [`Self::restart`] or [`Self::reformat`], whose empty slots are lost.
+    /// A packet that turns up after its turn ([`Insert::Late`]) was already
+    /// resolved as lost, and within [`LATE_WINDOW`] of the playout point it
+    /// is recounted as discarded, as §4.7.1 has it; one whose turn it was
+    /// played in is a duplicate, which §4.7.1 excludes outright ("excluding
+    /// duplicate packet discards"), as it does an [`Insert::Duplicate`]. A
+    /// held-and-accepted packet is not fed here either — it still awaits the
+    /// outcome [`Self::pull`] gives it later, and feeding it twice would
+    /// double the count.
     gmin: GminTracker,
+    /// Which of the last [`LATE_WINDOW`] sequence numbers resolved were
+    /// resolved as lost, one bit each, by sequence number: what a packet
+    /// turning up late is looked up in.
+    resolved_lost: [u64; LATE_WORDS],
 }
 
 impl JitterBuffer {
@@ -652,6 +671,7 @@ impl JitterBuffer {
             loss: LossWindow::new(),
             counts: Counters::default(),
             gmin: GminTracker::new(RECOMMENDED_GMIN),
+            resolved_lost: [0; LATE_WORDS],
         }
     }
 
@@ -682,6 +702,9 @@ impl JitterBuffer {
             // counts in full whatever its marker says
             self.note_arrival(sequence, header.timestamp, arrival, false);
             self.counts.discarded_late = self.counts.discarded_late.saturating_add(1);
+            if self.next.wrapping_sub(sequence) <= LATE_WINDOW && self.take_lost(sequence) {
+                self.gmin.late();
+            }
             return Insert::Late;
         }
 
@@ -756,7 +779,7 @@ impl JitterBuffer {
             return Pull::Empty;
         }
 
-        if !self.playing && !self.start() {
+        if !self.playing && !self.start(activity) {
             return Pull::Empty;
         }
 
@@ -785,17 +808,17 @@ impl JitterBuffer {
                 self.playing = false;
                 return Pull::Empty;
             }
+            self.resolve(self.next, PacketOutcome::Lost);
             self.advance_base(1);
             self.counts.lost = self.counts.lost.saturating_add(1);
             self.loss.record(true);
-            self.gmin.observe(PacketOutcome::Lost);
             return Pull::Conceal;
         }
 
+        self.resolve(self.next, PacketOutcome::Received);
         self.advance_base(1);
         self.held = self.held.saturating_sub(1);
         self.loss.record(false);
-        self.gmin.observe(PacketOutcome::Received);
 
         let Some(slot) = self.slots.get_mut(index) else {
             // it was filled a moment ago, so this cannot happen either
@@ -816,22 +839,32 @@ impl JitterBuffer {
     /// has restarted its stream, where what is still in the window belongs to
     /// a stream that no longer exists.
     pub fn restart(&mut self) {
-        for slot in &mut self.slots {
-            slot.filled = false;
-        }
         // what was waiting is thrown away, and saying so is the difference
         // between a counter that accounts for every packet taken in and one
         // that quietly loses some
-        self.counts.discarded_overflow = self
-            .counts
-            .discarded_overflow
-            .saturating_add(u64::from(self.held));
-        self.discard_held();
+        self.throw_out_window();
+        for slot in &mut self.slots {
+            slot.filled = false;
+        }
         self.held = 0;
         self.arrived = 0;
         self.anchored = false;
         self.playing = false;
         self.timing.restart();
+        // the next packet anchors the window afresh, and nothing behind it
+        // is known to have been lost
+        self.resolved_lost = [0; LATE_WORDS];
+    }
+
+    /// Start RFC 3611 §4.7's figures again, for a stream that is now another
+    /// source's. §4.7.1's rates are the fraction of packets "from the source
+    /// ... since the beginning of reception", and the block names the source
+    /// it describes, so what the last source lost or had thrown out is not
+    /// the new one's to answer for. `Gmin` stays what it was (§4.7.2).
+    /// The buffer's own counters belong to the call and carry on.
+    pub(crate) fn begin_source(&mut self) {
+        self.gmin = GminTracker::new(self.gmin.gmin());
+        self.resolved_lost = [0; LATE_WORDS];
     }
 
     /// Rebuild for a stream that changed codec mid-call, keeping what the call
@@ -851,28 +884,69 @@ impl JitterBuffer {
     /// the re-negotiation. The same goes for what RFC 3611 §4.7 reports about
     /// the stream, which describes the RTP session rather than its format.
     pub fn reformat(&mut self, clock_rate: u32, config: &BufferConfig) {
-        let mut counts = self.counts;
         // the same accounting `restart` does, for the same reason: what is in
         // the window belongs to the old format and cannot be played under the
         // new one
-        counts.discarded_overflow = counts
-            .discarded_overflow
-            .saturating_add(u64::from(self.held));
-        self.discard_held();
+        self.throw_out_window();
+        let counts = self.counts;
         let gmin = self.gmin;
         *self = Self::new(clock_rate, config);
         self.counts = counts;
         self.gmin = gmin;
     }
 
-    /// Tell the RFC 3611 §4.7 tracker that every packet held is being thrown
-    /// out unplayed. They arrived and the buffer dropped them, which is what
-    /// §4.7.1's discard rate counts, and the quality ratings are computed
-    /// from that rate as well as the loss.
-    fn discard_held(&mut self) {
-        for _ in 0..self.held {
-            self.gmin.observe(PacketOutcome::Discarded);
+    /// Resolve every sequence number from the playout point to the newest
+    /// received, as the window is thrown out unplayed: each packet held is
+    /// discarded, which is what §4.7.1's discard rate counts and the quality
+    /// ratings are computed from as well as the loss, and each slot still
+    /// empty is a packet that never arrived and now never will.
+    fn throw_out_window(&mut self) {
+        let mut discarded = 0_u16;
+        for offset in 0..self.queued() {
+            let sequence = self.next.wrapping_add(offset);
+            let filled = self
+                .slots
+                .get(self.index_of(sequence))
+                .is_some_and(|slot| slot.filled);
+            if filled {
+                discarded = discarded.saturating_add(1);
+                self.resolve(sequence, PacketOutcome::Discarded);
+            } else {
+                self.counts.lost = self.counts.lost.saturating_add(1);
+                self.resolve(sequence, PacketOutcome::Lost);
+            }
         }
+        self.counts.discarded_overflow = self
+            .counts
+            .discarded_overflow
+            .saturating_add(u64::from(discarded));
+    }
+
+    /// Hand the RFC 3611 §4.7 tracker the fate of `sequence`, and remember
+    /// whether it was lost, for a packet that turns up after it.
+    fn resolve(&mut self, sequence: u16, outcome: PacketOutcome) {
+        let bit = usize::from(sequence % LATE_WINDOW);
+        if let Some(word) = self.resolved_lost.get_mut(bit / 64) {
+            let mask = 1_u64 << (bit % 64);
+            if outcome == PacketOutcome::Lost {
+                *word |= mask;
+            } else {
+                *word &= !mask;
+            }
+        }
+        self.gmin.observe(outcome);
+    }
+
+    /// Whether `sequence` was resolved as lost, forgetting it if so, so a
+    /// second copy of it is the duplicate it is.
+    fn take_lost(&mut self, sequence: u16) -> bool {
+        let bit = usize::from(sequence % LATE_WINDOW);
+        let mask = 1_u64 << (bit % 64);
+        self.resolved_lost.get_mut(bit / 64).is_some_and(|word| {
+            let lost = *word & mask != 0;
+            *word &= !mask;
+            lost
+        })
     }
 
     /// Everything measured about this stream.
@@ -1016,19 +1090,32 @@ impl JitterBuffer {
     /// together, with no such gap between them, are all played, however many
     /// there are: that is the far end talking, and a delay that is longer than
     /// it has to be is given back in its next pause.
-    fn start(&mut self) -> bool {
+    ///
+    /// In a pause it waits for [`IN_HAND`] as well, which is how a spurt from
+    /// a far end that sends nothing in its pauses gets its frame in hand. The
+    /// buffer is empty at the end of every such pause, and a spurt started on
+    /// a single packet would be stretched on the very next pull, a frame the
+    /// codec conceals from the last audio it decoded — the end of the spurt
+    /// before — played just ahead of the new one. Waiting instead costs the
+    /// same frame, played as the pause it falls in.
+    fn start(&mut self, activity: Activity) -> bool {
         if self.held == 0 {
             return false;
         }
+        let wanted = if activity == Activity::Silence {
+            self.target.max(IN_HAND)
+        } else {
+            self.target
+        };
         let gap = self.leading_gap();
-        if self.queued().saturating_sub(gap) < self.target {
+        if self.queued().saturating_sub(gap) < wanted {
             return false;
         }
         self.pass_over(gap);
         let stranded = self.stranded();
         if stranded > 0 {
             self.pass_over(stranded);
-            if self.queued() < self.target {
+            if self.queued() < wanted {
                 return false;
             }
         }
@@ -1073,10 +1160,10 @@ impl JitterBuffer {
                 slot.filled = false;
                 self.held = self.held.saturating_sub(1);
                 self.counts.discarded_overflow = self.counts.discarded_overflow.saturating_add(1);
-                self.gmin.observe(PacketOutcome::Discarded);
+                self.resolve(self.next, PacketOutcome::Discarded);
             } else {
                 self.counts.lost = self.counts.lost.saturating_add(1);
-                self.gmin.observe(PacketOutcome::Lost);
+                self.resolve(self.next, PacketOutcome::Lost);
             }
             self.advance_base(1);
         }
@@ -1100,6 +1187,15 @@ impl JitterBuffer {
     /// Give up the oldest frame to bring the delay down by one. A slot that is
     /// empty anyway costs nothing to skip, which is the cheapest shrink there
     /// is and the reason this looks at the slot before counting anything.
+    ///
+    /// For RFC 3611 §4.7 the empty slot is a packet lost like any other. The
+    /// frame given up is received: §4.7.1 names what makes a discard — "late
+    /// or early arrival, under-run or overflow" — and a frame of a pause that
+    /// arrived in time and was dropped by choice is none of them, nor is it
+    /// missed by the ear, which is what the ratings computed from the discard
+    /// rate stand for. It is still a packet expected, and leaving it out
+    /// would take one from §4.7.1's "total number of packets expected" for
+    /// every frame given up.
     fn shorten(&mut self) {
         let index = self.index_of(self.next);
         let filled = self.slots.get(index).is_some_and(|slot| slot.filled);
@@ -1109,8 +1205,10 @@ impl JitterBuffer {
             }
             self.held = self.held.saturating_sub(1);
             self.counts.shrunk = self.counts.shrunk.saturating_add(1);
+            self.resolve(self.next, PacketOutcome::Received);
         } else {
             self.counts.lost = self.counts.lost.saturating_add(1);
+            self.resolve(self.next, PacketOutcome::Lost);
         }
         self.advance_base(1);
     }
@@ -1124,6 +1222,10 @@ impl JitterBuffer {
         // the same slots as a jump of exactly one window
         let steps = advance.min(self.depth);
 
+        // Every one of the `advance` sequence numbers the window just jumped
+        // past is resolved right here, once each and in order: those held
+        // but never played are RFC 3611 §4.7.1 discards (overflow at "the
+        // receiving jitter buffer"); the rest were never received at all
         let mut displaced: u16 = 0;
         let mut sequence = self.next;
         for _ in 0..steps {
@@ -1133,7 +1235,14 @@ impl JitterBuffer {
             {
                 slot.filled = false;
                 displaced = displaced.saturating_add(1);
+                self.resolve(sequence, PacketOutcome::Discarded);
+            } else {
+                self.resolve(sequence, PacketOutcome::Lost);
             }
+            sequence = sequence.wrapping_add(1);
+        }
+        for _ in steps..advance {
+            self.resolve(sequence, PacketOutcome::Lost);
             sequence = sequence.wrapping_add(1);
         }
 
@@ -1146,17 +1255,6 @@ impl JitterBuffer {
         // consumer will never be told about any other way
         let skipped = u64::from(advance).saturating_sub(u64::from(displaced));
         self.counts.lost = self.counts.lost.saturating_add(skipped);
-        // Every one of the `advance` sequence numbers the window just
-        // jumped past is resolved right here, once each: the `displaced`
-        // of them that were held but never played are RFC 3611 §4.7.1
-        // discards (late or, here, overflow at "the receiving jitter
-        // buffer"); the rest were never received at all.
-        for _ in 0..displaced {
-            self.gmin.observe(PacketOutcome::Discarded);
-        }
-        for _ in 0..skipped {
-            self.gmin.observe(PacketOutcome::Lost);
-        }
         self.advance_base(advance);
         displaced
     }
@@ -1514,6 +1612,61 @@ mod tests {
             128,
             "the stream's figures outlive its format, as its counters do"
         );
+    }
+
+    #[test]
+    fn a_shrink_in_a_pause_is_accounted_for_in_the_rfc_3611_rates() {
+        // 1 never arrives, and a pause drops the empty slot where it would
+        // have been, then 3 and 5 to bring the delay down: ten sequence
+        // numbers expected, one lost, and a frame given up by choice is none
+        // of §4.7.1's causes of a discard
+        let mut buffer = buffer(20, 1);
+        for sequence in [0_u16, 2, 3, 4, 5, 6, 7, 8, 9] {
+            insert(&mut buffer, sequence);
+        }
+        assert_eq!(pull(&mut buffer), Some(0));
+        let mut played = Vec::new();
+        for _ in 0..4 {
+            if let Pull::Packet(frame) = buffer.pull(Activity::Silence) {
+                played.push(frame.sequence);
+            }
+        }
+        while let Some(sequence) = pull(&mut buffer) {
+            played.push(sequence);
+        }
+        assert_eq!(played, vec![2, 4, 6, 7, 8, 9]);
+        assert_eq!(buffer.quality().shrunk, 2);
+        assert_eq!(buffer.quality().lost, 1);
+        let metrics = buffer.burst_gap_metrics();
+        assert_eq!(metrics.loss_rate, 25, "one in ten, in 256ths");
+        assert_eq!(metrics.discard_rate, 0);
+    }
+
+    #[test]
+    fn a_packet_that_turns_up_after_its_turn_is_a_discard_and_not_a_loss() {
+        // §4.7.1 counts a packet discarded "due to late ... arrival" in the
+        // discard rate, and lets a receiver call it lost only for a lateness
+        // "significantly greater than that which triggers a discard"
+        let mut buffer = buffer(20, 1);
+        for sequence in [0_u16, 1, 3] {
+            insert(&mut buffer, sequence);
+        }
+        assert_eq!(pull(&mut buffer), Some(0));
+        assert_eq!(pull(&mut buffer), Some(1));
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
+        assert_eq!(pull(&mut buffer), Some(3));
+        assert_eq!(buffer.burst_gap_metrics().loss_rate, 64);
+
+        assert_eq!(insert(&mut buffer, 2), Insert::Late);
+        let metrics = buffer.burst_gap_metrics();
+        assert_eq!((metrics.loss_rate, metrics.discard_rate), (0, 64));
+
+        // the same packet again, and one that was played arriving a second
+        // time, are duplicates, which §4.7.1 leaves out of both
+        assert_eq!(insert(&mut buffer, 2), Insert::Late);
+        assert_eq!(insert(&mut buffer, 1), Insert::Late);
+        let metrics = buffer.burst_gap_metrics();
+        assert_eq!((metrics.loss_rate, metrics.discard_rate), (0, 64));
     }
 
     #[test]
@@ -1953,6 +2106,17 @@ mod tests {
     /// milliseconds either side of its tick, as a device callback does, so
     /// an arrival near a pull is sometimes before it and sometimes after.
     fn played_against_a_skew(skew_ppm: i64, pulls: u32) -> (JitterBuffer, u32, u32) {
+        played_against(skew_ppm, pulls, false)
+    }
+
+    /// As [`played_against_a_skew`], and with `silent_pauses` the far end
+    /// sends nothing in its pauses, as one suppressing silence does: its
+    /// sequence numbers run on unbroken, its timestamps jump the pause, and
+    /// each spurt opens with a marker. The earpiece then hears a pause as
+    /// whatever it played that was not a packet, and what counts as running
+    /// dry is a frame without a packet inside a spurt, between one of its
+    /// packets and the next.
+    fn played_against(skew_ppm: i64, pulls: u32, silent_pauses: bool) -> (JitterBuffer, u32, u32) {
         const FRAME_US: i64 = 20_000;
         let mut buffer = buffer(100, 1);
         let pull_every = FRAME_US * 1_000_000 / (1_000_000 + skew_ppm);
@@ -1960,24 +2124,48 @@ mod tests {
         let mut next_arrival = FRAME_US / 2 + 1;
         let mut tick = FRAME_US;
         let mut sequence = 0_u16;
+        let mut sent = 0_u32;
         let (mut played, mut dry, mut pulled) = (0_u32, 0_u32, 0_u32);
+        let (mut heard_a_packet, mut empty_since_a_packet) = (false, 0_u32);
         while pulled < pulls {
             let wobble = (i64::from(pulled) * 7_919 % 7 - 3) * 1_000;
             let next_pull = tick + wobble;
             if next_arrival < next_pull {
-                let at = Duration::from_micros(u64::try_from(next_arrival).unwrap());
-                insert_at(&mut buffer, sequence, at);
-                sequence = sequence.wrapping_add(1);
+                let talking = sent % 90 < 60;
+                if talking || !silent_pauses {
+                    let at = Duration::from_micros(u64::try_from(next_arrival).unwrap());
+                    let opens = silent_pauses && sent.is_multiple_of(90);
+                    let bytes = spurt_datagram(sequence, sent, opens);
+                    let packet = RtpPacket::parse(&bytes).expect("a packet");
+                    buffer.insert(&packet, at);
+                    sequence = sequence.wrapping_add(1);
+                }
+                sent += 1;
                 next_arrival += FRAME_US;
                 continue;
             }
-            let activity = if pulled % 90 < 60 {
+            let activity = if silent_pauses {
+                if heard_a_packet {
+                    Activity::Speech
+                } else {
+                    Activity::Silence
+                }
+            } else if pulled % 90 < 60 {
                 Activity::Speech
             } else {
                 Activity::Silence
             };
+            heard_a_packet = false;
             match buffer.pull(activity) {
-                Pull::Packet(_) => played += 1,
+                Pull::Packet(frame) => {
+                    if silent_pauses && !frame.marker {
+                        dry += empty_since_a_packet;
+                    }
+                    empty_since_a_packet = 0;
+                    played += 1;
+                    heard_a_packet = true;
+                }
+                Pull::Empty if silent_pauses => empty_since_a_packet += 1,
                 Pull::Empty if played > 0 => dry += 1,
                 Pull::Conceal | Pull::Stretch | Pull::Empty => {}
             }
@@ -1987,10 +2175,54 @@ mod tests {
         (buffer, played, dry)
     }
 
+    /// The `sent`th frame of the far end's clock, carried as `sequence`.
+    fn spurt_datagram(sequence: u16, sent: u32, marker: bool) -> Vec<u8> {
+        let header = RtpHeader {
+            marker,
+            payload_type: 0,
+            sequence,
+            timestamp: sent.wrapping_mul(SPAN),
+            ssrc: 0x1234_5678,
+        };
+        let payload = sequence.to_be_bytes();
+        let mut out = vec![0; 32];
+        let n = PacketBuilder::new(header, &payload)
+            .write(&mut out)
+            .expect("room");
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn a_spurt_after_a_silent_pause_fills_its_frame_in_hand_rather_than_stretching() {
+        // a far end suppressing silence empties the buffer in every pause,
+        // and the next spurt starts it again. A spurt that started on one
+        // packet and was stretched on the next pull would buy its frame in
+        // hand with a frame of concealment built from the end of the spurt
+        // before, heard just ahead of the new one; waiting for the second
+        // packet buys it with a frame of the pause the earpiece was playing
+        // anyway
+        for skew in [0, 5_000, -5_000] {
+            let (buffer, played, dry) = played_against(skew, 9_000, true);
+            let quality = buffer.quality();
+            assert_eq!(
+                quality.stretched, 0,
+                "{skew} ppm: stretched {}",
+                quality.stretched
+            );
+            assert_eq!(
+                dry, 0,
+                "{skew} ppm: the buffer ran dry {dry} times in a spurt"
+            );
+            assert_eq!(quality.lost, 0, "{skew} ppm");
+            assert!(played >= 5_900, "{skew} ppm: played {played}");
+        }
+    }
+
     #[test]
     fn a_fast_earpiece_at_a_one_frame_target_is_stretched_and_never_runs_dry() {
-        // 5000 ppm fast: a frame slips every four seconds, about fifty in
-        // four minutes, each of which used to be a frame of silence played
+        // 5000 ppm fast: a frame slips every four seconds, sixty in the four
+        // minutes of pulls, each of which used to be a frame of silence played
         // wherever it fell, since at a target of one the queue has nowhere
         // below the target to fall to but empty
         let (buffer, _, dry) = played_against_a_skew(5_000, 12_000);

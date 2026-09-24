@@ -644,7 +644,10 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   wherever it fell, a word included, one every eighty seconds at 250 ppm.
   A pause now never leaves fewer than two packets queued, so a fast
   earpiece's slip takes the frame in hand and the next pause stretches it
-  back. A clean path pays one frame of delay for it, bought in a pause.
+  back. A clean path pays one frame of delay for it, bought in a pause. A
+  talk spurt from a far end that sends nothing in its pauses waits for its
+  second packet rather than being stretched as it starts, which would have
+  played a frame concealed from the end of the spurt before.
 - **The R factor and MOS-LQ count what the jitter buffer threw out.**
   They were rated from the loss rate alone, so a call whose buffer
   discarded most of what arrived still rated R 93 and MOS-LQ 4.4. RFC 3611
@@ -653,6 +656,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   buffer throws out on a restart of the far end's stream or a change of
   codec is now in the discard rate as well, and the RFC 3611 figures
   outlive a change of codec as the buffer's own counters do.
+- **RTCP XR's loss and discard rates count every packet once, as RFC 3611
+  defines them.** A packet that turned up after its turn stayed counted as
+  lost, where §4.7.1 has late arrival among a discard's causes; within 512
+  sequence numbers of the playout point it is now a discard. An empty slot
+  skipped in a pause was left out of the loss rate, and a frame given up in
+  a pause out of the packets expected. And the rates of a stream that took
+  on a new source carried what the old source lost and had thrown out,
+  though the block names the new one: they start again with it, as the RFC
+  3550 reception statistics do.
 - **A flood of ICE checks can no longer grow a call's memory without bound.**
   Both ICE roles answer every Binding request that reaches the media port, a
   stranger's unsigned one included, and queued the answers for as long as

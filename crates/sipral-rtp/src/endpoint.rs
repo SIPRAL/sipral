@@ -910,6 +910,7 @@ impl RtpSession {
         self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
+        self.inbound.buffer.begin_source();
         self.inbound.rtcp = ReceptionTracker::new();
         self.forget_departed();
     }
@@ -935,6 +936,7 @@ impl RtpSession {
         self.inbound.rtcp_source = None;
         self.inbound.sequence.reset();
         self.inbound.buffer.restart();
+        self.inbound.buffer.begin_source();
         self.inbound.rtcp = ReceptionTracker::new();
         self.forget_departed();
     }
@@ -1788,6 +1790,39 @@ mod tests {
             clean.r_factor
         );
         assert!(overflowed.mos_lq < clean.mos_lq);
+    }
+
+    #[test]
+    fn a_new_source_is_rated_on_its_own_packets_and_not_the_last_ones() {
+        // RFC 3611 §4.7.1's rates are the fraction of packets "from the
+        // source ... since the beginning of reception", and the block names
+        // the source it describes: what the buffer threw out of the old
+        // source's stream is not the new one's to answer for
+        for change in [
+            RtpSession::follow as fn(&mut RtpSession, u32),
+            |session, _| {
+                session.resync();
+            },
+        ] {
+            let mut session = session();
+            let next = establish(&mut session, 7, addr(PEER));
+            for step in 0..24_u16 {
+                session.receive(&mut datagram(7, next + step, 8), addr(PEER), Duration::ZERO);
+            }
+            while matches!(session.pull(Activity::Speech), Pull::Packet(_)) {}
+            let before = session.voip_metrics(None).expect("a source");
+            assert!(before.discard_rate > 0, "the old source overflowed");
+
+            change(&mut session, 9);
+            let next = establish(&mut session, 9, addr(PEER));
+            for step in 0..24_u16 {
+                session.receive(&mut datagram(9, next + step, 8), addr(PEER), Duration::ZERO);
+                assert!(matches!(session.pull(Activity::Speech), Pull::Packet(_)));
+            }
+            let after = session.voip_metrics(None).expect("a source");
+            assert_eq!(after.ssrc, 9);
+            assert_eq!((after.loss_rate, after.discard_rate), (0, 0));
+        }
     }
 
     #[test]

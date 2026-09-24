@@ -287,13 +287,27 @@ pseudocode so a reviewer can check the two side by side — fed by
 `playout::JitterBuffer` exactly once per sequence number as its fate is
 resolved: `Received` or `Lost` at `JitterBuffer::pull`, `Discarded` or
 `Lost` at a window jump in `JitterBuffer::slide` and when playout starts
-past packets it will not play, and `Discarded` for everything the window
-held when `JitterBuffer::restart` or `JitterBuffer::reformat` throws it out.
-Every packet the buffer counts in `Quality::discarded_overflow` is
-therefore in §4.7.1's discard rate. `Gmin` is fixed at its RFC-recommended
-16 for the life of the stream, a change of codec included (§4.7.2), and
-the tracker's counts outlive a change of codec the way the buffer's own
-counters do. Round-trip delay is
+past packets it will not play, `Received` or `Lost` for a frame given up
+or an empty slot skipped in a pause, and `Discarded` for everything the
+window held, `Lost` for every slot still empty in it, when
+`JitterBuffer::restart` or `JitterBuffer::reformat` throws it out. Every
+packet the buffer counts in `Quality::discarded_overflow` is therefore in
+§4.7.1's discard rate. A frame given up in a pause is not: §4.7.1 names
+what makes a discard — "late or early arrival, under-run or overflow" — and
+a frame of a pause that arrived in time and was dropped by choice is none
+of them, nor is it missed by the ear. A packet counted lost that turns up
+within 512 sequence numbers of the playout point is recounted as a
+discard, since §4.7.1 has late arrival among a discard's causes and asks
+that the lateness that makes a loss be "significantly greater" than the
+lateness that makes a discard; one that turns up later than that stays
+lost, and a second copy of a packet is a duplicate, which §4.7.1 counts in
+neither. `Gmin` is fixed at its RFC-recommended 16 for the life of the
+stream, a change of codec included (§4.7.2), and the tracker's counts
+outlive a change of codec the way the buffer's own counters do. They start
+again when `RtpSession::follow` or `RtpSession::resync` takes on another
+source, as the RFC 3550 reception statistics do: §4.7.1's rates are of the
+packets "from the source ... since the beginning of reception", and the
+block names the source it reports on. Round-trip delay is
 this session's own `round_trip_time`; end-system delay is always `0`
 (§4.7.3's own fallback: this crate has no visibility into the sending
 side's encode-and-accumulate delay); jitter buffer sizing comes from
@@ -389,7 +403,13 @@ someone configured once. Design targets:
   cannot catch that, since below one is empty. So a pause never leaves fewer
   than two packets queued, the one about to be played and one in hand: a
   fast earpiece's slip takes the one in hand, and the next pause stretches
-  it back, where nobody hears it. The pause's dead band is two packets wide
+  it back, where nobody hears it. A far end that sends nothing in its pauses
+  empties the buffer in every one of them, and the next spurt, starting in
+  what the earpiece still hears as a pause, waits for its second packet
+  rather than starting on one and being stretched on the next pull: a
+  stretch there is a frame the codec conceals from the last audio it
+  decoded, the end of the spurt before, played just ahead of the new one.
+  The pause's dead band is two packets wide
   above that floor, as it is above any target, so a pull that lands either
   side of an arrival from one frame to the next is not answered with a
   stretch and then a shrink; a clean path's queue therefore sits at two or

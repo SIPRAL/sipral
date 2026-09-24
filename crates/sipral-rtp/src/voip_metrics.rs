@@ -175,6 +175,18 @@ impl GminTracker {
         self.pkt = 0;
     }
 
+    /// Recount one packet observed as lost as discarded: it turned up after
+    /// its turn, and §4.7.1 has a packet "discarded ... due to late ...
+    /// arrival" in the discard rate. The appendix's algorithm treats a loss
+    /// and a discard alike, so the bursts and gaps already classified stand
+    /// and only the two counts move.
+    pub(crate) const fn late(&mut self) {
+        if self.loss_count > 0 {
+            self.loss_count -= 1;
+            self.discard_count += 1;
+        }
+    }
+
     /// §4.7.1's loss and discard rates, and §4.7.2's burst/gap densities
     /// and mean durations, from the counts accumulated so far.
     /// `packet_duration_ms` is the appendix's `m`, the nominal duration one
