@@ -86,6 +86,14 @@
 #define SPURT_MS 1200u
 #define PAUSE_MS 600u
 
+/* `FLOW_ICE_NAT`: how long a path is waited for once the call is answered,
+ * how long the tone then runs on it, and how many frames of the far end's
+ * tone have to be heard -- interop/harness/src/ice_lite.rs's own `PATIENCE`,
+ * `DWELL` and `AUDIBLE_FRAMES`, so the two drivers judge one call alike. */
+#define ICE_PATIENCE_MS 30000u
+#define ICE_DWELL_MS 3000u
+#define ICE_AUDIBLE 10u
+
 /* The digit this harness presses, and how long it holds it. */
 #define TEST_DIGIT "5"
 #define DIGIT_MS 200u
@@ -343,6 +351,20 @@ struct seen {
     int media_mapped;
     uint32_t media_mapping;
     char media_public[SIPRAL_ADDRESS_BYTES];
+    /* `FLOW_ICE_NAT`: what the TURN server said about the media socket, as
+     * `SIPRAL_EVENT_KIND_NAT_RELAY` carried it, and when */
+    int relay_seen;
+    uint32_t relay_outcome;
+    uint32_t relay_code;
+    uint64_t relay_at_ms;
+    char relayed[SIPRAL_ADDRESS_BYTES];
+    char relay_reason[128];
+    /* `FLOW_ICE_NAT`: when the call was answered, and when ICE chose the
+     * path its media takes -- the event carries no addresses, so which path
+     * it was is read off the packets the library addresses afterwards */
+    uint64_t confirmed_at_ms;
+    int path_chosen;
+    uint64_t path_chosen_at_ms;
     /* the registrar's own 200 to the REGISTER, which lists the bindings it
      * now holds -- the registrar's word for which Contact it took -- and the
      * description this end sent last, as the latest session change reported
@@ -392,6 +414,28 @@ static void on_event(const sipral_event_t *event, void *user_data)
         break;
     case SIPRAL_EVENT_KIND_CALL_CONFIRMED:
         seen->confirmed = 1;
+        if (seen->confirmed_at_ms == 0) {
+            seen->confirmed_at_ms = now_ms();
+        }
+        break;
+    case SIPRAL_EVENT_KIND_NAT_RELAY:
+        seen->relay_seen = 1;
+        seen->relay_outcome = event->payload.relay.outcome;
+        seen->relay_code = event->payload.relay.code;
+        seen->relay_at_ms = now_ms();
+        keep(seen->relayed, sizeof seen->relayed, event->payload.relay.relayed,
+             event->payload.relay.relayed_len);
+        keep(seen->relay_reason, sizeof seen->relay_reason, event->payload.relay.reason,
+             event->payload.relay.reason_len);
+        break;
+    case SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN:
+        /* the first nomination is the one timed; a later one of higher
+         * priority replacing it changes where packets go, which is read
+         * off the packets rather than off this */
+        if (!seen->path_chosen) {
+            seen->path_chosen = 1;
+            seen->path_chosen_at_ms = now_ms();
+        }
         break;
     case SIPRAL_EVENT_KIND_NAT_MAPPING:
         if (event->payload.nat.signalling != 0) {
@@ -553,6 +597,14 @@ struct endpoint {
     uint8_t withheld[1024];
     size_t withheld_len;
     char withheld_from[SIPRAL_ADDRESS_BYTES];
+    /* where the last frame of this end's own audio was addressed: after ICE
+     * has chosen, the one statement of which path it chose that reaches an
+     * application, since every packet names its own destination */
+    char media_to[SIPRAL_ADDRESS_BYTES];
+    /* `FLOW_ICE_NAT`: the Refreshes with a lifetime of zero this end sent,
+     * whichever queue handed them out, and where the last went */
+    unsigned relays_given_back;
+    char given_back_to[SIPRAL_ADDRESS_BYTES];
 
     /* the same four numbers the Rust harness prints, counted the same way:
      * from outside the session, watching what each call returns */
@@ -572,6 +624,20 @@ static char trouble[256];
  * stack that asks nobody -- every flow but `FLOW_NAT`, which `main` sets this
  * for from SIPRAL_STUN_SERVER. */
 static const char *stun_for_this_flow;
+
+/* The TURN server the flow being opened allocates its media socket's relay
+ * on, as `host:port`, with the credential it knows this end by, or NULL for
+ * a stack with no TURN server -- every flow but `FLOW_ICE_NAT` run with
+ * SIPRAL_TURN_SERVER set, which is scripts/lab.sh's own relay step. */
+static const char *turn_for_this_flow;
+static const char *turn_user_for_this_flow;
+static const char *turn_password_for_this_flow;
+
+/* Whether the flow being opened is `FLOW_ICE_NAT`: an account that never
+ * registers, calling the other stack straight at its NAT's address, from
+ * sockets on ephemeral ports whose STUN answers go straight in. `FLOW_NAT`
+ * asks the same STUN server and is none of those things. */
+static int calling_a_peer;
 
 static void wrong(const char *what, sipral_status_t status)
 {
@@ -663,6 +729,52 @@ static void send_media(struct endpoint *end, const uint8_t *data, size_t len,
     (void)sendto(end->rtp_fd, data, len, 0, (const struct sockaddr *)&to, sizeof to);
 }
 
+/* Whether `data` is a TURN Refresh request (RFC 8656 §7.2) whose LIFETIME is
+ * zero: the one that deletes an allocation. Read off the wire format itself --
+ * a 20-byte header with the magic cookie, then type-length-value attributes
+ * padded to four bytes -- rather than taken on trust from where it was sent,
+ * because an RTCP goodbye leaves through the same queue to the same server
+ * when the call's media ran over the relay. */
+static int releases_a_relay(const uint8_t *data, size_t len)
+{
+    size_t at = 20u;
+    size_t body;
+    if (len < 20u || data[0] != 0x00u || data[1] != 0x04u || data[4] != 0x21u
+        || data[5] != 0x12u || data[6] != 0xA4u || data[7] != 0x42u) {
+        return 0;
+    }
+    body = ((size_t)data[2] << 8) | (size_t)data[3];
+    if (20u + body > len) {
+        return 0;
+    }
+    while (at + 4u <= 20u + body) {
+        unsigned kind = ((unsigned)data[at] << 8) | (unsigned)data[at + 1u];
+        size_t size = ((size_t)data[at + 2u] << 8) | (size_t)data[at + 3u];
+        if (at + 4u + size > 20u + body) {
+            return 0;
+        }
+        if (kind == 0x000Du && size == 4u) {
+            return data[at + 4u] == 0u && data[at + 5u] == 0u && data[at + 6u] == 0u
+                   && data[at + 7u] == 0u;
+        }
+        at += 4u + ((size + 3u) & ~(size_t)3u);
+    }
+    return 0;
+}
+
+/* Count `data`, just sent to `destination`, if it gave a relay back: three
+ * seconds after ICE settles on a pair that does not use this end's relay it
+ * leaves through `sipral_media_poll_transmit`, and when the call ends through
+ * `sipral_stack_poll_farewell`, so both are watched. */
+static void note_given_back(struct endpoint *end, const uint8_t *data, size_t len,
+                            const char *destination)
+{
+    if (releases_a_relay(data, len)) {
+        end->relays_given_back++;
+        keep(end->given_back_to, sizeof end->given_back_to, destination, strlen(destination));
+    }
+}
+
 /* Everything the media side owes, and everything it is owed.
  *
  * The three-part shape every driver of this ABI needs and `docs/08-ffi.md`
@@ -723,6 +835,7 @@ static void run_media(struct endpoint *end, uint64_t now)
             break;
         }
         send_media(end, out, packet.len, destination);
+        note_given_back(end, out, packet.len, destination);
     }
 
     if (now < end->next_frame_ms) {
@@ -768,6 +881,7 @@ static void run_media(struct endpoint *end, uint64_t now)
             && packet.len > 0) {
             send_media(end, out, packet.len, destination);
             end->sent++;
+            keep(end->media_to, sizeof end->media_to, destination, strlen(destination));
         }
     }
 
@@ -839,6 +953,34 @@ static void run_stun(struct endpoint *end, uint64_t now)
     }
 }
 
+/* What a call that has ended still owes: its RTCP goodbye, and the Refresh
+ * that gives its relay back, both sent from the call's own socket. Drained
+ * after every poll rather than only the ones that ended a call, as the header
+ * asks, since a call that turns out not to use its relay queues the Refresh
+ * earlier -- then, while its media runs, through `sipral_media_poll_transmit`
+ * instead, which `run_media` counts the same way. */
+static void run_farewells(struct endpoint *end)
+{
+    static uint8_t out[DATAGRAM];
+    static char destination[SIPRAL_ADDRESS_BYTES];
+    for (;;) {
+        sipral_handle_t call = SIPRAL_HANDLE_NONE;
+        sipral_media_packet_t packet;
+        memset(&packet, 0, sizeof packet);
+        packet.size = sizeof packet;
+        packet.data = out;
+        packet.capacity = sizeof out;
+        packet.destination = destination;
+        packet.destination_capacity = sizeof destination;
+        if (sipral_stack_poll_farewell(end->stack, &call, &packet) != SIPRAL_STATUS_OK
+            || packet.len == 0) {
+            return;
+        }
+        send_media(end, out, packet.len, destination);
+        note_given_back(end, out, packet.len, destination);
+    }
+}
+
 /* One turn of everything. */
 static void pump(struct endpoint *end, uint64_t now)
 {
@@ -850,6 +992,7 @@ static void pump(struct endpoint *end, uint64_t now)
     read_signalling(end, now);
     run_stun(end, now);
     run_media(end, now);
+    run_farewells(end);
     flush_signalling(end);
 }
 
@@ -1066,15 +1209,15 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     end->server = *remote;
     /* from before the first poll, which is when the signalling socket's
      * first request goes out */
-    end->withhold_stun = stun_for_this_flow != NULL;
+    end->withhold_stun = stun_for_this_flow != NULL && !calling_a_peer;
 
     if (route_to(remote, routable, sizeof routable) != 0) {
         wrong_text("no route to the lab network");
         return -1;
     }
     /* behind the lab's NAT, at the two ports it moves (NAT_SIP_PORT) */
-    end->sip_fd = bind_udp_at(&sip_local, stun_for_this_flow != NULL ? NAT_SIP_PORT : 0u);
-    end->rtp_fd = bind_udp_at(&rtp_local, stun_for_this_flow != NULL ? NAT_RTP_PORT : 0u);
+    end->sip_fd = bind_udp_at(&sip_local, end->withhold_stun ? NAT_SIP_PORT : 0u);
+    end->rtp_fd = bind_udp_at(&rtp_local, end->withhold_stun ? NAT_RTP_PORT : 0u);
     if (end->sip_fd < 0 || end->rtp_fd < 0) {
         wrong_text("cannot bind a socket");
         close_endpoint(end);
@@ -1109,6 +1252,16 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         config.stun_server = stun_for_this_flow;
         config.stun_server_len = strlen(stun_for_this_flow);
     }
+    /* the relay rides on the STUN path above: the same media socket named
+     * with `sipral_stack_nat_map` is given a relay on this server too */
+    if (turn_for_this_flow != NULL) {
+        config.turn_server = turn_for_this_flow;
+        config.turn_server_len = strlen(turn_for_this_flow);
+        config.turn_username = turn_user_for_this_flow;
+        config.turn_username_len = strlen(turn_user_for_this_flow);
+        config.turn_password = turn_password_for_this_flow;
+        config.turn_password_len = strlen(turn_password_for_this_flow);
+    }
 
     status = sipral_stack_create(&config, &end->stack);
     if (status != SIPRAL_STATUS_OK) {
@@ -1117,7 +1270,13 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
         return -1;
     }
 
-    (void)snprintf(end->aor, sizeof end->aor, "sip:%s@%s", user, server);
+    /* a peer is called as the address this end is at, and knows it by
+     * nothing else: interop/harness/src/ice_nat.rs's own `sip:caller@` */
+    if (calling_a_peer) {
+        (void)snprintf(end->aor, sizeof end->aor, "sip:%s@%s", user, end->sip_address);
+    } else {
+        (void)snprintf(end->aor, sizeof end->aor, "sip:%s@%s", user, server);
+    }
     (void)snprintf(registrar, sizeof registrar, "sip:%s", server);
     (void)snprintf(contact, sizeof contact, "sip:%s@%s", user, end->sip_address);
     if (address_text(remote, registrar_address, sizeof registrar_address) != 0) {
@@ -1130,17 +1289,22 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     account.size = sizeof account;
     account.aor = end->aor;
     account.aor_len = strlen(end->aor);
-    account.registrar = registrar;
-    account.registrar_len = strlen(registrar);
+    /* no registrar for a peer: a `registrar_len` of zero is an account that
+     * never registers, and whose requests go to `registrar_address` all the
+     * same -- here the other stack's NAT, which forwards its SIP port */
+    if (!calling_a_peer) {
+        account.registrar = registrar;
+        account.registrar_len = strlen(registrar);
+        account.auth_user = user;
+        account.auth_user_len = strlen(user);
+        account.auth_password = pass;
+        account.auth_password_len = strlen(pass);
+        account.expires_seconds = 300u;
+    }
     account.contact = contact;
     account.contact_len = strlen(contact);
     account.registrar_address = registrar_address;
     account.registrar_address_len = strlen(registrar_address);
-    account.auth_user = user;
-    account.auth_user_len = strlen(user);
-    account.auth_password = pass;
-    account.auth_password_len = strlen(pass);
-    account.expires_seconds = 300u;
 
     status = sipral_account_add(end->stack, &account, &end->account);
     if (status != SIPRAL_STATUS_OK) {
@@ -1227,6 +1391,13 @@ enum flow {
      * SIPRAL_STUN_SERVER names one -- scripts/lab.sh's own `nat` step, which
      * also puts this process behind interop/nat's NAT. */
     FLOW_NAT,
+    /* 8.5.5: the calling half of two stacks behind two NATs finding each
+     * other with full ICE -- interop/harness/src/ice_nat.rs's own `call`,
+     * through this ABI, with the Rust harness answering behind the second
+     * NAT. With SIPRAL_TURN_SERVER set its media socket also gets a relay,
+     * which is scripts/lab.sh's own `turn` step. Run only when SIPRAL_FLOWS
+     * names it. */
+    FLOW_ICE_NAT,
     FLOW_COUNT
 };
 
@@ -1263,6 +1434,8 @@ static const char *flow_name(enum flow which)
         return "DTLS-SRTP, phone to phone";
     case FLOW_NAT:
         return "behind a NAT, through STUN";
+    case FLOW_ICE_NAT:
+        return "full ICE through two NATs, calling";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1304,6 +1477,8 @@ static const char *flow_key(enum flow which)
         return "peerdtls";
     case FLOW_NAT:
         return "nat";
+    case FLOW_ICE_NAT:
+        return "icenat";
     case FLOW_COUNT:
     default:
         return "?";
@@ -1508,6 +1683,16 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
     case FLOW_PEER_SRTP:
     case FLOW_PEER_DTLS:
         return for_baresip;
+    case FLOW_ICE_NAT: {
+        /* only when named, and with a STUN server to ask: the far end is a
+         * second stack behind a second NAT, which only scripts/lab.sh's own
+         * ICE steps start, and `server` is that NAT's address rather than a
+         * server's name */
+        const char *wanted = getenv("SIPRAL_FLOWS");
+        const char *stun = getenv("SIPRAL_STUN_SERVER");
+        return wanted != NULL && selected(wanted, "icenat") && stun != NULL
+               && stun[0] != '\0';
+    }
     case FLOW_NAT: {
         /* only a run that named a STUN server, which is only scripts/lab.sh's
          * own `nat` step: anywhere else there is no NAT in front of this end
@@ -1570,6 +1755,7 @@ static const char *extension_for(enum flow which, const char *named)
     case FLOW_HOLD_CODEC_CHANGE:
     case FLOW_MESSAGE:
     case FLOW_NAT:
+    case FLOW_ICE_NAT:
     case FLOW_COUNT:
     default:
         return named;
@@ -1627,6 +1813,7 @@ static uint32_t srtp_for(enum flow which)
     case FLOW_MESSAGE:
     case FLOW_MWI:
     case FLOW_NAT:
+    case FLOW_ICE_NAT:
     case FLOW_COUNT:
     default:
         return 0u;
@@ -1987,6 +2174,200 @@ static int flow_nat(struct endpoint *end, const char *server, const char *extens
     return 0;
 }
 
+/* Whether two `host:port`s name the same host, whatever their ports. */
+static int same_host(const char *one, const char *other)
+{
+    char first[SIPRAL_ADDRESS_BYTES];
+    char second[SIPRAL_ADDRESS_BYTES];
+    return split_address(one, first, sizeof first) != NULL
+           && split_address(other, second, sizeof second) != NULL
+           && strcmp(first, second) == 0;
+}
+
+/* ICE chose a path, or the call has nothing left to choose one for. */
+static int path_settled(const struct endpoint *end)
+{
+    return end->seen.path_chosen || end->seen.media_failed || end->seen.ended;
+}
+
+/* The media socket's mapping is in, and its relay's outcome too when a TURN
+ * server was named: before both, a call on the socket is refused. */
+static int media_ready(const struct endpoint *end)
+{
+    return end->seen.media_mapped && (turn_for_this_flow == NULL || end->seen.relay_seen);
+}
+
+/* The calling half of two stacks behind two NATs finding each other with full
+ * ICE, through this ABI: interop/harness/src/ice_nat.rs's own `call`, with the
+ * Rust harness's `answer` behind the second NAT.
+ *
+ * The media socket is named with `sipral_stack_nat_map` and the call waits for
+ * what coturn said about it -- where it appears from, and with a TURN server
+ * named, the relay allocated for it -- since the call's description is written
+ * from both. Then a call under `SIPRAL_ICE_REQUIRED` to `extension` at
+ * `server`, the callee's NAT, which forwards its SIP port and nothing else; a
+ * path chosen, the other end's tone heard on it, and the path judged by where
+ * the library addresses this end's audio afterwards: through the TURN server
+ * when one was named, since the lab's relay step has blocked every other path,
+ * and at the callee's NAT otherwise. This end hangs up, and with a relay the
+ * Refresh of lifetime zero that gives it back has to have left for the TURN
+ * server -- through `sipral_media_poll_transmit` when ICE settled on a pair
+ * that does not use it, through `sipral_stack_poll_farewell` when the call's
+ * end is what released it. coturn's own log is scripts/lab.sh's half of that
+ * check.
+ */
+static int flow_ice_nat(struct endpoint *end, const char *server, const char *extension)
+{
+    sipral_call_config_t call;
+    char target[192];
+    char callee_nat[SIPRAL_ADDRESS_BYTES] = "?";
+    uint64_t mapping_from;
+    uint64_t offered;
+    sipral_status_t status;
+
+    mapping_from = now_ms();
+    status = sipral_stack_nat_map(end->stack, end->rtp_address, strlen(end->rtp_address),
+                                  mapping_from);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_stack_nat_map", status);
+        return -1;
+    }
+    end->mapping_media = 1;
+    if (!wait_until(end, media_ready, FLOW_PATIENCE_MS)) {
+        wrong_text(end->seen.media_mapped ? "the TURN server never said whether there is a relay"
+                                          : "the STUN server never said where the media socket "
+                                            "is");
+        return -1;
+    }
+    if (end->seen.media_mapping != SIPRAL_NAT_MAPPING_LEARNED) {
+        wrong_text("the STUN server did not answer for the media socket");
+        return -1;
+    }
+    if (strcmp(end->seen.media_public, end->rtp_address) == 0) {
+        wrong_text("the STUN server saw the media socket at its own address: there is no NAT in "
+                   "the way, and the run proves nothing");
+        return -1;
+    }
+    if (turn_for_this_flow != NULL) {
+        if (end->seen.relay_outcome != SIPRAL_NAT_RELAY_ALLOCATED) {
+            (void)snprintf(trouble, sizeof trouble, "%s gave no relay (%u): %s",
+                           turn_for_this_flow, (unsigned)end->seen.relay_code,
+                           end->seen.relay_reason);
+            return -1;
+        }
+        printf("  ice   media %s appears as %s, relay %s allocated in %u ms\n",
+               end->rtp_address, end->seen.media_public, end->seen.relayed,
+               (unsigned)(end->seen.relay_at_ms - mapping_from));
+    } else {
+        printf("  ice   media %s appears as %s\n", end->rtp_address, end->seen.media_public);
+    }
+
+    (void)snprintf(target, sizeof target, "sip:%s@%s", extension, server);
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.target = target;
+    call.target_len = strlen(target);
+    call.media_address = end->rtp_address;
+    call.media_address_len = strlen(end->rtp_address);
+    call.ice = SIPRAL_ICE_REQUIRED;
+    offered = now_ms();
+    status = sipral_call_place(end->stack, end->account, &call, &end->call, offered);
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_place", status);
+        return -1;
+    }
+    if (!wait_until(end, answered, FLOW_PATIENCE_MS)) {
+        wrong_text("the call was never answered");
+        return -1;
+    }
+    if (end->seen.ended) {
+        wrong_text("the call ended before it was answered");
+        return -1;
+    }
+    if (open_media(end, end->call) != 0) {
+        return -1;
+    }
+
+    (void)wait_until(end, path_settled, ICE_PATIENCE_MS);
+    if (end->seen.media_failed) {
+        (void)snprintf(trouble, sizeof trouble, "the media failed: %s", end->seen.fault);
+        return -1;
+    }
+    if (!end->seen.path_chosen) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "no path was ever chosen (%u sent, %u back): the far end answered no "
+                       "check",
+                       end->sent, end->received);
+        return -1;
+    }
+    dwell(end, ICE_DWELL_MS);
+    if (end->seen.ended) {
+        wrong_text("the call ended while the tone was running on its path");
+        return -1;
+    }
+    if (end->audible < ICE_AUDIBLE) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "a path was chosen, sending to %s, but only %u frame(s) of the tone "
+                       "came back (%u sent, %u back, %u refused)",
+                       end->media_to, end->audible, end->sent, end->received, end->refused);
+        return -1;
+    }
+    /* with the direct path blocked, audio addressed anywhere but the TURN
+     * server -- this end's own relay, or the far end's relayed address on the
+     * same server -- is audio the block let through, and proves nothing
+     * about the relay; without one, the only address on the callee's side
+     * this end can reach is its NAT's */
+    if (turn_for_this_flow != NULL && !same_host(end->media_to, turn_for_this_flow)) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the path sends to %s, which does not go through the TURN server at %s",
+                       end->media_to, turn_for_this_flow);
+        return -1;
+    }
+    if (turn_for_this_flow == NULL
+        && (address_text(&end->server, callee_nat, sizeof callee_nat) != 0
+            || !same_host(end->media_to, callee_nat))) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the path sends to %s, which is not the callee's NAT at %s",
+                       end->media_to, callee_nat);
+        return -1;
+    }
+    printf("  ice   path sends to %s, chosen %u ms after the offer and %u ms after the answer\n",
+           end->media_to, (unsigned)(end->seen.path_chosen_at_ms - offered),
+           (unsigned)(end->seen.path_chosen_at_ms > end->seen.confirmed_at_ms
+                          ? end->seen.path_chosen_at_ms - end->seen.confirmed_at_ms
+                          : 0u));
+
+    status = sipral_call_hangup(end->stack, end->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_hangup", status);
+        return -1;
+    }
+    if (!wait_until(end, hung_up, FLOW_PATIENCE_MS)) {
+        wrong_text("the call never ended");
+        return -1;
+    }
+    if (turn_for_this_flow != NULL) {
+        /* the farewell queue is drained on every turn of the loop; a moment
+         * more gives the Refresh its turn after the call's own end */
+        dwell(end, 500u);
+        if (end->relays_given_back == 0) {
+            wrong_text("the call ended and its relay was never given back: no Refresh of "
+                       "lifetime zero left this end");
+            return -1;
+        }
+        if (!same_host(end->given_back_to, turn_for_this_flow)) {
+            (void)snprintf(trouble, sizeof trouble,
+                           "the relay's Refresh of lifetime zero went to %s, not to the TURN "
+                           "server at %s",
+                           end->given_back_to, turn_for_this_flow);
+            return -1;
+        }
+        printf("  ice   relay given back: a Refresh of lifetime zero to %s\n",
+               end->given_back_to);
+    }
+    return 0;
+}
+
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
                     const char *extension, const char *other)
 {
@@ -1995,6 +2376,9 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     }
     if (which == FLOW_NAT) {
         return flow_nat(end, server, extension);
+    }
+    if (which == FLOW_ICE_NAT) {
+        return flow_ice_nat(end, server, extension);
     }
     if (which == FLOW_MESSAGE) {
         return flow_message(end, server);
@@ -2302,6 +2686,7 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     case FLOW_MESSAGE:
     case FLOW_MWI:
     case FLOW_NAT:
+    case FLOW_ICE_NAT:
     case FLOW_COUNT:
     default:
         break;
@@ -2925,7 +3310,33 @@ int main(int argc, char **argv)
             continue;
         }
         account_for(flow, server, &flow_user, &flow_pass);
-        stun_for_this_flow = flow == FLOW_NAT ? getenv("SIPRAL_STUN_SERVER") : NULL;
+        stun_for_this_flow = flow == FLOW_NAT || flow == FLOW_ICE_NAT
+                                 ? getenv("SIPRAL_STUN_SERVER")
+                                 : NULL;
+        calling_a_peer = flow == FLOW_ICE_NAT;
+        turn_for_this_flow = NULL;
+        turn_user_for_this_flow = NULL;
+        turn_password_for_this_flow = NULL;
+        if (flow == FLOW_ICE_NAT) {
+            /* interop/harness/src/ice_nat.rs's own three variables: the
+             * callee behind the other NAT reads the same ones */
+            const char *turn = getenv("SIPRAL_TURN_SERVER");
+            if (turn != NULL && turn[0] != '\0') {
+                turn_for_this_flow = turn;
+                turn_user_for_this_flow = getenv("SIPRAL_TURN_USER");
+                turn_password_for_this_flow = getenv("SIPRAL_TURN_PASSWORD");
+                if (turn_user_for_this_flow == NULL || turn_password_for_this_flow == NULL) {
+                    printf("  FAIL  %s — SIPRAL_TURN_SERVER needs SIPRAL_TURN_USER and "
+                           "SIPRAL_TURN_PASSWORD\n",
+                           flow_name(flow));
+                    failed++;
+                    continue;
+                }
+            }
+            /* the caller, as the Rust harness names it: the callee answers
+             * whoever calls */
+            flow_user = "caller";
+        }
 
         trouble[0] = '\0';
         if (open_endpoint(&end, (unsigned)which, server, &remote, flow_user, flow_pass)

@@ -26,7 +26,9 @@
 #                               full ICE on what coturn told them, then the
 #                               same two with the path between them blocked,
 #                               through a relay on coturn as a TURN server
-#   scripts/lab.sh turn         only that last, relayed, step
+#   scripts/lab.sh turn         only that last, relayed, step, the call placed
+#                               from the Rust harness and then through the
+#                               C ABI
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -1180,10 +1182,12 @@ nat_pair_down() {
 # bash 3.2 calls a bare "$@" with no arguments unbound under `set -u`). The
 # callee's NAT forwards its SIP port -- signalling is not what this proves --
 # and nothing else. Both halves' output is printed; the status is 0 only
-# when both passed.
+# when both passed. NAT_PAIR_CALLER=c, set for the call, places it from the
+# C harness instead (interop/harness-c's own FLOW_ICE_NAT, the same flow key
+# and the same variables), with the Rust harness still answering.
 nat_pair_call() {
     local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
-    local callee callee_status status=0 tries=0
+    local callee callee_status status=0 tries=0 beside
     docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
     docker run -d --name "$ICE_CALLEE_NAME" --network "${project}_inside2" \
         --cap-add NET_ADMIN \
@@ -1226,7 +1230,21 @@ nat_pair_call() {
         sleep 1
     done
 
-    if [ "$status" -eq 0 ]; then
+    if [ "$status" -eq 0 ] && [ "${NAT_PAIR_CALLER:-rust}" = c ]; then
+        beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+        docker run --rm --network "${project}_inside" \
+            --cap-add NET_ADMIN \
+            -e SIPRAL_FLOWS=icenat \
+            -e "SIPRAL_STUN_SERVER=$NAT_PAIR_COTURN:3478" \
+            ${1+"$@"} \
+            -e LD_LIBRARY_PATH=/lib-sipral \
+            -v "$HARNESS_C:/harness-c:ro" \
+            -v "$beside:/lib-sipral:ro" \
+            sipral-lab-nat sh -c "
+                ip route replace default via $NAT_PAIR_GATEWAY || exit 1
+                exec /harness-c $NAT_PAIR_OUTSIDE2 5060 callee"
+        status=$?
+    elif [ "$status" -eq 0 ]; then
         docker run --rm --network "${project}_inside" \
             --cap-add NET_ADMIN \
             -e SIPRAL_FLOWS=icenat \
@@ -1258,8 +1276,17 @@ nat_pair_call() {
 # failing a path that does not go through it. Last, coturn's own log has to
 # show both allocations given back when the call ended rather than left to
 # lapse.
+#
+# Then the same two calls again with the C harness as the caller (8.5.5's
+# relay through the C ABI): the TURN server, user and password set through
+# sipral_stack_config_t, the relay seen as SIPRAL_EVENT_KIND_NAT_RELAY, the
+# path judged by where the library addresses the audio, and the Refresh of
+# lifetime zero read off sipral_stack_poll_farewell -- with the Rust harness
+# still answering, so the relay is proved from both drivers on every run of
+# the word. Without TURN that call has to find no path too, and coturn's log
+# has to count its two allocations as given back on top of the first two.
 ice_turn_flow() {
-    local status=0 allocations deleted said
+    local status=0
     SIPRAL_TURN_USER=sipral-lab
     SIPRAL_TURN_PASSWORD=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     export SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
@@ -1291,25 +1318,55 @@ ice_turn_flow() {
             || status=1
     fi
     if [ "$status" -eq 0 ]; then
-        # what coturn --verbose writes for an allocation made ("allocation
-        # new") and for one a Refresh with a lifetime of zero took down
-        # ("allocation refreshed ... lifetime=0"); the latter has to be as
-        # many as the former, both relays given back rather than lapsing.
-        # The permissions and the channel ("lifetime updated") are printed
-        # beside them, which is where the relayed path shows
-        said=$( (cd interop && docker compose --profile nat logs --no-color coturn) 2>/dev/null )
-        printf '%s\n' "$said" | grep 'allocation new,\|allocation refreshed,\|lifetime updated' \
-            | tail -40 | sed 's/^/    coturn  /'
-        allocations=$(printf '%s\n' "$said" | grep -c 'allocation new,')
-        deleted=$(printf '%s\n' "$said" | grep -c 'allocation refreshed,.*lifetime=0 ')
-        printf '  coturn: %s allocation(s), %s given back\n' "$allocations" "$deleted"
-        if [ "$allocations" -lt 2 ] || [ "$deleted" -lt "$allocations" ]; then
+        turn_given_back 2 || status=1
+    fi
+    if [ "$status" -eq 0 ] && [ -z "$HARNESS_C" ]; then
+        if [ "$WANT" = turn ]; then
+            # asked for by name, the relay step proves both drivers or fails
+            printf '  there is no C harness to place the relayed call through the C ABI\n'
             status=1
+        else
+            printf '  note  no C harness, so the relayed call through the C ABI is skipped with the other C flows\n'
+        fi
+    elif [ "$status" -eq 0 ]; then
+        printf '  without TURN, through the C ABI: the call has to find no path\n'
+        if NAT_PAIR_CALLER=c nat_pair_call; then
+            printf '  the call through the C ABI connected with the path between the NATs blocked: the block does not hold\n'
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            printf '  with TURN, through the C ABI: the call has to go through coturn\n'
+            NAT_PAIR_CALLER=c nat_pair_call \
+                -e "SIPRAL_TURN_SERVER=$NAT_PAIR_COTURN:3478" \
+                -e "SIPRAL_TURN_USER=$SIPRAL_TURN_USER" \
+                -e "SIPRAL_TURN_PASSWORD=$SIPRAL_TURN_PASSWORD" \
+                || status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            turn_given_back 4 || status=1
         fi
     fi
     nat_pair_down -f compose.yaml -f turn/compose.override.yaml
     unset SIPRAL_TURN_USER SIPRAL_TURN_PASSWORD
     return "$status"
+}
+
+# What coturn --verbose has written so far for an allocation made
+# ("allocation new") and for one a Refresh with a lifetime of zero took down
+# ("allocation refreshed ... lifetime=0"): at least $1 of the former, and as
+# many of the latter, every relay given back rather than lapsing. The
+# permissions and the channel ("lifetime updated") are printed beside them,
+# which is where the relayed path shows. The log is the container's whole
+# life, so a second call's count includes the first's.
+turn_given_back() {
+    local wanted="$1" allocations deleted said
+    said=$( (cd interop && docker compose --profile nat logs --no-color coturn) 2>/dev/null )
+    printf '%s\n' "$said" | grep 'allocation new,\|allocation refreshed,\|lifetime updated' \
+        | tail -40 | sed 's/^/    coturn  /'
+    allocations=$(printf '%s\n' "$said" | grep -c 'allocation new,')
+    deleted=$(printf '%s\n' "$said" | grep -c 'allocation refreshed,.*lifetime=0 ')
+    printf '  coturn: %s allocation(s), %s given back\n' "$allocations" "$deleted"
+    [ "$allocations" -ge "$wanted" ] && [ "$deleted" -ge "$allocations" ]
 }
 
 # The same call again, over a link deliberately made bad in both directions.
@@ -1572,7 +1629,7 @@ fi
 
 if [ "$WANT" = all ] || [ "$WANT" = ice ] || [ "$WANT" = turn ]; then
     step "full ICE through a relay -- the path between the two NATs blocked, coturn as TURN"
-    ice_turn_flow && pass "no path without TURN; with it, the call went through coturn and both relays were given back" \
+    ice_turn_flow && pass "no path without TURN; with it, every call went through coturn and every relay was given back" \
         || fail "full ICE through a TURN relay"
 fi
 
