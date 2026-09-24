@@ -368,10 +368,16 @@ impl<'a> Message<'a> {
 
     /// Walk every attribute once, checking that each one fits, and find where
     /// the ignore rule of §9 starts applying.
+    ///
+    /// The gate is whichever integrity attribute comes first. After
+    /// MESSAGE-INTEGRITY a MESSAGE-INTEGRITY-SHA256 may still follow (§14.5),
+    /// but after MESSAGE-INTEGRITY-SHA256 only FINGERPRINT may (§14.6): a
+    /// MESSAGE-INTEGRITY further on does not move the gate past what an
+    /// attacker appended in between.
     fn walk(&self) -> Result<Option<Gate>, ParseError> {
         let mut offset = HEADER_LEN;
-        let mut integrity = None;
-        let mut integrity_sha256 = None;
+        let mut integrity: Option<usize> = None;
+        let mut integrity_sha256: Option<usize> = None;
 
         while offset < self.raw.len() {
             let available = self.raw.len() - offset;
@@ -410,6 +416,10 @@ impl<'a> Message<'a> {
         }
 
         Ok(match (integrity, integrity_sha256) {
+            (Some(sha1), Some(end)) if end < sha1 => Some(Gate {
+                end,
+                integrity: false,
+            }),
             (Some(end), _) => Some(Gate {
                 end,
                 integrity: true,
@@ -1306,6 +1316,37 @@ mod tests {
             message.verify_integrity_sha256(b"other"),
             Integrity::Invalid
         );
+    }
+
+    #[test]
+    fn nothing_after_a_sha256_integrity_counts_but_the_fingerprint_even_before_a_sha1_one() {
+        // a message closed by a genuine MESSAGE-INTEGRITY-SHA256, and then
+        // what anyone on the path can append: a nomination, and a
+        // MESSAGE-INTEGRITY of zeros so that the message carries both kinds.
+        // The SHA-256 check covers only the bytes before it, so it still
+        // passes; what follows it must not be read, whatever else follows
+        // (RFC 8489 §14.6)
+        let mut bytes = assemble(0x0001, &attribute(0x8022, b"si"));
+        let adjusted = u16::try_from(bytes.len() - HEADER_LEN + 4 + 32).unwrap();
+        let mut input = bytes.clone();
+        input[2..4].copy_from_slice(&adjusted.to_be_bytes());
+        let mut mac = Hmac::<Sha256>::new(b"key");
+        mac.update(&input);
+        let full = mac.finish();
+        bytes.extend_from_slice(&[0x00, 0x1c, 0x00, 0x20]);
+        bytes.extend_from_slice(&full);
+        bytes.extend_from_slice(&attribute(0x0025, &[]));
+        bytes.extend_from_slice(&attribute(0x0008, &[0; 20]));
+        let total = u16::try_from(bytes.len() - HEADER_LEN).unwrap();
+        bytes[2..4].copy_from_slice(&total.to_be_bytes());
+
+        let message = Message::parse(&bytes).unwrap();
+        assert_eq!(message.verify_integrity_sha256(b"key"), Integrity::Valid);
+        assert!(
+            !message.use_candidate(),
+            "an attribute appended after the SHA-256 integrity was believed"
+        );
+        assert_eq!(message.verify_integrity(b"key"), Integrity::Absent);
     }
 
     #[test]

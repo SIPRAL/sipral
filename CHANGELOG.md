@@ -562,6 +562,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   once — 503 with `Retry-After` when no RTP port was to be had, 488 for an
   offer that cannot be answered, 500 otherwise — and the agent is told why on
   the error channel.
+- **Nothing appended after a STUN message's SHA-256 integrity is read any
+  more, even when a SHA-1 integrity follows it.** The parser drew the line
+  after which attributes are ignored at MESSAGE-INTEGRITY whenever the
+  message had one, including when MESSAGE-INTEGRITY-SHA256 came first. So a
+  message signed with SHA-256, with an attribute and any MESSAGE-INTEGRITY
+  appended by someone on the path, passed its SHA-256 check and then had the
+  appended attribute believed — a nomination, a role, an address the sender
+  never wrote. After MESSAGE-INTEGRITY-SHA256 only FINGERPRINT counts now
+  (RFC 8489 §14.6); after MESSAGE-INTEGRITY, MESSAGE-INTEGRITY-SHA256 and
+  FINGERPRINT still do (§14.5).
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered
