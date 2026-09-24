@@ -8,6 +8,13 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
+# Every `dotnet` below runs once and exits. Left to its defaults it starts a
+# compiler server and MSBuild worker nodes that outlive it by minutes and
+# inherit this script's file descriptors, so anything waiting on this run --
+# a lock held around it, a pipe read to its end -- waits for them too. MSBuild
+# reads the environment as properties, so these reach every invocation.
+export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
+
 HYGIENE_ONLY=0
 [ "${1:-}" = "--hygiene-only" ] && HYGIENE_ONLY=1
 
