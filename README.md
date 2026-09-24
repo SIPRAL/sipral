@@ -161,9 +161,12 @@ Measured on an Apple M-series machine with `scripts/bench.sh`, which anybody
 can rerun: the shared library is **2.79 MB**; one frame of audio in and out —
 `sipral_media_receive` and `sipral_media_playback`, G.711 through the jitter
 buffer — costs **under 3 µs** of thread time with **two hundred calls running
-on four threads**, and no call ever waited on another. What each number is, what
-it is not, and what it would take to make it worse:
-[`docs/19-numbers.md`](docs/19-numbers.md).
+on four threads**, and no call ever waited on another. A hundred concurrent
+calls between two stacks — each one challenged, answered, held, resumed and
+hung up — cost **under half a millisecond** of thread time to set one up at
+the calling end, and a live call holds about 16 KB of signalling state beside
+its media session. What each number is, what it is not, and what it would
+take to make it worse: [`docs/19-numbers.md`](docs/19-numbers.md).
 
 ## Build
 

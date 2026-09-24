@@ -39,6 +39,19 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   stacks behind two NATs that drop everything between them but SIP fail to
   connect without a relay, and with one the call completes through coturn
   and both allocations are given back.
+- **A hundred calls' worth of signalling, measured and tested.**
+  `crates/sipral-ffi/tests/signalling_load.rs` puts two stacks — a user agent
+  and a media engine each — on either end of a hundred concurrent calls with
+  no network between them: every INVITE challenged and answered again with
+  digest credentials the test verifies, a reliable 180 and its PRACK, the 200
+  and its ACK, a hold, a resume and a BYE. It fails if any call ends the wrong
+  way, if a single message is missing or extra against what the exchange
+  makes, or if anything goes out once every transaction's timers have run.
+  It prints the thread time each end spends per call set up and per
+  transaction, the messages a second one stack gets through, and the memory
+  a live call holds at each end, counted by its own allocator.
+  `scripts/bench.sh` runs it at a hundred calls and at a thousand, and
+  `docs/19-numbers.md` has the figures.
 - **`crates/sipral-aec-webrtc` ships its own licence texts.** It sits outside
   the workspace `tools/license-gen` generates `THIRD-PARTY-LICENSES.txt`
   from, so nothing it links — the three `webrtc-audio-processing` crates,

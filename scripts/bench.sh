@@ -16,7 +16,13 @@
 #   how many calls a machine holds;
 # - the peak memory of that run against the same run with one call: the
 #   difference over a hundred and ninety-nine is what a call costs;
-# - how long opening a stack takes, and how long bringing one call up takes.
+# - how long opening a stack takes, and how long bringing one call up takes;
+# - a hundred calls' worth of signalling, then a thousand, between two stacks
+#   (crates/sipral-ffi/tests/signalling_load.rs): every call challenged,
+#   answered, held, resumed and hung up, with the thread time each end spent
+#   per call set up and per transaction, the messages a second one stack gets
+#   through, and the memory a live call holds at each end, counted by that
+#   test's own allocator rather than read off the operating system.
 #
 # Everything here runs in this process, against the library, with no network
 # underneath it: what is measured is the library's own cost. A lab run's own
@@ -39,6 +45,10 @@ trap 'rm -f "$RSS_FILE"' EXIT
 # the per-frame figure is taken over a long enough run to settle.
 FRAMES="${SIPRAL_LOAD_FRAMES:-3000}"
 CALLS="${SIPRAL_LOAD_CALLS:-200}"
+# The signalling runs: the hundred the gate runs as well, and ten times that,
+# which is past the default ceilings on dialogs and server transactions and
+# so also says what raising them costs.
+SIGNALLING="${SIPRAL_SIGNALLING_RUNS:-100 1000}"
 
 printf 'sipral %s, %s, %s\n' \
     "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" \
@@ -114,6 +124,8 @@ step_library
 # megabytes and has nothing to do with a call
 cargo test --release -q -p sipral-ffi --lib load --no-run >/dev/null 2>&1 \
     || printf 'note: the load test would not build; the numbers below say so\n'
+cargo test --release -q -p sipral-ffi --test signalling_load --no-run >/dev/null 2>&1 \
+    || printf 'note: the signalling test would not build; the numbers below say so\n'
 
 printf '\nload, %s calls, %s frames each\n' "$CALLS" "$FRAMES"
 step_load "$CALLS"
@@ -127,3 +139,21 @@ if [ "$many" -gt "$one" ] && [ "$CALLS" -gt 1 ]; then
     printf '\nmemory per call: %s bytes (%s calls against one)\n' \
         "$(( (many - one) / (CALLS - 1) ))" "$CALLS"
 fi
+
+# The signalling test prints its own line, and fails -- printing everything
+# it said -- if a call ended the wrong way or a message went missing.
+STATUS=0
+for count in $SIGNALLING; do
+    printf '\nsignalling, %s calls\n' "$count"
+    out="$(mktemp)"
+    if SIPRAL_SIGNALLING_CALLS="$count" cargo test --release -q -p sipral-ffi \
+        --test signalling_load -- --nocapture >"$out" 2>&1; then
+        grep -o 'signalling: .*' "$out" | sed 's/^/    /'
+    else
+        printf 'signalling(%s): the test did not pass; its output:\n' "$count"
+        sed 's/^/    /' "$out"
+        STATUS=1
+    fi
+    rm -f "$out"
+done
+exit "$STATUS"
