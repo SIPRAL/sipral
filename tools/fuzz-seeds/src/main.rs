@@ -40,7 +40,7 @@
 //! ```
 
 use std::fmt::Write as _;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -1817,6 +1817,411 @@ fn through_stream_framing(name: &str, seed: &[u8], expected: usize) -> Result<()
     )))
 }
 
+// ---------------------------------------------------------------- TURN client
+
+/// The credential and realm `fuzz_targets/turn_client.rs` signs its answers
+/// with. A seed that names another realm leaves the key it derives unable to
+/// check anything the target signs.
+const TURN_USER: &str = "fuzz";
+const TURN_PASSWORD: &str = "secret";
+const TURN_REALM: &[u8] = b"fuzz.test";
+
+/// The target's instructions, by the opcode it reads modulo six.
+const TURN_ANSWER: u8 = 0;
+const TURN_RAW: u8 = 1;
+const TURN_TIME: u8 = 2;
+const TURN_PERMIT: u8 = 3;
+const TURN_BIND: u8 = 4;
+const TURN_SEND: u8 = 5;
+
+/// An `answer`'s first byte: an error, signed with MESSAGE-INTEGRITY under
+/// the MD5 key or MESSAGE-INTEGRITY-SHA256 under the SHA-256 one, and a
+/// FINGERPRINT.
+const ANSWER_ERROR: u8 = 1;
+const ANSWER_MD5: u8 = 1 << 1;
+const ANSWER_SHA256: u8 = 2 << 1;
+const ANSWER_FINGERPRINT: u8 = 8;
+
+/// The indexes into the target's table of error codes for the two
+/// challenges.
+const PICK_401: u8 = 2;
+const PICK_438: u8 = 6;
+
+/// A turn_client program being written: the configuration byte, then
+/// instructions.
+struct TurnProgram(Vec<u8>);
+
+impl TurnProgram {
+    fn new(shape: u8) -> Self {
+        Self(vec![shape])
+    }
+
+    fn op(mut self, op: u8, payload: &[u8]) -> Result<Self, Wrong> {
+        let len = u8::try_from(payload.len()).map_err(|_| {
+            Wrong(format!(
+                "a turn_client instruction of {} bytes",
+                payload.len()
+            ))
+        })?;
+        self.0.push(op);
+        self.0.push(len);
+        self.0.extend_from_slice(payload);
+        Ok(self)
+    }
+
+    fn answer(self, flags: u8, pick: u8, attributes: &[Vec<u8>]) -> Result<Self, Wrong> {
+        let mut payload = vec![flags, pick];
+        for attribute in attributes {
+            payload.extend_from_slice(attribute);
+        }
+        self.op(TURN_ANSWER, &payload)
+    }
+}
+
+/// One attribute as an `answer` spells it: a two-byte type, a one-byte
+/// length and the value.
+fn turn_attribute(kind: AttributeType, value: &[u8]) -> Result<Vec<u8>, Wrong> {
+    let len = u8::try_from(value.len())
+        .map_err(|_| Wrong(format!("a {kind} of {} bytes", value.len())))?;
+    let mut out = kind.code().to_be_bytes().to_vec();
+    out.push(len);
+    out.extend_from_slice(value);
+    Ok(out)
+}
+
+/// An address as an `answer` spells one for the target to XOR: the octets
+/// and the port.
+fn turn_address(kind: AttributeType, address: SocketAddr) -> Result<Vec<u8>, Wrong> {
+    let mut value = match address.ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
+    };
+    value.extend_from_slice(&address.port().to_be_bytes());
+    turn_attribute(kind, &value)
+}
+
+fn turn_client_seeds() -> Result<Vec<Seed>, Wrong> {
+    let relayed = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 15)), 50_000);
+    let relayed_v6 = SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 15)),
+        50_001,
+    );
+    let mapped = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 7_000);
+    let lifetime = turn_attribute(AttributeType::LIFETIME, &600_u32.to_be_bytes())?;
+    let realm = turn_attribute(AttributeType::REALM, TURN_REALM)?;
+    // the peer the target's `peer` reads out of [150, 0x7d, 0x66]
+    let peer = [150_u8, 0x7d, 0x66];
+    let mut channel_data = Vec::new();
+    ChannelData::encode(
+        ChannelNumber::new(0x4000).ok_or_else(|| Wrong("0x4000 is a channel".to_owned()))?,
+        b"relayed",
+        Transport::Udp,
+        &mut channel_data,
+    )
+    .map_err(|why| Wrong(format!("the ChannelData seed does not encode: {why:?}")))?;
+
+    // the whole life of an authenticated allocation: challenged, granted,
+    // a channel bound and used, the clock run to the refresh and a stale
+    // nonce answered on the way
+    let signed = ANSWER_MD5 | ANSWER_FINGERPRINT;
+    let lived = TurnProgram::new(0)
+        .answer(
+            ANSWER_ERROR | ANSWER_FINGERPRINT,
+            PICK_401,
+            &[
+                realm.clone(),
+                turn_attribute(AttributeType::NONCE, b"nonce-one")?,
+            ],
+        )?
+        .answer(
+            signed,
+            0,
+            &[
+                turn_address(AttributeType::XOR_RELAYED_ADDRESS, relayed)?,
+                turn_address(AttributeType::XOR_MAPPED_ADDRESS, mapped)?,
+                lifetime.clone(),
+            ],
+        )?
+        .op(TURN_BIND, &peer)?
+        .answer(signed, 0, &[])?
+        .op(TURN_RAW, &channel_data)?
+        .op(TURN_TIME, &5_400_u16.to_be_bytes())?
+        .answer(
+            ANSWER_ERROR | ANSWER_FINGERPRINT,
+            PICK_438,
+            &[
+                realm.clone(),
+                turn_attribute(AttributeType::NONCE, b"nonce-two")?,
+            ],
+        )?
+        .answer(signed, 0, std::slice::from_ref(&lifetime))?;
+
+    // a relay that asks for no credential, handing out both families, and a
+    // peer permitted and sent to by indication
+    let mut send = peer.to_vec();
+    send.extend_from_slice(b"by indication");
+    let open = TurnProgram::new(0b0010_0110)
+        .answer(
+            ANSWER_FINGERPRINT,
+            0,
+            &[
+                turn_address(AttributeType::XOR_RELAYED_ADDRESS, relayed)?,
+                turn_address(AttributeType::XOR_RELAYED_ADDRESS, relayed_v6)?,
+                lifetime.clone(),
+            ],
+        )?
+        .op(TURN_PERMIT, &peer)?
+        .answer(ANSWER_FINGERPRINT, 0, &[])?
+        .op(TURN_SEND, &send)?;
+
+    // a challenge offering SHA-256 as well as MD5, which the client has to
+    // take and then sign with MESSAGE-INTEGRITY-SHA256 alone (RFC 8489 §9.2.5)
+    let offered = TurnProgram::new(0)
+        .answer(
+            ANSWER_ERROR,
+            PICK_401,
+            &[
+                realm,
+                turn_attribute(AttributeType::NONCE, b"nonce-one")?,
+                turn_attribute(
+                    AttributeType::PASSWORD_ALGORITHMS,
+                    &[0, 2, 0, 0, 0, 1, 0, 0],
+                )?,
+            ],
+        )?
+        .answer(
+            ANSWER_SHA256 | ANSWER_FINGERPRINT,
+            0,
+            &[
+                turn_address(AttributeType::XOR_RELAYED_ADDRESS, relayed)?,
+                lifetime,
+            ],
+        )?;
+
+    // each with whether its ChannelData has to reach the application
+    let out = vec![
+        ("challenged-allocated-bound-refreshed", lived.0, true),
+        ("open-relay-dual-sent-by-indication", open.0, false),
+        ("sha256-offered-and-taken", offered.0, false),
+    ];
+    for (name, seed, delivers) in &out {
+        through_turn_client(name, seed, *delivers)?;
+    }
+    Ok(out
+        .into_iter()
+        .map(|(name, seed, _)| (name, seed))
+        .collect())
+}
+
+/// The long-term key `fuzz_targets/turn_client.rs` derives, the same way.
+fn turn_key(algorithm: sipral_core::auth::DigestAlgorithm) -> Vec<u8> {
+    let hex = algorithm.hash(format!("{TURN_USER}:fuzz.test:{TURN_PASSWORD}").as_bytes());
+    hex.as_bytes()
+        .chunks(2)
+        .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
+}
+
+/// One turn_client seed, run the way the target runs it, and required to end
+/// with an allocation — which is what every one of them is for, and what a
+/// seed that got an instruction's length or an attribute wrong never reaches
+/// — and, where it carries one, to have its ChannelData delivered.
+fn through_turn_client(name: &str, seed: &[u8], delivers: bool) -> Result<(), Wrong> {
+    use sipral_core::auth::DigestAlgorithm;
+    use sipral_nat::turn::Input;
+
+    let wrong = |what: &str| Wrong(format!("the {name} seed {what}"));
+    let (&shape, mut program) = seed
+        .split_first()
+        .ok_or_else(|| wrong("has no configuration byte"))?;
+    let mut client = turn_client_for(shape);
+    let md5 = turn_key(DigestAlgorithm::Md5);
+    let sha256 = turn_key(DigestAlgorithm::Sha256);
+    let mut now = Instant::now();
+    let mut ids = 0_u32;
+    turn_feed(&mut client, &mut ids);
+    client
+        .allocate(now)
+        .map_err(|why| wrong(&format!("does not start: {why}")))?;
+    let mut last = None;
+    let mut delivered = false;
+    while let [op, len, rest @ ..] = program {
+        while let Some(out) = client.poll_transmit() {
+            last = Some(out);
+        }
+        let (payload, after) = rest
+            .split_at_checked(usize::from(*len))
+            .ok_or_else(|| wrong("has an instruction longer than what follows it"))?;
+        program = after;
+        match *op {
+            TURN_ANSWER => {
+                let request = last
+                    .as_deref()
+                    .ok_or_else(|| wrong("answers before anything was asked"))?;
+                let response = turn_answer(request, payload, &md5, &sha256)
+                    .ok_or_else(|| wrong("has an answer that does not build"))?;
+                if client.handle_input(&response, now) != Input::Consumed {
+                    return Err(wrong("has an answer the client did not take"));
+                }
+            }
+            TURN_RAW => {
+                if let Input::Data { .. } = client.handle_input(payload, now) {
+                    delivered = true;
+                }
+            }
+            TURN_TIME => {
+                let step = payload
+                    .get(..2)
+                    .and_then(|pair| <[u8; 2]>::try_from(pair).ok())
+                    .map_or(1_000, |pair| u64::from(u16::from_be_bytes(pair)));
+                now += std::time::Duration::from_millis(step * 100);
+                client.handle_timeout(now);
+            }
+            TURN_PERMIT => client.permit(turn_peer(payload).ip(), now),
+            TURN_BIND => {
+                client
+                    .bind_channel(turn_peer(payload), now)
+                    .ok_or_else(|| wrong("binds no channel"))?;
+            }
+            TURN_SEND => {
+                let mut out = Vec::new();
+                client
+                    .send_to(
+                        turn_peer(payload),
+                        payload.get(3..).unwrap_or_default(),
+                        &mut out,
+                    )
+                    .map_err(|why| wrong(&format!("cannot send: {why}")))?;
+            }
+            other => return Err(wrong(&format!("has an opcode {other} it should not"))),
+        }
+        turn_feed(&mut client, &mut ids);
+        while client.poll_event().is_some() {}
+    }
+    if !program.is_empty() {
+        return Err(wrong("ends in the middle of an instruction"));
+    }
+    if !client.is_allocated() {
+        return Err(wrong("does not end with an allocation"));
+    }
+    if delivers && !delivered {
+        return Err(wrong(
+            "carries a ChannelData message the client did not deliver",
+        ));
+    }
+    Ok(())
+}
+
+/// The client the target configures from its first byte, for the bits the
+/// seeds set: whether it has a credential, and which families it asks for.
+fn turn_client_for(shape: u8) -> sipral_nat::turn::TurnClient {
+    use sipral_nat::stun::LongTermCredentials;
+    use sipral_nat::turn::{AddressFamily, FamilyRequest, TurnClient, TurnConfig};
+
+    let families = match (shape >> 1) & 3 {
+        0 => FamilyRequest::Whatever,
+        1 => FamilyRequest::Only(AddressFamily::V4),
+        2 => FamilyRequest::Only(AddressFamily::V6),
+        _ => FamilyRequest::Dual,
+    };
+    TurnClient::new(TurnConfig {
+        credentials: (shape & 32 == 0).then(|| LongTermCredentials::new(TURN_USER, TURN_PASSWORD)),
+        families,
+        ..TurnConfig::default()
+    })
+}
+
+/// Keep the client's pool full, with the ids the target draws.
+fn turn_feed(client: &mut sipral_nat::turn::TurnClient, ids: &mut u32) {
+    while client.transaction_ids_wanted() > 0 {
+        *ids = ids.wrapping_add(1);
+        let mut bytes = [0x5a_u8; 12];
+        if let Some(head) = bytes.get_mut(..4) {
+            head.copy_from_slice(&ids.to_be_bytes());
+        }
+        client.supply_transaction_id(TransactionId::new(bytes));
+    }
+}
+
+/// The peer the target reads out of an instruction's first three bytes.
+fn turn_peer(payload: &[u8]) -> SocketAddr {
+    let first = payload.first().copied().unwrap_or(0);
+    let port = payload
+        .get(1..3)
+        .and_then(|pair| <[u8; 2]>::try_from(pair).ok())
+        .map_or(40_000, u16::from_be_bytes);
+    let ip = if first & 0x80 == 0 {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, first))
+    } else {
+        IpAddr::V6(Ipv6Addr::new(
+            0x2001,
+            0xdb8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u16::from(first),
+        ))
+    };
+    SocketAddr::new(ip, port)
+}
+
+/// The relay's answer, built the way the target builds it.
+fn turn_answer(request: &[u8], payload: &[u8], md5: &[u8], sha256: &[u8]) -> Option<Vec<u8>> {
+    const CODES: [u16; 14] = [
+        300, 400, 401, 403, 420, 437, 438, 440, 441, 442, 443, 486, 500, 508,
+    ];
+    let message = Message::parse(request).ok()?;
+    let flags = payload.first().copied().unwrap_or(0);
+    let error = flags & ANSWER_ERROR != 0;
+    let class = if error { Class::Error } else { Class::Success };
+    let mut builder = MessageBuilder::new(class, message.method(), message.transaction_id());
+    if error {
+        let pick = payload.get(1).copied().unwrap_or(0);
+        let code = *CODES.get(usize::from(pick) % CODES.len())?;
+        builder.add_error_code(code, b"fuzz").ok()?;
+    }
+    let mut rest = payload.get(2..).unwrap_or_default();
+    while let [high, low, len, tail @ ..] = rest {
+        let kind = AttributeType::new(u16::from_be_bytes([*high, *low]));
+        let (value, after) = tail.split_at_checked(usize::from(*len))?;
+        rest = after;
+        let address = matches!(
+            kind,
+            AttributeType::XOR_RELAYED_ADDRESS
+                | AttributeType::XOR_MAPPED_ADDRESS
+                | AttributeType::XOR_PEER_ADDRESS
+        );
+        match (address, value.len()) {
+            (true, 6 | 18) => {
+                let (ip, port) = value.split_at(value.len() - 2);
+                let ip = match <[u8; 4]>::try_from(ip) {
+                    Ok(v4) => IpAddr::V4(Ipv4Addr::from(v4)),
+                    Err(_) => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(ip).ok()?)),
+                };
+                let port = u16::from_be_bytes(<[u8; 2]>::try_from(port).ok()?);
+                builder
+                    .add_xor_address(kind, SocketAddr::new(ip, port))
+                    .ok()?;
+            }
+            _ => builder.add(kind, value).ok()?,
+        }
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    match flags & (3 << 1) {
+        ANSWER_MD5 => builder.add_message_integrity(md5).ok()?,
+        ANSWER_SHA256 => builder.add_message_integrity_sha256(sha256).ok()?,
+        _ => {}
+    }
+    if flags & ANSWER_FINGERPRINT != 0 {
+        builder.add_fingerprint().ok()?;
+    }
+    Some(builder.finish())
+}
+
 // ---------------------------------------------------------------- DTLS
 
 /// The seeds of the two ends' random sources, as `dtls_record` has them.
@@ -2152,6 +2557,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("srtp_unprotect", srtp_seeds()?),
         ("stun", stun_seeds()?),
         ("turn", turn_seeds()?),
+        ("turn_client", turn_client_seeds()?),
     ])
 }
 

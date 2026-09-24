@@ -124,26 +124,27 @@ panics and never does unbounded work on the field itself — but it is a real
 gap between what `validate` proves in a test and what the dispatcher does with
 a live message, and it is worth closing rather than assuming closed.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Twenty-eight
+**Fuzzing covers the doors an attacker's bytes come through.** Twenty-nine
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
 `replay`, `dialoginfo`, `mwi`, `headless`, `rtcp`, `rtp_dtmf`,
 `srtp_unprotect`, `stun`, `turn`), two for DTLS (`dtls_record`,
 `dtls_handshake`), one for
-DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), nine
+DTMF over SIP INFO (`dtmf_info`), one for the ICE agent (`ice`), one for the
+TURN client driven by a relay that answers anything (`turn_client`), nine
 over `sipral-media`'s DSP once it was the turn of the codec and audio layer
 downstream of RTP (`media_resample`, `media_plc`, `media_drift`,
 `media_comfort_noise`, `media_vad`, `media_g722`, `media_g729`, `media_mix`,
 `media_opus`), and one for what the headless socket's messages do to a
 bridged session (`headless_media`). The exit gate is 24 hours per target
-with no crash and no hang, and every target but `headless_media` and
-`media_g729` has had it run: the first eighteen on 21 and 22 September 2026,
-about 37 billion executions, and the eight media ones before `media_g729`
-on 23 September, about 24 billion, nothing found on any
-(`docs/11-testing.md`). `media_g729` is the newest, over the G.729 decoder,
-the SID reader and the encoder; it and `headless_media` have not had that
-gate yet, and `scripts/check.sh` builds all twenty-eight on every run so
+with no crash and no hang, and every target but `headless_media`,
+`media_g729` and `turn_client` has had it run: the first eighteen on 21 and
+22 September 2026, about 37 billion executions, and the eight media ones
+before `media_g729` on 23 September, about 24 billion, nothing found on any
+(`docs/11-testing.md`). `media_g729` covers the G.729 decoder, the SID
+reader and the encoder; it, `turn_client` and `headless_media` have not had
+that gate yet, and `scripts/check.sh` builds all twenty-nine on every run so
 none of them rots uncompiled between releases.
 
 `ice` covers the one seam that is open to anybody before a

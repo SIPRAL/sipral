@@ -12,6 +12,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **A fuzz target for the TURN client against a relay that answers
+  anything.** `turn` fuzzed only the framing and ChannelData; the client's
+  own state machine — allocation, refresh, permissions, channels, stale
+  nonces, the password algorithm a challenge offers — had never been driven
+  by a hostile relay. `turn_client` runs it from a program whose answers
+  carry the request's own transaction id and can be signed with the
+  configured credential's key under either algorithm, so the paths behind
+  the integrity check are reached, and asserts that every control message
+  parses, every range indexes its datagram and no input raises events
+  without end.
 - **The Kotlin binding carries an event's whole payload, not just its head.**
   The generator now flattens every arm `sipral_event_payload_t` declares
   across JNI, and `SipralEvent.payload` reads them back as one instance of

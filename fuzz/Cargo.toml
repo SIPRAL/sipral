@@ -164,6 +164,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "turn_client"
+path = "fuzz_targets/turn_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dtls_record"
 path = "fuzz_targets/dtls_record.rs"
 test = false

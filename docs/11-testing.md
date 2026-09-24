@@ -188,7 +188,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Twenty-eight targets, one per door an attacker's bytes come through.
+Twenty-nine targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -273,6 +273,19 @@ every probe leaves from a socket it was given, `send` appends to the caller's
 buffer instead of overwriting it, and a datagram the agent reports as
 `Foreign` has not moved the selected pair.
 
+And one for the TURN client, added with 8.7.9, since `turn` reads only its
+framing. `turn_client` is a program: a configuration byte, then instructions
+that answer the last request the client sent, hand it a datagram of the
+fuzzer's own, move the clock, or ask it to permit, bind or send. An answer is
+written with the request's own method and transaction id, so no input is
+spent guessing ninety-six random bits, and it can be signed with the key the
+configured credential derives under either password algorithm, so the paths
+behind the integrity check are reached — allocation, refresh, permissions,
+channels, stale nonces, the algorithm a challenge offers. It asserts that
+every control message the client writes parses, that a range handed back
+indexes the datagram it came from, that a send appends to the caller's buffer,
+and that no instruction raises events without end.
+
 Its seeds are the reason it reaches anything. A connectivity check is
 authenticated before it is acted on, so an unsigned datagram dies at the door
 and a coverage-guided fuzzer will not forge an HMAC to get past it: the seeds
@@ -300,14 +313,16 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than twenty-eight runs beginning at
+targets with something to start from rather than twenty-nine runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
 an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
-the generator rather than sitting in the corpus doing nothing. Twenty-seven of
-the twenty-eight families go through that check; the one that does not is `builder`,
+the generator rather than sitting in the corpus doing nothing — the
+`turn_client` programs through a client driven the way the target drives
+one, each required to end with an allocation. Twenty-eight of
+the twenty-nine families go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -338,10 +353,10 @@ executions, and no crash, no timeout and no run out of memory on any target.
 The eight media targets, added after that run, had the same gate on 23
 September 2026: 48 runs of 30 minutes each per target, 384 CPU-hours in all,
 about 24 billion executions, and nothing found on any of them.
-`headless_media` and `media_g729`, the newest, have not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+`headless_media`, `media_g729` and `turn_client`, the newest, have not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all twenty-eight, under the nightly that `fuzz/` pins, so
+do on every run is **build** all twenty-nine, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -710,7 +725,7 @@ strict `-std` and the Apple SDK does not, so the compiler here alone passes a
 file that fails on the machine it runs on — `clippy` and `rustdoc` over the Windows half of the audio I/O
 and `clippy` over the iOS half of the CoreAudio one, for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all twenty-eight fuzz targets under their own nightly — which nothing else
+over all twenty-nine fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

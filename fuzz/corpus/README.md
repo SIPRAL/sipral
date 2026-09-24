@@ -25,6 +25,8 @@ traffic, and nothing came from another codebase.
   the framer seeds go through the framer, the control-channel seeds through
   the frame decoder and the JSON, the `headless_media` runs through a
   `HeadlessSession` driven step by step as the target drives one, the
+  `turn_client` programs through a `TurnClient` answered the way the target
+  answers one, each required to end with an allocation, the
   protected runs through an unprotector
   holding the target's own key, the DTLS runs through ends built as the
   target builds them, and the `dtmf_info` seeds through
