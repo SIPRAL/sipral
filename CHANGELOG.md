@@ -12,6 +12,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Added
 
+- **`crates/sipral-aec-webrtc` ships its own licence texts.** It sits outside
+  the workspace `tools/license-gen` generates `THIRD-PARTY-LICENSES.txt`
+  from, so nothing it links — the three `webrtc-audio-processing` crates,
+  the vendored C++ library itself, its two bundled third-party components
+  (rnnoise, pffft) and abseil-cpp, its one fetched meson subproject — ever
+  reached a shipped notice. `cargo run -p sipral-license-gen -- --aec` now
+  generates `crates/sipral-aec-webrtc/THIRD-PARTY-LICENSES.txt` from that
+  crate's own `Cargo.lock` and from what its build actually vendors or
+  fetches, and `scripts/check.sh` checks it is current once that crate is
+  built.
 - **A fuzz target for the TURN client against a relay that answers
   anything.** `turn` fuzzed only the framing and ChannelData; the client's
   own state machine — allocation, refresh, permissions, channels, stale

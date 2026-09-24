@@ -1478,6 +1478,18 @@ licence-checks it as its own step regardless — not skipped when the tools
 are missing, failed, the same as every other build prerequisite this tree
 already assumes.
 
+**Ships its own licence texts.** Outside the workspace also means outside
+`THIRD-PARTY-LICENSES.txt` at the workspace root, which `tools/license-gen`
+generates from `sipral`/`sipral-ffi`'s own dependency graph and this crate
+is never part of. `crates/sipral-aec-webrtc/THIRD-PARTY-LICENSES.txt` is the
+same tool's `--aec` mode instead, over this crate's own `Cargo.lock` and the
+C++ sources `webrtc-audio-processing-sys` vendors or fetches — every one of
+this crate's own third-party licence texts, kept current by
+`scripts/check.sh`'s step for this crate the same way the workspace root's
+file is. Ship it, or an equivalent notice screen, alongside any binary that
+links this crate, whether or not the same binary also ships
+`THIRD-PARTY-LICENSES.txt` for `sipral`/`sipral-ffi`.
+
 **Two conversions on every frame.** `sipral_media::Processor` works in
 `i16`, the width an RTP payload is decoded to; `webrtc-audio-processing`
 works in `f32` normalised to `[-1.0, 1.0]`. And the two libraries cut a

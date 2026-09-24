@@ -844,6 +844,18 @@ if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
     else
         fail "cargo build --manifest-path $manifest"
     fi
+    # Only reachable after the build above, which is what fetches abseil-cpp
+    # into this crate's own target/ — the one component tools/license-gen
+    # cannot read from a registry checkout alone, so this cannot run any
+    # earlier than here (the workspace's own third-party-licences step,
+    # above, runs long before this crate is built at all).
+    if lic_out=$(cargo run -p sipral-license-gen -- --aec --check 2>&1); then
+        pass "crates/sipral-aec-webrtc/THIRD-PARTY-LICENSES.txt matches its dependency graph"
+    else
+        fail "crates/sipral-aec-webrtc/THIRD-PARTY-LICENSES.txt is stale:"
+        printf '        %s\n' "$lic_out"
+        printf '        regenerate it: cargo run -p sipral-license-gen -- --aec\n'
+    fi
     cargo test --manifest-path "$manifest" >/dev/null 2>&1 \
         && pass "cargo test --manifest-path $manifest" \
         || fail "cargo test --manifest-path $manifest"
