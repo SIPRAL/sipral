@@ -382,7 +382,10 @@ a WebRTC gateway would be, places a call that requires ICE straight at
 `headless-socket-agent --ice-lite` and the reference agent's echo comes back
 on the chosen pair; then Asterisk's own ICE (`ice_support=yes` on an endpoint
 of its own, in `interop/ice/`, mounted only for that step) calls the same
-agent registered to it.
+agent registered to it, and Asterisk's RTP debug has to show its audio going
+out through its completed ICE session ("via ICE"). The application's own log
+cannot show that: Asterisk nominates as it checks, and it sends to the lite
+end's candidate, which is also its `c=`, whether its checks succeeded or not.
 
 ## ICE, full role
 

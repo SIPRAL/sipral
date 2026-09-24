@@ -1029,8 +1029,16 @@ ice_lite_flow() {
 # interop/ice/compose.override.yaml over the empty default only for this
 # step, so no other flow ever meets an Asterisk that offers ICE; Asterisk is
 # put back as it was afterwards, whatever happened.
+#
+# The application's own log cannot tell whether Asterisk's checks succeeded:
+# Asterisk nominates as it checks, so the lite end reports a pair on the
+# first check it receives, and an Asterisk whose checks all failed still
+# sends its audio to the lite end's candidate, which is also its `c=`. So
+# Asterisk's RTP debug is read as well: it marks each packet it sends
+# through a completed ICE session "(via ICE)", and a lite end whose answers
+# never reached it gets none.
 ice_lite_asterisk() {
-    local app_log status=0 tries
+    local app_log rtp_log since via_ice status=0 tries
     ( cd interop && docker compose -f compose.yaml -f ice/compose.override.yaml up -d asterisk ) \
         >/dev/null 2>&1 || { printf '  could not restart Asterisk with the ICE endpoint\n'; return 1; }
     wait_for asterisk "Asterisk Ready" || status=1
@@ -1047,9 +1055,14 @@ ice_lite_asterisk() {
             sleep 2
         done
         if [ "$status" -eq 0 ]; then
+            ( cd interop && docker compose exec -T asterisk asterisk -rx "rtp set debug on" ) \
+                >/dev/null 2>&1
+            since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             ( cd interop && docker compose exec -T asterisk asterisk -rx \
                 "channel originate PJSIP/labuser-agent-ice extension s@agent-call" ) >/dev/null 2>&1
             app_log=$(lite_agent_log 30)
+            rtp_log=$( cd interop && docker compose logs --no-color --since "$since" asterisk \
+                2>/dev/null )
         fi
         stop_lite_agent
     else
@@ -1066,6 +1079,12 @@ ice_lite_asterisk() {
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
+    # a fifth of a second of Asterisk's audio, which a packet or two sent
+    # before its checks finished cannot reach
+    via_ice=$(printf '%s\n' "$rtp_log" | grep -c 'Sent RTP packet to .*(via ICE)')
+    [ "$via_ice" -ge 10 ] \
+        || { printf '  Asterisk sent %s packet(s) through ICE: its checks never succeeded\n' \
+            "$via_ice"; return 1; }
 }
 
 # 8.6.16's step: two stacks, each behind a NAT of its own, completing full
@@ -1386,7 +1405,7 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
         ice_lite_flow && pass "the full caller chose a path on the lite end, and the tone came back on it" \
             || fail "ICE-lite, from the harness"
         step "ICE-lite -- Asterisk's own ICE calling the headless agent"
-        ice_lite_asterisk && pass "Asterisk nominated a pair on the lite end, and audio crossed it both ways" \
+        ice_lite_asterisk && pass "Asterisk's checks succeeded on the lite end, and audio crossed the pair both ways" \
             || fail "ICE-lite, from Asterisk"
     elif [ "$WANT" = ice ]; then
         fail "ICE-lite: the socket-framed agent was not built, so there is no lite end to call"
