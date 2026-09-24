@@ -3,7 +3,7 @@
 
 //! G.729: eight kilobits of narrowband speech, CS-ACELP, written from the
 //! Recommendation — the encoder and the decoder of Annex A, its
-//! reduced-complexity form.
+//! reduced-complexity form, with Annex B's silence compression over them.
 //!
 //! A frame is ten milliseconds, eighty samples at eight kilohertz, carried
 //! in eighty bits: ten octets. Each frame names a tenth-order LP filter by
@@ -27,10 +27,25 @@
 //! control of pitch-gain instability), `lpc` (the filters), `postfilter`,
 //! `bits`, `tables`, `encoder` for the encoder's frame loop, and `payload`
 //! for what an RTP payload of the codec holds ([`Payload`]: speech frames,
-//! and perhaps an Annex B SID frame, [`Sid`], at the end). Where the
-//! text does not pin the arithmetic down to the bit, the ITU's conformance
-//! streams decided, and the constant or the step says so where it is
-//! written.
+//! and perhaps an Annex B SID frame, [`Sid`], at the end). Annex B has four
+//! more: `activity` (the voice activity detector, B.3), `dtx` (the
+//! encoder's choice between a SID frame and nothing, and the SID's
+//! estimation, B.4.1 and B.4.2), `sid` (the SID's energy quantizer,
+//! B.4.2.1) and `comfort` (the comfort noise both ends synthesise, B.4.4).
+//! Where the text does not pin the arithmetic down to the bit, the ITU's
+//! conformance streams decided, and the constant or the step says so where
+//! it is written.
+//!
+//! **Annex B** is optional at the encoder and always there at the decoder.
+//! [`Encoder::with_dtx`] makes an encoder that finds the pauses in what it
+//! hears and, for each frame of one, sends a SID frame when the background
+//! has changed and nothing when it has not ([`Encoded`]). A decoder takes a
+//! speech frame ([`Decoder::decode`]), a SID frame
+//! ([`Decoder::decode_sid`]), a frame the far end did not send
+//! ([`Decoder::untransmitted`]) or one that was lost
+//! ([`Decoder::conceal`]), and makes eighty samples of each: a pause's are
+//! comfort noise shaped by the last SID's spectrum at its level, and a lost
+//! frame in a pause carries the noise on (B.4.5).
 //!
 //! **Annex A and the main body decode each other's streams** (A.1): the
 //! bitstream is the same, and only the encoder's searches and the decoder's
@@ -42,14 +57,15 @@
 //!
 //! # Conformance
 //!
-//! The ITU publishes conformance streams for Annex A with the
-//! Recommendation. They are not in this repository: they are part of the
-//! publication, which reserves all rights, so they are used where they were
-//! obtained and never committed. The tests in `conformance` read them from
-//! the directory named by `SIPRAL_G729_VECTORS` — the `G729_Release3`
-//! directory of the ITU's archive, holding `g729AnnexA/test_vectors` — or,
-//! without it, from `intern/itu/g729-vectors/Software/G729_Release3` at the
-//! top of the checkout, and are ignored unless asked for:
+//! The ITU publishes conformance streams for Annex A and for Annex B over
+//! it with the Recommendation. They are not in this repository: they are
+//! part of the publication, which reserves all rights, so they are used
+//! where they were obtained and never committed. The tests in `conformance`
+//! read them from the directory named by `SIPRAL_G729_VECTORS` — the
+//! `G729_Release3` directory of the ITU's archive, holding
+//! `g729AnnexA/test_vectors` and `g729AnnexB/test_vectors` — or, without it,
+//! from `intern/itu/g729-vectors/Software/G729_Release3` at the top of the
+//! checkout, and are ignored unless asked for:
 //!
 //! ```text
 //! SIPRAL_G729_VECTORS=/path/to/G729_Release3 \
@@ -58,12 +74,18 @@
 //!
 //! All seven Annex A inputs encode to their reference streams bit for bit,
 //! and all ten Annex A streams decode to their reference output sample for
-//! sample; `docs/05-media.md` records the result.
+//! sample. With DTX on, all four Annex B inputs encode to their reference
+//! streams — every frame's type and every bit — and all six Annex B streams
+//! decode to their reference output sample for sample. `docs/05-media.md`
+//! records the results.
 
 mod acelp;
+mod activity;
 mod analysis;
 mod arith;
 mod bits;
+mod comfort;
+mod dtx;
 mod encoder;
 mod gain;
 mod lpc;
@@ -71,22 +93,28 @@ mod lsp;
 mod payload;
 mod pitch;
 mod postfilter;
+mod sid;
 mod tables;
 mod taming;
 
 #[cfg(test)]
 mod conformance;
 
-pub use encoder::Encoder;
+pub use encoder::{Encoded, Encoder};
 pub use payload::{Payload, SID_OCTETS, Sid};
 
-use arith::{long_mult, long_shift_left, mac, round, shift_right};
+use arith::{long_mult, long_norm, long_shift_left, mac, round, shift_right, sub};
 use bits::{Frame, Subframe};
 use gain::Gains;
 use lsp::{Coefficients, Quantizer, Vector};
 use pitch::Delay;
 use postfilter::{HighPass, Postfilter};
-use tables::INITIAL_LSP;
+use tables::{INITIAL_LSP, SID_GAINS};
+
+/// A normalising shift as a signed shift count.
+fn to_count(shift: u32) -> i32 {
+    i32::try_from(shift).unwrap_or(0)
+}
 
 /// What the codec hears and produces: eight kilohertz.
 pub const SAMPLE_RATE: u32 = 8_000;
@@ -161,6 +189,20 @@ pub struct Decoder {
     seed: i16,
     postfilter: Postfilter,
     high_pass: HighPass,
+    /// Whether the last frame was speech — decoded or concealed — rather
+    /// than a pause (B.4.5).
+    after_speech: bool,
+    /// The comfort noise's generator, put back at every speech frame.
+    noise_seed: i16,
+    /// The last SID frame's LSPs and the gain its energy decodes to, and
+    /// the target gain the noise is synthesised at (B.19).
+    sid_lsp: Vector,
+    sid_level: i16,
+    noise_gain: i16,
+    /// The energy of the last good speech frame's excitation, an upper
+    /// half and the power of two it is scaled by, for a pause whose first
+    /// SID frame is lost (B.4.5).
+    speech_energy: (i16, i16),
 }
 
 impl Decoder {
@@ -179,6 +221,12 @@ impl Decoder {
             seed: SEED,
             postfilter: Postfilter::new(),
             high_pass: HighPass::new(),
+            after_speech: true,
+            noise_seed: comfort::SEED,
+            sid_lsp: INITIAL_LSP,
+            sid_level: 0,
+            noise_gain: 0,
+            speech_energy: (0, 0),
         }
     }
 
@@ -193,21 +241,42 @@ impl Decoder {
     /// A frame whose pitch parity fails (§4.1.2) is decoded with its first
     /// subframe's delay taken from the frame before.
     pub fn decode(&mut self, frame: &[u8; FRAME_OCTETS]) -> [i16; FRAME_SAMPLES] {
-        self.run(Some(Frame::unpack(frame)))
+        self.speech(Some(Frame::unpack(frame)))
     }
 
-    /// Produce eighty samples for a frame that never arrived (§4.4, A.4.4):
-    /// the last filter repeated, the last delay stretched by a sample a
-    /// subframe, the gains decaying, and pulses at random.
+    /// Decode an Annex B SID frame into eighty samples of comfort noise
+    /// (B.4.4): the noise's spectrum and level are the SID's from now on,
+    /// the level reached by B.19's smoothing unless the SID starts the
+    /// pause.
+    pub fn decode_sid(&mut self, sid: Sid) -> [i16; FRAME_SAMPLES] {
+        self.noise(Some(sid))
+    }
+
+    /// Produce eighty samples of comfort noise for a frame the far end did
+    /// not send because nothing had changed (Annex B's untransmitted frame):
+    /// the noise of the last SID frame, carried on.
+    pub fn untransmitted(&mut self) -> [i16; FRAME_SAMPLES] {
+        self.noise(None)
+    }
+
+    /// Produce eighty samples for a frame that never arrived. After speech
+    /// it is concealed as speech (§4.4, A.4.4): the last filter repeated,
+    /// the last delay stretched by a sample a subframe, the gains decaying,
+    /// and pulses at random. In a pause it is taken for a frame that was
+    /// not sent (B.4.5), and the comfort noise goes on.
     pub fn conceal(&mut self) -> [i16; FRAME_SAMPLES] {
-        self.run(None)
+        if self.after_speech {
+            self.speech(None)
+        } else {
+            self.noise(None)
+        }
     }
 
     /// Decode as many whole frames as `octets` holds and `samples` has room
     /// for, the way an RTP payload of several frames arrives (RFC 3551
-    /// §4.5.6), and return the samples written. Octets left over after the
-    /// last whole frame are not decoded: a SID frame is not speech, and
-    /// [`Payload`] is how a caller finds one.
+    /// §4.5.6), and a SID frame after them if there is one and room for it,
+    /// and return the samples written. Octets that are neither — a payload
+    /// [`Payload::parse`] refuses — are not decoded.
     pub fn decode_into(&mut self, octets: &[u8], samples: &mut [i16]) -> usize {
         let frames = (octets.len() / FRAME_OCTETS).min(samples.len() / FRAME_SAMPLES);
         for (frame, out) in octets
@@ -219,13 +288,105 @@ impl Decoder {
             bytes.copy_from_slice(frame);
             out.copy_from_slice(&self.decode(&bytes));
         }
-        frames * FRAME_SAMPLES
+        let written = frames * FRAME_SAMPLES;
+        let sid = Payload::parse(octets)
+            .filter(|payload| payload.frame_count() == frames)
+            .and_then(|payload| payload.sid());
+        match (sid, samples.get_mut(written..written + FRAME_SAMPLES)) {
+            (Some(sid), Some(out)) => {
+                out.copy_from_slice(&self.decode_sid(sid));
+                written + FRAME_SAMPLES
+            }
+            _ => written,
+        }
     }
 
-    fn run(&mut self, frame: Option<Frame>) -> [i16; FRAME_SAMPLES] {
+    /// A pause's frame (B.4.4, B.4.5): a SID frame, or nothing at all. The
+    /// first frame of a pause whose SID was lost takes its level from the
+    /// last speech frame's excitation, as B.4.5 says, and keeps the last
+    /// SID's spectrum, where B.4.5 says the last speech frame's LSPs: the
+    /// conformance stream that loses such a SID decodes only this way.
+    fn noise(&mut self, sid: Option<Sid>) -> [i16; FRAME_SAMPLES] {
+        let first = self.after_speech;
+        if let Some(sid) = sid {
+            self.sid_level = SID_GAINS
+                .get(usize::from(sid.energy_index()))
+                .copied()
+                .unwrap_or(0);
+            self.sid_lsp = lsp::to_cosines(&self.quantizer.decode_sid(sid.spectrum()));
+        } else if first {
+            let (energy, shift) = self.speech_energy;
+            let level = sid::quantize_excitation(energy, shift);
+            self.sid_level = SID_GAINS
+                .get(usize::from(level.index))
+                .copied()
+                .unwrap_or(0);
+        }
+        self.noise_gain = comfort::target_gain(self.noise_gain, self.sid_level, first);
+        comfort::excite(
+            self.noise_gain,
+            &mut self.excitation,
+            &mut self.noise_seed,
+            None,
+        );
+
+        let filters: [Coefficients; 2] = [
+            lsp::to_coefficients(&lsp::midpoint(&self.lsp, &self.sid_lsp)),
+            lsp::to_coefficients(&self.sid_lsp),
+        ];
+        self.lsp = self.sid_lsp;
+        let mut speech = [0_i16; 10 + FRAME_SAMPLES];
+        for (slot, value) in speech.iter_mut().zip(self.memory) {
+            *slot = value;
+        }
+        for (index, a) in filters.iter().enumerate() {
+            let reconstructed = self.synthesise(index, a);
+            for (slot, value) in speech
+                .iter_mut()
+                .skip(10 + SUBFRAME * index)
+                .zip(reconstructed)
+            {
+                *slot = value;
+            }
+        }
+        self.sharpening = SHARPENING_LOWEST;
+        self.after_speech = false;
+        self.finish(&filters, &speech, [None, None])
+    }
+
+    /// The postfilter over each subframe, with its own filter and — for
+    /// speech — its delay, then the high-pass and the doubling; and the
+    /// frame's excitation moved into the past.
+    fn finish(
+        &mut self,
+        filters: &[Coefficients; 2],
+        speech: &[i16; 10 + FRAME_SAMPLES],
+        delays: [Option<i16>; 2],
+    ) -> [i16; FRAME_SAMPLES] {
+        let mut output = [0_i16; FRAME_SAMPLES];
+        for (index, (a, delay)) in filters.iter().zip(delays).enumerate() {
+            let mut window = [0_i16; 50];
+            for (slot, value) in window.iter_mut().zip(speech.iter().skip(SUBFRAME * index)) {
+                *slot = *value;
+            }
+            let mut filtered = [0_i16; SUBFRAME];
+            self.postfilter.subframe(a, &window, delay, &mut filtered);
+            for (slot, value) in output.iter_mut().skip(SUBFRAME * index).zip(filtered) {
+                *slot = value;
+            }
+        }
+        self.high_pass.run(&mut output);
+
+        self.excitation.copy_within(FRAME_SAMPLES.., 0);
+        output
+    }
+
+    fn speech(&mut self, frame: Option<Frame>) -> [i16; FRAME_SAMPLES] {
         let erased = frame.is_none();
         let frame = frame.unwrap_or_default();
         let parity_failed = !erased && !frame.parity_holds();
+        self.noise_seed = comfort::SEED;
+        self.after_speech = true;
 
         // §4.1.1: the frame's LSPs, and the two subframes' filters
         let lsf = if erased {
@@ -270,24 +431,25 @@ impl Decoder {
             }
         }
 
+        // B.4.5: a good frame's excitation energy, which a pause whose first
+        // SID frame is lost takes its level from
+        if !erased {
+            let energy = self
+                .excitation
+                .get(PAST..)
+                .unwrap_or_default()
+                .iter()
+                .fold(0_i32, |sum, value| mac(sum, *value, *value));
+            let shift = long_norm(energy);
+            self.speech_energy = (
+                round(long_shift_left(energy, to_count(shift))),
+                sub(16, arith::to_word(shift)),
+            );
+        }
+
         // §4.2 and A.4.2: postfilter each subframe with its own filter and
         // delay, then high-pass and double the frame
-        let mut output = [0_i16; FRAME_SAMPLES];
-        for (index, (a, delay)) in filters.iter().zip(delays).enumerate() {
-            let mut window = [0_i16; 50];
-            for (slot, value) in window.iter_mut().zip(speech.iter().skip(SUBFRAME * index)) {
-                *slot = *value;
-            }
-            let mut filtered = [0_i16; SUBFRAME];
-            self.postfilter.subframe(a, &window, delay, &mut filtered);
-            for (slot, value) in output.iter_mut().skip(SUBFRAME * index).zip(filtered) {
-                *slot = value;
-            }
-        }
-        self.high_pass.run(&mut output);
-
-        self.excitation.copy_within(FRAME_SAMPLES.., 0);
-        output
+        self.finish(&filters, &speech, delays.map(Some))
     }
 
     /// §4.1.2, §4.1.3 and §4.4.4: the delay a subframe is decoded with.
@@ -366,8 +528,15 @@ impl Decoder {
             *sample = round(long_shift_left(mixed, 1));
         }
 
-        // an excitation loud enough to drive the synthesis past the end of
-        // the word is scaled down by four, all of it, and synthesised again
+        self.synthesise(index, a)
+    }
+
+    /// §4.1.6: the forty samples of speech a subframe's excitation, already
+    /// in place, synthesises through `a`. An excitation loud enough to drive
+    /// the synthesis past the end of the word is scaled down by four, all of
+    /// it, and synthesised again.
+    fn synthesise(&mut self, index: usize, a: &Coefficients) -> [i16; SUBFRAME] {
+        let start = PAST + SUBFRAME * index;
         let mut reconstructed = [0_i16; SUBFRAME];
         let excitation = self
             .excitation
@@ -406,6 +575,7 @@ impl Default for Decoder {
 mod tests {
     use super::{
         CLOCK_RATE, Decoder, ENCODING_NAME, FRAME_OCTETS, FRAME_SAMPLES, PAYLOAD_TYPE, SAMPLE_RATE,
+        Sid,
     };
 
     fn xorshift64(state: &mut u64) -> u64 {
@@ -522,5 +692,76 @@ mod tests {
         for _ in 0..200 {
             decoder.decode(&[0; FRAME_OCTETS]);
         }
+    }
+
+    /// B.4.5: a frame lost in a pause is taken for one the far end did not
+    /// send — the noise goes on exactly as it would have — while a frame
+    /// lost after speech is concealed as speech.
+    #[test]
+    fn a_frame_lost_in_a_pause_carries_the_noise_on() {
+        let mut decoder = Decoder::new();
+        for frame in arbitrary_frames(20, 0x5EED_0004) {
+            decoder.decode(&frame);
+        }
+        decoder.decode_sid(Sid::from_octets([0x5a, 0x3c]));
+        let mut lost = decoder.clone();
+        let mut untransmitted = decoder.clone();
+        for _ in 0..5 {
+            assert_eq!(lost.conceal(), untransmitted.untransmitted());
+        }
+
+        let mut decoder = Decoder::new();
+        for frame in arbitrary_frames(20, 0x5EED_0005) {
+            decoder.decode(&frame);
+        }
+        let mut lost = decoder.clone();
+        assert_ne!(lost.conceal(), decoder.clone().untransmitted());
+    }
+
+    /// A SID frame decodes to noise at the level it names: louder SIDs,
+    /// louder noise; and every pattern of its sixteen bits decodes.
+    #[test]
+    fn a_sid_frame_decodes_to_noise_at_its_level() {
+        let power = |energy: u8| -> f64 {
+            let mut decoder = Decoder::new();
+            let sid = Sid::from_octets([0x12, energy << 1]);
+            let mut total = 0.0;
+            decoder.decode_sid(sid);
+            for _ in 0..50 {
+                total += decoder
+                    .untransmitted()
+                    .iter()
+                    .map(|s| f64::from(*s).powi(2))
+                    .sum::<f64>();
+            }
+            total
+        };
+        let quiet = power(8);
+        let loud = power(20);
+        assert!(quiet > 0.0);
+        assert!(loud > quiet * 100.0, "{loud} against {quiet}");
+
+        let mut decoder = Decoder::new();
+        for bits in 0..=u16::MAX {
+            decoder.decode_sid(Sid::from_octets(bits.to_be_bytes()));
+        }
+    }
+
+    /// A payload of speech frames and a SID frame after them decodes the
+    /// SID too when there is room for it.
+    #[test]
+    fn a_trailing_sid_frame_is_decoded_when_there_is_room() {
+        let frames = arbitrary_frames(2, 0x5EED_0006);
+        let sid = [0x44, 0x22];
+        let mut one_by_one = Decoder::new();
+        let mut expected: Vec<i16> = frames.iter().flat_map(|f| one_by_one.decode(f)).collect();
+        expected.extend(one_by_one.decode_sid(Sid::from_octets(sid)));
+        let payload: Vec<u8> = frames.iter().flatten().copied().chain(sid).collect();
+        let mut samples = vec![0_i16; 3 * FRAME_SAMPLES];
+        assert_eq!(Decoder::new().decode_into(&payload, &mut samples), 240);
+        assert_eq!(samples, expected);
+        // a SID alone is a payload too
+        let mut alone = vec![0_i16; FRAME_SAMPLES];
+        assert_eq!(Decoder::new().decode_into(&sid, &mut alone), 80);
     }
 }

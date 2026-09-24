@@ -14,18 +14,32 @@
 //! the fixed codebook's four pulses (A.3.8); the two gains quantized
 //! together (§3.9); and the excitation and the filter's memory brought up
 //! to date (A.3.10).
+//!
+//! With Annex B's DTX on, every frame's LP analysis also feeds the voice
+//! activity detector (`activity`) and the DTX's store of autocorrelations
+//! (`dtx`), and a frame the detector finds silent skips the searches: the
+//! DTX decides what is sent and writes the comfort noise into the
+//! excitation, and the weighted speech and the weighted synthesis filter's
+//! memory follow that noise through the SID's filters, as the decoder's
+//! synthesis will. The unquantized LSPs a failed root search falls back on
+//! are those of the last speech frame.
 
 use super::acelp;
+use super::activity::{Detector, Features};
 use super::analysis::{self, InputFilter, Levinson, WINDOW};
 use super::arith::{add, high, long_mult, long_shift_left, mac, mult, round, sub};
 use super::bits::{Frame, Subframe};
+use super::comfort;
+use super::dtx::{Dtx, Silent};
 use super::gain::{Gains, Terms};
 use super::lpc::{expand, residual, synthesise};
 use super::lsp::{self, Coefficients, Quantizer, Vector};
 use super::pitch::{self, OPEN_LOOP_PAST};
 use super::tables::INITIAL_LSP;
 use super::taming::Taming;
-use super::{FRAME_OCTETS, FRAME_SAMPLES, PAST, SHARPENING_HIGHEST, SHARPENING_LOWEST, SUBFRAME};
+use super::{
+    FRAME_OCTETS, FRAME_SAMPLES, PAST, SHARPENING_HIGHEST, SHARPENING_LOWEST, SUBFRAME, Sid,
+};
 
 /// `γ` of the weighting filter, fixed at 0.75 in Annex A (equation A.1),
 /// Q15.
@@ -82,6 +96,70 @@ pub struct Encoder {
     sharpening: i16,
     gains: Gains,
     taming: Taming,
+    /// Annex B's state, when DTX is on.
+    annex_b: Option<AnnexB>,
+}
+
+/// What an encoder with DTX keeps besides a speech encoder's.
+#[derive(Debug, Clone)]
+struct AnnexB {
+    detector: Detector,
+    dtx: Dtx,
+    /// The frame's number, from one; after the largest a word holds it goes
+    /// on from [`FRAME_COUNT_RESTART`], past every count the detector reads.
+    frame: i16,
+    /// Whether each of the last two frames was speech, the last first.
+    before: [bool; 2],
+    /// The comfort noise's generator, put back at every speech frame.
+    seed: i16,
+}
+
+impl AnnexB {
+    fn new() -> Self {
+        Self {
+            detector: Detector::new(),
+            dtx: Dtx::new(),
+            frame: 0,
+            before: [true, true],
+            seed: comfort::SEED,
+        }
+    }
+}
+
+/// Where the frame count goes on from once it has run out of a word.
+const FRAME_COUNT_RESTART: i16 = 256;
+
+/// What the encoder made of a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoded {
+    /// Speech: the frame's ten octets.
+    Speech([u8; FRAME_OCTETS]),
+    /// A pause in which the background has changed: an Annex B SID frame
+    /// describing it.
+    Sid(Sid),
+    /// A pause that goes on as it was: nothing is sent.
+    Nothing,
+}
+
+impl Encoded {
+    /// The octets to send: ten, two, or none.
+    #[must_use]
+    pub fn octets(&self) -> &[u8] {
+        match self {
+            Self::Speech(octets) => octets,
+            Self::Sid(sid) => sid.as_octets(),
+            Self::Nothing => &[],
+        }
+    }
+
+    /// The speech frame, if it is one.
+    #[must_use]
+    pub const fn speech(self) -> Option<[u8; FRAME_OCTETS]> {
+        match self {
+            Self::Speech(octets) => Some(octets),
+            Self::Sid(_) | Self::Nothing => None,
+        }
+    }
 }
 
 impl Encoder {
@@ -105,38 +183,72 @@ impl Encoder {
             sharpening: SHARPENING_LOWEST,
             gains: Gains::new(),
             taming: Taming::new(),
+            annex_b: None,
         }
     }
 
-    /// Put it back where it started, for a stream that begins again.
-    pub fn reset(&mut self) {
-        *self = Self::new();
+    /// An encoder with Annex B's voice activity detection and discontinuous
+    /// transmission on: a frame the detector finds to be a pause is sent as
+    /// a SID frame when the noise has changed, and not sent at all when it
+    /// has not, and the encoder carries on in step with the comfort noise
+    /// the decoder will make of it.
+    #[must_use]
+    pub fn with_dtx() -> Self {
+        Self {
+            annex_b: Some(AnnexB::new()),
+            ..Self::new()
+        }
     }
 
-    /// Encode eighty samples into one frame of ten octets.
-    pub fn encode(&mut self, samples: &[i16; FRAME_SAMPLES]) -> [u8; FRAME_OCTETS] {
-        self.frame(samples).pack()
+    /// Whether this encoder was made with [`Encoder::with_dtx`].
+    #[must_use]
+    pub const fn dtx(&self) -> bool {
+        self.annex_b.is_some()
+    }
+
+    /// Put it back where it started, for a stream that begins again, with
+    /// DTX as it was.
+    pub fn reset(&mut self) {
+        *self = if self.dtx() {
+            Self::with_dtx()
+        } else {
+            Self::new()
+        };
+    }
+
+    /// Encode eighty samples. Without DTX every frame is speech.
+    pub fn encode(&mut self, samples: &[i16; FRAME_SAMPLES]) -> Encoded {
+        self.frame(samples)
     }
 
     /// Encode as many whole frames as `samples` holds and `octets` has room
     /// for, the way an RTP payload of several frames is built (RFC 3551
     /// §4.5.6), and return the octets written. Samples left over after the
     /// last whole frame are not encoded.
+    ///
+    /// With DTX on, a frame the encoder makes a SID frame writes its two
+    /// octets and a frame it sends nothing for writes none. RFC 3551 wants a
+    /// SID frame last in a payload and nothing after it; a caller with DTX
+    /// on that builds payloads of more than one frame encodes them one at a
+    /// time with [`Encoder::encode`] to put the payload's end where the
+    /// pause begins.
     pub fn encode_into(&mut self, samples: &[i16], octets: &mut [u8]) -> usize {
         let frames = (samples.len() / FRAME_SAMPLES).min(octets.len() / FRAME_OCTETS);
-        for (input, out) in samples
-            .chunks_exact(FRAME_SAMPLES)
-            .zip(octets.chunks_exact_mut(FRAME_OCTETS))
-            .take(frames)
-        {
+        let mut written = 0;
+        for input in samples.chunks_exact(FRAME_SAMPLES).take(frames) {
             let mut frame = [0_i16; FRAME_SAMPLES];
             frame.copy_from_slice(input);
-            out.copy_from_slice(&self.encode(&frame));
+            let encoded = self.encode(&frame);
+            let bytes = encoded.octets();
+            if let Some(out) = octets.get_mut(written..written + bytes.len()) {
+                out.copy_from_slice(bytes);
+                written += bytes.len();
+            }
         }
-        frames * FRAME_OCTETS
+        written
     }
 
-    fn frame(&mut self, samples: &[i16; FRAME_SAMPLES]) -> Frame {
+    fn frame(&mut self, samples: &[i16; FRAME_SAMPLES]) -> Encoded {
         // the new samples, filtered, at the end of the buffer
         self.speech.copy_within(FRAME_SAMPLES.., 0);
         let fresh = self
@@ -146,14 +258,122 @@ impl Encoder {
         fresh.copy_from_slice(samples);
         self.input.run(fresh);
 
-        // §3.2: the LP filter, its LSPs, their quantization and the two
-        // subframes' filters
-        let a = self.levinson.run(&analysis::autocorrelation(&self.speech));
-        let lsp = analysis::to_lsp(&a, &self.lsp);
+        // §3.2: the LP filter and its LSPs
+        let correlation = analysis::autocorrelation(&self.speech);
+        let prediction = self.levinson.run(&correlation.windowed);
+        let lsp = analysis::to_lsp(&prediction.a, &self.lsp);
+
+        // Annex B: is it speech, and if not, what is sent
+        if let Some(annex_b) = self.annex_b.as_mut() {
+            annex_b.frame = if annex_b.frame == i16::MAX {
+                FRAME_COUNT_RESTART
+            } else {
+                annex_b.frame + 1
+            };
+            let lsf = lsp::to_normalised_frequencies(&lsp);
+            let speech = annex_b.detector.decide(&Features {
+                reflection: prediction.reflection,
+                lsf: &lsf,
+                correlation: &correlation,
+                window: &self.speech,
+                frame: annex_b.frame,
+                before: annex_b.before,
+            });
+            annex_b.dtx.remember(&correlation, speech);
+            let [previous, _] = annex_b.before;
+            annex_b.before = [speech, previous];
+            if !speech {
+                return self.pause(previous);
+            }
+            annex_b.seed = comfort::SEED;
+        }
         self.lsp = lsp;
+        Encoded::Speech(self.speech_frame(&lsp).pack())
+    }
+
+    /// B.4: a frame the detector found silent. The DTX decides what is sent
+    /// and writes the comfort noise into the excitation; the filters'
+    /// memories and the weighted speech then follow the frame as the
+    /// decoder's synthesis of that noise does (A.3.10).
+    fn pause(&mut self, after_speech: bool) -> Encoded {
+        let Some(annex_b) = self.annex_b.as_mut() else {
+            return Encoded::Nothing;
+        };
+        let silent = annex_b.dtx.frame(
+            after_speech,
+            &mut self.levinson,
+            &mut self.quantizer,
+            &self.quantized,
+            &mut self.excitation,
+            &mut annex_b.seed,
+            &mut self.taming,
+        );
+        let sid_lsp = annex_b.dtx.lsp();
+        let filters: [Coefficients; 2] = [
+            lsp::to_coefficients(&lsp::midpoint(&self.quantized, &sid_lsp)),
+            lsp::to_coefficients(&sid_lsp),
+        ];
+        self.quantized = sid_lsp;
+
+        for (index, a) in filters.iter().enumerate() {
+            let weighted_a = expand(a, GAMMA);
+            let mut error = [0_i16; SUBFRAME];
+            residual(a, &self.speech, FRAME_START + SUBFRAME * index, &mut error);
+            self.weigh(index, &weighted_a, &error);
+
+            // the weighted synthesis filter's memory: the residual less the
+            // excitation, through 1/A(z/γ)
+            let start = PAST + SUBFRAME * index;
+            let mut difference = [0_i16; SUBFRAME];
+            for ((slot, x), e) in difference.iter_mut().zip(error).zip(
+                self.excitation
+                    .get(start..start + SUBFRAME)
+                    .unwrap_or_default(),
+            ) {
+                *slot = sub(x, *e);
+            }
+            let mut out = [0_i16; SUBFRAME];
+            synthesise(&weighted_a, &difference, &self.error, &mut out);
+            for (slot, value) in self.error.iter_mut().zip(out.iter().skip(SUBFRAME - 10)) {
+                *slot = *value;
+            }
+        }
+        self.sharpening = SHARPENING_LOWEST;
+        self.excitation.copy_within(FRAME_SAMPLES.., 0);
+        self.weighted.copy_within(FRAME_SAMPLES.., 0);
+        match silent {
+            Silent::Sid(spectrum, energy) => Encoded::Sid(Sid::from_fields(spectrum, energy)),
+            Silent::Nothing => Encoded::Nothing,
+        }
+    }
+
+    /// A.3.3: a subframe's weighted speech for the open-loop search, from
+    /// its residual through `A′(z) = A(z/γ)(1 − 0.7 z⁻¹)`, each product
+    /// truncated (the conformance streams are not encoded with them
+    /// rounded), and kept at the tenth order: the eleventh coefficient the
+    /// product has is left out.
+    fn weigh(&mut self, index: usize, weighted_a: &Coefficients, error: &[i16; SUBFRAME]) {
+        let mut low_passed: Coefficients = *weighted_a;
+        for (i, slot) in low_passed.iter_mut().enumerate().skip(1) {
+            let previous = weighted_a.get(i - 1).copied().unwrap_or(0);
+            *slot = sub(*slot, mult(previous, LOW_PASS));
+        }
+        let mut out = [0_i16; SUBFRAME];
+        synthesise(&low_passed, error, &self.weighting_memory, &mut out);
+        for (slot, value) in self.weighting_memory.iter_mut().zip(out.iter().skip(30)) {
+            *slot = *value;
+        }
+        let from = OPEN_LOOP_PAST + SUBFRAME * index;
+        if let Some(slot) = self.weighted.get_mut(from..from + SUBFRAME) {
+            slot.copy_from_slice(&out);
+        }
+    }
+
+    /// A speech frame's quantization and codebook searches, from its LSPs.
+    fn speech_frame(&mut self, lsp: &Vector) -> Frame {
         // the indices are searched for, then decoded as the decoder will
         // decode them, which also brings the predictor's memory up to date
-        let indices = self.quantizer.encode(&lsp::to_frequencies(&lsp));
+        let indices = self.quantizer.encode(&lsp::to_frequencies(lsp));
         let lsf = self.quantizer.decode(
             indices.predictor,
             indices.first,
@@ -177,24 +397,7 @@ impl Encoder {
             if let Some(slot) = self.excitation.get_mut(at..at + SUBFRAME) {
                 slot.copy_from_slice(&error);
             }
-            // A′(z) = A(z/γ)(1 − 0.7 z⁻¹) of A.3.3, each product truncated
-            // (the conformance streams are not encoded with them rounded),
-            // and kept at the tenth order: the eleventh coefficient the
-            // product has is left out
-            let mut low_passed: Coefficients = *weighted_a;
-            for (i, slot) in low_passed.iter_mut().enumerate().skip(1) {
-                let previous = weighted_a.get(i - 1).copied().unwrap_or(0);
-                *slot = sub(*slot, mult(previous, LOW_PASS));
-            }
-            let mut out = [0_i16; SUBFRAME];
-            synthesise(&low_passed, &error, &self.weighting_memory, &mut out);
-            for (slot, value) in self.weighting_memory.iter_mut().zip(out.iter().skip(30)) {
-                *slot = *value;
-            }
-            let from = OPEN_LOOP_PAST + SUBFRAME * index;
-            if let Some(slot) = self.weighted.get_mut(from..from + SUBFRAME) {
-                slot.copy_from_slice(&out);
-            }
+            self.weigh(index, weighted_a, &error);
         }
         let open_loop = pitch::open_loop(&self.weighted);
 
@@ -329,8 +532,107 @@ impl Default for Encoder {
 
 #[cfg(test)]
 mod tests {
-    use super::Encoder;
+    use super::{Encoded, Encoder};
     use crate::g729::{Decoder, FRAME_OCTETS, FRAME_SAMPLES};
+
+    /// A hiss far below fifteen decibels: a quiet room.
+    fn hiss(frames: usize) -> Vec<i16> {
+        let mut state = 0x7f4a_7c15_u32;
+        (0..frames * FRAME_SAMPLES)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                i16::try_from(state % 7).unwrap() - 3
+            })
+            .collect()
+    }
+
+    /// A voice, a pause and the voice again, through an encoder with DTX:
+    /// the pause starts with a SID frame and goes on mostly with nothing
+    /// sent, the voice on either side is speech, and a decoder takes all
+    /// of it — the pause as quiet noise, the voice after it as speech again.
+    #[test]
+    fn dtx_turns_a_pause_into_a_sid_and_silence() {
+        let mut input = voiced(100);
+        input.extend(hiss(200));
+        input.extend(voiced(100));
+        let mut encoder = Encoder::with_dtx();
+        assert!(encoder.dtx());
+        let sent: Vec<Encoded> = input
+            .chunks_exact(FRAME_SAMPLES)
+            .map(|chunk| encoder.encode(&chunk.try_into().unwrap()))
+            .collect();
+
+        let speech = |range: core::ops::Range<usize>| {
+            sent[range]
+                .iter()
+                .filter(|e| matches!(e, Encoded::Speech(_)))
+                .count()
+        };
+        assert_eq!(speech(40..100), 60, "the voice before the pause");
+        assert_eq!(speech(320..400), 80, "the voice after it");
+        let pause = &sent[110..300];
+        let sids = pause
+            .iter()
+            .filter(|e| matches!(e, Encoded::Sid(_)))
+            .count();
+        let nothing = pause
+            .iter()
+            .filter(|e| matches!(e, Encoded::Nothing))
+            .count();
+        assert!(sids >= 1, "{sent:?}");
+        assert!(nothing > 10 * sids, "{sids} SID frames, {nothing} not sent");
+        let first_pause = sent
+            .iter()
+            .position(|e| !matches!(e, Encoded::Speech(_)))
+            .unwrap();
+        assert!(matches!(sent[first_pause], Encoded::Sid(_)));
+
+        let mut decoder = Decoder::new();
+        let output: Vec<i16> = sent
+            .iter()
+            .flat_map(|e| match e {
+                Encoded::Speech(octets) => decoder.decode(octets),
+                Encoded::Sid(sid) => decoder.decode_sid(*sid),
+                Encoded::Nothing => decoder.untransmitted(),
+            })
+            .collect();
+        let power = |range: core::ops::Range<usize>| {
+            output[range.start * FRAME_SAMPLES..range.end * FRAME_SAMPLES]
+                .iter()
+                .map(|s| f64::from(*s).powi(2))
+                .sum::<f64>()
+                / f64::from(u32::try_from(range.len() * FRAME_SAMPLES).unwrap())
+        };
+        let talking = power(40..100);
+        let pausing = power(150..290);
+        assert!(pausing > 0.0, "comfort noise, not silence");
+        assert!(pausing * 1000.0 < talking, "{pausing} against {talking}");
+        assert!(power(340..400) * 10.0 > talking, "the voice comes back");
+    }
+
+    /// With DTX, a payload of frames is the frames' own octets in turn: ten
+    /// for speech, two for a SID frame, none for a frame not sent.
+    #[test]
+    fn encode_into_writes_what_each_frame_sends() {
+        let mut input = voiced(40);
+        input.extend(hiss(60));
+        let mut one_by_one = Encoder::with_dtx();
+        let expected: Vec<u8> = input
+            .chunks_exact(FRAME_SAMPLES)
+            .flat_map(|chunk| {
+                one_by_one
+                    .encode(&chunk.try_into().unwrap())
+                    .octets()
+                    .to_vec()
+            })
+            .collect();
+        let mut octets = vec![0_u8; 100 * FRAME_OCTETS];
+        let written = Encoder::with_dtx().encode_into(&input, &mut octets);
+        assert_eq!(&octets[..written], &expected[..]);
+        assert!(written < 100 * FRAME_OCTETS);
+    }
 
     /// A vowel-like signal: a 120 Hz pulse train through two resonances,
     /// the way a voice is a buzz through a vocal tract, with a little noise.
@@ -361,7 +663,7 @@ mod tests {
     fn encode_all(encoder: &mut Encoder, samples: &[i16]) -> Vec<[u8; FRAME_OCTETS]> {
         samples
             .chunks_exact(FRAME_SAMPLES)
-            .map(|chunk| encoder.encode(&chunk.try_into().unwrap()))
+            .map(|chunk| encoder.encode(&chunk.try_into().unwrap()).speech().unwrap())
             .collect()
     }
 
@@ -444,7 +746,7 @@ mod tests {
                 3 => 0,
                 _ => i16::MAX,
             });
-            decoder.decode(&encoder.encode(&samples));
+            decoder.decode(&encoder.encode(&samples).speech().unwrap());
         }
     }
 }

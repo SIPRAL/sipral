@@ -17,11 +17,14 @@
 
 use super::arith::{
     Split, add, at, high, long_add, long_mult, long_shift_left, long_shift_right,
-    long_shift_right_round, long_sub, low, mac, msu, mult, norm, shift_left, shift_right, sub,
+    long_shift_right_round, long_sub, low, mac, msu, mult, norm, round, shift_left, shift_right,
+    sub,
 };
 use super::tables::{
     ARCCOS_SLOPE, COSINE, COSINE_SLOPE, FIRST_STAGE, INITIAL_LSF, MA_CURRENT_WEIGHT,
-    MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+    MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, NOISE_MA_CURRENT_WEIGHT,
+    NOISE_MA_CURRENT_WEIGHT_INVERSE, NOISE_MA_PREDICTOR, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+    SID_FIRST_STAGE_ROWS, SID_FIRST_STAGE_SCALE, SID_SECOND_STAGE_ROWS,
 };
 
 /// Ten LSFs, or ten LSPs.
@@ -196,11 +199,12 @@ impl Quantizer {
     /// Σ p̂)`, the quantizer output that `ω` would be under `predictor`. The
     /// division is a multiplication by the stored reciprocal.
     fn unpredict(&self, lsf: &Vector, predictor: usize) -> Vector {
-        let taps = MA_PREDICTOR.get(predictor).copied().unwrap_or_default();
-        let inverse = MA_CURRENT_WEIGHT_INVERSE
-            .get(predictor)
-            .copied()
-            .unwrap_or_default();
+        self.unpredict_with(&SPEECH, lsf, predictor)
+    }
+
+    fn unpredict_with(&self, set: &Predictors, lsf: &Vector, predictor: usize) -> Vector {
+        let taps = set.taps.get(predictor).copied().unwrap_or_default();
+        let inverse = set.inverse.get(predictor).copied().unwrap_or_default();
         let mut output: Vector = [0; 10];
         for (index, slot) in output.iter_mut().enumerate() {
             let mut sum = i32::from(lsf.get(index).copied().unwrap_or(0)) << 16;
@@ -224,11 +228,12 @@ impl Quantizer {
     /// weights, summed in thirty-two bits and taken back to Q13 from the
     /// upper half.
     fn predict(&self, output: &Vector, predictor: usize) -> Vector {
-        let taps = MA_PREDICTOR.get(predictor).copied().unwrap_or_default();
-        let current = MA_CURRENT_WEIGHT
-            .get(predictor)
-            .copied()
-            .unwrap_or_default();
+        self.predict_with(&SPEECH, output, predictor)
+    }
+
+    fn predict_with(&self, set: &Predictors, output: &Vector, predictor: usize) -> Vector {
+        let taps = set.taps.get(predictor).copied().unwrap_or_default();
+        let current = set.current.get(predictor).copied().unwrap_or_default();
         let mut lsf: Vector = [0; 10];
         for (index, slot) in lsf.iter_mut().enumerate() {
             let mut sum = long_mult(
@@ -253,6 +258,211 @@ impl Quantizer {
             *newest = output;
         }
     }
+
+    /// B.4.3 and B.4.2.2 read backwards: the LSFs a SID frame's three
+    /// spectrum indices name. The same steps as a speech frame's, with the
+    /// SID's subsets of the codebooks, a single spacing pass and the noise
+    /// predictors; the memory takes the quantizer output as it would a
+    /// speech frame's. What an erased speech frame repeats — the last LSFs
+    /// and predictor of a speech frame — is left alone.
+    pub(super) fn decode_sid(&mut self, indices: NoiseIndices) -> Vector {
+        let mut output = sid_output(indices.first, indices.second);
+        space(&mut output, FIRST_GAP);
+        let mut lsf = self.predict_with(&NOISE, &output, usize::from(indices.predictor & 1));
+        self.remember(output);
+        stabilise(&mut lsf);
+        lsf
+    }
+
+    /// B.4.2.2: the SID indices for the spectrum `lsp`, and the LSFs they
+    /// decode to, which the memory is brought up to date with.
+    ///
+    /// The LSFs are first spaced at twice the stability check's minimum
+    /// distance, and weighted as a speech frame's are. For each of the two
+    /// noise predictors the target is the quantizer output that would give
+    /// them; the first stage keeps the [`SID_CANDIDATES`] nearest (target,
+    /// row) pairs of the two in plain squared error, the second stage tries
+    /// each of its sixteen rows against each candidate in squared error
+    /// weighted by the LSF weights and by the square of the predictor's
+    /// current-frame weight, and the nearest wins. Ties go to the first
+    /// found, the predictor before the row.
+    pub(super) fn encode_sid(&mut self, lsp: &Vector) -> (NoiseIndices, Vector) {
+        let mut lsf = to_frequencies(lsp);
+        let wide = shift_left(MINIMUM_DISTANCE, 1);
+        if let Some(first) = lsf.first_mut() {
+            *first = (*first).max(LOWEST);
+        }
+        for upper in 1..lsf.len() {
+            let below = lsf.get(upper - 1).copied().unwrap_or(0);
+            if let Some(slot) = lsf.get_mut(upper)
+                && sub(*slot, below) < wide
+            {
+                *slot = add(below, wide);
+            }
+        }
+        if let Some(last) = lsf.last_mut() {
+            *last = (*last).min(HIGHEST);
+        }
+        let (top, next) = (at(&lsf, 9), at(&lsf, 8));
+        if top < next
+            && let Some(slot) = lsf.get_mut(8)
+        {
+            *slot = sub(top, MINIMUM_DISTANCE);
+        }
+        let weights = weights(&lsf);
+        let targets = [0, 1].map(|predictor| self.unpredict_with(&NOISE, &lsf, predictor));
+
+        // the first stage: every target against every row it may use
+        let mut first_errors = [[0_i16; 32]; 2];
+        for ((errors, target), scale) in first_errors
+            .iter_mut()
+            .zip(&targets)
+            .zip(SID_FIRST_STAGE_SCALE)
+        {
+            for (error, row) in errors.iter_mut().zip(SID_FIRST_STAGE_ROWS) {
+                let entry = FIRST_STAGE
+                    .get(usize::from(row))
+                    .copied()
+                    .unwrap_or_default();
+                let sum = target.iter().zip(entry).fold(0_i32, |sum, (t, e)| {
+                    let difference = sub(*t, e);
+                    mac(sum, difference, difference)
+                });
+                *error = mult(high(sum), scale);
+            }
+        }
+        let mut candidates = [(0_usize, 0_usize); SID_CANDIDATES];
+        for candidate in &mut candidates {
+            let mut least = i16::MAX;
+            for (predictor, errors) in first_errors.iter().enumerate() {
+                for (row, error) in errors.iter().enumerate() {
+                    if *error < least {
+                        least = *error;
+                        *candidate = (predictor, row);
+                    }
+                }
+            }
+            let (predictor, row) = *candidate;
+            if let Some(slot) = first_errors.get_mut(predictor).and_then(|e| e.get_mut(row)) {
+                *slot = i16::MAX;
+            }
+        }
+
+        // the second stage, over what each candidate leaves
+        let mut best = (0_usize, 0_usize);
+        let mut least = i16::MAX;
+        for (candidate, (predictor, row)) in candidates.iter().enumerate() {
+            let target = targets.get(*predictor).copied().unwrap_or_default();
+            let entry = sid_first_stage(*row);
+            let current = NOISE_MA_CURRENT_WEIGHT
+                .get(*predictor)
+                .copied()
+                .unwrap_or_default();
+            for second in 0..16 {
+                let correction = sid_second_stage(second);
+                let mut sum = 0_i32;
+                for index in 0..10 {
+                    let share = at(&current, index);
+                    let mut weight = high(long_shift_left(long_mult(share, share), 2));
+                    weight = mult(weight, at(&weights, index));
+                    let difference = sub(
+                        sub(at(&target, index), at(&entry, index)),
+                        at(&correction, index),
+                    );
+                    let weighed = high(long_shift_left(long_mult(weight, difference), 3));
+                    sum = mac(sum, weighed, difference);
+                }
+                let error = high(sum);
+                if error < least {
+                    least = error;
+                    best = (candidate, second);
+                }
+            }
+        }
+        let (candidate, second) = best;
+        let (predictor, row) = candidates.get(candidate).copied().unwrap_or((0, 0));
+        let indices = NoiseIndices {
+            predictor: u16::try_from(predictor).unwrap_or(0),
+            first: u16::try_from(row).unwrap_or(0),
+            second: u16::try_from(second).unwrap_or(0),
+        };
+        (indices, self.decode_sid(indices))
+    }
+}
+
+/// A set of MA predictors with their current-frame weights: the speech
+/// quantizer's, or a SID frame's.
+struct Predictors {
+    taps: &'static [[[i16; 10]; 4]; 2],
+    current: &'static [[i16; 10]; 2],
+    inverse: &'static [[i16; 10]; 2],
+}
+
+const SPEECH: Predictors = Predictors {
+    taps: &MA_PREDICTOR,
+    current: &MA_CURRENT_WEIGHT,
+    inverse: &MA_CURRENT_WEIGHT_INVERSE,
+};
+
+const NOISE: Predictors = Predictors {
+    taps: &NOISE_MA_PREDICTOR,
+    current: &NOISE_MA_CURRENT_WEIGHT,
+    inverse: &NOISE_MA_CURRENT_WEIGHT_INVERSE,
+};
+
+/// How many first-stage choices a SID frame's search carries into its
+/// second stage (B.4.2.2, item 2: "a delayed decision quantization is used
+/// by keeping few candidates").
+const SID_CANDIDATES: usize = 4;
+
+/// The three spectrum indices of a SID frame (Table B.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct NoiseIndices {
+    pub(super) predictor: u16,
+    pub(super) first: u16,
+    pub(super) second: u16,
+}
+
+/// The row of `L1` a SID first-stage index names.
+fn sid_first_stage(index: usize) -> Vector {
+    SID_FIRST_STAGE_ROWS
+        .get(index)
+        .and_then(|row| FIRST_STAGE.get(usize::from(*row)))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// The ten corrections a SID second-stage index names: five from a row of
+/// `L2`, five from a row of `L3`.
+fn sid_second_stage(index: usize) -> Vector {
+    let [lower_rows, upper_rows] = SID_SECOND_STAGE_ROWS;
+    let lower = lower_rows
+        .get(index)
+        .and_then(|row| SECOND_STAGE_LOW.get(usize::from(*row)))
+        .copied()
+        .unwrap_or_default();
+    let upper = upper_rows
+        .get(index)
+        .and_then(|row| SECOND_STAGE_HIGH.get(usize::from(*row)))
+        .copied()
+        .unwrap_or_default();
+    let mut out: Vector = [0; 10];
+    for (slot, value) in out.iter_mut().zip(lower.iter().chain(upper.iter())) {
+        *slot = *value;
+    }
+    out
+}
+
+/// A SID frame's quantizer output before spacing: the two stages added.
+fn sid_output(first: u16, second: u16) -> Vector {
+    let mut output = sid_first_stage(usize::from(first & 31));
+    for (slot, correction) in output
+        .iter_mut()
+        .zip(sid_second_stage(usize::from(second & 15)))
+    {
+        *slot = add(*slot, correction);
+    }
+    output
 }
 
 /// The four LSP indices of a frame (Table 8's `L0` to `L3`).
@@ -397,6 +607,28 @@ pub(super) fn to_frequencies(lsp: &Vector) -> Vector {
         let start = shift_left(i16::try_from(segment).unwrap_or(0), 9);
         let within = low(long_shift_right(long_mult(slope, offset), 12));
         *slot = mult(add(start, within), QUARTER_PI);
+    }
+    lsf
+}
+
+/// The LSFs of `lsp` as fractions of the sampling rate, Q15, so that π is
+/// 16384: the form Annex B's detector compares spectra in (B.3.1.1). The
+/// cosine table read backwards as in [`to_frequencies`], each segment 256
+/// units wide, and the step into a segment rounded rather than truncated.
+pub(super) fn to_normalised_frequencies(lsp: &Vector) -> Vector {
+    let mut lsf: Vector = [0; 10];
+    let mut segment = COSINE.len() - 1;
+    for (slot, value) in lsf.iter_mut().zip(lsp).rev() {
+        while COSINE.get(segment).copied().unwrap_or(0) < *value {
+            if segment == 0 {
+                break;
+            }
+            segment -= 1;
+        }
+        let offset = sub(*value, COSINE.get(segment).copied().unwrap_or(0));
+        let slope = ARCCOS_SLOPE.get(segment).copied().unwrap_or(0);
+        let step = round(long_shift_left(long_mult(offset, slope), 3));
+        *slot = add(step, shift_left(i16::try_from(segment).unwrap_or(0), 8));
     }
     lsf
 }

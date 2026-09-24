@@ -1406,8 +1406,9 @@ fn through_media_g722(name: &str, data: &[u8]) -> Result<(), Wrong> {
 
 /// `media_g729` reads its input twice: as one RTP payload, and as a stream
 /// in which a tag octet names what follows — `0` a ten-octet frame, `1` a
-/// two-octet SID frame, `2` a lost frame with nothing after it. The seeds
-/// are this repository's own encoder's frames, one of them in each shape.
+/// two-octet SID frame, `2` a lost frame and `3` a frame the far end did
+/// not send, neither with anything after it. The seeds are this
+/// repository's own encoder's frames, one of them in each shape.
 fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
     use sipral_media::g729::{Encoder, FRAME_OCTETS};
 
@@ -1423,13 +1424,14 @@ fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
         .unwrap_or_default();
     with_sid.extend_from_slice(&[0x00, 0x14]);
 
-    // each frame behind its tag, a SID frame, a loss, and one frame more
+    // each frame behind its tag, a SID frame, a frame not sent, a loss in
+    // the pause, and one frame more
     let mut stream = Vec::new();
     for frame in payload.chunks_exact(FRAME_OCTETS) {
         stream.push(0);
         stream.extend_from_slice(frame);
     }
-    stream.extend_from_slice(&[1, 0x00, 0x14, 2]);
+    stream.extend_from_slice(&[1, 0x00, 0x14, 3, 2]);
     stream.push(0);
     stream.extend_from_slice(payload.get(..FRAME_OCTETS).unwrap_or_default());
 
@@ -1466,7 +1468,7 @@ fn through_media_g729(name: &str, data: &[u8]) -> Result<(), Wrong> {
         let needed = match tag {
             0 => FRAME_OCTETS,
             1 => SID_OCTETS,
-            2 => 0,
+            2 | 3 => 0,
             other => {
                 return Err(Wrong(format!(
                     "the {name} seed has a tag of {other}, which names nothing"

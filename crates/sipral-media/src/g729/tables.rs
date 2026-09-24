@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
-//! The constants of ITU-T G.729 Annex A.
+//! The constants of ITU-T G.729 Annex A, and of Annex B's silence
+//! compression over it.
 //!
 //! # Where each table came from
 //!
@@ -50,7 +51,7 @@
 //! | [`GA_THRESHOLDS`] | the same, for `GA` | `annex_a.thr1` |
 //! | [`GB_THRESHOLDS`] | the same, for `GB` | `annex_a.thr2` |
 //! | [`LP_WINDOW`] | `wlp(n)`, equation 3 | `annex_a.hamwindow`; equals the formula times 32767, rounded |
-//! | [`LAG_WINDOW`] | `wlag(k)`, equation 6, over 1.0001 | `annex_a.lag_h` and `annex_a.lag_l`; the formula to within 60 units in 2^31 |
+//! | [`LAG_WINDOW`] | `wlag(k)`, equation 6, over 1.0001 | `annex_ba_ld8a.lag_h` and `annex_ba_ld8a.lag_l`, twelve lags, whose first ten equal `annex_a.lag_h` and `annex_a.lag_l`; the formula to within 60 units in 2^31 |
 //! | [`GRID`] | the grid of A.3.2.3 | `annex_a.grid`; equals `cos(jπ/50)` truncated, but for its two ends |
 //! | [`ARCCOS_SLOPE`] | the inverse slopes of Table 12's cosine | `annex_a.slope_acos`; equals `2^20` over each segment's fall in [`COSINE`], its ends taken as ±32768, rounded |
 //! | [`INPUT_HIGH_PASS_ZEROS`] | equation 1, numerator | computed; equals `annex_a.b140` |
@@ -64,6 +65,30 @@
 //! | [`GAIN_PREDICTOR`] | `b1..b4`, equation 69 | computed; equals `annex_a.pred` |
 //! | [`OUTPUT_HIGH_PASS_ZEROS`] | equation 91, numerator | computed; equals `annex_a.b100` |
 //! | [`OUTPUT_HIGH_PASS_POLES`] | equation 91, denominator | computed; equals `annex_a.a100` |
+//!
+//! Annex B's own tables came the same way, from its table file for the
+//! silence compression (and, for the twelve-lag window above, its version
+//! of the Annex A table file), with the same script and nothing else of
+//! that software read:
+//!
+//! | Here | The Recommendation's name | Key in the extracted list |
+//! |---|---|---|
+//! | [`NOISE_MA_PREDICTOR`] | B.18's two predictors | computed from [`MA_PREDICTOR`] by equation B.18 |
+//! | [`NOISE_MA_CURRENT_WEIGHT`] | their `1 − Σ p̂` | `annex_ba_dtx.noise_fg_sum` |
+//! | [`NOISE_MA_CURRENT_WEIGHT_INVERSE`] | its reciprocal | `annex_ba_dtx.noise_fg_sum_inv` |
+//! | [`SID_FIRST_STAGE_ROWS`] | the subset of `L1`, B.4.2.2 item 2 | `annex_ba_dtx.PtrTab_1` |
+//! | [`SID_FIRST_STAGE_SCALE`] | not named; it scales the first stage's error per predictor | `annex_ba_dtx.Mp` |
+//! | [`SID_SECOND_STAGE_ROWS`] | the subsets of `L2` and `L3`, item 3 | `annex_ba_dtx.PtrTab_2` |
+//! | [`SID_GAINS`] | B.4.2.1's levels as gains | `annex_ba_dtx.tab_Sidgain`; the levels' square roots, Q3, to within 1% and a unit |
+//! | [`SID_ENERGY_FACTOR`] | equation B.15's factor | `annex_ba_dtx.fact`; equals the formula, rounded |
+//! | [`SID_ENERGY_HEADROOM`] | not named | `annex_ba_dtx.marg` |
+//! | [`LOW_BAND_CORRELATION`] | B.3.1.3's low-band filter `h`, as `hᵀRh` reads it | `annex_ba_dtx.lbf_corr` |
+//! | [`LOUD_FRAMES_MANTISSA`] | B.3.2's average over the loud frames | `annex_ba_dtx.factor_fx`; `32/(32 − n)` as a mantissa |
+//! | [`LOUD_FRAMES_SHIFT`] | the same | `annex_ba_dtx.shift_fx`; its shift |
+//!
+//! Where a name above says "not named", the text does not mention the
+//! table: which values the conformance streams need is what placed it,
+//! and the code that uses it says how.
 //!
 //! `b30` is described in the text — a Hamming-windowed sinc truncated at ±29,
 //! cut off at 3600 Hz in the three-times oversampled domain — but not closely
@@ -728,12 +753,14 @@ pub(super) const LP_WINDOW: [i16; 240] = [
     6114, 4838, 3554, 2264, 971,
 ];
 
-/// `wlag(k)` of equation 6 for `k = 1..10`, divided by the white-noise
+/// `wlag(k)` of equation 6 for `k = 1..12`, divided by the white-noise
 /// correction 1.0001 of equation 7: multiplying `r(k)` by this and leaving
 /// `r(0)` alone is the same filter as the text's, scaled by a constant the
 /// Levinson-Durbin recursion does not see. A Q31 value split into its upper
-/// sixteen bits and the fifteen below them, as `arith::Split` holds it.
-pub(super) const LAG_WINDOW: [(i16, i16); 10] = [
+/// sixteen bits and the fifteen below them, as `arith::Split` holds it. The
+/// LP analysis reads the first ten; Annex B's voice activity detector reads
+/// all twelve (B.3.1: `q = 12`).
+pub(super) const LAG_WINDOW: [(i16, i16); 12] = [
     (32728, 11904),
     (32619, 17280),
     (32438, 30720),
@@ -744,6 +771,8 @@ pub(super) const LAG_WINDOW: [(i16, i16); 10] = [
     (30517, 7360),
     (29946, 19520),
     (29321, 14784),
+    (28645, 22092),
+    (27923, 12924),
 ];
 
 /// The points the LP → LSP conversion looks for sign changes between
@@ -790,15 +819,115 @@ pub(super) const GA_THRESHOLDS: [i16; 4] = [10808, 12374, 19778, 32567];
 /// rows begin, Q15.
 pub(super) const GB_THRESHOLDS: [i16; 8] = [14087, 16188, 20274, 21321, 23525, 25232, 27873, 30542];
 
+/// The MA predictors of a SID frame's LSF quantizer (B.4.2.2, item 1): the
+/// first is the speech quantizer's first, and the second is equation B.18's
+/// mixture of the speech quantizer's two, `0.6 p̂1 + 0.4 p̂2`, Q15. The
+/// mixture is formed with 0.6 and 0.4 as the Q15 values below them and the
+/// upper half of the doubled sum kept (the test at the end works it out);
+/// rounded instead, the Annex B streams do not decode.
+pub(super) const NOISE_MA_PREDICTOR: [[[i16; 10]; 4]; 2] = [
+    MA_PREDICTOR[0],
+    [
+        [8145, 8617, 8779, 8648, 8718, 8829, 8713, 8705, 8806, 8231],
+        [5894, 5525, 5603, 5773, 6016, 5968, 5896, 5835, 5721, 5707],
+        [4568, 3765, 3605, 3963, 4144, 4038, 4225, 4139, 3914, 4255],
+        [3643, 2455, 1944, 2466, 2438, 2259, 2798, 2775, 2479, 3124],
+    ],
+];
+
+/// `1 − Σ p̂(i,k)` for the two predictors of [`NOISE_MA_PREDICTOR`], Q15.
+pub(super) const NOISE_MA_CURRENT_WEIGHT: [[i16; 10]; 2] = [
+    [7798, 8447, 8205, 8293, 8126, 8477, 8447, 8703, 9043, 8604],
+    [
+        10514, 12402, 12833, 11914, 11447, 11670, 11132, 11311, 11844, 11447,
+    ],
+];
+
+/// Its reciprocal, Q12.
+pub(super) const NOISE_MA_CURRENT_WEIGHT_INVERSE: [[i16; 10]; 2] = [
+    [
+        17210, 15888, 16357, 16183, 16516, 15833, 15888, 15421, 14840, 15597,
+    ],
+    [
+        12764, 10821, 10458, 11264, 11724, 11500, 12056, 11865, 11331, 11724,
+    ],
+];
+
+/// The part of `L1` a SID frame's first stage uses (B.4.2.2, item 2): the
+/// row of [`FIRST_STAGE`] each of the thirty-two first-stage indices names.
+pub(super) const SID_FIRST_STAGE_ROWS: [u8; 32] = [
+    96, 52, 20, 54, 86, 114, 82, 68, 36, 121, 48, 92, 18, 120, 94, 124, 50, 125, 4, 100, 28, 76,
+    12, 117, 81, 22, 90, 116, 127, 21, 108, 66,
+];
+
+/// What the first stage's squared error is scaled by for each of the two
+/// noise predictors before the candidates are compared, Q15: about four
+/// times the mean square of the predictor's current-frame weight, so that
+/// errors in the two predictors' targets are compared in the units of the
+/// LSFs they would produce.
+pub(super) const SID_FIRST_STAGE_SCALE: [i16; 2] = [8644, 16572];
+
+/// The part of `L2` and `L3` its second stage uses (item 3): for each of
+/// the sixteen second-stage indices, the row of [`SECOND_STAGE_LOW`] that
+/// gives the lower five coefficients and the row of [`SECOND_STAGE_HIGH`]
+/// that gives the upper five.
+pub(super) const SID_SECOND_STAGE_ROWS: [[u8; 16]; 2] = [
+    [31, 21, 9, 3, 10, 2, 19, 26, 4, 3, 11, 29, 15, 27, 21, 12],
+    [16, 1, 0, 0, 8, 25, 22, 20, 19, 23, 20, 31, 4, 31, 20, 31],
+];
+
+/// The thirty-two levels of B.4.2.1's energy quantizer as the gains of the
+/// comfort noise they describe: `√` of the energy, Q3. The levels are −12 dB,
+/// −4 to 16 dB in steps of 4, and 18 to 66 dB in steps of 2.
+pub(super) const SID_GAINS: [i16; 32] = [
+    2, 5, 8, 13, 20, 32, 50, 64, 80, 101, 127, 160, 201, 253, 318, 401, 505, 635, 800, 1007, 1268,
+    1596, 2010, 2530, 3185, 4009, 5048, 6355, 8000, 10071, 12679, 15962,
+];
+
+/// B.3.1.3's low-band filter as the voice activity detector uses it: the
+/// autocorrelation of its impulse response `h`, lags 0 to 12, so that
+/// `hᵀRh` is `c(0) R(0) + 2 Σ c(k) R(k)`, Q15.
+pub(super) const LOW_BAND_CORRELATION: [i16; 13] = [
+    7869, 7011, 4838, 2299, 321, -660, -782, -484, -164, 3, 39, 21, 4,
+];
+
+/// `32/(32 − n)` for `n = 0..32` as a Q15 mantissa and the left shift that
+/// scales it back: what turns a sum over the thirty-two frames of B.3.2
+/// divided by thirty-two into the average over the `32 − n` of them that
+/// were loud enough to count. The last entry, for none of them, is zero.
+pub(super) const LOUD_FRAMES_MANTISSA: [i16; 33] = [
+    32767, 16913, 17476, 18079, 18725, 19418, 20165, 20972, 21845, 22795, 23831, 24966, 26214,
+    27594, 29127, 30840, 32767, 17476, 18725, 20165, 21845, 23831, 26214, 29127, 32767, 18725,
+    21845, 26214, 32767, 21845, 32767, 32767, 0,
+];
+
+/// The shifts that go with [`LOUD_FRAMES_MANTISSA`].
+pub(super) const LOUD_FRAMES_SHIFT: [u8; 33] = [
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5,
+    0,
+];
+
+/// Equation B.15's factor `αw / (kE · Ncur · 80)`, Q15, for the energy of an
+/// erased first SID frame (entry 0, one frame of excitation) and for sums of
+/// one and of two residual energies (entries 1 and 2).
+pub(super) const SID_ENERGY_FACTOR: [i16; 3] = [410, 26, 13];
+
+/// The bits of headroom the sum of residual energies is formed with, for
+/// the same three cases.
+pub(super) const SID_ENERGY_HEADROOM: [i16; 3] = [0, 0, 1];
+
 #[cfg(test)]
 mod tests {
     use super::{
         ARCCOS_SLOPE, COSINE, COSINE_SLOPE, FIRST_STAGE, GA, GA_CODEWORD, GA_ROW, GA_THRESHOLDS,
         GAIN_PREDICTOR, GB, GB_CODEWORD, GB_ROW, GB_THRESHOLDS, GRID, INITIAL_LSF, INITIAL_LSP,
         INPUT_HIGH_PASS_POLES, INPUT_HIGH_PASS_ZEROS, INTERPOLATION_B30, INVERSE_SQRT, LAG_WINDOW,
-        LOG2, LP_WINDOW, MA_CURRENT_WEIGHT, MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR,
-        OUTPUT_HIGH_PASS_POLES, OUTPUT_HIGH_PASS_ZEROS, POWER_OF_TWO, PRESELECTION_OFFSETS,
-        PRESELECTION_SLOPES, SECOND_STAGE_HIGH, SECOND_STAGE_LOW,
+        LOG2, LOUD_FRAMES_MANTISSA, LOUD_FRAMES_SHIFT, LOW_BAND_CORRELATION, LP_WINDOW,
+        MA_CURRENT_WEIGHT, MA_CURRENT_WEIGHT_INVERSE, MA_PREDICTOR, NOISE_MA_CURRENT_WEIGHT,
+        NOISE_MA_CURRENT_WEIGHT_INVERSE, NOISE_MA_PREDICTOR, OUTPUT_HIGH_PASS_POLES,
+        OUTPUT_HIGH_PASS_ZEROS, POWER_OF_TWO, PRESELECTION_OFFSETS, PRESELECTION_SLOPES,
+        SECOND_STAGE_HIGH, SECOND_STAGE_LOW, SID_ENERGY_FACTOR, SID_ENERGY_HEADROOM,
+        SID_FIRST_STAGE_ROWS, SID_FIRST_STAGE_SCALE, SID_GAINS, SID_SECOND_STAGE_ROWS,
     };
     use core::f64::consts::PI;
 
@@ -927,6 +1056,129 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// B.18: the second noise predictor is `0.6 p̂1 + 0.4 p̂2`, formed with
+    /// the truncated Q15 weights and the upper half of the doubled sum; the
+    /// first is the speech quantizer's first. The current-frame weights
+    /// agree with the predictors as the speech ones do, and the inverses are
+    /// their reciprocals.
+    #[test]
+    fn the_noise_predictors_are_equation_b_18() {
+        assert_eq!(NOISE_MA_PREDICTOR[0], MA_PREDICTOR[0]);
+        for frame in 0..4 {
+            for index in 0..10 {
+                let first = i32::from(MA_PREDICTOR[0][frame][index]);
+                let second = i32::from(MA_PREDICTOR[1][frame][index]);
+                let mixed = (2 * (first * 19_660 + second * 13_107)) >> 16;
+                assert_eq!(i32::from(NOISE_MA_PREDICTOR[1][frame][index]), mixed);
+            }
+        }
+        assert_eq!(NOISE_MA_CURRENT_WEIGHT[0], MA_CURRENT_WEIGHT[0]);
+        assert_eq!(
+            NOISE_MA_CURRENT_WEIGHT_INVERSE[0],
+            MA_CURRENT_WEIGHT_INVERSE[0]
+        );
+        for (predictor, weights) in NOISE_MA_PREDICTOR.iter().zip(NOISE_MA_CURRENT_WEIGHT) {
+            for coefficient in 0..10 {
+                let taps: i32 = predictor
+                    .iter()
+                    .map(|row| i32::from(row[coefficient]))
+                    .sum();
+                // the weights were worked out before the taps were rounded,
+                // and each mixed tap is truncated: a few units apart
+                let weight = i32::from(weights[coefficient]);
+                assert!((32_768 - taps - weight).abs() <= 6, "{taps} and {weight}");
+            }
+        }
+        for (weights, inverses) in NOISE_MA_CURRENT_WEIGHT
+            .iter()
+            .zip(NOISE_MA_CURRENT_WEIGHT_INVERSE)
+        {
+            for (weight, inverse) in weights.iter().zip(inverses) {
+                let exact = 4096.0 * 32768.0 / f64::from(*weight);
+                assert!(
+                    (exact - f64::from(inverse)).abs() <= 2.5,
+                    "{exact} {inverse}"
+                );
+            }
+        }
+        // about four times the mean square of each predictor's weights
+        for (scale, weights) in SID_FIRST_STAGE_SCALE.iter().zip(NOISE_MA_CURRENT_WEIGHT) {
+            let mean_square = weights
+                .iter()
+                .map(|w| (f64::from(*w) / 32_768.0).powi(2))
+                .sum::<f64>()
+                / 10.0;
+            let ratio = f64::from(*scale) / 32_768.0 / (4.0 * mean_square);
+            assert!((0.95..1.05).contains(&ratio), "{scale}: {ratio}");
+        }
+    }
+
+    /// B.4.2.1's levels as gains: `√(10^(dB/10))` in Q3, to within the
+    /// rounding of the smallest.
+    #[test]
+    fn the_sid_gains_are_b_4_2_1s_levels() {
+        for (index, gain) in SID_GAINS.iter().enumerate() {
+            let index = i32::try_from(index).unwrap();
+            let decibels = match index {
+                0 => -12,
+                1..=6 => -4 + 4 * (index - 1),
+                _ => 16 + 2 * (index - 6),
+            };
+            let exact = 8.0 * 10_f64.powf(f64::from(decibels) / 20.0);
+            assert!(
+                (f64::from(*gain) - exact).abs() <= exact * 0.01 + 1.0,
+                "{decibels} dB: {gain} against {exact}"
+            );
+        }
+    }
+
+    /// The SID codebooks' subsets name rows that exist, and the low-band
+    /// filter's autocorrelation peaks at lag zero.
+    #[test]
+    fn the_sid_subsets_and_the_low_band_filter_are_in_range() {
+        assert!(
+            SID_FIRST_STAGE_ROWS
+                .iter()
+                .all(|row| usize::from(*row) < FIRST_STAGE.len())
+        );
+        for rows in SID_SECOND_STAGE_ROWS {
+            assert!(rows.iter().all(|row| usize::from(*row) < 32));
+        }
+        let [peak, rest @ ..] = LOW_BAND_CORRELATION;
+        assert!(rest.iter().all(|value| value.abs() < peak));
+    }
+
+    /// `32/(32 − n)`: the mantissa and shift make it to within a unit in the
+    /// mantissa, and the last entry, for no frames, is zero.
+    #[test]
+    fn the_start_factors_are_thirty_two_over_the_frames_that_count() {
+        for n in 0..32_u8 {
+            let exact = 32.0 / f64::from(32 - n);
+            let mantissa = f64::from(LOUD_FRAMES_MANTISSA[usize::from(n)]);
+            let value = mantissa / 32_768.0 * f64::from(1_u32 << LOUD_FRAMES_SHIFT[usize::from(n)]);
+            assert!(
+                (value - exact).abs() <= 2.0 / 32_768.0 * f64::from(1_u32 << 5),
+                "{n}: {value} against {exact}"
+            );
+        }
+        assert_eq!(LOUD_FRAMES_MANTISSA[32], 0);
+    }
+
+    /// Equation B.15's factor `αw / (kE · Ncur · 80)` for one and two
+    /// energies, and one over the eighty samples of a frame for the lost
+    /// first SID frame.
+    #[test]
+    fn the_sid_energy_factors_are_equation_b_15() {
+        let q15 = |value: f64| nearest(value * 32_768.0);
+        assert_eq!(i32::from(SID_ENERGY_FACTOR[0]), q15(1.0 / 80.0));
+        assert_eq!(i32::from(SID_ENERGY_FACTOR[1]), q15(0.125 / (2.0 * 80.0)));
+        assert_eq!(
+            i32::from(SID_ENERGY_FACTOR[2]),
+            q15(0.125 / (2.0 * 2.0 * 80.0))
+        );
+        assert_eq!(SID_ENERGY_HEADROOM, [0, 0, 1]);
     }
 
     #[test]

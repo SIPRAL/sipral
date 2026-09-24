@@ -93,6 +93,24 @@ pub(super) const fn shift_right_signed(a: i16, count: i16) -> i16 {
     }
 }
 
+/// "Short shift right with round" by a signed count: the last bit shifted
+/// out is added back, so a half rounds up; a negative count shifts left,
+/// held at the end of the word.
+pub(super) const fn shift_right_round(a: i16, count: i16) -> i16 {
+    if count <= 0 {
+        shift_right_signed(a, count)
+    } else if count > 15 {
+        0
+    } else {
+        let shifted = a >> count;
+        if (a >> (count - 1)) & 1 == 1 {
+            shifted + 1
+        } else {
+            shifted
+        }
+    }
+}
+
 /// "Short multiplication": two Q15 fractions to a Q15 fraction, truncated
 /// toward minus infinity. Only −1 × −1 leaves the word.
 pub(super) const fn mult(a: i16, b: i16) -> i16 {
@@ -448,6 +466,25 @@ pub(super) fn inverse_sqrt(value: i32) -> i32 {
     let end = INVERSE_SQRT.get(segment + 1).copied().unwrap_or(0);
     let interpolated = msu(deposit_high(start), sub(start, end), within);
     long_shift_right(interpolated, exponent)
+}
+
+/// The square root of a thirty-two-bit value, found a bit at a time from
+/// the top: the largest `r`, a multiple of two below `2^15`, whose square,
+/// doubled as every product here is, does not exceed `value`. So it is
+/// `√(value/2)`, rounded down to an even number. Zero and below give zero.
+pub(super) const fn half_square_root(value: i32) -> i16 {
+    let mut root = 0_i16;
+    let mut bit = 0x4000_i16;
+    let mut step = 0;
+    while step < 14 {
+        let candidate = add(root, bit);
+        if value >= long_mult(candidate, candidate) {
+            root = candidate;
+        }
+        bit >>= 1;
+        step += 1;
+    }
+    root
 }
 
 /// A normalising shift, at most thirty-one, as a signed shift count.

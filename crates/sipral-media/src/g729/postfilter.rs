@@ -89,13 +89,14 @@ impl Postfilter {
 
     /// Postfilter one subframe. `speech` holds the ten samples before it and
     /// then its forty; `a` is the subframe's `A(z)`; `delay` the whole part
-    /// of the pitch delay it was decoded with. The forty postfiltered samples
-    /// go to `out`.
+    /// of the pitch delay it was decoded with, or `None` for comfort noise,
+    /// which has no pitch to enhance and passes the long-term postfilter
+    /// untouched. The forty postfiltered samples go to `out`.
     pub(super) fn subframe(
         &mut self,
         a: &Coefficients,
         speech: &[i16; 50],
-        delay: i16,
+        delay: Option<i16>,
         out: &mut [i16; 40],
     ) {
         let numerator = expand(a, GAMMA_N);
@@ -107,7 +108,10 @@ impl Postfilter {
             *slot = value;
         }
 
-        let mut filtered = self.long_term(delay.min(CENTRE_CEILING));
+        let mut filtered = match delay {
+            Some(delay) => self.long_term(delay.min(CENTRE_CEILING)),
+            None => current,
+        };
         self.compensate_tilt(&numerator, &denominator, &mut filtered);
         synthesise(&denominator, &filtered, &self.synthesis, out);
         for (slot, value) in self.synthesis.iter_mut().zip(out.iter().skip(30)) {
@@ -397,7 +401,9 @@ mod tests {
         let a = [4096, -2000, 500, 0, 0, 0, 0, 0, 0, 0, 0];
         let speech = [0_i16; 50];
         let mut out = [1_i16; 40];
-        filter.subframe(&a, &speech, 60, &mut out);
+        filter.subframe(&a, &speech, Some(60), &mut out);
+        assert_eq!(out, [0; 40]);
+        filter.subframe(&a, &speech, None, &mut out);
         assert_eq!(out, [0; 40]);
     }
 

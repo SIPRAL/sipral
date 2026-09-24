@@ -1200,10 +1200,8 @@ Two behaviours no stream reaches are chosen from the text rather than
 checked: the LSF stability check's floor and ceiling are the nearest values
 to 0.005 and 3.135, and a stream that loses its very first frame conceals it
 with the shortest delay the codebook has, because §4.3's zero is not a delay.
-Annex B's comfort noise is not decoded: `decode_into` decodes the speech
-frames of a payload and leaves a two-octet SID frame at its end alone, and
-`g729::Payload` is how a caller finds one — what a call does with it is
-under "G.729 in a call", below.
+Annex B's SID frames and the frames between them are decoded too — see
+"G.729: Annex B, bit-exact" below.
 
 ### G.729: the encoder, bit-exact against Annex A
 
@@ -1253,6 +1251,96 @@ evaluation's floor, the impulse response's halving before the codebook
 search, or the exact value of the preselection's inverse slope. None of
 them is confirmed by a stream, and the modules say so where each is
 written.
+
+### G.729: Annex B, bit-exact
+
+Annex B is G.729's silence compression: a voice activity detector at the
+encoder, and for the frames it finds silent either a two-octet SID frame —
+fifteen bits describing the background's spectrum and level — or nothing at
+all, while both ends synthesise the same comfort noise from the last SID.
+`Encoder::with_dtx` makes an encoder that does this; `Encoder::encode`
+returns `Encoded::Speech`, `Encoded::Sid` or `Encoded::Nothing`, and an
+encoder made with `Encoder::new` returns speech every time, as before. The
+decoder takes all four things a frame can be: `decode` for speech,
+`decode_sid` for a SID frame, `untransmitted` for a frame the far end did
+not send, and `conceal` for one that was lost — concealed as speech after
+speech, and as the pause going on inside a pause (B.4.5). `decode_into`
+decodes a SID frame at the end of a payload when there is room for its
+eighty samples.
+
+Annex B's text describes its algorithms in outline — the detector's
+features and its fourteen decision regions, the DTX's Itakura tests, the
+comfort noise as a random excitation mixed with Gaussian noise — and leaves
+the fixed point, and in places the procedure itself, to the software it
+makes normative (B.5). The procedure here is the one the ITU's Annex B
+conformance streams are produced with, and it departs from the text where
+they do:
+
+- **The detector's boundaries** are not Table B.1's. The Implementers'
+  Guide (10/2017) records that the software's fourteen boundaries differ
+  from the table and that the streams follow the software; it prints only
+  the first (`a1 = −14680` against 23488). The rest are the ones under
+  which every frame of all four inputs is classified as the streams have
+  it.
+- **The detector's averages** start from the frames above fifteen decibels
+  as the text says, with the noise's full-band energy ten decibels and its
+  low-band energy twelve below their average rather than by Table B.1's
+  three cases; they are updated only when the frame is within three
+  decibels of the noise, its second reflection coefficient below 0.75 and
+  its spectral distance below 83, and the fourth smoothing stage also needs
+  that coefficient below 0.6 — the conditions Appendix II quotes from the
+  software (II.5.1, II.5.3). The long-term minimum of B.3.3 is kept over
+  sixteen stretches of eight frames.
+- **The DTX's thresholds** are 0.6 dB for a changed filter and 0.4 dB for
+  sending the frame's own filter rather than the past average, where the
+  text prints 1.20226 and 1.12202 (0.8 and 0.5 dB); with the text's values
+  the four inputs send their SID frames at other frames than the streams
+  do. A SID frame may follow the last one from the third silent frame, not
+  the second, and the autocorrelations the DTX keeps are taken before the
+  lag window, where B.4.1.1 says "including the bandwidth expansion".
+- **The SID's spectrum** is searched in two stages as B.4.2.2 says, with
+  four first-stage candidates across the two predictors; the first stage's
+  error is scaled by a per-predictor weight from the software's table file,
+  which the text does not mention, and the second is weighted by the LSF
+  weights and the square of each predictor's current-frame weight.
+- **The comfort noise** is the text's ingredients in another arrangement:
+  the Gaussian part is added to the adaptive-codebook vector before the
+  pulses' gain is solved for, where B.24 to B.26 mix it in afterwards, and
+  the generator starts from its own seed and is put back at every speech
+  frame, at both ends.
+- **A pause whose first SID frame is lost** takes its level from the last
+  speech frame's excitation, as B.4.5 says, but keeps the spectrum of the
+  last SID frame received, where B.4.5 says the last speech frame's LSPs:
+  `tstseq6` loses such a SID, and with the speech frame's LSPs its next
+  ten frames decode differently.
+
+Against Release 3's Annex B set for Annex A, every stream matches:
+
+| Stream | Frames: speech, SID, not sent, lost | What it is checked for | Result |
+|---|---|---|---|
+| `tstseq1.bin` → `tstseq1a.bit` | 998: 485, 85, 428, 0 | the encoder with DTX | identical, every frame's type and every bit |
+| `tstseq2.bin` → `tstseq2a.bit` | 273: 130, 13, 130, 0 | the same | identical |
+| `tstseq3.bin` → `tstseq3a.bit` | 856: 302, 79, 475, 0 | the same | identical |
+| `tstseq4.bin` → `tstseq4a.bit` | 800: 472, 62, 266, 0 | the same | identical |
+| `tstseq1a.bit` → `tstseq1a.out` | 998, as above | the decoder | identical, 79840 of 79840 samples |
+| `tstseq2a.bit` → `tstseq2a.out` | 273, as above | the same | identical, 21840 of 21840 |
+| `tstseq3a.bit` → `tstseq3a.out` | 856, as above | the same | identical, 68480 of 68480 |
+| `tstseq4a.bit` → `tstseq4a.out` | 800, as above | the same | identical, 64000 of 64000 |
+| `tstseq5.bit` → `tstseq5a.out` | 46: 45, 1, 0, 0 | a single SID frame | identical, 3680 of 3680 |
+| `tstseq6.bit` → `tstseq6a.out` | 100: 74, 6, 18, 2 | losses, one of them a pause's first SID frame | identical, 8000 of 8000 |
+
+`tstseq5` and `tstseq6` come as streams only, with no input to encode.
+Three input files are not a whole number of frames (`tstseq2.bin` and
+`tstseq3.bin` end fourteen and forty-four octets into a frame); the
+encoder takes the whole frames, as the reference streams do.
+
+What no stream reaches is not checked: the detector's frame count running
+out of a word after 32767 frames (five and a half minutes) and starting
+again from 256, the DTX's LP recursion becoming unstable, and an LP filter
+whose LSPs cannot all be found, which falls back on the last speech frame's
+LSPs at the encoder's analysis and on the last frame's quantized ones for
+a SID. These follow the text where it says anything, and the modules say
+so where each is written.
 
 ### G.729 in a call
 

@@ -65,19 +65,37 @@ impl InputFilter {
     }
 }
 
+/// Lags of the autocorrelation kept: the LP analysis reads `r(0)` to
+/// `r(10)`, Annex B's voice activity detector up to `r(12)` (B.3.1).
+pub(super) const LAGS: usize = 13;
+
+/// Equations 4, 5 and 7: the windowed signal's autocorrelations, normalised
+/// together so that `r(0)` fills the word.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Autocorrelation {
+    /// `r(0)` to `r(12)` with the lag window applied.
+    pub(super) windowed: [Split; LAGS],
+    /// The same before the lag window.
+    pub(super) plain: [Split; LAGS],
+    /// The power of two the normalised values are to be scaled by to give
+    /// the sums of doubled products: one, plus two for each time the signal
+    /// was divided by four, less the normalising shift.
+    pub(super) exponent: i16,
+}
+
 /// Equations 4, 5 and 7: the windowed signal's autocorrelations `r(0)` to
-/// `r(10)`, normalised together so that `r(0)` fills the word, with the lag
-/// window applied.
+/// `r(12)`, before and after the lag window.
 ///
 /// `r(0)` starts from one rather than zero, which is the text's lower bound
 /// on it (no conformance input tells the two apart). If the energy leaves
 /// the word, the windowed signal is divided by four and the sums taken
 /// again, as often as it takes.
-pub(super) fn autocorrelation(signal: &[i16; WINDOW]) -> [Split; 11] {
+pub(super) fn autocorrelation(signal: &[i16; WINDOW]) -> Autocorrelation {
     let mut windowed = [0_i16; WINDOW];
     for ((slot, sample), weight) in windowed.iter_mut().zip(signal).zip(LP_WINDOW) {
         *slot = mult_round(*sample, weight);
     }
+    let mut exponent = 1_i16;
     let energy = loop {
         let (energy, overflowed) = dot_checked(1, &windowed, &windowed);
         if !overflowed {
@@ -86,11 +104,14 @@ pub(super) fn autocorrelation(signal: &[i16; WINDOW]) -> [Split; 11] {
         for slot in &mut windowed {
             *slot = shift_right(*slot, 2);
         }
+        exponent = add(exponent, 4);
     };
-    let shift = i32::try_from(long_norm(energy)).unwrap_or(0);
+    let normalising = long_norm(energy);
+    let shift = i32::try_from(normalising).unwrap_or(0);
+    exponent = sub(exponent, super::arith::to_word(normalising));
 
-    let mut r = [Split::of(0); 11];
-    for (lag, slot) in r.iter_mut().enumerate() {
+    let mut plain = [Split::of(0); LAGS];
+    for (lag, slot) in plain.iter_mut().enumerate() {
         let sum = if lag == 0 {
             energy
         } else {
@@ -99,14 +120,33 @@ pub(super) fn autocorrelation(signal: &[i16; WINDOW]) -> [Split; 11] {
         };
         *slot = Split::of(long_shift_left(sum, shift));
     }
-    for (slot, (high_half, low_half)) in r.iter_mut().skip(1).zip(LAG_WINDOW) {
+    let mut lagged = plain;
+    for (slot, (high_half, low_half)) in lagged.iter_mut().skip(1).zip(LAG_WINDOW) {
         let weight = Split {
             high: high_half,
             low: low_half,
         };
         *slot = Split::of(slot.times_split(weight));
     }
-    r
+    Autocorrelation {
+        windowed: lagged,
+        plain,
+        exponent,
+    }
+}
+
+/// What the Levinson-Durbin recursion gives: the LP coefficients, the
+/// second reflection coefficient (Annex B's detector reads it) and the
+/// prediction error it ends with (Annex B's DTX reads that).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Prediction {
+    /// `A(z)`, Q12.
+    pub(super) a: Coefficients,
+    /// `k2`, Q15.
+    pub(super) reflection: i16,
+    /// The final prediction error, in the scale of `r(0)`'s upper half; not
+    /// known when the recursion stopped short and the last filter was kept.
+    pub(super) error: Option<i16>,
 }
 
 /// §3.2.2: the Levinson-Durbin recursion, with the filter of the last frame
@@ -114,24 +154,31 @@ pub(super) fn autocorrelation(signal: &[i16; WINDOW]) -> [Split; 11] {
 #[derive(Debug, Clone)]
 pub(super) struct Levinson {
     previous: Coefficients,
+    /// `k2` of the last recursion that finished.
+    previous_reflection: i16,
 }
 
 impl Levinson {
     pub(super) const fn new() -> Self {
         let mut previous = [0; 11];
         previous[0] = 4096;
-        Self { previous }
+        Self {
+            previous,
+            previous_reflection: 0,
+        }
     }
 
-    /// The LP coefficients, Q12, that the autocorrelations `r` describe.
+    /// The LP coefficients, Q12, that the autocorrelations `r` (the first
+    /// eleven of them) describe, with the second reflection coefficient and
+    /// the prediction error.
     ///
     /// The coefficients of each order are held in Q27 and the prediction
     /// error `E` normalised, with its exponent kept apart, so that each
     /// reflection coefficient `k = −(Σ a r)/E` is a division of two
     /// thirty-two-bit values. A reflection coefficient of magnitude
-    /// [`UNSTABLE`] or more stops the recursion and the last frame's filter
-    /// is used again.
-    pub(super) fn run(&mut self, r: &[Split; 11]) -> Coefficients {
+    /// [`UNSTABLE`] or more stops the recursion and the last filter and
+    /// `k2` it finished with are used again.
+    pub(super) fn run(&mut self, r: &[Split]) -> Prediction {
         let r0 = r.first().copied().unwrap_or(Split::of(0));
         let mut a = [Split::of(0); 11];
 
@@ -141,6 +188,7 @@ impl Levinson {
         if let Some(slot) = a.get_mut(1) {
             *slot = Split::of(long_shift_right(k, 4));
         }
+        let mut second = 0;
         let (mut error, mut exponent) = shrink(r0, Split::of(k));
 
         for order in 2..=10 {
@@ -159,7 +207,14 @@ impl Levinson {
             k = long_shift_left(divide_by(sum, error), exponent);
             let reflection = Split::of(k);
             if abs(reflection.high) > UNSTABLE {
-                return self.previous;
+                return Prediction {
+                    a: self.previous,
+                    reflection: self.previous_reflection,
+                    error: None,
+                };
+            }
+            if order == 2 {
+                second = reflection.high;
             }
 
             // a(j) + k a(order − j) for every j below the order, and the
@@ -190,7 +245,15 @@ impl Levinson {
             *slot = round(long_shift_left(value.join(), 1));
         }
         self.previous = out;
-        out
+        self.previous_reflection = second;
+        Prediction {
+            a: out,
+            reflection: second,
+            error: Some(shift_right(
+                error.high,
+                u32::try_from(exponent).unwrap_or(0),
+            )),
+        }
     }
 }
 
@@ -433,7 +496,7 @@ mod tests {
             *slot = sample;
         }
         let r = autocorrelation(&signal);
-        let a = Levinson::new().run(&r);
+        let a = Levinson::new().run(&r.windowed).a;
         assert_eq!(a[0], 4096);
         // |A(e^jω)| is smallest where 1/A peaks
         let magnitude = |hertz: f64| -> f64 {
@@ -487,10 +550,45 @@ mod tests {
         for (n, slot) in signal.iter_mut().enumerate() {
             *slot = if n % 2 == 0 { 20_000 } else { -20_000 };
         }
-        let first = levinson.run(&autocorrelation(&signal));
+        let first = levinson.run(&autocorrelation(&signal).windowed);
         let constant = [16_000_i16; WINDOW];
-        let second = levinson.run(&autocorrelation(&constant));
-        assert_eq!(first[0], 4096);
-        assert_eq!(second[0], 4096);
+        let second = levinson.run(&autocorrelation(&constant).windowed);
+        assert_eq!(first.a[0], 4096);
+        assert_eq!(second.a[0], 4096);
+        assert!(first.error.is_some());
+    }
+
+    /// The prediction error the recursion ends with is `r(0) Π (1 − k²)`: a
+    /// white signal leaves nearly all of its energy, and a resonance little.
+    #[test]
+    fn the_prediction_error_is_what_the_filter_leaves() {
+        let mut state = 0x2468_ace1_u32;
+        let mut white = [0_i16; WINDOW];
+        let mut tone = [0_i16; WINDOW];
+        for (n, (w, t)) in white.iter_mut().zip(tone.iter_mut()).enumerate() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *w = i16::try_from(i64::from(state % 8000) - 4000).unwrap();
+            let phase = f64::from(u16::try_from(n).unwrap()) * 0.3;
+            #[expect(clippy::cast_possible_truncation, reason = "bounded by the amplitude")]
+            let sample = (8000.0 * phase.sin()) as i16;
+            *t = sample;
+        }
+        let r = autocorrelation(&white);
+        let error = Levinson::new().run(&r.windowed).error.unwrap();
+        // r(0) fills the word, so its upper half is near 2^14 or above
+        assert!(
+            error > r.windowed[0].high / 2,
+            "{error} of {}",
+            r.windowed[0].high
+        );
+        let r = autocorrelation(&tone);
+        let error = Levinson::new().run(&r.windowed).error.unwrap();
+        assert!(
+            error < r.windowed[0].high / 100,
+            "{error} of {}",
+            r.windowed[0].high
+        );
     }
 }

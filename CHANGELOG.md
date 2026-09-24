@@ -54,6 +54,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   ip]` turns it on, and `scripts/lab.sh ice` proves it against the interop
   harness requiring ICE and against Asterisk's own ICE.
 
+- **G.729 Annex B, bit-exact against every Annex B conformance stream and
+  input.** `sipral_media::g729::Encoder::with_dtx` makes an encoder with
+  Annex B's voice activity detector and discontinuous transmission:
+  `encode` now returns `Encoded::Speech`, `Encoded::Sid` or
+  `Encoded::Nothing`, and an encoder made with `new` still sends speech
+  every time. The decoder gains `decode_sid` and `untransmitted`, turns a
+  SID frame into comfort noise with the SID's spectrum and level, carries a
+  lost frame in a pause on as the pause (B.4.5), and `decode_into` decodes a
+  SID frame at the end of a payload. All four Annex B inputs encode to the
+  reference streams — each frame's type and every bit — and all six Annex B
+  streams decode to the reference output sample for sample;
+  `docs/05-media.md` has the table and the places where the streams and the
+  text part ways. The `media_g729` fuzz target now drives SID frames,
+  frames not sent and an encoder with DTX.
 - **The Kotlin binding carries an event's whole payload, not just its head.**
   The generator now flattens every arm `sipral_event_payload_t` declares
   across JNI, and `SipralEvent.payload` reads them back as one instance of

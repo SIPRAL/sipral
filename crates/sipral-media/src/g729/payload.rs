@@ -16,11 +16,12 @@
 //! predictor bit, a first-stage index of five bits and a second-stage index
 //! of four for the noise's spectrum, then five bits for its energy, and a
 //! reserved bit. What the energy index means is B.4.2.1's quantizer, which
-//! the text states in full, so that much is decoded; the spectrum and the
-//! comfort-noise generator of B.4.4 are not, and a caller that meets a SID
-//! frame decides for itself what to play in the pause it announces.
+//! the text states in full, so that much is read here;
+//! [`Decoder::decode_sid`](super::Decoder::decode_sid) decodes the whole
+//! frame into comfort noise.
 
 use super::FRAME_OCTETS;
+use super::lsp::NoiseIndices;
 
 /// Octets in an Annex B SID frame.
 pub const SID_OCTETS: usize = 2;
@@ -87,11 +88,38 @@ impl Sid {
         self.0
     }
 
+    /// The two octets, borrowed.
+    #[must_use]
+    pub const fn as_octets(&self) -> &[u8; SID_OCTETS] {
+        &self.0
+    }
+
     /// The energy index, `0..=31`: the last five of the fifteen bits Table
     /// B.2 lays out, before the reserved bit.
     #[must_use]
     pub const fn energy_index(self) -> u8 {
         (self.0[1] >> 1) & 0x1f
+    }
+
+    /// The three spectrum indices, in Table B.2's order: the switched
+    /// predictor (one bit), the first stage (five) and the second (four).
+    pub(super) const fn spectrum(self) -> NoiseIndices {
+        let bits = u16::from_be_bytes(self.0);
+        NoiseIndices {
+            predictor: (bits >> 15) & 1,
+            first: (bits >> 10) & 0x1f,
+            second: (bits >> 6) & 0xf,
+        }
+    }
+
+    /// A SID frame from its four fields, each masked to its width, with the
+    /// reserved bit clear.
+    pub(super) fn from_fields(spectrum: NoiseIndices, energy_index: u8) -> Self {
+        let bits = ((spectrum.predictor & 1) << 15)
+            | ((spectrum.first & 0x1f) << 10)
+            | ((spectrum.second & 0xf) << 6)
+            | ((u16::from(energy_index) & 0x1f) << 1);
+        Self(bits.to_be_bytes())
     }
 
     /// What the energy index quantizes, in decibels (B.4.2.1): a single
@@ -163,6 +191,22 @@ mod tests {
             assert!(matches!(step, Some(2 | 4 | 8)), "{pair:?}");
         }
         assert!(levels.iter().all(|db| db % 2 == 0));
+    }
+
+    /// The four fields go where Table B.2 puts them and come back out.
+    #[test]
+    fn the_fields_are_table_b_2s() {
+        use crate::g729::lsp::NoiseIndices;
+        let spectrum = NoiseIndices {
+            predictor: 1,
+            first: 0b1_0110,
+            second: 0b1001,
+        };
+        let sid = Sid::from_fields(spectrum, 0b1_0011);
+        // 1 10110 1001 10011 0
+        assert_eq!(sid.octets(), [0b1101_1010, 0b0110_0110]);
+        assert_eq!(sid.spectrum(), spectrum);
+        assert_eq!(sid.energy_index(), 0b1_0011);
     }
 
     /// The reserved bit and the spectrum's ten bits do not reach the energy.

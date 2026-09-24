@@ -44,7 +44,7 @@ implementation is cheaper than the alternative.
 | STUN, TURN, ICE-lite | RFC 8489, 8656, 8445 | none |
 | G.711 A-law and µ-law | ITU-T G.711, and the companding law itself | none |
 | G.722 | the text of ITU-T G.722, with its tables read from the printed Recommendation and two of its own printing errors corrected against the closed form | none |
-| G.729 with Annex A | the text of ITU-T G.729 (06/2012) and the Implementers' Guide G.Imp729 (10/2017); the trained tables the text does not print, copied mechanically from the table files of the software attachment; the arithmetic the text leaves open, settled against the ITU's conformance streams. See below | none |
+| G.729 with Annexes A and B | the text of ITU-T G.729 (06/2012) and the Implementers' Guide G.Imp729 (10/2017); the trained tables the text does not print, copied mechanically from the table files of the software attachment; the arithmetic the text leaves open, settled against the ITU's conformance streams. See below | none |
 | Opus | not implemented here; libopus is linked, see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) | not applicable |
 | Device I/O for macOS, iOS and Windows | the platform's own published headers and documentation | none |
 | The C ABI and the bindings printed from it | written for this project; no other stack's ABI was examined | none |
@@ -125,25 +125,27 @@ and `fixtures/rfc4475/README.md` says so.
 ### What G.729 was built from, as it happened
 
 The codec in `crates/sipral-media/src/g729/` is Annex A's encoder and
-decoder. What went into it, by source:
+decoder, with Annex B's silence compression over them. What went into it,
+by source:
 
-- **The text.** G.729 (06/2012), main body and Annex A, read as the
-  Recommendation's own PDF and a text extraction of it; the pages whose
+- **The text.** G.729 (06/2012), main body, Annex A and Annex B, with
+  Appendix II for the conditions it quotes from Annex B's software, read as
+  the Recommendation's own PDF and a text extraction of it; the pages whose
   equations and figures the extraction garbled were read as rendered pages.
-  Annex B was read for its bit stream and its energy quantizer only, which is
-  all of it the tree uses: a received SID frame is recognised by its length
-  and its energy level read (B.4.2.1, Table B.2), and nothing else of Annex B
-  is implemented.
 - **The Implementers' Guide.** G.Imp729 (10/2017) was read in full. It
-  settled nothing for Annex A's encoder or decoder: its corrections concern
-  Annex B's voice activity detector, which is not here.
+  settled nothing for Annex A's encoder or decoder. For Annex B it records
+  that the software's voice activity boundaries differ from the text's
+  Table B.1 and that the software is what the streams follow, and gives the
+  first of them.
 - **The trained tables, and one exception to the four lines above.** The
   LSP codebooks and MA predictors, the gain codebooks and their maps, the
   interpolation filter and the encoder's preselection constants are
   numbers the text does not print; it defers them to the software
-  attachment. On counsel's advice and the owner's decision (23 September
-  2026), those numbers — and nothing else — were copied out of the
-  attachment's table files by a script, without anyone reading the files,
+  attachment, and so does Annex B for its own (the SID quantizer's
+  subsets and weights, the SID gains, the low-band filter, the detector's
+  start-up factors). On counsel's advice and the owner's decision (23
+  September 2026), those numbers — and nothing else — were copied out of
+  the attachment's table files by a script, without anyone reading the files,
   into a list of named arrays of values. The Rust tables are written from
   that list and named from what the text calls each table;
   `g729/tables.rs` records which name came from which array, and every
@@ -156,10 +158,14 @@ decoder. What went into it, by source:
   conformance streams decided: each such constant or step says so where it
   is written. The streams were used on the machine where they were
   obtained and are not in this repository; the tests that read them are
-  ignored unless pointed at a copy. What is published is the result —
-  every Annex A stream decodes, and every Annex A input encodes, to the
-  reference bit for bit (`docs/05-media.md`) — and the tests that produce
-  it.
+  ignored unless pointed at a copy. Annex B leaves far more to its software
+  than Annex A does — beyond constants, the arrangement of the comfort
+  noise and the order of the SID quantizer's comparisons — and there too
+  the procedure is the one the streams are produced with, each departure
+  from the text named in `docs/05-media.md` and in the code. What is
+  published is the result — every Annex A and Annex B stream decodes, and
+  every Annex A and Annex B input encodes, to the reference bit for bit
+  (`docs/05-media.md`) — and the tests that produce it.
 - **Nothing else.** No other G.729 implementation was opened, and no
   source code for one was searched for.
 
