@@ -2146,4 +2146,135 @@ mod tests {
         assert!(!said[0].reason.is_empty());
         assert!(!said[0].reason.contains("correct horse"));
     }
+
+    /// The lifetime a TURN Refresh request asks for (RFC 8656 §7.2, §18.2),
+    /// or `None` for a message that is not one.
+    #[cfg(feature = "ice")]
+    fn refresh_lifetime(message: &[u8]) -> Option<u32> {
+        if message.get(..2) != Some(&[0x00, 0x04][..]) {
+            return None;
+        }
+        let mut at = 20;
+        while let Some(head) = message.get(at..at + 4) {
+            let kind = u16::from_be_bytes([head[0], head[1]]);
+            let len = usize::from(u16::from_be_bytes([head[2], head[3]]));
+            if kind == 0x000d {
+                let value = message.get(at + 4..at + 8)?;
+                return Some(u32::from_be_bytes(value.try_into().ok()?));
+            }
+            at += 4 + len.div_ceil(4) * 4;
+        }
+        None
+    }
+
+    /// A relay allocated for a socket whose call was described when it rang
+    /// is not that call's: answering on the socket spends it, and it goes
+    /// back to the server rather than being kept alive for a call that will
+    /// never take it.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_relay_the_call_on_its_socket_does_not_take_goes_back_when_the_socket_is_spent() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _account = account_on(stack);
+        crate::call::tests::deliver(stack, &crate::call::tests::invitation(), 1_000);
+        let _ = poll(stack, 1_000);
+        let call = crate::call::tests::called(&observed);
+        let _ = signalling_out(stack);
+        let ring = crate::call::tests::ring_media_config();
+        assert_eq!(
+            unsafe {
+                crate::call::sipral_call_ring_media(stack, call, ptr::from_ref(&ring), 1_100)
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+
+        // the socket named after the ring, and given a relay
+        assert_eq!(map_media(stack, 1_200), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(out.len(), 2, "a Binding request and an Allocate");
+        let _ = on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 1_210);
+        let _ = on_media_socket(
+            stack,
+            &turn_answer(&out[1].0, RELAYED_AT, MEDIA_PUBLIC),
+            SERVER,
+            1_210,
+        );
+        let _ = poll(stack, 1_210);
+        assert_eq!(relayed().len(), 1, "the relay was allocated");
+
+        assert_eq!(
+            unsafe {
+                crate::call::sipral_call_answer_media(
+                    stack,
+                    call,
+                    MEDIA.as_ptr().cast::<c_char>(),
+                    MEDIA.len(),
+                    1_300,
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let out = stun_out(stack);
+        assert!(
+            out.iter().any(|(request, destination, source)| {
+                refresh_lifetime(request) == Some(0) && destination == SERVER && source == MEDIA
+            }),
+            "the relay nobody took was kept: {:?}",
+            out.iter()
+                .map(|(request, ..)| refresh_lifetime(request))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A transfer refused for a mistake in its configuration is still there
+    /// to take, and so is the socket's relay: nothing was placed, so nothing
+    /// may have been spent.
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_transfer_refused_for_its_configuration_leaves_the_relay_for_the_one_taken_after() {
+        let mut observed = Observed::default();
+        let _ = mapped();
+        let _ = relayed();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _account = account_on(stack);
+        let call = crate::call::tests::ready_for_a_transfer(&mut observed, stack);
+
+        assert_eq!(map_media(stack, 1_210), SipralStatus::Ok);
+        let out = stun_out(stack);
+        assert_eq!(out.len(), 2, "a Binding request and an Allocate");
+        let _ = on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 1_220);
+        let _ = on_media_socket(
+            stack,
+            &turn_answer(&out[1].0, RELAYED_AT, MEDIA_PUBLIC),
+            SERVER,
+            1_220,
+        );
+        let _ = poll(stack, 1_220);
+        assert_eq!(relayed().len(), 1, "the relay was allocated");
+
+        let mut refused = crate::call::tests::managed_transfer_config();
+        refused.ice = crate::media::SipralIce::Offered as u32;
+        (refused.destination, refused.destination_len) = as_text("not an address");
+        let (status, _, _) = crate::call::tests::accept_transfer(stack, call, &refused);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+
+        let mut taken = crate::call::tests::managed_transfer_config();
+        taken.ice = crate::media::SipralIce::Offered as u32;
+        let (status, _, invite) = crate::call::tests::accept_transfer(stack, call, &taken);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let text = String::from_utf8_lossy(&invite).into_owned();
+        assert!(
+            text.contains("198.51.100.1 50000 typ relay"),
+            "the relay was lost to the refusal: {text}"
+        );
+    }
 }

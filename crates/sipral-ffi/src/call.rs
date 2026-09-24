@@ -1458,17 +1458,7 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         let handle = with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
-            // asked before the headers below borrow the stack's own
-            // User-Agent, since taking a relay is a change to the stack
-            let outside = match media {
-                Some(local) => Some(outside(state, local)?),
-                None => None,
-            };
             let (destination, forks) = unsafe { destination_and_forks(state, &config) }?;
-            let mut headers = Vec::new();
-            if let Some(ref named) = state.user_agent {
-                headers.push((HeaderName::UserAgent, &**named));
-            }
             let asked = unsafe {
                 supplied(
                     config.headers,
@@ -1477,6 +1467,19 @@ entry! {
                     state.user_agent.is_some(),
                 )
             }?;
+            // taken once the configuration has been read whole, since a
+            // relay taken is the socket's no longer, and before the headers
+            // below borrow the stack's own User-Agent, since taking one is a
+            // change to the stack: a transfer refused for its configuration
+            // is still there to take, and so is the relay
+            let outside = match media {
+                Some(local) => Some(outside(state, local)?),
+                None => None,
+            };
+            let mut headers = Vec::new();
+            if let Some(ref named) = state.user_agent {
+                headers.push((HeaderName::UserAgent, &**named));
+            }
             headers.extend(asked);
             let extra = OutgoingExtras {
                 destination,
@@ -2320,7 +2323,7 @@ a=sendrecv\r\n";
     }
 
     /// An INVITE from somebody else, addressed here.
-    fn invitation() -> Vec<u8> {
+    pub(crate) fn invitation() -> Vec<u8> {
         let mut out = b"INVITE sip:alice@192.0.2.10:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 203.0.113.5:5060;branch=z9hG4bK-a-call-in\r\n\
 Max-Forwards: 70\r\n\
@@ -2437,7 +2440,7 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
     }
 
     /// The handle the one incoming-call event named.
-    fn called(observed: &Observed) -> SipralHandle {
+    pub(crate) fn called(observed: &Observed) -> SipralHandle {
         observed
             .events
             .iter()
@@ -2581,7 +2584,10 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
     /// Answer an incoming call and have the far end REFER it to carol, so
     /// that `sipral_call_accept_transfer` has something to take. Returns the
     /// call the REFER arrived on.
-    fn ready_for_a_transfer(observed: &mut Observed, handle: SipralHandle) -> SipralHandle {
+    pub(crate) fn ready_for_a_transfer(
+        observed: &mut Observed,
+        handle: SipralHandle,
+    ) -> SipralHandle {
         deliver(handle, &invitation(), 1_000);
         poll(handle, 1_000);
         let call = called(observed);
@@ -2618,7 +2624,7 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
     }
 
     /// Accept a transfer, and hand back the INVITE it placed to carol.
-    fn accept_transfer(
+    pub(crate) fn accept_transfer(
         handle: SipralHandle,
         call: SipralHandle,
         config: &SipralCallConfig,
