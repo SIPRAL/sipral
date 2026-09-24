@@ -733,11 +733,16 @@ impl TurnClient {
         }
         if self.state == State::Allocated {
             earliest = sooner(earliest, self.refresh_at);
+            // a renewal already on the wire is due at its own retransmission,
+            // not at the instant it left, which stays in the past until the
+            // answer comes; the lapse is due whether or not one is asked
             for entry in &self.permissions {
-                earliest = sooner(earliest, Some(entry.due));
+                let due = (!self.permission_in_flight(entry.peer)).then_some(entry.due);
+                earliest = sooner(earliest, sooner(due, entry.until));
             }
             for entry in &self.channels {
-                earliest = sooner(earliest, Some(entry.due));
+                let due = (!self.channel_in_flight(entry.number)).then_some(entry.due);
+                earliest = sooner(earliest, sooner(due, entry.until));
             }
         }
         earliest
@@ -2272,6 +2277,42 @@ mod tests {
         // nothing came back, so at 300 seconds the permission is gone
         client.handle_timeout(now + Duration::from_secs(300));
         assert!(!client.has_permission(peer().ip()));
+    }
+
+    #[test]
+    fn nothing_is_due_now_while_a_permission_or_a_channel_waits_for_its_answer() {
+        // a caller sleeps until `deadline()` and calls `handle_timeout`; a
+        // request already on the wire is due at its retransmission, and a
+        // renewal it carries must not also be due at the instant it left,
+        // or the caller wakes at once, over and over, until the answer comes
+        let now = Instant::now();
+        let (mut client, mut ids) = ready(now);
+        ids.feed(&mut client);
+        let _number = client.bind_channel(peer(), now).unwrap();
+        let permission = sent(&mut client);
+        let permission = Message::parse(&permission).unwrap();
+        let bind = sent(&mut client);
+        let bind = Message::parse(&bind).unwrap();
+        assert!(
+            client.deadline().is_some_and(|due| due > now),
+            "a caller would spin while the first permission and binding are asked"
+        );
+
+        client.handle_input(&success(&permission, |_| {}), now);
+        client.handle_input(&success(&bind, |_| {}), now);
+        let _seen = events(&mut client);
+        ids.feed(&mut client);
+        let renewal = now + Duration::from_secs(240);
+        assert_eq!(client.deadline(), Some(renewal));
+        client.handle_timeout(renewal);
+        assert_eq!(
+            Message::parse(&sent(&mut client)).unwrap().method(),
+            method::CREATE_PERMISSION
+        );
+        assert!(
+            client.deadline().is_some_and(|due| due > renewal),
+            "a caller would spin while the renewal is asked"
+        );
     }
 
     #[test]

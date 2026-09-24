@@ -608,6 +608,16 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   before, the registrar kept forking calls to the dead address until that
   binding expired. A mapping that moves back never asks for the address it is
   on to go.
+- **`TurnClient::deadline` is no longer in the past while a permission or a
+  channel binding waits for its answer.** The renewal time of each
+  permission and channel counted towards the deadline even after its
+  CreatePermission or ChannelBind had gone out, so from the first `permit`
+  or `bind_channel`, and again at every renewal, a caller that sleeps until
+  the deadline woke at once, over and over, until the relay answered — up to
+  39.5 seconds of a busy loop when it did not. The full ICE agent, which
+  folds the TURN deadline into its own, spun with it. A renewal in flight is
+  now due at its retransmission, and the lapse of a permission or a channel
+  is a deadline of its own.
 - **`SIPRAL_EVENT_KIND_NAT_MAPPING` no longer says `accounts=0` when the
   accounts did move.** `UserAgent::readdress` answered an error, and the
   event zero, whenever one REGISTER could not leave, although every
