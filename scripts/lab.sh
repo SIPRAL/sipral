@@ -19,7 +19,9 @@
 #                               against coturn, through the C ABI
 #   scripts/lab.sh ice          only the ICE steps: a call that requires ICE,
 #                               from the harness and from Asterisk, answered
-#                               by the headless agent as an ICE-lite endpoint
+#                               by the headless agent as an ICE-lite endpoint;
+#                               then two stacks behind two NATs completing
+#                               full ICE on what coturn told them
 #   scripts/lab.sh netem        only the runs over a bad link, every profile
 #   PROFILE=blackout scripts/lab.sh netem      one of them
 #   scripts/lab.sh pipewire     sipral-io-pipewire against a real PipeWire,
@@ -1066,6 +1068,106 @@ ice_lite_asterisk() {
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
+# 8.6.16's step: two stacks, each behind a NAT of its own, completing full
+# ICE on the server-reflexive candidates coturn gave them
+# (interop/harness/src/ice_nat.rs). The Rust harness twice, as caller on
+# `inside` behind natbox and as callee on `inside2` behind natbox2, both
+# requiring ICE. The callee's NAT forwards its SIP port -- signalling is not
+# what this proves -- and nothing else: its media is reachable only through
+# the hole its own checks punch. Both halves print how long ICE took, and the
+# caller fails a path that does not end at the callee's NAT.
+ICE_CALLEE_NAME=sipral-lab-ice-callee
+ice_nat_flow() {
+    local project="${COMPOSE_PROJECT_NAME:-sipral-interop}"
+    local natbox natbox2 coturn gateway gateway2 outside2 stun callee callee_status
+    local status=0 tries=0
+    ( cd interop && docker compose --profile nat up -d --build coturn natbox natbox2 ) >/dev/null 2>&1 \
+        || { printf '  could not start coturn and the two NATs\n'; return 1; }
+    wait_for natbox "nat: masquerading out of" required nat || return 1
+    wait_for natbox2 "nat: masquerading out of" required nat || return 1
+    wait_for coturn "Listener address to use" optional nat || true
+
+    natbox=$(cd interop && docker compose --profile nat ps -q natbox)
+    natbox2=$(cd interop && docker compose --profile nat ps -q natbox2)
+    coturn=$(cd interop && docker compose --profile nat ps -q coturn)
+    gateway=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside\"}}{{.IPAddress}}{{end}}" \
+        "$natbox")
+    gateway2=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
+        "$natbox2")
+    outside2=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$natbox2")
+    stun=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_lab\"}}{{.IPAddress}}{{end}}" \
+        "$coturn")
+    if [ -z "$gateway" ] || [ -z "$gateway2" ] || [ -z "$outside2" ] || [ -z "$stun" ]; then
+        printf '  could not read the addresses: NATs %s and %s (%s outside), coturn %s\n' \
+            "${gateway:-?}" "${gateway2:-?}" "${outside2:-?}" "${stun:-?}"
+        ( cd interop && docker compose --profile nat rm -sf coturn natbox natbox2 ) >/dev/null 2>&1
+        return 1
+    fi
+    printf '  caller behind %s, callee behind %s (%s outside), STUN at %s:3478\n' \
+        "$gateway" "$gateway2" "$outside2" "$stun"
+
+    docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
+    docker run -d --name "$ICE_CALLEE_NAME" --network "${project}_inside2" \
+        --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS=iceanswer \
+        -e "SIPRAL_STUN_SERVER=$stun:3478" \
+        -e "SIPRAL_CONTACT=$outside2:5060" \
+        -v "$HARNESS:/harness:ro" \
+        sipral-lab-nat sh -c "
+            ip route replace default via $gateway2 || exit 1
+            exec /harness $stun 3478 callee" >/dev/null \
+        || status=1
+    callee=$(docker inspect -f \
+        "{{with index .NetworkSettings.Networks \"${project}_inside2\"}}{{.IPAddress}}{{end}}" \
+        "$ICE_CALLEE_NAME" 2>/dev/null)
+    # the forward: SIP arriving at the second NAT from the lab network goes
+    # to the callee, and only SIP
+    if [ "$status" -eq 0 ] && [ -n "$callee" ]; then
+        docker exec "$natbox2" sh -c "
+            lab=\$(ip -o route get $stun | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p')
+            iptables -t nat -I PREROUTING -i \"\$lab\" -p udp --dport 5060 \
+                -j DNAT --to-destination $callee:5060" \
+            || { printf '  could not forward SIP to the callee\n'; status=1; }
+    else
+        printf '  could not start the callee\n'
+        status=1
+    fi
+    until [ "$status" -ne 0 ] \
+        || docker logs "$ICE_CALLEE_NAME" 2>&1 | grep -q '^waiting for the call'; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$ICE_CALLEE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 30 ]; then
+            printf '  the callee never came up\n'
+            status=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$status" -eq 0 ]; then
+        docker run --rm --network "${project}_inside" \
+            --cap-add NET_ADMIN \
+            -e SIPRAL_FLOWS=icenat \
+            -e "SIPRAL_STUN_SERVER=$stun:3478" \
+            -v "$HARNESS:/harness:ro" \
+            sipral-lab-nat sh -c "
+                ip route replace default via $gateway || exit 1
+                exec /harness $outside2 5060 callee"
+        status=$?
+    fi
+    callee_status=$(timeout 30 docker wait "$ICE_CALLEE_NAME" 2>/dev/null || echo 1)
+    docker logs "$ICE_CALLEE_NAME" 2>&1 | sed 's/^/    callee  /'
+    docker rm -f "$ICE_CALLEE_NAME" >/dev/null 2>&1
+    ( cd interop && docker compose --profile nat rm -sf coturn natbox natbox2 ) >/dev/null 2>&1
+    [ "$status" -eq 0 ] || return 1
+    [ "$callee_status" = 0 ] || { printf '  the callee did not pass\n'; return 1; }
+}
+
 # The same call again, over a link deliberately made bad in both directions.
 #
 # netem only ever shapes egress. That used to be enough on the strength of a
@@ -1291,6 +1393,9 @@ if [ "$WANT" = all ] || [ "$WANT" = ice ]; then
     else
         printf '  note  no socket-framed agent, so the ICE-lite steps are skipped with its own\n'
     fi
+    step "full ICE -- two stacks, each behind a NAT of its own, on what STUN gave them"
+    ice_nat_flow && pass "the call found its path through both NATs, and the tone crossed it both ways" \
+        || fail "full ICE through two NATs"
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = netem ]; then

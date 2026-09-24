@@ -36,5 +36,16 @@ outside=$(ip -o -4 addr show dev "$lab" | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p
 iptables -t nat -A POSTROUTING -o "$lab" -p udp --sport 5062 -j SNAT --to-source "$outside:15062"
 iptables -t nat -A POSTROUTING -o "$lab" -p udp --sport 40062 -j SNAT --to-source "$outside:45062"
 iptables -t nat -A POSTROUTING -o "$lab" -j MASQUERADE
+# A datagram nobody inside asked for -- a peer's connectivity check that gets
+# here before this side's own has gone out, which is how ICE's checks from
+# both ends at once always begin -- is dropped before conntrack confirms it.
+# Delivered to this box's own stack instead, it stays in the table as a flow
+# of its own for as long as the peer keeps retransmitting, and the inside
+# host's next datagram to that same peer is then translated to another port:
+# the mapping would depend on which end sent first, which RFC 4787 REQ-1
+# forbids, and no pair through two such NATs would ever be found. Answers to
+# what went out are translated before they get here, and the one port a step
+# forwards (`scripts/lab.sh ice`) is forwarded, so neither meets this rule.
+iptables -A INPUT -i "$lab" -p udp -m conntrack --ctstate NEW -j DROP
 echo "nat: masquerading out of $lab, 5062 as $outside:15062 and 40062 as $outside:45062"
 exec sleep infinity

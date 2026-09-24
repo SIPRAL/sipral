@@ -130,6 +130,22 @@ services:
       net.ipv4.ip_forward: "1"
     networks: [lab, inside]
 
+  # 8.6.16's second NAT, the same image and the same rules, in front of a
+  # network of its own: scripts/lab.sh's `ice` step puts one stack behind
+  # each, so that neither can reach the other's host candidate and the call
+  # has to find its path through both translations (interop/harness's own
+  # ice_nat.rs). Same profile, started and removed with the first.
+  natbox2:
+    build:
+      context: ./nat
+    image: sipral-lab-nat
+    profiles: [nat]
+    command: ["sh", "/usr/local/bin/sipral-nat-route"]
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks: [lab, inside2]
+
 networks:
   lab:
     driver: bridge
@@ -137,5 +153,10 @@ networks:
   # host or to any other network, so a packet from `inside` reaches the lab
   # only by way of `natbox`, translated.
   inside:
+    driver: bridge
+    internal: true
+  # `natbox2`'s side, with no route to `inside` either: the two stacks behind
+  # the two NATs share nothing but the lab network beyond them.
+  inside2:
     driver: bridge
     internal: true

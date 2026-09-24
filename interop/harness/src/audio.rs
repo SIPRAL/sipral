@@ -193,6 +193,22 @@ impl Media {
         let _ = self.socket.send_to(payload, destination);
     }
 
+    /// Hand whatever arrived on this socket, before any call is running on it,
+    /// to `mappings` as having arrived on `local`: the STUN server's answer
+    /// about where the socket appears from outside (`crate::ice_nat`).
+    /// Anything else that arrives this early is nobody's and is dropped.
+    pub(crate) fn receive_stun(
+        &mut self,
+        mappings: &mut sipral::Mappings,
+        local: SocketAddr,
+        now: Instant,
+    ) {
+        while let Ok((length, from)) = self.socket.recv_from(&mut self.inbox) {
+            let data = self.inbox.get(..length).unwrap_or_default();
+            let _ = mappings.receive(local, from, data, now);
+        }
+    }
+
     /// The receiving half of [`Media::turn`] alone, for a caller that drives
     /// the sending half itself.
     ///

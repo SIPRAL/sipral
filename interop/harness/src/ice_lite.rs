@@ -15,12 +15,10 @@
 //! nobody checked. The reference agent behind the socket echoes, so the tone
 //! this end sends is what comes back.
 //!
-//! The same flow runs between two stacks behind the lab's NAT
-//! (`scripts/lab.sh ice`), where the far end is full as well and the pair
-//! found is a server-reflexive one; what differs there is the far end, not
-//! anything here. In both, the time from placing the call to
-//! `MediaEvent::PathChosen` is printed: it is the start-up cost ICE adds,
-//! which `docs/06-nat.md` quotes.
+//! The loop and the verdict are shared with `crate::ice_nat`, where the far
+//! end is a full agent behind a NAT of its own. In both, the time from the
+//! offer to `MediaEvent::PathChosen` is printed, and the time from the answer
+//! to it: the start-up cost ICE adds, which `docs/06-nat.md` quotes.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -30,6 +28,7 @@ use sipral::{
     UaEvent,
 };
 
+use crate::audio::Heard;
 use crate::{Endpoint, catalog, place_call, route_to, uri};
 
 /// How long the flow may take before it is a failure.
@@ -44,14 +43,15 @@ const DWELL: Duration = Duration::from_secs(3);
 /// concealment reaches.
 const AUDIBLE_FRAMES: u32 = 10;
 
-/// What the call told this end, in the order it matters to the verdict.
+/// What the call told this end, in the order it matters to the verdict, and
+/// when — measured from the moment the offer was written.
 #[derive(Debug, Default)]
-struct Seen {
-    confirmed: bool,
-    started: bool,
-    chosen: Option<(SocketAddr, SocketAddr, Duration)>,
-    failed: Option<String>,
-    ended: bool,
+pub(crate) struct Seen {
+    pub(crate) confirmed: Option<Duration>,
+    pub(crate) started: bool,
+    pub(crate) chosen: Option<(SocketAddr, SocketAddr, Duration)>,
+    pub(crate) failed: Option<String>,
+    pub(crate) ended: bool,
 }
 
 /// Place the call at `target` (the far end's own SIP address), require ICE of
@@ -87,7 +87,25 @@ pub(crate) fn run(target: &str, remote: SocketAddr) -> Result<String, String> {
         remote,
         offered,
     )?;
+    let seen = drive(&mut endpoint, call, offered, true);
+    let heard = endpoint
+        .media
+        .get(&call)
+        .map(crate::audio::Media::heard)
+        .unwrap_or_default();
+    verdict(&seen, heard)
+}
 
+/// Drive `call` until it ends, fails, or runs out of patience, and say what
+/// it did. `ends_it` is the side that hangs up, [`DWELL`] after a path was
+/// chosen; the other waits for it. Either hangs up a call whose media
+/// failed.
+pub(crate) fn drive(
+    endpoint: &mut Endpoint,
+    call: CallHandle,
+    offered: Instant,
+    ends_it: bool,
+) -> Seen {
     let mut seen = Seen::default();
     let mut hung_up = false;
     loop {
@@ -101,6 +119,7 @@ pub(crate) fn run(target: &str, remote: SocketAddr) -> Result<String, String> {
         endpoint.run_media(now);
         endpoint.timers(now);
         if let Some((_, _, after)) = seen.chosen
+            && ends_it
             && !hung_up
             && now >= offered + after + DWELL
         {
@@ -118,18 +137,16 @@ pub(crate) fn run(target: &str, remote: SocketAddr) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
-    let heard = endpoint
-        .media
-        .get(&call)
-        .map(crate::audio::Media::heard)
-        .unwrap_or_default();
-    verdict(&seen, heard)
+    seen
 }
 
 fn note(seen: &mut Seen, call: CallHandle, event: &Event, offered: Instant, now: Instant) {
+    let since = now.saturating_duration_since(offered);
     match event {
-        Event::Signalling(UaEvent::CallConfirmed { call: which, .. }) if *which == call => {
-            seen.confirmed = true;
+        Event::Signalling(UaEvent::CallConfirmed { call: which, .. })
+            if *which == call && seen.confirmed.is_none() =>
+        {
+            seen.confirmed = Some(since);
         }
         Event::Signalling(UaEvent::CallEnded { call: which, .. }) if *which == call => {
             seen.ended = true;
@@ -142,7 +159,7 @@ fn note(seen: &mut Seen, call: CallHandle, event: &Event, offered: Instant, now:
             call: which,
             event: MediaEvent::PathChosen { local, remote },
         } if *which == call && seen.chosen.is_none() => {
-            seen.chosen = Some((*local, *remote, now.saturating_duration_since(offered)));
+            seen.chosen = Some((*local, *remote, since));
         }
         Event::Media {
             call: which,
@@ -152,13 +169,18 @@ fn note(seen: &mut Seen, call: CallHandle, event: &Event, offered: Instant, now:
     }
 }
 
-fn verdict(seen: &Seen, heard: crate::audio::Heard) -> Result<String, String> {
+/// The verdict on a call that required ICE: answered, media started, a path
+/// chosen, and the far end's audio heard on it.
+///
+/// # Errors
+/// The first of those that did not happen, named.
+pub(crate) fn verdict(seen: &Seen, heard: Heard) -> Result<String, String> {
     if let Some(why) = &seen.failed {
         return Err(format!("the media failed: {why}"));
     }
-    if !seen.confirmed {
+    let Some(confirmed) = seen.confirmed else {
         return Err("the call was never answered".to_owned());
-    }
+    };
     if !seen.started {
         return Err("the call never got media".to_owned());
     }
@@ -176,8 +198,10 @@ fn verdict(seen: &Seen, heard: crate::audio::Heard) -> Result<String, String> {
         ));
     }
     Ok(format!(
-        "   (path {local} -> {remote}, chosen {} ms after the offer; {} sent, {} back, {} audible)",
+        "   (path {local} -> {remote}, chosen {} ms after the offer and {} ms after the \
+         answer; {} sent, {} back, {} audible)",
         after.as_millis(),
+        after.saturating_sub(confirmed).as_millis(),
         heard.sent,
         heard.received,
         heard.audible

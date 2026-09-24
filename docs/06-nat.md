@@ -516,8 +516,48 @@ of its packets. `fuzz/fuzz_targets/ice.rs` drives the same agent from the other
 side — arbitrary datagrams from arbitrary sources on the media port, which is
 what this port is open to before any key exists — seeded with checks signed the
 way the agent will check them, because an unsigned datagram dies in the
-authenticator and reaches none of the state machine. The lab flows against
-coturn and Asterisk come with the wiring.
+authenticator and reaches none of the state machine.
+
+And it is proven in the lab (`scripts/lab.sh ice`), between two stacks each
+behind a NAT of its own: the interop harness as caller behind `interop/nat`'s
+NAT on one network, and again as callee behind a second NAT on another, with
+coturn on the lab network between them. Both require ICE, and each asks
+coturn where its media socket appears before the call, so each offers a host
+candidate the other has no route to and a server-reflexive one. The callee's
+NAT forwards its SIP port and nothing else. The call finds its path on the two
+reflexive candidates — the caller fails any path that does not end at the
+callee's NAT — and the tone crosses it both ways. The NATs map endpoint-
+independently and filter by address and port, and they drop an unsolicited
+datagram rather than let it into their own connection table: Linux's NAT
+otherwise gives the inside host a new port for a peer whose check arrived
+first, which is exactly what two agents checking each other at once produce
+(`interop/nat/route.sh` says how).
+
+### What ICE costs a call's start, measured
+
+Nothing goes out on a call using ICE until a pair is selected, so the time
+from the offer to `MediaEvent::PathChosen` is the audio a call does not have
+at its start. The lab harness prints it on every ICE flow, twice: from the
+moment `place_with` wrote the offer, and from the answer arriving. Measured on
+the lab VM (Debian 13, 32 cores, Docker bridges, no impairment), 24 September
+2026, six runs of the lite flow and four of the two-NAT one:
+
+| Peer | Offer to path | Answer to path |
+|---|---|---|
+| ICE-lite (`headless-socket-agent --ice-lite`), same network | 66–70 ms | 57–59 ms |
+| Full, each end behind a NAT of its own | 1115–1116 ms | 1112–1113 ms |
+
+The two differ by one setting, not by the network. Against a lite peer there
+is one pair, and a controlling agent nominates it as soon as its check comes
+back: one pacing interval for the check and one for the nomination, 50 ms
+each. Through two NATs each end has two candidates, and the pair of host
+candidates — unreachable here, but ranked above every reflexive pair — is
+still being checked when the reflexive pair succeeds, so regular nomination
+waits `nomination_wait`, one second, before settling for the pair it has
+(RFC 8445 §8.1.1 leaves the wait to the agent). That second is the cost of ICE
+in the full role between two NATted ends, and it is what a shorter
+`nomination_wait` would buy back at the price of nominating a pair a better
+one might have replaced.
 
 ## IPv6
 

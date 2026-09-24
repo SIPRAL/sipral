@@ -21,11 +21,13 @@ publish = false
 # in the graph asks for it and features unify.
 #
 # `dtls` back on: the DTLS-SRTP flow runs a handshake on the media path, and
-# it is pure Rust. `ice` beside it, for the same reason and for the flow that
-# requires ICE of a lite peer (src/ice_lite.rs).
+# it is pure Rust. `ice` beside it, for the same reason and for the flows that
+# require ICE (src/ice_lite.rs, src/ice_nat.rs), and `stun` for the second of
+# those, which asks coturn where each end's media socket appears.
 sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false, features = [
     "dtls",
     "ice",
+    "stun",
 ] }
 # Kept for reading what arrived, which the facade does not re-export the
 # parsers for: `HeaderName` and `OwnedMessage` for a refusal's own Warning and

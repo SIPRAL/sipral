@@ -22,6 +22,15 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   the integrity check are reached, and asserts that every control message
   parses, every range indexes its datagram and no input raises events
   without end.
+- **Full ICE is proven between two stacks behind two NATs, and its start-up
+  cost is measured.** `scripts/lab.sh ice` now puts one interop harness behind
+  each of two NATs, with coturn between them: both require ICE, neither can
+  reach the other's host candidate, and the call has to find its path on the
+  server-reflexive candidates STUN gave them, with the tone crossing it both
+  ways. The time from the offer, and from the answer, to
+  `MediaEvent::PathChosen` is printed on every run, and `docs/06-nat.md`
+  records what it measured.
+
 - **A headless agent on a public server can answer as an ICE-lite endpoint.**
   `IcePolicy::Lite`, which exists only in a build with `headless`, writes
   `a=ice-lite`, fresh credentials and one host candidate — the socket's own

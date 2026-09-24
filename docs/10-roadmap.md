@@ -410,11 +410,12 @@ after it. What is left is platform work, and platform work needs the platform.
   foreground service for a call's lifetime.
 - **ICE in the full role** (RFC 8445) with TURN, on top of the STUN, TURN and
   ICE-lite in `sipral-nat`: gathering, pairing, checks, nomination, role
-  conflicts, restarts, consent freshness (RFC 7675). *The agent is written* and
-  tested over a simulated network; what is left is reaching it from a call —
-  the facade, `MediaConfig` and the C ABI — and proving it in the lab with a
-  TURN server and two stacks behind two simulated NATs, and against Asterisk
-  with ICE enabled. Off by default for a desktop softphone, where it only adds
+  conflicts, restarts, consent freshness (RFC 7675). *The agent is written*,
+  tested over a simulated network and reached from a call through
+  `IcePolicy`; the lab proves two stacks behind two NATs finding each other on
+  STUN's reflexive candidates, with the start-up cost measured
+  (`docs/06-nat.md`), and Asterisk's own ICE against the lite role. What is
+  left is TURN: a relay in the lab, and the facade asking one. Off by default for a desktop softphone, where it only adds
   setup time; on for a phone on a carrier-grade NAT, and lite on a public
   server.
 

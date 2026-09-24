@@ -39,6 +39,7 @@
 
 mod audio;
 mod ice_lite;
+mod ice_nat;
 mod join;
 #[cfg(test)]
 mod local;
@@ -335,6 +336,27 @@ fn extra_flows(
             Ok(said) => println!("  pass  ICE required, against {server}{said}"),
             Err(why) => {
                 println!("  FAIL  ICE required, against {server} — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // the two halves of a call between two stacks behind two NATs, each run
+    // in a container of its own behind its NAT (see `ice_nat`): `server` is
+    // the callee's NAT for the caller, and the STUN server for the callee
+    if wanted.split(',').any(|name| name.trim() == "icenat") {
+        match ice_nat::call(extension, remote) {
+            Ok(said) => println!("  pass  full ICE through two NATs, calling{said}"),
+            Err(why) => {
+                println!("  FAIL  full ICE through two NATs, calling — {why}");
+                failures += 1;
+            }
+        }
+    }
+    if wanted.split(',').any(|name| name.trim() == "iceanswer") {
+        match ice_nat::answer(remote) {
+            Ok(said) => println!("  pass  full ICE through two NATs, answering{said}"),
+            Err(why) => {
+                println!("  FAIL  full ICE through two NATs, answering — {why}");
                 failures += 1;
             }
         }
