@@ -69,8 +69,9 @@ use std::time::{Duration, Instant};
 
 use sipral::{
     Account, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, MediaConfig,
-    MediaEngine, MediaEvent, StatusCode, UaEvent, Uri, UserAgent, WallClock,
+    MediaEngine, MediaError, MediaEvent, StatusCode, UaEvent, Uri, UserAgent, WallClock,
 };
+use sipral_core::msg::HeaderName;
 use sipral_headless::{
     AudioConfig, CallState, CallStateKind, ControlMessage, DecodeError, Decoded, Decoder,
     ErrorCode, ErrorMessage, HEADER_LEN, IncomingCall, SampleRate, SessionOpen, VoiceActivity,
@@ -116,6 +117,11 @@ const MOST_HELD: usize = 64 * 1_024;
 /// them has to fit `sipral_headless::MAX_CONTROL_PAYLOAD` even when every
 /// byte of both is one JSON escapes six times over.
 const IDENTITY_BYTES: usize = 512;
+
+/// The `Retry-After` on a call refused for want of an RTP port: long enough
+/// for one to come free, short enough that a caller who waits it out finds
+/// the agent answering again.
+const RETRY_AFTER_SECONDS: &[u8] = b"5";
 
 /// Where to register, for an application reached through a server rather
 /// than dialled directly: `--register user@domain --registrar ip:port
@@ -559,8 +565,53 @@ fn drive_bridge(
     }
 }
 
+/// A fresh, non-blocking RTP socket on `ip`, and the address it is bound to.
+fn bind_rtp(ip: std::net::IpAddr) -> std::io::Result<(UdpSocket, SocketAddr)> {
+    let rtp = UdpSocket::bind((ip, 0))?;
+    rtp.set_nonblocking(true)?;
+    let local = rtp.local_addr()?;
+    Ok((rtp, local))
+}
+
+/// Turns a call away that this binary could not take, rather than leaving it
+/// ringing until the caller gives up, and tells the agent why on the error
+/// channel: `status` goes to the caller, the reason to the agent and to
+/// standard output.
+fn refuse_call(
+    endpoint: &mut Endpoint,
+    out: &mut Vec<u8>,
+    (call, call_id): (CallHandle, &str),
+    status: StatusCode,
+    why: &str,
+    now: Instant,
+) {
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        let _ = endpoint
+            .agent
+            .respond_with_headers(call, &[(HeaderName::RetryAfter, RETRY_AFTER_SECONDS)]);
+    }
+    let refused = endpoint.agent.reject(call, status, now);
+    let message = match refused {
+        Ok(()) => format!("{why}; the call was refused with {}", status.get()),
+        Err(error) => format!("{why}; refusing the call failed too: {error}"),
+    };
+    println!("{call_id}: {message}");
+    let _ = encode_control(
+        &ControlMessage::Error(ErrorMessage {
+            call_id: Some(call_id.to_owned()),
+            code: ErrorCode::Internal,
+            message,
+        }),
+        out,
+    );
+}
+
 /// Takes an incoming call: its own RTP socket and `HeadlessSession`, the
 /// session's opening and the caller on the wire, then the answer.
+///
+/// A call this binary cannot take is refused at once, whichever step it
+/// failed at, and the agent hears why — before, each of them returned and
+/// left the call ringing, answered by nobody and refused by nobody.
 fn open_bridge(
     endpoint: &mut Endpoint,
     bridge: &mut Option<Bridge>,
@@ -568,21 +619,44 @@ fn open_bridge(
     call: CallHandle,
     now: Instant,
 ) {
-    let Ok(rtp) = UdpSocket::bind((endpoint.local.ip(), 0)) else {
-        return;
-    };
-    if rtp.set_nonblocking(true).is_err() {
-        return;
-    }
-    let Ok(local) = rtp.local_addr() else {
-        return;
-    };
     let call_id = format!("{call:?}");
-    let Ok(session) =
-        sipral::HeadlessSession::open(call_id.clone(), session_audio(), CODEC_RATE, 50, 50)
-    else {
-        return;
+    // No port to carry the call's audio on is a shortage of this host's, not
+    // a fault in the call: §21.5.4's 503, with a Retry-After, so that a
+    // server in front of several agents tries another one (RFC 3263 §4.3)
+    // and a caller that retries this one waits for a port to come free.
+    let (rtp, local) = match bind_rtp(endpoint.local.ip()) {
+        Ok(bound) => bound,
+        Err(error) => {
+            let why = format!("no RTP socket for the call's audio: {error}");
+            refuse_call(
+                endpoint,
+                out,
+                (call, &call_id),
+                StatusCode::SERVICE_UNAVAILABLE,
+                &why,
+                now,
+            );
+            return;
+        }
     };
+    // The socket's own audio against the codec's rate: fixed in this binary,
+    // so a refusal here is this binary's own fault — §21.5.1's 500.
+    let session =
+        match sipral::HeadlessSession::open(call_id.clone(), session_audio(), CODEC_RATE, 50, 50) {
+            Ok(session) => session,
+            Err(error) => {
+                let why = format!("the call's audio cannot be bridged: {error}");
+                refuse_call(
+                    endpoint,
+                    out,
+                    (call, &call_id),
+                    StatusCode::SERVER_ERROR,
+                    &why,
+                    now,
+                );
+                return;
+            }
+        };
     *bridge = Some(Bridge {
         call,
         call_id: call_id.clone(),
@@ -620,12 +694,25 @@ fn open_bridge(
         }),
         out,
     );
-    if endpoint
+    match endpoint
         .engine
         .answer(&mut endpoint.agent, call, local, now)
-        .is_ok()
     {
-        println!("answered {call_id}");
+        Ok(()) => println!("answered {call_id}"),
+        // the engine sent nothing: an offer that cannot be answered is
+        // RFC 3261 §21.4.26's 488, and anything else this end's own 500
+        Err(error) => {
+            let status = match error {
+                MediaError::Description(_)
+                | MediaError::NoCommonCodec
+                | MediaError::UnknownPayload { .. }
+                | MediaError::NoDtlsSrtp
+                | MediaError::SrtpRequired => StatusCode::NOT_ACCEPTABLE_HERE,
+                _ => StatusCode::SERVER_ERROR,
+            };
+            let why = format!("the call cannot be answered: {error}");
+            refuse_call(endpoint, out, (call, &call_id), status, &why, now);
+        }
     }
 }
 

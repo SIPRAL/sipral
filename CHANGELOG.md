@@ -542,6 +542,24 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   it is answered and the stream reads on, and one whose body is past the
   bound is answered 513 as soon as its head is in, the body passed over
   unheld. The examples print each datagram the parser refused.
+- **The reference headless agent reads audio frames of any length the
+  session agreed.** It bounded every frame by the control message limit, so
+  48 kHz frames longer than 85 ms ended its connection as malformed; it now
+  raises the bound to the session's own frame size once `SessionOpen` names
+  it (`payload_bound`, `FrameDecoder::set_max_payload`), and answers a control
+  message it cannot take with an error message instead of only logging it.
+- **A `SessionOpen` naming a frame duration no session can have is refused
+  where it is read.** Zero milliseconds, or a frame too long for the 16-bit
+  length at its rate, decoded without complaint and failed later in whatever
+  first tried to fill a frame; both are now `ControlError::FrameDuration`,
+  on decode and on encode alike, and `AudioConfig::with_frame_duration_ms`
+  refuses zero as `AudioError::EmptyFrame`.
+- **`headless-socket-agent` no longer leaves a call it cannot take
+  ringing.** A call it could not bind an RTP socket for, open a session for,
+  or answer was left neither answered nor refused. It is now refused at
+  once — 503 with `Retry-After` when no RTP port was to be had, 488 for an
+  offer that cannot be answered, 500 otherwise — and the agent is told why on
+  the error channel.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered

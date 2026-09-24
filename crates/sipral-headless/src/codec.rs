@@ -45,24 +45,38 @@ pub enum Decoded<'a> {
     Control(ControlMessage),
 }
 
+/// The longest frame payload a session opened at `audio` can carry: one audio
+/// frame at its rate and duration, or [`MAX_CONTROL_PAYLOAD`], whichever is
+/// larger, so that neither budget refuses the other's traffic.
+///
+/// What [`Decoder`] bounds its frames by, and what a reader working below it
+/// — one that learns the session's audio from [`crate::SessionOpen`] only
+/// after the connection is up, like `examples/agent.rs` — raises its own
+/// [`FrameDecoder`] to with [`FrameDecoder::set_max_payload`] once it has.
+/// A bound picked without the session's audio refuses real frames: at
+/// 48 kHz anything past 85 ms is longer than [`MAX_CONTROL_PAYLOAD`].
+///
+/// # Errors
+/// [`AudioError::FrameTooLarge`] if `audio`'s frame size does not fit the
+/// frame format's sixteen-bit length.
+pub fn payload_bound(audio: AudioConfig) -> Result<u16, AudioError> {
+    let frame_bytes = usize::from(audio.frame_bytes()?);
+    let bound = frame_bytes
+        .max(MAX_CONTROL_PAYLOAD)
+        .min(usize::from(u16::MAX));
+    Ok(u16::try_from(bound).unwrap_or(u16::MAX))
+}
+
 impl Decoder {
-    /// A decoder for a session opened at `audio`.
-    ///
-    /// The frame length bound is the larger of one audio frame and
-    /// [`MAX_CONTROL_PAYLOAD`], so neither budget rejects the other's
-    /// traffic.
+    /// A decoder for a session opened at `audio`, its frames bounded by
+    /// [`payload_bound`].
     ///
     /// # Errors
     /// [`AudioError::FrameTooLarge`] if `audio`'s frame size does not fit the
     /// frame format's sixteen-bit length.
     pub fn new(audio: AudioConfig) -> Result<Self, AudioError> {
-        let frame_bytes = usize::from(audio.frame_bytes()?);
-        let max_payload = frame_bytes
-            .max(MAX_CONTROL_PAYLOAD)
-            .min(usize::from(u16::MAX));
-        let max_payload = u16::try_from(max_payload).unwrap_or(u16::MAX);
         Ok(Self {
-            frames: FrameDecoder::new(max_payload),
+            frames: FrameDecoder::new(payload_bound(audio)?),
             audio,
         })
     }
@@ -245,11 +259,62 @@ impl core::error::Error for EncodeError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoded, Decoder, EncodeError, MAX_CONTROL_PAYLOAD, encode_audio, encode_control};
+    use super::{
+        Decoded, Decoder, EncodeError, MAX_CONTROL_PAYLOAD, encode_audio, encode_control,
+        payload_bound,
+    };
     use crate::audio::AudioConfig;
     use crate::audio::SampleRate;
     use crate::control::{Answer, ControlMessage, FrameKind, IncomingCall, SessionOpen};
-    use crate::frame::{FrameError, write_frame};
+    use crate::frame::{FrameDecoder, FrameError, write_frame};
+
+    #[test]
+    fn a_reader_bounded_before_the_session_opened_reads_its_audio_once_it_has() {
+        // the reference agent's bootstrap: frames are read before any audio is
+        // named, and one bound picked then refused 48 kHz audio past 85 ms as
+        // final, ending the connection over valid audio
+        let audio = AudioConfig::with_frame_duration_ms(SampleRate::Hz48000, 100).expect("fits");
+        let pcm = vec![0_u8; 9_600];
+        let mut wire = Vec::new();
+        encode_control(
+            &ControlMessage::SessionOpen(SessionOpen {
+                sample_rate: SampleRate::Hz48000,
+                frame_duration_ms: 100,
+            }),
+            &mut wire,
+        )
+        .expect("a session that can exist");
+        encode_audio(audio, &pcm, &mut wire).expect("one frame");
+
+        let mut frames =
+            FrameDecoder::new(u16::try_from(MAX_CONTROL_PAYLOAD).expect("sixteen bits"));
+        frames.push(&wire);
+        let open = {
+            let frame = frames.next_frame().expect("in bounds").expect("a frame");
+            match ControlMessage::decode(frame.kind(), frame.payload()) {
+                Ok(ControlMessage::SessionOpen(open)) => open,
+                other => panic!("expected a session open, got {other:?}"),
+            }
+        };
+        let bound = payload_bound(open.audio().expect("decoded, so it can exist"))
+            .expect("fits sixteen bits");
+        assert_eq!(bound, 9_600);
+        frames.set_max_payload(bound);
+        let frame = frames
+            .next_frame()
+            .expect("inside the session's own bound")
+            .expect("a frame");
+        assert_eq!(frame.payload(), pcm.as_slice());
+    }
+
+    #[test]
+    fn the_bound_is_never_below_what_a_control_message_may_take() {
+        let small = AudioConfig::new(SampleRate::Hz8000);
+        assert_eq!(
+            payload_bound(small).map(usize::from),
+            Ok(MAX_CONTROL_PAYLOAD)
+        );
+    }
 
     #[test]
     fn an_audio_frame_written_and_pushed_back_comes_out_as_audio() {

@@ -37,7 +37,8 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use sipral_headless::{
-    ControlMessage, FrameDecoder, FrameKind, Hangup, MAX_CONTROL_PAYLOAD, write_frame,
+    ControlMessage, ErrorCode, ErrorMessage, FrameDecoder, FrameKind, Hangup, MAX_CONTROL_PAYLOAD,
+    encode_control, payload_bound, write_frame,
 };
 
 /// How many frames of delay the echo holds — one, the way
@@ -77,18 +78,29 @@ fn connect(addr: &str) -> std::io::Result<TcpStream> {
     }
 }
 
+/// Answer a control message this agent could not take with the protocol's
+/// own error message, rather than only a line on standard error the other
+/// end never sees.
+fn refuse(out: &mut Vec<u8>, why: &str) {
+    let error = ControlMessage::Error(ErrorMessage {
+        call_id: None,
+        code: ErrorCode::ProtocolViolation,
+        message: why.to_owned(),
+    });
+    let _ = encode_control(&error, out);
+}
+
 fn main() -> std::io::Result<()> {
     let target = addr();
     println!("connecting to {target}");
     let mut stream = connect(&target)?;
     println!("connected");
 
-    // A bound generous enough for this session's audio at any rate this
-    // protocol allows (48 kHz, 20 ms is 1_920 bytes) and every control
-    // message this crate defines; not tied to any one call's own audio,
-    // since none has been named yet — see this file's own doc comment.
-    let max_payload = u16::try_from(MAX_CONTROL_PAYLOAD.max(4_096)).unwrap_or(u16::MAX);
-    let mut frames = FrameDecoder::new(max_payload);
+    // Until `SessionOpen` names the session's audio only control is due, and
+    // no control message is longer than MAX_CONTROL_PAYLOAD. The bound then
+    // follows the audio the session opened with (`payload_bound`): a fixed
+    // one picked here refused 48 kHz frames past 85 ms as final.
+    let mut frames = FrameDecoder::new(u16::try_from(MAX_CONTROL_PAYLOAD).unwrap_or(u16::MAX));
     let mut read_buf = [0_u8; 4_096];
     let mut out = Vec::new();
     let mut echo: VecDeque<Vec<u8>> = VecDeque::new();
@@ -124,6 +136,21 @@ fn main() -> std::io::Result<()> {
                 continue;
             }
             match ControlMessage::decode(frame.kind(), frame.payload()) {
+                Ok(ControlMessage::SessionOpen(open)) => {
+                    // decoding already refused a session that cannot exist,
+                    // so this names the audio every frame from here carries
+                    match open.audio().and_then(payload_bound) {
+                        Ok(bound) => {
+                            frames.set_max_payload(bound);
+                            println!(
+                                "session open: {} Hz, {} ms frames",
+                                open.sample_rate.hz(),
+                                open.frame_duration_ms
+                            );
+                        }
+                        Err(error) => refuse(&mut out, &error.to_string()),
+                    }
+                }
                 Ok(ControlMessage::IncomingCall(incoming)) => {
                     call_id.clone_from(&incoming.call_id);
                     println!("call {call_id} from {}", incoming.caller);
@@ -154,8 +181,21 @@ fn main() -> std::io::Result<()> {
                         }
                     );
                 }
+                Ok(ControlMessage::Error(error)) => {
+                    println!(
+                        "error from the application ({}): {}",
+                        error.call_id.as_deref().unwrap_or("no call"),
+                        error.message
+                    );
+                }
                 Ok(_) => {}
-                Err(error) => eprintln!("malformed control message: {error}"),
+                // a whole frame that did not decode, a session open with a
+                // frame duration no session can have among them: said back
+                // on the error channel, and the stream reads on
+                Err(error) => {
+                    eprintln!("malformed control message: {error}");
+                    refuse(&mut out, &error.to_string());
+                }
             }
         }
 

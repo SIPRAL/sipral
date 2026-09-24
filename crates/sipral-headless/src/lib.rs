@@ -43,6 +43,7 @@ pub use audio::{
 };
 pub use codec::{
     DecodeError, Decoded, Decoder, EncodeError, MAX_CONTROL_PAYLOAD, encode_audio, encode_control,
+    payload_bound,
 };
 pub use control::{
     Answer, BargeIn, CallState, CallStateKind, ControlError, ControlMessage, DtmfDigit,

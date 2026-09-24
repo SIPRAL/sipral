@@ -42,7 +42,16 @@ touching the protocol. Nothing here opens a socket, for the reason
 
 Audio payload is signed 16-bit little-endian PCM, mono, at the session rate
 declared when the session opens: 8000, 16000, 24000 or 48000 Hz. Frame duration
-is fixed per session, default 20 ms, and the same in both directions.
+is fixed per session, default 20 ms, and the same in both directions. It is
+at least 1 ms and at most the longest frame the 16-bit length carries at the
+session's rate — 682 ms at 48 kHz, 4095 ms at 8 kHz. A `SessionOpen` outside
+that is refused where it is decoded (`ControlError::FrameDuration`) and not
+written by `encode_control` either, so the sender hears about it on the error
+channel rather than a session failing later on frames that cannot exist. The
+longest frame a session carries follows from its audio: `payload_bound` says
+it, and a reader that meets the session's audio only in `SessionOpen` —
+`examples/agent.rs` — raises its `FrameDecoder` to that bound when it does,
+rather than refusing audio longer than a control message as final.
 
 Raw PCM rather than an encoded format is deliberate. The agent side is a speech
 model, and every transcode between it and the network costs latency and quality
@@ -196,6 +205,14 @@ frames it describes — dropping the oldest held audio past a bound, the
 capture queue's own policy one step further along, and never a control
 message. `headless-socket-agent.rs` is that shape, and prints how much audio
 it had to drop when a call ends.
+
+A call the application cannot take is refused at once rather than left
+ringing, and the agent hears why on the error channel, under the call's id.
+No RTP port to carry it on is a shortage of the host's, not a fault in the
+call: 503 with a `Retry-After`, so that a server in front of several agents
+tries another (RFC 3263 §4.3) and a caller retrying this one waits for a port
+to come free. An offer that cannot be answered is 488; anything else the
+application could not do is 500.
 
 `HeadlessSession` has no socket of its own either way — the paragraph above
 is the wiring an application writes, not something this type does for it —

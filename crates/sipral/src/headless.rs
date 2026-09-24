@@ -42,10 +42,10 @@ pub enum HeadlessMediaError {
     Rate(RateError),
     /// The socket's own frame duration and rate describe a frame with no
     /// samples in it, which no frame arithmetic here can make progress on.
-    /// Every rate and the default duration `docs/07-headless.md` names
-    /// cannot produce this; it is reachable only from a
-    /// [`sipral_headless::AudioConfig`] built with an unusual frame
-    /// duration of its own.
+    /// [`sipral_headless::AudioConfig::with_frame_duration_ms`] refuses a
+    /// duration of zero, and a `SessionOpen` carrying one is refused where it
+    /// is decoded, so no configuration that crate builds reaches this; it is
+    /// kept so that this type never divides by a frame it was not given.
     EmptyFrame,
 }
 

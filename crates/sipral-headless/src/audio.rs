@@ -79,7 +79,15 @@ impl AudioConfig {
 
     /// `sample_rate` at a frame duration other than the default.
     ///
+    /// The one place a duration is checked, so that every way into a session
+    /// — this, and [`crate::SessionOpen`] off the wire — agrees on which ones
+    /// exist: from one millisecond up to the longest frame the sixteen-bit
+    /// length field can carry at that rate (682 ms at 48 kHz, 4095 ms at
+    /// 8 kHz).
+    ///
     /// # Errors
+    /// [`AudioError::EmptyFrame`] for zero milliseconds, a frame with no audio
+    /// in it that no queue or resampler can make progress on, and
     /// [`AudioError::FrameTooLarge`] if a frame of that duration at that rate
     /// would not fit the sixteen-bit payload length every frame is written
     /// in.
@@ -87,6 +95,9 @@ impl AudioConfig {
         sample_rate: SampleRate,
         frame_duration_ms: u32,
     ) -> Result<Self, AudioError> {
+        if frame_duration_ms == 0 {
+            return Err(AudioError::EmptyFrame);
+        }
         let config = Self {
             sample_rate,
             frame_duration_ms,
@@ -173,6 +184,8 @@ pub fn write_samples(samples: &[i16], out: &mut Vec<u8>) {
 pub enum AudioError {
     /// A rate that is not one of the four the document allows.
     UnsupportedSampleRate(u32),
+    /// A frame duration of zero: frames with no audio in them.
+    EmptyFrame,
     /// A frame duration whose byte length overflows or does not fit sixteen
     /// bits.
     FrameTooLarge,
@@ -191,6 +204,7 @@ impl fmt::Display for AudioError {
             Self::UnsupportedSampleRate(hz) => {
                 write!(f, "{hz} Hz is not 8000, 16000, 24000 or 48000")
             }
+            Self::EmptyFrame => f.write_str("a frame duration of zero carries no audio"),
             Self::FrameTooLarge => f.write_str("frame duration does not fit the wire format"),
             Self::WrongFrameSize { expected, got } => {
                 write!(f, "frame of {got} bytes, session expects {expected}")
@@ -277,6 +291,25 @@ mod tests {
             AudioConfig::with_frame_duration_ms(SampleRate::Hz48000, 1_000),
             Err(AudioError::FrameTooLarge)
         );
+    }
+
+    #[test]
+    fn a_frame_duration_of_zero_is_refused_up_front() {
+        // a frame with no samples in it: nothing downstream can make progress
+        // on one, and a session opened with it failed only later, in whatever
+        // first tried to fill a frame
+        for rate in [
+            SampleRate::Hz8000,
+            SampleRate::Hz16000,
+            SampleRate::Hz24000,
+            SampleRate::Hz48000,
+        ] {
+            assert_eq!(
+                AudioConfig::with_frame_duration_ms(rate, 0),
+                Err(AudioError::EmptyFrame)
+            );
+            assert!(AudioConfig::with_frame_duration_ms(rate, 1).is_ok());
+        }
     }
 
     #[test]

@@ -69,6 +69,16 @@ impl FrameDecoder {
         }
     }
 
+    /// Bound every frame not read yet by `max_payload` instead.
+    ///
+    /// For a reader that learns what its frames may carry only from a frame
+    /// it has already read — the session's audio, from
+    /// [`crate::SessionOpen`] — and cannot know it when the connection opens.
+    /// [`crate::payload_bound`] is the bound a session's audio calls for.
+    pub fn set_max_payload(&mut self, max_payload: u16) {
+        self.max_payload = usize::from(max_payload);
+    }
+
     /// Take bytes off the transport.
     pub fn push(&mut self, bytes: &[u8]) {
         self.compact();

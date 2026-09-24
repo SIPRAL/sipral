@@ -16,7 +16,7 @@
 
 use core::fmt;
 
-use crate::audio::{self, SampleRate};
+use crate::audio::{self, AudioConfig, AudioError, SampleRate};
 use crate::json::{JsonError, Value};
 
 /// What a frame's kind byte means.
@@ -128,26 +128,44 @@ impl SessionOpen {
         }
     }
 
-    fn to_value(self) -> Value {
-        Value::Object(vec![
+    /// The audio every frame of the session carries.
+    ///
+    /// # Errors
+    /// Whatever [`AudioConfig::with_frame_duration_ms`] refuses: a duration
+    /// of zero, or one too long for a frame's sixteen-bit length at this
+    /// rate. A message decoded off the wire never holds either, since
+    /// decoding refuses them; one built by hand can.
+    pub fn audio(self) -> Result<AudioConfig, AudioError> {
+        AudioConfig::with_frame_duration_ms(self.sample_rate, self.frame_duration_ms)
+    }
+
+    fn to_value(self) -> Result<Value, ControlError> {
+        self.audio().map_err(ControlError::FrameDuration)?;
+        Ok(Value::Object(vec![
             ("sample_rate".to_owned(), Value::from(self.sample_rate.hz())),
             (
                 "frame_duration_ms".to_owned(),
                 Value::from(self.frame_duration_ms),
             ),
-        ])
+        ]))
     }
 
+    /// Checked here, where the message comes off the wire, rather than by
+    /// whatever opens a session with it later: a session that cannot exist is
+    /// the sender's mistake, and the error channel is where the sender hears
+    /// about it (`docs/07-headless.md`).
     fn from_value(value: &Value) -> Result<Self, ControlError> {
         let hz = u32_field(value, "sample_rate")?;
         let sample_rate =
             SampleRate::try_from(hz).map_err(|_| ControlError::InvalidField("sample_rate"))?;
         let frame_duration_ms = optional_u32_field(value, "frame_duration_ms")?
             .unwrap_or(audio::DEFAULT_FRAME_DURATION_MS);
-        Ok(Self {
+        let open = Self {
             sample_rate,
             frame_duration_ms,
-        })
+        };
+        open.audio().map_err(ControlError::FrameDuration)?;
+        Ok(open)
     }
 }
 
@@ -640,9 +658,9 @@ impl ControlMessage {
         }
     }
 
-    fn to_value(&self) -> Value {
-        match self {
-            Self::SessionOpen(m) => m.to_value(),
+    fn to_value(&self) -> Result<Value, ControlError> {
+        Ok(match self {
+            Self::SessionOpen(m) => m.to_value()?,
             Self::IncomingCall(m) => m.to_value(),
             Self::Answer(m) => m.to_value(),
             Self::Reject(m) => m.to_value(),
@@ -654,18 +672,21 @@ impl ControlMessage {
             Self::BargeIn(m) => m.to_value(),
             Self::Error(m) => m.to_value(),
             Self::VoiceActivity(m) => m.to_value(),
-        }
+        })
     }
 
     /// The JSON payload this message's frame carries.
     ///
     /// # Errors
-    /// [`JsonError::NumberOutOfRange`], unreachable for a message built from
-    /// this crate's own types since none of them can hold a non-finite
-    /// number — but the writer's contract is honoured here rather than
-    /// assumed.
+    /// [`ControlError::FrameDuration`] for a [`SessionOpen`] built by hand
+    /// with a frame duration no session can have — refused on the way out as
+    /// it would be on the way in, rather than written for the far end to
+    /// refuse. [`JsonError::NumberOutOfRange`] otherwise, unreachable for a
+    /// message built from this crate's own types since none of them can hold
+    /// a non-finite number — but the writer's contract is honoured here
+    /// rather than assumed.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, ControlError> {
-        Ok(self.to_value().to_json_string()?.into_bytes())
+        Ok(self.to_value()?.to_json_string()?.into_bytes())
     }
 
     /// Decode a control message from a frame's kind byte and JSON payload.
@@ -797,6 +818,9 @@ pub enum ControlError {
     MissingField(&'static str),
     /// A field is present but not the type or value this message requires.
     InvalidField(&'static str),
+    /// A [`SessionOpen`] whose `frame_duration_ms` no session can have, and
+    /// why: zero, or too long for a frame's length field at its rate.
+    FrameDuration(AudioError),
     /// The payload was not valid JSON at all.
     Json(JsonError),
 }
@@ -815,6 +839,7 @@ impl fmt::Display for ControlError {
             Self::NotAnObject => f.write_str("control payload is not a JSON object"),
             Self::MissingField(name) => write!(f, "missing field {name:?}"),
             Self::InvalidField(name) => write!(f, "field {name:?} has the wrong type or value"),
+            Self::FrameDuration(error) => write!(f, "field \"frame_duration_ms\": {error}"),
             Self::Json(error) => write!(f, "{error}"),
         }
     }
@@ -829,7 +854,7 @@ mod tests {
         DtmfReceived, DtmfSend, ErrorCode, ErrorMessage, FrameKind, Hangup, IncomingCall,
         OtherErrorCode, Reject, SessionOpen, Transfer, VoiceActivity,
     };
-    use crate::audio::SampleRate;
+    use crate::audio::{AudioError, SampleRate};
 
     fn round_trips(message: &ControlMessage) {
         let kind = message.kind();
@@ -925,6 +950,47 @@ mod tests {
         assert_eq!(
             message,
             ControlMessage::SessionOpen(SessionOpen::new(SampleRate::Hz8000))
+        );
+    }
+
+    #[test]
+    fn session_open_with_a_frame_duration_no_session_can_have_is_refused_where_it_is_read() {
+        // before, both decoded, and a session opened on them failed later in
+        // whatever first tried to fill a frame
+        for (payload, why) in [
+            (
+                br#"{"sample_rate":8000,"frame_duration_ms":0}"#.as_slice(),
+                AudioError::EmptyFrame,
+            ),
+            (
+                br#"{"sample_rate":48000,"frame_duration_ms":1000}"#,
+                AudioError::FrameTooLarge,
+            ),
+        ] {
+            assert_eq!(
+                ControlMessage::decode(FrameKind::SessionOpen.to_u8(), payload),
+                Err(ControlError::FrameDuration(why)),
+                "{}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+        // the longest frame the length field carries at 48 kHz still opens
+        let longest = ControlMessage::decode(
+            FrameKind::SessionOpen.to_u8(),
+            br#"{"sample_rate":48000,"frame_duration_ms":682}"#,
+        );
+        assert!(longest.is_ok(), "{longest:?}");
+    }
+
+    #[test]
+    fn a_session_open_no_session_can_have_is_not_written_either() {
+        let open = ControlMessage::SessionOpen(SessionOpen {
+            sample_rate: SampleRate::Hz8000,
+            frame_duration_ms: 0,
+        });
+        assert_eq!(
+            open.to_json_bytes(),
+            Err(ControlError::FrameDuration(AudioError::EmptyFrame))
         );
     }
 
