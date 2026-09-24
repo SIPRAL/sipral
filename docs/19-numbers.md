@@ -369,6 +369,17 @@ pull, far more than a frame in hand per talk spurt can take, and it still
 fails on the tone: 2 750 frames run dry and 1 896 cuts before; 793
 stretched, 1 957 run dry and 1 774 cuts after.
 
+Both runs again at `4806c7d`, which has a spurt that starts in a pause
+wait for its frame in hand rather than stretch for it, and brings RTCP-XR's
+loss and discard rates to RFC 3611's definitions (`docs/05-media.md`): the
+three minutes at 2000 ppm read exactly as the "after" columns above and
+passed. At 500 000 ppm the slow earpiece rated R 8 at the first report and
+7 after it, MOS-LQ 1.0 throughout, its frames given up in pauses now
+counted among the packets expected; the fast one stretched 732, ran dry
+2 018 times and was cut off 1 774 times, the control 93 and 4.4. The
+`scripts/lab.sh netem` profiles passed at both commits with no splice
+clicking.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus costs an encode and a decode of its own, and
