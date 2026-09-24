@@ -1253,6 +1253,77 @@ mod tests {
     }
 
     #[test]
+    fn a_sender_report_is_laid_out_the_way_section_6_4_1_draws_it() {
+        // The round trip above passes whatever order the writer and the
+        // reader agree on between themselves. These octets are assembled by
+        // hand from the figures of §6.4.1 and §6.5, field by field, so a
+        // layout both sides got wrong the same way fails here.
+        #[rustfmt::skip]
+        let wire: [u8; 80] = [
+            // SR: V=2 P=0 RC=1, PT=200, length 12 (13 words: 52 octets)
+            0x81, 0xc8, 0x00, 0x0c,
+            0xca, 0xfe, 0xba, 0xbe, // SSRC of sender
+            0x01, 0x02, 0x03, 0x04, // NTP timestamp, most significant word
+            0x05, 0x06, 0x07, 0x08, // NTP timestamp, least significant word
+            0x00, 0x02, 0x71, 0x00, // RTP timestamp 160 000
+            0x00, 0x00, 0x00, 0x2a, // sender's packet count 42
+            0x00, 0x00, 0x1a, 0x40, // sender's octet count 6 720
+            0xaa, 0xaa, 0xaa, 0xaa, // SSRC_1
+            0x0c, 0xff, 0xff, 0xfd, // fraction lost 12, cumulative lost -3 in 24 bits
+            0x00, 0x01, 0x11, 0x70, // extended highest sequence number 70 000
+            0x00, 0x00, 0x00, 0x37, // interarrival jitter 55
+            0x11, 0x11, 0x22, 0x22, // last SR
+            0x33, 0x33, 0x44, 0x44, // delay since last SR
+            // SDES: V=2 P=0 SC=1, PT=202, length 6 (7 words: 28 octets)
+            0x81, 0xca, 0x00, 0x06,
+            0xca, 0xfe, 0xba, 0xbe, // SSRC of the chunk
+            0x01, 0x0e,             // CNAME, 14 octets
+            b'd', b'o', b'e', b'@', b'1', b'9', b'2', b'.', b'0', b'.', b'2', b'.', b'1', b'0',
+            0x00, 0x00, 0x00, 0x00, // the terminating null item and padding to a word
+        ];
+        let info = SenderInfo {
+            ntp: 0x0102_0304_0506_0708,
+            rtp_timestamp: 160_000,
+            packet_count: 42,
+            octet_count: 6_720,
+        };
+        let reports = [ReportBlock {
+            ssrc: 0xAAAA_AAAA,
+            fraction_lost: 12,
+            cumulative_lost: -3,
+            extended_highest_sequence: 70_000,
+            jitter: 55,
+            last_sr: 0x1111_2222,
+            delay_since_last_sr: 0x3333_4444,
+        }];
+        let cname: &[SdesItem<'_>] = &[SdesItem {
+            kind: CNAME,
+            text: b"doe@192.0.2.10",
+        }];
+        let chunks = [cname_chunk(0xCAFE_BABE, cname)];
+        let compound = CompoundBuilder::new(
+            SenderOrReceiver::Sender(SenderReportBuilder {
+                ssrc: 0xCAFE_BABE,
+                info,
+                reports: &reports,
+            }),
+            SourceDescriptionBuilder { chunks: &chunks },
+        );
+        let mut out = [0_u8; 128];
+        let n = compound.write(&mut out).expect("room");
+        assert_eq!(out.get(..n), Some(&wire[..]));
+
+        // and the reader takes the same octets to the same fields
+        let parsed = CompoundPacket::parse(&wire).expect("a compound packet");
+        let Some(RtcpPacket::SenderReport(got)) = parsed.packets().next() else {
+            panic!("a sender report first");
+        };
+        assert_eq!(got.ssrc(), 0xCAFE_BABE);
+        assert_eq!(got.info(), info);
+        assert_eq!(got.reports().collect::<Vec<_>>(), reports);
+    }
+
+    #[test]
     fn a_receiver_report_and_a_bye_round_trip_together() {
         let rr = ReceiverReportBuilder {
             ssrc: 7,

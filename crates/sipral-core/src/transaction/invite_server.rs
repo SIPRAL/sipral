@@ -476,11 +476,17 @@ Content-Length: 0\r\n\
         let (mut machine, _, now, _) = start(false);
         machine.respond(response(486), now);
         let mut last = None;
+        let mut when = now;
         while let Some(at) = machine.next_deadline() {
             last = machine.handle_timeout(at);
+            when = at;
         }
         let (name, effects) = last.expect("timer H");
         assert_eq!(name, TimerName::H);
+        // §17.2.1: "timer H MUST be set to fire in 64*T1 seconds for all
+        // transports" when the response takes the transaction to Completed;
+        // 32 s at the default T1 of 500 ms
+        assert_eq!(when - now, Duration::from_secs(32), "timer H fired then");
         assert_eq!(effects.notify, Some(Notify::TimedOut));
         assert!(effects.terminated);
         assert_eq!(machine.state(), InviteServerState::Terminated);

@@ -1472,4 +1472,118 @@ mod tests {
             [AttributeType::new(0x0002), AttributeType::new(0x4000)]
         );
     }
+
+    /// RFC 5769 prints its messages as rows of hexadecimal octets.
+    fn octets(rows: &str) -> Vec<u8> {
+        rows.split_whitespace()
+            .map(|pair| u8::from_str_radix(pair, 16).expect("two hex digits"))
+            .collect()
+    }
+
+    /// The short-term password every RFC 5769 sample but the last is signed
+    /// with; SASLprep leaves it as it is.
+    const RFC5769_PASSWORD: &[u8] = b"VOkJxbRl1RmTxUk/WvJxBt";
+
+    #[test]
+    fn rfc_5769_sample_request_reads_and_verifies() {
+        // §2.1, byte for byte; the USERNAME's padding is three spaces, which
+        // §14 of RFC 8489 says a receiver ignores whatever it holds
+        let request = octets(
+            "00 01 00 58 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 10 53 54 55 4e 20 74 65 73 74 20 63 6c 69 65 6e 74
+             00 24 00 04 6e 00 01 ff
+             80 29 00 08 93 2f f9 b1 51 26 3b 36
+             00 06 00 09 65 76 74 6a 3a 68 36 76 59 20 20 20
+             00 08 00 14 9a ea a7 0c bf d8 cb 56 78 1e f2 b5 b2 d3 f2 49
+                         c1 b5 71 a2
+             80 28 00 04 e5 7a 3b cf",
+        );
+        let message = Message::parse(&request).expect("the sample parses");
+        assert_eq!(message.class(), Class::Request);
+        assert_eq!(message.method(), Method::BINDING);
+        assert_eq!(
+            message.transaction_id().as_bytes(),
+            [
+                0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae
+            ]
+        );
+        assert_eq!(message.software(), Some(&b"STUN test client"[..]));
+        assert_eq!(message.username(), Some(&b"evtj:h6vY"[..]));
+        assert_eq!(message.priority(), Some(0x6e00_01ff));
+        assert_eq!(message.ice_controlled(), Some(0x932f_f9b1_5126_3b36));
+        assert_eq!(message.verify_integrity(RFC5769_PASSWORD), Integrity::Valid);
+        assert_eq!(message.verify_fingerprint(), Integrity::Valid);
+        assert_eq!(
+            message.verify_integrity(b"VOkJxbRl1RmTxUk/WvJxBu"),
+            Integrity::Invalid
+        );
+    }
+
+    #[test]
+    fn rfc_5769_sample_responses_carry_the_mapped_address_they_say() {
+        // §2.2: 192.0.2.1 port 32853, XOR'd with the magic cookie
+        let ipv4 = octets(
+            "01 01 00 3c 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 0b 74 65 73 74 20 76 65 63 74 6f 72 20
+             00 20 00 08 00 01 a1 47 e1 12 a6 43
+             00 08 00 14 2b 91 f5 99 fd 9e 90 c3 8c 74 89 f9 2a f9 ba 53
+                         f0 6b e7 d7
+             80 28 00 04 c0 7d 4c 96",
+        );
+        // §2.3: 2001:db8:1234:5678:11:2233:4455:6677 port 32853, XOR'd with
+        // the cookie and the transaction ID
+        let ipv6 = octets(
+            "01 01 00 48 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 0b 74 65 73 74 20 76 65 63 74 6f 72 20
+             00 20 00 14 00 02 a1 47 01 13 a9 fa a5 d3 f1 79 bc 25 f4 b5
+                         be d2 b9 d9
+             00 08 00 14 a3 82 95 4e 4b e6 7b f1 17 84 c9 7c 82 92 c2 75
+                         bf e3 ed 41
+             80 28 00 04 c8 fb 0b 4c",
+        );
+        for (bytes, mapped) in [
+            (ipv4, "192.0.2.1:32853"),
+            (ipv6, "[2001:db8:1234:5678:11:2233:4455:6677]:32853"),
+        ] {
+            let message = Message::parse(&bytes).expect("the sample parses");
+            assert_eq!(message.class(), Class::Success, "{mapped}");
+            assert_eq!(message.software(), Some(&b"test vector"[..]), "{mapped}");
+            assert_eq!(
+                message.xor_mapped_address(),
+                Some(mapped.parse().expect("an address")),
+            );
+            assert_eq!(
+                message.verify_integrity(RFC5769_PASSWORD),
+                Integrity::Valid,
+                "{mapped}"
+            );
+            assert_eq!(message.verify_fingerprint(), Integrity::Valid, "{mapped}");
+        }
+    }
+
+    #[test]
+    fn rfc_5769_long_term_sample_verifies_under_the_key_its_credentials_make() {
+        // §2.4: the key is MD5(username ":" realm ":" password), the password
+        // after SASLprep ("TheMatrIX") and the username in UTF-8
+        use crate::crypto::Digest;
+        use crate::crypto::md5::Md5;
+        let request = octets(
+            "00 01 00 60 21 12 a4 42 78 ad 34 33 c6 ad 72 c0 29 da 41 2e
+             00 06 00 12 e3 83 9e e3 83 88 e3 83 aa e3 83 83 e3 82 af e3
+                         82 b9 00 00
+             00 15 00 1c 66 2f 2f 34 39 39 6b 39 35 34 64 36 4f 4c 33 34
+                         6f 4c 39 46 53 54 76 79 36 34 73 41
+             00 14 00 0b 65 78 61 6d 70 6c 65 2e 6f 72 67 00
+             00 08 00 14 f6 70 24 65 6d d6 4a 3e 02 b8 e0 71 2e 85 c9 a2
+                         8c a8 96 66",
+        );
+        let message = Message::parse(&request).expect("the sample parses");
+        let username = "\u{30DE}\u{30C8}\u{30EA}\u{30C3}\u{30AF}\u{30B9}";
+        assert_eq!(message.username(), Some(username.as_bytes()));
+        assert_eq!(message.realm(), Some(&b"example.org"[..]));
+        assert_eq!(message.nonce(), Some(&b"f//499k954d6OL34oL9FSTvy64sA"[..]));
+        let key = Md5::digest(format!("{username}:example.org:TheMatrIX").as_bytes());
+        assert_eq!(message.verify_integrity(key.as_ref()), Integrity::Valid);
+        assert_eq!(message.verify_fingerprint(), Integrity::Absent);
+    }
 }

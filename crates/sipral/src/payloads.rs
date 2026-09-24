@@ -346,6 +346,28 @@ mod tests {
     }
 
     #[test]
+    fn the_last_dynamic_number_is_127_and_it_is_given_out() {
+        // RFC 3551 §3 leaves 96 to 127 to be bound dynamically: with every
+        // number below 127 taken, the thirty-second codec of the call still
+        // has one. The test above cannot tell a range that stops short of
+        // 127 from one that does not, since both run out
+        let mut call = Payloads::default();
+        let formats: Vec<String> = (96..=126).map(|number: u8| number.to_string()).collect();
+        let lines: Vec<(String, String)> = (96..=126)
+            .map(|number: u8| ("rtpmap".to_owned(), format!("{number} X{number}/8000")))
+            .collect();
+        let formats: Vec<&str> = formats.iter().map(String::as_str).collect();
+        let lines: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        call.note(&described(stream(&formats, &lines)));
+        let mut offer = stream(&["96"], &[("rtpmap", "96 opus/48000/2")]);
+        call.renumber(&mut offer).expect("127 is still free");
+        assert_eq!(offer.formats, ["127"]);
+    }
+
+    #[test]
     fn a_static_number_is_left_where_the_profile_put_it() {
         let call = Payloads::default();
         let mut offer = stream(

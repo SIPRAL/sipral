@@ -273,9 +273,15 @@ mod tests {
     fn the_window_refuses_what_is_too_old() {
         let mut replay = Replay::default();
         replay.record(1000);
-        assert!(replay.accepts(1000 - WINDOW + 1));
-        assert!(!replay.accepts(1000 - WINDOW));
+        // written out rather than read back from `WINDOW`, so that the width
+        // the documentation promises is what is checked: 128 packets, the
+        // one 127 behind still in and the one 128 behind out
+        assert!(replay.accepts(873));
+        assert!(!replay.accepts(872));
         assert!(!replay.accepts(0));
+        // and never under the floor of §3.3.2: SRTP-WINDOW-SIZE "MUST be at
+        // least 64"
+        const { assert!(WINDOW >= 64) };
     }
 
     #[test]
