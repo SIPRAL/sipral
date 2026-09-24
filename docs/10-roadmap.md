@@ -415,9 +415,11 @@ after it. What is left is platform work, and platform work needs the platform.
   `IcePolicy`; the lab proves two stacks behind two NATs finding each other on
   STUN's reflexive candidates, with the start-up cost measured
   (`docs/06-nat.md`), and Asterisk's own ICE against the lite role. What is
-  left is TURN: a relay in the lab, and the facade asking one. Off by default for a desktop softphone, where it only adds
-  setup time; on for a phone on a carrier-grade NAT, and lite on a public
-  server.
+  left is TURN — a relay in the lab, and the facade asking one — and an ICE
+  restart in the full role, which the facade still answers with the
+  credentials the running agent holds. Off by default for a desktop
+  softphone, where it only adds setup time; on for a phone on a carrier-grade
+  NAT, and lite on a public server.
 
 **Exit:** applications accepted in both stores, incoming calls waking the app
 reliably from the background, and Bluetooth hands-free transitions surviving a

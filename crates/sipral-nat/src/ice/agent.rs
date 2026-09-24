@@ -379,6 +379,38 @@ mod tests {
         assert_eq!(error_code_of(&refused), error_code::UNAUTHENTICATED);
     }
 
+    #[test]
+    fn a_nomination_that_fails_authentication_selects_nothing() {
+        // RFC 8445 SS7.3: a check is processed as a STUN request first, and
+        // one RFC 8489 SS9.1.3 rejects is answered with the error and nothing
+        // else; under either credential, before and after a restart
+        let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 55_000);
+        let mut agent = agent(Role::Controlled);
+        let forged = check_as(LOCAL_UFRAG, "not the password RPASS", nominating);
+        let refused = agent
+            .handle_binding_request(ComponentId::RTP, local(), moved, &forged)
+            .expect("an error reply");
+        assert_eq!(error_code_of(&refused), error_code::UNAUTHENTICATED);
+        assert!(agent.valid_pair(ComponentId::RTP).is_none());
+
+        agent.handle_binding_request(ComponentId::RTP, local(), peer(), &check(nominating));
+        agent.restart(NEW_UFRAG.to_owned(), NEW_PWD.to_owned());
+        for forged in [
+            check_as(LOCAL_UFRAG, "not the password RPASS", nominating),
+            check_as(NEW_UFRAG, "not the password NEWPASS", nominating),
+            check_as(NEW_UFRAG, LOCAL_PWD, nominating),
+        ] {
+            let refused = agent
+                .handle_binding_request(ComponentId::RTP, local(), moved, &forged)
+                .expect("an error reply");
+            assert_eq!(error_code_of(&refused), error_code::UNAUTHENTICATED);
+            assert_eq!(
+                agent.valid_pair(ComponentId::RTP).expect("selected").remote,
+                peer()
+            );
+        }
+    }
+
     fn parsed(datagram: &[u8]) -> Message<'_> {
         Message::parse(datagram).expect("a well-formed STUN message")
     }

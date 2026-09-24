@@ -68,10 +68,12 @@
 //! A lite end writes `a=ice-lite`, its credentials and one host candidate —
 //! the address the socket is bound to, or the public address a one-to-one NAT
 //! in front of it forwards, which is what most clouds give a server — and
-//! then answers checks: authenticated with its short-term credential, signed
-//! back with it, `FINGERPRINT` on both, and the role rules of RFC 8445 §6.1.1
-//! and §7.3.1.1, under which a lite end facing a full one is always the
-//! controlled side. The pair a check with `USE-CANDIDATE` arrives on is the
+//! then answers checks: authenticated with its short-term credential (a
+//! `FINGERPRINT` that does not check out drops the request), signed back with
+//! it, `FINGERPRINT` on the answer, and the role rules of RFC 8445 §6.1.1 and
+//! §7.3.1.1, under which a lite end facing a full one starts as the
+//! controlled side, and leaves it only when a peer claims that role too and
+//! this end's tiebreaker is the larger. The pair a check with `USE-CANDIDATE` arrives on is the
 //! media path (§7.3.2), reported as [`MediaEvent::PathChosen`] exactly as a
 //! full agent's selection is, and nothing leaves before there is one. A
 //! consent check (RFC 7675) is an ordinary check to this end, and is

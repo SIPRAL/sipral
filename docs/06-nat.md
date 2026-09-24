@@ -343,8 +343,10 @@ order a call meets it:
 - **Checks.** Every STUN request on the media socket is authenticated with
   the call's short-term credential — USERNAME names this end's fragment first,
   MESSAGE-INTEGRITY (or its SHA-256 form) is verified under this end's
-  password, FINGERPRINT is required — and answered with XOR-MAPPED-ADDRESS,
-  signed the way the request was. One that fails is refused unsigned
+  password, and a request whose FINGERPRINT does not check out is dropped
+  unanswered, while one that carries none is judged by its integrity alone —
+  and answered with XOR-MAPPED-ADDRESS, signed the way the request was, with
+  FINGERPRINT. One that fails authentication is refused unsigned
   (RFC 8489 §9.1.3). The role rules are §7.3.1.1's: a lite end facing a full
   one starts controlled (§6.1.1), and a peer that claims the same role is
   settled by the tiebreaker.
@@ -497,8 +499,8 @@ agent's datagram model does not carry it), a restart from the facade in the
 full role — a peer's restart offer reaches the engine, and its answer keeps
 the credentials the running agent holds, since answering with new ones the
 agent does not would stop the checks it depends on — and
-`a=remote-candidates` (RFC 8839 §4.4.1.2.2). The second is not written because nothing yet writes an offer it
-would go in: it belongs in the updated offer a controlling agent sends after
+`a=remote-candidates` (RFC 8839 §4.4.1.2.2). The last is not written because
+nothing yet writes an offer it would go in: it belongs in the updated offer a controlling agent sends after
 nomination, when the selected pair differs from the default candidate pair.
 With a reflexive candidate that can now happen in address — `c=` names the
 reflexive address and the selected pair's local candidate is its base, the

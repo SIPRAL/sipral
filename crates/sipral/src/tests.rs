@@ -4986,6 +4986,116 @@ fn an_ice_restart_gives_the_lite_agent_new_credentials_and_the_old_pair_holds_un
     assert_eq!(sent.destination, moved);
 }
 
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn a_nomination_the_lite_agent_cannot_authenticate_moves_no_audio() {
+    let (mut pair, call, remote) = lite_call();
+    let answer = pair.caller.answer_received().expect("the answer");
+    let (ufrag, pwd) = (
+        ice_value(&answer, "ice-ufrag").expect("a fragment"),
+        ice_value(&answer, "ice-pwd").expect("a password"),
+    );
+    // a nominating check with a username but nothing signing it
+    let unsigned = {
+        use sipral_nat::stun::{AttributeType, Class, MessageBuilder, Method, TransactionId};
+        let mut builder =
+            MessageBuilder::new(Class::Request, Method::BINDING, TransactionId::new([9; 12]));
+        builder
+            .add(AttributeType::USERNAME, format!("{ufrag}:full").as_bytes())
+            .expect("a username");
+        builder
+            .add_u64(AttributeType::ICE_CONTROLLING, 7)
+            .expect("the role");
+        builder
+            .add_flag(AttributeType::USE_CANDIDATE)
+            .expect("a nomination");
+        builder.add_fingerprint().expect("a fingerprint");
+        builder.finish()
+    };
+    let forged = [
+        check_to_lite(&ufrag, "notthepasswordnotthepass", 1, true),
+        check_to_lite("nope", &pwd, 2, true),
+        unsigned,
+    ];
+    let elsewhere: SocketAddr = "198.51.100.66:40066".parse().expect("an address");
+
+    // before any nomination: each is refused, and the lite end still has
+    // nowhere to send
+    for check in &forged {
+        let refused = ask_lite(&mut pair, remote, elsewhere, check);
+        let refused = sipral_nat::stun::Message::parse(&refused).expect("a STUN answer");
+        assert_eq!(refused.class(), sipral_nat::stun::Class::Error);
+        let mut lite = pair.callee.engine.session(remote).expect("media");
+        assert!(lite.ice_path().is_none());
+        let frame = vec![100_i16; lite.frame_samples()];
+        assert!(
+            lite.capture(&frame, pair.now)
+                .expect("refused, not broken")
+                .is_none(),
+            "audio left for a pair nobody authenticated"
+        );
+    }
+
+    // after the real one: the same checks do not move the path off it
+    pair.check_paths(call, remote);
+    for check in &forged {
+        let refused = ask_lite(&mut pair, remote, elsewhere, check);
+        let refused = sipral_nat::stun::Message::parse(&refused).expect("a STUN answer");
+        assert_eq!(refused.class(), sipral_nat::stun::Class::Error);
+    }
+    assert_eq!(
+        paths_chosen(&pair.callee),
+        vec![(callee_media(), caller_media())]
+    );
+    let mut lite = pair.callee.engine.session(remote).expect("media");
+    let frame = vec![100_i16; lite.frame_samples()];
+    let sent = lite
+        .capture(&frame, pair.now)
+        .expect("the frame encodes")
+        .expect("a nominated lite end sends");
+    assert_eq!(sent.destination, caller_media());
+}
+
+#[cfg(all(feature = "ice", feature = "headless"))]
+#[test]
+fn two_lite_ends_carry_the_call_on_their_default_candidates() {
+    // RFC 8445 §6.1.1 gives two lite ends roles but neither sends a check,
+    // and each has one host candidate, which is its `c=`/`m=`: the pair
+    // there is to select is the default one
+    let lite = || {
+        CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_ice(crate::IcePolicy::Lite)
+    };
+    let mut pair = Pair::asymmetric(lite(), lite());
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's side of the call");
+    let offer = pair.callee.offer_received().expect("the offer");
+    let answer = pair.caller.answer_received().expect("the answer");
+    assert!(offer.attribute("ice-lite").is_some(), "{offer}");
+    assert!(answer.attribute("ice-lite").is_some(), "{answer}");
+
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        played = pair.exchange(call, remote, &samples);
+        pair.advance();
+    }
+    assert!(
+        loudness(&played) > 4_000,
+        "the tone reached the answering lite end at {}",
+        loudness(&played)
+    );
+    let mut answering = pair.callee.engine.session(remote).expect("media");
+    let sent = answering
+        .capture(&samples, pair.now)
+        .expect("the frame encodes")
+        .expect("the answering end sends on its default candidate");
+    assert_eq!(sent.destination, caller_media());
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn nothing_goes_out_on_a_call_whose_checks_have_not_finished() {
