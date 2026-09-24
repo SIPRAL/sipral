@@ -685,6 +685,14 @@ impl TurnClient {
     }
 
     /// Take one datagram, or one frame off a stream.
+    ///
+    /// Only what came from the TURN server: the client is not told the
+    /// server's address, so the caller is the one who can check it. A
+    /// ChannelData message or a Data indication carries nothing that proves
+    /// who wrote it — the relay's 5-tuple is the proof — and one handed in
+    /// from any other source would be delivered as the bound peer's data.
+    /// [`crate::ice::IceAgent`] hands in only datagrams from the server's
+    /// address.
     pub fn handle_input(&mut self, bytes: &[u8], now: Instant) -> Input {
         match bytes.first() {
             Some(0..=3) => self.on_stun(bytes, now),

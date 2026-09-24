@@ -582,6 +582,14 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   STUN mappings of `sipral::Mappings` — and `TurnClient` ended their first,
   unauthenticated request on an unsigned 400; §9.2.5 has it discarded and
   the request retransmitted, which is what happens now.
+- **A long-term STUN or TURN key is wiped when it goes, and a broken TURN
+  stream stops buffering.** The key derived from the username, realm and
+  password signs requests in that realm as well as the password does, and
+  was left in memory by every copy dropped, one per response checked; it is
+  now overwritten on drop with the same best effort as the password.
+  `StreamFraming` kept appending whatever arrived after the stream broke,
+  for as long as the caller kept reading; it now holds nothing after the
+  break.
 - **A resume asked for while the hold was still on its way is no longer
   accepted and lost.** `hold` and `resume` compared the request against the
   hold state last agreed, which a hold whose re-INVITE had not been answered

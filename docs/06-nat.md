@@ -269,6 +269,18 @@ packet.
 TCP and TLS to the TURN server where UDP is blocked, which is the case this
 whole component exists for: a corporate network that lets nothing out but 443.
 
+`TurnClient` is not told the server's address, so whoever holds it hands in
+only what came from there: ChannelData and Data indications carry no proof of
+who wrote them beyond the relay's 5-tuple. The full ICE agent does. Long-term
+credentials follow RFC 8489 §9.2: the first request goes out bare, a 401 is
+answered once per transaction, a 438 once per new nonce and at most three
+times, and a server that rotates its nonce without saying stale costs one
+retry per request rather than a loop. The derived key is wiped with every copy
+of it that is dropped, and neither it nor the password reaches a `Debug`.
+
+Nothing in the facade reaches it yet: the agent the facade builds names no
+TURN server.
+
 ## ICE-lite
 
 RFC 8445 for the lite role's behaviour; the SDP side, `a=ice-lite` and the

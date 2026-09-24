@@ -272,6 +272,23 @@ impl Key {
             Self::Sha256(key) => key,
         }
     }
+
+    /// Overwrite the key, with the same best effort [`Password`] makes.
+    fn wipe(&mut self) {
+        match self {
+            Self::Md5(key) => key.fill(0),
+            Self::Sha256(key) => key.fill(0),
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+/// The key is as good as the password in its realm (§9.2.2), so every copy of
+/// it goes the way the password does.
+impl Drop for Key {
+    fn drop(&mut self) {
+        self.wipe();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -405,8 +422,8 @@ impl BindingClient {
             return Progress::Idle;
         }
 
-        if let Some(key) = self.key.clone()
-            && !response_is_authentic(&message, &key)
+        if let Some(key) = self.key.as_ref()
+            && !response_is_authentic(&message, key)
         {
             self.integrity_violated = true;
             return Progress::Idle;
@@ -744,9 +761,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        BindingClient, BindingConfig, Failure, LongTermCredentials, Progress, security_features,
+        BindingClient, BindingConfig, Failure, Key, LongTermCredentials, Progress, derive_key,
+        security_features,
     };
-    use crate::stun::attribute::AttributeType;
+    use crate::stun::attribute::{AttributeType, PasswordAlgorithm};
     use crate::stun::builder::MessageBuilder;
     use crate::stun::message::{Class, Integrity, Message, Method, TransactionId};
 
@@ -1259,6 +1277,25 @@ mod tests {
             client.on_datagram(&response),
             Progress::Mapped(address("198.51.100.7:53412"))
         );
+    }
+
+    #[test]
+    fn a_long_term_key_is_overwritten_when_it_goes() {
+        // MD5(username ":" realm ":" password) is as good as the password to
+        // whoever holds it: it signs requests in that realm for as long as
+        // the password stays the same (§9.2.2). Every copy of one — the
+        // client's, a TURN allocation's, the clone a response is checked
+        // with — has to be wiped as it is dropped, the way the password is
+        assert!(
+            core::mem::needs_drop::<Key>(),
+            "a derived key is left in memory when it is dropped"
+        );
+        let mut key = derive_key(b"user", b"realm", b"pass", PasswordAlgorithm::Md5);
+        key.wipe();
+        assert_eq!(key.as_bytes(), [0_u8; 16]);
+        let mut key = derive_key(b"user", b"realm", b"pass", PasswordAlgorithm::Sha256);
+        key.wipe();
+        assert_eq!(key.as_bytes(), [0_u8; 32]);
     }
 
     #[test]

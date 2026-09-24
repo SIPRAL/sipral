@@ -119,7 +119,14 @@ impl StreamFraming {
     }
 
     /// Add what the socket handed over.
+    ///
+    /// Nothing, once the stream has broken: no byte after the break can be
+    /// part of a frame, and keeping them would let a peer that goes on
+    /// sending grow the buffer for as long as the caller goes on reading.
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.broken.is_some() {
+            return;
+        }
         if self.start != 0 {
             self.buffer.drain(..self.start);
             self.start = 0;
@@ -204,6 +211,8 @@ impl StreamFraming {
 
     fn break_off(&mut self, error: FrameError) -> FrameError {
         self.broken = Some(error);
+        self.buffer = Vec::new();
+        self.start = 0;
         error
     }
 }
@@ -341,6 +350,22 @@ mod tests {
         framer.push(&[22, 0xfe, 0xfd, 0]);
         assert_eq!(framer.next_frame(), Err(FrameError::NotTurn(22)));
         framer.push(&binding(3));
+        assert_eq!(framer.next_frame(), Err(FrameError::NotTurn(22)));
+    }
+
+    #[test]
+    fn a_broken_stream_holds_nothing_more_whatever_keeps_arriving() {
+        // a relay that sent one bad byte and then kept streaming, into a
+        // caller that goes on reading the socket until it gets round to
+        // closing it: nothing after the break can ever be a frame, so none
+        // of it may be kept
+        let mut framer = StreamFraming::new();
+        framer.push(&[22, 0xfe, 0xfd, 0]);
+        assert_eq!(framer.next_frame(), Err(FrameError::NotTurn(22)));
+        for _ in 0..256 {
+            framer.push(&[0_u8; 4096]);
+        }
+        assert_eq!(framer.pending(), 0, "a broken stream went on buffering");
         assert_eq!(framer.next_frame(), Err(FrameError::NotTurn(22)));
     }
 
