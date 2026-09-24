@@ -134,16 +134,17 @@ here treats them as exceptional.
   lints across the workspace, and `scripts/check.sh` runs with `-D warnings`.
 - **`Limits`** bounds every message parse before it starts: 64 KiB per message,
   128 header fields, 4 KiB per header value, all three lower on request.
-- **Fuzzing** since the twenty-sixth commit — twenty-seven `cargo-fuzz`
+- **Fuzzing** since the twenty-sixth commit — twenty-eight `cargo-fuzz`
   targets, over the parser, the builder, the stream framer, SDP and its
   `a=crypto` lines, the recording format, the dialog-info and
   message-summary bodies, the headless control channel and what its messages
   do to a session, RTCP, RTP named events, an incoming DTMF INFO, SRTP
   unprotect, STUN, TURN, the ICE agent, the DTLS record layer and handshake
-  messages, and the eight media stages (resampling, drift, concealment,
-  comfort noise, voice activity, G.722, the mixer, the Opus wrapper). All
-  but the newest, `headless_media`, have run for 24 CPU-hours each, about
-  61 billion executions in all, with no crash, hang or runaway memory. Run by
+  messages, and the nine media stages (resampling, drift, concealment,
+  comfort noise, voice activity, G.722, G.729, the mixer, the Opus wrapper).
+  All but the two newest, `headless_media` and `media_g729`, have run for 24
+  CPU-hours each, about 61 billion executions in all, with no crash, hang or
+  runaway memory. Run by
   `scripts/fuzz.sh`; built by `scripts/check.sh` on every run so none of them
   can rot uncompiled. The seeds are committed under `fuzz/corpus/`, written by
   `tools/fuzz-seeds` out of the library's own encoders, so a clone starts with

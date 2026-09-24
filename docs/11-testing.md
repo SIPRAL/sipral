@@ -188,7 +188,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Twenty-seven targets, one per door an attacker's bytes come through.
+Twenty-eight targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -338,7 +338,7 @@ executions, and no crash, no timeout and no run out of memory on any target.
 The eight media targets, added after that run, had the same gate on 23
 September 2026: 48 runs of 30 minutes each per target, 384 CPU-hours in all,
 about 24 billion executions, and nothing found on any of them.
-`headless_media`, the newest, has not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+`headless_media` and `media_g729`, the newest, have not had it yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
 do on every run is **build** all twenty-eight, under the nightly that `fuzz/` pins, so
