@@ -1079,13 +1079,18 @@ impl UserAgent {
     /// The CANCEL lost its race and the call connected anyway.
     ///
     /// §13.2.2.4 still wants the ACK — a 2xx is acknowledged whether or not it
-    /// is wanted — and only then can the call be hung up.
+    /// is wanted — and only then can the call be hung up. The first 2xx to
+    /// cross the CANCEL also speaks for the answer window: one on any other
+    /// branch after it is [`UserAgent::let_go_late_branch`]'s, whether or not
+    /// the call it would have belonged to is still around to hang up.
     fn on_cancel_lost(
         &mut self,
         invite: TransactionId<InviteClient>,
         dialog: DialogId,
         now: Instant,
     ) {
+        // none on a branch other than the first to cross it: `Established`
+        // follows for the same 2xx, and lets it go without minting a call
         let Some(call) = self.branch(invite, Some(dialog)) else {
             return;
         };
@@ -1095,6 +1100,13 @@ impl UserAgent {
         if self.ack_parked_in(dialog) {
             return;
         }
+        let offered = self
+            .calls
+            .get(&call)
+            .is_some_and(|held| held.session.has_local());
+        self.kept_branches
+            .entry(invite)
+            .or_insert(KeptBranch { dialog, offered });
         self.ack_by_itself(dialog, now);
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = true;
@@ -1286,8 +1298,9 @@ impl UserAgent {
         dialog: Option<DialogId>,
     ) -> Option<CallHandle> {
         // a branch other than the one kept has nothing left to report: the
-        // ones that were ringing ended when it was kept, and one heard of
-        // only now is not a call anybody will take
+        // ones that were ringing ended when it was kept, one heard of only
+        // now is not a call anybody will take, and a 2xx that crossed the
+        // CANCEL after the first one did is `let_go_late_branch`'s
         if let Some(dialog) = dialog
             && self
                 .kept_branches
@@ -1578,9 +1591,17 @@ impl UserAgent {
                 .and_then(|placed| self.calls.get(placed))
                 .is_some_and(|placed| placed.hangup_wanted);
         // the first branch to answer, under the policy that keeps one: the
-        // later ones never get here (`let_go_late_branch`)
+        // later ones never get here (`let_go_late_branch`). A call put down
+        // keeps nothing, and its first answer speaks for the window all the
+        // same, so that a later one is let go even after this one has gone
         let kept = match invite {
-            Some(invite) if forks == ForkPolicy::KeepFirst && !giving_up => {
+            Some(invite) if giving_up => {
+                self.kept_branches
+                    .entry(invite)
+                    .or_insert(KeptBranch { dialog, offered });
+                None
+            }
+            Some(invite) if forks == ForkPolicy::KeepFirst => {
                 self.keep_branch(call, invite, dialog, offered);
                 Some(invite)
             }
@@ -1682,13 +1703,16 @@ impl UserAgent {
         }
     }
 
-    /// A 2xx on a branch other than the one [`ForkPolicy::KeepFirst`] kept.
-    /// `true` when it was one, and has been dealt with.
+    /// A 2xx on a branch other than the one [`ForkPolicy::KeepFirst`] kept,
+    /// or than the first to answer a call the user had put down. `true` when
+    /// it was one, and has been dealt with.
     ///
     /// §13.2.2.4 has every 2xx acknowledged whether it is wanted or not, and
     /// then the dialog it confirmed is ended with a BYE. There is no call to
-    /// report it on: the branch ended when another was kept, or is heard of
-    /// only now. A 2xx that carries the offer, to an INVITE that carried
+    /// report it on: the branch ended when another was kept, is heard of
+    /// only now, or belongs to a call that is over or on its way down. A
+    /// branch still ringing when the user put the call down ends when that
+    /// BYE is answered. A 2xx that carries the offer, to an INVITE that carried
     /// none, would need an answer in its ACK that only the application could
     /// write, so it is left for its sender to give up on (§13.3.1.4).
     fn let_go_late_branch(

@@ -83,7 +83,8 @@ pub struct UserAgent {
     pub(crate) by_invite: HashMap<TransactionId<InviteClient>, CallHandle>,
     pub(crate) by_server: HashMap<TransactionId<InviteServer>, CallHandle>,
     pub(crate) by_dialog: HashMap<DialogId, CallHandle>,
-    /// The branch [`crate::ForkPolicy::KeepFirst`] kept, for each INVITE of
+    /// The branch [`crate::ForkPolicy::KeepFirst`] kept, or the first to
+    /// answer an INVITE the user had already put down, for each INVITE of
     /// ours a branch has answered, until the INVITE's transaction is retired:
     /// the window in which another branch's 2xx can still arrive (§13.2.2.4)
     /// and has to be acknowledged and hung up. Kept apart from the calls,

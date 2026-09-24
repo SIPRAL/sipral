@@ -5620,7 +5620,6 @@ fn a_relay_outlives_a_ring_longer_than_its_lifetime() {
 
 /// The 2xx of the callee, as a second phone a proxy forked the INVITE to
 /// would have sent it: the same answer, from a dialog of its own.
-#[cfg(feature = "ice")]
 fn from_another_branch(response: &[u8]) -> Vec<u8> {
     let text = String::from_utf8(response.to_vec()).expect("text");
     let mut lines: Vec<String> = Vec::new();
@@ -5851,6 +5850,117 @@ fn a_branch_that_answers_after_one_was_kept_leaves_the_relay_where_it_is() {
     pair.caller.drain(pair.now, false);
     let server: SocketAddr = SERVER.parse().expect("an address");
     assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
+/// Early media from the desk phone a proxy rang, at an address of its own.
+const DESK_EARLY_MEDIA: &str = "v=0\r\no=- 5 5 IN IP4 192.0.2.50\r\ns=-\r\n\
+c=IN IP4 192.0.2.50\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+#[test]
+fn a_second_branch_kept_plays_the_session_its_own_answer_described() {
+    // the desk rang with early media and the mobile answered first: the audio
+    // goes where the mobile's 2xx says, and the desk's early session is gone
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+    let incoming = pair.callee.call().expect("the callee heard the INVITE");
+    pair.callee
+        .agent
+        .ring(incoming, None, pair.now)
+        .expect("a 180");
+    let ringing = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 180"))
+        .expect("the 180");
+    let progress = String::from_utf8(ringing).expect("text").replacen(
+        "SIP/2.0 180 Ringing",
+        "SIP/2.0 183 Session Progress",
+        1,
+    );
+    let desk = with_body(progress.as_bytes(), "application/sdp", DESK_EARLY_MEDIA);
+    pair.caller.deliver(&desk, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let early: SocketAddr = "192.0.2.50:6000".parse().expect("an address");
+    assert_eq!(
+        pair.caller
+            .engine
+            .session(call)
+            .map(|session| session.destination()),
+        Some(early),
+        "the desk's early media plays"
+    );
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, incoming, callee_media(), pair.now)
+        .expect("the 200 goes");
+    let answered = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 200"))
+        .expect("the 2xx");
+    let described = String::from_utf8(wire_message_body(&answered))
+        .expect("text")
+        .replace("192.0.2.2", "192.0.2.77")
+        .replace(" 40002 ", " 7000 ");
+    let mobile = with_body(
+        &from_another_branch(&answered),
+        "application/sdp",
+        &described,
+    );
+    pair.caller.deliver(&mobile, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+
+    let sibling = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+            _ => None,
+        })
+        .expect("the 2xx came from a second dialog");
+    assert!(pair.caller.heard.iter().any(|event| matches!(
+        event,
+        Event::Signalling(UaEvent::CallEnded {
+            call: ended,
+            reason: crate::CallEndReason::ForkLost,
+            ..
+        }) if *ended == call
+    )));
+    assert!(
+        pair.caller.engine.session(call).is_none(),
+        "the desk's early media outlived its branch"
+    );
+    let mobile_media: SocketAddr = "192.0.2.77:7000".parse().expect("an address");
+    assert_eq!(
+        pair.caller
+            .engine
+            .session(sibling)
+            .map(|session| session.destination()),
+        Some(mobile_media),
+        "the audio does not go where the branch kept said"
+    );
 }
 
 #[cfg(feature = "ice")]

@@ -2318,7 +2318,7 @@ impl MediaEngine {
     /// agent reports that branch up before it ends the one the call was
     /// placed on, so the relay has moved by the time that ending would give
     /// it back. A branch that answers after another was kept never becomes a
-    /// call, and a consultation is as up as a call.
+    /// call.
     ///
     /// [`ForkPolicy::KeepFirst`]: sipral_ua::ForkPolicy::KeepFirst
     #[cfg(feature = "ice")]
@@ -2328,7 +2328,7 @@ impl MediaEngine {
         };
         if self.gathered.contains_key(&call)
             || self.sessions.contains_key(&call)
-            || !agent.call_state(call).is_some_and(CallState::is_confirmed)
+            || agent.call_state(call) != Some(CallState::Confirmed)
         {
             return;
         }

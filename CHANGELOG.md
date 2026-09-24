@@ -668,6 +668,13 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   CANCEL of a call the user put down is no longer also reported up and
   acknowledged a second time. Proven through Kamailio forking one user to
   two registered stacks (`scripts/lab.sh kamailio`).
+- **A second branch answering a call that is already over is still hung up.**
+  Once the call an INVITE placed had ended, whether it was put down before
+  anybody answered or its CANCEL lost the race, a 2xx from another branch of
+  the fork arriving inside the answer window was dropped: neither
+  acknowledged nor hung up, so that phone stayed off-hook until it gave up
+  by itself. It is now acknowledged and hung up, without an event, as a late
+  branch of a call that was kept already is.
 - **An earpiece whose clock runs fast no longer hears the drift as gaps.**
   On a clean path the jitter buffer aims at one frame, and a buffer at one
   frame has nothing below its target to fall to but empty: every frame the

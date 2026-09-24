@@ -3576,6 +3576,13 @@ fn a_consultation_answered_on_a_second_branch_is_still_the_consultation() {
     transmits(&mut agent);
     events(&mut agent);
     assert_eq!(agent.call_state(mobile), Some(CallState::Consulting));
+    // the first call is still consulting, with the mobile now: one
+    // consultation at a time, even after the branch it was placed on ended
+    assert!(matches!(
+        agent.consult(first, &outgoing(), t0),
+        Err(UaError::WrongState(_))
+    ));
+    assert!(transmits(&mut agent).is_empty());
 
     agent
         .transfer_to(first, mobile, t0)
@@ -3583,6 +3590,448 @@ fn a_consultation_answered_on_a_second_branch_is_still_the_consultation() {
     let refer = sent(&mut agent);
     let refer_to = String::from_utf8_lossy(&header(&refer, HeaderName::ReferTo)).into_owned();
     assert!(refer_to.contains("%3Bto-tag%3Dmobile"), "{refer_to}");
+}
+
+#[test]
+fn a_branch_that_answers_after_the_kept_one_has_ended_is_still_hung_up() {
+    // §13.2.2.4 keeps the answer window open for 64*T1 after the first 2xx,
+    // whatever became of the call it confirmed: the desk was kept and hung up
+    // already, and the mobile answering now is acknowledged and let go
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    agent.hangup(call, t0).expect("the BYE goes");
+    let bye = sent(&mut agent);
+    deliver(&mut agent, &reply(&bye, 200, "OK", ""), t0);
+    let said = events(&mut agent);
+    assert_eq!(ended_calls(&said), vec![(call, CallEndReason::LocalHangup)]);
+    assert_eq!(agent.call_state(call), None);
+
+    let later = t0 + Duration::from_secs(5);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        later,
+    );
+    let out = transmits(&mut agent);
+    let ack = only(&out, "ACK ");
+    assert!(tagged(&ack, "mobile"), "{out:?}");
+    let bye = only(&out, "BYE ");
+    assert!(tagged(&bye, "mobile"));
+    assert!(bye.starts_with(b"BYE sip:bob@192.0.2.77 "));
+    assert!(
+        events(&mut agent).is_empty(),
+        "a call already over came back to life"
+    );
+}
+
+/// Hang up the one call a 2xx left standing: the BYE this layer sent by
+/// itself, answered.
+fn bye_answered(agent: &mut UserAgent, out: &[Vec<u8>], now: Instant) {
+    let bye = only(out, "BYE ");
+    deliver(agent, &reply(&bye, 200, "OK", ""), now);
+}
+
+#[test]
+fn a_second_branch_answering_a_call_given_up_before_it_rang_is_hung_up() {
+    // the user put the call down before anything came back, so the CANCEL
+    // never left (§9.1) and the desk's 2xx is acknowledged and hung up. The
+    // call is over once that BYE is answered, and the mobile's 2xx inside
+    // the answer window still owes an ACK and a BYE (§13.2.2.4)
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    agent.hangup(call, t0).expect("the CANCEL waits");
+    assert!(transmits(&mut agent).is_empty(), "a CANCEL before a 1xx");
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"), "{out:?}");
+    bye_answered(&mut agent, &out, t0);
+    events(&mut agent);
+    assert_eq!(agent.call_state(call), None);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    let said = events(&mut agent);
+    assert!(
+        !said.iter().any(|event| matches!(
+            *event,
+            UaEvent::CallForked { .. } | UaEvent::CallConfirmed { .. }
+        )),
+        "a call the user put down came back: {said:?}"
+    );
+}
+
+#[test]
+fn a_second_branch_answering_after_a_cancel_lost_on_the_first_is_hung_up() {
+    // the CANCEL crossed the desk's 2xx, which was acknowledged and hung up,
+    // and that BYE has been answered: the mobile's 2xx arriving after it is
+    // one more the CANCEL lost to
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    only(&transmits(&mut agent), "CANCEL ");
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"), "{out:?}");
+    bye_answered(&mut agent, &out, t0);
+    events(&mut agent);
+    assert_eq!(agent.call_state(call), None);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    let said = events(&mut agent);
+    assert!(
+        !said.iter().any(|event| matches!(
+            *event,
+            UaEvent::CallForked { .. } | UaEvent::CallConfirmed { .. }
+        )),
+        "a call the user put down came back: {said:?}"
+    );
+}
+
+#[test]
+fn two_branches_that_both_cross_a_cancel_are_each_acknowledged_and_hung_up_once() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    agent.hangup(call, t0).expect("the CANCEL goes");
+    only(&transmits(&mut agent), "CANCEL ");
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    events(&mut agent);
+
+    // the desk's 2xx crossed the CANCEL too, and the desk's call is still
+    // waiting for the window to close
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "desk"), "{out:?}");
+    let said = events(&mut agent);
+    assert!(confirmed_calls(&said).is_empty(), "{said:?}");
+    assert_eq!(agent.call_state(mobile), None);
+}
+
+#[test]
+fn a_branch_never_heard_of_that_answers_after_one_was_kept_is_hung_up() {
+    // the proxy forwards every 2xx (§16.7 step 5), including one from a
+    // branch whose provisionals never reached this end
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"), "{out:?}");
+    assert!(tagged(&only(&out, "BYE "), "mobile"));
+    let said = events(&mut agent);
+    assert!(
+        !said.iter().any(|event| matches!(
+            *event,
+            UaEvent::CallForked { .. } | UaEvent::CallConfirmed { .. } | UaEvent::CallEnded { .. }
+        )),
+        "a branch too late became a call: {said:?}"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_branch_let_go_that_rings_again_is_news_to_nobody() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    // the desk, which the proxy is cancelling, rings once more on its way
+    deliver(
+        &mut agent,
+        &answered(&invite, 180, "Ringing", "desk", None),
+        t0,
+    );
+    deliver(
+        &mut agent,
+        &answered(&invite, 183, "Session Progress", "desk", Some(ANSWER)),
+        t0,
+    );
+    let said = events(&mut agent);
+    assert!(said.is_empty(), "a branch let go still reports: {said:?}");
+    assert!(transmits(&mut agent).is_empty());
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_second_branch_kept_is_reached_at_its_own_contact_along_its_own_route() {
+    // §12.1.2: the dialog the mobile's 2xx opened has its own remote target
+    // (the Contact) and its own route set (the Record-Route, reversed), and
+    // every request inside it — a hold, a transfer, the BYE — follows them
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    let routed = String::from_utf8(from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)))
+        .expect("text")
+        .replace(
+            "Contact: <sip:bob@192.0.2.77>\r\n",
+            "Record-Route: <sip:edge.example.com;lr>\r\n\
+             Contact: <sip:bob@192.0.2.77>\r\n",
+        )
+        .into_bytes();
+    deliver(&mut agent, &routed, t0);
+    let ack = only(&transmits(&mut agent), "ACK ");
+    assert!(ack.starts_with(b"ACK sip:bob@192.0.2.77 "));
+    assert_eq!(text(&ack, HeaderName::Route), "<sip:edge.example.com;lr>");
+    events(&mut agent);
+
+    agent.hold(mobile, t0).expect("the hold goes");
+    let reinvite = sent(&mut agent);
+    assert!(reinvite.starts_with(b"INVITE sip:bob@192.0.2.77 "));
+    assert!(tagged(&reinvite, "mobile"));
+    assert_eq!(
+        text(&reinvite, HeaderName::Route),
+        "<sip:edge.example.com;lr>"
+    );
+    assert_eq!(
+        header(&reinvite, HeaderName::CallId),
+        header(&invite, HeaderName::CallId)
+    );
+    deliver(
+        &mut agent,
+        &from_the_mobile(&reinvite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent
+        .transfer(mobile, &uri("sip:carol@example.com"), t0)
+        .expect("the REFER goes");
+    let refer = sent(&mut agent);
+    assert!(
+        refer.starts_with(b"REFER sip:bob@192.0.2.77 "),
+        "{}",
+        String::from_utf8_lossy(&refer)
+    );
+    assert!(tagged(&refer, "mobile"));
+    assert_eq!(text(&refer, HeaderName::Route), "<sip:edge.example.com;lr>");
+    deliver(&mut agent, &reply(&refer, 202, "Accepted", ""), t0);
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.hangup(mobile, t0).expect("the BYE goes");
+    let bye = only(&transmits(&mut agent), "BYE ");
+    assert!(bye.starts_with(b"BYE sip:bob@192.0.2.77 "));
+    assert!(tagged(&bye, "mobile"));
+    assert_eq!(text(&bye, HeaderName::Route), "<sip:edge.example.com;lr>");
+}
+
+#[test]
+fn a_second_branch_kept_refreshes_the_session_the_call_placed_asked_for() {
+    // RFC 4028 §7.2: a 2xx that says nothing about timers leaves the session
+    // on the interval the INVITE asked for, with this end refreshing it. The
+    // INVITE was the call placed's, and the mobile's branch kept is that call
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().session_interval(Some(Duration::from_secs(600))));
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    assert_eq!(header(&invite, HeaderName::SessionExpires), b"600");
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+
+    agent.handle_timeout(t0 + Duration::from_secs(300));
+    let refresh = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the kept branch's session is never refreshed");
+    assert!(refresh.starts_with(b"INVITE sip:bob@192.0.2.77 "));
+    assert!(tagged(&refresh, "mobile"));
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+}
+
+#[test]
+fn the_answer_window_closing_forgets_the_branch_kept() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    transmits(&mut agent);
+    events(&mut agent);
+    assert_eq!(agent.kept_branches.len(), 1);
+
+    // Timer M, 64*T1 after the first 2xx (RFC 6026 §7.2)
+    agent.handle_timeout(t0 + Duration::from_secs(33));
+    transmits(&mut agent);
+    events(&mut agent);
+    assert!(agent.kept_branches.is_empty(), "the window stayed open");
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
+}
+
+#[test]
+fn keeping_every_branch_leaves_the_first_ringing_when_a_second_answers() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &outgoing().forks(ForkPolicy::KeepAll), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "mobile"));
+    let said = events(&mut agent);
+    assert_eq!(confirmed_calls(&said), vec![mobile]);
+    assert!(ended_calls(&said).is_empty(), "{said:?}");
+    assert_eq!(agent.call_state(call), Some(CallState::Ringing));
+    assert!(agent.kept_branches.is_empty());
+
+    deliver(
+        &mut agent,
+        &answered(&invite, 200, "OK", "desk", Some(ANSWER)),
+        t0,
+    );
+    let out = transmits(&mut agent);
+    assert!(tagged(&only(&out, "ACK "), "desk"));
+    assert!(!out.iter().any(|bytes| bytes.starts_with(b"BYE ")));
+    assert_eq!(confirmed_calls(&events(&mut agent)), vec![call]);
+}
+
+#[test]
+fn an_offerless_call_keeps_the_second_branch_and_leaves_the_answer_to_it() {
+    // the offer comes back in the 2xx and the answer goes in the ACK, which
+    // only the application can write: the branch kept waits for it
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent
+        .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    let mobile = rung_on_two_phones(&mut agent, &invite, call, t0);
+    deliver(
+        &mut agent,
+        &from_the_mobile(&invite, 200, "OK", Some(MOBILE_ANSWER)),
+        t0,
+    );
+    assert!(transmits(&mut agent).is_empty(), "an ACK with no answer");
+    let said = events(&mut agent);
+    assert!(said.iter().any(|event| matches!(
+        *event,
+        UaEvent::CallConfirmed {
+            call: confirmed,
+            answer_wanted: true,
+            ..
+        } if confirmed == mobile
+    )));
+    assert_eq!(ended_calls(&said), vec![(call, CallEndReason::ForkLost)]);
+    agent
+        .acknowledge(mobile, Some(OFFER), t0)
+        .expect("the ACK goes");
+    let ack = sent(&mut agent);
+    assert!(ack.starts_with(b"ACK sip:bob@192.0.2.77 "));
+    assert!(tagged(&ack, "mobile"));
+    assert_eq!(agent.call_state(mobile), Some(CallState::Confirmed));
 }
 
 // -- calls that come in ------------------------------------------------------

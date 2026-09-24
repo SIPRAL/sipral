@@ -490,7 +490,9 @@ pub(crate) struct ContactContext {
     pub(crate) plain: Box<[u8]>,
 }
 
-/// The branch [`ForkPolicy::KeepFirst`] kept out of one INVITE's fork.
+/// The branch [`ForkPolicy::KeepFirst`] kept out of one INVITE's fork, or the
+/// first to answer an INVITE the user had already put down, which is hung up
+/// like every branch after it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeptBranch {
     /// Its dialog. A 2xx in any other dialog of the same INVITE is one this
