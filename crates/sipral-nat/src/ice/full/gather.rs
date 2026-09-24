@@ -430,6 +430,26 @@ impl IceAgent {
         }
     }
 
+    /// Hand back every allocation this agent holds and has not given back,
+    /// each with the server it is on, for an agent that will never run.
+    ///
+    /// The other way out of [`IceAgent::add_relayed`]: an application that
+    /// wrote an offer around a relay and then had it refused before it left —
+    /// the call it described never existed, so there is no peer, no check and
+    /// no permission to undo — gets the allocation back whole, still live on
+    /// its server, for the next call on the same socket. Whatever the agent
+    /// had queued for the server is dropped with it; the client's own
+    /// refresh timer is untouched, and keeps the allocation from lapsing once
+    /// its new owner drives it.
+    #[must_use]
+    pub fn into_relays(self) -> Vec<(SocketAddr, TurnClient)> {
+        self.relays
+            .into_iter()
+            .filter(|entry| entry.progress != Progress::Freed && entry.client.is_allocated())
+            .map(|entry| (entry.server, entry.client))
+            .collect()
+    }
+
     /// A server-reflexive candidate, unless it is redundant with one already
     /// held: "A candidate is redundant if and only if its transport address
     /// and base equal those of another candidate. The agent SHOULD eliminate

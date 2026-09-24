@@ -1462,6 +1462,15 @@ entry! {
     /// holding it. No account is de-registered and no call is hung up; a stack
     /// that has to leave politely does that first.
     ///
+    /// Nothing is sent, either: the stack owns no socket. A relay on a TURN
+    /// server is given back only by a Refresh this end sends, so one still
+    /// held at this point stays allocated on the server until its lifetime
+    /// runs out, up to ten minutes later. To leave none behind, hang up every
+    /// call, poll until each has ended and send what
+    /// `sipral_stack_poll_farewell` hands out, call
+    /// `sipral_stack_nat_unmap` for every media socket still named and send
+    /// what `sipral_stack_poll_stun` hands out, and destroy after that.
+    ///
     /// # Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.

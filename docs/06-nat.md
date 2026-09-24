@@ -348,6 +348,21 @@ What the giving back sends leaves among the call's farewells
 (`MediaEngine::poll_farewell`, `sipral_stack_poll_farewell`), from the call's
 own socket.
 
+A description that is refused — the user agent will not place the call or the
+transfer, or a ring or an answer is refused before it is sent — sent nothing
+that named the relay, so there is nothing to undo on the server and no reason
+to spend a round trip deleting what the next call on the socket can use. The
+engine hands the allocation back whole (`MediaEngine::poll_returned_relay`,
+taken out of the agent it was drawn into with `IceAgent::into_relays` when it
+got that far), and `Relays::put_back` keeps it alive for the socket it came
+from, as if it had never been taken; the C ABI does both itself. A socket
+that will carry no call after all gives its relay back with
+`Relays::release`, or `sipral_stack_nat_unmap` over the C ABI. Destroying a
+C ABI stack sends nothing — the stack owns no socket — so an allocation still
+held then lapses at the server in its lifetime: an application that must leave
+none behind hangs up its calls, unmaps its sockets, sends what that hands out,
+and destroys the stack after.
+
 The credential is a `LongTermCredentials` from the moment it is read: its
 password is overwritten when it is dropped, with the same best effort as the
 derived key, and no `Debug`, event or error text carries it. The C ABI reads it
@@ -357,21 +372,40 @@ Between the call being described and its session opening — a caller waiting
 for the 200, a callee ringing — the agent that holds the relay waits in the
 engine rather than being rebuilt from the description, as every other call's
 agent is: an allocation is state on a server, and nothing written down can
-make it again. `MediaEngine::handle_timeout` and `MediaEngine::poll_transmit`
-drive it while it waits, so a Rust application that polls them keeps the NAT
-binding towards the server alive through a long ring. The C ABI drives its
-timer too but has no queue that sends from a call's socket before the call's
-media handle exists, so there its Binding indications wait with it and leave
-when the session opens. The allocation itself lasts ten minutes and outlives
-any ring; a NAT that drops an idle binding after thirty seconds, in front of a
-C ABI phone rung for longer than that, is the case not covered yet.
+make it again. It keeps the NAT binding towards the server open with a Binding
+indication every fifteen seconds, and refreshes the allocation a minute
+before its lifetime runs out — nine minutes into a ring, with coturn's
+default — so it has to be able to both send and hear before its session
+exists. `MediaEngine::handle_timeout` gives it the time,
+`MediaEngine::poll_transmit` (or `MediaEngine::poll_waiting_transmit`, for an
+application that drives its sessions through shares) hands out what it sends,
+with the socket to send it from, and `MediaEngine::receive_waiting` takes the
+server's answers from that socket. The C ABI uses the queue the socket's relay
+used before the call: until the call's media handle exists, what the agent
+sends comes out of `sipral_stack_poll_stun` and the server's answers go back
+through `sipral_stack_receive_stun`, which is what an application already does
+with a named socket that has no media handle. An answer to the refresh that
+never arrives loses the relay, and the call goes on with the candidates that
+need none.
+
+A forked INVITE sent one offer, with one relayed candidate in it, to every
+branch, and one allocation stands behind that candidate: the server relays for
+the one client that holds it, so only one branch's agent can answer the checks
+it draws. The agent waits with the branch the call was placed on — the one
+`ForkPolicy::KeepFirst` keeps, so a branch the user agent is about to hang up
+never takes it — and moves to the first other branch that is answered and kept
+while that first branch has no session yet: two phones ringing, and the second
+picked up. A branch whose session opens while another already runs the relay
+— both answered under `ForkPolicy::KeepAll`, or early media on the first
+before the second answers — runs an agent rebuilt from the description,
+without the relay, and its checks towards the relayed candidate go unanswered;
+ICE finds the paths that need none. The offer cannot say otherwise: it left
+once, before anybody knew the INVITE would fork, and it was true for the branch
+that holds the relay.
 
 Not done yet: TURN over TCP or TLS to the server, for the network that lets
 nothing out but 443. The client has the framing; the agent's datagram model
-does not carry a stream. And a forked INVITE: one allocation serves one agent,
-which stays with the branch the call was placed on, so a second branch a proxy
-forks off runs an agent rebuilt from the description, without the relay its
-offer named, and finds only the paths that need none.
+does not carry a stream.
 
 ### Proven in the lab
 

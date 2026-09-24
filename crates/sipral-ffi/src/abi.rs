@@ -719,6 +719,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::sipral_stack_transport_failed::ABI,
         crate::transport::sipral_stack_stream_closed::ABI,
         crate::nat::sipral_stack_nat_map::ABI,
+        crate::nat::sipral_stack_nat_unmap::ABI,
         crate::nat::sipral_stack_poll_stun::ABI,
         crate::nat::sipral_stack_receive_stun::ABI,
         crate::event::sipral_event_kind_name::ABI,

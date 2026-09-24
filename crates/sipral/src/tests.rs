@@ -5377,6 +5377,410 @@ fn a_relay_goes_back_when_the_peer_answers_without_ice() {
     assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
 }
 
+/// Relays on the test's TURN server with an allocation for `media`, already
+/// answered, waiting to be taken.
+#[cfg(feature = "ice")]
+fn relays_with_one_for(stack: &mut Stack, media: SocketAddr, now: Instant) -> crate::Relays {
+    use crate::relay::tests::{SERVER, answer};
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let mut relays = stack.engine.relays(server, "alice", "correct horse");
+    relays.allocate(media, now);
+    while let Some(request) = relays.poll_transmit() {
+        let reply = answer(&request.payload).expect("an answer");
+        assert!(relays.receive(request.local, request.destination, &reply, now));
+    }
+    while relays.poll_event().is_some() {}
+    relays
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_handed_to_a_call_the_user_agent_refuses_comes_back_whole() {
+    use crate::relay::tests::RELAYED;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    // an account of the other stack's, which this one's user agent has
+    // never heard of
+    let unknown = pair.callee.account("bob", caller_sip());
+    let mut relays = relays_with_one_for(&mut pair.caller, caller_media(), pair.now);
+    let relay = relays.take(caller_media()).expect("the relay");
+    let refused = pair.caller.engine.place_with(
+        &mut pair.caller.agent,
+        unknown,
+        OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+        caller_media(),
+        CallMedia::new(catalog.clone(), MediaConfig::default()).relay(relay),
+        pair.now,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(pair.caller.outbound().is_empty(), "no INVITE left");
+    assert!(
+        pair.caller.engine.poll_farewell().is_none(),
+        "nothing to give back to the server: the relay is still good"
+    );
+    let back = pair
+        .caller
+        .engine
+        .poll_returned_relay()
+        .expect("the relay comes back from the refusal");
+    assert!(pair.caller.engine.poll_returned_relay().is_none());
+    assert_eq!(back.local(), caller_media());
+    assert_eq!(back.relayed(), Some(RELAYED.parse().expect("an address")));
+
+    // put back on its socket, it is the next call's there
+    relays.put_back(back, pair.now);
+    assert!(relays.poll_transmit().is_none(), "nothing deleted it");
+    let account = pair.caller.account("alice", callee_sip());
+    let relay = relays.take(caller_media()).expect("kept for the socket");
+    pair.caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            CallMedia::new(catalog, MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+    let offer = pair
+        .callee
+        .offer_received()
+        .expect("the callee saw an offer")
+        .to_string();
+    assert!(
+        offer.contains("198.51.100.9 50000 typ relay"),
+        "the relay was lost to the refusal: {offer}"
+    );
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_handed_to_a_ring_refused_before_it_describes_anything_comes_back() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let incoming = pair.ring();
+    let mut relays = relays_with_one_for(&mut pair.callee, callee_media(), pair.now);
+    // a call of the callee's own user agent the engine never described
+    let carol = pair.callee.account("carol", caller_sip());
+    let stranger = pair
+        .callee
+        .agent
+        .call(
+            carol,
+            &OutgoingCall::new(uri("sip:alice@example.com")).to_address(UDP, caller_sip()),
+            pair.now,
+        )
+        .expect("a call the engine knows nothing of");
+    let relay = relays.take(callee_media()).expect("the relay");
+    let refused = pair.callee.engine.ring_with(
+        &mut pair.callee.agent,
+        stranger,
+        callee_media(),
+        CallMedia::new(catalog.clone(), MediaConfig::default()).relay(relay),
+        pair.now,
+    );
+    assert_eq!(refused, Err(MediaError::NoSuchCall));
+    let back = pair
+        .callee
+        .engine
+        .poll_returned_relay()
+        .expect("the relay comes back from the refusal");
+    assert_eq!(back.local(), callee_media());
+
+    // and a second ring on a call already rung refuses the same way
+    relays.put_back(back, pair.now);
+    let relay = relays.take(callee_media()).expect("kept for the socket");
+    pair.callee
+        .engine
+        .ring_with(
+            &mut pair.callee.agent,
+            incoming,
+            callee_media(),
+            CallMedia::new(catalog.clone(), MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the 183 goes");
+    let other: SocketAddr = "192.0.2.2:40010".parse().expect("an address");
+    let mut others = relays_with_one_for(&mut pair.callee, other, pair.now);
+    let second = others.take(other).expect("a second relay");
+    let refused = pair.callee.engine.ring_with(
+        &mut pair.callee.agent,
+        incoming,
+        other,
+        CallMedia::new(catalog, MediaConfig::default()).relay(second),
+        pair.now,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let back = pair
+        .callee
+        .engine
+        .poll_returned_relay()
+        .expect("the second relay comes back");
+    assert_eq!(back.local(), other);
+    assert!(
+        relays_given_back(&mut pair.callee).is_empty(),
+        "the call's own relay is still its own, and the refused one was not deleted"
+    );
+}
+
+/// A phone that rings for longer than the allocation's lifetime less a
+/// minute: the agent waiting with the relay refreshes it, and the answer to
+/// that refresh has a way in before the session opens.
+#[cfg(feature = "ice")]
+#[test]
+fn a_relay_outlives_a_ring_longer_than_its_lifetime() {
+    use crate::relay::tests::{SERVER, answer};
+    use sipral_nat::stun::{Class, Message};
+    use sipral_nat::turn::method;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog.clone());
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let mut relays = relays_with_one_for(&mut pair.caller, caller_media(), pair.now);
+    let relay = relays.take(caller_media()).expect("the relay");
+    let call = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            CallMedia::new(catalog, MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    let start = pair.now;
+    let mut refreshed = 0;
+    while pair.now < start + Duration::from_secs(700) {
+        let due = pair
+            .caller
+            .engine
+            .poll_timeout()
+            .expect("the waiting agent has a deadline");
+        pair.now = due.max(pair.now);
+        pair.caller.engine.handle_timeout(pair.now);
+        while let Some((from, datagram)) = pair.caller.engine.poll_waiting_transmit() {
+            assert_eq!(from, call);
+            assert_eq!(datagram.local, caller_media());
+            assert_eq!(datagram.destination, server);
+            let Some(reply) = answer(&datagram.payload) else {
+                continue;
+            };
+            let request = Message::parse(&datagram.payload).expect("STUN");
+            if request.class() == Class::Request && request.method() == method::REFRESH {
+                refreshed += 1;
+            }
+            assert!(
+                pair.caller
+                    .engine
+                    .receive_waiting(caller_media(), server, &reply, pair.now),
+                "the server's answer reaches the waiting agent"
+            );
+        }
+    }
+    assert!(refreshed >= 1, "the allocation was refreshed while it rang");
+
+    // the relay is alive eleven minutes in, and goes back with the call
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the CANCEL");
+    pair.caller.drain(pair.now, false);
+    pair.settle();
+    pair.caller.drain(pair.now, false);
+    assert_eq!(
+        relays_given_back(&mut pair.caller),
+        vec![(call, server)],
+        "a relay lost to an unanswered refresh has nothing to give back"
+    );
+}
+
+/// The 2xx of the callee, as a second phone a proxy forked the INVITE to
+/// would have sent it: the same answer, from a dialog of its own.
+#[cfg(feature = "ice")]
+fn from_another_branch(response: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8(response.to_vec()).expect("text");
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.split("\r\n") {
+        let lower = line.to_ascii_lowercase();
+        if (lower.starts_with("to:") || lower.starts_with("t:"))
+            && let Some(at) = lower.find(";tag=")
+        {
+            lines.push(format!("{};tag=secondphone", &line[..at]));
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    lines.join("\r\n").into_bytes()
+}
+
+/// A call placed with a relay, rung plainly by the callee (a 180 with no
+/// description, naming the first dialog), and the callee's 2xx held back.
+#[cfg(feature = "ice")]
+fn rung_with_a_relay(pair: &mut Pair, forks: crate::ForkPolicy) -> (CallHandle, Vec<u8>) {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let relay = relay_for_the_caller(pair);
+    let call = pair
+        .caller
+        .engine
+        .place_with(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com"))
+                .to_address(UDP, callee_sip())
+                .forks(forks),
+            caller_media(),
+            CallMedia::new(catalog, MediaConfig::default()).relay(relay),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    for datagram in pair.caller.outbound() {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, false);
+    let incoming = pair.callee.call().expect("the callee heard the INVITE");
+    pair.callee
+        .agent
+        .ring(incoming, None, pair.now)
+        .expect("a 180");
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, incoming, callee_media(), pair.now)
+        .expect("the 200 goes");
+    let answered = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 200"))
+        .expect("the 2xx");
+    (call, answered)
+}
+
+/// What left for the TURN server from a call's session, as the engine
+/// hands it out.
+#[cfg(feature = "ice")]
+fn sent_to_the_server(stack: &mut Stack, now: Instant) -> Vec<CallHandle> {
+    let server: SocketAddr = crate::relay::tests::SERVER.parse().expect("an address");
+    std::iter::from_fn(|| stack.engine.poll_transmit(now))
+        .filter(|(_, destination, _)| *destination == server)
+        .map(|(call, _, _)| call)
+        .collect()
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_forked_branch_answered_and_kept_takes_the_relay_its_offer_named() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepAll);
+    // the second phone picks up while the first still rings
+    pair.caller
+        .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let sibling = pair
+        .caller
+        .heard
+        .iter()
+        .find_map(|event| match event {
+            Event::Signalling(UaEvent::CallForked { sibling, .. }) => Some(*sibling),
+            _ => None,
+        })
+        .expect("the 2xx came from a second dialog");
+    assert!(pair.caller.engine.session(sibling).is_some(), "media");
+    // its agent holds the allocation: the permission for the peer's
+    // candidates goes to the TURN server, for that branch
+    let sent = sent_to_the_server(&mut pair.caller, pair.now);
+    assert!(
+        sent.contains(&sibling),
+        "the branch that was answered has no relay: {sent:?}"
+    );
+    assert!(!sent.contains(&call), "{sent:?}");
+
+    // and it gives it back when it ends, the first branch having none
+    pair.caller
+        .agent
+        .hangup(sibling, pair.now)
+        .expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(sibling, server)]);
+    pair.caller
+        .agent
+        .hangup(call, pair.now)
+        .expect("the CANCEL");
+    pair.caller.drain(pair.now, false);
+    assert!(relays_given_back(&mut pair.caller).is_empty());
+}
+
+#[cfg(feature = "ice")]
+#[test]
+fn a_forked_branch_the_user_agent_hangs_up_leaves_the_relay_with_the_first() {
+    use crate::relay::tests::SERVER;
+
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_ice(crate::IcePolicy::Offered);
+    let mut pair = Pair::new(catalog);
+    let (call, answered) = rung_with_a_relay(&mut pair, crate::ForkPolicy::KeepFirst);
+    pair.caller
+        .deliver(&from_another_branch(&answered), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    let sent = sent_to_the_server(&mut pair.caller, pair.now);
+    assert!(
+        sent.is_empty(),
+        "the losing branch took the relay: {sent:?}"
+    );
+
+    // the first phone answers, and its session runs on the relay
+    pair.caller.deliver(&answered, callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    assert!(pair.caller.engine.session(call).is_some(), "media");
+    assert!(
+        sent_to_the_server(&mut pair.caller, pair.now).contains(&call),
+        "the branch kept has no relay"
+    );
+    pair.caller.agent.hangup(call, pair.now).expect("the BYE");
+    pair.caller.drain(pair.now, false);
+    let server: SocketAddr = SERVER.parse().expect("an address");
+    assert_eq!(relays_given_back(&mut pair.caller), vec![(call, server)]);
+}
+
 #[cfg(feature = "ice")]
 #[test]
 fn a_hold_does_not_withdraw_ice_from_a_call_that_had_it() {

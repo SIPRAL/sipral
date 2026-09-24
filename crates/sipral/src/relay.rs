@@ -318,9 +318,49 @@ impl Relays {
         let mut pending = self.sockets.remove(&local)?;
         top_up(&mut self.keys, &mut pending.client);
         Some(Relay {
+            local,
             server: self.server,
             client: pending.client,
         })
+    }
+
+    /// Take back a relay [`Relays::take`] handed out, for a call that was
+    /// never placed after all: kept alive for the socket it was allocated
+    /// from, exactly as it was before it was taken, and handed to the next
+    /// call on that socket.
+    ///
+    /// What [`MediaEngine::poll_returned_relay`](crate::MediaEngine::poll_returned_relay)
+    /// gives back after a description it was handed is refused. A relay
+    /// whose socket already has another, or one allocated on a different
+    /// server, is given back to its server instead — a Refresh with a
+    /// lifetime of zero, sent from [`Relays::poll_transmit`] — since this is
+    /// not where it would be kept.
+    pub fn put_back(&mut self, relay: Relay, now: Instant) {
+        let Relay {
+            local,
+            server,
+            mut client,
+        } = relay;
+        top_up(&mut self.keys, &mut client);
+        if server != self.server || self.sockets.contains_key(&local) || !client.is_allocated() {
+            let _unallocated = client.delete(now);
+            while let Some(payload) = client.poll_transmit() {
+                self.outbox.push_back(RelayDatagram {
+                    local,
+                    destination: server,
+                    payload,
+                });
+            }
+            return;
+        }
+        self.sockets.insert(
+            local,
+            Pending {
+                client,
+                keepalive_at: now.checked_add(KEEPALIVE),
+            },
+        );
+        self.drain(local, now);
     }
 
     /// Give `local`'s relay back to the server, for a socket that will not
@@ -404,11 +444,20 @@ impl core::fmt::Debug for Relays {
 ///
 /// Not `Clone`: it is the allocation, and two calls cannot hold one relay.
 pub struct Relay {
+    local: SocketAddr,
     server: SocketAddr,
     client: TurnClient,
 }
 
 impl Relay {
+    /// The media socket it was allocated from, and the only one it relays
+    /// for: the server knows the allocation by the address it sees that
+    /// socket's datagrams come from.
+    #[must_use]
+    pub const fn local(&self) -> SocketAddr {
+        self.local
+    }
+
     /// The TURN server it is on.
     #[must_use]
     pub const fn server(&self) -> SocketAddr {
@@ -437,6 +486,20 @@ impl Relay {
         (self.server, self.client)
     }
 
+    /// The allocation an agent that will never run hands back: `client` on
+    /// `server`, allocated from `local`.
+    pub(crate) const fn from_parts(
+        local: SocketAddr,
+        server: SocketAddr,
+        client: TurnClient,
+    ) -> Self {
+        Self {
+            local,
+            server,
+            client,
+        }
+    }
+
     /// Give the allocation back, for a call that will not use it: the
     /// Refresh with a lifetime of zero, to send to [`Relay::server`] from the
     /// socket it was allocated from.
@@ -454,6 +517,7 @@ impl Relay {
 impl core::fmt::Debug for Relay {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Relay")
+            .field("local", &self.local)
             .field("server", &self.server)
             .field("relayed", &self.relayed())
             .field("mapped", &self.mapped())

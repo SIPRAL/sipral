@@ -51,7 +51,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # application asks.
 #
 # `stun` is the fourth, and branches here for the same reason: the stack's
-# mappings are the facade's `Mappings`. `SIPRAL_NAT_STUN`, the three
+# mappings are the facade's `Mappings`. `SIPRAL_NAT_STUN`, the four
 # `sipral_stack_*stun*`/`nat` entry points and `SIPRAL_EVENT_KIND_NAT_MAPPING`
 # are in every build of the header; a build without the feature refuses
 # `SIPRAL_NAT_STUN` with `SIPRAL_STATUS_NOT_SUPPORTED`, and

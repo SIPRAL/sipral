@@ -603,24 +603,47 @@ the server's error code (401, 486, 508; zero for no answer) and a reason for
 `SIPRAL_NAT_RELAY_FAILED`. A call on the socket before that event is
 `SIPRAL_STATUS_WRONG_STATE`, as it is before the mapping; after a failure it
 goes without a relay. Until its call the socket keeps its allocation alive
-through the same queue. From the call on the relay is the call's: its
-permissions, channel and refreshes go out through
+through the same queue. From the call on the relay is the call's. Until the
+call's media handle exists — a caller waiting for the 200, a callee ringing —
+what its agent sends still comes out of `sipral_stack_poll_stun`, from the
+same socket: the Binding indications that keep the NAT binding towards the
+server open, and the refresh that keeps the allocation past its lifetime less
+a minute, nine minutes into a ring with coturn's default. The server's answers
+go back through `sipral_stack_receive_stun`, which is where a loop that has no
+media handle for the socket sends what arrives on it anyway. From the media
+handle on, its permissions, channel and refreshes go out through
 `sipral_media_poll_transmit` with the rest of the media path, and the
 Refresh with a lifetime of zero that gives it back when the call ends comes
 out of `sipral_stack_poll_farewell` with the call's other farewells, to be
 sent from the call's own socket. A call that does not use ICE — its policy is
 `SIPRAL_ICE_OFF`, or the peer answered without it — gives the relay back the
-same way as soon as that is known. A call whose configuration is refused before
-the stack is reached, and a transfer refused for its destination or its
-headers, leave the relay on its socket; a call the user agent refuses after
-the relay has gone into its description — a `Replaces` among the headers of an
-accepted transfer, say — has no call to give it back for, and the allocation
-lapses at the server in the lifetime it was granted: the socket is named again
-with `sipral_stack_nat_map` for a relay of its own. A relay nobody takes is
-given back when the socket is spent by a call that did not take it, and is
-otherwise kept, refreshed, until the stack is destroyed, which gives nothing
-back: there is no call to name a socket's relay unwanted short of describing a
-call on it.
+same way as soon as that is known. A call that is refused — for its
+configuration before the stack is reached, or by the user agent after the
+relay has gone into its description, a `Replaces` among the headers of an
+accepted transfer, say, or a second `sipral_call_ring_media` on one call —
+sent nothing that named the relay, and leaves it on its socket for the next
+call there. A relay nobody takes is given back when the socket is spent by a
+call that did not take it.
+
+**`sipral_stack_nat_unmap(stack, local, len, now_ms)`** (task 8.5.5) is how a
+socket named with `sipral_stack_nat_map` that will carry no call after all
+says so: it is no longer asked about every twenty-five seconds, a request for
+it still queued is dropped, and its relay goes back to the server — a Refresh
+with a lifetime of zero, waiting in `sipral_stack_poll_stun` when the call
+returns. Without it the stack keeps the allocation refreshed for as long as it
+lives. A socket a call was described on was spent by that call already, and a
+socket never named is nothing to give back; both are `SIPRAL_STATUS_OK` with
+nothing done. `SIPRAL_STATUS_WRONG_STATE` on a stack without
+`SIPRAL_NAT_STUN`, `SIPRAL_STATUS_INVALID_ARGUMENT` for a signalling socket.
+
+`sipral_stack_destroy` sends nothing, relays included: the stack owns no
+socket, and a relay is given back only by a Refresh this end sends. One still
+held when the stack is destroyed stays allocated on the server until its
+lifetime runs out, up to ten minutes later, holding a port and a share of the
+account's quota. An application that must leave none behind hangs up its calls
+and sends their farewells, calls `sipral_stack_nat_unmap` for every socket
+still named and sends what `sipral_stack_poll_stun` hands out, and destroys
+the stack after that.
 
 ## Media across the boundary
 

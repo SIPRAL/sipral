@@ -1862,6 +1862,15 @@ public enum Sipral {
     /// holding it. No account is de-registered and no call is hung up; a stack
     /// that has to leave politely does that first.
     ///
+    /// Nothing is sent, either: the stack owns no socket. A relay on a TURN
+    /// server is given back only by a Refresh this end sends, so one still
+    /// held at this point stays allocated on the server until its lifetime
+    /// runs out, up to ten minutes later. To leave none behind, hang up every
+    /// call, poll until each has ended and send what
+    /// `sipral_stack_poll_farewell` hands out, call
+    /// `sipral_stack_nat_unmap` for every media socket still named and send
+    /// what `sipral_stack_poll_stun` hands out, and destroy after that.
+    ///
     /// Safety
     ///
     /// Safe to call with any handle value. Reads no memory the caller owns.
@@ -3849,6 +3858,46 @@ public enum Sipral {
         try check(status)
     }
 
+    /// Say that a media socket sipral_stack_nat_map named will carry no
+    /// call after all, and give back what the stack keeps for it.
+    ///
+    /// Its mapping is no longer asked again every twenty-five seconds, and a
+    /// request for it still waiting in sipral_stack_poll_stun is
+    /// dropped. With a TURN server configured, its relay goes back to the
+    /// server: a Refresh with a lifetime of zero (RFC 8656 §8), waiting in
+    /// sipral_stack_poll_stun when this returns, to be sent from the
+    /// socket like everything else there. Without this the stack keeps the
+    /// allocation refreshed for as long as it lives, and after
+    /// `sipral_stack_destroy`, which sends nothing, the server holds it — a
+    /// port and a share of the account's quota — until its lifetime runs
+    /// out, up to ten minutes later.
+    ///
+    /// For a socket the application closes, a call it decides not to place,
+    /// and every socket still named before the stack is destroyed. A socket
+    /// a call was placed, rung or answered on has already been spent by that
+    /// call, whose relay goes back when the call ends; naming it here, or a
+    /// socket never named, does nothing. To be named again the socket goes
+    /// through sipral_stack_nat_map from the start.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` on a stack created without
+    /// `SIPRAL_NAT_STUN`, and `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+    /// signalling socket of the stack's own, which is kept mapped for as long
+    /// as it is bound.
+    ///
+    /// Safety
+    ///
+    /// `local` must be readable for `local_len` bytes.
+    public static func stackNatUnmap(stack: SipralHandle, local: String, nowMs: UInt64) throws {
+        try ensureAbi()
+        let status =
+            Array(local.utf8).withUnsafeBufferPointer { raw1 in
+                raw1.withMemoryRebound(to: CChar.self) { p1 in
+                    sipral_stack_nat_unmap(stack, p1.baseAddress, p1.count, nowMs)
+                }
+            }
+        try check(status)
+    }
+
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -3859,6 +3908,14 @@ public enum Sipral {
     /// send from — the whole point is the address the server sees it come
     /// from, so sending it from any other socket learns the wrong one.
     /// `transport` is zero and names nothing here, and `protocol` is UDP.
+    ///
+    /// A call placed, rung or answered on a socket with its relay sends
+    /// through here too, for as long as it has no media handle: the Binding
+    /// indications that keep the NAT binding towards the TURN server open
+    /// while the phone rings, and the refresh that keeps the allocation past
+    /// its lifetime less a minute — nine minutes with coturn's default. From
+    /// the media handle on they leave through `sipral_media_poll_transmit`
+    /// with the rest of the call's media path.
     ///
     /// Safety
     ///
@@ -3873,6 +3930,11 @@ public enum Sipral {
 
     /// Hand over a datagram that arrived on a media socket
     /// sipral_stack_nat_map named, before a call has media on it.
+    ///
+    /// That includes a call already placed, rung or answered on the socket
+    /// with its relay, until its media handle exists: the TURN server's
+    /// answers to what the call sent through sipral_stack_poll_stun come
+    /// in here, and a refresh left unanswered loses the relay.
     ///
     /// `to` is the socket it arrived on, as `local` was given there; `from`
     /// is where it came from. `SIPRAL_STATUS_OK` when it was the STUN

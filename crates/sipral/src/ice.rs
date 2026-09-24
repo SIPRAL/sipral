@@ -364,19 +364,25 @@ impl LocalIce {
     /// As [`LocalIce::draw`], and [`MediaError::Ice`] for a relay of an
     /// address family other than `address`'s, which the engine does not hand
     /// in.
+    ///
+    /// `relay` is taken out of its slot only once the agent it goes into has
+    /// been gathered, so a refusal of `address` leaves it where it was, for
+    /// the caller to hand back; `None` when the slot was empty.
     pub(crate) fn draw_relayed(
         keys: &mut KeySource,
         address: SocketAddr,
         public: Option<SocketAddr>,
-        relay: crate::relay::Relay,
+        relay: &mut Option<crate::relay::Relay>,
         we_are_offerer: bool,
         now: Instant,
-    ) -> Result<(Self, Ice), MediaError> {
+    ) -> Result<Option<(Self, Ice)>, MediaError> {
         let credentials = draw_credentials(keys)?;
         let tiebreaker = u64::from_be_bytes(keys.block()[..8].try_into().unwrap_or([0; 8]));
         let role = Role::initial_full(we_are_offerer, false);
         let (mut agent, stream) = new_agent(&credentials, role, tiebreaker, address, public, now)?;
-        let (server, client) = relay.into_parts();
+        let Some((server, client)) = relay.take().map(crate::relay::Relay::into_parts) else {
+            return Ok(None);
+        };
         agent
             .add_relayed(stream, ComponentId::RTP, address, server, client, now)
             .map_err(MediaError::Ice)?;
@@ -392,7 +398,7 @@ impl LocalIce {
             })),
         };
         ice.top_up();
-        Ok((
+        Ok(Some((
             Self {
                 credentials,
                 role,
@@ -402,7 +408,7 @@ impl LocalIce {
                 lite: false,
             },
             ice,
-        ))
+        )))
     }
 
     /// The same call's ICE after an ICE restart the peer asked for: new
@@ -920,6 +926,27 @@ impl Ice {
             out.push((destination, data));
         }
         out
+    }
+
+    /// The relays this agent holds, whole and still live on their servers,
+    /// for an agent that will never run: its description was refused before
+    /// it left. A lite end holds none.
+    pub(crate) fn into_relays(self) -> Vec<crate::relay::Relay> {
+        let local = self.local;
+        match self.running {
+            Running::Full(full) => full
+                .agent
+                .into_relays()
+                .into_iter()
+                .map(|(server, client)| crate::relay::Relay::from_parts(local, server, client))
+                .collect(),
+            Running::Lite(_) => Vec::new(),
+        }
+    }
+
+    /// The socket the application bound for this call.
+    pub(crate) const fn local(&self) -> SocketAddr {
+        self.local
     }
 
     /// The pair the agent selected, once it has one.

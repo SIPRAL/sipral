@@ -2506,6 +2506,20 @@ Java_org_sipral_SipralNative_sipral_1stack_1nat_1map(JNIEnv *env, jobject self, 
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1nat_1unmap(JNIEnv *env, jobject self, jlong stack, jbyteArray local, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    jbyte *local_data = local ? (*env)->GetByteArrayElements(env, local, NULL) : NULL;
+    jsize local_size = local ? (*env)->GetArrayLength(env, local) : 0;
+    sipral_status_t status = sipral_stack_nat_unmap((sipral_handle_t)stack, (const char *)local_data, (size_t)local_size, (uint64_t)nowMs);
+    if (local) {
+        (*env)->ReleaseByteArrayElements(env, local, local_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1stack_1poll_1stun(JNIEnv *env, jobject self, jlong stack, jlong transmit)
 {
     (void)env;

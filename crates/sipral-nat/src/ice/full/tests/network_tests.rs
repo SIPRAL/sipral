@@ -342,6 +342,76 @@ fn a_client_with_no_allocation_is_not_taken_over() {
     );
 }
 
+#[test]
+fn an_agent_that_never_runs_hands_its_relay_back_whole() {
+    let mut net = Network::new(32);
+    let (a_agent, a_stream) = agent(
+        config(false, false),
+        "A",
+        Role::Controlling,
+        10,
+        address(A_HOST),
+    );
+    let a = net.add_full(a_agent, a_stream, &[address(A_HOST)], None);
+    let client = net.allocate_outside(a, address(A_HOST));
+    let relayed = client.relayed_addresses()[0];
+    let now = net.now;
+
+    // an offer written around the relay, and refused before it left
+    let (mut refused, stream) = agent(
+        config(false, false),
+        "B",
+        Role::Controlling,
+        20,
+        address(A_HOST),
+    );
+    refused.gather(now).expect("gathering starts");
+    refused
+        .add_relayed(
+            stream,
+            ComponentId::RTP,
+            address(A_HOST),
+            net_turn(),
+            client,
+            now,
+        )
+        .expect("an allocated client is taken over");
+    let mut back = refused.into_relays();
+    assert_eq!(back.len(), 1);
+    let (server, client) = back.remove(0);
+    assert_eq!(server, net_turn());
+    assert!(client.is_allocated(), "still live on its server");
+
+    // and the next call on the socket offers it again
+    let (mut taker, stream) = agent(
+        config(false, false),
+        "C",
+        Role::Controlling,
+        30,
+        address(A_HOST),
+    );
+    taker.gather(now).expect("gathering starts");
+    taker
+        .add_relayed(
+            stream,
+            ComponentId::RTP,
+            address(A_HOST),
+            server,
+            client,
+            now,
+        )
+        .expect("the handed-back client is taken over again");
+    assert!(
+        taker
+            .local_candidates(stream)
+            .iter()
+            .any(|candidate| candidate.kind == CandidateType::Relay && candidate.address == relayed)
+    );
+    // one given back already is not handed out a second time
+    taker.release_relays(now);
+    assert!(taker.into_relays().is_empty());
+}
+
 fn net_turn() -> std::net::SocketAddr {
     address(super::sim_tests::TURN_SERVER)
 }

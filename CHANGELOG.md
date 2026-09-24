@@ -39,6 +39,20 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   stacks behind two NATs that drop everything between them but SIP fail to
   connect without a relay, and with one the call completes through coturn
   and both allocations are given back.
+- **A relay is kept, or given back, wherever the call around it goes.** A
+  description refused before it left — a call or transfer the user agent
+  will not place, a ring or an answer refused — hands its relay back whole
+  (`MediaEngine::poll_returned_relay`, `Relays::put_back`) for the next call
+  on the socket, where it used to lapse at the server. A call that rings
+  longer than the allocation's lifetime less a minute keeps it: what the
+  waiting agent sends comes out of `MediaEngine::poll_waiting_transmit`, the
+  server's answers go in through `MediaEngine::receive_waiting`, and over
+  the C ABI both ride `sipral_stack_poll_stun` and
+  `sipral_stack_receive_stun` until the call has a media handle. On a forked
+  INVITE the relay moves to the branch that is answered and kept while the
+  first still rings. `sipral_stack_nat_unmap` gives back the relay of a
+  socket that will carry no call, which until now was kept for as long as
+  the stack lived and left to lapse after it was destroyed.
 - **An hour on a call, and what the jitter buffer did for all of it.**
   `scripts/lab.sh drift` — not part of a run that names nothing, since it
   takes an hour — holds three calls to Asterisk's echo for sixty minutes,

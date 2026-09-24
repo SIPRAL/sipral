@@ -343,30 +343,25 @@ unsafe fn codec_order(config: &SipralCallConfig) -> Result<Option<Vec<&str>>, Fa
     Ok(Some(named))
 }
 
-/// The catalogue and settings one call runs its media with, or `None` for the
-/// stack's own catalogue untouched — which is what `srtp` and `codecs` both
-/// left unset has to mean.
+/// The catalogue one call runs its media with, or `None` for the stack's own
+/// catalogue untouched — which is what `srtp`, `ice` and `codecs` all left
+/// unset has to mean.
 ///
-/// The two overrides compose here rather than each in its own branch, because
-/// a call is allowed to name both and a second branch that rebuilt the
+/// The overrides compose here rather than each in its own branch, because a
+/// call is allowed to name several and a second branch that rebuilt the
 /// catalogue from names would be a branch that dropped the policy the first
 /// one applied.
 ///
-/// `public` is where the call's media socket appears from outside, when the
-/// stack asked a STUN server about it ([`crate::nat`]): a call described by
-/// it is never the stack's own catalogue untouched, because the description
-/// names another address and asks for multiplexing.
-///
-/// `relay` is the relay a TURN server allocated for the socket, when the
-/// stack names one ([`crate::nat`]): the call's relayed ICE candidate.
-fn call_media(
+/// Worked out before the socket's relay is taken ([`outside`]), since it is
+/// the half that can still be refused: a relay taken and then dropped with
+/// the refusal would be lost to the socket with nothing sent to its server.
+fn call_catalog(
     state: &StackState,
-    (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
     srtp: Option<SrtpPolicy>,
     ice: Option<IcePolicy>,
     codecs: Option<&[&str]>,
-) -> Result<Option<CallMedia>, Fail> {
-    if srtp.is_none() && ice.is_none() && codecs.is_none() && public.is_none() && relay.is_none() {
+) -> Result<Option<CodecCatalog>, Fail> {
+    if srtp.is_none() && ice.is_none() && codecs.is_none() {
         return Ok(None);
     }
     let mut catalog = state.engine.catalog().clone();
@@ -381,10 +376,33 @@ fn call_media(
     if let Some(policy) = ice {
         catalog = catalog.with_ice(policy);
     }
-    Ok(Some(dressed(
+    Ok(Some(catalog))
+}
+
+/// The catalogue and settings one call runs its media with, or `None` for the
+/// stack's own catalogue untouched: [`call_catalog`]'s answer, dressed in
+/// what the stack learned about the socket.
+///
+/// `public` is where the call's media socket appears from outside, when the
+/// stack asked a STUN server about it ([`crate::nat`]): a call described by
+/// it is never the stack's own catalogue untouched, because the description
+/// names another address and asks for multiplexing.
+///
+/// `relay` is the relay a TURN server allocated for the socket, when the
+/// stack names one ([`crate::nat`]): the call's relayed ICE candidate.
+fn call_media(
+    state: &StackState,
+    catalog: Option<CodecCatalog>,
+    (public, relay): (Option<SocketAddr>, crate::nat::HeldRelay),
+) -> Option<CallMedia> {
+    if catalog.is_none() && public.is_none() && relay.is_none() {
+        return None;
+    }
+    let catalog = catalog.unwrap_or_else(|| state.engine.catalog().clone());
+    Some(dressed(
         CallMedia::new(catalog, state.media_config()),
         (public, relay),
-    )))
+    ))
 }
 
 /// `media`, described by the public address and given the relay the stack
@@ -557,8 +575,9 @@ entry! {
             let outgoing = unsafe { outgoing_from(state, &config, media.is_some()) }?;
             let placed = match media {
                 Some(local) => {
+                    let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
                     let outside = outside(state, local)?;
-                    let placed = match call_media(state, outside, srtp, ice, codecs.as_deref())? {
+                    let placed = match call_media(state, catalog, outside) {
                         // the stack's own catalogue, untouched: this is what
                         // `srtp` and `codecs` both unspecified on the call
                         // have to mean
@@ -573,8 +592,11 @@ entry! {
                             media,
                             now,
                         ),
-                    }
-                    .map_err(|error| media_failed(&error))?;
+                    };
+                    // a relay the call was handed goes back onto its socket
+                    // when the user agent refused the call
+                    crate::nat::Nat::take_back(state, now);
+                    let placed = placed.map_err(|error| media_failed(&error))?;
                     crate::nat::Nat::spent(state, local, now);
                     state.manage(placed);
                     placed
@@ -687,16 +709,20 @@ entry! {
         let codecs = unsafe { codec_order(&config) }?;
         with_stack_at(stack, now_ms, |state, now| {
             let id = state.calls.get(call).map_err(handle_failed)?;
+            let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
             let outside = outside(state, local)?;
-            match call_media(state, outside, srtp, ice, codecs.as_deref())? {
+            let rung = match call_media(state, catalog, outside) {
                 // the stack's own catalogue, untouched: this is what `srtp`
                 // and `codecs` both unspecified on the call have to mean
                 None => state.engine.ring(&mut state.agent, id, local, now),
                 Some(media) => state
                     .engine
                     .ring_with(&mut state.agent, id, local, media, now),
-            }
-            .map_err(|error| media_failed(&error))?;
+            };
+            // a ring refused — twice on one call, an INVITE with no offer —
+            // hands the socket's relay back for the next try
+            crate::nat::Nat::take_back(state, now);
+            rung.map_err(|error| media_failed(&error))?;
             crate::nat::Nat::spent(state, local, now);
             state.manage(id);
             Ok(())
@@ -771,14 +797,16 @@ entry! {
             let id = state.calls.get(call).map_err(handle_failed)?;
             // a call already rung with media keeps the description its 183
             // carried, so its socket's mapping is not asked about again, and
-            // a relay waiting on the socket goes back when it is spent below
-            let (public, relay) = if state.agent.has_described(id) {
+            // a relay waiting on the socket goes back when it is spent below;
+            // nor is it for a call the engine never saw, which is refused
+            // below with nothing of the socket's taken
+            let catalog = state.engine.call_catalog(id).cloned();
+            let (public, relay) = if state.agent.has_described(id) || catalog.is_none() {
                 (None, None)
             } else {
                 outside(state, local)?
             };
-            let catalog = state.engine.call_catalog(id).cloned();
-            match catalog {
+            let answered = match catalog {
                 Some(catalog) if public.is_some() || relay.is_some() => {
                     let media = dressed(
                         CallMedia::new(catalog, state.media_config()),
@@ -789,8 +817,9 @@ entry! {
                         .answer_with(&mut state.agent, id, local, media, now)
                 }
                 _ => state.engine.answer(&mut state.agent, id, local, now),
-            }
-            .map_err(|error| media_failed(&error))?;
+            };
+            crate::nat::Nat::take_back(state, now);
+            answered.map_err(|error| media_failed(&error))?;
             crate::nat::Nat::spent(state, local, now);
             state.manage(id);
             Ok(())
@@ -1473,7 +1502,10 @@ entry! {
             // change to the stack: a transfer refused for its configuration
             // is still there to take, and so is the relay
             let outside = match media {
-                Some(local) => Some(outside(state, local)?),
+                Some(local) => {
+                    let catalog = call_catalog(state, srtp, ice, codecs.as_deref())?;
+                    Some((catalog, outside(state, local)?))
+                }
                 None => None,
             };
             let mut headers = Vec::new();
@@ -1486,8 +1518,8 @@ entry! {
                 forks,
                 headers: &headers,
             };
-            let placed = if let (Some(local), Some(outside)) = (media, outside) {
-                let placed = match call_media(state, outside, srtp, ice, codecs.as_deref())? {
+            let placed = if let (Some(local), Some((catalog, outside))) = (media, outside) {
+                let placed = match call_media(state, catalog, outside) {
                     // the stack's own catalogue, untouched: this is what
                     // `srtp` and `codecs` both unspecified on the call have
                     // to mean
@@ -1502,8 +1534,12 @@ entry! {
                         media,
                         now,
                     ),
-                }
-                .map_err(|error| media_failed(&error))?;
+                };
+                // a transfer the user agent refused — a `Replaces` among the
+                // headers, say — hands the socket's relay back for the one
+                // taken after
+                crate::nat::Nat::take_back(state, now);
+                let placed = placed.map_err(|error| media_failed(&error))?;
                 crate::nat::Nat::spent(state, local, now);
                 state.manage(placed);
                 placed
@@ -1994,7 +2030,7 @@ a=recvonly\r\n";
     /// The far end's final answer to a non-INVITE request this end sent
     /// inside the dialog `request` opened or travelled in — a BYE, a REFER,
     /// or an INFO.
-    fn answered_with(request: &[u8], status: u32, reason: &str) -> Vec<u8> {
+    pub(crate) fn answered_with(request: &[u8], status: u32, reason: &str) -> Vec<u8> {
         let mut out = format!("SIP/2.0 {status} {reason}\r\n").into_bytes();
         for (name, value) in [
             ("Via", field(request, HeaderName::Via)),
@@ -2056,7 +2092,7 @@ a=recvonly\r\n";
     }
 
     /// A 180 the far end sends back for the INVITE this end placed.
-    fn ringing(invite: &[u8]) -> Vec<u8> {
+    pub(crate) fn ringing(invite: &[u8]) -> Vec<u8> {
         let mut out = b"SIP/2.0 180 Ringing\r\n".to_vec();
         for (name, value) in [
             ("Via", field(invite, HeaderName::Via)),
