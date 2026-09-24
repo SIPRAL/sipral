@@ -1392,7 +1392,11 @@ So the parameter is each end's statement about what it will take:
   microphone, say — sends one SID frame and then nothing for as long as the
   pause lasts, so while the decoder is in a pause the far end announced,
   `MediaEvent::Stalled` waits on its RTCP reports rather than on its audio,
-  and a stream whose reports stop as well is reported as ever.
+  and a stream whose reports stop as well is reported as ever. What the
+  facade cannot do is B.4.5's recovery of a pause whose first SID frame was
+  lost: RTP has no frame that says "not sent", so a buffer that runs dry
+  right after speech is a pause and a stream that stopped alike, and it
+  plays as silence until the next SID frame or speech arrives.
 
 On the wire, a payload is what RFC 3551 §4.5.6 allows: speech frames and at
 most one SID frame after them. With DTX on, a frame length of several G.729
